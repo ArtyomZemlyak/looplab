@@ -28,7 +28,7 @@ single box, for four reasons:
 | `setup_algotune.sh` | Applies every deviation from upstream a published number depends on. Idempotent; run on each machine and after any `git pull` in the checkout. |
 | `campaign.sh` | The campaign driver. `ARM=A` / `ARM=B`, one arm per invocation, tasks in parallel lanes sized to the machine. |
 | `pick_tasks.py` | Ranks all 154 tasks by evaluation cost — how the 20-task list was chosen, committed so the choice is reproducible. |
-| `campaign_status.py` | Live status while a campaign runs: what finished vs what actually SCORED (`N/A` is neither a zero nor a low score). |
+| `campaign_status.py` | Live status while a campaign runs: what finished vs what actually SCORED (`N/A` is neither a zero nor a low score). **Per arm, out of that arm's own files**: arm A from `reports/agent_summary.json`, arm B from `B-<task>.final.json` — only arm A writes the summary, so reading it for arm B printed arm A's number under arm B's banner. |
 | `compare_arms.py` | Summarises a campaign: arm A from `reports/agent_summary.json`, arm B from the LoopLab run's folded event log. A missing arm prints `--`, never `0`. |
 | `.baseline_cache.json` | Written at runtime; the per-task AGGREGATE baseline (stabilises the denominator). Not committed. |
 | `.baseline_times/` | Written at runtime; the per-INSTANCE reference timings (saves the wall clock). Not committed. |

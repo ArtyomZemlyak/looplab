@@ -62,8 +62,15 @@ OpenRouter. Measured 2026-08-20:
 
 ### The fix is one meter in front of both arms, not an edit to either
 
-`benchmarks/meter/proxy.py`. Both arms point at `http://127.0.0.1:8801/m/<arm>/<task>/v1` and the
-proxy:
+`benchmarks/meter/proxy.py`. Both arms point at `http://127.0.0.1:8801/m/<arm>/<task>/<attempt>/v1` and
+the proxy:
+
+(The attempt segment arrived 2026-08-23. `(<arm>, <task>)` alone is not an identity — a task-arm
+that is RE-RUN adds to the same bucket, and `B/kcenters` came to hold $2.0086 over 816 calls
+against one `.done` marker whose run cost $1.0070. The two-segment form above is still
+accepted and is recorded with an empty `attempt`; a row from a log written before the change
+carries no `attempt` key at all. `campaign.sh::next_attempt` mints the id and stamps it into the
+marker as `attempt=aN`, so the marker and the meter rows join by equality.)
 
 1. **Prices every response** from a pinned table (`benchmarks/meter/pricing.json`) and writes the
    result into `usage.cost`, where both arms already look. Neither framework is modified.

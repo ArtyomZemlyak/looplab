@@ -233,11 +233,19 @@ def marker_state(final_dir: Path | None, arm: str, task: str) -> str:
         # not spent the budget they are compared at — `A-count_riemann_zeta_zeros` reached $0.14 of
         # $1.00 because forty gateway timeouts at 300 s each ate three and a half of its four hours.
         # Averaging that beside a task that spent its dollar answers a question nobody asked.
+        #
+        # `state=wall_cut` IS ASKED FIRST AND `rc=124` SECOND, and both are kept. The driver now
+        # names the state in words (`record_done`), which is the field to read: recovering "a clock
+        # killed this" from an integer is what left every other reader wrong about it. But the 27
+        # markers of the campaign under `/var/tmp/looplab-bench` were written before that field
+        # existed and carry only `rc=124`, so dropping the integer would silently reclassify five
+        # real wall cuts as clean finishes — the exact defect, arriving through the fix for it.
         try:
-            if "rc=124" in marker.read_text(encoding="utf-8"):
-                return "wall_cut"
+            text = marker.read_text(encoding="utf-8")
         except OSError:
-            pass
+            return "done"
+        if "state=wall_cut" in text or "rc=124" in text:
+            return "wall_cut"
         return "done"
     if (final_dir / f"{arm}-{task}.refused").exists():
         return "refused"

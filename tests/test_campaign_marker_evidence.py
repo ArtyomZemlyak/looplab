@@ -33,6 +33,7 @@ difference between proving the marker is withheld and pinning the text of a `cas
 """
 from __future__ import annotations
 
+import importlib.util
 import re
 import subprocess
 from pathlib import Path
@@ -43,7 +44,8 @@ CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "ca
 
 # The functions under test, plus the two variables `record_done` reads out of the campaign's
 # preamble (the regime it stamps into every marker).
-_FUNCTIONS = ("run_started_evidence", "record_done", "refuse_to_start", "final_banner")
+_FUNCTIONS = ("run_started_evidence", "next_attempt", "already_measured", "record_done",
+              "refuse_to_start", "final_banner")
 
 
 def _harness() -> str:
@@ -237,3 +239,254 @@ def test_the_exit_code_of_an_unmeasured_arm_is_not_success():
     src = CAMPAIGN.read_text(encoding="utf-8")
     assert 'exit "$CAMPAIGN_RC"' in src
     assert "CAMPAIGN_RC=$?" in src
+
+
+# ---------------------------------------------------------------------------------------------
+# A WALL-CLOCK KILL IS NOT A FINISHED TASK
+#
+# `HARD_TIMEOUT` sends SIGTERM at 4 h and `record_done` wrote a `.done` for rc=124 in the SAME
+# branch as a clean exit -- one marker, two opposite facts, and every reader downstream had to
+# recover "a clock killed this" from an integer. Only `compare_arms.py` ever learned to; the driver
+# counted a wall cut into its own COMPLETE banner and `campaign_status.py` printed it as finished.
+#
+# Measured 2026-08-23 on `/var/tmp/looplab-bench/campaign-paired`: FIVE task-arms were cut at the
+# wall (A-convex_hull, A-count_riemann_zeta_zeros, B-max_weighted_independent_set, B-pde_heat1d,
+# B-sparse_eigenvectors_complex) and THREE of them had not spent the budget they are compared at --
+# $0.70, $0.139 and $0.866 of $1.00 in the meter log. `A-count_riemann_zeta_zeros` reached $0.14
+# because forty nginx 504s at 300 s each ate three and a half of its four hours.
+# ---------------------------------------------------------------------------------------------
+
+# The five markers exactly as `campaign-paired/` holds them: written BEFORE `state=` existed, which
+# is the shape the back-compat branch has to keep reading.
+_LEGACY_WALL_CUT = "wall=14400 rc=124 cpus=22-43 lanes=4 cores_per_lane=22\n"
+
+
+@pytest.mark.parametrize("rc,state", [(0, "ran_to_completion"), (124, "wall_cut")])
+def test_the_marker_says_in_words_what_happened(rc, state, tmp_path):
+    """rc=0 and rc=124 shared one `case` arm and one marker format, so the two states were spelled
+    only by an integer nobody but `compare_arms.py` read. `rc=` stays beside `state=` -- the 27
+    markers already on disk carry only the integer."""
+    run = _run_that_started(tmp_path)
+    done = tmp_path / "B-svm.done"
+    got = _bash(f'record_done "{done}" {rc} 0 "0-21" "{run}"', tmp_path)
+    assert got.returncode == 0, got.stderr
+    marker = done.read_text()
+    assert f"state={state}" in marker, marker
+    assert f"rc={rc}" in marker, marker
+
+
+def test_a_refusal_after_the_run_started_is_its_own_state(tmp_path):
+    """The third member, so the vocabulary is closed rather than "wall_cut and everything else"."""
+    run = _run_that_started(tmp_path)
+    done = tmp_path / "B-svm.done"
+    _bash(f'record_done "{done}" 2 0 "0-21" "{run}"', tmp_path)
+    marker = done.read_text()
+    assert "state=stopped_after_start" in marker, marker
+    assert "state=wall_cut" not in marker, marker
+
+
+def test_the_marker_carries_the_attempt_that_wrote_it(tmp_path):
+    """The join to the meter. `attempt=` names the `/m/<arm>/<task>/<attempt>/v1` path this run's
+    calls went to, so a per-task cost can be summed for THIS attempt and not for every attempt ever
+    made at the task. A marker written outside `run_one` says `none` rather than guessing."""
+    run = _run_that_started(tmp_path)
+    done = tmp_path / "B-svm.done"
+    _bash(f'ATTEMPT=a7; record_done "{done}" 0 0 "0-21" "{run}"', tmp_path)
+    assert "attempt=a7" in done.read_text()
+    other = tmp_path / "B-other.done"
+    _bash(f'record_done "{other}" 0 0 "0-21" "{run}"', tmp_path)
+    assert "attempt=none" in other.read_text()
+
+
+# ---------------------------------------------------------------------------------------------
+# Is a wall cut resumable? By default NO, and the flag is the argument.
+# ---------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("marker_text", [
+    "wall=14400 rc=124 state=wall_cut cpus=0-21 lanes=4 cores_per_lane=22 attempt=a1\n",
+    _LEGACY_WALL_CUT,          # written before `state=` existed -- five of these are on disk
+])
+def test_a_wall_cut_is_terminal_by_default_and_a_blind_resume_leaves_it_alone(marker_text, tmp_path):
+    """`.done` means "do not run this again", and a resume must be safe to run blind.
+
+    The driver cannot tell "the wall bound because forty gateway 504s ate the clock" from "this task
+    genuinely needs more than four hours", and auto-retrying the second kind spends four hours and a
+    dollar to reproduce the same cut on every resume, forever.
+    """
+    done = tmp_path / "B-svm.done"
+    done.write_text(marker_text)
+    assert _bash(f'already_measured "{done}"', tmp_path).returncode == 0
+
+
+@pytest.mark.parametrize("marker_text", [
+    "wall=14400 rc=124 state=wall_cut cpus=0-21 attempt=a1\n",
+    _LEGACY_WALL_CUT,
+])
+def test_retry_wall_cut_reopens_a_wall_cut_without_deleting_its_marker(marker_text, tmp_path):
+    """The retry is ONE FLAG away rather than zero, because the alternative is deleting `.done`
+    files by hand -- which is how a marker over a real measurement gets destroyed.
+    `PENDING_FIXES.md` item 4 (raise the wall once the transport fixes land) is this operation."""
+    done = tmp_path / "B-svm.done"
+    done.write_text(marker_text)
+    assert _bash(f'RETRY_WALL_CUT=1; already_measured "{done}"', tmp_path).returncode == 1
+    assert done.exists(), "the flag must not delete the marker it reopens"
+
+
+@pytest.mark.parametrize("marker_text", [
+    "wall=100 rc=0 state=ran_to_completion cpus=0-21 attempt=a1\n",
+    "wall=8808 rc=2 state=stopped_after_start cpus=0-21 metered=371 attempt=a1\n",
+    "wall=7775 rc=0 cpus=44-65 lanes=4 cores_per_lane=22\n",     # a real pre-`state=` marker
+])
+def test_retry_wall_cut_reopens_nothing_else(marker_text, tmp_path):
+    """THE BOUNDARY. The flag must reopen exactly the wall cuts: a task-arm that ran to completion
+    or spent its ceiling is a MEASUREMENT, and re-running it spends the allowance again to reach the
+    same place. A flag that reopened everything would just be a slower `rm *.done`."""
+    done = tmp_path / "B-svm.done"
+    done.write_text(marker_text)
+    assert _bash(f'RETRY_WALL_CUT=1; already_measured "{done}"', tmp_path).returncode == 0
+
+
+def test_no_marker_at_all_is_still_owed_with_or_without_the_flag(tmp_path):
+    """The pre-existing rule the hoisted predicate must not have changed: an interrupted task-arm
+    has no marker, and `already_measured` has to answer "run it" for both flag values."""
+    done = tmp_path / "B-svm.done"
+    assert _bash(f'already_measured "{done}"', tmp_path).returncode == 1
+    done.write_text("")                              # the zero-byte case `-s` exists to catch
+    assert _bash(f'already_measured "{done}"', tmp_path).returncode == 1
+    assert _bash(f'RETRY_WALL_CUT=1; already_measured "{done}"', tmp_path).returncode == 1
+
+
+# ---------------------------------------------------------------------------------------------
+# "rc=124 produces no number" was FALSE for arm B, and the behaviour is what proves it
+# ---------------------------------------------------------------------------------------------
+
+def test_a_wall_cut_does_not_erase_the_number_the_run_left_behind(tmp_path):
+    """`campaign.sh:309` said rc=124 "produces no number (see docs/51)". docs/51 item 4 measures
+    ARM A, where a cut AlgoTuner run writes no `final_speedup` into `agent_summary.json` at all --
+    and the live corpus agrees, neither wall-cut arm-A task has an entry. It is FALSE for arm B:
+    the champion extraction and the TEST scoring pass run in `run_one` AFTER `timeout` has killed
+    the run, so `B-pde_heat1d.final.json` = 3.1223, `B-sparse_eigenvectors_complex` = 1.0045 and
+    `B-max_weighted_independent_set` = 1.0393 are all real scores behind an rc=124 marker.
+
+    THE COMMENT WAS CORRECTED AND THE BEHAVIOUR KEPT, so this is the behaviour: the number survives
+    the marker, and the marker says the number is not a measurement at the budget.
+    """
+    run = _run_that_started(tmp_path)
+    final = tmp_path / "B-pde_heat1d.final.json"
+    final.write_text('{"speedup": 3.1223, "eval_seconds": 47.2, "subset": "test"}')
+    done = tmp_path / "B-pde_heat1d.done"
+    _bash(f'record_done "{done}" 124 0 "66-87" "{run}"', tmp_path)
+    assert "3.1223" in final.read_text(), "the wall cut destroyed a real score"
+    assert "state=wall_cut" in done.read_text()
+
+
+def test_the_falsified_sentence_is_not_back():
+    """A negative pin over the DEFECT'S OWN TEXT (CLAUDE.md's ladder, tier 2): red if anyone
+    restores the claim, which is a claim about arm B that three live files falsify."""
+    src = CAMPAIGN.read_text(encoding="utf-8")
+    assert "produces no number" not in src, (
+        "rc=124 produces no number for arm A only; arm B's champion is extracted and scored after "
+        "the kill (B-pde_heat1d.final.json = 3.1223)")
+
+
+# ---------------------------------------------------------------------------------------------
+# What the banner SAYS about a wall cut it counted as complete
+# ---------------------------------------------------------------------------------------------
+
+def test_the_banner_names_the_wall_cut_task_arms_inside_its_own_complete(tmp_path):
+    """A wall cut IS terminal, so it counts into the marker total and the arm really is complete.
+    But a banner that prints only a count hides the one fact an operator needs to decide whether to
+    raise HARD_TIMEOUT: that the wall bound at all, on three of the five cuts before the budget did.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "B-alpha.done").write_text("wall=100 rc=0 state=ran_to_completion cpus=0-21\n")
+    (out / "B-beta.done").write_text("wall=14447 rc=124 state=wall_cut cpus=66-87\n")
+    got = _bash(f'final_banner "{out}" B 2 "alpha beta"', tmp_path)
+    assert got.returncode == 0, got.stdout + got.stderr
+    assert "COMPLETE (2/2 markers)" in got.stdout, got.stdout
+    assert "WALL-CUT" in got.stdout, got.stdout
+    assert "B-beta" in got.stdout, got.stdout
+    assert "B-alpha" not in got.stdout.split("WALL-CUT", 1)[1], got.stdout
+    assert "RETRY_WALL_CUT=1" in got.stdout
+
+
+def test_the_banner_says_nothing_about_wall_cuts_when_there_are_none(tmp_path):
+    """The control. A line that always prints is a line nobody reads."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "B-alpha.done").write_text("wall=100 rc=0 state=ran_to_completion cpus=0-21\n")
+    got = _bash(f'final_banner "{out}" B 1 "alpha"', tmp_path)
+    assert got.returncode == 0, got.stdout
+    assert "WALL-CUT" not in got.stdout, got.stdout
+
+
+def test_the_banner_reads_a_marker_written_before_state_existed(tmp_path):
+    """Five real markers under `campaign-paired/` carry only `rc=124`. A banner that keyed on
+    `state=wall_cut` alone would silently reclassify all five as clean finishes -- the defect,
+    arriving through the fix for it."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "A-convex_hull.done").write_text(_LEGACY_WALL_CUT)
+    got = _bash(f'final_banner "{out}" A 1 "convex_hull"', tmp_path)
+    assert "WALL-CUT" in got.stdout, got.stdout
+    assert "A-convex_hull" in got.stdout, got.stdout
+
+
+# ---------------------------------------------------------------------------------------------
+# The attempt ledger: an id the CAMPAIGN mints, not one the proxy invents
+# ---------------------------------------------------------------------------------------------
+
+def test_attempts_at_one_task_arm_are_numbered_and_recorded(tmp_path):
+    """`(arm, task)` is not an identity. Measured on `meter/meter.jsonl`: `B/kcenters` holds $2.0086
+    over 816 calls in four sessions against ONE `.done` marker whose run cost $1.0070, so a naive
+    per-task sum reads 2x a $1.00 ceiling and looks like a breach that never happened.
+
+    The ledger is append-only and survives the `rm -rf "$TASK_ROOT"` a re-run does, so an attempt
+    the marker no longer mentions is still on record.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    got = _bash(f'OUT="{out}"; next_attempt B kcenters; next_attempt B kcenters; '
+                f'next_attempt B discrete_log', tmp_path)
+    assert got.returncode == 0, got.stderr
+    assert got.stdout.split() == ["a1", "a2", "a1"], got.stdout
+    ledger = (out / "B-kcenters.attempts").read_text().splitlines()
+    assert len(ledger) == 2, ledger
+    assert ledger[0].startswith("a1 started=") and ledger[1].startswith("a2 started="), ledger
+    assert "epoch=" in ledger[0]
+    # per task-arm, not per task: discrete_log starts at a1 of its own
+    assert (out / "B-discrete_log.attempts").read_text().startswith("a1 ")
+
+
+def test_the_id_the_campaign_mints_is_the_id_the_proxy_reads_back(tmp_path):
+    """THE TWO HALVES OF ONE FIX, JOINED. `campaign.sh` mints the id and `meter/proxy.py` parses it
+    out of the URL, and the whole point is that the marker and the meter row name the SAME attempt.
+
+    Driven rather than pinned: the id comes out of the real allocator, is pasted into the real URL
+    template `run_one` builds, and is handed to the real `_split_path`. It also pins the one thing
+    an id may not be -- `v1` -- because the parser tells the two URL shapes apart by whether the
+    fourth segment is the upstream prefix, so an attempt named `v1` would silently lose its name.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    got = _bash(f'OUT="{out}"; next_attempt B kcenters', tmp_path)
+    attempt = got.stdout.strip()
+    assert attempt and attempt != "v1", attempt
+
+    spec = importlib.util.spec_from_file_location(
+        "meter_proxy_under_test", CAMPAIGN.parent.parent / "meter" / "proxy.py")
+    proxy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(proxy)
+
+    class _Path(proxy.Handler):                     # the parser, without a socket
+        def __init__(self, path):
+            self.path = path
+
+    url_tail = f"/m/B/kcenters/{attempt}/v1/chat/completions"
+    assert _Path(url_tail)._split_path() == ("B", "kcenters", attempt, "/v1/chat/completions")
+    # and the marker for that same run names it, so the two are joinable by equality alone
+    run = _run_that_started(tmp_path)
+    done = tmp_path / "B-kcenters.done"
+    _bash(f'ATTEMPT={attempt}; record_done "{done}" 0 0 "0-21" "{run}"', tmp_path)
+    assert f"attempt={attempt}" in done.read_text()

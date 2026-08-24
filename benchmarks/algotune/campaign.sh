@@ -55,11 +55,15 @@ BUDGET_USD="${BUDGET_USD:-0.02}"
 # match). Defaults to the OpenRouter shape the campaign was designed with; a box whose model comes
 # from a gateway sets this to that entry's key instead -- see benchmarks/meter/setup_gateway_arm.py.
 ALGOTUNE_MODEL_KEY="${ALGOTUNE_MODEL_KEY:-openrouter/${LOOPLAB_LLM_MODEL:-deepseek/deepseek-v4-flash-0731}}"
-# When set, every LLM call goes through the metering proxy on a path that names the arm and the
-# task, so cost is attributed per task-arm without either framework knowing it is metered.
-# e.g. METER_BASE=http://127.0.0.1:8801  ->  http://127.0.0.1:8801/m/B/svm/v1
+# When set, every LLM call goes through the metering proxy on a path that names the arm, the task
+# and THIS ATTEMPT at it, so cost is attributed per attempt without either framework knowing it is
+# metered.
+# e.g. METER_BASE=http://127.0.0.1:8801  ->  http://127.0.0.1:8801/m/B/svm/a1/v1
 METER_BASE="${METER_BASE:-}"
 HARD_TIMEOUT="${HARD_TIMEOUT:-14400}"
+# A `.done` written for rc=124 means "the wall clock cut this", and by default that is still
+# terminal -- see `already_measured` for why, and for what this flag costs.
+RETRY_WALL_CUT="${RETRY_WALL_CUT:-0}"
 
 ARM="${ARM:-A}"
 case "$ARM" in A|B) ;; *) echo "ARM must be A or B (got '$ARM')"; exit 2 ;; esac
@@ -286,6 +290,66 @@ run_started_evidence() {   # $1 = run dir ("" = no LoopLab run dir, i.e. arm A).
   echo "${N:-0}"
 }
 
+# THE IDENTITY OF ONE ATTEMPT, ALLOCATED HERE AND NOWHERE ELSE.
+#
+# `(arm, task)` is not an identity, because a task-arm gets RE-RUN and every attempt used to land in
+# the same meter bucket. Measured 2026-08-23 on `meter/meter.jsonl`: `B/kcenters` holds $2.0086 over
+# 816 calls in four sessions against ONE `.done` marker whose run cost $1.0070 -- a naive per-task
+# sum reads 2x the $1.00 ceiling and looks like a budget breach that never happened. `B/discrete_log`
+# is $1.4749 over 526 calls; `B/count_riemann_zeta_zeros` $0.8386 over 127.
+#
+# WHY THE CAMPAIGN ALLOCATES IT AND NOT THE PROXY. The proxy sees a URL and nothing else: any id it
+# invented (a start-up counter, a first-seen-at stamp) would renumber on every meter restart, and
+# there would be nothing on the campaign's side to join it to. The id has to be minted by whoever
+# also writes the `.done` marker, which is here, so `attempt=aN` in the marker and the `aN` in the
+# path name the same thing and a reader can sum ONE attempt by equality -- no session-gap heuristic,
+# no date arithmetic. (That heuristic is not merely inconvenient, it is undecidable: the same
+# `count_riemann_zeta_zeros` rows split into 19 / 16 / 14 / 12 / 2 sessions at a 5 / 10 / 15 / 20 /
+# 40-minute gap. Nothing in the log says which is right.)
+#
+# The ledger is APPEND-ONLY and one file per task-arm, so it survives the `rm -rf "$TASK_ROOT"` a
+# re-run does and records attempts the marker no longer mentions. It is not locked: two lanes never
+# hold the same task inside one invocation (one PID slot per lane, one task per slot), and two
+# campaigns sharing one $CAMPAIGN_OUT would already be racing on the markers themselves.
+next_attempt() {   # $1 = arm, $2 = task. Echoes this attempt's id AND records the allocation.
+  LEDGER="$OUT/$1-$2.attempts"
+  N=$(( $(wc -l < "$LEDGER" 2>/dev/null || echo 0) + 1 ))
+  printf 'a%s started=%s epoch=%s\n' "$N" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date +%s)" \
+    >> "$LEDGER"
+  echo "a$N"
+}
+
+# IS THIS TASK-ARM ALREADY MEASURED? The resume predicate, hoisted out of the two arm branches so
+# there is ONE answer to it -- and so the wall-cut exception below is not written twice.
+#
+# A WALL CUT IS TERMINAL BY DEFAULT, AND THAT IS A DECISION, NOT AN OVERSIGHT.
+# The argument for making it resumable is real: rc=124 is not a property of the INPUT the way the
+# rc=2 spend refusal is. Measured 2026-08-23, five task-arms were cut at the 4 h wall and THREE had
+# not spent the budget they are compared at -- A-convex_hull $0.70, A-count_riemann_zeta_zeros
+# $0.139, B-max_weighted_independent_set $0.866 of $1.00. `A-count_riemann_zeta_zeros` ran out of
+# clock because forty nginx 504s at 300 s each ate three and a half of its four hours: an
+# environment condition that a re-run under a different transport would simply not meet.
+#
+# It stays terminal anyway, because THIS DRIVER CANNOT TELL THOSE APART from a task that genuinely
+# needs more than four hours, and auto-retrying the second kind spends four hours and a dollar to
+# reproduce the same cut, every resume, forever -- which is what "recorded so it is visible rather
+# than retried forever" was protecting. A resume must be safe to run blind; that is the whole reason
+# `.done` exists.
+#
+# So the retry is one flag away instead of zero: `RETRY_WALL_CUT=1` re-runs exactly the wall-cut
+# task-arms and nothing else. An operator CAN tell the two apart -- from `state=wall_cut` in the
+# marker plus the attempt's own metered spend -- and the alternative to a flag is deleting `.done`
+# files by hand, which is how a marker over a real measurement gets destroyed. `PENDING_FIXES.md`
+# item 4 (raise the wall once the transport fixes land) is exactly this operation.
+already_measured() {   # $1 = marker path. Success = do NOT run this task-arm again.
+  [ -s "$1" ] || return 1
+  case "$(cat "$1")" in
+    *state=wall_cut*|*rc=124*)      # `rc=124` alone: markers written before `state=` existed
+      [ "${RETRY_WALL_CUT:-0}" = "1" ] && return 1 ;;
+  esac
+  return 0
+}
+
 record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpus, $5 = run dir
   RC=$2
   WALL=$(( $(date +%s) - $3 ))
@@ -305,17 +369,46 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
   #              a traceback and was recorded as "interrupted, still owed", i.e. a FINISHED task
   #              queued for a retry that could never do anything different). WITHOUT it there is no
   #              measurement to preserve and no allowance that was spent, so no marker is written.
-  #   124      - the wall-clock net fired; terminal, and deliberately recorded so it is visible
-  #              rather than retried forever, but it produces no number (see docs/51)
+  #   124      - the wall-clock net fired; terminal (see `already_measured` for why, and for the
+  #              one flag that reopens it), and it CAN still carry a number -- see below.
   #   130/137/143 and anything else - interrupted. NO marker; the task is still owed.
+  #
+  # EVERY MARKER NOW NAMES ITS STATE IN WORDS, and `rc=` stays beside it. A reader that has to
+  # recover "the clock killed this" from an integer gets it wrong: `compare_arms.py` learned to
+  # match the substring `rc=124`, and nothing else did -- `final_banner` counted a wall cut into
+  # `COMPLETE` and `campaign_status.py` printed it as a finished task. The vocabulary is closed:
+  #   state=ran_to_completion   rc=0,   the run ended on its own terms
+  #   state=stopped_after_start rc=2,   a typed OperatorRefusal from a run that HAD started
+  #   state=wall_cut            rc=124, `timeout` sent SIGTERM at HARD_TIMEOUT
+  # `attempt=` joins the marker to the meter rows this attempt wrote (`next_attempt`); a marker
+  # written outside `run_one` -- i.e. by a test driving this function -- says `attempt=none`.
+  #
+  # "IT PRODUCES NO NUMBER (see docs/51)" WAS FALSE FOR ARM B, and the comment used to say it for
+  # both arms. What docs/51 item 4 measures is arm A: a cut AlgoTuner run writes no `final_speedup`
+  # into `reports/agent_summary.json` at all, and the live corpus agrees -- neither wall-cut arm-A
+  # task has an entry there. But arm B's champion extraction and TEST scoring run in `run_one`
+  # AFTER `timeout` has killed the run, so a cut arm-B task-arm scores whatever fold it had reached:
+  # measured 2026-08-23, `B-pde_heat1d.final.json` = 3.1223, `B-sparse_eigenvectors_complex` =
+  # 1.0045, `B-max_weighted_independent_set` = 1.0393, each from a clean un-cut eval pass (47 s,
+  # 44 s, 350 s).
+  #
+  # THE COMMENT IS CORRECTED AND THE BEHAVIOUR IS KEPT. Suppressing that number would destroy a real
+  # measurement -- the champion is the fold's own, and the eval pass that scored it was not cut --
+  # and it would blind the one reader that needs it: `compare_arms.py` PRINTS a `wall_cut` row and
+  # keeps it out of the means precisely so an operator can see the wall binding at all. What was
+  # wrong was never the number, only the claim that it is comparable, and that claim is already
+  # refused downstream. So: a wall-cut arm-B row is a number from a TRUNCATED search, reported and
+  # never averaged; a wall-cut arm-A row has no number at all.
   case "$RC" in
-    0|124)
-      echo "wall=$WALL rc=$RC $REGIME" > "$1" ;;
+    0)
+      echo "wall=$WALL rc=0 state=ran_to_completion $REGIME attempt=${ATTEMPT:-none}" > "$1" ;;
+    124)
+      echo "wall=$WALL rc=124 state=wall_cut $REGIME attempt=${ATTEMPT:-none}" > "$1" ;;
     2)
       if METERED="$(run_started_evidence "${5:-}")"; then
         # `metered` is recorded because a started run that paid for nothing is still worth seeing in
         # the marker; it is not what decides the marker.
-        echo "wall=$WALL rc=$RC $REGIME metered=$METERED" > "$1"
+        echo "wall=$WALL rc=$RC state=stopped_after_start $REGIME metered=$METERED attempt=${ATTEMPT:-none}" > "$1"
       else
         refuse_to_start "$1" "$WALL" "$4" "${5:-}"
       fi ;;
@@ -366,6 +459,29 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
   for T in ${4:-}; do
     [ -s "$1/$2-$T.done" ] || MISSING="$MISSING $T"
   done
+
+  # A WALL CUT HAS A MARKER AND IS NOT A RESULT AT THE BUDGET. It counts into DONE_N -- it really is
+  # terminal, and `already_measured` will not re-run it -- but a banner that only prints a count
+  # hides the fact that the wall is binding at all. Measured 2026-08-23: five of the campaign's
+  # task-arms were cut at 4 h and three of them had not spent the ceiling they are compared at, one
+  # at $0.14 of $1.00. That is the single thing an operator has to see to decide whether to raise
+  # HARD_TIMEOUT, and it was in no banner.
+  WALL_CUT=""
+  for M in "$1/$2"-*.done; do
+    [ -s "$M" ] || continue
+    case "$(cat "$M")" in
+      *state=wall_cut*|*rc=124*) WALL_CUT="$WALL_CUT $(basename "${M%.done}")" ;;
+    esac
+  done
+  if [ -n "$WALL_CUT" ]; then
+    echo "[$(date +%H:%M:%S)] WALL-CUT (rc=124, state=wall_cut) --$WALL_CUT"
+    echo "  These reached a TERMINAL state and hold a .done marker, so a resume will not retry them."
+    echo "  They were stopped by HARD_TIMEOUT=${HARD_TIMEOUT:-?} s, NOT by the budget every other row is"
+    echo "  compared at, so they are not measurements at that ceiling. compare_arms.py prints them"
+    echo "  and leaves them out of the means; arm B may still carry a score (the champion is"
+    echo "  extracted and scored after the kill), arm A writes no final_speedup at all."
+    echo "  RETRY_WALL_CUT=1 re-runs exactly these; raise HARD_TIMEOUT first or expect the same cut."
+  fi
   if [ "$REFUSED_N" -eq 0 ] && [ -n "$MISSING" ]; then
     # "UNFINISHED", never "INCOMPLETE": a watcher greps this log for `arm $ARM COMPLETE` and
     # "INCOMPLETE" CONTAINS it -- the same trap the refusal banner below was already written around.
@@ -398,36 +514,39 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
 
 run_one() {                       # $1 = task, $2 = cpu list
   T=$1; CPUS=$2
+  MARKER="$OUT/$ARM-$T.done"
+  # THE RESUME CHECK IS ASKED FIRST, and once. It used to sit inside each arm branch, BELOW the
+  # meter block -- so a skipped task-arm still ran the export. That was harmless while the path held
+  # no per-attempt state; it is not harmless now, because `next_attempt` allocates an id and a
+  # resume that skips 17 of 20 tasks would burn 17 attempt numbers on runs that never happened.
+  if already_measured "$MARKER"; then echo "[$CPUS] $T arm $ARM already done"; return; fi
+  # Allocated whether or not the meter is on: the attempt id is this driver's own name for this
+  # run of this task-arm, it goes into the marker either way, and a marker whose `attempt=` means
+  # something different depending on METER_BASE would be worse than one that has no attempt at all.
+  ATTEMPT="$(next_attempt "$ARM" "$T")"
   if [ -n "$METER_BASE" ]; then
     # Both arms, same meter, one path segment apart. Arm A reaches it through OPENAI_BASE_URL,
     # which litellm honours for an `openai/<model>` entry that carries no api_base of its own.
-    # OPEN[meter-path-cannot-separate-two-attempts-at-one-task] the meter attributes by
-    # (arm, task) and by nothing else, so a task-arm that is RE-RUN adds to the same bucket and no
-    # reader can tell the attempts apart. Measured 2026-08-23 on `meter/meter.jsonl`: `kcenters`
-    # holds $2.0086 over 816 calls in FOUR sessions (13:18-13:37, 14:08-14:59, 15:30-16:02,
-    # 16:20-17:56) against ONE `.done` marker whose run is the last of them at $1.0070 -- so a naive
-    # per-task cost reads 2x the ceiling and looks like a budget breach that never happened.
-    # `discrete_log` has six sessions and `count_riemann_zeta_zeros` fourteen. DEFERRED because the
-    # fix is a new path segment (`/m/$ARM/$T/$ATTEMPT/v1`), which re-keys attribution for a campaign
-    # that is 7,700 calls in: the rows already written would be under the old key and the ones after
-    # it under the new, which is worse than one key that is honestly coarse. Between campaigns, the
-    # segment plus a matching `_split_path` in `meter/proxy.py` closes it.
-    # proof:absent:/m/$ARM/$T/$ATTEMPT@benchmarks/algotune/campaign.sh
-    export LOOPLAB_LLM_BASE_URL="$METER_BASE/m/$ARM/$T/v1"
+    #
+    # THE THIRD SEGMENT IS THE ATTEMPT (see `next_attempt` for the measurement that forced it). The
+    # proxy still accepts the two-segment `/m/<arm>/<task>/v1` -- `docs/52` and any hand-built curl
+    # spell it, and a metered call must never be refused for arriving on the old shape -- and
+    # records it with an empty `attempt`. Rows in a log written before 2026-08-23 carry no `attempt`
+    # KEY at all, which is a third, distinguishable state; `meter/proxy.py`'s docstring says how to
+    # read such a log, and the short answer is per `(arm, task)` and labelled "all attempts".
+    export LOOPLAB_LLM_BASE_URL="$METER_BASE/m/$ARM/$T/$ATTEMPT/v1"
     export LOOPLAB_LLM_API_KEY_BASE_URL="$LOOPLAB_LLM_BASE_URL"
     export OPENAI_BASE_URL="$LOOPLAB_LLM_BASE_URL"
     export OPENAI_API_KEY="${LOOPLAB_LLM_API_KEY:-meter}"
   fi
   if [ "$ARM" = "A" ]; then
-    if [ -s "$OUT/A-$T.done" ]; then echo "[$CPUS] $T arm A already done"; return; fi
     S=$(date +%s)
     timeout "$HARD_TIMEOUT" taskset -c "$CPUS" ./algotune.sh agent --standalone \
         "$ALGOTUNE_MODEL_KEY" "$T" > "$OUT/A-$T.log" 2>&1
     RC=$?
-    record_done "$OUT/A-$T.done" "$RC" "$S" "$CPUS" ""
-    [ -s "$OUT/A-$T.done" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm A done ($(cat "$OUT/A-$T.done"))"
+    record_done "$MARKER" "$RC" "$S" "$CPUS" ""
+    [ -s "$MARKER" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm A done ($(cat "$MARKER"))"
   else
-    if [ -s "$OUT/B-$T.done" ]; then echo "[$CPUS] $T arm B already done"; return; fi
     TASK_ROOT="$RUNS_ROOT/$T"
     rm -rf "$TASK_ROOT"; mkdir -p "$TASK_ROOT/memory" "$TASK_ROOT/knowledge"
     # MAKE_TASK_ARGS carries goal VARIANTS (e.g. --role-split). A pass-through rather than a knob
@@ -463,13 +582,13 @@ run_one() {                       # $1 = task, $2 = cpu list
     else
       echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"
     fi
-    record_done "$OUT/B-$T.done" "$RC" "$S" "$CPUS" "$TASK_ROOT/run"
-    [ -s "$OUT/B-$T.done" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm B done ($(cat "$OUT/B-$T.done"))"
+    record_done "$MARKER" "$RC" "$S" "$CPUS" "$TASK_ROOT/run"
+    [ -s "$MARKER" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm B done ($(cat "$MARKER"))"
   fi
 }
 
 echo "arm $ARM | $NTASKS tasks | $LANE_COUNT lanes x $CORES_PER_LANE cores from core $CORE_OFFSET (of $NPROC) | budget \$$BUDGET_USD"
-echo "model $ALGOTUNE_MODEL_KEY | llm ${METER_BASE:-$LOOPLAB_LLM_BASE_URL}${METER_BASE:+ (metered, per-task paths)}"
+echo "model $ALGOTUNE_MODEL_KEY | llm ${METER_BASE:-$LOOPLAB_LLM_BASE_URL}${METER_BASE:+ (metered, per-attempt paths)}"
 reap_orphan_workers
 
 # One PID slot per lane, assigned by ACTUAL freeness. Round-robin by index would hand task N+k the

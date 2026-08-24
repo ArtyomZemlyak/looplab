@@ -1414,6 +1414,7 @@ def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
         st.paused = False
         st.pause_node_id = None
         st.pause_generation = None
+        st.pause_reason = None
     if st.building and st.building.get("node_id") in affected:
         st.building = None
     for _aff in affected:
@@ -1456,6 +1457,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             st.paused = False
             st.pause_node_id = None
             st.pause_generation = None
+            st.pause_reason = None
         n.status = NodeStatus.pending
         n.terminal_event_seq = None
         n.metric = None
@@ -1603,6 +1605,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # left alone — that's the operator's separate resume.)
         st.finished = False
         st.stop_reason = None
+        st.stop_detail = None
         st.stop_requested = None
 
 def _stage_epoch(row) -> int:
@@ -3348,6 +3351,11 @@ def _on_run_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if not bool(d.get("finalization_required", False)):
             st.finalized_finish_seq = e.seq
     st.stop_reason = d.get("reason")
+    # …and the finishing writer's own sentence beside the class. Folded for the same reason the
+    # `pause` reason is: it was already durable on the row and no reader could reach it. `error` is
+    # the class the engine decided; this is the account it wrote at the same moment.
+    _detail = d.get("error")
+    st.stop_detail = str(_detail) if isinstance(_detail, str) and _detail.strip() else None
     # Drop dangling markers on normal completion. Error finishes deliberately retain crash prefixes:
     # older/external writers may need resume recovery to append the missing node_failed receipt. Other
     # terminal reasons must not leave a false in-flight pulse on a run that is over.
@@ -3409,8 +3417,10 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
     st.paused = False
     st.pause_node_id = None
     st.pause_generation = None
+    st.pause_reason = None
     st.finished = False
     st.stop_reason = None
+    st.stop_detail = None
     st.stop_requested = None
 
 # --- live operator control events (UI intervention). Intent only; the engine reads
@@ -3474,6 +3484,16 @@ def _on_pause(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.paused = True
     if previous != (st.paused, st.pause_node_id, st.pause_generation):
         st.pause_event_seq = e.seq
+        # …and the pausing writer's own words, beside the seq that identifies the row they came from.
+        # Under the SAME guard on purpose: a second `pause` that does not change the triple did not
+        # take effect (the run was already paused by the first), so the reason a reader is owed is the
+        # first one's, exactly as `pause_event_seq` already answers with the first one's row.
+        #
+        # NOT capped, and that is the faithful choice: this field is a projection of a byte range that
+        # is already durable in `events.jsonl`, so a cap here would make `looplab replay` disagree with
+        # the log it replayed. Every producer already bounds its own text at the append site.
+        reason = d.get("reason")
+        st.pause_reason = str(reason) if isinstance(reason, str) and reason.strip() else None
 
 
 def _on_restart(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -3508,6 +3528,7 @@ def _on_node_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             st.paused = False
             st.pause_node_id = None
             st.pause_generation = None
+            st.pause_reason = None
         _purge_node_requests(st, {nid})
         if st.approval_subject == nid or st.approved_node_id == nid:
             # A FINISHED run keeps its certificates; only the grant that named THIS node is void.

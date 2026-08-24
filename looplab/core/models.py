@@ -1591,6 +1591,19 @@ class RunState(BaseModel):
     # n_labels} — the labels themselves NEVER enter the event log. Audit/UI only.
     host_grading: Optional[dict] = None
     stop_reason: Optional[str] = None     # why the run finished (budget/leakage/done)
+    # The COARSE reason above with its own sentence beside it, folded from `run_finished.error`.
+    #
+    # Same shape and same argument as `pause_reason` below: durable text the fold was discarding.
+    # Measured over `/var/tmp/looplab-bench/runs-B`, ALL TWELVE runs that DID finish fold to
+    # `stop_reason="error"` — which reads as a crash, and none of them crashed. Every one stopped on
+    # the operator's own spend ceiling, and the `run_finished` row said so in a full sentence naming
+    # the amount, the setting and the remedy. A reader given only "error" is worse off than one given
+    # nothing: `finished=False` at least prompts a question, while `reason=error` answers it wrongly.
+    #
+    # A RECORD, never a decision input. The one predicate that branches on how a run finished —
+    # `cli/run_cmds.py::classify_prior_run`'s `stop_reason == "error"` pending-finalize rung — reads
+    # the COARSE field, and must keep reading it: the class is the engine's, the sentence is prose.
+    stop_detail: Optional[str] = None
     confirmed_done: bool = False          # the multi-seed confirmation phase completed (I12)
     # P0-2 search epoch: bumped when a FINISHED run is reopened (resume/run_reopened). The nodes
     # added after a reopen are a fresh candidate set, so the prior confirmation/approval COMPLETION
@@ -1777,6 +1790,19 @@ class RunState(BaseModel):
     pause_node_id: Optional[int] = None         # scoped auto-pause owner (None = explicit operator pause)
     pause_generation: Optional[int] = None
     pause_event_seq: Optional[int] = Field(default=None, exclude=True)
+    # WHY the run is paused, in the pausing writer's own words, folded from `pause.reason`.
+    #
+    # A RECORD, never a decision input: nothing branches on this string. The two things that DO branch
+    # — `cli/run_cmds.py::classify_prior_run` and the loop's own break — read `paused`, which is a fact
+    # the fold owns out of band. It is folded because the reason was ALREADY durable and the fold threw
+    # it away: measured over `/var/tmp/looplab-bench/runs-B` (20 real runs), 5 of the 8 that ended with
+    # no `run_finished` had written a `pause` carrying a full sentence naming both the cause and the
+    # remedy, and no reader could reach one word of it — `looplab inspect` printed `finished=False` and
+    # stopped there, which is why one of those five cost hours to investigate.
+    #
+    # Meaningful ONLY while `paused` is True — the same lifetime as `pause_node_id`/`pause_generation`
+    # above, and cleared beside them at every site that lifts a pause.
+    pause_reason: Optional[str] = None
     stop_requested: Optional[str] = None       # `run_abort`: reason; loop -> run_finished + break
     # Seq of the latest finalize intent. A request newer than the accepted finish still needs a new
     # finish/finalization boundary; an older one was already consumed by that finish.

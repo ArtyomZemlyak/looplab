@@ -51,9 +51,41 @@ USAGE
 
 Arms address it with a path prefix that attributes each call without either framework knowing:
 
-    http://127.0.0.1:8801/m/<arm>/<task>/v1/chat/completions   ->  <upstream>/chat/completions
+    http://127.0.0.1:8801/m/<arm>/<task>/<attempt>/v1/chat/completions -> <upstream>/chat/completions
 
 `/v1/...` also works and is attributed to arm `?`.
+
+WHAT AN ATTEMPT SEGMENT IS FOR, AND HOW TO READ A LOG WRITTEN BEFORE IT EXISTED
+------------------------------------------------------------------------------
+`(arm, task)` is not an identity: a task-arm gets RE-RUN, and until 2026-08-23 every attempt at one
+task added to one bucket. Measured on `/var/tmp/looplab-bench/meter/meter.jsonl`: `B/kcenters`
+holds **$2.0086 over 816 calls** against ONE `.done` marker whose run really cost **$1.0070**, so a
+naive per-task sum reads 2x the $1.00 ceiling and looks like a budget breach that never happened --
+a colleague read it as one. `B/discrete_log` is $1.4749 over 526 calls and
+`B/count_riemann_zeta_zeros` $0.8386 over 127.
+
+The third segment is that identity, and it is **the campaign's**, not this proxy's:
+`benchmarks/algotune/campaign.sh::next_attempt` allocates `a1`, `a2`, ... per task-arm, appends the
+allocation to `$CAMPAIGN_OUT/<arm>-<task>.attempts`, stamps it into the `.done` marker as
+`attempt=aN`, and puts it in the URL. A proxy that invented one instead (a start-up counter, a
+first-seen-at timestamp) would renumber itself on every restart and could not be joined to a marker.
+So this file only ever COPIES what the path says, and copies the empty string when the path says
+nothing -- `attempt` is never synthesised here.
+
+Both forms are accepted, and the two-segment one is not deprecated: `docs/52`, `setup_gateway_arm.py`
+and any hand-built curl still spell it, and a metered call that arrives on the short path must be
+metered, not refused. It is recorded with `"attempt": ""`.
+
+**Reading the 9,456-row log that predates this**: rows written before the change carry NO `attempt`
+key at all, and `row.get("attempt")` returning `None` (key absent) rather than `""` (key present,
+caller named no attempt) is exactly that distinction -- do not collapse them. Such a row is
+attributable to `(arm, task)` and to nothing finer, and **the attempts inside it are not
+recoverable**: the only handle left is a gap heuristic over `ts`, and its answer is whatever
+threshold you picked. `B/count_riemann_zeta_zeros` splits into 19 / 16 / 14 / 12 / 2 sessions at a
+5 / 10 / 15 / 20 / 40-minute gap. So sum an OLD log per `(arm, task)` and label it "all attempts";
+sum a NEW one per `(arm, task, attempt)` and label it with the marker's own `attempt=`. Do not mix
+the two in one total -- a task whose log spans the change has both shapes, and the honest split is
+"before" and "after", not a re-sessionised guess.
 """
 
 from __future__ import annotations
@@ -211,14 +243,28 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # the meter log is the log; keep stderr for real problems
         return
 
-    def _split_path(self) -> tuple[str, str, str]:
-        """`/m/<arm>/<task>/v1/x` -> (arm, task, '/v1/x'). Anything else -> ('?', '?', path)."""
+    def _split_path(self) -> tuple[str, str, str, str]:
+        """`/m/<arm>/<task>/<attempt>/v1/x` -> (arm, task, attempt, '/v1/x').
+
+        THE TWO-SEGMENT FORM STILL WORKS and yields `attempt=''`. That is not a courtesy: `docs/52`
+        and `setup_gateway_arm.py` document the short path, and refusing a call because its URL is
+        the old shape would drop a real, paid request out of the ledger -- the one thing this file
+        must never do.
+
+        The two are told apart by the segment itself, not by a length count, because both forms have
+        the same number of `/` once the tail is long enough: `/m/A/t/v1/chat/completions` and
+        `/m/A/t/a3/v1/chat` both split into six. `/v1` is where the UPSTREAM path begins, so a
+        fourth segment that is not `v1` is an attempt id and a fourth segment that IS `v1` is the
+        tail. An attempt id may therefore not be spelled `v1`; `campaign.sh` spells them `a<N>`.
+        """
         path = self.path
         if path.startswith("/m/"):
-            parts = path.split("/", 4)
+            parts = path.split("/", 5)          # ['', 'm', arm, task, seg, rest]
+            if len(parts) >= 6 and parts[4] != "v1":
+                return parts[2], parts[3], parts[4], "/" + parts[5]
             if len(parts) >= 5:
-                return parts[2], parts[3], "/" + parts[4]
-        return "?", "?", path
+                return parts[2], parts[3], "", "/" + "/".join(parts[4:])
+        return "?", "?", "", path
 
     def _send(self, status: int, body: bytes, headers: dict) -> None:
         self.send_response(status)
@@ -230,10 +276,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _fail(self, status: int, message: str, arm: str, task: str, t0: float) -> None:
+    def _fail(self, status: int, message: str, arm: str, task: str, attempt: str,
+              t0: float) -> None:
         body = json.dumps({"error": {"message": message, "type": "meter_proxy"}}).encode()
         self.server.meter.record({
-            "ts": time.time(), "arm": arm, "task": task, "status": status,
+            "ts": time.time(), "arm": arm, "task": task, "attempt": attempt, "status": status,
             "latency_ms": round((time.time() - t0) * 1000, 1), "error": message, "metered": False,
         })
         self._send(status, body, {"Content-Type": "application/json"})
@@ -325,7 +372,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _proxy(self, body: bytes) -> None:
         t0 = time.time()
-        arm, task, tail = self._split_path()
+        arm, task, attempt, tail = self._split_path()
 
         if tail in ("/healthz", "/m/healthz"):
             self._send(200, json.dumps(self.server.meter.snapshot()).encode(),
@@ -359,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
                                      method=self.command)
 
         if streaming:
-            self._proxy_stream(req, arm, task, tail, model, t0)
+            self._proxy_stream(req, arm, task, attempt, tail, model, t0)
             return
 
         # The client asked for a whole answer. With the adapter on, ask UPSTREAM for a stream (so
@@ -373,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
         if adapted:
             req = urllib.request.Request(url, data=adapted_body, headers=req_headers,
                                          method=self.command)
-            self._proxy_stream(req, arm, task, tail, model, t0, collect_for_client=True)
+            self._proxy_stream(req, arm, task, attempt, tail, model, t0, collect_for_client=True)
             return
 
         attempts, queued_s = 1, 0.0
@@ -390,13 +437,13 @@ class Handler(BaseHTTPRequestHandler):
             status = exc.code
             resp_headers = {k: v for k, v in (exc.headers or {}).items()}
         except Exception as exc:  # noqa: BLE001 - upstream failures are data, not crashes
-            self._fail(502, f"upstream {type(exc).__name__}: {exc}", arm, task, t0)
+            self._fail(502, f"upstream {type(exc).__name__}: {exc}", arm, task, attempt, t0)
             return
 
         latency_ms = round((time.time() - t0) * 1000, 1)
         row = {
-            "ts": time.time(), "arm": arm, "task": task, "path": tail, "model": model,
-            "status": status, "latency_ms": latency_ms, "stream": streaming,
+            "ts": time.time(), "arm": arm, "task": task, "attempt": attempt, "path": tail,
+            "model": model, "status": status, "latency_ms": latency_ms, "stream": streaming,
             "attempts": attempts, "queued_s": round(queued_s, 2),
         }
 
@@ -486,8 +533,8 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(delay)
                 waited += delay
 
-    def _proxy_stream(self, req, arm: str, task: str, tail: str, model: str, t0: float,
-                      *, collect_for_client: bool = False) -> None:
+    def _proxy_stream(self, req, arm: str, task: str, attempt: str, tail: str, model: str,
+                      t0: float, *, collect_for_client: bool = False) -> None:
         """Forward an SSE stream chunk-by-chunk, pricing the usage frame on its way past.
 
         LoopLab streams by default (`Settings.llm_stream`) and AlgoTuner does not. Metering only
@@ -498,8 +545,8 @@ class Handler(BaseHTTPRequestHandler):
         Frames are forwarded the moment they arrive: a proxy that buffered them would make every
         liveness signal in the run a property of this file.
         """
-        row = {"ts": time.time(), "arm": arm, "task": task, "path": tail, "model": model,
-               "stream": True}
+        row = {"ts": time.time(), "arm": arm, "task": task, "attempt": attempt, "path": tail,
+               "model": model, "stream": True}
         if collect_for_client:
             # The client is NOT expecting SSE. Frames are collected here and answered as one
             # JSON body, so nothing about this is visible to it except that the call did not
@@ -518,7 +565,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(exc.code, raw, {"Content-Type": "application/json"})
             return
         except Exception as exc:  # noqa: BLE001
-            self._fail(502, f"upstream {type(exc).__name__}: {exc}", arm, task, t0)
+            self._fail(502, f"upstream {type(exc).__name__}: {exc}", arm, task, attempt, t0)
             return
 
         if not collect_for_client:

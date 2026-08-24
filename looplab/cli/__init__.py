@@ -37,6 +37,7 @@ from looplab.core.run_deletion import (
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed)
 from looplab.events.eventstore import INTEGRITY_COMPLETE, EventStore, integrity_sentence
+from looplab.events.stop_account import stop_account
 from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import (
     Engine,
@@ -908,8 +909,23 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
 
 
 def _print_result(state) -> None:
+    """The run summary every entry point closes with, and `looplab inspect` re-prints.
+
+    WHY THE STOP LINE IS HERE AND UNCONDITIONAL. `finished={state.finished}` was the whole of what
+    this said about a run's lifecycle, and `False` covers three unrelated things: an auto-pause that
+    is resumable and already carries a written reason, an operator stop, and a run whose process was
+    killed with nothing recorded. Measured over `/var/tmp/looplab-bench/runs-B` (20 real runs), 8
+    printed `finished=False` — 5 of them paused with a full sentence naming the cause and the remedy
+    sitting unread in `events.jsonl`, 3 of them killed at a harness wall clock. One of the five cost
+    hours of investigation that the string it had already written would have ended.
+
+    Printed for EVERY disposition including `finished`, on the same argument as the `comparability:`
+    line in `inspect_cmds.py`: a line that appears only when there is something to say makes its own
+    absence invisible on exactly the runs where it matters most.
+    """
     best = state.best()
     typer.echo(f"run={state.run_id} task={state.task_id} finished={state.finished}")
+    typer.echo(f"stop: {stop_account(state).line}")
     typer.echo(f"nodes={len(state.nodes)} evaluated={len(state.evaluated_nodes())}")
     if best is not None:
         m = best.robust_metric

@@ -39,6 +39,7 @@ from looplab.events.replay import fold
 from looplab.events.types import EV_BUDGET
 from looplab.engine.comparability import record_of as comparability_record_of
 from looplab.trust.scan_receipt import trust_scan_summary
+from looplab.events.stop_account import last_record_line
 from looplab.cli import (
     _RUN_DIR_HINT, _echo_log_integrity, _print_result, _require_run_dir, app)
 
@@ -383,6 +384,19 @@ def inspect(run_dir: Path = typer.Argument(...)):
         all_events = store.read_all()
         state = fold(all_events)
         _print_result(state)
+        # WHAT THE RUN WAS DOING WHEN THE RECORD STOPPED — the evidence half of the `stop:` line
+        # `_print_result` just printed. It lives here rather than there because it needs the EVENTS,
+        # which `_print_result` is not given (and must not be: four suite tests monkeypatch it with a
+        # one-argument lambda, and a run/resume exit would pay a second full read of the log for a
+        # line that is only ever asked for post hoc).
+        #
+        # Printed for every disposition, not only the ones with no boundary: on a finished run it
+        # names the finalize tail, which is how a reader knows the line is live rather than absent.
+        # Both facts are read off rows that were already being written — no event was added, and
+        # nothing had to survive the process to make this sayable.
+        _evidence = last_record_line(all_events)
+        if _evidence:
+            typer.echo(f"stop evidence: {_evidence}")
         # WHAT THIS RUN'S LOG CAN AND CANNOT SAY ABOUT ITS TRUST SCANS. `looplab inspect` is where
         # someone goes to ask what a run actually did, and until the `trust_scan` receipt existed the
         # honest answer here was unobtainable: a clean scan wrote nothing, so silence covered

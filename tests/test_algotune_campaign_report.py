@@ -694,3 +694,154 @@ def test_a_run_that_spent_its_ceiling_is_done_even_with_no_marker(tmp_path):
 
     # 4. No run directory at all -> owed, never "done by default".
     assert cmp_mod.marker_state(final, "B", "absent") == "unfinished"
+
+
+# ------------------------------------------------------------------------------------------------
+# campaign_status: arm B's number comes out of arm B's files
+#
+# THE DEFECT, and why it is worse than "reports arm B as unmeasured". This script read
+# `<algotune>/reports/agent_summary.json` for both arms. Only arm A writes that file
+# (`AlgoTuner/main.py::update_summary_json`), but the rows are keyed by TASK and by MODEL NAME and
+# both arms run the SAME model -- so `--arm B` did not miss, it HIT, on arm A's number.
+#
+# Measured 2026-08-23 against `campaign-paired/`, `--arm B` printed `kcenters 5.9454` (arm B scored
+# 4.3635), `edge_expansion 0.9852` (arm B scored 24.1928), `integer_factorization 5.8271` (1.0025)
+# and `discrete_log 0.9926` (1.0118), and reported the other fourteen -- every one of which has a
+# number in `B-<task>.final.json` -- as "no number". Four of arm A's scores under arm B's banner,
+# the arm's best result off by 24x in the direction that loses it the comparison, and nothing in
+# the output a reader could use to notice.
+# ------------------------------------------------------------------------------------------------
+STATUS = BENCH / "algotune" / "campaign_status.py"
+
+# The live rows, so the test is falsifiable against the campaign it was found in.
+_LIVE_ARM_A = {"kcenters": 5.9454, "edge_expansion": 0.9852, "integer_factorization": 5.8271}
+_LIVE_ARM_B = {"kcenters": 4.3635, "edge_expansion": 24.1928, "integer_factorization": 1.0025}
+
+
+def _status(tmp_path: Path, arm: str, *, arm_a: dict, rows: dict, markers=None,
+            reports: bool = True) -> subprocess.CompletedProcess:
+    out = _campaign_dir(tmp_path, rows, markers=markers)
+    if arm == "A":
+        # Arm A leaves a `.log` and a `.done` and writes its number into AlgoTuner's summary; it has
+        # no `.final.json` at all. `_campaign_dir` builds the arm-B shape, so the arm-A side is
+        # added here rather than by pretending one arm's files are the other's -- which is the
+        # defect this whole block is about.
+        for task in sorted(set(arm_a) | set(rows)):
+            (out / f"A-{task}.log").write_text("", encoding="utf-8")
+            (out / f"A-{task}.done").write_text(
+                "wall=7881 rc=0 state=ran_to_completion cpus=0-1 lanes=1 cores_per_lane=2 "
+                "attempt=a1\n", encoding="utf-8")
+    root = tmp_path / "AlgoTune"
+    (root / "reports").mkdir(parents=True, exist_ok=True)
+    if reports:
+        (root / "reports" / "agent_summary.json").write_text(
+            json.dumps({t: {"deepseek-v4-flash": {"final_speedup": f"{v:.4f}"}}
+                        for t, v in arm_a.items()}), encoding="utf-8")
+    # `marker_state` derives runs-<arm> from the marker directory's PARENT, so it has to exist for
+    # the "no marker but the run reached its ceiling" branch to answer at all.
+    for task in rows:
+        (out.parent / f"runs-{arm}" / task / "run").mkdir(parents=True, exist_ok=True)
+    return subprocess.run(
+        [sys.executable, str(STATUS), "--algotune-root", str(root), "--out", str(out),
+         "--arm", arm], capture_output=True, text=True, timeout=120, cwd=str(ROOT))
+
+
+def test_arm_b_status_reads_arm_b_and_never_arm_a(tmp_path):
+    """THE ROW THAT STARTED IT, three times over. Every one of these numbers exists in BOTH arms'
+    files for the same task and the same model, so a reader cannot tell from the output which arm
+    produced them -- which is why the assertion is that arm A's numbers are ABSENT, not merely that
+    arm B's are present."""
+    rows = {t: dict(_GOOD, speedup=v) for t, v in _LIVE_ARM_B.items()}
+    proc = _status(tmp_path, "B", arm_a=_LIVE_ARM_A, rows=rows)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    for task, value in _LIVE_ARM_B.items():
+        assert f"{value:.4f}" in proc.stdout, (task, proc.stdout)
+    for task, value in _LIVE_ARM_A.items():
+        assert f"{value:.4f}" not in proc.stdout, (
+            f"{task} printed arm A's {value} under an arm-B banner:\n{proc.stdout}")
+    assert "3 SCORED, 0 no number" in proc.stdout, proc.stdout
+
+
+def test_arm_a_status_still_reads_arm_a(tmp_path):
+    """The control: the file arm A writes is still the file arm A is read from, and arm B's own
+    `.final.json` rows must not leak into it either."""
+    rows = {t: dict(_GOOD, speedup=v) for t, v in _LIVE_ARM_B.items()}
+    proc = _status(tmp_path, "A", arm_a=_LIVE_ARM_A, rows=rows)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    for value in _LIVE_ARM_A.values():
+        assert f"{value:.4f}" in proc.stdout, proc.stdout
+    assert "24.1928" not in proc.stdout, proc.stdout
+
+
+def test_a_missing_agent_summary_is_printed_rather_than_raised(tmp_path):
+    """It was an unguarded `read_text()`. Running this before arm A finished its first task -- or on
+    a box that only ever runs arm B -- ended in a `FileNotFoundError` traceback instead of a status,
+    and the missing FILE reads exactly like every task failing unless the tool says which it is."""
+    proc = _status(tmp_path, "A", arm_a={}, rows={"kcenters": _GOOD}, reports=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "FileNotFoundError" not in proc.stderr, proc.stderr
+    assert "agent_summary.json" in proc.stdout, proc.stdout
+    assert "that is the FILE missing, not the tasks failing" in proc.stdout, proc.stdout
+
+
+def test_arm_b_status_never_needs_arm_a_at_all(tmp_path):
+    """Arm B is measurable on a box where AlgoTuner has never run. It used to be the case that no
+    `agent_summary.json` meant no arm-B status either, which is the dependency the split removes."""
+    rows = {t: dict(_GOOD, speedup=v) for t, v in _LIVE_ARM_B.items()}
+    proc = _status(tmp_path, "B", arm_a={}, rows=rows, reports=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "3 SCORED" in proc.stdout, proc.stdout
+    # and it does not print a complaint about a file it never needed
+    assert "agent_summary.json" not in proc.stdout, proc.stdout
+
+
+def test_arm_b_status_reads_the_reason_beside_the_zero(tmp_path):
+    """`_arm_b_final` is IMPORTED from `compare_arms.py` rather than re-spelled, so the "a zero the
+    ARENA is responsible for is not a score" rule holds in both reports or in neither. A second
+    copy of that rule is how the two tools came to disagree in the first place."""
+    rows = {"good": _GOOD, "arena": _HARNESS_ZERO, "wrong": _SOLVER_ZERO}
+    proc = _status(tmp_path, "B", arm_a={}, rows=rows, reports=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "no_valid_speedups" in proc.stdout, proc.stdout          # arena: `--`, with its reason
+    assert re.search(r"^\s+wrong\s+0\.0000", proc.stdout, re.M), proc.stdout   # solver: a real zero
+    assert "1 SCORED" not in proc.stdout and "2 SCORED" in proc.stdout, proc.stdout
+
+
+def test_arm_b_status_shows_a_wall_cut_and_keeps_it_out_of_the_median(tmp_path):
+    """A `.done` for rc=124 made a wall-cut task-arm read as finished here too. It is SHOWN --
+    the operator has to see the wall binding at all -- and excluded from the median, on the same
+    rule `compare_arms.py` applies to the mean."""
+    rows = {"clean": dict(_GOOD, speedup=2.0), "cut": dict(_GOOD, speedup=3.1223)}
+    out = _campaign_dir(tmp_path, rows)
+    (out / "B-cut.done").write_text("wall=14447 rc=124 state=wall_cut cpus=66-87 lanes=4 "
+                                    "cores_per_lane=22 attempt=a1\n", encoding="utf-8")
+    for task in rows:
+        (out.parent / "runs-B" / task / "run").mkdir(parents=True, exist_ok=True)
+    root = tmp_path / "AlgoTune"
+    (root / "reports").mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [sys.executable, str(STATUS), "--algotune-root", str(root), "--out", str(out), "--arm", "B"],
+        capture_output=True, text=True, timeout=120, cwd=str(ROOT))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "3.1223" in proc.stdout, proc.stdout                     # shown
+    assert "[wall_cut]" in proc.stdout, proc.stdout                 # and labelled
+    assert "CUT AT THE WALL CLOCK" in proc.stdout, proc.stdout
+    assert "median 2.0000" in proc.stdout, proc.stdout              # not averaged in
+    assert "over 1 at the budget" in proc.stdout, proc.stdout
+
+
+def test_a_pre_state_marker_is_still_a_wall_cut_to_compare_arms(tmp_path):
+    """The 27 markers of the live campaign were written before `record_done` named the state in
+    words and carry only `rc=124`. `marker_state` asks `state=wall_cut` first and the integer
+    second; dropping the integer would silently reclassify five real wall cuts as clean finishes."""
+    legacy = tmp_path / "camp"
+    legacy.mkdir()
+    (legacy / "B-cut.done").write_text("wall=14400 rc=124 cpus=22-43 lanes=4 cores_per_lane=22\n",
+                                       encoding="utf-8")
+    assert CA.marker_state(legacy, "B", "cut") == "wall_cut"
+    (legacy / "B-new.done").write_text("wall=100 rc=124 state=wall_cut cpus=0-1 attempt=a2\n",
+                                       encoding="utf-8")
+    assert CA.marker_state(legacy, "B", "new") == "wall_cut"
+    (legacy / "B-fine.done").write_text("wall=100 rc=0 state=ran_to_completion cpus=0-1\n",
+                                        encoding="utf-8")
+    assert CA.marker_state(legacy, "B", "fine") == "done"
