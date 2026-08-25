@@ -1356,6 +1356,25 @@ class Card(BaseModel):
     # `status`: an operator must not see a months-long direction sitting in "Running" because one of
     # its two hundred experiments is. None on a card with no children. See `card_child_rollup`.
     child_rollup: Optional[dict] = None
+    # THE CONCEPTS THIS DIRECTION'S EXPERIMENTS TOUCH — the union over its children (DERIVED).
+    #
+    # A SEPARATE FIELD FROM `concept_tags`, and that is the whole care in it. Those are AUTHORED and
+    # carry `concept_source` provenance naming exactly who claimed them (`card_added` /
+    # `card_enriched` / `node`); writing a derived union into them would make the board attribute to
+    # a proposer a membership nobody proposed — the defect `CardConceptSource` exists to prevent.
+    #
+    # Why it is needed: concepts are a hierarchy and so is the direction forest, and until this
+    # field the two were disjoint taxonomies over one board. Measured on
+    # `runs/e5small-dr-unified-v5`: all five directions carried `concept_tags=[]` while card-0
+    # carried four, so an operator grouping the board by concept saw the experiments and none of the
+    # questions they answer. Corpus-wide only 28% of cards are tagged at all, which is why
+    # densifying at the DIRECTION level — a dozen questions rather than 236 experiments — is where
+    # the grouping becomes usable.
+    #
+    # EMPTY FOR A CHILDLESS DIRECTION, honestly rather than conveniently: a question nobody has run
+    # an experiment against has no MEASURED concept membership, and deriving one from its wording is
+    # a classifier's job, not this fold's. It fills the moment the first child is filed.
+    child_concept_tags: list[str] = Field(default_factory=list, max_length=64)
     # WHICH OF THE TWO THINGS THIS ROW IS (DERIVED, from `selection_provenance.action_source`):
     # `direction` — owns no executable action, so it is a research question children answer;
     # `experiment` — owns one action, the minimal-change hypothesis the engine can actually run.

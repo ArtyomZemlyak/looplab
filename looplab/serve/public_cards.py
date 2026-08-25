@@ -36,6 +36,7 @@ _SKIP = object()
 # boundary is reviewed; fixed order also makes byte output deterministic across event/mapping order.
 _FIELDS = (
     "id", "belief_id", "retry_of", "card_kind", "parent_card_id", "child_rollup",
+    "child_concept_tags",
     "status", "status_nodes", "verdict", "actionable", "identity",
     "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
@@ -76,7 +77,11 @@ _INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority",
 _NONNEG_INT_FIELDS = {"statement_edit_seq", "scored_against_generation"}
 _FLOAT_FIELDS = {"best_delta", "confidence"}
 _POSITIVE_FLOAT_FIELDS = {"eval_timeout"}
-_REF_LIST_FIELDS = {"aliases", "belief_aliases", "concept_tags", "lesson_refs", "claim_refs"}
+# `child_concept_tags` rides the SAME projector as `concept_tags` — the pair is only useful side
+# by side (authored vs derived-from-children), and two bounding rules would let one clip where the
+# other did not and make an inherited membership look narrower than it is.
+_REF_LIST_FIELDS = {"aliases", "belief_aliases", "concept_tags", "child_concept_tags",
+                    "lesson_refs", "claim_refs"}
 # `status_nodes` rides the same projector as `evidence`: the node ids the lifecycle lane was derived
 # from. It is published because the board's own claim has to be checkable — an operator reading
 # "Running" must be able to name the node that is running, and until it existed a `building` card

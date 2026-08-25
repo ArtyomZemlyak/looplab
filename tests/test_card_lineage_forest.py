@@ -301,3 +301,42 @@ def test_the_edge_survives_a_path_with_no_card_added_receipt():
     # value never reaching the fold at all, which is what this pins through `cards_added`-free input.
     from looplab.events.card_ledger import _card_added_snapshot
     assert _card_added_snapshot({"id": "c", "parent_card_id": "dir-7"})[0]["parent_card_id"] == "dir-7"
+
+
+def test_a_direction_inherits_the_concept_UNION_of_its_children():
+    """Concepts are a hierarchy and so is the direction forest; until this they were disjoint
+    taxonomies over one board. Measured on `runs/e5small-dr-unified-v5`: all five directions carried
+    `concept_tags=[]` while card-0 carried four, so grouping the board by concept showed the
+    experiments and none of the questions they answer."""
+    def _tagged(cid, tags):
+        return Card(id=cid, statement=cid, seed_statement=cid, parent_card_id="dir",
+                    concept_tags=tags,
+                    selection_provenance=CardSelectionProvenance(
+                        action_source="card_added", action_owner_count=1))
+
+    cards = _fold([_direction("dir"),
+                   _tagged("a", ["loss/contrastive", "regularization/rdrop"]),
+                   _tagged("b", ["loss/contrastive", "training/negative-mining"])])
+    assert cards["dir"].child_concept_tags == [
+        "loss/contrastive", "regularization/rdrop", "training/negative-mining"]
+    assert cards["dir"].concept_tags == [], (
+        "the AUTHORED field is untouched — `concept_source` says who claimed a membership and must "
+        "never be handed a derived union")
+
+
+def test_a_childless_direction_inherits_nothing_rather_than_guessing():
+    """A question nobody has run an experiment against has no MEASURED membership. Deriving one
+    from its wording is a classifier's job, not this fold's."""
+    assert _fold([_direction("dir")])["dir"].child_concept_tags == []
+
+
+def test_the_union_covers_every_child_even_where_the_id_list_clips():
+    kids = []
+    for i in range(CARD_CHILD_LIMIT + 3):
+        kids.append(Card(id=f"k{i:04d}", statement="k", seed_statement="k", parent_card_id="dir",
+                         concept_tags=[f"axis/slug{i}"],
+                         selection_provenance=CardSelectionProvenance(
+                             action_source="card_added", action_owner_count=1)))
+    cards = _fold([_direction("dir"), *kids])
+    assert len(cards["dir"].child_card_ids) == CARD_CHILD_LIMIT, "the id list still clips"
+    assert len(cards["dir"].child_concept_tags) == 64, "the union is bounded at its own cap"

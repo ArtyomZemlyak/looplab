@@ -6,11 +6,12 @@
 // `freshness_unknown` — unbuildable by construction — rendered in the Kanban lanes beside 134 real
 // work items. On v5 that ratio was 5 of 5, i.e. a board that read as full with nothing to run.
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
   CARD_KIND_DIRECTION, CARD_KIND_EXPERIMENT, UNFILED_GROUP_ID,
   cardIsDirection, cardKind, cardLineageIndex, cardLineageView, cardParentId,
-  cardLineageViews, directionGroups, rollupChips,
+  cardLineageViews, cardProposalDrift, directionGroups, rollupChips,
 } from '../src/cardLineageModel.js'
 
 const direction = (id, extra = {}) => ({ id, card_kind: 'direction', ...extra })
@@ -163,4 +164,35 @@ test('every card\'s view from ONE walk agrees with the per-card one', () => {
   for (const card of cards) {
     assert.deepEqual(bulk.get(card.id), cardLineageView(cards, card.id), card.id)
   }
+})
+
+test('the browser drift mirrors the python: only shared coordinates, silent on agreement', () => {
+  // The pane leads with the value that RAN and keeps the proposal in brackets, so getting this
+  // wrong is a confident falsehood about somebody's experiment. Measured on the live run: card-0
+  // declared SIXTEEN coordinates and the carrier answered TWELVE — comparing the union would have
+  // reported four "moved" knobs where nothing moved at all.
+  assert.equal(cardProposalDrift({ params: { a: 1 }, applied_params: { a: 1 } }), null,
+    'agreement renders nothing')
+  assert.equal(cardProposalDrift({ params: { a: 1 } }), null, 'no applied record')
+  assert.equal(cardProposalDrift({ params: { a: 1 }, applied_params: { z: 1 } }), null,
+    'no shared coordinate')
+  assert.deepEqual(
+    cardProposalDrift({ params: { a: 1, b: 2, unread: 9 }, applied_params: { a: 1, b: 3 } }),
+    { compared: 2, moved: 1, params: ['b'] })
+})
+
+test('a direction row is not judged by work-item gates', () => {
+  // `identity_not_native` / `action_owner_missing` / `freshness_unknown` answer "why will the Card
+  // queue not pick this up next". A direction owns no executable action BY DESIGN, so on its row
+  // those three are its definition restated as alarms — every direction on the live v5 wore all
+  // three, which reads as breakage on a row that is working exactly as intended.
+  const source = readFileSync(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
+  const gate = source.split("className=\"card-kanban-k\">Gate")[0].slice(-260)
+  assert.ok(gate.includes('!isDirection'), 'the Gate row is suppressed on a direction')
+  const blockers = source.split('aria-label="Selection blockers"')[0].slice(-200)
+  assert.ok(blockers.includes('!isDirection'), 'the blocker chips are suppressed on a direction')
+  assert.ok(source.includes('not runnable by design'),
+    'and the row says what IS true of a direction instead of leaving it blank')
+  assert.ok(source.includes('no experiment filed under it yet'),
+    'an unanswered direction states what it needs, which is the actionable half')
 })

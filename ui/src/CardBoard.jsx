@@ -160,6 +160,10 @@ function _CardKanbanCard({
   // the real value and keep the proposal in brackets — the same shape `param_carriers.
   // node_params_brief` renders for the agents. `drift` is null when the two agree or when nothing
   // was comparable, which is what keeps an unchanged card byte-identical to what it drew before.
+  const isDirection = cardIsDirection(card)
+  // The server's own exact count — see `card_child_rollup`; it stays true where `child_card_ids`
+  // clipped and where the 256-card wire cap kept a child off this page.
+  const childCount = Number.isSafeInteger(card.child_rollup?.children) ? card.child_rollup.children : 0
   const drift = cardProposalDrift(card)
   const moved = new Map((drift?.params || [])
     .filter(name => isRecord(card.applied_params) && card.applied_params[name] != null)
@@ -426,17 +430,33 @@ function _CardKanbanCard({
       <span className="card-kanban-k">Provenance</span>
       <span>{provenanceBits.length ? provenanceBits.join(' · ') : 'unavailable'}</span>
     </div>
-    <div className="card-kanban-fact">
+    {/* THE GATE AND ITS BLOCKERS ANSWER "why will the Card queue not pick this up next" — a question
+        about a WORK ITEM. A direction is not one: it owns no executable action BY DESIGN, so
+        `identity_not_native` / `action_owner_missing` / `freshness_unknown` are not defects on it,
+        they are its definition restated as three alarms. Every direction on
+        `runs/e5small-dr-unified-v5` wore all three, which reads as breakage on a row that is
+        working exactly as intended. What a direction needs is an experiment filed under it, and
+        that is what this says instead. */}
+    {!isDirection && <div className="card-kanban-fact">
       <span className="card-kanban-k">Gate</span>
       <span>{selection && _cardText(selection.freshness) ? `freshness ${selection.freshness}` : 'freshness unknown'}
         {selection && _cardText(selection.owner_state) ? ` · owner ${selection.owner_state}` : ''}
         {selection && typeof selection.action_complete === 'boolean'
           ? ` · action ${selection.action_complete ? 'complete' : 'incomplete'}` : ''}</span>
-    </div>
-    {blockers.length > 0 && <div className="card-kanban-blockers" aria-label="Selection blockers">
+    </div>}
+    {!isDirection && blockers.length > 0 && <div className="card-kanban-blockers" aria-label="Selection blockers">
       {blockers.slice(0, 5).map(blocker => <span key={blocker} className="chip xs warn">
         {blocker.replaceAll('_', ' ')}</span>)}
       {blockers.length > 5 && <span className="muted">+{blockers.length - 5}</span>}
+    </div>}
+    {isDirection && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Direction</span>
+      <span>
+        <span className="chip xs chip-direction">not runnable by design</span>
+        <span className="muted">{childCount > 0
+          ? `${childCount} experiment${childCount === 1 ? '' : 's'} filed under it`
+          : 'no experiment filed under it yet'}</span>
+      </span>
     </div>}
     {!blockersKnown && <div className="muted card-kanban-unknown">Selection blockers unavailable</div>}
     {/* WHICH RESEARCH QUESTION THIS ROW BELONGS TO — above the node Lineage below, because the two

@@ -2898,6 +2898,14 @@ def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases) -> None:
         parent = cards[parent_id]
         parent.child_card_ids = kids[:CARD_CHILD_LIMIT]
         parent.child_rollup = card_child_rollup([cards[k] for k in kids])
+        # The concept union over EVERY child, not only the published ids — same reason the rollup
+        # counts every child. Written to `child_concept_tags` and never to `concept_tags`, whose
+        # `concept_source` provenance says who AUTHORED a membership and may not be handed a
+        # derived union (see the field).
+        union: set[str] = set()
+        for k in kids:
+            union.update(t for t in (cards[k].concept_tags or []) if isinstance(t, str) and t)
+        parent.child_concept_tags = sorted(union)[:64]
 
 
 def _publish_visible_cards(
