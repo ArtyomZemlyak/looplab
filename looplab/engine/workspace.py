@@ -129,6 +129,42 @@ class WorkspaceSeeder:
                 srcs[f"ref:{ref['name']}"] = _shallow_fingerprint(ref["path"])
         return srcs
 
+    def substrate_fingerprint(self) -> dict:
+        """The editable source tree a NUMBER was produced on — HEAD *and* the uncommitted work.
+
+        `workspace_fingerprint` above is `git rev-parse HEAD` per source, and its own sibling
+        (`orchestrator._dirty_inputs`) says in its docstring that HEAD "is blind to uncommitted
+        work". That is fine for its job — detecting that the operator's repo MOVED between a run's
+        start and a resume — and it is not fine for this one.
+
+        The gesture this exists to catch is an operator promoting a fix into the editable repo
+        mid-run, which `looplab repair-candidates` explicitly urges them to do, and the ordinary way
+        to do that is to EDIT THE WORKING TREE. On a HEAD-only digest both sides of that edit read
+        identical and `comparability` would answer SAME while `_SUBSTRATE_NOTICE` asserted the
+        opposite — a record that is confidently wrong, which is worse than one that says nothing.
+
+        So the porcelain list and the bounded diff digest ride along. Best-effort exactly like the
+        fingerprint it extends: a source that cannot be read contributes nothing rather than raising,
+        because this record may never cost a node its terminal. Cheap enough only because it is
+        called off the event loop, once per node terminal — see the call site.
+        """
+        base = self.workspace_fingerprint()
+        if not base:
+            return {}
+        try:
+            dirty = self._e._dirty_inputs(base)
+        except Exception:  # noqa: BLE001 — an unreadable tree contributes no dirty evidence
+            dirty = None
+        if not dirty:
+            return base
+        # A DIGEST of the enumeration, not the enumeration: the caller hashes this into one opaque
+        # token, and carrying a few hundred porcelain lines through `metric_provenance` on every
+        # node would bloat the durable record for bytes nobody reads back.
+        import hashlib
+        from looplab.core.jsonutil import canonical_json
+        return {**base, "dirty": hashlib.sha256(
+            canonical_json(dirty).encode("utf-8", "replace")).hexdigest()[:16]}
+
     def seed_workspace(self, workdir) -> None:
         """RepoTask (ADR-7): materialize the editable repo tree(s) into the eval workdir, plus
         any runtime-mounted reference repos and data files. Phase 4: each editable repo is

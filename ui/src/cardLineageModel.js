@@ -71,7 +71,7 @@ export function cardLineageIndex(cards) {
       roots.push(card)
     }
   }
-  return { byId, childrenByParent, roots }
+  return { rows, byId, childrenByParent, roots }
 }
 
 // The groups the Directions view draws, in a stable order: every direction (even an empty one — an
@@ -79,7 +79,7 @@ export function cardLineageIndex(cards) {
 // experiments. `order` sorts within a group and is the board's own `cardOrder`, passed in so this
 // module does not acquire a second opinion about priority.
 export function directionGroups(cards, order) {
-  const { childrenByParent, roots } = cardLineageIndex(cards)
+  const { rows, childrenByParent, roots } = cardLineageIndex(cards)
   const sort = typeof order === 'function' ? order : undefined
   const sorted = rows => (sort ? [...rows].sort(sort) : rows)
   const groups = []
@@ -98,8 +98,31 @@ export function directionGroups(cards, order) {
     const children = childrenByParent.get(parent.id) || []
     if (children.length) groups.push({ id: parent.id, direction: parent, children: sorted(children) })
   }
-  const grouped = new Set(groups.flatMap(g => [g.id, ...g.children.map(c => c.id)]))
-  const unfiled = sorted(roots.filter(row => !cardIsDirection(row) && !grouped.has(row.id)))
+  // ANY card that is still in no group gets one, and this is the bug the first cut shipped: groups
+  // were built from ROOTS only, so a card at depth >= 2 — `dir-1 -> exp-1 -> exp-2`, a perfectly
+  // ordinary refinement of a refinement — rendered NOWHERE. Not under its parent, not under the
+  // root, not even in the Unfiled bucket. The forest is bounded at `CARD_LINEAGE_MAX_DEPTH`, not at
+  // one, so the view has to be total over whatever the fold publishes.
+  //
+  // A deep card becomes its OWN group headed by its parent rather than being flattened into the
+  // root's: "these experiments answer that experiment" is the true statement, and hoisting them to
+  // the root would claim they answer a question they are two steps away from.
+  const heads = new Set(groups.map(g => g.id))
+  const claimed = new Set(groups.flatMap(g => [g.id, ...g.children.map(c => c.id)]))
+  for (const card of rows) {
+    const children = childrenByParent.get(card.id) || []
+    // A card that HAS children heads a group, whether or not it is itself somebody's child. The
+    // `claimed` set may not gate this: `exp-1` is a child of `dir-1` AND the parent of `exp-2`, and
+    // treating "already appears somewhere" as "already handled" is what dropped `exp-2` into the
+    // Unfiled bucket — filed under nothing, when it is filed under a card on the same screen.
+    if (!children.length || heads.has(card.id)) continue
+    groups.push({ id: card.id, direction: card, children: sorted(children) })
+    heads.add(card.id)
+    claimed.add(card.id)
+    for (const child of children) claimed.add(child.id)
+  }
+  // Whatever is STILL unclaimed is genuinely filed under nothing this page can show.
+  const unfiled = sorted(rows.filter(row => !claimed.has(row.id)))
   if (unfiled.length) {
     groups.push({ id: UNFILED_GROUP_ID, direction: null, children: unfiled })
   }

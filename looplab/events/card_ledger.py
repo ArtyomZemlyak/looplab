@@ -1604,6 +1604,13 @@ def _link_cards_to_nodes(
                      provenance_tier=node_concept_source.provenance,
                      parent_id=(n.parent_ids[0] if n.parent_ids else None),
                      parent_ids=list(n.parent_ids or []),
+                     # THE DIRECTION EDGE THE RESEARCHER AUTHORED, on the path that has no
+                     # `card_added` receipt to decode it from. `Idea.parent_card_id` rides
+                     # `node_created` for free, and until this line the board dropped it on every
+                     # such path — `card_driven_selection=False` (which is the LEGACY snapshot
+                     # default, i.e. every resumed pre-flag run) and `inject_node`. The edge was
+                     # written durably and then silently lost by the only reader that renders it.
+                     parent_card_id=(n.idea.parent_card_id or None),
                      parent_generations=_node_parent_generations(st, n))
             cards[cid] = c
             card_origins[cid] = "node_card_id" if explicit_card_id else "node_statement_hash"
@@ -1620,6 +1627,10 @@ def _link_cards_to_nodes(
             c.eval_timeout = n.idea.eval_timeout
             c.parent_id = n.parent_ids[0] if n.parent_ids else None
             c.parent_ids = list(n.parent_ids or [])
+            # Part of the same atomic action block: a thin `card_added` that never carried the edge
+            # must still take the one its own first node stated, or the backfill leaves the card
+            # substance-complete and lineage-blind.
+            c.parent_card_id = c.parent_card_id or (n.idea.parent_card_id or None)
             c.parent_generations = _node_parent_generations(st, n)
             action_owned_cards.add(cid)
         if c.concept_source is None or c.concept_source.kind != "node":

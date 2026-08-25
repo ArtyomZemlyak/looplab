@@ -98,13 +98,24 @@ def test_the_refusal_names_the_source_tree_and_not_a_phantom_authority():
     assert a["substrate"] in notice and b["substrate"] in notice
 
 
-def test_the_partition_splits_on_the_substrate_too():
-    """A token that ignored it would put two rows in ONE group while `comparability_status` calls
-    them incomparable — a surface would then rank numbers the rule refuses."""
+def test_the_partition_deliberately_does_NOT_split_on_the_substrate():
+    """The token stays COARSER than the status, which is this function's own recorded contract.
+
+    THIS TEST ASSERTED THE OPPOSITE FOR ONE COMMIT. The argument for splitting reads well — a pair
+    `comparability_status` refuses should not share a group — and it is wrong twice: `group_token`'s
+    docstring says the grouping "never becomes stricter than the evidence, only never looser", and
+    the token is PERSISTED as `cases.jsonl`'s `comparability`, where it partitions the cross-run
+    case library that elects a prior champion. The substrate moves on every commit to the editable
+    repo — precisely what `looplab repair-candidates` urges — so one promoted fix would put every
+    later run in a singleton group and the library would elect nothing. A refusal about ONE PAIR
+    must not become a fact about a whole corpus.
+    """
     inputs = _bound_inputs("d0")
     a = comparability_record(task=_TASK, inputs_prov=inputs, substrate={"repo": "x"})
     b = comparability_record(task=_TASK, inputs_prov=inputs, substrate={"repo": "y"})
-    assert group_token(a) != group_token(b)
+    assert group_token(a) == group_token(b)
+    assert comparability_status(a, b) == DIFFERENT, (
+        "the PAIRWISE refusal is unchanged — only the corpus-wide partition stays coarse")
 
 
 def test_a_record_with_no_substrate_keeps_its_exact_historical_token():

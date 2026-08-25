@@ -4763,6 +4763,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         "_write_node_files": ("workspace", None),
         "_materialize": ("workspace", None),
         "_workspace_fingerprint": ("workspace", None),
+        "_substrate_fingerprint": ("workspace", None),
         "_seed_workspace": ("workspace", None),
         "_seed_repo_tree": ("workspace", None),
         "_link_input": ("workspace", None),

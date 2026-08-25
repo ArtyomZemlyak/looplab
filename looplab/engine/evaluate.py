@@ -3348,16 +3348,23 @@ class EvaluateMixin:
                     # "two runs that recorded nothing are the same evaluation" is the exact statement
                     # this mechanism exists to refuse.
                     _inputs_prov = getattr(res, "eval_inputs", None)
-                    # …and the SUBSTRATE this number was produced on. Read from the LIVE workspace
-                    # fingerprint rather than the folded pin: the pin is what `run_started` recorded
-                    # and is blind to a fix the operator promoted into the editable repo an hour ago,
-                    # which is exactly the move that has to split two nodes. It is a discriminator
-                    # only — see `comparability.py::comparability_record` — so a wrong or missing
-                    # answer can never CERTIFY a comparison, and a task with no editable repo simply
-                    # records none. Best-effort by construction: this must not cost a node its
-                    # terminal, so any failure degrades to "no substrate", i.e. unknown.
+                    # …and the SUBSTRATE this number was produced on, read LIVE rather than from
+                    # the folded pin: the pin is what `run_started` recorded and is blind to a fix
+                    # the operator promoted into the editable repo an hour ago, which is exactly the
+                    # move that has to split two nodes. Discriminator only — see
+                    # `comparability.py::comparability_record` — so a wrong or missing answer can
+                    # never CERTIFY a comparison, and a task with no editable repo records none.
+                    #
+                    # IN A THREAD, and that is not tidiness. `_substrate_fingerprint` spawns
+                    # `git rev-parse` / `git status` / `git diff` with real timeouts, or walks a tree
+                    # with `rglob`+`stat` for a non-git source. Until 2026-08-25 it ran on the event
+                    # loop at EVERY node terminal — where it had previously only ever run at setup
+                    # and resume — and a wedged FUSE mount would have frozen eval finalisation,
+                    # terminals and GPU dispatch for the whole of its timeout. This engine has
+                    # already paid that bill once, for a propose phase.
                     try:
-                        _substrate = self._workspace_fingerprint() if self._repo_spec else None
+                        _substrate = (await anyio.to_thread.run_sync(self._substrate_fingerprint)
+                                      if self._repo_spec else None)
                     except Exception:  # noqa: BLE001 — an unreadable tree is `unknown`, never a failure
                         _substrate = None
                     _cmp = comparability_record(task=self._task_snapshot_for_comparability(),

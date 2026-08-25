@@ -967,17 +967,22 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
     blocks were split to prevent).
     """
     by_id = {card.id: card for card in cards}
-    parent = by_id.get(idea.parent_card_id) if idea.parent_card_id else None
-    # A card names its parent, never itself. The fold refuses a self edge anyway, but nulling it
-    # here keeps the durable payload from carrying a link the board will silently drop.
-    if parent is not None and parent.id == idea.card_id:
-        parent = None
-    parent_update = ({} if (parent.id if parent else None) == idea.parent_card_id
-                     else {"parent_card_id": parent.id if parent else None})
+    # RESOLVE THE CLAIM FIRST — the self-edge test must compare against the card this proposal will
+    # actually be bound to, not the id it happened to type. A proposal that names no `card_id` and
+    # is matched to a card by its SEED STATEMENT can name that same card as its parent, and against
+    # the raw `idea.card_id` (None) the guard sees no self edge and emits `card_id ==
+    # parent_card_id` into the durable payload for the fold to drop silently.
     chosen = by_id.get(idea.card_id) if idea.card_id else None
     if chosen is None and idea.hypothesis:
         matches = [card for card in cards if card.seed_statement == idea.hypothesis]
         chosen = matches[0] if len(matches) == 1 else None
+    parent = by_id.get(idea.parent_card_id) if idea.parent_card_id else None
+    # A card names its parent, never itself. The fold refuses a self edge anyway, but nulling it
+    # here keeps the durable payload from carrying a link the board will silently drop.
+    if parent is not None and chosen is not None and parent.id == chosen.id:
+        parent = None
+    parent_update = ({} if (parent.id if parent else None) == idea.parent_card_id
+                     else {"parent_card_id": parent.id if parent else None})
     if chosen is not None:
         return idea.model_copy(update={
             "card_id": chosen.id,

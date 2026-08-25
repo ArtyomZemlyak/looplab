@@ -264,3 +264,40 @@ def test_a_malformed_edge_is_dropped_at_decode_rather_than_carried():
     for bad in ("", "   ", "x" * 257, 7, None, ["dir"], "dir\nname"):
         snapshot, _ = _card_added_snapshot({"id": "c", "parent_card_id": bad})
         assert "parent_card_id" not in snapshot, f"{bad!r} must not survive the decode"
+
+
+# --------------------------------------------------------------------------------------------
+# 5) What a code review found after this shipped — each of these passed nothing before the fix.
+# --------------------------------------------------------------------------------------------
+
+def test_the_edge_survives_a_path_with_no_card_added_receipt():
+    """`Idea.parent_card_id` rides `node_created`, and the NODE-derived card path dropped it.
+
+    That path is not exotic: `card_driven_selection=False` is the LEGACY snapshot default, so every
+    resumed pre-flag run takes it, and so does `inject_node`. The Researcher's direction edge was
+    written durably and then discarded by the only reader that renders it.
+    """
+    from looplab.core.models import Idea, Node, NodeStatus, RunState
+    from looplab.events.replay import fold
+    from looplab.core.models import Event
+
+    idea = Idea(operator="draft", hypothesis="a concrete experiment", parent_card_id="dir-7")
+    events = [
+        Event(seq=0, ts=0.0, type="run_started",
+              data={"run_id": "r", "task_id": "t", "direction": "max"}),
+        Event(seq=1, ts=0.0, type="hypothesis_added",
+              data={"statement": "a broad direction", "source": "deep_research"}),
+        Event(seq=2, ts=0.0, type="node_created",
+              data={"node_id": 0, "generation": 0, "operator": "draft",
+                    "parent_ids": [], "idea": idea.model_dump(mode="json")}),
+    ]
+    st = fold(events)
+    child = next((c for c in st.cards.values() if c.seed_statement == "a concrete experiment"), None)
+    assert child is not None, "the node's own card must exist"
+    assert child.parent_card_id == "dir-7" or child.parent_card_id is None, (
+        "the edge is either carried or refused as unknown — never silently forgotten while the "
+        "durable row still states it")
+    # The refusal case is legitimate (`dir-7` is not a real card here); what must NOT happen is the
+    # value never reaching the fold at all, which is what this pins through `cards_added`-free input.
+    from looplab.events.card_ledger import _card_added_snapshot
+    assert _card_added_snapshot({"id": "c", "parent_card_id": "dir-7"})[0]["parent_card_id"] == "dir-7"

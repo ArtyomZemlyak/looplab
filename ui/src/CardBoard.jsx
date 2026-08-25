@@ -1130,6 +1130,10 @@ function _CardKanban({
       const unfiled = group.id === UNFILED_GROUP_ID
       const headId = `card-direction-${encodeURIComponent(group.id)}`
       const chips = unfiled ? [] : rollupChips(group.direction?.child_rollup)
+      // The server's own count, which is EXACT even where `child_card_ids` clipped and where the
+      // 256-card wire cap kept a child off this page entirely.
+      const rollupTotal = Number.isSafeInteger(group.direction?.child_rollup?.children)
+        ? group.direction.child_rollup.children : 0
       return <section key={group.id} className="card-direction" aria-labelledby={headId}>
         <header className="card-direction-h">
           <h3 id={headId}>
@@ -1146,10 +1150,20 @@ function _CardKanban({
           </span>}
         </header>
         {/* A direction with no experiment yet is the most actionable row on this view, so it keeps
-            its section and says so rather than being filtered out for being empty. */}
-        {group.children.length === 0
-          ? <div className="muted card-empty">no experiment proposed against this yet</div>
-          : <div className="card-direction-rows">{group.children.map(renderCard)}</div>}
+            its section and says so rather than being filtered out for being empty.
+            THE EMPTINESS SENTENCE READS THE SAME SOURCE AS THE CHIPS ABOVE IT. It used to be
+            decided from `group.children.length` — what this page can SEE — while the chips came
+            from the server's `child_rollup`, so a direction whose children are off the 256-card
+            wire cap or behind a filter rendered "40 experiments" and "no experiment proposed
+            against this yet" on the SAME ROW. When the two disagree the rollup wins and the row
+            says the children exist but are not on this page, which is a third and true statement. */}
+        {group.children.length > 0
+          ? <div className="card-direction-rows">{group.children.map(renderCard)}</div>
+          : (rollupTotal > 0
+            ? <div className="muted card-empty">
+                {rollupTotal} experiment{rollupTotal === 1 ? '' : 's'} under this direction, none on this page
+              </div>
+            : <div className="muted card-empty">no experiment proposed against this yet</div>)}
       </section>
     })}
     {groups.length === 0 && <div className="muted card-empty">no work items yet</div>}

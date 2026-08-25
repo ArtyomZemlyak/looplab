@@ -411,17 +411,22 @@ def group_token(record: Optional[dict]) -> str:
     authority = str(record.get("authority") or "")
     keys = record.get("keys")
     key = keys.get(authority) if isinstance(keys, dict) else None
-    if not key:
-        return ""
-    # The SUBSTRATE is part of the partition, and it has to be: `comparability_status` refuses a
-    # pair whose source trees differ, so a token that ignored it would put those two rows in ONE
-    # group and let a surface rank numbers the rule right above declares incomparable. Appended
-    # rather than woven in, so a record with no substrate produces the byte-identical token it
-    # always did — every log written before this shipped keeps its exact grouping.
-    substrate = record.get("substrate")
-    if isinstance(substrate, str) and substrate:
-        return f"{authority}:{key}@{substrate}"
-    return f"{authority}:{key}"
+    # THE SUBSTRATE IS DELIBERATELY NOT IN THE TOKEN, and it was for one commit on 2026-08-25. The
+    # argument for adding it reads well — `comparability_status` refuses a pair whose source trees
+    # differ, so a token ignoring that puts two "incomparable" rows in one group — and it is wrong
+    # twice over.
+    #
+    # It contradicts this function's own contract three paragraphs up: the grouping is "deliberately
+    # COARSER" than the status and "never becomes stricter than the evidence, only never looser".
+    # Making it stricter is the one direction ruled out.
+    #
+    # And the cost is concrete, because this token is PERSISTED: `engine/lessons.py` writes it as
+    # `cases.jsonl`'s `comparability` field, where it partitions the cross-run case library that
+    # elects a prior champion. The substrate moves on every commit to the editable repo — which is
+    # exactly what `looplab repair-candidates` urges an operator to do — so one promoted fix would
+    # put every later run in a singleton group and the library would stop electing anything at all.
+    # A refusal about ONE PAIR must not become a fact about a whole corpus.
+    return f"{authority}:{key}" if key else ""
 
 
 def run_split_by_key(nodes) -> bool:

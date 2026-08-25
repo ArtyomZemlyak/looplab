@@ -813,8 +813,12 @@ def card_kind_of(card) -> str:
     stale, incomplete, in flight or terminal — so a ``not selection_ready`` test would re-label a
     perfectly ordinary experiment as a direction every time it was blocked, which is precisely the
     confusion this function exists to end. ``engine/research_cadence.py::is_pure_belief`` applies the
-    SAME test at the append site and now calls through here, so the gate that refuses to mint a
-    duplicate direction and the board that renders one cannot drift apart.
+    SAME test at the append site. THEY ARE NOT ONE CALL and this docstring claimed they were:
+    that function is untouched, and the two already answer differently when
+    `selection_provenance` is None — it reads `action_source` off a missing object and gets
+    `"none"` (a direction), while this returns `experiment`, the conservative side. Unifying
+    them is worth doing; ASSERTING it had been done was worse than leaving them apart, because a
+    reader trusts the claim and stops checking.
 
     Total by construction: an unknown/None card reads as an ``experiment``, the conservative answer,
     because the only thing the ``direction`` label unlocks is being EXCLUDED from the work accounting
@@ -1334,7 +1338,11 @@ class Card(BaseModel):
     # 5 of 5 board rows were directions and none of them was buildable.
     #
     # `parent_card_id` is DURABLE-derived — decoded from the `card_added` payload's own
-    # `parent_card_id` member, and re-pointable by a `card_relinked` control event. It is deliberately
+    # `parent_card_id` member, or — on a path with no receipt to decode — from the owning node's
+    # `Idea.parent_card_id`. THERE IS NO CORRECTION PATH YET: an earlier draft of this comment
+    # promised a `card_relinked` control event and no such event exists (`grep -rn card_relinked`
+    # returned only the promise), so a wrong edge today can only be changed by re-proposing. That
+    # is a real gap, stated rather than implied. It is deliberately
     # NOT part of the action digest: a research-lineage annotation must never change the executable
     # identity, exactly as `steering_context` does not. It is canonicalized through merges, may never
     # be a self-edge, and may never close a cycle — `_apply_card_lineage` walks the chain and refuses
