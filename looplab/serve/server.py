@@ -428,7 +428,25 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
         in_process_test = (host == "testserver" and request.client is not None
                            and request.client.host == "testclient")
         if host not in allowed_hosts and not in_process_test:
-            return JSONResponse({"detail": "untrusted Host header"}, status_code=421)
+            # THE REFUSAL NAMES ITS REMEDY. `{"detail": "untrusted Host header"}` was the whole
+            # answer, and an operator who reaches it behind a reverse proxy — the ONLY way to reach
+            # it, since a local browser sends a name already on the list — learns from it neither
+            # which host was rejected nor that a variable exists to accept it. That is the same
+            # spent-remedy defect `tools/log_tools.py` rule 3 exists for, on the one surface where
+            # the reader cannot read the source: it is a JSON body in a browser.
+            #
+            # The rejected host is echoed back deliberately. It is a value the CLIENT just sent, so
+            # returning it discloses nothing it does not already know, and without it the operator
+            # cannot tell a proxy hostname from a typo, an IPv6 literal or a stray port.
+            return JSONResponse(
+                {"detail": "untrusted Host header",
+                 "host": host or "(absent or unparseable)",
+                 "allowed": sorted(allowed_hosts),
+                 "remedy": ("This server only trusts local names by default, which is what closes "
+                            "DNS rebinding. To serve it behind a reverse proxy, restart with "
+                            "LOOPLAB_UI_HOSTS=" + (host or "<your-public-hostname>")
+                            + " (comma-separated for several).")},
+                status_code=421)
         return await call_next(request)
 
     @app.middleware("http")

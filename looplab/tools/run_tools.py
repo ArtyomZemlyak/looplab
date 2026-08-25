@@ -19,6 +19,7 @@ from looplab.core.advisory_payloads import (MAX_RESEARCH_CLAIMS, VERDICT_UNVERIF
                                             memo_verification_view, verdict_tally)
 from looplab.core.models import (NodeStatus, RunState, card_lineage_brief,
                                  extra_metric_channel)
+from looplab.core.param_carriers import node_params_brief
 from looplab.tools._base import RESULT_CAP, clip, fit_rows, fn_spec
 from looplab.tools._runcache import RunStateCache
 
@@ -317,9 +318,19 @@ class RunTools:
         n = st.nodes.get(nid)
         if n is None:
             return f"(no experiment #{nid})"
+        # THE COORDINATES THAT RAN, not the ones that were asked for. This line read
+        # `params={n.idea.params}` — the raw PROPOSAL under an unqualified label — while
+        # `events/digest.py` and `agents/roles.py::_state_brief` had both already moved to
+        # `node_params_brief`. It is the surface a Researcher calls to read ONE specific past
+        # experiment, which is precisely the "size the next idea one knob off this one" path, and
+        # under `params_style: "none"` the Developer realises an idea by editing the repo, so the
+        # proposal and the run legitimately differ. `node_params_brief` puts the applied value
+        # first and the proposal in brackets beside the ones that moved, and falls back to the
+        # declaration UNMARKED when no applied record exists — a pre-2026-08-20 node reads exactly
+        # as it did.
         out = [f"experiment #{n.id} — operator={n.operator} status={n.status.value}",
                f"parents={n.parent_ids or '[]'}",
-               f"params={n.idea.params}"]
+               f"params={node_params_brief(n)}"]
         if n.idea.space:
             out.append(f"sweep_space={n.idea.space}")
         out.append(f"metric={digest.fmt_num(n.metric)}")

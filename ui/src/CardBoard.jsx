@@ -28,7 +28,7 @@ import {
 } from './cardBoardModel.js'
 import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
 import { CARD_KIND_DIRECTION, UNFILED_GROUP_ID, cardIsDirection, cardLineageViews,
-  directionGroups, rollupChips } from './cardLineageModel.js'
+  cardProposalDrift, directionGroups, rollupChips } from './cardLineageModel.js'
 import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
 import { nodeTraceSubject } from './traceSurfaceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
@@ -156,6 +156,14 @@ function _CardKanbanCard({
   const params = isRecord(card.params) ? Object.entries(card.params)
     .filter(([, value]) => _cardNumber(value) != null).slice(0, 6) : []
   const spaceCount = isRecord(card.space) ? Object.keys(card.space).length : 0
+  // The coordinates that RAN, keyed by the knob that moved, so the Action row above can lead with
+  // the real value and keep the proposal in brackets — the same shape `param_carriers.
+  // node_params_brief` renders for the agents. `drift` is null when the two agree or when nothing
+  // was comparable, which is what keeps an unchanged card byte-identical to what it drew before.
+  const drift = cardProposalDrift(card)
+  const moved = new Map((drift?.params || [])
+    .filter(name => isRecord(card.applied_params) && card.applied_params[name] != null)
+    .map(name => [name, card.applied_params[name]]))
   const footprintKnown = Object.hasOwn(card, 'footprint')
   const baseFootprint = isRecord(card.footprint) ? card.footprint : null
   const resourcePin = isRecord(card.resource_pin) ? card.resource_pin : null
@@ -383,8 +391,26 @@ function _CardKanbanCard({
       <span className="card-kanban-k">Action</span>
       <span>{operator || 'operator unspecified'}</span>
       {evalProfile && <span>profile {evalProfile}</span>}
-      {params.map(([key, value]) => <span key={key} className="card-param">{key}={fmt(value)}</span>)}
+      {params.map(([key, value]) => <span key={key} className={'card-param' + (moved.has(key) ? ' card-param-moved' : '')}>
+        {key}={fmt(moved.has(key) ? moved.get(key) : value)}
+        {moved.has(key) && <span className="muted"> (proposed {fmt(value)})</span>}
+      </span>)}
       {spaceCount > 0 && <span>{spaceCount} search variable{spaceCount === 1 ? '' : 's'}</span>}
+    </div>}
+    {/* WHAT ACTUALLY RAN, and until 2026-08-25 this pane showed the PROPOSAL alone. `card.params`
+        is receipt-bound and cannot be corrected; `applied_params` rides beside it on the wire and
+        was rendered nowhere — so the fix that taught the agent's prompt, the digest and the tools to
+        lead with the coordinates that ran left the one surface the OPERATOR looks at still saying
+        the old numbers. Measured on `runs/e5small-dr-unified-v4`: six of the nine cards with an
+        applied record disagree with their own proposal, the run's champion among them.
+        Silent when the two agree, so a card that ran as proposed renders exactly as it always did. */}
+    {drift && <div className="card-kanban-fact card-drift">
+      <span className="card-kanban-k">Ran at</span>
+      <span>
+        <span className="chip xs warn">{drift.moved} of {drift.compared} knobs moved</span>
+        {typeof card.applied_params_node === 'number'
+          ? <span className="muted">on experiment #{card.applied_params_node}</span> : null}
+      </span>
     </div>}
     <div className="card-kanban-fact">
       <span className="card-kanban-k">Declared</span>

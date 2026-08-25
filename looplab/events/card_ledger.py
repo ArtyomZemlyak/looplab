@@ -462,8 +462,26 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
             best_delta = delta if best_delta is None else max(best_delta, delta)
             if better(n.metric, base):
                 supported = True
-        if n.id in record_setters:                 # a draft/node that advanced the run's SOTA (sticky —
-            supported = True                       # stays supported even after a later node overtakes it)
+        # A RECORD SET OVER NOTHING IS NOT SUPPORT, and `base is not None` is the whole of that
+        # distinction. `record_setters` deliberately includes the node that ESTABLISHES the first
+        # SOTA — which on every run is node 0, by being the only node — so this clause used to
+        # declare the OPENING hypothesis of every run `supported` with `best_delta=None`, i.e.
+        # borne out against nothing at all.
+        #
+        # It is not a cosmetic wrong word. `verdict` is what the proposal board shows the
+        # Researcher, and a model reading "supported" either believes it and stops testing the
+        # question, or distrusts the whole board. Measured live on `runs/e5small-dr-unified-v5`:
+        # card-0 read `supported` on node 0 (metric 0.693, no parents, one node in the run), the
+        # Researcher wrote "…but wait, the card says NODES=[0] and verdict=supported … that's odd"
+        # in its own trace, and spent the next proposal re-implementing what the board claimed was
+        # already done — card-1, a near-duplicate of card-0.
+        #
+        # The sticky clause keeps its real job: a node that BEAT a standing record stays supported
+        # after something overtakes it, which is the board bug its comment describes. What it no
+        # longer does is mint a verdict where no comparison exists. Such a card lands on `tested`
+        # ("evaluated without improvement"), which is exactly true of a first measurement.
+        if n.id in record_setters and base is not None:
+            supported = True
     pending = [n for n in ev if n.status is NodeStatus.pending]
     if is_abandoned:
         status = "abandoned"

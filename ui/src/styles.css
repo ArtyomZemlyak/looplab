@@ -628,6 +628,11 @@ button { font: inherit; }
 .card-direction-rows { display: grid; gap: 6px;
   grid-template-columns: repeat(auto-fill, minmax(225px, 1fr)); align-items: start; }
 .card-grouping { gap: 4px; margin: 0; }
+/* A coordinate the run MOVED away from its proposal. Toned, not shouted: the row already leads with
+   the real value and carries the proposal in brackets, so the colour only has to make the pair
+   findable in a line of a dozen knobs. */
+.card-param-moved { color: var(--fg); font-weight: 600; }
+.card-drift .chip.warn { white-space: nowrap; }
 .card-kanban-card { min-width: 0; margin-bottom: 6px; padding: 7px; border: 1px solid var(--border);
   border-radius: 7px; background: var(--bg-3); font-size: 11px; overflow-wrap: anywhere; }
 /* These two rules were DEAD: no module ever emitted `card-outcome-*`, so the per-card marker their

@@ -188,3 +188,25 @@ function viewFromIndex({ byId, childrenByParent }, cardId) {
     rollup: isRecord(card.child_rollup) ? card.child_rollup : null,
   }
 }
+
+// How far the experiment that RAN is from the one the card proposed — `null` when there is nothing
+// to say. MIRRORS `core/cards.py::card_proposal_drift` and is deliberately a second implementation
+// rather than a wire field: the two maps are already on the wire, the rule is four lines, and a
+// derived scalar would be one more thing to keep in sync across a version skew.
+//
+// The rules that matter are the python's and are repeated because getting either wrong is a
+// confident falsehood about somebody's experiment: only the coordinates BOTH sides name are
+// compared (a knob the carrier never answered is not evidence of a move, so `moved` can never
+// exceed `compared`), and `null` for "nothing was comparable" is a different answer from
+// `moved: 0` for "they agree".
+export function cardProposalDrift(card) {
+  if (!isRecord(card)) return null
+  const proposed = isRecord(card.params) ? card.params : null
+  const applied = isRecord(card.applied_params) ? card.applied_params : null
+  if (!proposed || !applied) return null
+  const shared = Object.keys(proposed).filter(name => Object.hasOwn(applied, name)).sort()
+  if (!shared.length) return null
+  const params = shared.filter(name => proposed[name] !== applied[name])
+  if (!params.length) return null          // agreement renders nothing; the loud case stays loud
+  return { compared: shared.length, moved: params.length, params }
+}
