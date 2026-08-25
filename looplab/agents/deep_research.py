@@ -80,7 +80,32 @@ class _MemoOut(BaseModel):
     # This is the join that makes a question findable: without it the concept hierarchy and the
     # question board are disjoint taxonomies over one run. Measured on `runs/e5small-dr-unified-v5`:
     # every one of five questions carried no concepts while the run's one experiment carried four.
-    question_concepts: list[list[str]] = Field(default_factory=list)
+    #
+    # IT IS THE ONLY FIELD IN THIS CLASS WITH A `description`, and the measurement is why. On
+    # `runs/e5small-dr-unified-v6` — the first run pinning the schema fix — the memo came back with
+    # `question_concepts: []` while the model had made TWENTY-FIVE concept calls in that same phase
+    # (`find_concept_slugs` 19, `concept_card` 4, `read_concept_tree` 1, `cross_run_concept_map` 1,
+    # out of 203 tool calls). So the instruction was READ and the work was DONE; what was missing at
+    # the moment the emit call was constructed — thousands of tokens and 203 tool calls after the
+    # system prompt — was any reminder AT THE FIELD. `_emit_spec` hands `model_json_schema()` to the
+    # provider as the tool's parameters, and a `description` rides in it, so this is the one channel
+    # that is in front of the model exactly when it fills the argument.
+    #
+    # NOT made required, which was the other candidate and is worse: a model obliged to supply a
+    # value for a field it has nothing to say about pads it, and a fabricated concept membership is
+    # a lie the fold will persist and the board will render. Absence is recoverable; a wrong
+    # membership is not. The default stays, and a memo that genuinely has nothing may still say so.
+    question_concepts: list[list[str]] = Field(
+        default_factory=list,
+        description=(
+            "What each open question is ABOUT, as concept ids. One inner list per entry of "
+            "open_questions, at the SAME position: question_concepts[0] describes "
+            "open_questions[0]. 2-3 ids each, in axis/slug form (e.g. loss/contrastive, "
+            "training/negative-mining). Reuse ids that already exist where they fit; MINT a new "
+            "axis/slug when nothing does — an empty list here means the question belongs to no "
+            "part of the tree and can be found by nobody, which is never the right answer for a "
+            "question worth asking."),
+    )
 
 
 # Backticked names in `_SYSTEM` that are NOT memo fields. The guard in

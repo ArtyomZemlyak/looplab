@@ -109,3 +109,44 @@ def test_a_card_added_ROW_never_takes_the_memo_provenance():
     card = st.cards["card-0"]
     assert card.concept_tags == [], "a top-level `concepts` on a card row is not a memo membership"
     assert card.concept_source is None or card.concept_source.kind != "hypothesis_added"
+
+
+def test_the_alignment_rule_rides_in_the_EMIT_SCHEMA_and_not_only_in_the_prompt():
+    """The rule has to be in front of the model when it fills the argument, not only at the top.
+
+    MEASURED on `runs/e5small-dr-unified-v6`, the first run pinning the schema fix: the memo came
+    back `question_concepts: []` while that same deep-research phase made TWENTY-FIVE concept calls
+    (`find_concept_slugs` 19, `concept_card` 4, `read_concept_tree` 1, `cross_run_concept_map` 1, of
+    203 tool calls). The instruction in `_SYSTEM` was read and the lookups were done; the field was
+    dropped when the emit call was constructed, thousands of tokens later.
+
+    `_emit_spec` hands `_MemoOut.model_json_schema()` to the provider as the tool's parameters, so a
+    `description` on the field is the one channel that reaches the model at that moment. This pins
+    the CHANNEL — that the schema the provider actually receives carries the rule — not the wording.
+    """
+    from looplab.agents.deep_research import _MemoOut
+
+    schema = _MemoOut.model_json_schema()
+    described = schema["properties"]["question_concepts"].get("description", "")
+    assert described, (
+        "MUTATION: drop `description=` from `_MemoOut.question_concepts` and this goes red — which "
+        "is the state that produced an empty list on v6")
+    # The two halves that make it actionable: WHICH question a row describes, and what to do when
+    # the tree has nothing (a greenfield run has an empty tree, and every run starts greenfield).
+    assert "same position" in described.lower(), "the alignment rule must be stated at the field"
+    assert "mint" in described.lower(), (
+        "reuse-only reads as 'nothing to put here' on an empty tree, which is every run's opening "
+        "memo")
+
+
+def test_the_field_is_NOT_required_because_a_padded_membership_is_worse_than_none():
+    """The rejected alternative, pinned so nobody 'fixes' the empty list by forcing a value.
+
+    A model obliged to fill a field it has nothing to say about pads it, and a fabricated concept
+    membership is a lie the fold persists and the board renders. Absence is recoverable.
+    """
+    from looplab.agents.deep_research import _MemoOut
+
+    assert "question_concepts" not in set(_MemoOut.model_json_schema().get("required", [])), (
+        "making it required trades a recoverable absence for an unrecoverable falsehood")
+    assert _MemoOut().question_concepts == [], "and a memo that says nothing still validates"
