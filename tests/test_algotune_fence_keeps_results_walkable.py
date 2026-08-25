@@ -73,6 +73,16 @@ def test_arena_can_still_walk_results_while_the_fence_is_closed(tmp_path):
     assert (results / "o4-mini" / "pagerank" / "solver.py").read_text().startswith("# a finished")
 
 
+# OPEN[fence-walkable-test-red-under-root] this falsifier fails whenever the suite runs as root.
+# proof:absent:geteuid@tests/test_algotune_fence_keeps_results_walkable.py
+# REVIEW 2026-08-25 (guard-test): the negative control assumes `chmod 000` denies the walk, and
+# root (CAP_DAC_OVERRIDE) reads mode-000 directories fine -- measured 2026-08-25 under uid 0:
+# `assert raised` fails with this test's own "proves nothing" message while the two real fence
+# tests beside it pass (the shipped move-aside design is root-safe, which is part of why it
+# replaced the chmod one). Containers routinely run suites as root, so this reds in exactly the
+# environments the fence targets. Fix: skip when the effective uid is 0, or probe once whether
+# mode 000 actually denies before asserting -- the falsifier's value is real everywhere else and
+# should not be deleted.
 def test_chmod_000_would_have_failed_this_test(tmp_path):
     """Non-vacuous by construction: the abandoned implementation, run against the same assertion.
 

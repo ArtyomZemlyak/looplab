@@ -670,6 +670,29 @@ class Handler(BaseHTTPRequestHandler):
                         usage["cost_source"] = self.server.pricing.fetched_at
                         out = b"data: " + json.dumps(frame).encode() + b"\n"
                 emit(out)
+            # OPEN[meter-estimate-lands-after-done] on the STREAMING route the synthesized usage
+            # frame is emitted after the `[DONE]` line, where no spec-compliant SSE client will
+            # ever read it -- and every tidy no-usage stream is then logged as aborted.
+            # proof:`present:if basis == "estimated_from_deltas":@benchmarks/meter/proxy.py`
+            # REVIEW 2026-08-25 (correctness): the loop above forwards `data: [DONE]` like any
+            # other line (the startswith guard only skips PARSING it), so when a stream ends WITH
+            # `[DONE]` but WITHOUT a usage frame, the estimate built below goes out behind the
+            # terminator -- openai-python's `Stream.__stream__` BREAKS on `[DONE]`, LoopLab's
+            # `defer_inband_error` keeps that rule, so the one client this injection exists for
+            # ("the arm's accountant reads the stream, not this file") cannot see it. The ledger
+            # then records the call as metered at the delta floor while the run's own accountant
+            # saw no usage at all: the arm looks free to itself while the meter says it paid.
+            # Reachable whenever a client streams without usage accounting -- LoopLab requests
+            # `stream_options.include_usage` but DEGRADES it away on an endpoint that rejects the
+            # parameter -- and untested as shipped: the fake upstream in
+            # tests/test_meter_proxy_stream_rows.py never sends `[DONE]`, so the cut-stream case
+            # (no terminator) is the only ordering any test exercises. Second half, one screen
+            # down: `stream_aborted` is keyed on the estimate basis, so a stream that ended
+            # cleanly with `[DONE]` and merely carried no usage frame is stamped aborted -- the
+            # guard test even asserts that for a stream its own docstring calls "tidy". Fix
+            # direction: hold the `[DONE]` line back one step and emit the estimate BEFORE
+            # forwarding it, and gate the aborted flag on "no `[DONE]` seen" rather than on which
+            # basis priced the row.
             if usage_frame_seen:
                 pass                            # the gateway priced it; nothing to estimate
             elif not basis and deltas:

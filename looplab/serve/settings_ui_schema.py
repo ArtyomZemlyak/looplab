@@ -126,6 +126,21 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # reached a moment with no pending node. It buys no extra passes per node count and its output is
 # fenced out of the graded-novelty evidence channel, so nothing it enables can reach selection.)
 SETTINGS_UI_SCHEMA_KEYSET_REVISION = "6a2cb5947cf06c792329f9dbc46b3a5cf862f0cfe649421028d0c0633a44eb87"
+# OPEN[budget-help-claims-resume-reads-live-value] the catalogue's `llm_budget_usd` help states the
+# claim its own field comment measured as FALSE.
+# proof:`present:a resume reads whatever is set now@looplab/serve/settings_ui_schema.json`
+# REVIEW 2026-08-25 (docs): the JSON help ends "Not pinned into run_started, so a resume reads
+# whatever is set now" -- which is word for word the pre-correction claim `core/config.py`'s
+# `llm_budget_usd` comment retracted on 2026-08-20 ("NOT IN run_started IS NOT THE SAME AS RE-READ
+# ON RESUME ... every `resume` adopts the snapshot ... Measured, on the run that produced this
+# correction"), and `cli/run_cmds.py::resume` confirms: settings come from `load_run_settings(
+# run_dir, strict=True)`, i.e. the run's own `config.snapshot.json`, so an env var or ambient value
+# at resume time never reaches the ceiling. An operator following this help text walks into the
+# exact measured trap ("stops again at $0.15") that the `BudgetExceeded` refusal message was
+# rewritten to prevent. Fix the sentence to match the field comment: a resume adopts the snapshot;
+# raise the ceiling by editing the run's own config (the per-run settings editor or the snapshot
+# file), then resume. The per-run editor path is the one grain of truth in the current wording --
+# say THAT instead of "whatever is set now".
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

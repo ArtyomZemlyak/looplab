@@ -90,6 +90,24 @@ STALL_TIMEOUT="${STALL_TIMEOUT:-2400}"        # 40 min of total silence = hung, 
 
 # `timeout 0` means "no timeout" to GNU coreutils, so one spelling serves both settings and there is
 # no second code path to keep in step.
+#
+# OPEN[stall-kill-writes-no-marker] a stall kill lands as rc=143, which record_done files under
+# "interrupted -- no marker written, task still owed", so the task is retried from scratch forever.
+# proof:absent:stall_cut@benchmarks/algotune/campaign.sh
+# REVIEW 2026-08-25 (correctness): the guard below SIGTERMs the lane (rc=143 out of run_bounded --
+# driven 2026-08-25), and record_done's `*)` arm treats every non-0/2/124 rc as an operator
+# interrupt: no marker, no state word, and for arm B the next resume does `rm -rf` on the task root
+# and spends a fresh full LLM budget. If the >40-min silence is STRUCTURAL, every resume reproduces
+# the same kill -- exactly the retried-forever loop the wall-cut design spends twenty lines below
+# making terminal ("spends four hours and a dollar to reproduce the same cut, every resume,
+# forever"). And a working lane CAN go silent that long on this campaign's own numbers:
+# README's measured 87-minute single-candidate evaluation (69 isolated benchmark runs, zero output),
+# or ~100 instances x 10 s baseline_timeout x 3 runs ~= 50 min inside one eval, during which arm
+# B's events.jsonl legitimately may not grow (the budget is spent, the last eval is draining).
+# Fix direction: give the stall path its own marker state, terminal-with-a-flag exactly like the
+# wall cut (and its own RETRY_-style gate), or at minimum drop a `.stalled` breadcrumb so
+# final_banner/compare_arms can name it -- today a structural stall is indistinguishable in the
+# record from Ctrl-C.
 run_bounded() {   # run_bounded <events-file-or-empty> <cmd…>
   local watch="$1"; shift
   if [ -z "$watch" ] || [ "${STALL_TIMEOUT:-0}" = "0" ]; then
@@ -722,6 +740,22 @@ run_one() {                       # $1 = task, $2 = cpu list
       # and found nothing. `compare_arms.py` reads only `speedup`, so the sentence is for the human.
       echo '{"speedup": null, "error": "the LoopLab run refused to start (exit 2, no event log) -- not a measurement"}' \
         > "$OUT/B-$T.final.json"
+    # OPEN[champion-final-scoring-drops-helper-files] the graded test pass materializes ONE file,
+    # so a multi-file champion -- the capability this branch itself added for parity -- fails to
+    # import and is averaged into arm B's mean as a solver-fault 0.0.
+    # proof:`present:--out "$TASK_ROOT/champion_solver.py"@benchmarks/algotune/campaign.sh`
+    # REVIEW 2026-08-25 (correctness): node evals submit EVERY file beside solver.py and run the
+    # arena's own `build_ext` (looplab_eval's whole-submission default; commit "both arms may reach
+    # the same techniques"), so a node may legitimately win with solver.py + helper .py/.pyx +
+    # setup.py -- `Node.files` holds the whole committed working set. This block then extracts only
+    # one file into $TASK_ROOT and scores it there: in looplab_eval, `src.parent` is $TASK_ROOT,
+    # whose other entries are directories (skipped), so `_submitted` is empty, no build runs, and
+    # the copied solver's `import fast` dies -> `no_speedup.reason: solver_unloadable` -> classified
+    # by compare_arms as the SOLVER's fault -> a real winning champion becomes 0.0 in the mean,
+    # silently, in the direction that loses arm B the comparison. Fix direction: extract the
+    # champion's entire committed working set (minus reference_*/description.txt) into a fresh dir
+    # and point the bridge at its solver.py -- extract_champion.py already reads `best.files`, so
+    # this is an `--all-files` mode plus one line here.
     elif python "$REPO/benchmarks/algotune/extract_champion.py" --run-dir "$TASK_ROOT/run" \
            --out "$TASK_ROOT/champion_solver.py" >> "$OUT/B-$T.log" 2>&1; then
       (cd "$TASK_ROOT" && timeout "$HARD_TIMEOUT" taskset -c "$CPUS" \

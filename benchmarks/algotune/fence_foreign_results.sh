@@ -20,6 +20,18 @@
 # So: mode 000 for the duration, restored afterwards. Not moved, because the fork tracks all 2,831
 # files and a moved tree would no longer be the commit the campaign names. `CapEff` is 0 in this
 # container, so the owner bits are enforced against us too — checked, not assumed.
+#
+# OPEN[fence-header-describes-abandoned-design] the paragraph above is the ABANDONED design: the
+# code below MOVES the directories.
+# proof:`present:So: mode 000 for the duration@benchmarks/algotune/fence_foreign_results.sh`
+# REVIEW 2026-08-25 (correctness): the chmod design was replaced because mode 000 killed the
+# evaluator's own results/ walk (commit "the fence must hide foreign work without blinding the
+# ruler"), and `close` now does `mv` into $HOLD -- so the header asserts the exact opposite of the
+# behaviour, INCLUDING the rationale ("Not moved, because ...") for the provenance property the
+# current code deliberately gives up (a closed fence leaves the fork's `git status` showing 2,831
+# deletions -- worth stating, since the header currently promises it away). `check`'s "SOME ARE
+# READABLE" wording is chmod-era too. Rewrite the header to the move design; the commit message's
+# text is accurate and can be lifted.
 set -u
 AT=${FENCE_ALGOTUNE_ROOT:-/var/tmp/looplab-bench/AlgoTune}
 STATE=${FENCE_STATE:-/var/tmp/looplab-bench/.foreign_results_moved}
@@ -41,6 +53,18 @@ case "${1:-}" in
     done
     held=$(wc -l < "$STATE")
     n=0
+    # OPEN[fence-close-unmatched-glob-fabricates-a-close] with results/ holding no directories, the
+    # unmatched glob is processed as a literal `*` entry.
+    # proof:`absent:-d "$D"@benchmarks/algotune/fence_foreign_results.sh`
+    # REVIEW 2026-08-25 (correctness): `set -u` does not set nullglob, so an empty results/ leaves
+    # `$D` as the literal pattern; `basename` yields `*`, which no skip pattern matches, so the
+    # loop records a `*` row in $STATE, `mv` errors on stderr, and it prints "closed 1 foreign
+    # result directories" about nothing. Driven 2026-08-25 against an empty results/. The realistic
+    # trigger is the exact double-close the idempotence comment above documents the driver doing
+    # (everything already held, no LoopLab* dirs yet); `check` has the same unguarded glob and then
+    # reports "STILL PRESENT: *" and exits 1 on a fresh checkout. Fix: guard both loops with a
+    # directory-exists test on `$D` (the held-restore loop above already does exactly that for its
+    # own glob), and the fabricated close and false alarm both disappear.
     for D in "$AT/results"/*/; do
       B="$(basename "$D")"
       case "$B" in LoopLab*|diag*|recheck*|REC-*|RuleCheck-*|CTL*) continue ;; esac

@@ -750,6 +750,45 @@ def main() -> int:
     # So: glob the timings this run could use BEFORE it runs, and compare after. A file that appears
     # or changes during the run means the reference was measured here, which means the number below
     # is not about the candidate. `_emit` is told to refuse it rather than print it.
+    #
+    # OPEN[baseline-guard-blind-in-serial-regime] the refusal this branch was built around cannot
+    # fire in the campaign's own mandated configuration.
+    # proof:present:glob(f"{args.task}__{subset}__*.json")@benchmarks/algotune/looplab_eval.py
+    # REVIEW 2026-08-25 (correctness): three defects in this one fingerprint, worst first.
+    # (1) THE GLOB NEVER MATCHES A SERIAL-REGIME CACHE FILE. `patch_baseline_cache.py` writes the
+    # per-instance timings as `<task>__<subset>.json` when workers <= 1 (its `_ll_regime` is the
+    # EMPTY string then, and the regime suffix only appears at w>1), while this glob demands a
+    # literal `__` plus a third segment after the subset. Driven 2026-08-25: a dir holding
+    # `discrete_log__test.json` and `discrete_log__test__w22x1.json` matches ONLY the second.
+    # docs/51 SS10 mandates serial ("leave ALGOTUNE_EVAL_WORKERS unset ... every campaign so far is
+    # serial") and campaign.sh sets nothing -- so on every mandated campaign both fingerprints are
+    # {} and compare equal, node 0's cold train baseline sails through unguarded, and the champion's
+    # one TEST scoring (always the first test-subset eval, therefore always cold) records exactly
+    # the plausible ~1.0 reference-vs-itself artifact the HEAD commit says "cost eight of this
+    # campaign's twenty final numbers". The guard's own test never sees this: its fixture
+    # hand-writes three-segment names (`t__test__w22x1r3.json`), i.e. the live box's divergent
+    # naming, not what the repo's own patch produces.
+    # (2) THE WATCHED DIRECTORY IS THE WRONG CLONE in the documented two-clone workflow:
+    # `patch_baseline_cache.py` bakes its cache dir at PATCH time (default: beside the patch script
+    # that ran, docs/52 SS6 runs it from the working clone) while `DEFAULT_TIMES_DIR` here resolves
+    # beside THIS file at run time (docs/51 SS7 runs the campaign from the pinned `looplab-armb`
+    # clone) -- two different `.baseline_times`, nothing passes `--baseline-times-dir`, nothing
+    # checks the pairing, so even at w>1 the guard can fingerprint a directory the arena never
+    # writes.
+    # (3) THE CLOSURE READS A VARIABLE THAT IS REASSIGNED BETWEEN ITS TWO CALLS: `subset` can be
+    # rewritten by `subset_from_stderr` after the run (the `subset_mismatch` case), so the
+    # before-glob and after-glob then cover DIFFERENT splits and the refusal fires with a fabricated
+    # explanation -- `timings_written` lists files that existed all along (or claims "(existing file
+    # changed)" about nothing) beside a `subset_evidence` that already states the real problem.
+    # Refusing on a mismatch is the right direction; lying about why is not.
+    # Fix direction: derive ONE `times_key = f"{task}__{subset}"` before the run and glob
+    # `<that>*.json` (matches both the bare serial spelling and every regime suffix) in both
+    # fingerprints; read the cache dir out of the patched `baseline_manager.py` (or refuse when the
+    # watched dir does not match the patch's embedded one); and give campaign.sh a re-score path for
+    # a refused champion pass, since `record_done` writes the marker regardless and
+    # `already_measured` will never re-run it. The refusal branch itself is also the one part of
+    # this mechanism no test executes -- see the annotation in
+    # tests/test_algotune_refuses_baseline_measured_in_pass.py.
     def _baseline_fingerprint() -> dict:
         try:
             return {f.name: (f.stat().st_mtime_ns, f.stat().st_size)

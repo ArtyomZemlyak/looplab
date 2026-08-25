@@ -4,6 +4,20 @@
 #
 # The list is not a guess: every entry is a leak this project actually had.
 set -u
+# OPEN[check-leaks-pinned-to-one-box] the leak checker answers "чисто" about directories it never
+# looked at, and flags the repo's own baseline cache as stale.
+# proof:`present:ROOT=/var/tmp/looplab-bench@benchmarks/algotune/check_leaks.sh`
+# REVIEW 2026-08-25 (correctness): three hardcodes, each defeating the tool's one job on any box
+# but the original. (1) ROOT ignores BENCH_ROOT, which every other script here honours. (2) The
+# marker and memory sweeps walk FIXED directory-name lists, so a campaign under the shipped
+# defaults (campaign/ + camp-runs/, per campaign.sh and box-jhub-l40s.sh) is invisible: section 1
+# reports clean while that campaign's .done markers will make the next run skip every task -- the
+# precise leak the section exists for, and the same hardcoded-name defect snapshot.sh documents
+# having already caused an incident one file over. (3) Section 3 counts files not containing "r3"
+# as stale, but the repo's own patch_baseline_cache.py writes names with no such generation token
+# at all (`<task>__<subset>[__wNxC].json`), so every CURRENT cache file it produces is reported as
+# a leak. Fix: `ROOT="${BENCH_ROOT:-...}"`, discover campaign*/runs-*/camp-runs by glob, and derive
+# the current-generation test from the patch's real naming rather than a literal one box used once.
 ROOT=/var/tmp/looplab-bench
 BAD=0
 say() { printf "  %-52s %s\n" "$1" "$2"; }

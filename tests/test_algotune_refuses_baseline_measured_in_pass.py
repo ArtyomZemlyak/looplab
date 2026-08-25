@@ -53,6 +53,25 @@ def test_the_fingerprint_is_taken_before_the_evaluator_and_compared_after():
     assert before < run < after, "the fingerprint no longer brackets the evaluator call"
 
 
+# OPEN[baseline-refusal-tested-as-simulation] the decision that "runs" here is a hand-copied
+# re-spelling; the bridge's real fingerprint/refusal code is executed by no test in the suite.
+# proof:`line:speedup_reported&&== 12.5@tests/test_algotune_refuses_baseline_measured_in_pass.py`
+# REVIEW 2026-08-25 (guard-test): `_run_refusal_branch` re-implements fingerprint -> mutate ->
+# compare -> emit as an inline `python -c` script, so `looplab_eval.py`'s actual `_baseline_
+# fingerprint` and refusal block are traversed by nothing (`grep -rl` over tests/: only this file
+# names the reason, and nothing anywhere passes `--baseline-times-dir`). The simulation has already
+# diverged from production in both directions that matter: it asserts the refused number back as
+# the FLOAT `12.5`, while the real `_no_speedup(..., reported=...)` stringifies (`str(reported)`,
+# so production writes `"12.5"`); and its fixture invents three-segment cache names
+# (`t__test__w22x1r3.json`) that the repo's own `patch_baseline_cache.py` never produces in the
+# serial regime -- which is exactly how the LIVE defect (the glob that cannot match a serial-regime
+# name; see the annotation at `_baseline_fingerprint` in the bridge) stayed green under this file.
+# The ordering companion above is a `SRC.index` positive substring pin -- the tier CLAUDE.md's
+# guard-test ladder documents as satisfiable by a comment carrying the pinned calls in order.
+# Fix direction: drive the real bridge the way this suite already drives it elsewhere (a stub
+# evaluator + the bridge's own `--baseline-times-dir` flag), write a bare `<task>__train.json`
+# mid-run from the stub, and assert on the bridge's actual emitted JSON line -- that one test nails
+# the glob defect, the str-vs-float shape and the ordering at once; then the `SRC.index` pin can go.
 def _run_refusal_branch(tmp_path: Path, timings_change: bool) -> dict:
     """Drive the refusal in isolation, with the same shape the bridge builds.
 

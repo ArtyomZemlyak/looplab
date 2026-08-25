@@ -50,6 +50,20 @@ fi
 # `campaign.sh`'s `|| echo "(snapshot failed...)"` could never fire. An archive that is silently
 # empty is worse than no archive: it is one somebody will restore from.
 MISSING=0
+# OPEN[snapshot-copy-failure-reads-as-success] a cp that dies mid-archive still exits 0 and claims
+# a complete snapshot.
+# proof:`present:cp -r "$1" "$OUT/" 2>/dev/null && echo@benchmarks/snapshot.sh`
+# REVIEW 2026-08-25 (correctness): only a MISSING SOURCE counts into the partial-snapshot tally; a
+# failed copy (its stderr discarded) is silently ignored -- the `&& echo` prints nothing, the
+# counter stays 0, the completeness check passes and the script exits 0, so campaign.sh's
+# "(snapshot failed...)" arm can never fire for it and snapshot_timer records the fingerprint as
+# archived. The destination is the geesefs S3 FUSE mount, where a transient error or ENOSPC
+# mid-`cp` is the ordinary failure -- producing exactly the artifact the comment above calls the
+# worst outcome ("an archive that is silently empty is worse than no archive: it is one somebody
+# will restore from"); the 2026-08-23 fix closed only the missing-source half. Secondary: the
+# prune below runs BEFORE the completeness check, so an incomplete snapshot still deletes the
+# oldest complete one. Fix: on cp failure print a COPY FAILED line, bump the same counter, and
+# keep cp's stderr; prune only after the check passes.
 copy() {  # $1 = path under $SRC (or absolute), $2 = label
   if [ ! -e "$1" ]; then
     echo "  MISSING              $2 -- $1 does not exist, so it is NOT in this snapshot"

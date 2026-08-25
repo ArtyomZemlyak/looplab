@@ -301,6 +301,17 @@ def test_a_reset_does_not_carry_the_previous_attempts_reason_onto_the_new_one():
     src = inspect.getsource(replay)
     # Both reset sites (node_reset and the abandoned-lifecycle sweep) clear the sibling tail; this
     # column must be cleared by the same statement blocks or it outlives its own metric.
+    # OPEN[scored-evidence-reset-count-pin] a positive substring COUNT pin -- satisfiable by one
+    # comment. proof:`present:src.count('n.stderr_tail = ""')@tests/test_scored_output_evidence.py`
+    # REVIEW 2026-08-25 (guard-test): the cheapest mutation -- delete one real clear in a reset
+    # handler and leave a commented-out copy in its place -- keeps both counts at 2 and this green
+    # while a reset now carries a stale stderr reason onto the new attempt. That is the exact
+    # residue class CLAUDE.md's ladder sends to tier 3, and the SAME diff already contains the
+    # correct pattern for the IDENTICAL property one file over:
+    # tests/test_stop_account.py::test_pause_reason_is_cleared_wherever_the_pause_is_lifted counts
+    # real `ast.Assign` targets, and comments are not AST nodes. Rewrite this assert the same way
+    # (or better, drive both reset sites behaviourally, as that file's lift-parametrized sibling
+    # test does through the real fold).
     assert src.count('n.stdout_tail = ""') == src.count('n.stderr_tail = ""') == 2
 
 

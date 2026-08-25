@@ -28,6 +28,24 @@ import sys
 from pathlib import Path
 
 
+# OPEN[model-entry-update-strips-provider-pin] the remedy campaign.sh itself prints silently
+# unpins the reference arm's model deployment.
+# proof:`present:text = text[:existing.start()]@benchmarks/algotune/patch_model_entry.py`
+# REVIEW 2026-08-25 (correctness): the update path below REPLACES an existing entry wholesale with
+# `_entry(...)`'s block, and `_entry` never emits a `provider:` pin -- its own docstring argues the
+# omission for a Google model. But `campaign.sh::budget_hint` prints this exact command for
+# WHATEVER openrouter key is in play, i.e. for the campaign's default deepseek slug too, whose
+# entry `setup_algotune.sh` writes WITH the pin (order: siliconflow/fp8, no fallbacks) for the
+# measured reason README quotes ("three calls hit two different fp4 providers and returned
+# 96/17/96 completion tokens for one prompt; 24 endpoints serve that slug at fp4/fp8/bf16").
+# Driven 2026-08-25: running the printed command against the setup-written entry prints
+# `updated ... verified: spend_limit=...` and the resulting `extra_body` carries only `reasoning`
+# -- the pin is gone, nothing says so, and re-running setup_algotune.sh does NOT restore it (its
+# model block is inserted only when the key is absent). So the standard budget-mismatch flow
+# leaves arm A on a different deployment per call while arm B stays pinned -- an arms asymmetry in
+# the exact variable the pin exists to hold still. Fix direction: update `spend_limit` in place
+# instead of replacing the block, or have `_entry` carry over an existing entry's
+# `extra_body.provider` subtree (and say when it did).
 def _entry(key: str, slug: str, spend_limit: float, effort: str) -> str:
     """The block to write. Mirrors the shape of the entries already in the file.
 

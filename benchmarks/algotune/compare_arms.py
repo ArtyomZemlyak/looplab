@@ -265,6 +265,17 @@ def arm_a_failure(algotune_root: Path, task: str) -> tuple:
     row = raw.get(task) or {}
     if not isinstance(row, dict):
         return (False, "", "")
+    # OPEN[compare-arm-a-failure-first-model-wins] the first dict row decides, whatever model it
+    # belongs to. proof:`present:for _model, rec in row.items():@benchmarks/algotune/compare_arms.py`
+    # REVIEW 2026-08-25 (correctness): the loop RETURNS on its first dict `rec` unconditionally, so
+    # in a merge-target file this function's own docstring warns about ("rows from earlier
+    # campaigns survive a rerun"), a task row holding records for TWO models -- an old campaign's
+    # beside this one's -- is answered by whichever was inserted FIRST, and the current campaign's
+    # `missing_metrics`+`final_eval_success=True` record is never read: arm A's real zero prints
+    # `--` again, which is the exact asymmetry the caller was corrected for. `_arm_a` one screen up
+    # filters by the model fragment; this reader takes no model at all. Fix direction: pass the
+    # fragment in and filter like `_arm_a` does (falling back to the newest `timestamp_utc` among
+    # matches), instead of iterating-and-returning.
     for _model, rec in row.items():
         if not isinstance(rec, dict):
             continue
@@ -338,6 +349,21 @@ def _run_reached_its_ceiling(final_dir: Path, arm: str, task: str) -> bool:
     driver, so a killed driver cannot forge either. Absent or unreadable evidence answers False —
     a task with no record of finishing is owed, which is the safe direction.
     """
+    # OPEN[compare-ceiling-rescue-reads-wrong-runs-root] this rescue is dead code on the shipped
+    # defaults: it guesses a sibling layout the campaign never produces.
+    # proof:`present:runs = final_dir.parent / f"runs-{arm}"@benchmarks/algotune/compare_arms.py`
+    # REVIEW 2026-08-25 (correctness): campaign.sh's default is `CAMPAIGN_RUNS=.../camp-runs` (and
+    # box-jhub-l40s.sh keeps that name), while this derives `<final-dir>/../runs-<arm>` -- so with
+    # the documented setup the glob under it never exists, this always answers False, and the
+    # drained-at-the-boundary case the docstring above cites ("$1.003 and $1.002 of $1.00 ...
+    # excluding them would have dropped two real results") is excluded ANYWAY. main() already takes
+    # `--runs-root` and campaign.sh even prints the correct invocation -- the table honours it and
+    # this helper ignores it. The same layout guess is in campaign_status.py's default and in
+    # watchdog.sh's events-growth glob, so all three advertised behaviours are inert unless an
+    # operator happens to name their runs dir `runs-B`; every miss fails toward "less credit / more
+    # alarm", which is why nobody noticed. Fix direction: thread `args.runs_root` into this helper
+    # (it is only called from main), and default the other two readers from an explicit flag rather
+    # than a sibling-name guess.
     runs = final_dir.parent / f"runs-{arm}"
     events = runs / task / "run" / "events.jsonl"
     snapshot = runs / task / "run" / "config.snapshot.json"
@@ -444,6 +470,15 @@ def main() -> int:
             winner = "A" if va > vb else "B"
         # The REASON travels with the row. A `--` and a `0.0000` both used to be bare, and the whole
         # point of the split above is that the operator can see which of the two this is and why.
+        # OPEN[compare-note-label-says-b-for-arm-a] every note is labelled as arm B's, including the
+        # ones that are about arm A.
+        # proof:`present:note = f"   [B: {why}]" if why else ""@benchmarks/algotune/compare_arms.py`
+        # REVIEW 2026-08-25 (correctness): the 2026-08-24 change routed arm-A reasons into the same
+        # `why` variable ("arm A missing_metrics ...", "arm A unfinished ...", "arm A cut at the
+        # wall clock"), and this hardcoded prefix predates that -- so the table now prints
+        # self-contradicting rows like `[B: arm A cut at the wall clock ...]` in the one report the
+        # operator reads the arms' health from. Fix: drop the arm prefix from the wrapper (the
+        # sentences already name their arm), or pick it from which side the note came from.
         note = f"   [B: {why}]" if why else ""
         print(f"{task:<{width}}  {_fmt(va):>13}  {_fmt(vb):>11}   {winner}{note}")
 

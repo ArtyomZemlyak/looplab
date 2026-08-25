@@ -26,6 +26,23 @@ from looplab.tools import dev_probe
 from looplab.tools._base import RESULT_CAP, stream_tails
 from looplab.tools.dev_probe import _MAX_TIMEOUT, DevProbeTools
 
+# OPEN[dev-probe-tests-red-without-landlock] 21 of this file's tests fail on any kernel without
+# Landlock. proof:absent:pytestmark@tests/test_dev_probe.py
+# REVIEW 2026-08-25 (guard-test): `confine_reads` now defaults True and FAILS CLOSED -- the right
+# production behaviour, documented and switchable -- but every probe-executing test here runs the
+# live rung unconditionally, so on a kernel where `landlock.unavailable_reason()` is not None (this
+# container: "no Landlock support"; Docker's default seccomp returns ENOSYS, so common CI sandboxes
+# qualify) 21 tests die on `exit=3 ... landlock_create_ruleset failed` -- measured 2026-08-25:
+# `21 failed, 51 passed, 2 skipped`. That breaks the repo's own "suite runs fully offline" contract,
+# and it takes down PRE-EXISTING tests (`test_a_probe_answers_the_question_and_leaves_no_trace`)
+# whose subject is not confinement at all. Even the availability-aware
+# `test_the_kernel_no_write_rung_is_applied_and_says_so_when_it_is_not` fails, because the generic
+# no-Landlock refusal now pre-empts the branch it tests. Fix direction: gate probe-EXECUTING tests
+# on `landlock.unavailable_reason() is None` (a module-level mark, or run those arms with
+# `confine_reads=False` where confinement is not the property under test), and keep exactly ONE
+# test asserting the fail-closed refusal text on a Landlock-less kernel -- that refusal is itself a
+# documented contract worth a test, and today it is only ever exercised by accident.
+
 
 def _probe(code, **kw):
     return DevProbeTools(timeout_s=kw.pop("timeout_s", 30), **kw).execute("run_probe", {"code": code})

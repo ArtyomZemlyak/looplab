@@ -103,6 +103,14 @@ if old not in s:
     raise SystemExit("   FAILED: upstream shape changed; narrow the filter by hand "
                      "(see README, 'Known upstream bug')")
 s = s.replace(old, new, 1)
+# OPEN[setup-algotune-noop-self-replace] the line below replaces a string with ITSELF.
+# proof:`present:'\n                ):', 1)@benchmarks/algotune/setup_algotune.sh`
+# REVIEW 2026-08-25 (correctness): both arguments are identical, so this is a no-op wearing a
+# comment that claims it "close[s] the `if (` that the replacement opened". Harmless today -- the
+# replacement above is already balanced and the ast.parse gate below would catch a break -- but a
+# comment describing work that is not happening is exactly the recorded-fact drift CLAUDE.md's
+# claim-pin rule exists for, and the next person to edit `old`/`new` will trust it. Delete the
+# line and its comment, or make it do the closing it describes.
 # close the `if (` that the replacement opened: the original line ended with `):` two lines down
 s = s.replace(new + '\n                ):', new + '\n                ):', 1)
 p.write_text(s, encoding="utf-8")

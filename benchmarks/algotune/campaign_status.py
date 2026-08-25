@@ -116,6 +116,21 @@ def _wall_minutes(out: Path, arm: str, task: str) -> int | None:
 
 def _arm_a_number(summary: dict, failures: dict, task: str, fragment: str):
     """`(speedup, reason)` for arm A out of AlgoTuner's own summary. Arm A's file, arm A only."""
+    # OPEN[status-arm-a-first-match-wins] a second copy of the lookup this file's own docstring
+    # says must not be re-made, and it disagrees with the original on the same input.
+    # proof:`present:raw = next((v.get("final_speedup")@benchmarks/algotune/campaign_status.py`
+    # REVIEW 2026-08-25 (correctness): the first fragment-matching model row decides, while
+    # `compare_arms._arm_a` implements the documented "LAST WRITER DOES NOT WIN" priority rule for
+    # exactly this file -- its comment names the routine case, two keys both matching the default
+    # fragment (`deepseek-v4-flash` and `deepseek-v4-flash-0731`). Driven 2026-08-25 on that shape
+    # with an "N/A" under the short key and a real 1.42 under the long one: compare_arms answers
+    # 1.42, this answers "no number" and the status tool then prints the task as failed (with a
+    # reason fished out of agent_failures.json -- by ANOTHER first-match `next()`, the same defect
+    # one line down) while the end-of-campaign report scores it. `_compare_arms`'s docstring above
+    # lists this exact decision among the "Three decisions [that] live there and must not be
+    # re-made here, because a second copy of a rule is the drift" -- this function is that second
+    # copy. Fix: call `CA._arm_a(summary_path, fragment)` (the module is already imported as CA)
+    # and fall back to `failures` only when it yields nothing for the task.
     raw = next((v.get("final_speedup") for k, v in (summary.get(task) or {}).items()
                 if fragment.lower() in str(k).lower() and isinstance(v, dict)), None)
     value = CA._to_float(raw)
