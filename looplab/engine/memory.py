@@ -295,6 +295,20 @@ def select_comparison_pairs(state, k: int = 3, exclude=None) -> list[dict]:
         # mine stage, and each rediscovered the same fix because none of it became a lesson.
         # Self-paired on purpose: the two sides of this comparison are the SAME node before and
         # after its repair, which is what the reconciler's `a.id == b.id` branch words.
+        # OPEN[repair-self-pair-ignores-spent-ledger] the self-pair never consults `excl`, so an
+        # already-distilled repair is re-selected on every later firing.
+        # proof:`line:"a": n.id,&&"b": n.id,@looplab/engine/memory.py`
+        # REVIEW 2026-08-25 (correctness): this function's own contract says `exclude` is the
+        # "(child, parent) id tuples already distilled (later firings must not re-spend LLM budget
+        # on the same pair)", and the parent loop honours it — but this append has no membership
+        # test against `excl`, and `spent_pairs` DOES return self-pairs once one is distilled (the
+        # lesson's `pairs` row round-trips through `lessons_distilled`). Because `debug` sorts
+        # FIRST and k defaults to 3, every repaired node with a metric re-occupies a top slot on
+        # every distillation cadence AND at run-end reflection: the same pair is re-sent to the
+        # paid comparative-lesson call each firing, and once a run holds three such nodes (v4 held
+        # four) no NEW solution pair can ever reach the judge again. Fix direction: gate this
+        # append on the same spent-ledger membership the parent loop uses, self-keyed; then delete
+        # this marker.
         if int(getattr(n, "repairs", 0) or 0) > 0:
             pairs.append({"kind": "debug", "a": n.id, "b": n.id, "delta": None})
     pairs.sort(key=lambda pr: (0 if pr["kind"] == "debug" else 1,

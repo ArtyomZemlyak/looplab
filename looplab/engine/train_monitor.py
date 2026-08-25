@@ -528,6 +528,27 @@ def _eta_of(rows) -> Optional[float]:
     if not rows:
         return None
     first, last = rows[0], rows[-1]
+    # OPEN[eta-pairs-progress-across-lanes] the two ends of this rate can come from DIFFERENT
+    # progress bars, and nothing checks that they share one.
+    # proof:line:first.progress_done,&&last.progress_total@looplab/engine/train_monitor.py
+    # REVIEW 2026-08-25 (correctness): each window's `progress_done`/`progress_total` is
+    # `_latest_progress` over that tick's tail — the LAST counter in the window, whichever lane
+    # rendered it — and this pairs `first`'s done with `last`'s done/total with no same-lane check.
+    # That is the exact defect `schedule_reading` below refuses by its ONE-RECORD rule, quoting the
+    # same measurement (109 of the 109 stage logs above 200 KB carry more than one bar lane), so on
+    # the corpus this runs over the mixed pairing is the ROUTINE case, not the corner: a tick that
+    # lands during an in-epoch validation ends with the val bar (total ~361) while its neighbours
+    # end with the train bar (total ~10,590), and `advanced` is then a difference between two
+    # unrelated counters. Most mixes only DEFLATE the ETA (the conservative direction
+    # `projected_overrun_s` leans on), but the claim there — "it will under-report an overrun and
+    # never invent one" — is not safe against the mix that INFLATES it: a first window ending on a
+    # near-complete eval-on-start/sanity-val bar (HF `eval_on_start`, Lightning's sanity check) and
+    # a last window on the young train bar gives a small positive `advanced` over a real span, so
+    # the per-step time is overstated and `projected_overrun_s`/`stage_wall_s` can be stamped on the
+    # durable alert for a stage that fits. Fix direction: key the pair by lane the way the clock
+    # derivation already does ("tqdm elapsed tracked PER BAR TOTAL") — take `done_a` from the latest
+    # window whose total equals the last window's total, and answer None when no earlier
+    # window shares that lane. Delete this marker with the fix.
     done_a, done_b, total = first.progress_done, last.progress_done, last.progress_total
     if not (type(done_a) is int and type(done_b) is int and type(total) is int and total > 0):
         return None

@@ -22,7 +22,11 @@ Nothing below is a bug you can fix without deciding something first. That is the
 > - **OPEN[agent-node-purge-has-no-durable-receipt]** `_purge_node_snapshot` is still an irreversible
 >   multi-file transaction inside a bare `try/finally` with the ad-hoc `events.jsonl.bak-del<N>`
 >   backup, still reachable from the agent-facing tool provider — no operation id, no phase, no
->   crash-recovery record. proof:present:events.jsonl.bak-del@looplab/tools/machine_runs_tools.py
+>   crash-recovery record. proof:present:_purge_node_snapshot@looplab/tools/machine_runs_tools.py
+>   (re-pointed 2026-08-25: the previous literal, the backup filename, exists in that file only
+>   inside the f-strings that BUILD the path, so `test_no_proof_is_satisfiable_only_by_prose`
+>   rightly refused it and the guard sat red from the day this row was indexed — the exact
+>   silent-red this index exists to end. The deciding symbol is the function itself.)
 > - **OPEN[trace-exporter-hardens-per-span-not-per-batch]** the worker still takes exactly one row per
 >   iteration and runs the whole hardened ladder (guarded open, torn-tail heal, identity CAS before
 >   and after, one append receipt) per SPAN. proof:present:self._queue.popleft()@looplab/core/tracing.py

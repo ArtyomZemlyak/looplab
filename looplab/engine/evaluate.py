@@ -2460,6 +2460,21 @@ class EvaluateMixin:
                 # DURING the attempt that just died — a snapshot taken before the node started
                 # contains, by construction, none of them. This is the one place in the node loop
                 # where that distinction is the whole point of the read.
+                # OPEN[monitor-verdicts-read-on-event-loop] this fresh read runs ON the event loop
+                # while the line above it already pays for a worker hop.
+                # proof:present:_durable_monitor_verdicts(self.store.read_all(),@looplab/engine/evaluate.py
+                # REVIEW 2026-08-25 (efficiency): `read_all()` is incrementally cached, but the
+                # increment here is exactly one multi-hour attempt's appends (stage rows, cost rows,
+                # up to `_MAX_MONITOR_LLM_CALLS` alert rows — parsed on this thread), and the
+                # `_durable_monitor_verdicts` walk after it is O(whole log) pure Python per failed
+                # attempt. Both run between two awaits, so every concurrent eval's terminal and the
+                # whole serve/read side stall behind them — the same event-loop-callback shape
+                # `card_reservation._stage_card_creates` was moved off-thread for, on 2026-08-22 —
+                # ONE DAY after this line landed on the loop. The fix is already half-paid: fold this read
+                # into the `to_thread.run_sync` immediately above (`EventStore` serializes via its
+                # own locks, so a worker-thread read is sanctioned — invariant #1's own note), or
+                # thread the rows out of the same lambda that builds `diagnosis_tools`. Delete this
+                # marker with the fix.
                 _monitor_verdicts = _durable_monitor_verdicts(self.store.read_all(), node_id,
                                                               generation)
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
