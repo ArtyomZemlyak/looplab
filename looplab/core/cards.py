@@ -895,6 +895,59 @@ def card_child_rollup(children) -> dict | None:
     }
 
 
+def card_proposal_drift(card) -> dict | None:
+    """How far the experiment that RAN is from the one this card proposed, or None.
+
+    THE ARBITER, and this is the half that was measured and never consumed. `Card.params` is the
+    receipt-bound proposal and `Card.applied_params` is what the coordinates turned out to be; the
+    question nobody was answering is whether the two still describe ONE experiment. A card is meant
+    to be a single hypothesis with a minimal change — so a run that moved four of its knobs is not
+    that card's experiment any more, and a reader sizing the next idea "one knob off this one" is
+    sizing it off a recipe that never existed. That reading cost `runs/e5small-dr-unified-v4` four
+    days: its champion is recorded at batch 8192 / accum 2 / 15 epochs and ran 512 / 32 / 3.
+
+    Compared only on the coordinates BOTH sides name. A knob the card declared and the carrier never
+    answered is not evidence of a move — the applied record answers what it could read, and absence
+    is `unknown` exactly as it is everywhere else in this file. `moved` therefore never exceeds
+    `compared`, and `compared` is the honest denominator for "how much of this proposal was checked".
+
+    None when there is nothing to say: no applied record, or no shared coordinate. Never an empty
+    dict — a caller must be able to tell "they agree" from "nothing was comparable", which is the
+    same distinction `metric_provenance`'s `checked`-beside-`diverged` pair exists for one layer down.
+    """
+    proposed = getattr(card, "params", None)
+    applied = getattr(card, "applied_params", None)
+    if not isinstance(proposed, dict) or not isinstance(applied, dict) or not applied:
+        return None
+    shared = sorted(set(proposed) & set(applied))
+    if not shared:
+        return None
+    moved = [name for name in shared if proposed[name] != applied[name]]
+    return {
+        "compared": len(shared),
+        "moved": len(moved),
+        "params": moved[:12],
+        "node": getattr(card, "applied_params_node", None),
+    }
+
+
+def card_drift_brief(card) -> str:
+    """One clause for a prompt or a board row — "" when the card and its run still agree.
+
+    Deliberately silent on agreement: a line saying "0 of 6 knobs moved" on every card is noise that
+    trains a reader to skip the line, and the whole point is that the loud case be loud.
+    """
+    drift = card_proposal_drift(card)
+    if not drift or not drift["moved"]:
+        return ""
+    names = ", ".join(drift["params"])
+    more = drift["moved"] - len(drift["params"])
+    node = drift.get("node")
+    where = f" on node {node}" if isinstance(node, int) else ""
+    return (f"RAN AT DIFFERENT COORDINATES{where}: {drift['moved']} of {drift['compared']} "
+            f"declared knobs moved ({names}{f', +{more} more' if more > 0 else ''})")
+
+
 def card_rollup_brief(rollup) -> str:
     """One line of a direction's progress, or "" — the shared spelling of the counts.
 

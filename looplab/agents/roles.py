@@ -16,7 +16,7 @@ from typing import Optional, Protocol
 
 from looplab.core.advisory_payloads import memo_verdict_cue
 from looplab.core.models import (Idea, IdeaEmission, Node, RunState,
-                                 card_is_direction,
+                                 card_drift_brief, card_is_direction,
                                  developer_artifact_footprint, hypothesis_statement_digest,
                                  normalize_researcher_footprint)
 from looplab.core.parse import LLMClient, ParseError, extract_code, parse_structured
@@ -911,11 +911,23 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
         lines.append("Research questions ALREADY on the board (each already has an experiment — "
                      "do NOT propose one of these again as if it were new):")
         for card in attempted:
+            # …AND WHETHER THE EXPERIMENT THAT RAN IS STILL THE ONE THIS CARD PROPOSED. The arbiter
+            # existed and nothing consumed it, which made this block quietly dangerous: a card's
+            # `params` is the receipt-bound PROPOSAL, and under `params_style: "none"` the Developer
+            # realises the idea by editing the repo, so a repair that fits a training into memory
+            # moves the numbers while the card keeps the old ones. A proposer reading "already
+            # tried" and sizing its next idea one knob off THAT is sizing it off a recipe nothing
+            # ever ran. Measured on `runs/e5small-dr-unified-v4`: six of the nine cards with an
+            # applied record disagree with their own proposal, the run's CHAMPION among them —
+            # card-132 says batch 4096 / lr 0.001 / 3 epochs and node 13 ran 2048 / 0.0005 / ONE
+            # epoch. Silent when the two agree, so the loud case stays loud.
+            drift = card_drift_brief(card)
             lines.append(
                 f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
                 f"STATUS={card.status} VERDICT={card.verdict} "
                 f"NODES={sorted(card.evidence)} "
-                f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
+                + (f"{drift} " if drift else "")
+                + f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
         if for_proposal:
             # THE PROMISE THAT WAS MADE HERE AND NEVER EXISTED, removed rather than implemented, and
             # the choice is deliberate. It read: "If one of these genuinely needs another attempt,

@@ -31,6 +31,8 @@ from looplab.core.cards import (
     _card_action_digest as __card_action_digest,
     card_action_digest as _card_action_digest_v2,
     card_child_rollup,
+    card_drift_brief,
+    card_proposal_drift,
     card_lineage_brief,
     card_rollup_brief,
     card_is_direction,
