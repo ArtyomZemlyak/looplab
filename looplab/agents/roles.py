@@ -972,6 +972,11 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
     # is matched to a card by its SEED STATEMENT can name that same card as its parent, and against
     # the raw `idea.card_id` (None) the guard sees no self edge and emits `card_id ==
     # parent_card_id` into the durable payload for the fold to drop silently.
+    # REVIEW 2026-08-25 (P1 correctness): visibility is not enough here. Both the direct id lookup
+    # and the seed fallback can select a direction even though this function's contract explicitly
+    # says a direction must never become `card_id`. A non-compliant proposal can therefore reserve
+    # an action-less card. Null `chosen` when `card_is_direction(chosen)` and cover both resolution
+    # paths with direction fixtures.
     chosen = by_id.get(idea.card_id) if idea.card_id else None
     if chosen is None and idea.hypothesis:
         matches = [card for card in cards if card.seed_statement == idea.hypothesis]

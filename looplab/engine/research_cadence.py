@@ -513,6 +513,11 @@ class ResearchCadenceMixin:
         # it did — absence means "this memo did not draw the distinction", never "it has no
         # questions".
         questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()] or directions
+        # REVIEW 2026-08-25 (P1 delivery): hypothesis delivery is accidentally coupled to legacy
+        # hint delivery. A schema-valid memo may supply `open_questions` while leaving the redundant
+        # `recommended_directions` field empty; `questions` is then non-empty, but this outer gate
+        # suppresses every EV_HYPOTHESIS_ADDED append. Gate EV_HINT on `directions` and hypothesis
+        # registration on `questions` independently (or reconstruct the compatibility field).
         if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
             # The prefix comes from `agents/hints.py`, which FILTERS on it — a deep-research row
@@ -533,6 +538,10 @@ class ResearchCadenceMixin:
                 # mean nothing). Checked, not trusted: a mis-aligned or short list simply yields no
                 # concepts for that question, and a question with none is registered exactly as it
                 # was before this shipped.
+                # REVIEW 2026-08-25 (P1 attribution): removing blanks before `enumerate` shifts the
+                # positional `question_concepts` join. For ["", "q2"] with [["c1"], ["c2"]], q2
+                # receives c1. Enumerate the original open_questions, read the same-index concept row,
+                # and only then skip an empty statement.
                 raw_questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()]
                 per_question = memo_d.get("question_concepts") or []
                 by_statement = {}

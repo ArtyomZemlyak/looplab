@@ -20,6 +20,10 @@ export const UNGROUPED_ID = '__no_concepts__'
 // A question's set, normalised: sorted, de-duplicated, blank-free. Sorting is what makes the key
 // stable — `{a,b}` and `{b,a}` are one set and must not render as two rows.
 export function conceptSet(card) {
+  // REVIEW 2026-08-25 (P2 contract): the public projection ships `child_concept_tags` specifically
+  // to derive a direction's concept membership from its experiments, but this sole lattice reader
+  // ignores it. Directions without memo-authored `concept_tags` therefore remain permanently
+  // ungrouped even after tagged children arrive. Union the two bounded fields for direction rows.
   const raw = isRecord(card) && Array.isArray(card.concept_tags) ? card.concept_tags : []
   const seen = new Set()
   for (const tag of raw) {
@@ -47,6 +51,11 @@ export function isStrictSubset(outer, inner) {
 // strict subset of `{a,b,c}` too — hanging the row under both would draw one subtree at two depths
 // and double every number rolled up through it. A candidate parent survives only when no OTHER
 // candidate sits strictly between it and the child.
+// REVIEW 2026-08-25 (P1 availability): multi-parent expansion enumerates root-to-node paths, not
+// cards. A valid public payload containing every non-empty subset of eight concepts has 255 cards
+// but emits 109,600 placements (sum C(8,k)*k!). `latticeRollups` then scans all placements once per
+// placement through `descendantIds`, approaching 12 billion prefix checks and freezing the browser.
+// Bound placements, choose a canonical placement, or aggregate on the DAG without materialising paths.
 export function latticeRows(cards, { order } = {}) {
   const sort = typeof order === 'function'
     ? order
