@@ -104,3 +104,80 @@ def test_rc0_consults_the_check_before_writing_the_marker():
     assert "successful_calls" in code, "rc=0 no longer checks for a successful call"
     assert code.index("successful_calls") < code.index("ran_to_completion"), \
         "the check must come before the marker is written"
+
+
+# ---------------------------------------------------------------------------
+# The other half of the same defect, measured 2026-08-25 when the gateway fell a SECOND time.
+#
+# `successful_calls` asks only whether the run ever paid for anything. That catches a total outage
+# — attempt 1 of arm A, sixteen task-arms with zero calls each. It does NOT catch a run that HAD
+# spent money and was then cut mid-search: four task-arms exited 0 while the endpoint was returning
+# `503 No available workers` and earned `ran_to_completion` markers over runs that had used 15 %,
+# 27 %, 37 % and 69 % of their $1.00 — against arm B, which spent the whole of it. Their reported
+# numbers are real AND are measurements of a truncated search, which is the one thing a marker must
+# not hide: `.done` means "do not re-run this".
+#
+# The discriminator is the LAST metered row of the attempt: a run that ends on its own terms ends
+# after a call that worked. On the live log the one task-arm that reached its ceiling
+# (`edge_expansion`, 107 % spent) has a 200 last; all four cut ones have a 503.
+
+
+def _ended_on_failure(meter_log, arm, task, attempt="a1", set_env=True) -> str:
+    src = CAMPAIGN.read_text(encoding="utf-8")
+    m = re.search(r"^ended_on_failure\(\)\s*\{.*?^\}", src, re.S | re.M)
+    assert m, "ended_on_failure() is gone from campaign.sh — this test needs rewriting"
+    env_line = f'METER_LOG={meter_log}\n' if set_env else "unset METER_LOG\n"
+    script = env_line + m.group(0) + f'\nended_on_failure {arm} {task} {attempt}\n'
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def test_a_run_cut_by_the_endpoint_is_not_complete(tmp_path):
+    """Spent money, then the endpoint died: the shape that earned four false markers."""
+    log = _log(tmp_path, [
+        {"arm": "A", "task": "discrete_log", "attempt": "a1", "status": "200"},
+        {"arm": "A", "task": "discrete_log", "attempt": "a1", "status": "200"},
+        {"arm": "A", "task": "discrete_log", "attempt": "a1", "status": "503"},
+    ])
+    assert _ended_on_failure(log, "A", "discrete_log") == "yes"
+
+
+def test_a_run_that_ended_on_a_working_call_is_complete(tmp_path):
+    """The falsifier: a check that always said "yes" would pass the test above and refuse every
+    marker the campaign ever earns, including the one task-arm that really did reach its ceiling."""
+    log = _log(tmp_path, [
+        {"arm": "A", "task": "edge_expansion", "attempt": "a1", "status": "503"},
+        {"arm": "A", "task": "edge_expansion", "attempt": "a1", "status": "200"},
+    ])
+    assert _ended_on_failure(log, "A", "edge_expansion") == "no"
+
+
+def test_a_trailing_broken_pipe_also_counts_as_a_failure(tmp_path):
+    """The proxy records a broken pipe as status 200 with an `error`; nothing was delivered, so a
+    run whose last row is one did not end on a call that worked."""
+    log = _log(tmp_path, [
+        {"arm": "A", "task": "x", "attempt": "a1", "status": "200"},
+        {"arm": "A", "task": "x", "attempt": "a1", "status": "200",
+         "error": "BrokenPipeError: [Errno 32] Broken pipe"},
+    ])
+    assert _ended_on_failure(log, "A", "x") == "yes"
+
+
+def test_no_rows_for_this_attempt_is_unknowable(tmp_path):
+    """"" is not "yes": a run with no rows of its own gets no verdict from this check, and the
+    zero-calls check above is what speaks for it instead."""
+    log = _log(tmp_path, [{"arm": "A", "task": "x", "attempt": "a1", "status": "200"}])
+    assert _ended_on_failure(log, "A", "x", attempt="a2") == ""
+    assert _ended_on_failure(log, "B", "x") == ""
+
+
+def test_rc0_consults_the_failure_check_before_writing_the_marker():
+    src = CAMPAIGN.read_text(encoding="utf-8")
+    case = src.index('  case "$RC" in')
+    rc0 = src.index("    0)", case)
+    rc124 = src.index("    124)", rc0)
+    code = "\n".join(ln for ln in src[rc0:rc124].splitlines() if not ln.lstrip().startswith("#"))
+    assert "ended_on_failure" in code, "rc=0 no longer checks whether the endpoint cut the run"
+    assert code.index("ended_on_failure") < code.index("ran_to_completion"), \
+        "the check must come before the marker is written"

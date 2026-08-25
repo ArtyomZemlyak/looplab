@@ -384,6 +384,44 @@ reap_orphan_workers() {
 # The event log is the discriminator, NOT the wall clock (a threshold between 2 s and 136 s is a
 # guess that a slow endpoint invalidates) and NOT the exit code (which cannot separate them, by
 # construction -- that is the defect).
+ended_on_failure() {   # $1 = arm, $2 = task, $3 = attempt. "yes" | "no" | "" when unknowable.
+  # DID THE RUN END ON ITS OWN TERMS? `successful_calls` below asks only whether the run ever paid
+  # for anything, and that catches a total outage (attempt 1 of arm A: sixteen task-arms, zero calls
+  # each). It does NOT catch the other half, measured 2026-08-25 when the gateway fell a second
+  # time: four task-arms that HAD spent money were cut mid-search and still exited 0, so they earned
+  # `ran_to_completion` markers over runs that had used 15 %, 27 %, 37 % and 69 % of their $1.00 —
+  # against arm B, which spent the whole of it. The numbers those runs report are real and are
+  # measurements of a TRUNCATED search, which is the one thing a marker must not hide.
+  #
+  # The discriminator is the LAST metered row of the attempt. A run that ends on its own terms ends
+  # after a call that worked; a run the endpoint killed ends after one that did not. Checked against
+  # the live log: the one task-arm that reached its ceiling (`edge_expansion`, 107 % spent) has a
+  # 200 last, and all four cut ones have a 503.
+  [ -n "${METER_LOG:-}" ] && [ -s "${METER_LOG:-/nonexistent}" ] || { echo ""; return 0; }
+  grep -q "\"arm\": \"$1\"" "$METER_LOG" 2>/dev/null || { echo ""; return 0; }
+  python3 - "$METER_LOG" "$1" "$2" "${3:-}" <<'PYEOF'
+import json, sys
+log, arm, task, attempt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+last = None
+with open(log, "r", encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("arm") != arm or d.get("task") != task:
+            continue
+        if attempt and d.get("attempt") not in ("", None, attempt):
+            continue
+        last = d
+if last is None:
+    print("")                       # no rows for this attempt: unknowable, not a verdict
+else:
+    ok = str(last.get("status")) == "200" and not last.get("error")
+    print("no" if ok else "yes")
+PYEOF
+}
+
 successful_calls() {   # $1 = arm, $2 = task, $3 = attempt. Echoes the count, or "" when unknowable.
   # "" and "0" are DIFFERENT ANSWERS and the caller only acts on "0": "" means the meter log is
   # missing, unreadable, or carries no rows for this arm, and refusing a marker on that would punish
@@ -540,6 +578,11 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
       # for this arm, so a missing or untagged log leaves the old behaviour rather than refusing
       # markers for runs that were fine.
       OK_CALLS="$(successful_calls "$ARM" "$T" "${ATTEMPT:-}")"
+      if [ "$(ended_on_failure "$ARM" "$T" "${ATTEMPT:-}")" = "yes" ]; then
+        echo "  [$(date +%H:%M:%S)][$4] ENDED ON A FAILED CALL after ${WALL}s (rc=0, ok_calls=${OK_CALLS:-?})" \
+             "-- the endpoint cut this run, it did not finish. No marker written, task still owed"
+        return 0
+      fi
       if [ "$OK_CALLS" = "0" ]; then
         echo "  [$(date +%H:%M:%S)][$4] NO SUCCESSFUL CALLS in ${WALL}s (rc=0) -- endpoint down?" \
              "no marker written, task still owed"
