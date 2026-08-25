@@ -34,9 +34,16 @@
 #
 #  6. The budget and run counts. See the comments written into config.yaml itself.
 #
-#  7. The two on-disk patches (persistent baseline cache, train/test subset). The SECOND one is
-#     what makes `--subset train` mean anything: unpatched, evaluate_results.py ignores it and
-#     scores every LoopLab node on the TEST split while the bridge still records subset=train.
+#  7. The three on-disk patches (persistent baseline cache, train/test subset, invalid-solution
+#     analysis). The SECOND one is what makes `--subset train` mean anything: unpatched,
+#     evaluate_results.py ignores it and scores every LoopLab node on the TEST split while the
+#     bridge still records subset=train. The THIRD carries AlgoTune's own per-instance
+#     `invalid_solution_analysis` -- the code context of the `is_solution` line that rejected an
+#     instance, which AlgoTuner's own agent is shown three of -- out of the evaluator and into
+#     `evaluate_summary.json`, which is the only structured channel the LoopLab bridge has. Without
+#     it a wrong solver is told 94/100 and nothing about WHICH check it failed: measured cost, one
+#     arm-B agent that read three bare `0.0`s for a solver correct on 95 of 100 instances and spent
+#     the rest of a $1.00 budget concluding the approach was answered and failed.
 set -eu
 
 AT="${1:-}"
@@ -70,6 +77,8 @@ if [ "$ON_FORK" = "1" ]; then
     echo "== this checkout already carries the fork branch (looplab_parallel.py present)."
     echo "   The patches below are already committed there; re-applying them is a no-op, but the"
     echo "   parallel evaluator is NOT reproducible from this script -- do not revert it."
+    echo "   EXCEPT patch_invalid_solution_analysis.py, added 2026-08-25 and not on the branch: it"
+    echo "   WILL apply here, and it must, or a wrong solver is scored 0.0 with no reason."
 fi
 
 
@@ -159,6 +168,24 @@ PY
 echo "== 7/7  on-disk patches"
 python3 "$HERE/patch_eval_subset.py"    --algotune-root "$AT"
 python3 "$HERE/patch_baseline_cache.py" --algotune-root "$AT"
+python3 "$HERE/patch_invalid_solution_analysis.py" --algotune-root "$AT"
+# Verify-or-fail, the same lesson step 2 records: a patch that prints nothing an operator reads as
+# a failure leaves the defect in place on a fresh machine. BOTH halves are checked, and each is
+# checked on the thing that is actually different about it -- because either half alone is silent,
+# and silence here is indistinguishable from a solver that failed no checks.
+#
+#   * the evaluator must have STOPPED DISCARDING the analysis. `grep invalid_solution_analysis`
+#     would pass on an untouched main.py -- upstream names the key a dozen times -- so what is
+#     grepped for is the GATE, whose absence is the change.
+#   * `evaluate_results.py` must NAME the key: upstream's copy does not contain the string at all,
+#     so here presence is the change.
+if grep -q "if baseline_manager and all_invalid_analyses:" \
+        "$AT/AlgoTuner/utils/evaluator/main.py"; then
+    echo "   FAILED: the baseline_manager gate still discards invalid_solution_analysis"; exit 1
+fi
+grep -q "invalid_solution_analysis" "$AT/scripts/evaluate_results.py" \
+    || { echo "   FAILED: invalid_solution_analysis never reaches evaluate_summary.json"; exit 1; }
+echo "   invalid_solution_analysis reaches evaluate_summary.json"
 
 echo
 echo "done. verify:"

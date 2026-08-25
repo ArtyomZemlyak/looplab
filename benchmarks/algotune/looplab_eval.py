@@ -71,6 +71,24 @@ The ``no_speedup`` keys are STABLE; add to them, do not rename them:
 ``is_solution_error_lines`` / ``is_solution_errors_distinct``
                     how many such lines there were in total, so "3 shown" is never mistaken for
                     "3 happened".
+``invalid_solution_analysis`` up to 3 strings: the formatted CODE CONTEXT of the ``is_solution``
+                    line that rejected an instance, with ``>`` on the line that rejected it — the
+                    same list, from the same call, that AlgoTuner's own agent is shown
+                    (``message_writer.py:726-750``). PER-INSTANCE, and therefore NOT deduplicated:
+                    three instances that failed the same check give three identical strings, which
+                    is exactly what the verification run below produced (14 invalid instances, 3
+                    sampled, 1 distinct). Collapsing them would make "3 shown" mean something
+                    different here than it means to arm A, and ``is_solution_errors`` above is
+                    already the deduplicated-and-counted view. They are also the FIRST three in
+                    DATASET ORDER, not the most common: `result_aggregator.py` breaks at
+                    `max_contexts=3`, so a check that only fails late in the split has no context
+                    here. That is arm A's cap on arm A's channel and is deliberately not corrected,
+                    because a different sample on this side would stop being the same evidence.
+                    Present only against a checkout
+                    carrying ``patch_invalid_solution_analysis.py``; absent, and silently so, on one
+                    that is not, exactly as ``ALGOTUNE_EVAL_SUBSET`` is inert on an unpatched
+                    checkout. Each entry is truncated at ``_MAX_ANALYSIS_CHARS`` and says so in its
+                    own text when it was.
 ``stderr_tail``     stays at the TOP level, unchanged, as on the other failure paths.
 
 It is one NESTED object and not a set of top-level keys, which is a deliberate choice about a
@@ -83,20 +101,30 @@ reads and out of the metric plumbing. Verified 2026-08-22: on the line below, `j
 still returns the speedup and `json_line_extras` returns `{"eval_seconds": ...}` and nothing else —
 i.e. exactly what it returned before this change.
 
-WHAT IS NOT REACHABLE, established rather than assumed. AlgoTune builds a richer
-``invalid_solution_analysis`` — a per-instance code-context of the ``is_solution`` line that
-rejected the solution, which arm A's own agent is shown up to three of
-(``AlgoTuner/utils/message_writer.py:726-750``). It cannot get here:
-``AlgoTuner/utils/evaluator/main.py:1160`` attaches it to the returned list ONLY when a
-``baseline_manager`` was passed, and ``scripts/evaluate_results.py`` does not pass one; that script
-then reads only aggregate fields off the per-instance dicts and writes a summary whose entire
-payload is ``{"final_speedup": "<str>"}`` (``update_single_result``, line 852). Nothing under
-``results/<model>/<task>/`` is written by the evaluator at all — that directory is our INPUT. The
-``ERROR:`` lines above are the residual that IS reachable, and they are reachable for an accidental
-reason worth writing down: the ``ProcessPoolExecutor`` children are started with ``forkserver``, so
-they never run ``setup_logging`` and their root logger falls through to ``logging.lastResort``,
-which prints ``levelname:name:message`` to the inherited stderr at WARNING and above. INFO from a
-child is therefore lost (that is why "Validation stats: 94/100" never appears) and ERROR is not.
+WHAT WAS NOT REACHABLE, AND WHAT IT COST TO REACH IT. AlgoTune builds a richer
+``invalid_solution_analysis`` — the formatted code-context of the ``is_solution`` line that rejected
+an instance, up to three of them, which arm A's own agent is shown
+(``AlgoTuner/utils/message_writer.py:726-750``). Until 2026-08-25 it could not get here, for two
+independent reasons, and neither one was in this file: ``evaluate_code_on_dataset`` attached the
+accumulated list ONLY under ``if baseline_manager and ...`` — an argument that selects where the
+REFERENCE TIMINGS come from and that ``scripts/evaluate_results.py`` does not pass, because it
+resolves the timings itself and hands over ``baseline_times=`` instead — and even attached it had
+nowhere to go, since ``update_single_result`` writes a summary whose entire payload is
+``{"final_speedup": "<str>"}``. Both are DEVIATIONS FROM UPSTREAM now, applied on disk by
+``patch_invalid_solution_analysis.py`` and listed in ``setup_algotune.sh`` beside the rest; the
+bridge reads the key off the summary record and does not synthesise it. Nothing under ``results/<model>/<task>/``
+is written by the evaluator at all — that directory is our INPUT — so the summary is the only
+structured channel there is, which is why the patch had to widen it rather than the bridge parse
+harder.
+
+The ``ERROR:`` lines above remain the residual that is reachable WITHOUT a patch, and they are
+reachable for an accidental reason worth writing down: the ``ProcessPoolExecutor`` children are
+started with ``forkserver``, so they never run ``setup_logging`` and their root logger falls through
+to ``logging.lastResort``, which prints ``levelname:name:message`` to the inherited stderr at
+WARNING and above. INFO from a child is therefore lost (that is why "Validation stats: 94/100"
+never appears) and ERROR is not. They are kept, and not replaced by the analysis: they survive a
+reverted or freshly cloned checkout, they survive a TIMED-OUT run that never writes a summary at
+all, and they carry an occurrence COUNT the three sampled contexts do not.
 
 Two things those lines are NOT, and the keys are named so as not to claim otherwise: they are not
 attributed to an instance, and they do not COUNT instances. The recorded run below is 6 invalid
@@ -303,6 +331,44 @@ _MAX_IS_SOLUTION_CHARS = 400       # one rejection line, not a pasted traceback
 # operator can make on evidence rather than a guess made here.
 
 
+# THE ONE THING ON THIS LINE THAT IS NOT SCRAPED. `is_solution_errors` above are a windfall off an
+# accidental logging channel; `invalid_solution_analysis` is the harness's own structured answer to
+# "why was this instance rejected", read out of `evaluate_summary.json` where
+# `patch_invalid_solution_analysis.py` puts it. The cap of three is upstream's own
+# (`main.py`: `all_invalid_analyses[:3]`, `result_aggregator.py`: `max_contexts=3`) and is NOT
+# re-imposed here -- this constant only bounds what a reshaped or hand-edited summary could inject.
+_MAX_ANALYSIS_EXAMPLES = 3
+# Arm A is shown these contexts whole. This line is not a chat message: it is read by
+# `runtime/sandbox.py` and lands in a node's score.log, so one pathological context may not become
+# the JSON line. 2000 chars is ~25 lines of source with the marker column, i.e. the whole of a
+# `format_for_display()` context on every task measured so far -- 900 chars each on the 2026-08-25
+# `convex_hull` verification run, for a 4.5 KB line in total -- and a truncated entry SAYS it was
+# truncated rather than trailing off: a reader must never mistake a cut for the end of the check.
+_MAX_ANALYSIS_CHARS = 2000
+_ANALYSIS_TRUNCATED = "\n… [truncated by looplab_eval at %d chars]"
+
+
+def _invalid_analysis(value: Any) -> list[str]:
+    """The per-instance `is_solution` code contexts off the summary record, bounded.
+
+    Returns `[]` for everything that is not a non-empty list of strings, which includes the ONLY
+    shape an unpatched checkout can produce: the key absent entirely. That silence is deliberate and
+    it matches `ALGOTUNE_EVAL_SUBSET` -- a checkout without `patch_invalid_solution_analysis.py`
+    behaves exactly as upstream does, and `subset_evidence` is the precedent for how this bridge
+    reports which kind of checkout it just ran against.
+    """
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for entry in value[:_MAX_ANALYSIS_EXAMPLES]:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        if len(entry) > _MAX_ANALYSIS_CHARS:
+            entry = entry[:_MAX_ANALYSIS_CHARS] + (_ANALYSIS_TRUNCATED % _MAX_ANALYSIS_CHARS)
+        out.append(entry)
+    return out
+
+
 def _verdict_from_stderr(stderr: str, task: str) -> str:
     """AlgoTune's own `error_message` for THIS task, off its stderr, or "".
 
@@ -359,7 +425,7 @@ def _is_solution_errors(stderr: str) -> tuple[list[dict], int, int]:
 
 
 def _no_speedup(reason: str, *, stderr: str = "", task: str = "",
-                reported: Any = None) -> dict[str, Any]:
+                reported: Any = None, analysis: Any = None) -> dict[str, Any]:
     """Build the `no_speedup` block: the class, the harness's own words, and the counts.
 
     `reason` is what the CALL SITE knows (it timed out; there was no summary). A verdict recovered
@@ -392,6 +458,11 @@ def _no_speedup(reason: str, *, stderr: str = "", task: str = "",
         out["is_solution_errors"] = rows
         out["is_solution_error_lines"] = lines
         out["is_solution_errors_distinct"] = distinct
+    # LAST, and only when the checkout actually produced it. This is the one field here that is
+    # THEIRS rather than ours: not parsed out of a log line, but read from the record they wrote.
+    contexts = _invalid_analysis(analysis)
+    if contexts:
+        out["invalid_solution_analysis"] = contexts
     return out
 
 
@@ -910,8 +981,13 @@ def main() -> int:
     if out["speedup"] <= 0:
         reported = next((record[k] for k in _SPEEDUP_KEYS if k in record), None)
         out["stderr_tail"] = proc.stderr[-1000:]
+        # `record` and not `proc.stderr`: the analysis travels in the SUMMARY, which is why
+        # closing this needed a patch to their checkout rather than a better regex here. On a
+        # checkout without `patch_invalid_solution_analysis.py` the key is simply absent and the
+        # block is exactly what it was before -- see `_invalid_analysis`.
         out["no_speedup"] = _no_speedup("reported_zero", stderr=proc.stderr, task=args.task,
-                                        reported=reported)
+                                        reported=reported,
+                                        analysis=record.get("invalid_solution_analysis"))
 
     _emit(out)
     return 0

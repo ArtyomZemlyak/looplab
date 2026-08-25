@@ -24,6 +24,7 @@ single box, for four reasons:
 | `make_task.py` | Generates a LoopLab `repo` task spec + workspace for one AlgoTune task. |
 | `patch_baseline_cache.py` | Patches `BaselineManager` on disk to give it a **persistent** baseline cache. Without it the reference pass is re-measured on **every node** — see Parity below. Idempotent, keeps a `.orig`, `--revert` undoes it. |
 | `patch_eval_subset.py` | Patches `evaluate_results.py` to honour `ALGOTUNE_EVAL_SUBSET`, so the LoopLab arm can iterate on **train** like AlgoTuner's own agent. **Required** — without it every node is scored on test. |
+| `patch_invalid_solution_analysis.py` | Patches the evaluator and `evaluate_results.py` so AlgoTune's per-instance `invalid_solution_analysis` — the code context of the `is_solution` line that rejected an instance, which AlgoTuner's own agent is shown three of — survives into `evaluate_summary.json` and therefore into the bridge's `no_speedup` block. Without it a wrong solver is told *how often* and never *why*. Idempotent, keeps a `.analysis.orig`, `--revert` undoes it. |
 | `extract_champion.py` | Writes the champion node's `solver.py` out of a run's folded event log, for the final test scoring. |
 | `setup_algotune.sh` | Applies every deviation from upstream a published number depends on. Idempotent; run on each machine and after any `git pull` in the checkout. |
 | `campaign.sh` | The campaign driver. `ARM=A` / `ARM=B`, one arm per invocation, tasks in parallel lanes sized to the machine. |
@@ -91,20 +92,30 @@ sed -i 's/for module_name, module in sys.modules.items():/for module_name, modul
     AlgoTuner/utils/isolated_benchmark.py
 ```
 
-### The two patches this arm REQUIRES
+### The three patches this arm REQUIRES
 
-Neither is optional, and skipping the second is silent:
+None is optional, and skipping the second or the third is silent:
 
 ```bash
 python benchmarks/algotune/patch_eval_subset.py    --algotune-root /path/to/AlgoTune
 python benchmarks/algotune/patch_baseline_cache.py --algotune-root /path/to/AlgoTune
+python benchmarks/algotune/patch_invalid_solution_analysis.py --algotune-root /path/to/AlgoTune
 ```
 
 `patch_eval_subset.py` is what makes `--subset train` mean anything. `evaluate_results.py` hardcodes
 `subset="test"` at three sites; unpatched, it ignores `ALGOTUNE_EVAL_SUBSET` and scores **every
 LoopLab node on the test split** while `looplab_eval.py` still stamps `"subset": "train"` into its
-output — so the train/test leak is present *and* the recorded provenance says it was closed. Both
-scripts are idempotent, keep a `.orig`, and support `--revert`.
+output — so the train/test leak is present *and* the recorded provenance says it was closed.
+
+`patch_invalid_solution_analysis.py` is what makes a `0.0` say WHICH zero it is. AlgoTune builds the
+`is_solution` code context for up to three rejected instances and hands it to AlgoTuner's own agent
+(`message_writer.py:726-750`); `evaluate_code_on_dataset` attaches that list only under
+`if baseline_manager and …` — an argument that chooses where the *reference timings* come from and
+that `evaluate_results.py` does not pass — and `update_single_result` writes a summary whose entire
+payload is `{"final_speedup": "<str>"}`. Unpatched, the bridge's only channel is the evaluator's
+stderr, so arm B's proposer learns 94/100 and nothing about which check failed. All three scripts
+are idempotent, keep a backup, and support `--revert`; this one backs up to `.analysis.orig` rather
+than `.orig` precisely so reverting it cannot undo `patch_eval_subset.py` on the same file.
 
 ## Running an arm
 
