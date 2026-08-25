@@ -627,7 +627,7 @@ def _bounded_card_cross_run_enrichment(value) -> dict | None:
 
 
 def _proposal_card_concept_source(
-    kind: Literal["card_added", "card_enriched"], *, present: bool,
+    kind: Literal["card_added", "card_enriched", "hypothesis_added"], *, present: bool,
     overflow: bool = False, invalid: bool = False,
 ) -> CardConceptSource:
     reasons: set[ConceptMaterializationReason] = set()
@@ -1558,10 +1558,30 @@ def _seed_cards_from_receipts(
                     _record_action_owner(cid, "card_added", complete=action_complete)
             if cid in cards:
                 continue
+            # THE QUESTION'S OWN CONCEPTS, on the path where `snapshot` is empty by construction.
+            # `_card_added_snapshot` runs only for a NATIVE row, so a question registered through
+            # `hypothesis_added` reached this constructor with no membership at all — measured on
+            # `runs/e5small-dr-unified-v5`, all five questions carried `concept_tags=[]` while the
+            # run's one experiment carried four, leaving the concept hierarchy and the question
+            # board as disjoint taxonomies over one run.
+            #
+            # The receipt is `hypothesis_added` and deliberately not `card_added`: the tags ARE
+            # authored, but by a memo rather than by a card mint, and there is no ownership receipt
+            # or action digest behind them. Absent tags leave BOTH the list and the source alone, so
+            # every log on disk folds byte-identically and "nobody said" stays distinguishable from
+            # "said none".
+            question_concepts = d.get("concepts") if not native_row else None
+            question_source = (
+                {"concept_tags": list(question_concepts),
+                 "concept_source": _proposal_card_concept_source(
+                     "hypothesis_added", present=True)}
+                if isinstance(question_concepts, list) and question_concepts else {}
+            )
             cards[cid] = Card(
                 id=cid, statement=stmt, seed_statement=stmt,
                 source=str(d.get("source") or "human"),   # mirror _derive_hypotheses' default
                 rationale=str(d.get("rationale", ""))[:400], created_at_node=at_node,
+                **question_source,
                 **snapshot,
             )
             card_origins[cid] = "card_added_unbound" if native_row else "hypothesis_shadow"

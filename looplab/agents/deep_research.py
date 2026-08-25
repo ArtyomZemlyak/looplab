@@ -72,7 +72,28 @@ class _MemoOut(BaseModel):
     # the text and asserts each one exists here, so the two cannot move apart again.
     open_questions: list[str] = Field(default_factory=list)
     next_experiments: list[str] = Field(default_factory=list)
+    # WHAT EACH QUESTION IS ABOUT, as concept ids, positionally aligned with `open_questions`.
+    # A list-of-lists rather than objects because the emit schema is what a provider renders into a
+    # tool signature, and a nested object per question costs tokens on every memo for no gain — the
+    # alignment rule is one sentence in the prompt and is checked, not trusted, at the append site.
+    #
+    # This is the join that makes a question findable: without it the concept hierarchy and the
+    # question board are disjoint taxonomies over one run. Measured on `runs/e5small-dr-unified-v5`:
+    # every one of five questions carried no concepts while the run's one experiment carried four.
+    question_concepts: list[list[str]] = Field(default_factory=list)
 
+
+# Backticked names in `_SYSTEM` that are NOT memo fields. The guard in
+# `tests/test_memo_question_experiment_split.py` demands a schema slot for every backticked name in
+# the emit instruction, because a field the prompt asks for and the schema lacks ships INERT — that
+# happened, and cost a whole run's memos. Tool CALLS and example ids look identical to a parser, so
+# they are declared here rather than pattern-matched: adding an example to the prompt then fails the
+# guard until it is listed, which is the cost of the guard staying able to fire on a real field.
+_PROMPT_NON_FIELD_NAMES = frozenset({
+    "emit", "update_plan",                       # tools the prompt tells the model to call
+    "read_concept_tree", "find_concept_slugs",   # …and the two it must use before inventing an id
+    "train", "training",                         # the near-duplicate EXAMPLE, not a field
+})
 
 _SYSTEM = (
     "You are a senior ML researcher doing a DEEP-RESEARCH review of an ongoing automated experiment "
@@ -107,6 +128,12 @@ _SYSTEM = (
     "DCL+R-Drop recipe'). If a line names an exact value or an exact edit, it belongs in "
     "`next_experiments`, not in `open_questions`. Also fill `recommended_directions` with the union "
     "of both, unchanged, so existing readers keep working. "
+    # The join. Without it a question is findable by nobody and belongs to no part of the tree.
+    "For EVERY entry of `open_questions`, put 2-3 concept ids in `question_concepts` at the SAME "
+    "position — `question_concepts[0]` describes `open_questions[0]`. Use ids that ALREADY EXIST: "
+    "call `read_concept_tree` or `find_concept_slugs` first and reuse what is there, because a "
+    "near-duplicate id (`train` beside `training`) splits the same knowledge in two. Propose a new "
+    "`axis/slug` only when nothing in the tree fits. "
     "Put your detailed deliberation in `reasoning`. Be "
     "concrete and grounded in the actual results, not generic advice."
 )
@@ -520,6 +547,7 @@ class DeepResearcher:
         # prompt and every log on disk behave exactly as before.
         memo.open_questions = clean["open_questions"]
         memo.next_experiments = clean["next_experiments"]
+        memo.question_concepts = clean["question_concepts"]
         memo.sources = clean["sources"]
         return memo
 

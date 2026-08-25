@@ -11,6 +11,11 @@ import itertools
 import json
 import math
 
+# The SAME bound the fold applies to every other concept membership. It bounds SHAPE and
+# COUNT; an invalid id is filtered downstream by the Card model, exactly as it is for a
+# node's own membership — one rule, single-sourced. `valid_concept_id` is deliberately not
+# used: it accepts `NOT A SLUG` and a bare single segment, i.e. it is a different question.
+from looplab.core.concepts import bounded_raw_concept_values
 from looplab.core.jsonutil import canonical_json_digest, valid_digest_ref
 from looplab.core.redact import (bounded_redacted_tree, is_secret_key_name,
                                  redact_persisted_text)
@@ -756,6 +761,7 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
         "recommended_directions": [],
         "open_questions": [],
         "next_experiments": [],
+        "question_concepts": [],
         "proposed_ideas": [],
         "at_node": (src.get("at_node") if type(src.get("at_node")) is int
                     and 0 <= src.get("at_node") <= (1 << 63) - 1 else None),
@@ -837,6 +843,14 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
     # reader putting them side by side must not find one clipped where the other was not. See
     # `ResearchMemo.open_questions` for why the split exists — the old field's NAME contradicted its
     # own description, so a concrete experiment arrived through a channel that carries no action.
+    # Concept ids per question, positionally aligned with `open_questions`. Each id goes through
+    # the SAME bound every other concept membership does, so a memo cannot introduce a slug shape a
+    # node could not; a row that survives with nothing usable becomes an empty list rather than
+    # vanishing, because dropping it would silently shift every later question's alignment.
+    out["question_concepts"] = [
+        list(bounded_raw_concept_values(list(_items(row, 8)))[0])
+        for row in _items(src.get("question_concepts"), 16)
+    ]
     for _field in ("recommended_directions", "open_questions", "next_experiments"):
         out[_field] = [
             _text(v, 1_200, budget, single_line=True)

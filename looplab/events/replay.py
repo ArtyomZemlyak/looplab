@@ -2929,6 +2929,23 @@ def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
         at_node = d.get("at_node")
         if type(at_node) is int and 0 <= at_node <= (1 << 31) - 1:
             receipt["at_node"] = at_node
+        # THE CONCEPTS THE QUESTION IS ABOUT, and until now this handler dropped them on the floor.
+        # A question registered here becomes a board row that owns no action, and it carried NO
+        # concept membership at all — measured on `runs/e5small-dr-unified-v5`, all five questions
+        # had `concept_tags=[]` while the run's one experiment carried four. So the concept
+        # hierarchy and the question board were disjoint taxonomies over the same run: an operator
+        # grouping by concept saw the experiments and none of the questions they answer.
+        #
+        # Bounded by the SAME rule every other concept membership goes through
+        # (`bounded_raw_concept_values`), so a question cannot introduce a slug shape a node could
+        # not. Absent/malformed leaves the receipt without the key entirely, which is what keeps
+        # every log on disk folding byte-identically — an empty list would be an authored claim of
+        # "no concepts", and that is a different statement from "this writer said nothing".
+        raw_concepts = d.get("concepts", d.get("concept_tags"))
+        if isinstance(raw_concepts, list):
+            values, _overflow, _invalid = bounded_raw_concept_values(raw_concepts)
+            if values:
+                receipt["concepts"] = values
         st.hypotheses_added.append(receipt)
         # Re-adding an abandoned statement reopens it (last write wins).
         try:

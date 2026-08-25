@@ -702,7 +702,13 @@ class CardConceptSource(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["card_added", "card_enriched", "node"]
+    # `hypothesis_added` joined on 2026-08-25 and is NOT a synonym for `card_added`. A QUESTION
+    # registered by a memo (or by an operator's "+ Add") carries concepts its writer authored, and
+    # that writer is not a card mint: there is no ownership receipt, no action digest, and the row
+    # owns no executable action. Filing those tags under `card_added` would mint a receipt nobody
+    # issued — the exact provenance lie this class exists to prevent — and leaving `concept_source`
+    # None would make an authored membership indistinguishable from one nobody claimed.
+    kind: Literal["card_added", "card_enriched", "node", "hypothesis_added"]
     node_id: Optional[int] = Field(default=None, ge=0)
     node_generation: Optional[int] = Field(default=None, ge=0)
     provenance: Optional[Literal[

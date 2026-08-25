@@ -92,8 +92,12 @@ def test_every_field_the_prompt_NAMES_exists_in_the_emit_schema():
     schema = set(_MemoOut.model_json_schema()["properties"])
     # The prompt's own instruction sentence: "call `emit` exactly once with: a `summary` …".
     asked = set(re.findall(r"`([a-z_]+)`", _SYSTEM.split("call `emit` exactly once")[1]))
-    tools = {"update_plan", "emit"}          # named as CALLS, not as memo fields
-    missing = sorted(asked - tools - schema)
+    # DECLARED, not pattern-matched. A tool call and an example id are indistinguishable from a
+    # field to any parser, and a heuristic that guessed would eventually guess a real field away.
+    # `_PROMPT_NON_FIELD_NAMES` makes the exclusion explicit, so adding an example to the prompt
+    # fails this guard until it is listed — a small, visible cost that keeps the guard able to fire.
+    from looplab.agents.deep_research import _PROMPT_NON_FIELD_NAMES
+    missing = sorted(asked - _PROMPT_NON_FIELD_NAMES - schema)
     assert not missing, (
         f"the prompt asks for {missing} and the emit schema has no slot for them — the model "
         f"cannot answer and the field ships inert")
@@ -109,3 +113,61 @@ def test_the_emit_schema_and_the_durable_model_agree_on_the_split():
     for field in ("open_questions", "next_experiments", "recommended_directions"):
         assert field in emit, f"{field} is not fillable by the model"
         assert field in stored, f"{field} is not storable"
+
+
+def _registered_with_concepts(memo_d: dict, admitted: list[str]) -> list[dict]:
+    """The exact alignment `_record_deep_research` evaluates before appending each question."""
+    raw_questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()]
+    per_question = memo_d.get("question_concepts") or []
+    by_statement = {}
+    for index, statement in enumerate(raw_questions):
+        row = per_question[index] if index < len(per_question) else None
+        if isinstance(row, list) and row:
+            by_statement[str(statement).strip()] = row
+    return [{"statement": d, **({"concepts": by_statement[d]} if d in by_statement else {})}
+            for d in admitted]
+
+
+def test_a_question_carries_the_concepts_at_ITS_OWN_position():
+    memo = {"open_questions": ["does distillation help", "does a momentum queue help"],
+            "question_concepts": [["training/distillation"], ["training/negative-mining"]]}
+    rows = _registered_with_concepts(memo, ["does a momentum queue help"])
+    assert rows[0]["concepts"] == ["training/negative-mining"], (
+        "alignment is POSITIONAL — resolving by order of ADMISSION would hand this question the "
+        "first row's concepts, which is a confident falsehood about what it is about")
+
+
+def test_a_short_or_missing_concepts_list_leaves_a_question_untagged():
+    """Checked, not trusted. A memo that filled two questions and one concept row must not make
+    the second question borrow the first's."""
+    memo = {"open_questions": ["q1", "q2"], "question_concepts": [["loss/contrastive"]]}
+    rows = _registered_with_concepts(memo, ["q1", "q2"])
+    assert rows[0]["concepts"] == ["loss/contrastive"]
+    assert "concepts" not in rows[1]
+
+
+def test_a_memo_that_drew_no_distinction_gets_no_concepts_at_all():
+    """`questions` falls back to `recommended_directions` for an old memo, and THOSE positions mean
+    nothing — resolving against them would attach concepts by coincidence of order."""
+    memo = {"recommended_directions": ["a", "b"], "question_concepts": [["loss/contrastive"]]}
+    rows = _registered_with_concepts(memo, ["a", "b"])
+    assert all("concepts" not in r for r in rows)
+
+
+def test_an_empty_concept_row_is_not_a_membership():
+    memo = {"open_questions": ["q1"], "question_concepts": [[]]}
+    assert "concepts" not in _registered_with_concepts(memo, ["q1"])[0]
+
+
+def test_the_sanitizer_keeps_alignment_and_applies_the_fold_s_own_bound():
+    out = sanitize_research_memo_payload({
+        "summary": "s", "open_questions": ["q1", "q2"],
+        "question_concepts": [["loss/contrastive", "x/y"], ["training/distillation"]]})
+    assert len(out["question_concepts"]) == len(out["open_questions"])
+    assert out["question_concepts"][1] == ["training/distillation"]
+
+
+def test_question_concepts_is_fillable_by_the_model():
+    """The lesson from the split shipping inert: a field the prompt names must have a schema slot."""
+    from looplab.agents.deep_research import _MemoOut
+    assert "question_concepts" in _MemoOut.model_json_schema()["properties"]

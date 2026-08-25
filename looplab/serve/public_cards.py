@@ -145,7 +145,8 @@ _CONCEPT_SOURCE_KEYS = {
 }
 # this is the CARD's exact node/proposal owner receipt.  It is intentionally separate from
 # `_CONCEPT_SOURCE_KEYS`, which describes cross-run capsule-store completeness inside cross_run_prior.
-_CARD_CONCEPT_SOURCE_KINDS = frozenset({"card_added", "card_enriched", "node"})
+_CARD_CONCEPT_SOURCE_KINDS = frozenset(
+    {"card_added", "card_enriched", "node", "hypothesis_added"})
 _CARD_CONCEPT_SOURCE_KEYS = frozenset({
     "kind", "node_id", "node_generation", "provenance", "membership_present",
     "complete", "receipt_valid", "materialization_receipt",
