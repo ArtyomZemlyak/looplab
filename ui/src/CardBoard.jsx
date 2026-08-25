@@ -28,7 +28,7 @@ import {
 } from './cardBoardModel.js'
 import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
 import { CARD_KIND_DIRECTION, UNFILED_GROUP_ID, cardIsDirection, cardLineageViews,
-  cardProposalDrift, directionGroups, rollupChips } from './cardLineageModel.js'
+  cardProposalDrift, directionGroups, rollupChips, splitBoardByKind } from './cardLineageModel.js'
 import ResearchView from './ResearchView.jsx'
 import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
 import { nodeTraceSubject } from './traceSurfaceModel.js'
@@ -1219,6 +1219,17 @@ function _CardKanban({
   // draw from, so a filter or a control applied on one board reaches this one too rather than the
   // view growing its own quietly-different population.
   const researchBoard = <ResearchView cards={visibleCards} state={state} renderCard={renderCard} />
+  // Said where the lanes are, not where the questions went: an operator who sees fewer rows than the
+  // board's own total needs the reconciliation on the surface that shrank.
+  const questionNotice = laneQuestions.length > 0 && grouping === 'lanes'
+    ? <div className="muted card-question-notice" role="status">
+        {laneQuestions.length} research question{laneQuestions.length === 1 ? '' : 's'} not shown
+        here — a question owns no experiment, so it has no lane.{' '}
+        <button type="button" className="btn sm ghost" onClick={() => setGrouping('research')}>
+          open the Research ladder
+        </button>
+      </div>
+    : null
   const groupingBar = <div className="toolbar card-grouping" role="group"
     aria-label="Group the board by">
     {[['lanes', 'Lanes', 'lifecycle status — what the machine is doing now'],
@@ -1228,9 +1239,13 @@ function _CardKanban({
       className={'btn sm' + (grouping === key ? ' primary' : '')}
       aria-pressed={grouping === key} onClick={() => setGrouping(key)}>{label}</button>)}
   </div>
+  // The lanes are a LIFECYCLE view and a question has no lifecycle of its own — see
+  // `splitBoardByKind`. The questions are not dropped: the count and the way to them ride above the
+  // lanes, because "five questions await an experiment" and "the board is empty" are different runs.
+  const { work: laneCards, questions: laneQuestions } = splitBoardByKind(visibleCards)
   const board = <div className="card-board" role="region" aria-label="Card lifecycle kanban">
     {lanes.map(([key, label, hint]) => {
-      const rows = visibleCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
+      const rows = laneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
       const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
       const laneId = `card-lane-${encodeURIComponent(key)}`
       return <section key={key} className={'card-col' + tone} aria-labelledby={laneId}>
@@ -1255,6 +1270,7 @@ function _CardKanban({
           <span className="muted">{sub}</span>
           <_CardProjectionNotice projection={projection} cards={visibleCards} />
           {groupingBar}
+          {questionNotice}
         </div>
         {addBar}
         {grouping === 'research' ? researchBoard : (grouping === 'directions' ? directionsBoard : board)}
@@ -1302,6 +1318,7 @@ function _CardKanban({
   return <Panel title="Cards" sub={sub} onClose={onClose} size="board">
     <_CardProjectionNotice projection={projection} cards={visibleCards} />
     {groupingBar}
+    {questionNotice}
     {addBar}
     {grouping === 'research' ? researchBoard : (grouping === 'directions' ? directionsBoard : board)}
   </Panel>

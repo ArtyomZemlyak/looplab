@@ -210,3 +210,27 @@ export function cardProposalDrift(card) {
   if (!params.length) return null          // agreement renders nothing; the loud case stays loud
   return { compared: shared.length, moved: params.length, params }
 }
+
+// THE KANBAN'S POPULATION, split from the board's. The lanes answer "what is the machine doing now"
+// — a lifecycle question — and a QUESTION has no lifecycle of its own: it owns no action, so it can
+// never be building, running or evaluated on its own account, and every selection blocker drawn on
+// it is about work it was never going to do (the R7 finding, one view over).
+//
+// Measured before this shipped, on `runs/e5small-dr-unified-v5`: the opening board was 5 directions
+// and 1 experiment, so the Kanban read as SIX work items with one buildable — five of the six rows
+// describing something the engine would never dispatch.
+//
+// IT IS A SPLIT, NOT A DROP, and the difference is the whole safety of it: the questions come back
+// as the second half of the pair so the board can SAY how many it moved and where they went. A
+// filter that silently shrank the lanes would turn "five questions are waiting for an experiment"
+// into "the board is empty", which is the more expensive misreading of the two.
+export function splitBoardByKind(cards) {
+  const rows = Array.isArray(cards) ? cards : []
+  const work = []
+  const questions = []
+  for (const card of rows) {
+    if (cardIsDirection(card)) questions.push(card)
+    else work.push(card)
+  }
+  return { work, questions }
+}

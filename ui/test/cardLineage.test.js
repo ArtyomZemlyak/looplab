@@ -11,7 +11,7 @@ import { test } from 'node:test'
 import {
   CARD_KIND_DIRECTION, CARD_KIND_EXPERIMENT, UNFILED_GROUP_ID,
   cardIsDirection, cardKind, cardLineageIndex, cardLineageView, cardParentId,
-  cardLineageViews, cardProposalDrift, directionGroups, rollupChips,
+  cardLineageViews, cardProposalDrift, directionGroups, rollupChips, splitBoardByKind,
 } from '../src/cardLineageModel.js'
 
 const direction = (id, extra = {}) => ({ id, card_kind: 'direction', ...extra })
@@ -195,4 +195,30 @@ test('a direction row is not judged by work-item gates', () => {
     'and the row says what IS true of a direction instead of leaving it blank')
   assert.ok(source.includes('no experiment filed under it yet'),
     'an unanswered direction states what it needs, which is the actionable half')
+})
+
+// The Kanban's population, split from the board's (P2). Measured on `runs/e5small-dr-unified-v5`:
+// the opening board was 5 directions and 1 experiment, so the lanes read as SIX work items with one
+// buildable — five rows describing work the engine would never dispatch.
+test('the lanes take work items only, and the questions come back rather than vanishing', () => {
+  const rows = [direction('card-0'), experiment('card-1'), direction('card-2')]
+  const { work, questions } = splitBoardByKind(rows)
+  assert.deepEqual(work.map(c => c.id), ['card-1'])
+  assert.deepEqual(questions.map(c => c.id), ['card-0', 'card-2'])
+  // A SPLIT and not a drop: nothing may be lost between the two halves, or the board's own total
+  // stops reconciling with what it draws.
+  assert.equal(work.length + questions.length, rows.length)
+})
+
+test('a wire that predates card_kind puts every row in the LANES, unchanged', () => {
+  // `cardKind` reads an experiment out of an absent/None provenance on purpose (mislabelling work as
+  // a question HIDES it), so an old log's board renders exactly as it always did.
+  const legacy = [{ id: 'a' }, { id: 'b', selection_provenance: { action_source: 'propose' } }]
+  const { work, questions } = splitBoardByKind(legacy)
+  assert.deepEqual(work.map(c => c.id), ['a', 'b'])
+  assert.deepEqual(questions, [])
+})
+
+test('splitBoardByKind is total over junk', () => {
+  assert.deepEqual(splitBoardByKind(null), { work: [], questions: [] })
 })
