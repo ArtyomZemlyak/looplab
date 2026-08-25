@@ -541,8 +541,27 @@ class ResearchCadenceMixin:
         """
         try:
             board = fold(self.store.read_all())
+            # A DIRECTION THAT HAS BEEN TAKEN UP NO LONGER OCCUPIES A SLOT, and without this clause
+            # the cap is permanent. `open_research_beliefs()` means "open and carrying no EVIDENCE",
+            # and a direction never carries any — since the `parent_card_id` edge shipped, the
+            # experiments answering it are CHILD cards with evidence of their own, so the direction
+            # stays evidence-free for the whole run by design.
+            #
+            # Measured live on `runs/e5small-dr-unified-v5`: FOUR research memos completed and only
+            # the FIRST one's directions were ever registered — five of them, seq 35-39. Memos 2, 3
+            # and 4 produced concrete directions (a `dcl_threshold` sweep among them, visible in
+            # their `hint` rows) and contributed ZERO to the board, because five childless beliefs
+            # met a cap of five and nothing ever frees it. The run paid for three think-hard reviews
+            # and could not act on any of them.
+            #
+            # Counting only CHILDLESS directions is the whole fix: the cap still bounds "unanswered
+            # questions on the board", which is the resource it was written to protect, and a
+            # question somebody is already working on stops competing for that room. The proposal
+            # FEED is untouched — a direction with one child and twelve experiments left to run must
+            # still be visible — so this narrows what the cap counts, never what the model sees.
+            taken_up = {c.parent_card_id for c in board.cards.values() if c.parent_card_id}
             open_statements = [c.seed_statement for c in board.open_research_beliefs()
-                               if is_pure_belief(c)]
+                               if is_pure_belief(c) and c.id not in taken_up]
         except Exception:  # noqa: BLE001 — see the docstring: degrade to the pre-bound behaviour
             open_statements = []
         admitted = admit_research_beliefs(open_statements, directions)
