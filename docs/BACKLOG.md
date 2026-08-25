@@ -4269,6 +4269,75 @@ Same shape both times: the mechanism is intact end to end, the bound cuts the TA
 is at the tail. A bound that removes the answer is worse than no answer, because the caller cannot
 tell a short record from a truncated one.
 
+## Three cadences that looked like defects — measured 2026-08-25, and two of my own claims were wrong
+
+The post-v5 fix list carried three "unexplained cadence" items with the standing rule attached: they
+are MEASUREMENTS, and no gate may be touched before the number exists. All three were replayed over
+every event log and every span file on the box. One is a real and larger defect than described, one
+was misdescribed by me, and one is not a defect at all.
+
+### 1. The first propose phase is SYSTEMICALLY the longest, with both GPUs idle
+
+Not the v5 one-off it was filed as. Per-run `propose` operation spans, minutes:
+
+| run | n | first | median | max |
+|---|---|---|---|---|
+| `e5small-dr-unified-v2` | 18 | **19.9** | 8.8 | 19.9 |
+| `e5small-dr-unified-v3` | 12 | **138.0** | 21.4 | 138.0 |
+| `e5small-dr-unified-v4` | 137 | 8.8 | 5.2 | 31.7 |
+| `rubertlite-dr-unified-v6` | 10 | **10.9** | 5.6 | 10.9 |
+| `rubertlite-dr-unified-v7` | 13 | 9.9 | 6.7 | 12.5 |
+| `rubertlite-dr-unified-v8` | 25 | **21.7** | 6.3 | 21.7 |
+| `rubertlite-dr-unified-v9` | 13 | 6.7 | 8.4 | 23.2 |
+
+**In four of the seven the FIRST propose IS the run's maximum**, at 1.6-6.4x that run's median, and
+v9 is the only run whose first is below its own median. v5's 34 minutes fits the shape exactly.
+
+What makes it expensive is WHEN it happens: at `n == 0` no node exists, so every GPU on the box is
+idle for the whole phase — this is not one long turn among many, it is dead time at the front of
+every run. v3 spent **2 hours 18 minutes** there and then died with three nodes and no metric.
+
+OPEN[first-propose-runs-with-every-gpu-idle] the opening propose is the longest phase of most runs and the only one that cannot overlap an evaluation. proof:`present:def _ground_run_start@looplab/engine/research_cadence.py`
+
+  NOT a cadence fix and not a prompt fix. The lever is overlap: `_ground_run_start` and the first
+  propose both run before any node exists, serially, on the loop thread. Measure the split between
+  them before choosing — the numbers above are the SUM.
+
+### 2. Trust scans — the question is not "why not every node", it is "why only one run"
+
+I filed this as "trust scans ran 4 times for 10 nodes (unexplained)". That is wrong, and the real
+shape is more interesting: over the six unified runs plus v2/v3, `trust_scan` rows exist in
+**exactly one run** — `e5small-dr-unified-v4`, 11 rows against 15 nodes. v2, v3, v6, v7, v8 and v9
+have **ZERO**. A per-node ratio was never the question.
+
+DECLINED[trust-scan-ratio-is-not-the-defect] the 4-of-10 ratio I filed does not exist in any log. measured: 11 scans in 1 of 8 runs, 0 in the other 7 — docs/BACKLOG.md
+
+  Superseded by, not closed into, the real question: what turned the scanner on for v4 alone. Until
+  that is answered nothing about a ratio is worth arguing.
+
+### 3. The distillation cadence is honest; the PAIR ledger leaks on long runs only
+
+Filed as "lessons distillation ran twice in three days, the first with count: 0 (unexplained)". Both
+halves dissolve on measurement. The cadence is a clean every-4-nodes rule and the `count: 0` is
+simply the first firing having nothing comparable yet:
+
+* `e5small-dr-unified-v4` — firings at nodes 4, 8, 12, 15, sizes 0/3/3/3, **no pair repeated**;
+* `rubertlite-dr-unified-v8` — two firings AT NODE 16, 75 seconds apart, which looked like the
+  duplicate I suspected and is not: their pairs are `[(6,1),(15,3),(10,3)]` and
+  `[(13,3),(11,3),(14,3)]`, disjoint. The `at_node` value is not the gate; the PAIR LEDGER is, and
+  it did its job.
+
+What the sweep did find is a real leak on the one long run. `rubertlite-dense-retrieval` (81 nodes,
+22 firings) re-distilled **three pairs** — `(23,14)`, `(14,7)`, `(24,14)` — each paid for twice, and
+it also has a double firing at `at_node=24`.
+
+OPEN[distilled-pair-ledger-leaks-on-long-runs] three (child, parent) pairs were distilled and paid for twice on the only run long enough to show it. proof:`present:for p in (d.get("pairs") or [])@looplab/engine/lessons_reconcile.py`
+
+  Three pairs of ~60 on one run is small, and it is the SHAPE that matters: the ledger is the thing
+  standing between a cadence and unbounded re-spend, and it is the only run with enough firings to
+  test it at all. Find which of the 22 firings admitted a pair an earlier one had spent before
+  changing anything.
+
 ## An EMPTY-authority card dies the moment the board stops being empty, and its prefetched node is killed before it ever runs
 
 Measured on `runs/e5small-dr-unified-v4`, 2026-08-24. `card-2` — "complete a teacher/self-mined
@@ -4342,7 +4411,13 @@ working and is a change to WHEN a session dispatches speculation, i.e. wider tha
 built nodes". That last one was not run to ground and is the reason this is a measurement rather
 than a merge.
 
-OPEN[empty-authority-card-dies-when-the-board-fills] an action with no incumbent anchors nothing, yet the empty branch still requires the board to be empty NOW — 9 of the 10 nodes ever killed `superseded` died on it. proof:`present:if scored_against_generation is None and board_empty@looplab/core/cards.py`
+**SHIPPED 2026-08-25 in `31918a2c`.** The clause is gone, the anchored branch is untouched, three
+test expectations flipped and the calibration allow-list gained `card_auto_dropped` — the only
+remaining real way a pre-commit head closes stale once the board can no longer stale a card. The
+marker that stood here was deleted by its own guard going red, which is exactly what that guard
+is for: a red `test_open_item_index` means the item shipped, not that the product broke. Leaving
+it would have reproduced the five-day gap this index exists to close — in the same session that
+restored the entry for being invisible.
 
   The fix is two words in `_card_action_freshness` and a decision that does not belong to it: either
   the calibration receipt protocol admits a re-elected empty-authority card, or the empty branch
