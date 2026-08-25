@@ -343,6 +343,32 @@ Who is told, and what else they are told:
 | Researcher (both prompts) | the `TIME BUDGET` cue, stamped per proposal | whether its own `eval_timeout` is honoured at all (`agent_control.timeout`) and how far it may raise the budget (`max_eval_timeout` clamps it) |
 | Developer (repo) | the stages + implement prompts (and, on a repair, the implement prompt is the only one it gets) | that a stage `timeout` longer than the budget is not more budget — nothing clamps it at the wall, so it runs, spending GPU-hours the run was not planned around, and `declare_stages` therefore refuses to declare one |
 
+#### The DEVICE COUNT has the same shape, and only the Researcher knew it
+
+**Fixed 2026-08-25.** `engine/proposal_cues.py::_stamp_gpu_budget_hint` puts the GPU cue on the
+Researcher, which DECLARES the footprint; the Developer, which writes
+`accelerate launch --num_processes N` into a stage command, was told nothing about device count —
+grep the Developer prompts before that date and there is no mention of gpus, devices or CUDA at all.
+`engine/resources.py::_acquire_gpus` fences `CUDA_VISIBLE_DEVICES` to exactly the granted devices, so
+a launcher that starts more processes than that dies on the first one outside the fence.
+
+Measured on `runs/e5small-dr-unified-v6` node 0: the node declared `footprint {"gpus": 1}`, its own
+`train` stage was authored as `accelerate launch --num_processes 2 --multi_gpu`, and rank 1 died with
+`torch.AcceleratorError: CUDA error: invalid device ordinal`. Cost: `mine` 356.5 s + `train` 171.6 s,
+an INERT repair that carried the right diagnosis and changed nothing, the identical `train` failure
+again at 172.0 s — **62.7 minutes** from the first failure to a working manifest. Joined across every
+run on the box, six of seven multi-process stages DO match their node's footprint, so this is a rare
+miss rather than a systemic mismatch.
+
+`adapters/repo_developer.py::_gpu_footprint_note` states the count in both Developer prompts, beside
+`_time_budget_note` and for the same reason. It has **no `Settings` flag**, following its twin rather
+than `gpu_footprint_cue`: a note spliced into the Developer prompt makes no provider call, spends
+nothing, kills nothing and moves no selection. It is a rung and not a gate — it only ADDS a fact the
+role could not otherwise know, and says nothing at all when the footprint states no integer count,
+because a role told "some GPUs" is worse off than one told nothing. A static refusal
+(`procs > footprint.gpus`) is a reasonable second rung and is deliberately not shipped with it:
+refusing before informing tells the Developer "no" without telling it what to write.
+
 #### The budget is PER STAGE, and both prompts used to say otherwise
 
 **Fixed 2026-08-15.** All three role-facing statements announced the number as an *end-to-end pool* —

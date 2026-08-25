@@ -943,6 +943,59 @@ class LLMRepoDeveloper:
         except Exception:  # noqa: BLE001 — a bare/unit-test dev with no task states no budget
             return None
 
+    def _gpu_footprint_note(self, idea) -> str:
+        """How many GPUs THIS node will actually get, for the role that writes the launcher.
+
+        `_time_budget_note` one axis over, and the same defect: the RESEARCHER declares the footprint
+        and is told the budget (`engine/proposal_cues.py::_stamp_gpu_budget_hint` sets
+        `_gpu_budget_hint` on it, and `_gpu_footprint_cue` rides its prompts), while THIS role — the
+        one that writes `accelerate launch --num_processes N` into a stage command — was told
+        nothing about device count at all. Grep the Developer prompts before this landed: not one
+        mention of gpus, devices or CUDA.
+
+        MEASURED on `runs/e5small-dr-unified-v6` node 0, the run this note was written from. The
+        node declared `footprint {"gpus": 1}`; its own train stage was authored as
+        `accelerate launch --num_processes 2 --multi_gpu -m vectorsearch.train`;
+        `engine/resources.py::_acquire_gpus` fenced `CUDA_VISIBLE_DEVICES` to the one granted
+        device, and rank 1 died with `torch.AcceleratorError: CUDA error: invalid device ordinal`.
+        Cost: `mine` 356.5 s + `train` 171.6 s + a second identical `train` 172.0 s after an INERT
+        repair, and 62.7 minutes of wall clock from the first failure to a working manifest — to
+        discover a number that fits in one sentence.
+
+        SIX OF SEVEN nodes on this box get it right, so this is a rare miss and the note is a rung,
+        not a gate. It only ever ADDS a fact the role could not otherwise know; a static refusal
+        (`procs > footprint.gpus`) is a reasonable SECOND rung and is deliberately not here, because
+        refusing before informing tells the Developer "no" without telling it what to write — the
+        `runtime/deps.py` rule, where text may NOMINATE and only a probe DECIDES.
+
+        UNCONDITIONAL, with no `Settings` flag, following `_time_budget_note` rather than
+        `gpu_footprint_cue`: a note spliced into the DEVELOPER prompt makes no provider call, spends
+        nothing, kills nothing and moves no selection, so it has nothing a legacy-snapshot default
+        would need to hold back. Empty when the footprint states no integer count — a role told
+        "some GPUs" is worse off than one told nothing, and this must never guess.
+        """
+        gpus = None
+        try:
+            footprint = getattr(idea, "footprint", None)
+            if isinstance(footprint, dict):
+                raw = footprint.get("gpus")
+                # `isinstance(True, int)` is True, so a bool has to be refused explicitly — a
+                # footprint of `{"gpus": true}` would otherwise announce "1 GPU" about a
+                # declaration that states no count at all.
+                if type(raw) is int and raw > 0:
+                    gpus = raw
+        except Exception:  # noqa: BLE001 — a bare/unit-test dev carrying no idea states no footprint
+            return ""
+        if gpus is None:
+            return ""
+        return (f"\n\nTHIS NODE GETS EXACTLY {gpus} GPU{'' if gpus == 1 else 's'}. "
+                f"`CUDA_VISIBLE_DEVICES` is fenced to {'that device' if gpus == 1 else 'those devices'} "
+                "before your stages run, so a launcher that starts more processes than that dies on "
+                "the first one that asks for a device outside the fence "
+                "(`CUDA error: invalid device ordinal`), after the earlier stages have already been "
+                f"paid for. Size every `--num_processes` / `--nproc_per_node` / `--gpus` to {gpus}, "
+                "and put the per-device batch size where it fits that many.")
+
     def _time_budget_note(self) -> str:
         """The operator's per-eval WALL-CLOCK budget, for the role that actually spends it (docs/29 F1h).
 
@@ -1188,7 +1241,11 @@ class LLMRepoDeveloper:
             "`%params%`). Give training a generous timeout."
             # docs/29 F1h: spliced AFTER the generous-timeout ask, never instead of it — "generous"
             # without a ceiling is what produced a 48-hour `train` stage on a 6-hour budget.
-            + self._time_budget_note() + "\n\n"
+            + self._time_budget_note()
+            # The device count, at the SAME splice position and for the same reason one axis over:
+            # this is the phase that authors the launcher command, so it is the phase that has to
+            # know how many devices exist.
+            + self._gpu_footprint_note(idea) + "\n\n"
             "GIVE EVERY STAGE ITS `needs` — the workdir-relative files it READS and cannot run without: "
             "what an earlier stage produces, plus whatever the seeded workdir must already contain. The "
             "engine checks them BEFORE the stage starts, so a pipeline whose stages disagree about where "
@@ -1361,7 +1418,10 @@ class LLMRepoDeveloper:
                 # docs/29 F1h: the STAGES phase declares the leash, but the CODE written here is where the
                 # schedule and the batch size are actually chosen — and a repair session (which skips the
                 # stages phase entirely) reaches this path and nothing else.
-                + self._time_budget_note())
+                + self._time_budget_note()
+                # A repair session skips the stages phase entirely and reaches ONLY this path, which
+                # is exactly where v6's launcher bug had to be fixed — so the count rides here too.
+                + self._gpu_footprint_note(idea))
         if base:
             cap_each, cap_total, used = 8000, 24000, 0
             parts = []
