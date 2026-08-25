@@ -655,6 +655,12 @@ button { font: inherit; }
 /* A closed question is DIMMED and never removed: it is part of the chain that explains its
    neighbours, and the operator asked for the whole ladder to stay readable. Opacity alone would be
    colour-only signalling, so the row also carries its own `dropped`/`abandoned` chip. */
+/* The cards no question claims. A SECTION beside the ladder rather than a row inside it: they have
+   no position in a concept lattice, and seating them at depth 0 would put them among questions whose
+   position is measured. Between this and the ladder every card on the wire is drawn, which is what
+   makes retiring the Directions tab lossless. */
+.research-unfiled { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.research-unfiled-h { font-size: 12px; font-weight: 600; margin: 0 0 4px; }
 .research-closed { opacity: .62; }
 .research-closed .research-statement { text-decoration: line-through; }
 /* Closed on NOTHING narrower — the one closure the operator suspected the run of making. It keeps

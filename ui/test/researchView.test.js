@@ -124,3 +124,36 @@ test('a closed question is DIMMED in place, and a closure on nothing narrower sa
     'a sharper question below it is exactly what makes the discard supported')
   assert.ok(!narrowed.includes('nothing narrower'))
 })
+
+test('an experiment no question claims is DRAWN, in its own section, last', async () => {
+  // The property the Directions-tab retirement rests on: between the ladder and this section every
+  // card the wire carried is drawn. Its "Not filed under any direction" group was the only surface
+  // that ever had these, and the operator's first complaint about this board was two of them.
+  const { default: ResearchView } = await loadView()
+  const cards = [
+    { id: 'q1', card_kind: 'direction', statement: 'a question', concept_tags: ['a'] },
+    { id: 'e-kid', card_kind: 'experiment', parent_card_id: 'q1', statement: 'a claimed one' },
+    { id: 'e-orphan', card_kind: 'experiment', statement: 'an unclaimed one' },
+  ]
+  const markup = renderToStaticMarkup(React.createElement(ResearchView, {
+    cards, state: { nodes: {} }, renderCard: c => React.createElement('span', { key: c.id }, c.id),
+  }))
+  assert.ok(markup.includes('Not filed under any question'))
+  assert.ok(markup.includes('>e-orphan<'), 'the unclaimed experiment must appear')
+  assert.ok(markup.includes('>e-kid<'), 'and the claimed one still appears under its question')
+  // LAST: the section follows the ladder, so the chain reads before the leftovers.
+  assert.ok(markup.indexOf('research-unfiled') > markup.indexOf('research-lattice'))
+})
+
+test('the unfiled section is absent when nothing is unfiled', async () => {
+  // A permanently empty "unfiled" heading is a question the operator must answer before ignoring it.
+  const { default: ResearchView } = await loadView()
+  const cards = [
+    { id: 'q1', card_kind: 'direction', statement: 'a question', concept_tags: ['a'] },
+    { id: 'e-kid', card_kind: 'experiment', parent_card_id: 'q1', statement: 'claimed' },
+  ]
+  const markup = renderToStaticMarkup(React.createElement(ResearchView, {
+    cards, state: { nodes: {} }, renderCard: () => null,
+  }))
+  assert.ok(!markup.includes('Not filed under any question'))
+})

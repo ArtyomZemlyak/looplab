@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import {
   UNGROUPED_ID, conceptSet, descendantIds, isStrictSubset, latticeRollups, latticeRows,
   questionClosure,
+  UNFILED_EXPERIMENTS_ID, unfiledExperiments,
 } from '../src/questionLattice.js'
 
 const q = (id, tags, extra = {}) => ({ id, concept_tags: tags, ...extra })
@@ -223,4 +224,54 @@ test('an OPEN question has no closure at all — absence is not "supported"', ()
   const roll = latticeRollups({ nodes: {} }, cards, latticeRows(cards)).get('q1')
   assert.equal(questionClosure(cards[0], roll), null)
   assert.equal(questionClosure(null, roll), null)
+})
+
+// The complement of the ladder (P2, second half). Between `latticeRows` and this, every card the
+// wire carried is drawn somewhere — which is the property that makes retiring the Directions tab
+// safe rather than lossy. Its "Not filed under any direction" group was the ONLY surface that ever
+// drew a parentless experiment, and the operator's first complaint about this board was two of them.
+test('an experiment no question claims is drawn, and a claimed one is not', () => {
+  const cards = [
+    { id: 'q1', card_kind: 'direction', concept_tags: ['a'] },
+    { id: 'e-kid', card_kind: 'experiment', parent_card_id: 'q1' },
+    { id: 'e-orphan', card_kind: 'experiment' },
+  ]
+  assert.deepEqual(unfiledExperiments(cards).map(c => c.id), ['e-orphan'])
+})
+
+test('a parent this PAGE cannot show is still a parent — the card is filed, not unfiled', () => {
+  // `child_card_ids` clips at CARD_CHILD_LIMIT and the wire caps the board at 256 rows, so an edge
+  // naming an absent card is routine. Drawing it here would assert the run has no question for it
+  // when it has one it cannot draw.
+  const cards = [{ id: 'e', card_kind: 'experiment', parent_card_id: 'q-off-the-page' }]
+  assert.deepEqual(unfiledExperiments(cards), [])
+})
+
+test('a QUESTION is never unfiled — a root question already has its own row', () => {
+  const cards = [{ id: 'q', card_kind: 'direction' }]
+  assert.deepEqual(unfiledExperiments(cards), [])
+})
+
+test('the ladder and the unfiled bucket together cover EVERY card', () => {
+  // The invariant the tab retirement rests on. A card that is in neither is a row that vanishes.
+  const cards = [
+    { id: 'q1', card_kind: 'direction', concept_tags: ['a'] },
+    { id: 'q2', card_kind: 'direction', concept_tags: ['a', 'b'] },
+    { id: 'q3', card_kind: 'direction' },
+    { id: 'e1', card_kind: 'experiment', parent_card_id: 'q1' },
+    { id: 'e2', card_kind: 'experiment' },
+  ]
+  const questions = cards.filter(c => c.card_kind === 'direction')
+  const drawn = new Set([
+    ...latticeRows(questions).map(r => r.id),
+    ...unfiledExperiments(cards).map(c => c.id),
+    // an experiment WITH a parent is drawn under its question by the view, from `parent_card_id`
+    ...cards.filter(c => c.card_kind !== 'direction' && c.parent_card_id).map(c => c.id),
+  ])
+  assert.deepEqual([...drawn].sort(), ['e1', 'e2', 'q1', 'q2', 'q3'])
+})
+
+test('unfiledExperiments is total over junk', () => {
+  assert.deepEqual(unfiledExperiments(null), [])
+  assert.deepEqual(unfiledExperiments([null, 'x', { no_id: 1 }]), [])
 })

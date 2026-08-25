@@ -12,10 +12,17 @@
 //   * comparability is TRANSPARENT — a question whose descendants were measured against different
 //     baselines says so instead of reporting a "best" across numbers that never met.
 
+import { cardIsDirection, cardParentId } from './cardLineageModel.js'
 import { isRecord } from './panelPrimitives.js'
 import { nodesSplitByComparability } from './runIndex.js'
 
 export const UNGROUPED_ID = '__no_concepts__'
+// The experiments no question owns. A concept lattice has no position for a card with no parent —
+// it is not a question, so it is not a row — and the Directions view's "Not filed under any
+// direction" group is the ONLY surface that has ever drawn them. Retiring that tab without this
+// bucket would not tidy the board, it would delete rows: measured on `runs/e5small-dr-unified-v5`,
+// the operator's first complaint about this board was two such cards.
+export const UNFILED_EXPERIMENTS_ID = '__unfiled_experiments__'
 
 // A question's set, normalised: sorted, de-duplicated, blank-free. Sorting is what makes the key
 // stable — `{a,b}` and `{b,a}` are one set and must not render as two rows.
@@ -243,4 +250,30 @@ export function questionClosure(card, rollup) {
     sharper,
     measured,
   }
+}
+
+// The experiments filed under NO question, in render order. The complement of the ladder over the
+// same card list, so between them the two cover every card the wire carried — which is the property
+// that makes retiring the Directions tab safe rather than lossy.
+//
+// PARENT-BASED, never concept-based: an experiment carrying `loss/contrastive` is still unfiled if
+// no question claims it, and grouping it by its tags would seat it in the lattice as though some
+// question owned it. The edge is the claim; the tags are a description.
+export function unfiledExperiments(cards, { order } = {}) {
+  const rows = (Array.isArray(cards) ? cards : []).filter(c => isRecord(c) && c.id)
+  const sort = typeof order === 'function'
+    ? order
+    : (a, b) => String(a.id).localeCompare(String(b.id))
+  return rows
+    // A question is never "unfiled" — a root question is a root, and it already has its own row.
+    .filter(card => !cardIsDirection(card))
+    // UNFILED means the card DECLARES no parent. An edge naming a card this page does not hold —
+    // clipped by the 256-row wire cap, or filtered out — is still an edge, and drawing that card
+    // here would assert the run has no question for it when it has one it cannot show.
+    //
+    // The first cut of this filter also consulted a set of known ids and was exactly equivalent to
+    // `!parent` in every branch — dead logic wearing a rule's clothes. Removed rather than kept
+    // "for clarity": a condition that cannot change the answer is a claim nobody can check.
+    .filter(card => !cardParentId(card))
+    .sort(sort)
 }

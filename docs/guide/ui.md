@@ -336,7 +336,12 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   rather than hiding it, exactly as a champion that won a mixed field does: blanking it would leave
   the questions that got the most work showing nothing. Absent keys are silence, not disagreement.
   A question with no experiment yet keeps its row and says so — it is the most actionable row on the
-  view. A question the run **closed** (status `dropped`, or verdict `abandoned`) is **dimmed in
+  view. Below the ladder, **Not filed under any question** holds the experiments no question claims:
+  they have no position in a concept lattice, so they are a section beside it rather than a row
+  inside it, and the section is rendered only when occupied. Between the ladder and that section
+  every card the wire carried is drawn somewhere — the property that lets the Directions tab be
+  retired without losing rows, since its own "Not filed under any direction" group was previously
+  the only surface that had them. A question the run **closed** (status `dropped`, or verdict `abandoned`) is **dimmed in
   place, never removed**: it is part of the chain that explains its neighbours, and there is no
   "hide closed" control for that reason. Beside it the view says whether the closure rests on
   anything — at least one sharper question below it, or at least one experiment of its own that

@@ -12,7 +12,8 @@ import React, { useMemo, useState } from 'react'
 
 import { cardIsDirection } from './cardLineageModel.js'
 import { isRecord } from './panelPrimitives.js'
-import { UNGROUPED_ID, latticeRollups, latticeRows, questionClosure } from './questionLattice.js'
+import { UNGROUPED_ID, latticeRollups, latticeRows, questionClosure,
+  unfiledExperiments } from './questionLattice.js'
 
 const _text = value => (typeof value === 'string' ? value.trim() : '')
 const _delta = value => `${value > 0 ? '+' : ''}${Number(value.toFixed(4))}`
@@ -56,6 +57,10 @@ export default function ResearchView({ cards, state, renderCard }) {
   }, [all])
 
   const rows = useMemo(() => latticeRows(questions), [questions])
+  // The complement of the ladder. Without it a parentless experiment is drawn by NOTHING here, and
+  // the Directions tab's "Not filed under any direction" group stays the only surface that has it —
+  // which is exactly why that tab cannot be retired until this exists.
+  const unfiled = useMemo(() => unfiledExperiments(all), [all])
   const rollups = useMemo(() => latticeRollups(state, all, rows), [state, all, rows])
   const byRowKey = useMemo(() => new Map(rows.map(r => [r.rowKey, r])), [rows])
 
@@ -209,6 +214,21 @@ export default function ResearchView({ cards, state, renderCard }) {
         no question names {concept}
       </li>}
     </ol>
+    {/* Always LAST and never inside the ladder: these cards have no position in it. The section is
+        rendered only when occupied — a permanently empty "unfiled" heading is a question the
+        operator has to answer before they can ignore it — and it is suppressed while a concept
+        filter is on, because an unfiled card names no concept and cannot match one. */}
+    {!concept && unfiled.length > 0 && <section className="research-unfiled"
+      aria-labelledby="research-unfiled-h">
+      <h3 id="research-unfiled-h" className="research-unfiled-h">
+        Not filed under any question <span className="muted">{unfiled.length}</span>
+      </h3>
+      <div className="muted card-empty">
+        no question claims {unfiled.length === 1 ? 'this experiment' : 'these experiments'} — the
+        Researcher proposed {unfiled.length === 1 ? 'it' : 'them'} without naming a direction
+      </div>
+      <div className="research-experiments">{unfiled.map(card => renderCard(card))}</div>
+    </section>}
   </div>
 }
 
