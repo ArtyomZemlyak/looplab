@@ -1122,7 +1122,7 @@ def card_score_fence_state(
 
     **One thing the fix revealed and did not create.** With the phantom staleness gone, a prefetched
     node is ADMITTED in the session that built it instead of idling until the next outer turn. That
-    was never a deliberate boundary: ``speculation.py::CardSessionLanes.open_for_production`` closes
+    was never a deliberate boundary: ``speculation.py::CardSession.open_for_production`` closes
     PAID producer work on the first terminal (a provider call would hold the session open), while
     ``open_for_admission`` only closes on ``stopping`` — so what actually stopped the dispatch of
     already-built work was this clause. Dispatching costs no provider call and evals outlive their

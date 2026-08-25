@@ -1230,7 +1230,7 @@ def test_depth_one_prefetches_next_card_then_returns_at_outer_cadence_boundary(
     # different boundary that never existed. It read "the session deliberately leaves the prebuilt
     # Node pending and returns so outer controls/Strategist/cadences run before another admission",
     # and the prebuilt node really did stay pending — but not because any rule said so.
-    # `CardSessionLanes.open_for_production` closes PAID producer work on the first terminal (a
+    # `CardSession.open_for_production` closes PAID producer work on the first terminal (a
     # provider call started after it would hold the session open for its whole duration), while
     # `open_for_admission` closes only on `stopping`. What actually stopped the already-built node
     # from being dispatched was `core/cards.py::card_score_fence_state`'s empty-authority clause
