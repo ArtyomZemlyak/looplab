@@ -223,6 +223,7 @@ NO_SPEEDUP_REASONS = (
     "invalid_results",     # some instances failed `is_solution`; AlgoTune refuses a partial speedup
     "critical_error",      # solver_exception / import_error / memory_error — stopped mid-dataset
     "no_valid_speedups",   # nothing was timed at all
+    "baseline_measured_in_pass",  # the arena timed the REFERENCE, not the candidate — see below
     "solver_unloadable",   # their import of our solver.py failed
     "compilation_failed",  # a Cython/pythran/DaCe build step failed
     "no_problems",         # the requested dataset half was empty
@@ -731,6 +732,33 @@ def main() -> int:
     # it, and `subset_evidence` above has already recorded which of those this checkout is.
     env = dict(os.environ, ALGOTUNE_EVAL_SUBSET=args.subset)
 
+    # THE REFERENCE TIMINGS MUST ALREADY EXIST, and this snapshot is how we know they did.
+    #
+    # When AlgoTune has no cached per-instance baseline for this (task, subset, lane) it measures one
+    # in the same pass -- and in that pass THE CANDIDATE IS NEVER TIMED. The evaluator reports the
+    # reference against itself: `final_speedup` comes back ~1.0 and every instance validates,
+    # whatever was submitted. Demonstrated 2026-08-25 with a solver whose `solve()` returns `[]` for
+    # every instance: it scored 1.0009 with 100/100 valid. The same champion scored 0.0 (98/100
+    # valid) once the cache was warm, and `edge_expansion`'s scored 0.9996 cold against 24.68 warm.
+    #
+    # It cost eight of this campaign's twenty final numbers, all of them plausible: 1.146, 1.069,
+    # 1.0646, 1.0362, 1.0308, 1.0243, 0.9865. Nothing in the output said they were not measurements,
+    # and they were read for hours as a real train/test collapse -- the tell was only that those
+    # eight evaluations each ran ~330 s against ~50 s for the eleven that had a warm cache, the extra
+    # ~210 s being the reference pass itself.
+    #
+    # So: glob the timings this run could use BEFORE it runs, and compare after. A file that appears
+    # or changes during the run means the reference was measured here, which means the number below
+    # is not about the candidate. `_emit` is told to refuse it rather than print it.
+    def _baseline_fingerprint() -> dict:
+        try:
+            return {f.name: (f.stat().st_mtime_ns, f.stat().st_size)
+                    for f in args.baseline_times_dir.glob(f"{args.task}__{subset}__*.json")}
+        except OSError:
+            return {}
+
+    _baseline_before = _baseline_fingerprint()
+
     started = time.time()
     try:
         proc = subprocess.run(argv, cwd=str(root), capture_output=True, text=True,
@@ -840,6 +868,29 @@ def main() -> int:
             # investigation on 2026-08-20: a node scoring 0.0 was diagnosed as "no baseline" when
             # the actual cause was an empty working set, three layers away.
             out["baseline_source"] = "in-harness (record exposes no baseline_time_ms to cache)"
+
+    # The other half of the fingerprint taken before the evaluator ran. If the reference timings for
+    # this (task, subset) appeared or changed while it ran, the reference was measured in this pass
+    # and the candidate was not timed -- so whatever `final_speedup` says is about the reference.
+    # Refuse it. A null speedup with a reason is a result the campaign can act on; a plausible 1.0
+    # is one it cannot even doubt.
+    _baseline_after = _baseline_fingerprint()
+    if _baseline_after != _baseline_before:
+        appeared = sorted(set(_baseline_after) - set(_baseline_before))
+        # Through `_no_speedup`, not a dict literal: `tests/test_algotune_bridge_says_why.py`
+        # derives the producible set from the AST of THIS call and would have called the new
+        # reason registered-but-dead. It caught exactly that, which is what it is for.
+        out["speedup"] = None
+        block = _no_speedup("baseline_measured_in_pass", reported=speedup)
+        block["evaluator_verdict"] = (
+            "the per-instance reference timings for this task/subset were written during this "
+            "evaluation, so the arena timed the reference and not the candidate")
+        block["timings_written"] = appeared or ["(existing file changed)"]
+        block["remedy"] = "re-run this scoring now that the timings are cached"
+        out["no_speedup"] = block
+        out["baseline_source"] = "measured in this pass — NOT A MEASUREMENT OF THE CANDIDATE"
+        _emit(out)
+        return 0
 
     out["speedup"] = float(speedup) if speedup is not None else 0.0
     if baseline_ms is not None:
