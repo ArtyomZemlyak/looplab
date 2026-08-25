@@ -339,6 +339,22 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
     #
     # So a conflicted coordinate is NOT in `applied`; it rides in `conflicts` with EVERY reading and
     # the file each came from, and `unresolved` names it `conflict`. Surfaced, never settled.
+    # OPEN[applied-ambiguous-popped-by-python-settle] a document's `ambiguous` refusal is silently
+    # popped here when a `.py` carrier answers the same key.
+    # proof:line:where[key]&&(rel,@looplab/runtime/applied_params.py
+    # REVIEW 2026-08-25 (correctness): the document branch above is careful that an `ambiguous`
+    # refusal "OUTRANKS a later `absent`" — it is a fact about the DECLARATION — but the Python
+    # branch offers its reading without touching `unresolved`, and this pop then erases the marker
+    # whenever the `.py` side settles to one value. The record that results says K = 4096, clean,
+    # about a node whose own config document defines K at two or more leaves (possibly two OTHER
+    # numbers): a three-way disagreement rendered as a single answered coordinate, which is the
+    # settling this block's own heading forbids — the ambiguous document's readings never reach
+    # `readings`, so the conflict rule cannot see them either. Reachable on this corpus: the
+    # measured bare-suffix shapes (a `batch_size`-family declaration matching sibling `train.*` and
+    # `test.*` leaves) plus the same key assigned once in `train.py`, i.e. the 51-of-54
+    # both-families population. Fix direction: only pop an `absent` marker here — keep `ambiguous`
+    # beside the applied value (or demote the coordinate to `conflicts` with the document named as
+    # unreadably plural), then delete this marker.
     for key, seen in readings.items():
         if len(seen) == 1:
             value = next(iter(seen))

@@ -14,6 +14,9 @@ from __future__ import annotations
 import math
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
+# REVIEW 2026-08-25 (cleanup): `Collection` is imported twice — the `typing` spelling below rebinds
+# the `collections.abc` one imported above (they alias the same ABC today, but `typing.Collection`
+# is the deprecated alias and the duplicate reads as if two different names were meant). Keep one.
 from typing import Collection, Any, Literal
 
 from looplab.core.models import (

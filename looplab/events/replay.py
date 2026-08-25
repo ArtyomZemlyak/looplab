@@ -1350,6 +1350,23 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     if not isinstance(found, dict) or not found:
         return
     node.extra_metrics = normalize_extra_metrics(found)
+    # OPEN[score-backfill-fold-drops-backfilled-marker] the docstring's "backfilled marker beside
+    # it" never reaches folded state, and neither does `precision_decimals`.
+    # proof:line:EXTRA_METRIC_DECLARED&&node.extra_metrics})@looplab/events/replay.py
+    # REVIEW 2026-08-25 (correctness): the sibling handler below stamps `backfilled: true` into the
+    # record it folds, so a reconstruction is legible as one on every surface; THIS handler folds
+    # only values + a bare `declared` channel, and the marker plus the per-key decimals the writer
+    # argues a reader "must not have to guess" (`maintenance/backfill_score_metrics.py`) live only
+    # on the raw event row — which no surface reads. So a recovered 2-decimal nDCG@100 renders on
+    # the extras table, the exports and `read_experiment` exactly like a live operator-declared
+    # measurement (`extraMetricIsDeclared` answers true for it), and v4's nodes 0 and 1 — equal on
+    # every recovered row only because the print statement cannot separate them — read as MEASURED
+    # ties. That is the reconstruction-presented-as-measurement inversion both backfill docstrings
+    # exist to refuse, committed by the one handler of the pair that promises otherwise. Fix
+    # direction: carry the marker + decimals somewhere the fold keeps (the sibling stamps its
+    # record inside `metric_provenance`, which is a plain dict) and teach the extras readers the
+    # absent-means-live default; or stop the docstring claiming a marker exists. Delete this
+    # marker with either.
     node.extra_metrics_provenance = normalize_extra_metric_channels(
         {k: EXTRA_METRIC_DECLARED for k in node.extra_metrics})
     # ...and NOT `extra_metrics_direction`. See the docstring: the axis stays unorientable because
