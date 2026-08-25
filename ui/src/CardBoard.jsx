@@ -1219,6 +1219,10 @@ function _CardKanban({
   // draw from, so a filter or a control applied on one board reaches this one too rather than the
   // view growing its own quietly-different population.
   const researchBoard = <ResearchView cards={visibleCards} state={state} renderCard={renderCard} />
+  // The lanes are a LIFECYCLE view and a question has no lifecycle of its own — see
+  // `splitBoardByKind`. The questions are not dropped: the count and the way to them ride above the
+  // lanes, because "five questions await an experiment" and "the board is empty" are different runs.
+  const { work: laneCards, questions: laneQuestions } = splitBoardByKind(visibleCards)
   // Said where the lanes are, not where the questions went: an operator who sees fewer rows than the
   // board's own total needs the reconciliation on the surface that shrank.
   const questionNotice = laneQuestions.length > 0 && grouping === 'lanes'
@@ -1239,10 +1243,6 @@ function _CardKanban({
       className={'btn sm' + (grouping === key ? ' primary' : '')}
       aria-pressed={grouping === key} onClick={() => setGrouping(key)}>{label}</button>)}
   </div>
-  // The lanes are a LIFECYCLE view and a question has no lifecycle of its own — see
-  // `splitBoardByKind`. The questions are not dropped: the count and the way to them ride above the
-  // lanes, because "five questions await an experiment" and "the board is empty" are different runs.
-  const { work: laneCards, questions: laneQuestions } = splitBoardByKind(visibleCards)
   const board = <div className="card-board" role="region" aria-label="Card lifecycle kanban">
     {lanes.map(([key, label, hint]) => {
       const rows = laneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
