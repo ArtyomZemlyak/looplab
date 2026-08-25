@@ -754,6 +754,8 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
         "claims": [],
         "sources": [],
         "recommended_directions": [],
+        "open_questions": [],
+        "next_experiments": [],
         "proposed_ideas": [],
         "at_node": (src.get("at_node") if type(src.get("at_node")) is int
                     and 0 <= src.get("at_node") <= (1 << 63) - 1 else None),
@@ -831,10 +833,15 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
         })
     out["reasoning"] = _text(src.get("reasoning", ""), 12_000, budget)
     out["findings"] = [_text(v, 1_200, budget) for v in _items(src.get("findings"), 32)]
-    out["recommended_directions"] = [
-        _text(v, 1_200, budget, single_line=True)
-        for v in _items(src.get("recommended_directions"), 16)
-    ]
+    # The compat field and the two halves it was split into share ONE bound and one text rule: a
+    # reader putting them side by side must not find one clipped where the other was not. See
+    # `ResearchMemo.open_questions` for why the split exists — the old field's NAME contradicted its
+    # own description, so a concrete experiment arrived through a channel that carries no action.
+    for _field in ("recommended_directions", "open_questions", "next_experiments"):
+        out[_field] = [
+            _text(v, 1_200, budget, single_line=True)
+            for v in _items(src.get(_field), 16)
+        ]
     out["proposed_ideas"] = [
         _tree(v, budget, proposal_items) for v in _items(src.get("proposed_ideas"), 16)
     ]

@@ -80,8 +80,22 @@ _SYSTEM = (
     "as {statement, node_ids, urls} citing the experiment ids and/or source urls it rests on "
     "(a claim with no evidence will be flagged by the verifier). A claim URL MUST exactly equal a "
     "URL you actually fetched or otherwise consulted through a tool during this review; a search-result "
-    "URL must be fetched before you cite it — and `recommended_directions` "
-    "(specific next experiments to try). Put your detailed deliberation in `reasoning`. Be "
+    "URL must be fetched before you cite it. "
+    # THE SPLIT. This field used to be `recommended_directions`, described as "(specific next
+    # experiments to try)" — a name that contradicted its own description, so the model returned
+    # experiments and the board filed them as unbuildable directions. Measured on
+    # `runs/e5small-dr-unified-v5`: one of five outputs was a genuine family; the rest were concrete
+    # single- or two-change experiments the engine then could not run, because the channel they
+    # arrived through carries no action.
+    "Then SPLIT what you would try next into two lists, by what each one IS rather than by how "
+    "promising it is. `open_questions`: broad questions a FAMILY of experiments would answer, which "
+    "cannot be run as they stand ('does distilling from a stronger teacher help here'). "
+    "`next_experiments`: ONE concrete change each, specific enough that somebody could run it "
+    "tomorrow without deciding anything else ('set loss.temperature to 0.01 on the ported "
+    "DCL+R-Drop recipe'). If a line names an exact value or an exact edit, it belongs in "
+    "`next_experiments`, not in `open_questions`. Also fill `recommended_directions` with the union "
+    "of both, unchanged, so existing readers keep working. "
+    "Put your detailed deliberation in `reasoning`. Be "
     "concrete and grounded in the actual results, not generic advice."
 )
 
@@ -489,6 +503,11 @@ class DeepResearcher:
         memo.claims = clean["claims"]                  # D8 evidence ledger
         memo.claims_receipt = clean["claims_receipt"]  # authoritative pre-cap denominator
         memo.recommended_directions = clean["recommended_directions"]
+        # The two halves the compat field was split into. A model that filled neither leaves both
+        # empty and the registration path falls back to `recommended_directions`, so a pre-split
+        # prompt and every log on disk behave exactly as before.
+        memo.open_questions = clean["open_questions"]
+        memo.next_experiments = clean["next_experiments"]
         memo.sources = clean["sources"]
         return memo
 

@@ -501,6 +501,18 @@ class ResearchCadenceMixin:
         # It is explicitly model-generated advisory data, not operator authority; prompt rendering
         # filters this source while the research memo/open-hypothesis channels carry the signal.
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
+        # WHAT BECOMES A BOARD ROW is now what the memo itself called a QUESTION, not everything it
+        # would try next. `recommended_directions` was described to the model as "specific next
+        # experiments to try", so it correctly returned experiments and every one of them landed as
+        # a row owning no action — unbuildable by construction. Measured on
+        # `runs/e5small-dr-unified-v5`: one of five was a genuine family; the rest were concrete
+        # single-change experiments the engine could not run.
+        #
+        # `open_questions` when the memo filled it, the whole list otherwise. The fallback is what
+        # keeps every log already on disk and every memo from a pre-split prompt folding exactly as
+        # it did — absence means "this memo did not draw the distinction", never "it has no
+        # questions".
+        questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()] or directions
         if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
             # The prefix comes from `agents/hints.py`, which FILTERS on it — a deep-research row
@@ -514,7 +526,7 @@ class ResearchCadenceMixin:
             # runs, and shows on the board as an open question the search should resolve.
             if self._track_hypotheses:
                 assert EV_HYPOTHESIS_ADDED in BACKGROUND_APPENDABLE   # see the method-level note
-                for direction in self._admissible_beliefs(directions[:5]):
+                for direction in self._admissible_beliefs(questions[:5]):
                     self.store.append(EV_HYPOTHESIS_ADDED, {
                         "statement": direction, "source": "deep_research",
                         "at_node": memo.at_node})

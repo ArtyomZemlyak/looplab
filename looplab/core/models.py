@@ -1345,6 +1345,22 @@ class ResearchMemo(BaseModel):
     claims_receipt: Optional[dict] = Field(default=None, exclude=True)
     sources: list[dict] = Field(default_factory=list)   # {title, url} consulted (web/arXiv)
     recommended_directions: list[str] = Field(default_factory=list)  # what to try next (steer hints)
+    # THE SPLIT, and it exists because the FIELD NAME contradicted its own description. The prompt
+    # asked for `recommended_directions` and defined them as "(specific next experiments to try)",
+    # so the model correctly returned EXPERIMENTS and the channel called them directions. Measured on
+    # `runs/e5small-dr-unified-v5`: of five, exactly ONE was a genuine direction (a family —
+    # "cross-encoder / strong-teacher distillation"); #2 was a single-knob experiment with an exact
+    # value ("test temperature 0.01"), #1 and #3 were two concrete actions each. A one-knob
+    # experiment arriving through a channel that carries no action is unbuildable forever, so the
+    # memo already decided an experiment the engine then could not run.
+    #
+    # Both are ADDITIVE and `recommended_directions` keeps its meaning byte-for-byte: every log on
+    # disk carries only it, every reader keeps working, and a memo that fills neither new field
+    # folds exactly as it always did. The registration path prefers `open_questions` when present —
+    # those are the rows that legitimately own no action — and leaves `next_experiments` to be
+    # proposed as real work.
+    open_questions: list[str] = Field(default_factory=list)    # families, no action, may not be built
+    next_experiments: list[str] = Field(default_factory=list)  # one concrete change each
     # Optional concrete proposals the engine may materialize as injected nodes (empty for v1; the
     # directions above already feed the Researcher as standing context).
     proposed_ideas: list[Idea] = Field(default_factory=list)
