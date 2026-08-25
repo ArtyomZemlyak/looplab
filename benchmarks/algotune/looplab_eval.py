@@ -130,7 +130,21 @@ DEFAULT_CACHE = Path(__file__).resolve().parent / ".baseline_cache.json"
 # The per-INSTANCE reference timings (the cache that saves the WALL CLOCK), as opposed to
 # DEFAULT_CACHE above, which holds the aggregate (the cache that stabilises the DENOMINATOR).
 # The per-instance one is written by `patch_baseline_cache.py`, which patches AlgoTune itself.
-DEFAULT_TIMES_DIR = Path(__file__).resolve().parent / ".baseline_times"
+# AND IT IS READ FROM THE ENVIRONMENT FIRST, because the patched `BaselineManager` is. The two
+# must name the SAME directory or the guard below watches a place nothing writes to.
+#
+# Found 2026-08-25 by review and confirmed by measurement. This default derives from `__file__`,
+# and the campaign runs this bridge out of the PINNED clone (`looplab-armb`) while the patch writes
+# into the working clone's `.baseline_times` (`ALGOTUNE_BASELINE_CACHE_DIR`, set by the box
+# profile). Measured on the live box: the `__file__`-derived path does not exist and holds 0 files;
+# the real one holds 44. So `_baseline_fingerprint` returned `{}` before AND after every campaign
+# evaluation, the two compared equal, and `baseline_measured_in_pass` could never fire — the whole
+# refusal was inert in the only configuration that matters. It passed its live check because that
+# check passed `--baseline-times-dir` by hand, which the campaign does not.
+DEFAULT_TIMES_DIR = Path(
+    os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR")
+    or (Path(__file__).resolve().parent / ".baseline_times")
+)
 
 
 def _load_cache(path: Path) -> dict[str, Any]:
