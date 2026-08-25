@@ -384,6 +384,32 @@ reap_orphan_workers() {
 # The event log is the discriminator, NOT the wall clock (a threshold between 2 s and 136 s is a
 # guess that a slow endpoint invalidates) and NOT the exit code (which cannot separate them, by
 # construction -- that is the defect).
+successful_calls() {   # $1 = arm, $2 = task, $3 = attempt. Echoes the count, or "" when unknowable.
+  # "" and "0" are DIFFERENT ANSWERS and the caller only acts on "0": "" means the meter log is
+  # missing, unreadable, or carries no rows for this arm, and refusing a marker on that would punish
+  # a run for a bookkeeping gap it did not cause.
+  [ -n "${METER_LOG:-}" ] && [ -s "${METER_LOG:-/nonexistent}" ] || { echo ""; return 0; }
+  grep -q "\"arm\": \"$1\"" "$METER_LOG" 2>/dev/null || { echo ""; return 0; }
+  python3 - "$METER_LOG" "$1" "$2" "${3:-}" <<'PYEOF'
+import json, sys
+log, arm, task, attempt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+n = 0
+with open(log, "r", encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("arm") != arm or d.get("task") != task:
+            continue
+        if attempt and d.get("attempt") not in ("", None, attempt):
+            continue
+        if str(d.get("status")) == "200" and not d.get("error"):
+            n += 1
+print(n)
+PYEOF
+}
+
 run_started_evidence() {   # $1 = run dir ("" = no LoopLab run dir, i.e. arm A). echoes metered calls
   [ -n "${1:-}" ] && [ -s "$1/events.jsonl" ] || return 1
   N="$(grep -c '"type":"llm_usage"' "$1/events.jsonl" 2>/dev/null)"
@@ -501,7 +527,25 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
   # never averaged; a wall-cut arm-A row has no number at all.
   case "$RC" in
     0)
-      echo "wall=$WALL rc=0 state=ran_to_completion $REGIME attempt=${ATTEMPT:-none}" > "$1" ;;
+      # `rc=0` IS NOT ENOUGH TO CALL A RUN COMPLETE. Measured 2026-08-25: the gateway's model group
+      # went to `503 No available workers (all circuits open or unhealthy)` mid-campaign, and arm A's
+      # remaining sixteen task-arms each exited 0 after THREE TO NINETEEN SECONDS having made no
+      # successful call at all. Every one was marked `ran_to_completion`, `final_banner` counted
+      # 20/20 and the driver printed "FINAL CAMPAIGN COMPLETE". A total outage of the endpoint is
+      # indistinguishable, in the markers, from a campaign that worked — and a marker means "do not
+      # re-run this", so a resume would have skipped all sixteen for ever.
+      #
+      # So a run that paid for nothing gets NO MARKER and stays owed, exactly like an interruption.
+      # The check is positive-evidence only: it needs the meter log to be readable AND to hold rows
+      # for this arm, so a missing or untagged log leaves the old behaviour rather than refusing
+      # markers for runs that were fine.
+      OK_CALLS="$(successful_calls "$ARM" "$T" "${ATTEMPT:-}")"
+      if [ "$OK_CALLS" = "0" ]; then
+        echo "  [$(date +%H:%M:%S)][$4] NO SUCCESSFUL CALLS in ${WALL}s (rc=0) -- endpoint down?" \
+             "no marker written, task still owed"
+        return 0
+      fi
+      echo "wall=$WALL rc=0 state=ran_to_completion $REGIME ok_calls=$OK_CALLS attempt=${ATTEMPT:-none}" > "$1" ;;
     124)
       echo "wall=$WALL rc=124 state=wall_cut $REGIME attempt=${ATTEMPT:-none}" > "$1" ;;
     2)
