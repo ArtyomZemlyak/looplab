@@ -1,0 +1,191 @@
+// The question lattice's pure model. Every property here is one the shape gets wrong under an
+// obvious simpler implementation — a path tree, a canonical parent, a summed rollup — and each was
+// driven by mutating the module and watching this file go red.
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import {
+  UNGROUPED_ID, conceptSet, descendantIds, isStrictSubset, latticeRollups, latticeRows,
+} from '../src/questionLattice.js'
+
+const q = (id, tags, extra = {}) => ({ id, concept_tags: tags, ...extra })
+const keys = rows => rows.map(r => `${'  '.repeat(r.depth)}${r.id}`)
+
+test('a set is normalised, so {a,b} and {b,a} are one question position', () => {
+  assert.deepEqual(conceptSet(q('x', ['b', 'a'])), ['a', 'b'])
+  assert.deepEqual(conceptSet(q('x', ['a', 'a', ' a '])), ['a'])
+  // Junk on the wire is not a concept and must not become a lattice coordinate.
+  assert.deepEqual(conceptSet(q('x', ['', '  ', null, 7, 'a'])), ['a'])
+  assert.deepEqual(conceptSet({ id: 'x' }), [])
+  assert.deepEqual(conceptSet(null), [])
+})
+
+test('subset is STRICT — an equal pair is one position, not a sharpening of itself', () => {
+  assert.equal(isStrictSubset(['a'], ['a', 'b']), true)
+  assert.equal(isStrictSubset(['a', 'b'], ['a', 'b']), false)
+  assert.equal(isStrictSubset(['a', 'c'], ['a', 'b']), false)
+  assert.equal(isStrictSubset([], ['a']), true)
+})
+
+test('a sharpening hangs under the question it sharpens', () => {
+  const rows = latticeRows([q('q2', ['distill', 'llm']), q('q1', ['distill'])])
+  assert.deepEqual(keys(rows), ['q1', '  q2'])
+  assert.equal(rows[1].parentId, 'q1')
+})
+
+test('a row with two parents is DUPLICATED under both, subtree and all', () => {
+  const rows = latticeRows([
+    q('q1', ['distill']), q('q4', ['llm']),
+    q('q2', ['distill', 'llm']), q('q3', ['distill', 'llm', 'rl']),
+  ])
+  assert.deepEqual(keys(rows), ['q1', '  q2', '    q3', 'q4', '  q2', '    q3'])
+  // Distinct render keys per PLACEMENT: one collapse must not close the other copy.
+  assert.deepEqual(rows.filter(r => r.id === 'q2').map(r => r.rowKey), ['q1>q2', 'q4>q2'])
+  assert.deepEqual(rows.filter(r => r.id === 'q2').map(r => r.duplicated), [true, true])
+  assert.equal(rows.find(r => r.rowKey === 'q1>q2>q3').duplicated, false)
+})
+
+test('only the IMMEDIATE parent adopts — a grandchild is not also drawn at depth 1', () => {
+  // `{a}` is a strict subset of `{a,b,c}` as well, and adopting on strictness alone draws the same
+  // subtree twice at two depths and doubles every number rolled up through it.
+  const rows = latticeRows([q('a', ['a']), q('ab', ['a', 'b']), q('abc', ['a', 'b', 'c'])])
+  assert.deepEqual(keys(rows), ['a', '  ab', '    abc'])
+  assert.equal(rows.filter(r => r.id === 'abc').length, 1)
+})
+
+test('an untagged question keeps its own bucket, last, and is never dropped', () => {
+  const rows = latticeRows([q('bare', []), q('a', ['a'])])
+  assert.deepEqual(keys(rows), ['a', 'bare'])
+  const bare = rows.find(r => r.id === 'bare')
+  assert.equal(bare.parentId, UNGROUPED_ID)
+  assert.equal(bare.rowKey, `${UNGROUPED_ID}>bare`)
+})
+
+test('two questions with the SAME set are siblings, not one nested under the other', () => {
+  const rows = latticeRows([q('x', ['a']), q('y', ['a'])])
+  assert.deepEqual(keys(rows), ['x', 'y'])
+})
+
+test('a card with no id is not a row, and a non-record is not a card', () => {
+  assert.deepEqual(latticeRows([null, 'q1', { concept_tags: ['a'] }, q('q1', ['a'])]).map(r => r.id),
+    ['q1'])
+  assert.deepEqual(latticeRows(null), [])
+})
+
+test('descendants are per PLACEMENT and exclude the row itself', () => {
+  const rows = latticeRows([q('q1', ['a']), q('q4', ['b']), q('q2', ['a', 'b'])])
+  assert.deepEqual(descendantIds(rows, 'q1'), ['q2'])
+  assert.deepEqual(descendantIds(rows, 'q1>q2'), [])
+  assert.deepEqual(descendantIds(rows, 'nope'), [])
+})
+
+// A question's number lives in `child_rollup` — the best its own experiments measured — because a
+// question owns no action and its own `best_delta` is null on every real board.
+const asked = (id, tags, best, extra = {}) => q(id, tags, {
+  child_rollup: best === null ? null : { children: 1, best_delta: best, best_card_id: `${id}-x` },
+  ...extra,
+})
+
+test('a question wears the BEST delta in its subtree, counting ITSELF and not summing', () => {
+  const cards = [asked('q1', ['a'], 3), asked('q2', ['a', 'b'], 5), asked('q3', ['a', 'b', 'c'], 1)]
+  const roll = latticeRollups({ nodes: {} }, cards, latticeRows(cards))
+  const top = roll.get('q1')
+  // 5, not 9 (a sum) and not 3 (its own alone), and it comes from the CHILD.
+  assert.equal(top.best, 5)
+  assert.equal(top.bestCardId, 'q2')
+  assert.equal(top.own, 3, 'the row still reports what its OWN experiments reached')
+  assert.equal(top.descendants, 2)
+})
+
+test('a question with experiments and NO sharpening still shows its own number', () => {
+  // The first cut scanned descendants only and reported `null` here — i.e. on the whole early
+  // board, where nobody has asked a sharper question yet.
+  const cards = [asked('q1', ['a'], 4)]
+  const roll = latticeRollups({ nodes: {} }, cards, latticeRows(cards)).get('q1')
+  assert.equal(roll.best, 4)
+  assert.equal(roll.bestCardId, 'q1')
+  assert.equal(roll.descendants, 0)
+})
+
+test('the maximum is kept even when it arrives FIRST', () => {
+  // Without this arm "keep the max" and "keep whatever came last" are indistinguishable.
+  const cards = [asked('q1', ['a'], null), asked('q2', ['a', 'b'], 5), asked('q3', ['a', 'b', 'c'], 2)]
+  const head = latticeRollups({ nodes: {} }, cards, latticeRows(cards)).get('q1')
+  assert.equal(head.best, 5)
+  assert.equal(head.bestCardId, 'q2')
+})
+
+test('an EXPERIMENT card in the lattice reports its own best_delta', () => {
+  // Both fields are consulted: reading only `child_rollup` reports null for every experiment.
+  const cards = [q('e1', ['a'], { best_delta: 7 })]
+  assert.equal(latticeRollups({ nodes: {} }, cards, latticeRows(cards)).get('e1').best, 7)
+})
+
+test('a non-finite or missing delta contributes nothing rather than a zero', () => {
+  const cards = [
+    q('q1', ['a']),
+    asked('q2', ['a', 'b'], Number.NaN),
+    asked('q3', ['a', 'c'], Number.POSITIVE_INFINITY),
+    q('q4', ['a', 'd'], {}),
+  ]
+  const roll = latticeRollups({ nodes: {} }, cards, latticeRows(cards))
+  assert.equal(roll.get('q1').best, null)
+  assert.equal(roll.get('q1').bestCardId, null)
+})
+
+test('provably different comparability MARKS the best, it does not suppress it', () => {
+  const cards = [
+    q('q1', ['a']),
+    q('q2', ['a', 'b'], { best_delta: 2, evidence: ['n1'] }),
+    q('q3', ['a', 'c'], { best_delta: 5, evidence: ['n2'] }),
+  ]
+  const rec = key => ({ metric_provenance: { comparability: { keys: { measured: key } } } })
+  const state = { nodes: { n1: rec('LEFT'), n2: rec('RIGHT') } }
+  const mixed = latticeRollups(state, cards, latticeRows(cards)).get('q1')
+  assert.equal(mixed.mixedComparability, true)
+  assert.equal(mixed.best, 5, 'the number stays — hiding it leaves the busiest question blank')
+  assert.equal(mixed.measuredNodes, 2)
+
+  const same = { nodes: { n1: rec('SAME'), n2: rec('SAME') } }
+  assert.equal(latticeRollups(same, cards, latticeRows(cards)).get('q1').mixedComparability, false)
+})
+
+test('ABSENT keys are silence, not a second key — an unrecorded board is never marked', () => {
+  // Every node on this box records no comparability key. A refusal that counted silence as
+  // disagreement would fire on all of them and therefore mean nothing.
+  const cards = [
+    q('q1', ['a']),
+    q('q2', ['a', 'b'], { best_delta: 2, evidence: ['n1'] }),
+    q('q3', ['a', 'c'], { best_delta: 5, evidence: ['n2'] }),
+  ]
+  const state = { nodes: { n1: { metric: 1 }, n2: { metric: 2 } } }
+  assert.equal(latticeRollups(state, cards, latticeRows(cards)).get('q1').mixedComparability, false)
+})
+
+test('an evidence id that resolves to no node is not counted as measured', () => {
+  const cards = [q('q1', ['a']), q('q2', ['a', 'b'], { best_delta: 1, evidence: ['gone'] })]
+  const roll = latticeRollups({ nodes: {} }, cards, latticeRows(cards)).get('q1')
+  assert.equal(roll.measuredNodes, 0)
+  assert.equal(roll.best, 1, 'the delta is on the CARD; a trimmed node does not unmake it')
+})
+
+test("a question's comparability marker comes from its EXPERIMENTS' nodes", () => {
+  // A question's own `evidence` is empty by construction, so reading only that field marks nothing
+  // on exactly the rows that aggregate the most work.
+  const rec = key => ({ metric_provenance: { comparability: { keys: { measured: key } } } })
+  const cards = [
+    q('q1', ['a'], {
+      child_rollup: { children: 2, best_delta: 3, best_card_id: 'e1' },
+      child_card_ids: ['e1', 'e2'],
+    }),
+    q('e1', ['a'], { best_delta: 3, evidence: ['n1'] }),
+    q('e2', ['a'], { best_delta: 1, evidence: ['n2'] }),
+  ]
+  // Only the question is a lattice row; its experiments are reached through `child_card_ids`.
+  const rows = latticeRows(cards.slice(0, 1))
+  const split = latticeRollups({ nodes: { n1: rec('L'), n2: rec('R') } }, cards, rows).get('q1')
+  assert.equal(split.measuredNodes, 2)
+  assert.equal(split.mixedComparability, true)
+
+  const agreed = latticeRollups({ nodes: { n1: rec('S'), n2: rec('S') } }, cards, rows).get('q1')
+  assert.equal(agreed.mixedComparability, false)
+})
