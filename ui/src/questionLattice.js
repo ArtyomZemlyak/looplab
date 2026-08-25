@@ -208,3 +208,39 @@ export function latticeRollups(state, cards, rows) {
   }
   return out
 }
+
+// A question the run has CLOSED, and whether the closure rests on anything.
+//
+// The operator's own suspicion, made checkable: *"we cannot discard a direction if we have no
+// experiments that are more precise."* A question is closed by `status: dropped` or by
+// `verdict: abandoned` (`core/cards.py`), and the closure is SUPPORTED when the run actually
+// narrowed it — at least one sharper question below it, or at least one experiment of its own that
+// produced evidence. Otherwise the row was abandoned on nothing.
+//
+// IT ONLY REPORTS. Nothing here reopens a card, hides a row or changes a number: an unsupported
+// closure is a fact for the operator to act on, and a view that quietly un-dropped a card would be
+// asserting a decision the run's own record does not carry. A closed row is DIMMED and never
+// removed, which is what keeps the chain readable — the whole point of the ladder.
+export const CLOSED_QUESTION_STATUSES = new Set(['dropped'])
+export const CLOSED_QUESTION_VERDICTS = new Set(['abandoned'])
+
+export function questionClosure(card, rollup) {
+  if (!isRecord(card)) return null
+  const status = typeof card.status === 'string' ? card.status : ''
+  const verdict = typeof card.verdict === 'string' ? card.verdict : ''
+  if (!CLOSED_QUESTION_STATUSES.has(status) && !CLOSED_QUESTION_VERDICTS.has(verdict)) return null
+  const sharper = isRecord(rollup) && Number.isSafeInteger(rollup.descendants)
+    ? rollup.descendants : 0
+  // An experiment that never ran is not a narrowing. `evidence` is the audit set — the nodes that
+  // TESTED the card — which is exactly the distinction `card_ledger` draws between a build
+  // reservation and evidence.
+  const measured = isRecord(rollup) && Number.isSafeInteger(rollup.measuredNodes)
+    ? rollup.measuredNodes : 0
+  return {
+    closed: true,
+    by: CLOSED_QUESTION_STATUSES.has(status) ? status : verdict,
+    supported: sharper > 0 || measured > 0,
+    sharper,
+    measured,
+  }
+}

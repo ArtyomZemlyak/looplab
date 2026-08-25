@@ -39,6 +39,7 @@ looplab claims          Lean statement/reference claim projection (PART IV cross
 looplab claim-decide    Lean operator decision overlay (PART V §22.4)
 looplab claim-steward   AGENTIC claim curator: proposal-only ratify/reject/pin review (PART IV §22.4)
 looplab atlas           Capped Atlas summary: explored / thin / contradictory (PART IV Step 6)
+looplab repair-candidates Which files this run's nodes had to fix, ranked by DISTINCT nodes
 looplab backfill-applied-params Repair the record where a node's PROPOSED params are not what RAN (offline, append-only)
 looplab backfill-score-metrics Recover the objectives a score stage measured and the record kept one of (offline, append-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)
@@ -1106,6 +1107,38 @@ looplab backfill-score-metrics runs/ --apply             # actually append
   scored node".
 * **It refuses a live run**, by contending for `engine.lock`: a `score.log` still being written
   describes nothing yet.
+
+## `repair-candidates`
+
+**Which files this run's nodes had to fix, ranked by how many DISTINCT nodes fixed them.**
+
+`RunState.repair_candidates()` has been derived on every fold since the repair ledger landed and had
+no CLI, no route and no panel — the one question it answers, *what belongs in the source repo rather
+than in one node?*, could only be asked from a Python REPL over the event log.
+
+**DISTINCT NODES, not repair count**, and the distinction is the whole ranking: one node repairing
+the same file four times is one discovery, while four nodes repairing it once each is a property of
+the repo. A node inherits its PARENT's files and can never inherit a fix a SIBLING found — a node
+becomes a parent only by winning on metric — so the same fix is paid for again on every branch.
+Measured on `runs/e5small-dr-unified-v4`: **six** nodes repaired `looplab_stages.json` and **five**
+repaired `vectorsearch/configs/config.yaml`, four of those for `oom`, across 19 repair rows.
+
+It RANKS and decides nothing. Promoting a fix into the source repo moves the substrate every later
+node is measured on: that is the operator's call, and it has to be recorded as an event or the
+comparability key cannot tell nodes on either side of it apart (see `promote-repo-fix`).
+
+An empty answer distinguishes two facts an operator must not confuse — a run whose nodes never
+needed a repair, and a log written before the ledger existed.
+
+```bash
+looplab repair-candidates runs/my-run            # the ranked files
+looplab repair-candidates runs/my-run --nodes    # with the node ids behind each row
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `RUN_DIR` | *(required)* | The run directory to read |
+| `--nodes` | off | List the node ids behind each row |
 
 ## `backfill-applied-params`
 

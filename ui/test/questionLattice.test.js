@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   UNGROUPED_ID, conceptSet, descendantIds, isStrictSubset, latticeRollups, latticeRows,
+  questionClosure,
 } from '../src/questionLattice.js'
 
 const q = (id, tags, extra = {}) => ({ id, concept_tags: tags, ...extra })
@@ -188,4 +189,38 @@ test("a question's comparability marker comes from its EXPERIMENTS' nodes", () =
 
   const agreed = latticeRollups({ nodes: { n1: rec('S'), n2: rec('S') } }, cards, rows).get('q1')
   assert.equal(agreed.mixedComparability, false)
+})
+
+test('a closed question with nothing narrower is an UNSUPPORTED discard', () => {
+  const cards = [{ id: 'q1', concept_tags: ['a'], status: 'dropped' }]
+  const rows = latticeRows(cards)
+  const roll = latticeRollups({ nodes: {} }, cards, rows).get('q1')
+  const closure = questionClosure(cards[0], roll)
+  assert.equal(closure.closed, true)
+  assert.equal(closure.by, 'dropped')
+  assert.equal(closure.supported, false, 'nothing sharper and nothing measured')
+})
+
+test('a sharper question, or a measured experiment, SUPPORTS the discard', () => {
+  const bySharper = [
+    { id: 'q1', concept_tags: ['a'], status: 'dropped' },
+    { id: 'q2', concept_tags: ['a', 'b'] },
+  ]
+  const sharperRoll = latticeRollups({ nodes: {} }, bySharper, latticeRows(bySharper)).get('q1')
+  assert.equal(questionClosure(bySharper[0], sharperRoll).supported, true)
+
+  const byEvidence = [{ id: 'q1', concept_tags: ['a'], verdict: 'abandoned',
+    child_card_ids: ['e1'] }, { id: 'e1', concept_tags: ['a'], evidence: ['n1'] }]
+  const rows = latticeRows(byEvidence.slice(0, 1))
+  const roll = latticeRollups({ nodes: { n1: { metric: 1 } } }, byEvidence, rows).get('q1')
+  const closure = questionClosure(byEvidence[0], roll)
+  assert.equal(closure.by, 'abandoned')
+  assert.equal(closure.supported, true)
+})
+
+test('an OPEN question has no closure at all — absence is not "supported"', () => {
+  const cards = [{ id: 'q1', concept_tags: ['a'], status: 'proposed', verdict: 'open' }]
+  const roll = latticeRollups({ nodes: {} }, cards, latticeRows(cards)).get('q1')
+  assert.equal(questionClosure(cards[0], roll), null)
+  assert.equal(questionClosure(null, roll), null)
 })

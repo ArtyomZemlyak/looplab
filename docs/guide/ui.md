@@ -319,7 +319,35 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   `trust_gate` to `gate`/`block` (or pick the `thorough` profile) to make a **high-precision** flag
   ineligible to win or seed breeding/confirmation. Broad critic/perfect-score warnings remain advisory;
   `critic:hardcoded_metric` is the narrow high-precision critic exception.
-- **Cards board** — the run's bounded work-item projection, grouped into the replay-derived lifecycle
+- **Cards board** — three views over one card population, chosen by the **Group the board by** bar,
+  and they answer three different questions. **Lanes** is the kanban below. **Directions** groups
+  experiments under the direction card that owns them, one flat parent→child level. **Research** is
+  the question LADDER: rows are the run's questions, nested by *concept-set inclusion* — a question
+  about `{distill, llm}` sits under both `{distill}` and `{llm}`, indented one rung under each.
+  Four rules an operator should know it follows, none of them cosmetic. A question with two broader
+  questions is **listed under both**, subtree and all, and says "also listed above" where it appears:
+  electing one canonical parent would hide half the structure and the choice would depend on
+  iteration order. A rung shows only the concepts it **adds** to its parent, so each row states what
+  it narrows instead of repeating the chain. The number on a row is the **best** improvement measured
+  anywhere in its subtree *including its own experiments* — never a sum, since two experiments testing
+  one sharpening would add their gains into a total nobody measured — with `own` shown separately
+  when the row's own experiments did worse than a sharper child. And a row whose evidence nodes
+  recorded **provably different comparability keys** says `mixed comparability` beside the number
+  rather than hiding it, exactly as a champion that won a mixed field does: blanking it would leave
+  the questions that got the most work showing nothing. Absent keys are silence, not disagreement.
+  A question with no experiment yet keeps its row and says so — it is the most actionable row on the
+  view. A question the run **closed** (status `dropped`, or verdict `abandoned`) is **dimmed in
+  place, never removed**: it is part of the chain that explains its neighbours, and there is no
+  "hide closed" control for that reason. Beside it the view says whether the closure rests on
+  anything — at least one sharper question below it, or at least one experiment of its own that
+  produced evidence — and a closure resting on neither is marked `nothing narrower`. That is the
+  operator's own rule made checkable: a direction should not be discarded when no more precise
+  experiment was ever run. The view only REPORTS it; nothing here reopens a card, and reopening is
+  not yet a control the engine has. A question carrying no concepts is neither dropped nor seated among the real roots; it has no
+  position in the lattice and gets its own bucket, last. Before the opening memo is written the view
+  says no question has been registered, which is a healthy run's first minutes and not an empty board.
+  The lanes:
+  the run's bounded work-item projection, grouped into the replay-derived lifecycle
   lanes (proposed / building / **coded** / running / evaluated / **failed** / gated / dropped) —
   *except while a build is in
   flight*, where the derived, never-folded `state.card_authoring` overlay replaces the folded status

@@ -29,6 +29,7 @@ import {
 import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
 import { CARD_KIND_DIRECTION, UNFILED_GROUP_ID, cardIsDirection, cardLineageViews,
   cardProposalDrift, directionGroups, rollupChips } from './cardLineageModel.js'
+import ResearchView from './ResearchView.jsx'
 import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
 import { nodeTraceSubject } from './traceSurfaceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
@@ -1214,10 +1215,15 @@ function _CardKanban({
     })}
     {groups.length === 0 && <div className="muted card-empty">no work items yet</div>}
   </div>
+  // The question ladder. `visibleCards` and `renderCard` are the SAME inputs the other two views
+  // draw from, so a filter or a control applied on one board reaches this one too rather than the
+  // view growing its own quietly-different population.
+  const researchBoard = <ResearchView cards={visibleCards} state={state} renderCard={renderCard} />
   const groupingBar = <div className="toolbar card-grouping" role="group"
     aria-label="Group the board by">
     {[['lanes', 'Lanes', 'lifecycle status — what the machine is doing now'],
       ['directions', 'Directions', 'research directions and the experiments filed under them'],
+      ['research', 'Research', 'the ladder of questions, each one narrowing the one above it'],
     ].map(([key, label, hint]) => <button key={key} type="button" title={hint}
       className={'btn sm' + (grouping === key ? ' primary' : '')}
       aria-pressed={grouping === key} onClick={() => setGrouping(key)}>{label}</button>)}
@@ -1251,7 +1257,7 @@ function _CardKanban({
           {groupingBar}
         </div>
         {addBar}
-        {grouping === 'directions' ? directionsBoard : board}
+        {grouping === 'research' ? researchBoard : (grouping === 'directions' ? directionsBoard : board)}
       </div>
       {detailOpen && pane?.compact && <button type="button" className="workspace-scrim"
         tabIndex={-1} onClick={closeDetails} aria-label="Close work item details" />}
@@ -1297,7 +1303,7 @@ function _CardKanban({
     <_CardProjectionNotice projection={projection} cards={visibleCards} />
     {groupingBar}
     {addBar}
-    {grouping === 'directions' ? directionsBoard : board}
+    {grouping === 'research' ? researchBoard : (grouping === 'directions' ? directionsBoard : board)}
   </Panel>
 }
 

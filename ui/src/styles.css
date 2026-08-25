@@ -628,6 +628,45 @@ button { font: inherit; }
 .card-direction-rows { display: grid; gap: 6px;
   grid-template-columns: repeat(auto-fill, minmax(225px, 1fr)); align-items: start; }
 .card-grouping { gap: 4px; margin: 0; }
+/* THE RESEARCH LADDER. Not a grid and not a kanban: the point of this view is that a chain of
+   sharpening questions reads top-to-bottom as ONE chain, so the rows are a plain ordered list and
+   the only structural signal is the indent, applied inline from the row's own depth. */
+.card-research { min-width: 0; }
+.research-filter { gap: 6px; margin: 0 0 8px; }
+.research-lattice { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.research-row { min-width: 0; background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 7px 8px; }
+/* The indent is a MARGIN on a bordered row rather than padding inside a shared box, so a deep rung
+   is visibly a narrower card and not just text that starts further right. */
+.research-row-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; }
+.research-statement { font-size: 12px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+/* Fixed width whether it holds a twist or the empty placeholder, so every statement on the ladder
+   starts at the same x within its own depth and the indent stays the only left-edge signal. */
+.research-twist { display: inline-block; width: 18px; min-width: 18px; text-align: center;
+  padding: 0; line-height: 1.2; }
+.research-row-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; }
+/* A concept id is a coordinate, not a status — toned like the direction chip it shares a taxonomy
+   with, and never like a lifecycle lane. */
+.chip-concept { background: color-mix(in srgb, var(--accent) 10%, var(--bg-3));
+  color: var(--fg); border-color: color-mix(in srgb, var(--accent) 26%, var(--border));
+  font-size: 11px; }
+/* The experiments under one question reflow exactly as they do under a direction — same floor, same
+   auto-fill — so moving between the two views does not change how work items are shaped. */
+/* A closed question is DIMMED and never removed: it is part of the chain that explains its
+   neighbours, and the operator asked for the whole ladder to stay readable. Opacity alone would be
+   colour-only signalling, so the row also carries its own `dropped`/`abandoned` chip. */
+.research-closed { opacity: .62; }
+.research-closed .research-statement { text-decoration: line-through; }
+/* Closed on NOTHING narrower — the one closure the operator suspected the run of making. It keeps
+   the left border rather than a fill, so it reads at a glance in a column of dimmed rows. */
+.research-closed-unsupported { opacity: .85; border-left: 3px solid var(--working); }
+.research-experiments { display: grid; gap: 6px; margin-top: 7px;
+  grid-template-columns: repeat(auto-fill, minmax(225px, 1fr)); align-items: start; }
+@media (max-width: 700px) {
+  /* On a narrow viewport a 22px-per-level indent runs the deepest rungs off the edge; the ladder is
+     still readable from the twists and the order, so the indent collapses rather than the rows. */
+  .research-row { margin-left: 0 !important; }
+}
 /* A coordinate the run MOVED away from its proposal. Toned, not shouted: the row already leads with
    the real value and carries the proposal in brackets, so the colour only has to make the pair
    findable in a line of a dozen knobs. */
