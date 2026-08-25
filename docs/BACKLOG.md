@@ -4269,6 +4269,42 @@ Same shape both times: the mechanism is intact end to end, the bound cuts the TA
 is at the tail. A bound that removes the answer is worse than no answer, because the caller cannot
 tell a short record from a truncated one.
 
+## The calibration corpus is already revoked, and ordinary `Settings` work is what revokes it
+
+Found 2026-08-24 while PRICING a different change, which is the only reason anyone looked: the
+empty-authority fix had to prove it did not move the paired-run receipt, so
+`analyze_speculation_run` was replayed over all six preserved calibration runs. All six REFUSE, and
+not for any reason to do with that change:
+
+    ValueError: config fields differ from the exact calibration snapshot
+    (missing=['asha_live_kill_confidence', 'assistant_time_budget_s', 'auto_extra_metrics',
+              'cadence_while_evaluating', 'concept_tidy', 'developer_probe',
+              'developer_probe_timeout_s', 'eval_deadline_grace_s', ...])
+
+`_validate_calibration_config` requires the snapshot's field SET to equal
+`SPECULATION_CALIBRATION_SNAPSHOT_FIELDS | SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS` exactly,
+and that expected set is a CURRENT constant. Every one of the missing names is an ordinary `Settings`
+field added after those runs were recorded — several of them mine, over the last two weeks. So the
+check demands that evidence written in the past carry fields that did not exist when it was written,
+and **no receipt can be minted on this box today at all**. Six GPU runs are sitting there as a dead
+asset and nothing said so; the gate reports it as a snapshot mismatch, which reads like a corrupt
+run rather than like a version skew.
+
+**This is not the same failure as a changed derivation, and the difference decides the fix.** A
+changed derivation SHOULD revoke receipts — that is the protocol working, and it is why a change
+there is proved by comparing `canonical_json(body)` over the same corpus. Adding an unrelated
+`Settings` field changes no derivation and no measurement; it changes only what a snapshot happens
+to contain. The equality is doing the job of a version check with the tool of an exactness check.
+
+OPEN[calibration-corpus-revoked-by-unrelated-settings] every preserved calibration run refuses because the expected field set is a CURRENT constant, so any new `Settings` field revokes evidence it cannot affect. proof:`present:if set(config) != expected_config_fields@looplab/search/speculation_quality.py`
+
+  The shape of the fix is a VERSION, not a loosening: the expected set has to be the one that was
+  current when the evidence was written (the snapshot already stamps `config_snapshot_schema`), so a
+  field added later is absent-and-fine while a field the calibration actually READS staying absent is
+  still fatal. Do NOT simply subtract the unknown names — that turns an exactness check into a
+  no-op and the next genuinely-lossy snapshot passes. It is a receipt-protocol revision and belongs
+  with that module's owner; what this entry adds is that the cost of NOT doing it is already paid.
+
 ## Three cadences that looked like defects — measured 2026-08-25, and two of my own claims were wrong
 
 The post-v5 fix list carried three "unexplained cadence" items with the standing rule attached: they
