@@ -71,7 +71,15 @@ ALSO appended to the fence's own diagnostic log beside the run.
 WHAT IT DOES NOT FENCE (by construction, and each is deliberate)
 ----------------------------------------------------------------
 * the node's own workdir, the run directory, `/tmp`, site-packages, the HF/model cache — none of
-  them are under an editable source root, so the prefix test never matches;
+  them are under an editable source root, so the prefix test never matches. THE ONE EXCEPTION IS
+  THIS FENCE'S OWN GENERATED FILE, which lives in that same unfenced run directory and, until
+  2026-08-25, could therefore simply be overwritten by the process it fences — refuse the read,
+  `open(<run_dir>/.looplab-fence/sitecustomize.py, "w")`, and every process the run starts after
+  that is unfenced. Relocating it does not help (there is nowhere outside the operator's tree that
+  the denylist covers), so it is protected by two rungs of its own instead: the kernel one
+  (`_harden`, mode 0444) and the hook one (`_SELF`, which refuses every mutation event aimed at the
+  fence directory whatever `_ROOTS`/`_ALLOW` say). Both are needed and neither is sufficient —
+  measured, with one rung removed at a time;
 * `data:` / `references:` mount SOURCES — allow-listed explicitly, because a data source is legally
   allowed to live INSIDE the editable tree and mounts are exactly the sanctioned read channel;
 * the engine's own machinery — seeding (`engine/workspace.py`), the git plumbing, the fault
@@ -177,6 +185,11 @@ from looplab.runtime.read_allowlist import mount_sources
 FENCE_DIR_ENV = "LOOPLAB_READ_FENCE_DIR"
 FENCE_DIRNAME = ".looplab-fence"
 VIOLATION_LOG = "violations.log"
+
+# The mode `install` leaves on the generated `sitecustomize.py`: readable by every interpreter that
+# has to IMPORT it, writable by nobody — see `_harden` for why this is the rung that carries the
+# self-protection and `_SELF` in the template for the rung that guards it.
+FENCE_FILE_MODE = 0o444
 
 # The policy rungs, in increasing strictness. See `Settings.read_fence` for why `deny` is the
 # default rather than `warn`.
@@ -540,6 +553,40 @@ _realcache = {}
 _seen = set()
 _busy = threading.local()
 
+# THIS FILE'S OWN DIRECTORY — the one region no fenced process may CHANGE, whatever `_ROOTS` and
+# `_ALLOW` say. It is the hook half of the self-protection whose other half is the kernel one
+# (`install` writes this file mode 0444, and `CapEff` is 0 in the container a node runs in, so the
+# owner write bit genuinely binds). Neither rung is sufficient alone: 0444 stops
+# `open(fence, "w")` and stops nothing else, because the owner of a file may always chmod it back;
+# and an audit-hook refusal is only as good as the hook, which is what the write was trying to
+# remove. Together the kernel bit refuses the write and the hook refuses the `os.chmod` /
+# `os.remove` / `os.rename` that would take the kernel bit away.
+#
+# Measured 2026-08-21 and re-measured 2026-08-25 on this tree: a fenced child refused a read of the
+# operator's checkpoint, then `open(os.environ["LOOPLAB_READ_FENCE_DIR"] + "/sitecustomize.py",
+# "w")` SUCCEEDED, and the same read from the next process of the run returned the bytes. Note what
+# the re-measurement settled: the run dir was NOT under an editable root in that reproduction, so
+# `fence_inputs` had dropped `allow=[run_dir]` entirely and the allow list was `()`. The hole is not
+# the allow entry — it is that this file lives outside every fenced root by construction, which is
+# true of every place it could legally be written.
+#
+# DERIVED FROM `__file__` rather than baked by `render`: the fence protects wherever it actually
+# lives, including a copy, and `render` keeps its signature. `_realpath`, because `_fenced_target`
+# resolves the DIRNAME of its argument and a byte-exact prefix compare against an unresolved
+# `__file__` would miss a fence dir reached through a symlink. Empty under the probe seam
+# (`_PROBE_NAME`), where the source is exec'd from a namespace that has no `__file__` — the probe
+# yields the pure `_fenced()` predicate and installs nothing, so it has no file to protect.
+#
+# COST: none on the READ hot path, by construction — `_SELF` is consulted in `_fenced_target` only,
+# i.e. on the mutation events a training process never raises. What it adds there is one string
+# concat and one `startswith` against a ONE-element tuple, and a create+close+remove loop
+# (N=20,000, best-of-5, one fresh process per variant) could not separate it from this box's
+# run-to-run noise in either direction. Startup pays one `realpath` of this file's directory.
+try:
+    _SELF = (_realpath(os.path.dirname(os.path.abspath(__file__))) + _SEP,)
+except Exception:
+    _SELF = ()
+
 # Is a RELATIVE open able to reach a fenced root from where this process stands? Normally no, and
 # that is what buys the syscall-free fast bail for the branch nearly every read takes. But a
 # process's cwd is far more often set AT CREATION than by `os.chdir`: `subprocess.run(cwd=...)`,
@@ -777,7 +824,16 @@ def _fenced_target(path, dir_fd):
                 return None
         r = _join(base, r)
     head, _sep, tail = r.rpartition(_SEP)
-    return _prefixed(_join(_real(head or _SEP), tail))
+    full = _join(_real(head or _SEP), tail)
+    # BEFORE the root/allow policy, and deliberately not expressible through it: `_SELF` is refused
+    # for every caller, allow-list included. See `_SELF`. A run dir is allow-listed on purpose (a
+    # run may be `--out`-ed inside the repo it edits) and, far more often, this file is simply
+    # outside every root — so under the ordinary policy the fence's own source is the one file a
+    # fenced process may freely delete, rename or chmod, and doing any of those disarms the fence
+    # for every process the run starts afterwards.
+    if _SELF and _join(full, "").startswith(_SELF):
+        return full
+    return _prefixed(full)
 
 
 def _dir_fd(args, index):
@@ -969,6 +1025,68 @@ def render(roots, allow, *, policy: str, log: str = "", run: str = "",
     }
 
 
+def _harden(target: Path) -> None:
+    """Drop every WRITE bit on the generated fence — the KERNEL rung of its self-protection.
+
+    THE DEFECT. Until 2026-08-25 this file was left at `atomic_write_text`'s mode (0600, i.e. the
+    `mkstemp` default carried through `os.replace`) inside a directory the fenced process may write,
+    and NOTHING refused a write to it: the hook is a denylist over the operator's editable roots, and
+    this file is outside every one of them by construction. Driven end to end, twice: a fenced child
+    refuses the read, `open(<fence>, "w")` succeeds, and the next process of the run reads the
+    operator's checkpoint — i.e. the `rubertlite-dr-unified-v6` node-4 incident, re-enabled from
+    inside a node, for the whole rest of the run rather than for one process.
+
+    WHY THE KERNEL AND NOT THE HOOK. The thing being protected IS the hook, so a rung expressed only
+    in the hook protects itself with the object under attack. `CapEff` is 0 for a node process in
+    this container (no `CAP_DAC_OVERRIDE`), so the owner write bit is not advisory here: it is the
+    kernel refusing the `open`, before any Python runs, for every writer including the native ones
+    (`ctypes`, a C extension, a `cp`) that raise no audit event at all and that the whole module
+    docstring lists as beyond an audit hook's reach.
+
+    WHAT IT DOES NOT DO, and why `_SELF` exists beside it: the owner of a file may always chmod it
+    back, and `CapEff` says nothing about that — ownership, not a capability, is what `chmod`
+    checks. So the bit alone converts a one-call escape into `os.chmod` + write. `os.chmod`,
+    `os.remove` and `os.rename` all raise audit events, so the template's `_SELF` refuses exactly
+    the calls that would remove this bit, and the two rungs hold each other up.
+
+    NOT the DIRECTORY. 0555 on `<run_dir>/.looplab-fence` would also stop the unlink-and-recreate
+    path at the kernel rung, and it was measured and rejected: CPython writes
+    `__pycache__/sitecustomize.*.pyc` there on first import, that write is silently skipped when the
+    directory is read-only, and every fenced process then recompiles the template — 1.02 ms measured
+    on this box against a 17.9 ms fenced-process startup, +5.7 %, paid by every python a run
+    launches. `_SELF` already refuses the unlink, so the directory bit would buy a second copy of a
+    rung that is there, at a price the read path is not allowed to pay.
+
+    Best-effort: a chmod that fails leaves the `_SELF` rung standing, whereas raising here would be
+    turned by `_read_fence_dir`'s `except OSError` into an entirely UNFENCED run — strictly worse
+    than a fence whose file is one rung down.
+
+    OPEN[read-fence-self-protection-ends-at-an-unfenced-child]
+    proof:present:FENCE_FILE_MODE@looplab/runtime/read_fence.py
+    The two rungs above hold against every writer that goes through this interpreter — measured
+    2026-08-25, 11 of 11 probes refused (`open(fence, "w")`, chmod back, unlink, unlink via
+    `dir_fd`, rename away, rename over, truncate, chmod of the directory, `shutil.rmtree` of it,
+    rename of it, symlink over the file), in BOTH layouts (run dir inside and outside the editable
+    root). They do not hold against a process that is not fenced in the first place: measured in the
+    same session, `subprocess.run([sys.executable, "-S", ...])` with `PYTHONPATH` stripped chmods
+    this file to 0644, rewrites it, and the NEXT process of the run reads the operator's checkpoint.
+    That child is the module docstring's own stated residual (`-S`/`-E`/`-I` or a stripped
+    `PYTHONPATH`), but the ESCALATION is specific to this file and is why the marker stays: every
+    other use of that residual costs the node one unfenced process, while rewriting this file
+    unfences every process the run starts afterwards.
+    What would close it is a rung that does not rest on OWNERSHIP — `chmod` asks who owns the inode,
+    never what capabilities the caller holds, so `CapEff` 0 does not help here the way it does for
+    the write bit. The candidates, in the order this repo would pay for them: the Landlock ruleset
+    already in `runtime/landlock.py` extended to cover the fence directory read-only (it is `off` by
+    default today, see `Settings.landlock`); or re-asserting `install` per LAUNCH rather than once
+    per engine, which repairs a tampered fence instead of preventing it and costs a 24 KB read at
+    every `run_argv`. Neither is measured yet, so neither is claimed here."""
+    try:
+        os.chmod(target, FENCE_FILE_MODE)
+    except OSError:
+        pass
+
+
 def install(run_dir, *, roots, allow, policy: str) -> Optional[str]:
     """Materialize the fence beside a run and return the directory to prepend to `PYTHONPATH`.
 
@@ -985,6 +1103,10 @@ def install(run_dir, *, roots, allow, policy: str) -> Optional[str]:
     # write would let one worker truncate the file another interpreter is mid-import of.
     try:
         if target.read_text(encoding="utf-8") == src:
+            # Re-assert the mode even when the bytes already match: `_harden` is what makes the file
+            # unwritable, and a run that finds the right content has no idea whether the previous
+            # writer was this function or a node that put the content back after widening the bits.
+            _harden(target)
             return str(d)
     except OSError:
         pass
@@ -995,7 +1117,11 @@ def install(run_dir, *, roots, allow, policy: str) -> Optional[str]:
     # root cannot publish a truncated `sitecustomize.py` that every python of the run then fails to
     # import, and an `except BaseException: unlink(tmp)` so a failed or cancelled write does not
     # leave a permanent multi-KB `.tmp` in the run dir with nothing to reclaim it.
+    # `os.replace` onto a 0444 destination is a DIRECTORY operation and succeeds — the mode of the
+    # file being replaced is not consulted — so re-installing over a hardened fence needs no unlock,
+    # and the new inode arrives at `mkstemp`'s 0600 and is hardened below.
     atomic_write_text(target, src)
+    _harden(target)
     return str(d)
 
 
