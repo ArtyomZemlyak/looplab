@@ -60,6 +60,18 @@ class _MemoOut(BaseModel):
     findings: list[str] = Field(default_factory=list)
     claims: list[_ClaimOut] = Field(default_factory=list)
     recommended_directions: list[str] = Field(default_factory=list)
+    # THE TWO HALVES THE PROMPT ASKS FOR. They were added to `ResearchMemo` and to `_SYSTEM` and NOT
+    # here, and this class is the one the model actually fills — `_emit_spec` hands
+    # `_MemoOut.model_json_schema()` to the provider as the tool's parameters. So the prompt asked
+    # for fields the model had no slot to write into, and it did the only thing it could: put all
+    # eleven outputs in `recommended_directions` and leave both new fields empty. Verified live on
+    # the fresh `runs/e5small-dr-unified-v5`: `open_questions` 0, `next_experiments` 0, compat 11.
+    #
+    # A prompt that names a field and a schema that lacks it is a feature shipped INERT. The guard
+    # in `tests/test_memo_question_experiment_split.py` now re-derives the prompt's field names from
+    # the text and asserts each one exists here, so the two cannot move apart again.
+    open_questions: list[str] = Field(default_factory=list)
+    next_experiments: list[str] = Field(default_factory=list)
 
 
 _SYSTEM = (

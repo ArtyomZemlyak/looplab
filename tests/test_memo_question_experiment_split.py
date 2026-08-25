@@ -71,3 +71,41 @@ def test_the_model_defaults_leave_both_empty_so_an_old_memo_is_unchanged():
     memo = ResearchMemo(recommended_directions=["a"])
     assert memo.open_questions == [] and memo.next_experiments == []
     assert _registered(memo.model_dump()) == ["a"]
+
+
+def test_every_field_the_prompt_NAMES_exists_in_the_emit_schema():
+    """A prompt that asks for a field the schema lacks is a feature shipped INERT.
+
+    THIS IS THE GUARD FOR A BUG THAT SHIPPED. `open_questions` / `next_experiments` were added to
+    `ResearchMemo` and to `_SYSTEM` and NOT to `_MemoOut` — the class `_emit_spec` hands to the
+    provider as the tool's parameters. The model was asked for fields it had no slot to write into
+    and did the only thing it could. Measured on the fresh `runs/e5small-dr-unified-v5`:
+    `open_questions` 0, `next_experiments` 0, `recommended_directions` 11.
+
+    Re-derived from the prompt text rather than listed, so a NEW field named in the prompt is
+    covered the day it is written. Backticked names only — the prompt also mentions tool names and
+    prose, and a substring sweep would demand a schema slot for `update_plan`.
+    """
+    import re
+    from looplab.agents.deep_research import _MemoOut, _SYSTEM, DeepResearcher
+
+    schema = set(_MemoOut.model_json_schema()["properties"])
+    # The prompt's own instruction sentence: "call `emit` exactly once with: a `summary` …".
+    asked = set(re.findall(r"`([a-z_]+)`", _SYSTEM.split("call `emit` exactly once")[1]))
+    tools = {"update_plan", "emit"}          # named as CALLS, not as memo fields
+    missing = sorted(asked - tools - schema)
+    assert not missing, (
+        f"the prompt asks for {missing} and the emit schema has no slot for them — the model "
+        f"cannot answer and the field ships inert")
+
+
+def test_the_emit_schema_and_the_durable_model_agree_on_the_split():
+    """The two halves must exist on BOTH: `_MemoOut` is what the model fills, `ResearchMemo` is what
+    is stored. A field on one and not the other is silently dropped at the boundary."""
+    from looplab.agents.deep_research import _MemoOut
+
+    emit = set(_MemoOut.model_json_schema()["properties"])
+    stored = set(ResearchMemo.model_json_schema()["properties"])
+    for field in ("open_questions", "next_experiments", "recommended_directions"):
+        assert field in emit, f"{field} is not fillable by the model"
+        assert field in stored, f"{field} is not storable"
