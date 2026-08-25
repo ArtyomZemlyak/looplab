@@ -314,6 +314,18 @@ def _bounded_card_added_receipt(d: dict) -> dict | None:
     parent_id = _card_replay_node_id(d.get("parent_id"))
     if parent_id is not None:
         rec["parent_id"] = parent_id
+    # THE RESEARCH-LINEAGE EDGE, and it has to be named HERE or it does not exist. This function
+    # rebuilds the replay row from an ALLOW-LIST — `RunState` is deep-copied on every incremental
+    # snapshot, so `_on_card_added` must never retain `Event.data` — and a key it does not name is
+    # gone before any reader sees it. `_card_added_snapshot` decoded `parent_card_id` faithfully
+    # from a dict that had already been stripped of it, so the decoder worked and the field was
+    # dead: measured on `runs/e5small-dr-unified-v5`, the durable row named a direction that WAS on
+    # the board and the folded child's parent was None with every direction childless.
+    # NOT a node id — this is a CARD id, so it takes the same string bound as a card's own id
+    # rather than `_card_replay_node_id` one line above it.
+    parent_card_id = _bounded_card_ref(d.get("parent_card_id"))
+    if parent_card_id is not None:
+        rec["parent_card_id"] = parent_card_id
     scored_against = _card_replay_node_id(d.get("scored_against"))
     if scored_against is not None:
         rec["scored_against"] = scored_against
@@ -536,13 +548,6 @@ def _bounded_card_enrichment(value, *, depth: int = 0, budget: list[int] | None 
                 out[key] = bounded
         return True, out
     return False, None
-
-
-def _bounded_card_ref(value) -> str | None:
-    if (not isinstance(value, str) or not value or value != value.strip()
-            or len(value) > 400 or not value.isprintable()):
-        return None
-    return value
 
 
 def _digest_ref(value: str, namespace: str) -> bool:

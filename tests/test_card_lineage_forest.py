@@ -294,13 +294,71 @@ def test_the_edge_survives_a_path_with_no_card_added_receipt():
     st = fold(events)
     child = next((c for c in st.cards.values() if c.seed_statement == "a concrete experiment"), None)
     assert child is not None, "the node's own card must exist"
-    assert child.parent_card_id == "dir-7" or child.parent_card_id is None, (
-        "the edge is either carried or refused as unknown — never silently forgotten while the "
-        "durable row still states it")
-    # The refusal case is legitimate (`dir-7` is not a real card here); what must NOT happen is the
-    # value never reaching the fold at all, which is what this pins through `cards_added`-free input.
-    from looplab.events.card_ledger import _card_added_snapshot
-    assert _card_added_snapshot({"id": "c", "parent_card_id": "dir-7"})[0]["parent_card_id"] == "dir-7"
+    # The direction the node names must EXIST for the edge to be legal, so the log carries one. The
+    # previous version of this assertion read `== "dir-7" or is None` about a target no card had,
+    # which is a guard that cannot fail — and it did not fail, for the eleven days the edge was dead.
+    assert child.parent_card_id is None, (
+        "`dir-7` is not a card in this log, so the edge is correctly REFUSED — the carrying case is "
+        "pinned by test_a_card_added_parent_edge_survives_the_whole_fold below")
+
+
+def test_a_card_added_parent_edge_survives_the_WHOLE_fold():
+    """The end-to-end edge, through `card_added` — and the one thing the old guard could not see.
+
+    MEASURED on the live `runs/e5small-dr-unified-v5` on 2026-08-25, folded with master's own code:
+    the durable `card_added` row carries
+    `parent_card_id='reproduce-the-0-7934-champion-in-this-run-dcl-nl-d609f0'`, that id IS a card on
+    the folded board (`aliases.canon` is the identity on all six ids), and the folded child's
+    `parent_card_id` was **None** with every direction's `child_card_ids` **[]**. The operator's
+    whole requirement — seeing parent/child links — was dead.
+
+    `_apply_card_lineage` was innocent: spying on it through the real fold, the field was already
+    None on ENTRY. `_bounded_card_added_receipt` rebuilds the replay row from an ALLOW-LIST of keys
+    and `parent_card_id` was not one of them, so `_card_added_snapshot` decoded a key that had been
+    stripped one layer above it — the decoder worked on a dict nothing ever handed it.
+
+    THE OLD GUARD ASSERTED THE DECODER DIRECTLY (`_card_added_snapshot({...})`), on a dict it built
+    itself, which is why it stayed green: it proved the reader could read and never that the writer
+    wrote. Same shape as the `_MemoOut` fields that shipped inert. This one goes through `fold`.
+    """
+    from looplab.core.models import Event
+    from looplab.events.replay import fold
+
+    events = [
+        Event(seq=0, ts=0.0, type="run_started",
+              data={"run_id": "r", "task_id": "t", "direction": "max"}),
+        Event(seq=1, ts=0.0, type="card_added",
+              data={"id": "dir-1", "statement": "a broad direction", "source": "deep_research"}),
+        Event(seq=2, ts=0.0, type="card_added",
+              data={"id": "exp-1", "statement": "a concrete experiment", "source": "researcher",
+                    "parent_card_id": "dir-1"}),
+    ]
+    cards = fold(events).cards
+    assert cards["exp-1"].parent_card_id == "dir-1", (
+        "MUTATION: drop `parent_card_id` from `_bounded_card_added_receipt` and this goes red — "
+        "which is exactly the state master was in")
+    assert cards["dir-1"].child_card_ids == ["exp-1"], "and the inverse edge is published"
+    assert cards["dir-1"].child_rollup is not None, "a parent with a child gets its rollup"
+
+
+def test_an_edge_naming_a_card_that_does_not_exist_is_refused_not_invented():
+    """The receipt now carries the field, so the LEGALITY check has to keep doing its job."""
+    from looplab.core.models import Event
+    from looplab.events.replay import fold
+
+    events = [
+        Event(seq=0, ts=0.0, type="run_started",
+              data={"run_id": "r", "task_id": "t", "direction": "max"}),
+        Event(seq=1, ts=0.0, type="card_added",
+              data={"id": "exp-1", "statement": "an experiment", "source": "researcher",
+                    "parent_card_id": "nobody"}),
+        Event(seq=2, ts=0.0, type="card_added",
+              data={"id": "self-1", "statement": "a self-edge", "source": "researcher",
+                    "parent_card_id": "self-1"}),
+    ]
+    cards = fold(events).cards
+    assert cards["exp-1"].parent_card_id is None, "an unknown target is a root, not a dangling edge"
+    assert cards["self-1"].parent_card_id is None, "a self-edge is refused"
 
 
 def test_a_direction_inherits_the_concept_UNION_of_its_children():
