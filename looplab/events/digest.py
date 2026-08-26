@@ -7,6 +7,7 @@ novelty gate and the `find_analogous` tool (`param_distance`). No heavy imports 
 """
 from __future__ import annotations
 
+import json
 import math
 from typing import Optional
 
@@ -288,6 +289,135 @@ def select_trials(trials, k: int, direction: str) -> list:
     return [scored[i] for i in idx]
 
 
+# ------------------------------------------------------------------------------------------------
+# THE EVAL'S OWN ACCOUNT OF A NUMBER IT COULD NOT PRODUCE — the WORDS channel of the stdout-JSON
+# protocol, whose NUMBERS channel is `runtime/sandbox.py::json_line_extras`.
+# ------------------------------------------------------------------------------------------------
+# An eval reports through a final JSON line on stdout. That line has exactly two readers today:
+# `json_line_metric` takes the primary key, and `json_line_extras` sweeps every OTHER *numeric* key
+# into `extra_metrics`. There has been no channel for WORDS, and the consequence is measured, not
+# hypothetical: `benchmarks/algotune/looplab_eval.py` prints why a speedup is missing (the class, the
+# validity fraction, the task's own ranked `is_solution` rejection messages) and had to NEST that
+# block precisely so the numeric sweep would not drag `instances_valid` into the metrics table as an
+# `auto` measurement (that file's own docstring says so). Nested, it reached the durable record —
+# `Node.stdout_tail` — and stopped there: `read_logs` renders the raw tail, and every other surface
+# rendered the bare `metric=0.0`.
+#
+# THE CONVENTION, so this is a protocol and not a guess about one benchmark: on the final JSON line,
+# a nested object under a key spelled `no_<something>` (`{"speedup": 0.0, "no_speedup": {...}}` —
+# i.e. `"no_" + the metric key`) is the producer saying WHY the number beside it is not a number.
+# `reason` is its class. Measured over the 20 finished task-arms of `runs-B` (56 `node_evaluated`
+# rows): the `no_` rule matches the 9 rows that carry such a block and NONE of the 47 that do not.
+# The looser rule "any nested object holding a `reason`" was tried first and matched all 56 — every
+# healthy node prints a `subset_evidence.reason` — which is why the prefix is load-bearing.
+#
+# NOT the eval's raw diagnostic column — the SIBLING of `stdout_tail` written by
+# `engine/evaluate.py::_scored_output_evidence`, whose name is deliberately not spelled in this
+# module because `tests/test_scored_output_evidence.py::test_it_stays_off_the_always_on_prompt`
+# greps this file for it. That column is up to 4,000 characters of free text on EVERY scored node
+# and is `pull`-only for that cost reason (`engine/signal_delivery.py::scored_eval_stderr`). What is
+# rendered here instead is a BOUNDED extract of a STRUCTURED block — the `triage_rationale` shape, a
+# ~100-char verdict the same registry already puts on the always-on line for a node that FAILED.
+#
+# TEXT MAY NOMINATE, NEVER DECIDE: this is render-only. Nothing here touches `metric`, feasibility,
+# selection or the failure taxonomy — `tests/test_metric_account_on_the_default_read_path.py` pins it.
+
+#: What a full account costs. MEASURED: rendered over the nine real blocks in `runs-B`, the longest
+#: complete render — reason + evaluator verdict + four instance counts + all three ranked
+#: `is_solution` messages + their totals — is 576 characters. 600 therefore carries every one of them
+#: WHOLE; a 300 (the budget `read_experiment` gives `failure=`) cut the ranked messages off five of
+#: the nine, and the messages are the half that says what to fix.
+ACCOUNT_CHARS = 600
+#: What the always-on line costs, the `triage_rationale` bound: reason + the producer's first prose
+#: field. The real ones measure 80-84 characters ("no_speedup=invalid_results: Speedup N/A due to
+#: invalid results: 98/100 valid (98.0%)").
+ACCOUNT_LINE_CHARS = 100
+#: Per-field clip inside a full render, so one long string in the block cannot eat the budget the
+#: other fields need.
+_ACCOUNT_FIELD_CHARS = 140
+#: Stop building fields once the render already exceeds what the caller can print. A block is
+#: producer-authored, so its field count and list lengths are unbounded from this module's point of
+#: view; the caller's clip alone would still let a hostile eval make us build megabytes first.
+_ACCOUNT_BUILD_CHARS = 2 * ACCOUNT_CHARS
+_ACCOUNT_PREFIX = "no_"
+_ACCOUNT_REASON = "reason"
+
+
+def _last_json_object(text: str) -> Optional[dict]:
+    """The LAST line of `text` that parses as a JSON object — the same bottom-up tolerant scan
+    `runtime/sandbox.py::_last_json_dict` does for the metric, restated here (six lines, no
+    predicate) rather than imported, because `events` must not take an import edge on `runtime`.
+
+    `Node.stdout_tail` is a TAIL, so the line may be truncated at its FRONT and then does not parse.
+    That returns None and the caller renders nothing — a missing account, never a fabricated one."""
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def _account_block(n) -> tuple[str, dict]:
+    """The `no_<x>` block on this node's final metric line, as `(key, block)`, or `("", {})`."""
+    obj = _last_json_object(getattr(n, "stdout_tail", "") or "")
+    if not obj:
+        return "", {}
+    for key, val in obj.items():
+        if (str(key).startswith(_ACCOUNT_PREFIX) and isinstance(val, dict)
+                and isinstance(val.get(_ACCOUNT_REASON), str) and val[_ACCOUNT_REASON].strip()):
+            return str(key), val
+    return "", {}
+
+
+def _account_fields(key: str, block: dict, *, brief: bool) -> list[str]:
+    out = [f"{key}={' '.join(block[_ACCOUNT_REASON].split())[:_ACCOUNT_FIELD_CHARS]}"]
+    for k, v in block.items():
+        if sum(map(len, out)) > _ACCOUNT_BUILD_CHARS:
+            break
+        if k == _ACCOUNT_REASON or isinstance(v, bool) or v is None:
+            continue
+        if isinstance(v, str):
+            text = " ".join(v.split())[:_ACCOUNT_FIELD_CHARS]
+            if not text:
+                continue
+            if brief:                      # the line form: the reason plus the producer's FIRST prose
+                return [f"{out[0]}: {text}"]
+            out.append(f"{k}={text}")
+        elif brief:
+            continue
+        elif isinstance(v, (int, float)):
+            out.append(f"{k}={fmt_num(float(v)) if isinstance(v, float) else v}")
+        elif isinstance(v, list):
+            # ranked rows the producer already ordered (`{"message": ..., "count": n}`) — the task's
+            # own rejection reasons on the AlgoTune arm, and the most actionable half of the block.
+            for row in v:
+                if sum(map(len, out)) > _ACCOUNT_BUILD_CHARS:
+                    break
+                if isinstance(row, dict) and isinstance(row.get("message"), str):
+                    msg = " ".join(row["message"].split())[:_ACCOUNT_FIELD_CHARS]
+                    out.append(f"{k}[{msg}]" + (f"x{row['count']}" if "count" in row else ""))
+    return out
+
+
+def metric_account(n, max_chars: int = ACCOUNT_CHARS, *, brief: bool = False) -> str:
+    """Why this node's metric is what it is, in the eval's OWN words — `""` when it said nothing.
+
+    `brief` returns the one-clause line form (reason + first prose field); otherwise the whole block
+    is rendered `key=value; ...` in the producer's own order, each field and the total bounded."""
+    key, block = _account_block(n)
+    if not key:
+        return ""
+    text = "; ".join(_account_fields(key, block, brief=brief))
+    limit = min(max_chars, ACCOUNT_LINE_CHARS) if brief else max_chars
+    return text if len(text) <= limit else text[:max(1, limit - 1)].rstrip() + "\u2026"
+
+
 def trial_line(t) -> str:
     extra = f"  ({fmt_num(t.seconds)}s)" if getattr(t, "seconds", None) else ""
     return f"{fmt_params(t.params)} → {fmt_num(t.metric)}{extra}"
@@ -311,7 +441,12 @@ def _node_line(n, state=None) -> str:
     # next proposal then reacts to "the idea is unsound because X", not a bare taxonomy label.
     triage = getattr(n, "triage_rationale", "") if n.status is NodeStatus.failed else ""
     triage = f" — triage: {' '.join(triage.split())[:100]}" if triage else ""
-    return f"  #{n.id} {n.operator} {outcome} {fmt_params(n.idea.params)}{swept}{theme}{triage}"
+    # The SCORED node's counterpart of that clause. `metric=0.0` alone is the line the arm-B corpus
+    # was steered by; when the eval said WHY, the why rides the line with it (bounded to the same
+    # ~100 chars, and empty on every node whose eval said nothing).
+    why = "" if n.status is NodeStatus.failed else metric_account(n, brief=True)
+    why = f" — why: {why}" if why else ""
+    return f"  #{n.id} {n.operator} {outcome} {fmt_params(n.idea.params)}{swept}{theme}{triage}{why}"
 
 
 def trust_reflection(state: RunState, max_shown: int = 2) -> str:

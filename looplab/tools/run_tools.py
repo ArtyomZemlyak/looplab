@@ -170,7 +170,10 @@ class RunTools:
                  "theme": {"type": "string", "description": "filter to one theme slug (optional)"}}),
             fn_spec("read_experiment",
                 "Read one experiment's full detail: params, metric, robustness, rationale, failure "
-                "reason, extra metrics, and — for a hyperparameter sweep — its trials. `trials` "
+                "reason, extra metrics, the eval's own account of WHY the metric is what it is when "
+                "it gave one (`metric_account` — e.g. a zero that is really 'wrong on 2 of 100 "
+                "instances' and not 'as fast as the baseline'), and — for a hyperparameter sweep — "
+                "its trials. `trials` "
                 "chooses how many sweep points to return: a number like '20' (a representative sample "
                 "spanning best→worst), or 'all' for every trial. Omit for a 10-trial sample.",
                 {"node_id": {"type": "integer"},
@@ -303,7 +306,13 @@ class RunTools:
         else:
             node_theme = digest.node_theme(n)
         theme = f" {{{node_theme}}}" if node_theme else ""
-        line = f"#{n.id} {n.operator} {outcome} {digest.fmt_params(n.idea.params)}{theme}"
+        # `digest._node_line` carries the same trailing clause on the always-on working set; a
+        # listing that RANKS a node has to say the same thing as the line that ranks it, or the two
+        # surfaces disagree about what a 0.0 means. Trailing, in the same slot `_node_line` puts its
+        # `— triage:` on, so the params stay where a reader scanning the column expects them.
+        why = "" if n.status is NodeStatus.failed else digest.metric_account(n, brief=True)
+        why = f" — why: {why}" if why else ""
+        line = f"#{n.id} {n.operator} {outcome} {digest.fmt_params(n.idea.params)}{theme}{why}"
         return (line if len(line) <= self._MAX_LINE_CHARS else
                 line[:self._MAX_LINE_CHARS].rstrip() + " …(truncated)")
 
@@ -368,6 +377,16 @@ class RunTools:
         if n.idea.space:
             out.append(f"sweep_space={n.idea.space}")
         out.append(f"metric={digest.fmt_num(n.metric)}")
+        # THE NUMBER'S OWN ACCOUNT, on the surface that is actually called. Measured over the 20
+        # finished task-arms of `runs-B`: on the nine scored nodes whose eval said WHY it could not
+        # produce a number, agents made 61 `read_experiment` calls and 32 `read_logs` calls; the
+        # reason reached them through 32 of 32 of the latter and 0 of 61 of the former, and on
+        # `spectral_clustering` — 4 `read_experiment` calls on the node, 0 `read_logs` on the whole
+        # arm — it reached NO tool output in the run at all. Same record, same fold, one call apart:
+        # this is the read path, not a new signal (`events/digest.py::metric_account`).
+        account = digest.metric_account(n)
+        if account:
+            out.append(f"metric_account: {account}")
         if n.confirmed_mean is not None:
             out.append(f"confirmed={digest.fmt_num(n.confirmed_mean)} "
                        f"±{digest.fmt_num(n.confirmed_std)} ({n.confirmed_seeds} seeds)")

@@ -198,8 +198,57 @@ quote that sha.
 
 ## 4. The validity verdict exists, is good, and is off the default path
 
-    OPEN[validity-verdict-not-on-the-default-read-path]
-    proof:absent:no_speedup@looplab/tools/run_tools.py
+**PART-FIXED 2026-08-26.** The marker is deleted for fix 1; fixes 2 and 3 in the body below (an
+invalid node counted as `0 failed`, and a memo built from a pre-eval snapshot) are untouched and
+are re-opened as §4a.
+
+**In plain words, because the section did not manage it.** When our solver is scored, the bridge
+prints one JSON line. If the solver is wrong on even one of the hundred instances the arena refuses
+to time it and the line carries `speedup: 0.0` — but never alone. Beside the zero sits a
+`no_speedup` object: the failure class, how many instances were valid, and verbatim the messages
+the task's own `is_solution` logged when it rejected our answers. That object is good, it reached
+disk, and it was in the fold every time. **The problem was which tool showed it.** An agent asking
+"why did my last experiment score that" calls `read_experiment` — the tool whose own description
+says "read one experiment's full detail". It printed `metric=0.0` and stopped. Only `read_logs`
+rendered the reason, and an agent that already has the number has little reason to make a second
+call. So the run read `0.0` as a verdict on its IDEA — approach wrong, discard — while the record
+said the approach was right and the implementation had two bad edge cases.
+
+**Measured over the twenty arms.** Eleven `score.log` records are zeros carrying a reason; nine of
+them reached a `node_evaluated` row. On those nine: **61 `read_experiment` calls returned the
+reason 0 times, and 32 `read_logs` calls returned it 32 times.** Corpus-wide the same shape, 574
+against 293. On `spectral_clustering` — four `read_experiment` calls on the zero node and **zero**
+`read_logs` calls in the entire arm — the verdict "98/100 valid" plus two named hack-detector
+messages reached **no tool output in that run at all**.
+
+`digest.metric_account` now reads the `no_<metric key>` block off the node's final metric line and
+renders it at three sites: `read_experiment` (600 chars — the longest real block renders at 576 with
+all three ranked messages whole, where the 300 that `failure=` gets cuts five of nine short), the
+`list_experiments` line, and the always-on working set (~84 chars). Registered as signal route
+`scored_eval_reason`. Render-only: no decision path references it.
+
+**The `no_` prefix is load-bearing, and that was found by measurement, not design.** The first rule
+was "any nested object carrying a `reason`" — which matched all 56 rows, because every healthy node
+prints `subset_evidence.reason: patch_marker_present`. `no_<x>` matches the nine and none of the
+forty-seven, and a mutation relaxing it reproduces that exact false positive.
+
+**A correction to §0 of this document, which was mine.** §0 recorded that the claim "`read_logs` was
+called 0 times on `spectral_clustering`" had been refuted — "13 times on that task". It had not.
+All thirteen occurrences are the tool INVENTORY receipt (`read_logs=0`, a count of nodes) and the
+advertised tool list inside prompts; the real call count is **zero**. That rebuttal was a `grep -c`
+over `spans.jsonl` — the same class of error this document exists to catch. The separate
+88-across-eight-arms figure stands.
+
+**And one record is not an instance of this defect at all:** `count_riemann_zeta_zeros`'s
+`speedup: null` rules violation travels `looplab_failure_reason`, fails the node, and
+`read_experiment` already rendered `failure=`.
+
+### 4a. STILL OPEN — the two halves the fix does not touch
+
+    OPEN[an-invalid-node-is-counted-as-zero-failed]
+    proof:absent:invalid_is_not_healthy@looplab/events/digest.py
+
+The original finding:
 
 `score.log` carries the best failure record in the campaign: reason, instance counts, validity
 percentage, and the task's own ranked `is_solution` rejection messages. On `spectral_clustering`

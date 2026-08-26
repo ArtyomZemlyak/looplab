@@ -67,6 +67,25 @@ def _probe_scored_eval_stderr():
     return rt.execute("read_logs", {"node_id": 0}), "95 of 100 instances valid"
 
 
+def _probe_scored_eval_reason():
+    """The eval's `no_<x>` account reaching the surface the loop actually reads a score off.
+
+    Driven through `read_experiment` (the REAL tool surface, specs() + execute()) rather than
+    `_node_line`, because `read_experiment` is where the corpus says the calls went: 61 of them on
+    an affected node against 32 to `read_logs`."""
+    from looplab.tools.run_tools import RunTools
+    st = RunState(direction="max", goal="g")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                       metric=0.0, status=NodeStatus.evaluated,
+                       stdout_tail='{"speedup": 0.0, "no_speedup": {"reason": "invalid_results", '
+                                   '"evaluator_verdict": "98/100 valid (98.0%)"}}')
+    rt = RunTools()
+    rt.bind_state(st)
+    assert any(s["function"]["name"] == "read_experiment" for s in rt.specs()), \
+        "read_experiment not registered in RunTools.specs()"
+    return rt.execute("read_experiment", {"node_id": 0}), "invalid_results"
+
+
 def _probe_foresight_calibration():
     from looplab.search.foresight import foresight_scoreboard
     st = RunState(direction="min", goal="g")
@@ -115,6 +134,7 @@ _PROBES = {
     "watchdog_signals": _probe_watchdog_signals,
     "triage_rationale": _probe_triage_rationale,
     "scored_eval_stderr": _probe_scored_eval_stderr,
+    "scored_eval_reason": _probe_scored_eval_reason,
     "foresight_calibration": _probe_foresight_calibration,
     "deep_research_memo": _probe_deep_research_memo,
     "operator_yields": _probe_operator_yields,
