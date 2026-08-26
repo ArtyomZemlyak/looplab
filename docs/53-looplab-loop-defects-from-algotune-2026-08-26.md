@@ -205,27 +205,102 @@ ceiling reached: $1.00xx of the $1.0000…"}`. Reaching the budget is the **desi
 of a budgeted run; recording it as an error makes a healthy run indistinguishable from a crash, and
 the campaign driver had to learn the difference from the exit code instead.
 
+**And it is not cosmetic.** `reason: "error"` is what makes `finalize_run` abandon its whole
+checklist — see item 8: the run-end reflection, the case store, the budget receipt and the
+curation stewards are all downstream of a predicate that excludes `error` by construction, so a
+budgeted run threw its own cross-run memory away every single time.
+
 **Fix.** A distinct `reason: "budget_exhausted"`, with the error text kept as detail.
 
 ---
 
-## 8. Nothing is retained between runs
+## 8. The run-end memory write is unreachable after a budget stop
 
-    OPEN[no-lesson-survives-a-run]
-    proof:absent:write_lessons@looplab/engine/claim_steward.py
+The `no-lesson-survives-a-run` marker stood here and is **deleted** (the index rule: closing is a
+deletion, so the slug is not spelled as a live key anywhere below). It was wrong in its evidence,
+wrong in its diagnosis, and asked a question this corpus cannot answer. What was actually broken
+is fixed and pinned by `tests/test_finalization_recovery.py::
+test_error_terminal_still_writes_the_run_end_reflection`; what remains open belongs to item 7's
+slug, not to a new one. Re-measured over ALL TWENTY arm-B task dirs (the original reading used the
+eight scored ones).
 
-**Measured:** every task's `memory/` holds `lessons.jsonl.lock` and **no `lessons.jsonl`**;
-`knowledge/` is empty in all eight. The `spans.jsonl` shows `lessons_distill`, `lessons_refresh`
-and `lessons_reconcile` running 11 times each on `edge_expansion` alone — the machinery runs and
-writes nothing.
+**What the original item got wrong.**
 
-Two insights worth keeping were lost this way: that `mpmath.mp.prec` assignment is refused by the
-arena's rules checker (learned by paying $0.0597 and 306.7 s for a rejected node), and the
-`_fp.siegelz` guard idiom that produced the campaign's only 6x against a mature library.
+* *"every task's `memory/` holds `lessons.jsonl.lock` and no `lessons.jsonl`"* — false over 20:
+  `max_clique_cpsat`, `max_common_subgraph`, `multi_dim_knapsack` and `sparse_eigenvectors_complex`
+  each hold a `lessons.jsonl` with one distilled lesson (4.3–4.6 KB). The eight-task corpus simply
+  contained none of the four.
+* *"a lock without a payload suggests the write path is failing silently"* — false. Those lock
+  files are created by a **reader**: `governance_health.py::project_governed_sources` takes
+  `_interprocess_lock` on every name in `_GOVERNED_SOURCE_NAMES` (`lessons.jsonl`,
+  `research_claims.jsonl`, `concept_capsules.jsonl`) plus `claim_decisions.jsonl` and
+  `concept_governance`, whether or not the payload exists. All five bare locks appear in all 20
+  dirs for that reason.
+* *"`knowledge/` is empty in all eight"* — true and **not a defect**. `knowledge_tools.py` says so
+  in its own words: "The knowledge base is OPERATOR-authored: nothing a run does adds a note, so an
+  empty one stays empty." It is a read surface (`kb_search`), the campaign put nothing in it, and an
+  empty KB is the correct state. The auto-distilled SKILL cards, which a run does write, land in
+  `<memory_dir>/skills/` — absent in all 20, for the reason below.
+* *"the machinery runs and writes nothing"* — the 11 `lessons_distill` spans on `edge_expansion`
+  each last **1.8e-05 s**. They are the cadence gate returning immediately
+  (`_cadence_due(n, last, lessons_every)`), not a failing write. Where the gate does open the span
+  runs 4.8–8.7 s and the write succeeds: distillation fired at `at_node == 4` in exactly the four
+  runs above, `lessons_distilled {"count": 1}` each.
+* *"nothing is retained BETWEEN runs"* — **unanswerable from this corpus, by harness design.**
+  `benchmarks/algotune/campaign.sh` sets `LOOPLAB_MEMORY_DIR="$TASK_ROOT/memory"` and
+  `LOOPLAB_KNOWLEDGE_DIR="$TASK_ROOT/knowledge"` per task, and its own comment says why: left
+  shared, arm B would reach task 12 with eleven prior runs to read, "measuring a capability the
+  other arm does not have rather than the loop". There is no second run sharing a store anywhere in
+  the campaign, so cross-run transfer was never on trial. Every read confirms it and says so
+  plainly: `cross_run_search` × 43 → *"the cross-run store is EMPTY — 0 records"*;
+  `search_lessons` × 5 → `rows=0; bytes=0`; `list_sibling_runs` × 47 → *"no sibling runs
+  of this task"*; `cross_run_prior_attempts` × 30, `kb_search` × 15, `similar_runs` × 11 — all
+  empty.
+  **This part of the item is a property of the benchmark harness and is deliberate. Do not
+  "fix" it: it is what keeps the two arms comparable.**
 
-**Fix.** Find out why the distil step produces no file — a lock without a payload suggests the
-write path is failing silently — and make the absence loud. Then make a rules refusal a first-class
-lesson, since it is the cheapest possible thing to remember and the most expensive to rediscover.
+**What is actually broken, and it is ours.** The run-end reflection — the meta-note
+(`meta_notes.jsonl`), the run-end distilled lessons, the auto-skills (`<memory_dir>/skills/`) —
+is a step in `finalize_run`'s checklist, and **that checklist never runs after an error terminal**:
+
+    _recover_scoped_terminal()  reason == "error"  ->  append finalization_finished
+                                                   ->  mark scope abandoned/error_terminal
+    finalize_run()  should_finalize = finalization_pending()   # now False
+                                    or scoped_terminal          # False: _scope_is_effective_terminal
+                                                                #        excludes reason == "error"
+                                    or legacy_initial           # False: same exclusion
+
+So budget, diversity archive, `store_case`, `ensure_finalize_reflection` and the curation stewards
+are all skipped. And by item 7 above, **a budget-ceiling stop IS a `reason: "error"` terminal** —
+the designed terminal of a budgeted run. Item 7 is not cosmetic: it is the cause of this one.
+
+**Measured over the 20 arm-B tasks.** 11 runs reached finalization; **all 11** closed as
+`begun -> report_begun -> run_finished(error) -> report:completed -> abandoned:error_terminal`.
+Zero `budget`, `diversity_archive`, `case` or `reflection` finalize steps anywhere in the corpus.
+`meta_notes.jsonl`: **0 of 20**. `cases.jsonl`: **0 of 20**. `skills/`: **0 of 20**. Not even a
+`meta_notes.jsonl.lock` exists anywhere, which is the tightest proof available that
+`write_reflection_note` was never entered — it takes that lock unconditionally once it has a
+winner. The only four lessons that survived at all are the mid-run cadence ones, which do not go
+through finalization.
+
+**Not a within-run defect.** A lesson this run distilled is deliberately invisible to this run:
+`LessonScope.allows` fails `is_current_run(row)` first, so the passive prior AND `search_lessons`
+both exclude it ("a run must not read its own output back as another run's experience"). The
+`lessons_refreshed` receipts prove the exclusion is exact — `chars: 454` in each of the four runs
+is 2 × 227, the two role-prior `[MEMORY_SOURCE: …]` headers with **zero** lesson body, and
+`changed: true` only records the header appearing for the first time. The in-run channel that does
+work is `lessons_distilled -> card_enriched.lesson_refs`, which fired on 4 cards across 2 tasks.
+
+**Fixed.** `_recover_scoped_terminal` now calls `ensure_finalize_reflection` before closing an
+error-terminal scope, guarded so it can never wedge convergence. It is idempotent on the scope's
+own `reflection` marker (a resume does not re-spend the reflection LLM) and degrades to a
+deterministic meta-note when the provider is exhausted — which on this path it usually is. The
+protocol already anticipated this: `finalize_scope_quiescent` has allow-listed `reflection_note`
+and `lessons_distilled` as a finalization's own effects since before the call site existed.
+
+**Still open, deliberately out of scope of that patch:** `store_case`, the budget receipt, the
+diversity archive and the curation stewards remain skipped on an error terminal. Item 7's
+`reason: "budget_exhausted"` is the fix that restores all of them at once, and is the better one.
 
 ---
 

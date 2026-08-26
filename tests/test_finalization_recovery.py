@@ -853,6 +853,55 @@ def test_scoped_error_finish_converges_and_does_not_loop(tmp_path):
     assert st.finished and not st.finalization_pending()
 
 
+def test_error_terminal_still_writes_the_run_end_reflection(tmp_path):
+    """doc 53 §8 `no-lesson-survives-a-run`: an error terminal must not cost the run its MEMORY.
+
+    A budgeted run stops on `llm_budget_usd` with `reason="error"`, `_recover_scoped_terminal`
+    closes that scope as `abandoned/error_terminal`, and `should_finalize` is then False forever —
+    so `finalize_run`'s checklist, which is where run-end reflection (meta-note + distilled
+    cross-run lessons + auto-skills) lives, never ran. Measured on the 20-task AlgoTune arm-B
+    corpus: 11 runs reached finalization, all 11 closed here, and `memory/meta_notes.jsonl` exists
+    for none of them. Reflection must run exactly ONCE on this path, and stay once across resumes
+    (it is paid), without re-opening or duplicating the terminal.
+    """
+    import looplab.engine.finalize as mod
+    from looplab.engine.finalize import incomplete_finalize_scope
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    (run_dir / "task.snapshot.json").write_text("{}", encoding="utf-8")
+    scope = "finalize:0badc0de00000000"
+    begun = store.append("finalize_step", {
+        "scope": scope, "step": "begun",
+        "finish_data": {"reason": "error",
+                        "error": "LLM spend ceiling reached: $1.0107 of the $1.0000 set by "
+                                 "`llm_budget_usd`."},
+        "finish_report_planned": False})
+    store.append("run_finished", {
+        "reason": "error",
+        "error": "LLM spend ceiling reached: $1.0107 of the $1.0000 set by `llm_budget_usd`.",
+        "finalize_scope": scope, "after_seq": begun.seq, "finalization_required": True})
+    eng = _EngineStub(run_dir)
+
+    baseline = sum(e.type == "run_finished" for e in store.read_all())
+    for _ in range(5):                          # each iteration models one resume
+        mod.finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    # THE POINT: the run distilled its memory even though its terminal was an error.
+    assert eng.reflection_calls == 1, "run-end reflection was skipped on an error terminal"
+    events = store.read_all()
+    steps = [e.data for e in events if e.type == "finalize_step" and e.data.get("scope") == scope]
+    assert any(d.get("step") == "reflection" for d in steps), steps
+    # ...and the convergence contract R8-A1 still holds: one terminal, scope closed, not pending.
+    assert sum(e.type == "run_finished" for e in events) == baseline
+    assert any(d.get("step") == "abandoned" for d in steps), steps
+    assert incomplete_finalize_scope(events) is None
+    st = fold(events)
+    assert st.finished and not st.finalization_pending()
+
+
 def test_a_never_converging_cost_refresh_degrades_instead_of_wedging(tmp_path, monkeypatch):
     """A permanently-failing usage reconcile must not block completion forever.
 

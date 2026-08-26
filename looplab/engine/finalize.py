@@ -543,6 +543,39 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
         _own_finish = _scope_finish_event(events, scope)
         _finish_is_foreign = (_own_finish is not None
                               and _own_finish.seq != state.last_finish_seq)
+        # THE RUN'S OWN MEMORY IS NOT A CASUALTY OF AN ERROR TERMINAL (doc 53 §8).
+        # Closing this scope below takes `finalize_run`'s ENTIRE checklist with it: the
+        # `finalization_finished` append two lines down clears `finalization_pending()`, and
+        # `_scope_is_effective_terminal` excludes `reason="error"` by construction, so
+        # `should_finalize` is False on this pass and on every later one. Run-end REFLECTION —
+        # the meta-note, the distilled cross-run lessons and the auto-skill cards, i.e. everything
+        # a LATER run can read — lives in that checklist, so it never ran.
+        #
+        # Which made it the ordinary outcome, not an edge case: a run that stops on the operator's
+        # own `llm_budget_usd` ceiling finishes with `reason="error"` (core/llm.py's "LLM spend
+        # ceiling reached" terminal), and that is how a BUDGETED run is *supposed* to end. Measured
+        # on the 20-task AlgoTune arm-B corpus: 11 runs reached finalization, ALL 11 closed right
+        # here as `abandoned/error_terminal`, and across all 20 `memory/` dirs there is no
+        # `meta_notes.jsonl`, no `cases.jsonl` and no `skills/` — not even a
+        # `meta_notes.jsonl.lock`, which that writer takes unconditionally once the run has a
+        # winner, so reflection was never ENTERED. The only lessons that survived anywhere are the
+        # four the mid-run `lessons_every` cadence wrote before the money ran out. That reads as a
+        # broken write path; the write path is fine and was simply never reached.
+        #
+        # Reflection FIRST, then close — and it cannot block the close.
+        # `ensure_finalize_reflection` gates on this scope's own `reflection` marker, so a resume
+        # neither re-spends the reflection LLM nor duplicates a note, and
+        # `write_reflection_note` degrades to a deterministic meta-note when the provider is
+        # exhausted (on this path it usually is). Its two effects — `reflection_note` and
+        # `lessons_distilled` — are ALREADY allow-listed by `finalize_scope_quiescent` as a
+        # finalization's own, under a comment written for exactly this "crash after
+        # reflection_note but before the completion markers" window, so appending them here cannot
+        # make the scope read as foreign on re-entry.
+        if not _finish_is_foreign:
+            try:
+                ensure_finalize_reflection(engine, scope, state.last_finish_seq)
+            except Exception:  # noqa: BLE001 - cross-run memory must never wedge a terminal
+                pass
         if (state.finished and state.last_finish_seq >= 0 and not _finish_is_foreign
                 and not _has_finish_step(events, EV_FINALIZATION_FINISHED, state.last_finish_seq)):
             try:
