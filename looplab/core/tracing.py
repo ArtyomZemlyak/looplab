@@ -340,6 +340,45 @@ def current_ids() -> tuple[Optional[str], Optional[str]]:
     return (st[-1]["trace_id"], st[-1]["span_id"]) if st else (None, None)
 
 
+def record_paid_call(cost, usage=None) -> bool:
+    """Stamp what one provider call COST onto the generation span open around it, AT THE MOMENT THE
+    MONEY IS COMMITTED — not after the call returns. Returns whether a generation span took it.
+
+    WHY IT IS NOT ENOUGH FOR THE CALLER TO STAMP IT. `core/llm.py` sets `.usage(...).cost(...)` on
+    the yielded handle only on the line AFTER `_post` returns, and `_post` can pay and then raise:
+    `CostAccountant.add` commits the delta, emits the durable `llm_usage` row through its sink, and
+    only then raises `BudgetExceeded`. The span is written (status=ERROR, phase intact) but
+    carries NO `cost`, so the money exists in the event log and is invisible to every sum taken over
+    the span channel — the same failure as a call with no span at all, one layer in.
+
+    MEASURED over the twenty arm-B AlgoTune runs (`/var/tmp/looplab-bench/runs-B`): 36 calls,
+    $0.1015, every one of them an aborted-on-ceiling call, concentrated in `card_build` (16), `plan`
+    (7), `novelty` (5), `propose` (4), `foresight_rank` (4). Together with the 916 rows that join
+    no span record at all it is the whole of the $2.3214 by which `sum(llm_usage.cost)` exceeded
+    `sum(generation span cost)` on that arm.
+
+    Deliberately WRITE-ONCE-FROM-BELOW: it fills `cost`/`usage` only when they are absent, and the
+    caller's own richer stamp still runs afterwards on the success path and wins. Deliberately
+    silent when nothing is traced (or the innermost span is not a generation) — like every other
+    entry point here, observability may not decide whether the paid work proceeds.
+    """
+    rec = next((r for r in reversed(_stack.get()) if r.get("kind") == "generation"), None)
+    if rec is None:
+        return False
+    try:
+        handle = SpanHandle(rec, None)
+        attrs = rec.get("attributes") or {}
+        if usage and "usage" not in attrs:
+            handle.set("usage", _norm_usage(usage))
+        if cost is not None and "cost" not in attrs:
+            value = float(cost)
+            if math.isfinite(value):
+                handle.set("cost", value)
+    except Exception:  # noqa: BLE001 - the tracer's diagnostic boundary must stay non-throwing
+        return False
+    return True
+
+
 # LLM I/O capture (ADR-17): off by default at import; each run turns it on from its own
 # Settings.trace_llm_io. When on, record_llm_call attaches the prompt+completion as a span
 # event on whatever operation span is active (propose/implement/repair), so the UI gets a bounded,

@@ -129,8 +129,54 @@ It opens no call and cannot change a verdict.
 
 ### 2b. The item this one uncovered
 
-    OPEN[llm-calls-that-open-no-span-at-all]
-    proof:absent:spanless_llm_usage@looplab/engine/shared.py
+**CLOSED 2026-08-26, and the location I recorded was WRONG.** The headline re-derives exactly --
+`llm_usage` $20.0081 over 6819 calls against $17.6867 over 5903 generation spans, a $2.3214 gap --
+but "almost all of it is `card_build` and `hyp_prioritize`" does not survive. Both open spans and
+are fully accounted (`card_build` $6.1620 / 1755 generations; `hyp_prioritize` is a real span name
+at `search/foresight.py:391`, $0.2908 / 297). **Zero** unspanned rows belong to either. That
+sentence came from a summary I passed on without checking the one claim in it I could have checked.
+
+Attributed to the operation actually open around each row, the gap is FOUR unrelated defects and
+sums to $2.3214 with nothing left over:
+
+| site | calls | $ | share | cause |
+|---|---|---|---|---|
+| concurrent deep research | 817 | **2.1921** | 94.4 % | `_research_attempt_step` is shared by the serial cadence and BOTH concurrent seams; only `_run_deep_research` opened the span |
+| `_tag_hypothesis_concepts` | 88 | 0.0211 | 0.9 % | pays after the `concept_coverage` span beside it closes |
+| ceiling-aborted calls | 36 | 0.1015 | 4.4 % | the span exists and carries no cost: `CostAccountant.add` pays, emits the row, then raises `BudgetExceeded` before the caller can stamp it |
+| finish report | 11 | 0.0067 | 0.3 % | the span WAS opened and never reached disk — a different defect, §2c |
+
+**What it changes about the loop.** Deep research filed $0.8352 (4.7 %) and actually cost about
+**$3.03 -- roughly 15 %, the arm's fourth-largest consumer, ahead of the novelty gate.** Every
+per-phase conclusion drawn before this was drawn over a channel missing its third-biggest line.
+
+The docstring that caused it -- *"the tracer is not safe to write from the concurrent worker"* --
+is false, and the counter-example sits in the same file family: `_maybe_merge_hypotheses` appends
+`hypothesis_merged` from the very same `anyio.to_thread.run_sync` hop.
+
+A third site was found BY INSPECTION rather than by measurement: `verifier_tiebreak.py` runs
+between two span-opening siblings and opened none. `select_verifier` is off by default, so it
+bought $0.0000 here and would first have surfaced in whichever campaign turned that knob on.
+
+**The guard is a CONSERVATION test, not a per-site checklist**: every `llm_usage` row joins a
+generation span, every such span carries a cost, and the two sums agree to 1e-9, with a
+non-vacuity latch so a scenario that bought nothing cannot pass. Not an assertion in the tracer,
+deliberately: the failure mode IS that nothing calls the tracer, and at the one place that sees
+every paid call, "no span is open" and "nothing is traced" are the same observation.
+
+### 2c. The one it uncovered
+
+    OPEN[a-span-can-vanish-between-close-and-flush]
+    proof:absent:span_flush_receipt@looplab/core/tracing.py
+
+Eleven finish-report spans were opened, their ids reached the events, and the records are absent
+from `spans.jsonl`, `.spans-append.jsonl` AND `trace.json`, with no exporter-loss receipt anywhere
+in the corpus. The corpus splits cleanly 20 of 20: **all 11 runs that lost the span ended on
+`BudgetExceeded`; all 9 that ended otherwise kept it.** Cause not established. It matters more than
+its $0.0067 -- a barrier that returns while leaving an accepted span off disk is a hole in the
+record, not an accounting rounding error.
+
+The original finding:
 
 **$2.3214 across 916 calls — 11.6 % of arm B's money — appears in `llm_usage` events and in NO
 generation span.** Spans account for $17.6867 of the $20.0081 the event log records. Almost all of

@@ -25,6 +25,7 @@ Layering: no runtime import of the orchestrator and never serve — only core, e
 stdlib (the concept-graph / lock-in producers stay lazy, method-local, as they were)."""
 from __future__ import annotations
 
+import contextlib
 from typing import Optional
 
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
@@ -352,8 +353,6 @@ class ConceptCadenceMixin:
         result, whose graph/tags/coverage the driver reuses. NO guard of its own on purpose: a failed
         tagging pass has nothing to summarize, so it falls through to the driver's outer guard and
         yields no snapshot (unlike the two enrichment steps below, which swallow their own failures)."""
-        import contextlib
-
         from looplab.agents.roles import resolve_role_prompts
         from looplab.search.concept_map import build_concept_map
         known, known_renames = self._reusable_node_tags(state)
@@ -480,7 +479,21 @@ class ConceptCadenceMixin:
             pass
 
     def _tag_hypothesis_concepts(self, state: RunState, graph, client, parser, mode: str) -> None:
-        """Tag the untagged / most-stale cards against the SAME graph, bounded per cadence."""
+        """Tag the untagged / most-stale cards against the SAME graph, bounded per cadence.
+
+        SPANNED, and it has to be: this is a PAID step that runs AFTER `_refresh_concept_tags`'s
+        `concept_coverage` span has closed, so every `tag_text_llm` call it makes used to reach
+        `core/tracing.py::generation` with no span open at all — a null handle, no generation span,
+        and an `llm_usage` row written with `trace_id=null, span_id=null`. MEASURED over the twenty
+        arm-B AlgoTune runs (`/var/tmp/looplab-bench/runs-B`): 88 paid calls, $0.0211, in eleven of
+        the twenty arms — small money, but it is one card tag per call, so the count grows with the
+        board while nothing in the trace ever says where it went.
+
+        The span is opened LAZILY, on the first card actually tagged: this cadence usually finds
+        every card fresh and returns having paid nothing, and an empty `hypothesis_tagging` span per
+        strategist cadence would be pure trace noise. Span only, no `phase_progress` beacon — the
+        loop is still inside the concept cadence and `events/types.py::PROGRESS_PHASES` rows are
+        pinned by `test_end_to_end` / `test_settled_width_pins`."""
         # HT (§21.18): agentically tag any UNtagged hypotheses against the SAME graph and record
         # them, so taxonomy dedup reuses the agentic tags instead of the tag_text alias heuristic.
         # Incremental (skip already-tagged) + capped per cadence, so a big board tags over a few
@@ -502,21 +515,31 @@ class ConceptCadenceMixin:
             # an explicit card_id already has that hash as its id, but a migrated native card-N does
             # not, so an id-only join would orphan its legacy tags.
             from looplab.core.models import hypothesis_concept_cache_keys
-            for h in state.research_cards():
-                if not getattr(h, "statement", ""):
-                    continue
-                # Match the recorded tags by the card id OR its seed-statement hash (peer review),
-                # and judge staleness on the MATCHED key — an id-only skip re-tagged a migrated
-                # card-N belief every resume and mis-read its freshness.
-                matched = next((k for k in hypothesis_concept_cache_keys(h) if k in known_h), None)
-                if matched is not None and matched not in stale_h:   # already tagged & fresh -> skip
-                    continue
-                if tagged_this_cadence >= _HYP_TAG_CAP:
-                    break
-                htags = sorted(tag_text_llm(h.statement, graph, client, parser=parser,
-                                            allow_plural=True))
-                self.store.append(EV_HYPOTHESIS_CONCEPTS, {"hyp_id": str(h.id), "concepts": htags,
-                                                           "mode": mode, "at_vocab": v_now})
-                tagged_this_cadence += 1
+            # The op-trace that holds every paid call below is opened LAZILY on the first card
+            # actually tagged (see the docstring): most cadences find the board fresh and pay
+            # nothing, and an empty span each time would be trace noise. On the ExitStack so the
+            # `break` and the outer `except` both close it.
+            _span = getattr(self, "_op_span", None)
+            with contextlib.ExitStack() as paid_span:
+                for h in state.research_cards():
+                    if not getattr(h, "statement", ""):
+                        continue
+                    # Match the recorded tags by the card id OR its seed-statement hash (peer
+                    # review), and judge staleness on the MATCHED key — an id-only skip re-tagged a
+                    # migrated card-N belief every resume and mis-read its freshness.
+                    matched = next((k for k in hypothesis_concept_cache_keys(h) if k in known_h),
+                                   None)
+                    if matched is not None and matched not in stale_h:  # tagged & fresh -> skip
+                        continue
+                    if tagged_this_cadence >= _HYP_TAG_CAP:
+                        break
+                    if tagged_this_cadence == 0 and callable(_span):
+                        paid_span.enter_context(_span("hypothesis_tagging"))
+                    htags = sorted(tag_text_llm(h.statement, graph, client, parser=parser,
+                                                allow_plural=True))
+                    self.store.append(EV_HYPOTHESIS_CONCEPTS,
+                                      {"hyp_id": str(h.id), "concepts": htags,
+                                       "mode": mode, "at_vocab": v_now})
+                    tagged_this_cadence += 1
         except Exception:  # noqa: BLE001 — hypothesis tagging is best-effort audit enrichment
             pass

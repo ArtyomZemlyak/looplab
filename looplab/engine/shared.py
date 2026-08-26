@@ -226,6 +226,17 @@ class SharedEngineMixin:
         underneath it and the cost becomes attributable by the SAME key the beacon uses. Degrades to
         the beacon alone when no tracer is wired — tests build `Engine` via `__new__` — exactly as
         `_op_span` does, and for the same reason: observability may never decide whether work runs.
+
+        THE NULL-TRACE SHARE ABOVE IS FROM 2026-08-20 AND IS NO LONGER 26 %. Re-derived on the later
+        twenty-run arm B (`/var/tmp/looplab-bench/runs-B`, doc 53 §2b), the remaining spanless money
+        was $2.2132 over 905 calls — 11.1 % of $20.0081 — and it was NOT this helper's absence: 817
+        of those calls were the CONCURRENT deep-research seams, whose shared step opened no span
+        because only its serial caller did (`research_cadence.py::_research_attempt_step`), and 88
+        were `concept_cadence.py::_tag_hypothesis_concepts` paying after the span beside it closed.
+        Both now open one. So the lesson this docstring teaches generalizes past `_progress`: ANY
+        paid seam outside a span is invisible, beacon or no beacon. What keeps it that way is
+        `tests/test_paid_calls_are_spanned.py`, a conservation check over the two channels
+        (`sum(llm_usage.cost) == sum(generation-span cost)`) rather than a list of known sites.
         """
 
         tracer = getattr(self, "tracer", None)

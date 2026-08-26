@@ -16,6 +16,7 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 events and stdlib (the trust/search deps are lazy, method-local imports)."""
 from __future__ import annotations
 
+import contextlib
 import logging
 import uuid
 from typing import Iterable, Optional
@@ -331,11 +332,9 @@ class ResearchCadenceMixin:
         """Execute one Deep-Research step (serial path) and record it, then re-fold. Always records a
         `research_completed` event (even with no model wired, so a manual request's gate advances and
         the loop doesn't spin)."""
-        # One trace for the whole serial step: compute WITHOUT its own inner span (trace=False) so the
-        # research LLM spans + the research_completed append both live in THIS op-trace → the event is
-        # stamped with it (UI scopes the event's trace to just the research, not a node).
-        with self._op_span("deep_research", trigger=trigger):
-            self._research_attempt_step(state, trigger, manual=manual)
+        # The `deep_research` op-trace is opened by `_research_attempt_step` itself, so this path and
+        # BOTH concurrent seams get exactly one — see that method for why it moved down there.
+        self._research_attempt_step(state, trigger, manual=manual)
         return fold(self.store.read_all())
 
     def _research_attempt_step(self, state: RunState, trigger: str, *, manual: bool = False,
@@ -369,18 +368,45 @@ class ResearchCadenceMixin:
         Returns `(sig, recorded)`: the memo's content signature (None when the compute yielded
         nothing) and whether it was appended. `last_sig` is the repeated-overlap convergence gate —
         an identical re-run is not re-recorded (that pass rides a TIME cadence and is deliberately
-        unreceipted, so nothing is spent by skipping it)."""
-        attempt_id = self._record_research_attempt(state, trigger=trigger, manual=manual)
-        memo = self._compute_deep_research(state, trigger, trace=False)
-        if memo is None:
-            # Contractually unreachable (`_compute_deep_research` degrades to a stub memo rather than
-            # returning None), and kept only so a stubbed/foreign compute cannot crash the record.
-            return None, False
-        sig = research_memo_sig(memo)
-        if last_sig is not None and sig == last_sig:
-            return sig, False
-        self._record_deep_research(memo, trigger=trigger, manual=manual, attempt_id=attempt_id)
-        return sig, True
+        unreceipted, so nothing is spent by skipping it).
+
+        IT OPENS THE `deep_research` OP-TRACE, and that is why the span moved here out of
+        `_run_deep_research`. `core/tracing.py::generation` yields a NULL handle whenever no span is
+        open, so a paid call made outside one is written to `events.jsonl` with
+        `trace_id=null, span_id=null` and lands in NO span: real money attributable to nothing, and
+        invisible to `looplab timings`, the trace view and every per-phase cost question. Only the
+        SERIAL caller opened a span, so the two CONCURRENT seams — the ones that actually run under
+        the shipped `concurrent_research` — paid entirely outside the span channel.
+
+        MEASURED over the twenty arm-B AlgoTune runs (`/var/tmp/looplab-bench/runs-B`): 817 of the
+        campaign's 6,819 paid calls and $2.1921 of its $20.0081 — 11.0 % of the arm; 94.4 % of the
+        $2.3214 by which the event log exceeded the span channel, and 98.7 % of the $2.2198 that
+        opened no span at all — against the $0.8352 the serial path DID file under `deep_research`.
+        Deep research is the run's fourth-largest consumer at ~$3.03 (15 %), not the 4.7 % the trace
+        reported.
+
+        Opening it HERE rather than at each seam is the argument indivisibility already makes for
+        this method: one spelling, three callers, and a fourth cannot forget it. SPAN ONLY — no
+        `phase_progress` beacon — because no new operator-facing phase exists and that table's exact
+        rows are pinned by `test_end_to_end` / `test_settled_width_pins`; it opens no provider call
+        of its own and changes no decision, exactly like `novelty.py::_repropose_phase`.
+
+        `_op_span` is resolved defensively: `test_research_overlap.py` drives this method on a stub
+        host with no Engine helpers, and observability may never decide whether the work runs."""
+        _span = getattr(self, "_op_span", None)
+        with (_span("deep_research", trigger=trigger) if callable(_span)
+              else contextlib.nullcontext()):
+            attempt_id = self._record_research_attempt(state, trigger=trigger, manual=manual)
+            memo = self._compute_deep_research(state, trigger, trace=False)
+            if memo is None:
+                # Contractually unreachable (`_compute_deep_research` degrades to a stub memo rather
+                # than returning None), kept so a stubbed/foreign compute cannot crash the record.
+                return None, False
+            sig = research_memo_sig(memo)
+            if last_sig is not None and sig == last_sig:
+                return sig, False
+            self._record_deep_research(memo, trigger=trigger, manual=manual, attempt_id=attempt_id)
+            return sig, True
 
     def _record_research_attempt(self, state: RunState, *, trigger: str,
                                  manual: bool) -> Optional[str]:
@@ -415,7 +441,13 @@ class ResearchCadenceMixin:
         so it can run in a worker thread concurrently with an eval while the engine stays the sole
         writer. Best-effort for ordinary failures (a crash/None model yields a stub so the gate still
         advances); the global `BudgetExceeded` hard stop always propagates.
-        `trace=False` skips the span: the tracer is not safe to write from the concurrent worker."""
+        `trace=False` skips the INNER span because the caller (`_research_attempt_step`) already
+        opened the `deep_research` op-trace and two nested spans of one name double-count the phase
+        — NOT because the tracer is unsafe off the main task. It is not: `Tracer.span` keeps its
+        stack in a contextvar and `AsyncJsonlSpanExporter` serializes writers under a lock, and
+        `_maybe_merge_hypotheses` has always opened `hypothesis_merge` from the very same
+        `anyio.to_thread.run_sync` hop in `_research_overlap_loop`. Reading the older wording as "the
+        concurrent path must stay spanless" is what left 817 paid calls in no span at all."""
         from looplab.core.models import ResearchMemo
         if self.deep_researcher is None:
             return ResearchMemo(at_node=len(state.nodes), trigger=trigger,

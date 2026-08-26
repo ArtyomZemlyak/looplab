@@ -2097,6 +2097,13 @@ class CostAccountant:
             sink = self.on_delta
             committed_spent = self.spent
 
+        # The span channel is settled HERE, on the committed delta, and not on the line after the
+        # provider call returns — because `exceeded` below raises out of this method and the caller
+        # never reaches its own `.usage(...).cost(...)`. See `tracing.record_paid_call`: on arm B
+        # that gap was 36 calls / $0.1015 of generation spans that name a phase and no money.
+        # Write-once-from-below: the caller's richer stamp still runs and wins on the success path.
+        tracing.record_paid_call(safe_cost, normalized)
+
         if sink is not None:
             try:
                 sink(dict(delta))
