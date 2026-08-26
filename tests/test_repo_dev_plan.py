@@ -502,3 +502,90 @@ def test_a_repo_repair_declaring_it_is_stuck_reaches_the_engine(monkeypatch):
     fresh = dev.implement(idea)
     assert not is_developer_stuck(fresh), fresh
     assert DEVELOPER_STUCK_PREFIX not in fresh
+
+
+def test_the_trace_attributes_each_shipped_file_to_the_step_that_actually_wrote_it(
+        monkeypatch, tmp_path):
+    """The plan-vs-artefact item of docs/53 3, driven on the exact shape
+    `runs-B/count_riemann_zeta_zeros` node 0 shipped: a 3-step plan whose step 1 writes solver.py,
+    whose step 2 -- the one carrying the whole speedup rationale -- runs to completion and writes
+    NOTHING, and whose step 3 ("cleanup") is where the shipped bytes actually came from.
+
+    The plan is a PROPOSAL and the artefact is the truth, so the divergence itself is not a bug to
+    prevent. What was a defect is that it left no trace: `_run_step` returns "" on success, every
+    step's writes land in one flat `write.files` map with no author, and a reader attributing the
+    eval failure in solver.py would credit it to the step whose TITLE claims to write solver.py --
+    step 1. Measured over the 20-task runs-B corpus at 2026-08-26: 46 of 46 plan-driven builds carry
+    at least one no-op step or a later-step rewrite, and zero plans reach the event log at all.
+    """
+    import looplab.agents.agent as agent_mod
+    from looplab.core import tracing
+
+    plan = [{"title": "Implement exact nzeros port in solver.py", "detail": "a"},
+            {"title": "Accelerate block-analysis siegelz calls with numpy", "detail": "b"},
+            {"title": "Final correctness sweep and cleanup", "detail": "c"}]
+
+    def loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
+        name = emit_spec["function"]["name"]
+        if name == "declare_stages":
+            return finalize({"stages": [{"name": "train", "command": ["python", "train.py"]}]})
+        if name == "propose_plan":
+            return finalize({"steps": plan})
+        body = " ".join(str(m.get("content") or "") for m in messages)
+        if "STEP 1 of 3" in body:
+            tools.execute("write_file", {"path": "solver.py", "content": "V = 1\n"})
+        elif "STEP 3 of 3" in body:                   # where the shipped bytes actually came from
+            tools.execute("write_file", {"path": "solver.py", "content": "V = 3\n"})
+        # STEP 2 writes nothing at all and still reports success -- the silent no-op.
+        return finalize({"summary": "ok"})
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", loop)
+
+    spans = tmp_path / "spans.jsonl"
+    tracer = tracing.Tracer(tracing.JsonlSpanExporter(spans), run_id="r")
+    with tracer.span("build", new_trace=True, node_id=7):
+        dev = _dev(plan_decompose=True, plan_min_steps=2)
+        dev.implement(Idea(operator="draft", params={}, rationale="a big multi-part change"))
+
+    assert dev.last_files["solver.py"] == "V = 3\n"                    # what actually shipped
+    rows = [json.loads(l) for l in spans.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+    # Each step is its own trace band, in order, carrying its plan title -- what the phase list in
+    # `_run` has always CLAIMED and `run_phase` (which opens no operation span) never delivered.
+    bands = [r for r in rows if r.get("name") == "plan_step"]
+    assert [r["attributes"]["index"] for r in bands] == [1, 2, 3], bands
+    assert all(r["attributes"]["total"] == 3 for r in bands)
+    assert bands[1]["attributes"]["title"].startswith("Accelerate block-analysis")
+
+    # ...and ONE reconciliation span says which step each shipped file actually came from.
+    rec = [r for r in rows if r.get("name") == "plan_steps"]
+    assert len(rec) == 1, [r.get("name") for r in rows]
+    a = rec[0]["attributes"]
+    assert a["total"] == 3
+    assert a["authors"] == {"solver.py": 3}, a["authors"]   # NOT step 1, whose title claims it
+    assert a["noop_steps"] == [2] and a["superseding_steps"] == [3]
+    by_step = {r["step"]: r for r in a["steps"]}
+    assert by_step[1]["wrote"] == ["solver.py"] and not by_step[1].get("superseded")
+    assert by_step[2]["wrote"] == [] and by_step[2]["noop"] is True
+    assert by_step[2]["title"].startswith("Accelerate block-analysis")
+    assert by_step[3]["superseded"] == ["solver.py"]
+    # The stages manifest was written by the STAGES phase, before any step -- so no step authored
+    # it, and the record says so rather than crediting one.
+    assert "looplab_stages.json" in a["unattributed"]
+
+
+def test_plan_step_attribution_credits_a_no_op_step_with_nothing_it_did_not_change():
+    """The unit truth table for the reconciliation, including the two cases a naive
+    "did the file exist afterwards" check gets wrong: a step that rewrote a file byte-for-byte
+    changed nothing, and a file inherited from the base preload has no step author at all."""
+    from looplab.adapters.repo_developer import plan_step_attribution
+
+    steps = [{"title": "write it"}, {"title": "rewrite it identically"}, {"title": "delete it"}]
+    observed = [{"wrote": ["a.py"]}, {"wrote": []}, {"wrote": [], "deleted": ["a.py"]}]
+    out = plan_step_attribution(steps, observed, {"parent.py": "x"})
+
+    assert out["noop_steps"] == [2]                       # the identical rewrite is NOT authorship
+    assert out["superseding_steps"] == []
+    assert out["authors"] == {}                           # a.py was deleted, so nobody ships it
+    assert out["unattributed"] == ["parent.py"]           # came from the base, not from this plan
+    assert out["steps"][2]["deleted"] == ["a.py"] and "noop" not in out["steps"][2]

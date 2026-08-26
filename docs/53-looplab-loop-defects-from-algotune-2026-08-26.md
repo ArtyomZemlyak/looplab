@@ -181,6 +181,47 @@ that only a cheap measurement can find.
     OPEN[stored-plan-diverges-from-shipped-artefact]
     proof:absent:plan_superseded@looplab/agents/unified_agent.py
 
+**STAYS OPEN — the build half is now RECORDED, the repair half is not.** The proof is unchanged
+because `triage_crash` is not reached by this work.
+
+**The item was right and too narrow: there are TWO plans, and the durable record holds the wrong
+one.** The CARD's rationale is authored by the Researcher BEFORE any repo read, and nothing rewrites
+it afterwards. The DEVELOPER'S plan is authored AFTER the plan phase has read the source and run
+probes — it is the plan the code actually came from — and it is a local Python list handed to
+`_run_step` and then dropped. Measured: 63 of 70 builds produced one, and **`propose_plan` appears
+0 times across all twenty event logs**. It survives only as an unkeyed tool-call payload inside a
+span attribute.
+
+Three more things the corpus says, all verified independently: **0 `plan_step` spans** — every
+step session collapsed into one `card_build` band, while the phase list has claimed "each step its
+own trace block" since it was written; **0 `stages` spans** — the operator declares `eval.stages`,
+so that phase short-circuits for every build; and only **6 `plan_steps_failed` spans** exist, so
+the silent steps are almost entirely unexplained.
+
+Of the 46 builds whose plan had two or more steps: **46 steps (41 %) wrote nothing at all**, and
+**22 files were finished by a LATER step than the one whose title claims to produce them**, across
+18 builds. Every one of the 46 carries at least one divergence.
+
+`discrete_log` node 1 is the specimen, and it shows the loop WORKING. The card says "Pollard's rho,
+O(1) memory". The plan phase then probed rho against BSGS at 2^37…2^46, found rho slower at every
+size, and titled step 1 *"Implement solver.py with a BSGS-everywhere discrete_log"* — in its own
+words, *"the winning move is the OPPOSITE of the hypothesis."* The shipped file sets
+`RHO_THRESHOLD = 2 ** 46`. Only the record is wrong: 1.018 reads as a verdict on rho when it is a
+verdict on BSGS. And that run's champion, node 0 at 1.186, has a step titled *"Add three subgroup
+solvers with dispatch"* that **wrote nothing** — the shipped solver has one plain `_bsgs` and no
+fallback, so its whole correctness tier exists only in a tool-call payload.
+
+**Design consequence, not a bug — so record, don't prevent.** The plan is a proposal, the artefact
+is the truth, and a Developer that overrides its plan on measured evidence is doing its job. Each
+step now runs in its own `plan_step` span; the working set is diffed BY CONTENT around each step,
+so an `edit_file` rewriting identical bytes is not authorship; and one `plan_steps` span carries
+the reconciliation — per step what it wrote, whether it superseded an earlier one, whether it was a
+silent no-op — plus `authors` (shipped file → the step that LAST wrote it) and `unattributed`
+(shipped files no step touched). 1808 developer/plan/card tests green; crediting the first writer
+instead of the last, or testing presence instead of content, each turns the new tests red.
+
+The original finding:
+
 On `count_riemann_zeta_zeros` the `node_repaired` triage prose plans a capitulation — *"call
 `mp.nzeros(t)` directly… yields a valid scored submission (speedup ~1.0)"* — while the `files`
 payload on that same event is the `_fp.siegelz` port that scored **6.0212**. On `discrete_log`,

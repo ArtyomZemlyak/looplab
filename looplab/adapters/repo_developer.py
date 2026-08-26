@@ -367,6 +367,69 @@ _REPO_DEV_REPAIR_BLOCK = (
     "--- eval error (stderr/stdout tail) ---\n")
 
 
+def plan_step_attribution(steps, observed, shipped) -> dict:
+    """Reconcile the PLAN against the ARTEFACT and return the record of the difference.
+
+    The plan is a PROPOSAL: `_propose_plan` runs BEFORE a byte is written and its steps are
+    advisory — a step session may legitimately do something else (on `runs-B/discrete_log` the plan
+    phase MEASURED the card's Pollard-rho hypothesis losing to BSGS and planned the opposite, which
+    is the loop working), do nothing at all, or overwrite what an earlier step wrote. That is by
+    design and is not what this function is for. What it is for is that the difference used to leave
+    NO TRACE: `_run_step` returns "" on success, every step's writes land in one flat `write.files`
+    map with no author, and the durable record (`node_created.files` + the card's `idea.rationale`,
+    written before the repo was read) therefore presents a proposal as if it described the artefact.
+    Measured on the 20-task `runs-B` corpus at 2026-08-26: 63 of 70 builds ran a plan phase, ZERO of
+    those plans appear anywhere in `events.jsonl`, and of the 46 builds whose plan actually drove
+    execution (113 steps) ALL 46 contained at least one step that wrote nothing (46 steps, only 7
+    of them explained by the existing `plan_steps_failed` span) or a file finished by a LATER step
+    than the one the plan says produces it (22 rewrites across 18 builds).
+
+    So: RECORD, don't prevent. `observed` is one `{"wrote": [...], "deleted": [...], "error": str}`
+    per executed step, in plan order, diffed from the working set before and after that step;
+    `shipped` is the final working set. The result names, for every step, what it actually changed
+    and whether it superseded an earlier step — and, for every shipped file, the step that last
+    wrote it (`authors`) or the fact that no step touched it (`unattributed`: it came from the
+    parent/base preload, not from this plan). That is what lets a later reader attribute an eval
+    failure to the step that caused it, which is the whole point of decomposing into steps.
+    """
+    author: dict = {}
+    rows: list = []
+    noop: list = []
+    superseding: list = []
+    for index, step in enumerate(steps, 1):
+        obs = observed[index - 1] if index - 1 < len(observed) else {}
+        wrote = list(obs.get("wrote") or [])
+        removed = list(obs.get("deleted") or [])
+        # "Superseded" is about AUTHORSHIP inside this plan, not about the repo: a path an EARLIER
+        # step of THIS plan already wrote and this one has now replaced. A path inherited from the
+        # base preload has no step author yet, so the first step to touch it is its author, not a
+        # superseder.
+        over = sorted({p for p in wrote if p in author})
+        for p in wrote:
+            author[p] = index
+        for p in removed:
+            author.pop(p, None)
+        row = {"step": index, "title": str(step.get("title") or "")[:160], "wrote": wrote}
+        if removed:
+            row["deleted"] = removed
+        if over:
+            row["superseded"] = over
+            superseding.append(index)
+        if not wrote and not removed:
+            # A step that ran to completion and changed nothing. Distinct from an ERRORED step
+            # (`plan_steps_failed` already names those): this one reported success, so nothing
+            # downstream could tell that the plan's stated work never happened.
+            row["noop"] = True
+            noop.append(index)
+        if obs.get("error"):
+            row["error"] = str(obs["error"])[:300]
+        rows.append(row)
+    return {"total": len(steps), "steps": rows, "noop_steps": noop,
+            "superseding_steps": superseding,
+            "authors": {p: author[p] for p in sorted(author)},
+            "unattributed": sorted(p for p in (shipped or {}) if p not in author)}
+
+
 def empty_build_refusal(*, error, base, base_deleted, files, deleted) -> str:
     """The refusal for a BUILD that wrote nothing, or "" when there is something to evaluate.
 
@@ -1575,9 +1638,37 @@ class LLMRepoDeveloper:
                     # run on whatever got written. But it must not vanish either: discarded, a later
                     # eval failure could never be attributed to the step that broke. Collect them and
                     # stamp ONE span so the trace says which steps failed and why.
-                    step_errors = [note for i, step in enumerate(steps, 1)
-                                   if (note := self._run_step(idea, step, i, len(steps), write,
-                                                              system, stage_note=stage_note))]
+                    #
+                    # The SAME argument applies to a step that does not error: the plan is a
+                    # proposal, the artefact is the truth, and until this loop diffed the working set
+                    # around each step nothing recorded which step actually produced which shipped
+                    # file (or that a step produced nothing at all). Each step now gets its own
+                    # `plan_step` trace band — which is what the phase list above has claimed since
+                    # it was written, and was not true: `_run_step` calls `run_phase`, which opens no
+                    # operation span, so all K sessions collapsed into one band with no ordinal — and
+                    # the reconciliation is stamped as `plan_steps` (see `plan_step_attribution`).
+                    step_errors: list = []
+                    observed: list = []
+                    for i, step in enumerate(steps, 1):
+                        before, before_deleted = dict(write.files), set(write.deleted)
+                        with tracing.operation("plan_step", index=i, total=len(steps),
+                                               title=str(step.get("title") or "")[:120]):
+                            note = self._run_step(idea, step, i, len(steps), write,
+                                                  system, stage_note=stage_note)
+                        # Compare CONTENT, not just presence: `edit_file` patches in place, and a
+                        # step that rewrote a file byte-for-byte changed nothing and must not be
+                        # credited with authoring it.
+                        observed.append({
+                            "wrote": sorted(p for p, body in write.files.items()
+                                            if before.get(p) != body),
+                            "deleted": sorted(set(write.deleted) - before_deleted),
+                            "error": note})
+                        if note:
+                            step_errors.append(note)
+                    with tracing.operation(
+                            "plan_steps",
+                            **plan_step_attribution(steps, observed, write.files)):
+                        pass
                     if step_errors:
                         with tracing.operation("plan_steps_failed", failed=len(step_errors),
                                                total=len(steps),
