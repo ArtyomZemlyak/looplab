@@ -157,3 +157,45 @@ def test_a_task_with_no_dataset_is_refused_not_silently_degraded(tmp_path):
     err = _build(tmp_path, "--deliver", "--full-context", root=root)
     assert isinstance(err, str), "it built a --full-context task with no context"
     assert "no train split found" in err, err
+
+
+def test_the_card_does_not_argue_with_itself_about_the_size(tmp_path):
+    """`--role-split` names "the problem sizes" as an example of what nobody here knows. Under
+    `--full-context` the goal states the measured n two paragraphs earlier, and a card that
+    contradicts itself is one the model is right to disregard -- the failure `repo_developer.py`
+    records for the probe clause ("two paragraphs contradicting each other is worse than either one
+    alone"). What stays genuinely unknown at a known n is what the sentence must point at."""
+    spec = _build(tmp_path, "--deliver", "--role-split", "--full-context")
+    goal = spec["goal"]
+    assert "n = 4408" in goal
+    assert "nobody here knows yet (the problem sizes" not in goal, (
+        "the card states the size as measured AND as unknowable in the same prompt")
+    assert "nobody here knows yet" in goal, "the clause itself must survive, only its example changes"
+    assert "how much memory a table would take at that n" in goal
+
+
+def test_role_split_without_the_flag_is_unchanged(tmp_path):
+    """The falsifier: the arm already measured must keep the wording it ran on."""
+    spec = _build(tmp_path, "--deliver", "--role-split")
+    assert "nobody here knows yet (the problem sizes, how much memory a table would take)" in \
+        spec["goal"]
+
+
+def test_every_role_gets_the_description_not_only_the_developer(tmp_path):
+    """The description must ride the channel that reaches EVERYONE, not a Developer-only one.
+
+    `RepoTask.agent_brief()` embeds `Goal:` and becomes the Developer's system prompt -- and the
+    SAME `system` string is handed to `_run_step`, so a fresh multi-step session carries it too.
+    `roles.py::_state_brief` opens with `Goal: {state.goal}` for the proposal roles. So the goal is
+    the broad channel and `_data_brief()` (which needs a `data` mount we deliberately do not make)
+    is not. This pins that: if the clause ever moves somewhere narrower, this fails.
+    """
+    from looplab.adapters.repo_task import RepoTask
+
+    spec = _build(tmp_path, "--deliver", "--full-context")
+    task = RepoTask.model_validate(spec)
+    brief = task.agent_brief()
+    for fact in ("n = 4408", "100 instances", "about 100 ms",
+                 "ndarray(shape=(4408, 2), dtype=float64)", 'run_dev_command("eval_train")'):
+        assert fact in brief, f"{fact!r} never reaches the developer's system prompt"
+    assert f"Goal: {task.goal}" in brief, "the goal is no longer carried whole into the brief"

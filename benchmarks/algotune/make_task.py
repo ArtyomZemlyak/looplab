@@ -74,11 +74,22 @@ GOAL = (
 # and makes an unresolved assumption a first-class experimental outcome instead of a probe loop: a
 # committed guess that turns out wrong is a failed node, and a failed node is information the next
 # Researcher turn reads. That is what the loop is for.
+# The parenthetical is a PARAMETER because `--full-context` makes half of it false. Under that
+# flag the goal states `n = 267021` as a measured fact two paragraphs earlier, and naming "the
+# problem sizes" here as an example of what nobody knows contradicts it in the same prompt --
+# exactly the failure `repo_developer.py` records for the probe clause: "two paragraphs
+# contradicting each other is worse than either one alone", because the model is right to
+# disregard a card that argues with itself. What stays unknown under --full-context is real and
+# is what the sentence should point at.
+_UNKNOWNS_DEFAULT = "the problem sizes, how much memory a table would take"
+_UNKNOWNS_FULL_CONTEXT = ("how much memory a table would take at that n, whether this library's "
+                          "implementation is the bottleneck, how the constant factors land")
+
 ROLE_SPLIT = (
     " ONE EXPERIMENT = ONE ALGORITHM. The Researcher names exactly one concrete algorithm per "
     "experiment and commits to it -- not a decision tree, not \"A or B depending on C\". If whether "
-    "that algorithm is viable depends on something nobody here knows yet (the problem sizes, how "
-    "much memory a table would take), the Researcher STATES THE ASSUMPTION as part of the idea and "
+    "that algorithm is viable depends on something nobody here knows yet ({unknowns}), the "
+    "Researcher STATES THE ASSUMPTION as part of the idea and "
     "commits anyway; an assumption that turns out wrong is a FAILED EXPERIMENT, which is a result "
     "this loop is built to read and build on, not something to avoid by searching first. The "
     "Developer implements exactly the algorithm it was given. It does not pick between algorithms, "
@@ -616,7 +627,9 @@ def main() -> int:
         "kind": "repo",
         "id": f"algotune_{args.task}",
         "goal": (GOAL.format(task=args.task)
-                 + (ROLE_SPLIT if args.role_split else "")
+                 + (ROLE_SPLIT.format(
+                       unknowns=(_UNKNOWNS_FULL_CONTEXT if args.full_context
+                                 else _UNKNOWNS_DEFAULT)) if args.role_split else "")
                  # --full-context swaps the FALSE half of --deliver for the measured facts and the
                  # capability that makes them checkable. The half that says "write the file early,
                  # a working solver beats an unwritten plan" is true either way and is kept.
