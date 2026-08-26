@@ -1360,6 +1360,22 @@ class ResearchMemo(BaseModel):
     # those are the rows that legitimately own no action — and leaves `next_experiments` to be
     # proposed as real work.
     open_questions: list[str] = Field(default_factory=list)    # families, no action, may not be built
+    # WHAT EACH OPEN QUESTION IS ABOUT, positionally aligned with `open_questions`.
+    #
+    # IT WAS MISSING AND `_assemble` ASSIGNED IT ANYWAY, which is a sharper defect than a dropped
+    # value: `agents/deep_research.py::_assemble` sets the memo's fields one by one and its line
+    # `memo.question_concepts = clean["question_concepts"]` raised on a model with no such field —
+    # so `memo.sources` on the NEXT line was never set and the call died half way. Because
+    # `_assemble` mutates the memo IN PLACE, everything assigned before that line survived in the
+    # object, and a memo could come back looking populated while being the product of a crashed
+    # assembly. Every deep-research memo on this box went through that path.
+    #
+    # The durable event never showed it because `core/advisory_payloads.py::sanitize_research_memo_payload`
+    # builds its own dict and defaults this key to `[]` when the source lacks it — so the row said
+    # "no concepts" about a memo whose carrier could not hold any. Two writers, one payload; the
+    # sanitizer was looking for a key the object was structurally unable to provide.
+    question_concepts: list[list[str]] = Field(default_factory=list)
+
     next_experiments: list[str] = Field(default_factory=list)  # one concrete change each
     # Optional concrete proposals the engine may materialize as injected nodes (empty for v1; the
     # directions above already feed the Researcher as standing context).

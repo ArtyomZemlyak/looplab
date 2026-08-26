@@ -20,7 +20,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+import logging
+
+from pydantic import BaseModel, Field, ValidationError
 
 from looplab.agents.loop_options import LoopOptions
 from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
@@ -36,6 +38,8 @@ from looplab.core.prompts import PromptStore, render
 from looplab.core.redact import redact_persisted_text
 from looplab.core.source_identity import canonical_source_ref
 
+
+_LOG = logging.getLogger(__name__)
 
 _MAX_SOURCES = MAX_RESEARCH_SOURCES
 _STATE_BRIEF_MAX_NODES = 80
@@ -577,13 +581,54 @@ class DeepResearcher:
         return memo
 
     def _finalize(self, args: dict, memo: ResearchMemo, sources: list[dict]) -> ResearchMemo:
+        """Assemble the emitted memo, keeping every field that validated.
+
+        ALL-OR-NOTHING WAS THE DEFECT, and it cost two whole runs of memos. This used to be one
+        `try` around `model_validate` whose `except` returned a memo carrying ONLY `summary` and
+        `sources` — so a single field of the wrong shape discarded the directions, the questions,
+        the experiments, the findings and the claims that had all validated beside it.
+
+        MEASURED on `runs/e5small-dr-unified-v7`: both of that run's deep-research memos came back
+        with a real summary, 64 sources and every list empty, against a corpus base rate of one
+        empty memo in 101. The model had emitted — its last generation reads "I have everything I
+        need. Let me emit the final research memo. [tool_calls: emit]" at ~136 turns, well short of
+        the 300-turn nudge. The trigger was `question_concepts`, the only `list[list[str]]` in
+        `_MemoOut`: a model returning the natural flat shape `["loss/contrastive", …]` instead of
+        `[["loss/contrastive"], …]` took nine good fields with it. Two full passes — 203 tool calls
+        and 64 sources on the first alone — were thrown away.
+
+        SO THE OFFENDING KEYS ARE DROPPED AND THE REST IS KEPT. `ValidationError.errors()` names the
+        field in `loc[0]`; every named key is removed and the memo is validated once more. ONE retry
+        and no loop: a second failure after the offenders are gone means the payload is junk
+        throughout, which is what the summary-only fallback is for and what it still does.
+
+        NOT SILENT. A dropped field is logged at WARNING, because a field the engine discards must
+        be visible — this defect survived two runs precisely because nothing said anything.
+        `engine/research_cadence.py::_admissible_beliefs` sets the same precedent one module over:
+        what it refuses to register, it still says out loud.
+        """
         try:
             return self._assemble(_MemoOut.model_validate(args), memo, sources)
+        except ValidationError as first:
+            refused = sorted({str(err["loc"][0]) for err in first.errors()
+                              if err.get("loc")})
+            if isinstance(args, dict) and refused:
+                kept = {key: value for key, value in args.items() if key not in refused}
+                try:
+                    assembled = self._assemble(_MemoOut.model_validate(kept), memo, sources)
+                except Exception:  # noqa: BLE001 — junk throughout; fall through to summary-only
+                    pass
+                else:
+                    _LOG.warning(
+                        "deep research: emitted memo kept, %d field(s) refused for shape: %s",
+                        len(refused), ", ".join(refused))
+                    return assembled
         except Exception:  # noqa: BLE001 — a junk emit must not crash the run
-            value = (args or {}).get("summary", "") if isinstance(args, dict) else ""
-            memo.summary = redact_persisted_text(value or "(empty memo)", max_chars=1_000)
-            memo.sources = sources
-            return memo
+            pass
+        value = (args or {}).get("summary", "") if isinstance(args, dict) else ""
+        memo.summary = redact_persisted_text(value or "(empty memo)", max_chars=1_000)
+        memo.sources = sources
+        return memo
 
     def _forced(self, messages: list[dict], memo: ResearchMemo, sources: list[dict]) -> ResearchMemo:
         from looplab.core.parse import forced_structured
