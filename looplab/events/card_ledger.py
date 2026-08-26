@@ -2036,6 +2036,34 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
         cid = aliases.canon_at(bounded_id, drop_index)
         if cid:
             dropped[cid] = d
+    # A REOPEN SUPERSEDES AN EARLIER DROP, and only an earlier one. Resolution is LAST RECEIPT WINS
+    # by `_event_index`, so drop / reopen / drop is expressible and a replay of the same log gives
+    # the same board every time. Until this shipped, `cards_dropped` accumulated and nothing ever
+    # removed an entry: an operator stop was TERMINAL, the card sat visible-but-unactionable in the
+    # `dropped` lane, and no event in the vocabulary could put it back. The operator asked for the
+    # control by name.
+    #
+    # The DROP RECEIPT SURVIVES in `st.cards_dropped` — the log is append-only and who stopped the
+    # work and why is history the reopened card still owes its reader, which is the same reason
+    # `Card.discarded_nodes` keeps nodes that never ran instead of deleting them. What changes is
+    # only whether the drop is APPLIED.
+    #
+    # A reopen with no index cannot claim to be later than anything: `drop_index` is stamped on
+    # every receipt by the fold, so a missing one means a hand-written or pre-upgrade row, and the
+    # conservative answer is to leave the drop standing rather than let an unordered receipt revive
+    # a card the operator stopped.
+    for r in st.cards_reopened:
+        bounded_id = _card_id(r.get("id"))
+        raw_index = r.get("_event_index")
+        if bounded_id is None or type(raw_index) is not int or raw_index < 0:
+            continue
+        cid = aliases.canon_at(bounded_id, raw_index)
+        prior = dropped.get(cid) if cid else None
+        if prior is None:
+            continue
+        prior_index = prior.get("_event_index")
+        if type(prior_index) is int and prior_index < raw_index:
+            dropped.pop(cid, None)
     for cid, d in dropped.items():
         c = cards.get(cid)
         if c is not None:

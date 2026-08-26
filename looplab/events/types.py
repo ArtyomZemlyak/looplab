@@ -296,6 +296,16 @@ EV_CARD_REPRIORITIZED = "card_reprioritized"
 EV_CARD_EDITED = "card_edited"
 EV_CARD_RESOURCE_PINNED = "card_resource_pinned"
 EV_CARD_DROPPED = "card_dropped"                # explicit operator stop intent (server-stamped)
+# THE COUNTERPART A DROP NEVER HAD. `cards_dropped` is an ACCUMULATING list and nothing removed an
+# entry, so an operator stop was TERMINAL — the card stayed visible in the `dropped` lane, was
+# `actionable=False`, and no event in the vocabulary could put it back. The operator asked for a
+# reopen and the vocabulary did not contain one.
+#
+# Resolution is LAST RECEIPT WINS by `_event_index`, so drop/reopen/drop is expressible and replay
+# gives the same answer every time. The drop receipt is NOT deleted: the log is append-only and who
+# stopped a line of work and why is history a reopen must not erase — the same rule
+# `Card.discarded_nodes` keeps for nodes that never ran.
+EV_CARD_REOPENED = "card_reopened"              # explicit operator resume intent (server-stamped)
 # Layer 5's request/done execution ledger. Both are folded and main-task-only: the request is the
 # durable selection+compute gate; done advances it after commit or an explicit producer-failure give-up.
 EV_CARD_BUILD_REQUESTED = "card_build_requested"

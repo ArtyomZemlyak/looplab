@@ -386,8 +386,9 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   reads Failed and retires, which is what stops a returned idea from looping. Unknown future
   statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
-  edit display text, pin the 1-based visible priority, pin a configured GPU request, or deliberately
-  drop a Card. All four actions use the same generation-fenced command lifecycle as the rest of the
+  edit display text, pin the 1-based visible priority, pin a configured GPU request, deliberately
+  drop a Card, or — since 2026-08-26 — **reopen** one. All five actions use the same
+  generation-fenced command lifecycle as the rest of the
   workspace; accepted/executing actions remain visibly pending across SSE lag, while a definite
   failure rolls back only that optimistic field. Browser state is scoped to run + event-log generation,
   so a late response from a replaced run cannot mutate the new board. Resource display keeps the
@@ -397,7 +398,18 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   GPU-owning Run may wait behind the conservative pool-wide host lease. The UI shows the configured
   request, not a live allocation or queue position. Dropping a Card is
   the explicit stop-now affordance for its matching in-flight eval; engine/freshness drops still burn
-  to a valid terminal result. The Card board stores work items; `belief_id` groups retries or other cards
+  to a valid terminal result. **A drop is no longer terminal.** `st.cards_dropped` was an
+  accumulating list nothing ever removed, so a stopped Card sat visible-but-unactionable in the
+  `dropped` lane with no event in the vocabulary that could return it — the operator asked for the
+  control by name. `card_reopened` is its counterpart, resolved **last receipt wins** by event index,
+  so drop / reopen / drop is expressible and replays identically, and a stale reopen can never revive
+  a Card the operator has since stopped again. The **drop receipt survives**: the log is append-only
+  and who stopped the work and why is history the reopened Card still owes its reader — only whether
+  the drop is *applied* changes. The affordance appears **only on a stopped Card** and deliberately
+  **not** behind the danger disclosure the drop lives in: ending a line of work and resuming one
+  should not be presented with the same weight. A reopen carrying no event index leaves the drop
+  standing, which is the fail-closed direction — the fold stamps an index on every receipt it writes,
+  so a missing one means a hand-written or pre-upgrade row. The Card board stores work items; `belief_id` groups retries or other cards
   that test the same hypothesis, while the distinct-belief projection avoids duplicate prompt/ranking rows. The
   operator **+ Add** / **abandon** affordances write `hypothesis_added` / `hypothesis_updated` control
   events that seed and update cards.

@@ -76,7 +76,7 @@ from looplab.events.types import (
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
     EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_BUILD_ATTEMPTED, EV_CARD_BUILD_DONE,
     EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED,
-    EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED,
+    EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED, EV_CARD_REOPENED,
     EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
     EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
@@ -3012,6 +3012,24 @@ def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.cards_dropped.append(receipt)
 
 
+def _on_card_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """An operator putting a stopped card back on the board.
+
+    MIRRORS `_on_card_dropped` deliberately, down to reusing its bounded receipt: the two are one
+    lifecycle switch and a second, subtly different bound is how they come to disagree about which
+    ids are admissible. `_event_index` is what resolves them — last receipt wins — so drop, reopen
+    and drop again is expressible and replays identically.
+
+    The drop receipt is NOT removed. The log is append-only and who stopped the work and why is
+    history the reopened card still owes its reader; `_apply_card_drops` simply stops APPLYING a drop
+    that a later reopen supersedes.
+    """
+    receipt = _bounded_card_drop_receipt(d)
+    if receipt is not None:
+        receipt["_event_index"] = ctx.event_index
+        st.cards_reopened.append(receipt)
+
+
 def _on_card_reprioritized(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     """Fold one server-stamped operator priority pin into its last-write-wins map."""
     card_id = _card_replay_id(d.get("id"))
@@ -4158,6 +4176,7 @@ _HANDLERS = {
     EV_CARD_DROPPED: _on_card_dropped,
     EV_CARD_REPRIORITIZED: _on_card_reprioritized,
     EV_CARD_EDITED: _on_card_edited,
+    EV_CARD_REOPENED: _on_card_reopened,
     EV_CARD_RESOURCE_PINNED: _on_card_resource_pinned,
     EV_CARD_ENRICHED: _on_card_enriched,
     EV_CARD_RANKED: _on_card_ranked,

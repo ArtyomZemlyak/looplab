@@ -55,7 +55,7 @@ const _CARD_ICON = {
 const _cardRefs = value => Array.isArray(value)
   ? value.filter(item => typeof item === 'string' && item).slice(0, 32) : []
 
-const _CARD_CONTROL_KINDS = ['edit', 'priority', 'resources', 'drop', 'abandon']
+const _CARD_CONTROL_KINDS = ['edit', 'priority', 'resources', 'drop', 'reopen', 'abandon']
 
 function _cardResourceValues(value) {
   if (!isRecord(value)) return null
@@ -87,6 +87,11 @@ function cardControlReflected(card, kind, patch, baseline, expectedEventSeq) {
   if (kind === 'resources') return _sameCardResourceValues(card.resource_pin, patch.resource_pin)
   if (kind === 'drop') return card.status === 'dropped'
     && (!patch.dropped_reason || card.dropped_reason === patch.dropped_reason)
+  // The drop's mirror. Reflection is "the card left the dropped lane" and deliberately NOT "the
+  // reason matches": the server's reopen receipt carries its OWN reason, and the fold clears
+  // `dropped_reason` when the drop stops applying, so keying on it would leave every reopen
+  // optimistically pending until a poll timed it out.
+  if (kind === 'reopen') return card.status !== 'dropped'
   if (kind === 'abandon') return card.verdict === 'abandoned'
   return false
 }
@@ -227,6 +232,7 @@ function _CardKanbanCard({
   const [gpuDraft, setGpuDraft] = useState(formGpus == null ? '' : String(formGpus))
   const [memoryDraft, setMemoryDraft] = useState(formGpuMem == null ? '' : String(formGpuMem))
   const [dropReason, setDropReason] = useState('operator dropped')
+  const [reopenReason, setReopenReason] = useState('operator reopened')
   const [controlError, setControlError] = useState('')
   const ownPending = isRecord(controlState?.pending) ? controlState.pending : null
   const busy = !!ownPending || controlsLocked === true
@@ -287,6 +293,14 @@ function _CardKanbanCard({
   const drop = () => {
     const reason = dropReason.trim() || 'operator dropped'
     control('drop', { reason }, { status: 'dropped', dropped_reason: reason })
+  }
+  // The drop's counterpart. The optimistic patch clears `dropped_reason` alongside the lane
+  // because the fold does: once a later reopen supersedes the drop, the card is not carrying a
+  // drop reason any more, and showing one on a reopened row would state a stop that no longer
+  // applies. The drop RECEIPT survives in the log — this is the board, not the history.
+  const reopen = () => {
+    const reason = reopenReason.trim() || 'operator reopened'
+    control('reopen', { reason }, { status: 'proposed', dropped_reason: null })
   }
   // This is deliberately Card-scoped: the backend receives one Card id, so siblings that happen to
   // share a seed remain unchanged. The control changes the Card's research verdict, not its work lane.
@@ -607,6 +621,20 @@ function _CardKanbanCard({
           Abandon this Card
         </button>
       </div>
+      {/* SHOWN ONLY ON A STOPPED CARD, and not behind a danger disclosure: dropping ends a line of
+          work and reopening resumes one, so presenting them with the same weight would be wrong in
+          both directions. Until this shipped a drop was TERMINAL — the card stayed visible in the
+          `dropped` lane, unactionable, with no event in the vocabulary that could return it. */}
+      {_cardStatus(card) === 'dropped' && <form className="card-control-form"
+        onSubmit={event => { event.preventDefault(); reopen() }}>
+        <label><span>Reopen reason (optional)</span><input className="text" value={reopenReason}
+          maxLength={400} aria-label={`Reopen reason for ${card.id}`} disabled={busy}
+          onChange={event => setReopenReason(event.target.value)} /></label>
+        <button type="submit" className="btn xs" disabled={busy}
+          title="Put this stopped Card back on the board; the drop receipt stays in the log">
+          Reopen this Card
+        </button>
+      </form>}
       <details className="card-control-danger">
         <summary>Drop Card…</summary>
         <form className="card-control-form" onSubmit={event => { event.preventDefault(); drop() }}>
@@ -976,7 +1004,9 @@ function _CardKanban({
             ? await CONTROL.pinCardResources(runId, card.id, data.gpus, data.gpu_mem_mib)
             : kind === 'abandon'
               ? await CONTROL.abandonHypothesis(runId, card.id)
-              : await CONTROL.dropCard(runId, card.id, data.reason)
+              : kind === 'reopen'
+                ? await CONTROL.reopenCard(runId, card.id, data.reason)
+                : await CONTROL.dropCard(runId, card.id, data.reason)
       if (!activeRef.current) return { kind: 'stale', message: 'Card board scope changed' }
       const feedback = commandFeedback(record, {
         success: labels.success, noop: `${labels.success} (already current)`,

@@ -2124,6 +2124,10 @@ class RunState(BaseModel):
     cards_added: list[dict] = Field(default_factory=list)
     cards_merged: list[dict] = Field(default_factory=list)
     cards_dropped: list[dict] = Field(default_factory=list)
+    # The reopen receipts, resolved against `cards_dropped` by `_event_index` (last one wins). Kept
+    # as its OWN list rather than by removing the drop: the drop carries who/why, which a reopened
+    # card's history still owes the operator.
+    cards_reopened: list[dict] = Field(default_factory=list)
     # Layer 1b enrichment channel. `cards_enriched`: engine/operator card_enriched deltas (novelty verdict,
     # cross-run prior, footprint-finalize, steering cues), applied last-write-by-seq in `_derive_cards`.
     # `card_ranking`: the latest `card_ranked` event {order:[card ids], confidence, reason}; stamps each

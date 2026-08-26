@@ -58,7 +58,8 @@ from looplab.events.comment_projection import (
     normalize_comment_text)
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
-    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
+    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
+    EV_CARD_RESOURCE_PINNED,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
@@ -1282,6 +1283,19 @@ def _normalize_card_dropped(ctx: _ControlIntake) -> dict:
     return {"id": card_id, "reason": reason, "dropped_by": "operator"}
 
 
+def _normalize_card_reopened(ctx: _ControlIntake) -> dict:
+    """The drop's counterpart, and the SAME shape on purpose.
+
+    `replay.py::_on_card_reopened` reuses `_bounded_card_drop_receipt`, so the two receipts must be
+    one shape — a second, subtly different bound is how two halves of one lifecycle switch come to
+    disagree about which ids are admissible. `by` rather than `dropped_by` because the receipt reads
+    either and "dropped_by" on a reopen row would be a lie to whoever reads the log.
+    """
+    card_id, _card_value = ctx.card()
+    reason = ctx.text("reason", required=False, limit=400) or "operator reopened"
+    return {"id": card_id, "reason": reason, "by": "operator"}
+
+
 # ------------------------------------------------------------------ append-time preconditions
 #
 # Every one of these runs against a FRESH fold, immediately before the strict-lock append, inside
@@ -1556,6 +1570,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_CARD_EDITED: frozenset({"id", "statement"}),
     EV_CARD_RESOURCE_PINNED: frozenset({"id", "gpus", "gpu_mem_mib"}),
     EV_CARD_DROPPED: frozenset({"id", "reason"}),
+    EV_CARD_REOPENED: frozenset({"id", "reason"}),
 }
 assert set(CONTROL_DATA_FIELDS) == set(CONTROL_EVENTS), "every control event needs a data allowlist"
 assert _INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE], (
@@ -1595,6 +1610,7 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_CARD_EDITED: _normalize_card_edited,
     EV_CARD_RESOURCE_PINNED: _normalize_card_resource_pinned,
     EV_CARD_DROPPED: _normalize_card_dropped,
+    EV_CARD_REOPENED: _normalize_card_reopened,
 }
 assert set(_CONTROL_NORMALIZERS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit intake normalizer (None = allow-list only)")
@@ -1634,6 +1650,7 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_CARD_EDITED: _precondition_card,
     EV_CARD_RESOURCE_PINNED: _precondition_card,
     EV_CARD_DROPPED: _precondition_card,
+    EV_CARD_REOPENED: _precondition_card,
 }
 assert set(_CONTROL_PRECONDITIONS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit append-time precondition (None = not applicable)")
@@ -1674,6 +1691,7 @@ _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
     EV_CARD_EDITED: None,
     EV_CARD_RESOURCE_PINNED: None,
     EV_CARD_DROPPED: None,
+    EV_CARD_REOPENED: None,
 }
 assert set(_CONTROL_DECISIONS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit engine decision (None = the shared policy tail)")
@@ -1731,6 +1749,7 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     EV_CARD_EDITED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_CARD_RESOURCE_PINNED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_CARD_DROPPED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_REOPENED: (EnginePolicy.NO_SPAWN, "folded_intent"),
 }
 
 

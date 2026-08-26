@@ -286,6 +286,10 @@ export const CONTROL = {
     }),
   dropCard: (rid, id, reason = 'operator dropped') => runCommand(
     rid, 'card_dropped', { id, reason }),
+  // The counterpart a drop never had: an operator putting a stopped card back on the board. Same
+  // command path, same generation fence — a reopen is as much a selection decision as the drop was.
+  reopenCard: (rid, id, reason = 'operator reopened') => runCommand(
+    rid, 'card_reopened', { id, reason }),
   // Workstream A: force a high-quality regeneration of the agent-authored run report now. Dedicated
   // endpoint (not /control) — appends a `report_generated` event. Runs as a background job, so we
   // jobAwait the response (a slow/large regen can't 504 behind a proxy; a fast one returns inline).
