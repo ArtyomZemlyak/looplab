@@ -26,6 +26,7 @@ from looplab.core.models import (
     NodeStatus,
     RunState,
     _durable_speculative_lifecycle,
+    card_is_direction,
     card_score_fence_state,
     effective_card_footprint,
     is_unevaluated_speculative_discard,
@@ -441,7 +442,9 @@ def unconsumed_card_inventory(state: RunState, *, exclude: "Collection[str]" = (
     thing the gate buys was invisible to the number that limits the buying.
 
     Measured live on `runs/e5small-dr-unified-v4`: `_speculation_depth_used()` returned **1** against
-    a pinned ceiling of 2 while **88** cards sat unbuilt — `1 < 2` every turn, forever. Nothing could
+    a pinned ceiling of 2 while a large backlog of staged cards sat unbuilt — `1 < 2` every turn,
+    forever. (That backlog was a MID-RUN count and is not a board census: v4's final fold holds 141
+    cards of which 20 are non-terminal, 15 of them work items. Re-derived 2026-08-26.) Nothing could
     consume them either: while any node is pending, `card_next_actions` returns `forced_card_actions`
     (an `evaluate` for the running node) and never reaches card SELECTION, which the engine documents
     at `_occupancy_paced_creates`.
@@ -462,6 +465,31 @@ def unconsumed_card_inventory(state: RunState, *, exclude: "Collection[str]" = (
     for card in state.cards.values():
         if card.id in skip:
             continue                       # already counted by the caller's other half
+        if card_is_direction(card):
+            # A research QUESTION is not inventory any build can consume. It owns no action, so it
+            # can never become a Node, and the four terminal checks below admit it only because it
+            # is a non-terminal card — which describes a question perfectly and says nothing about
+            # buildability.
+            #
+            # MEASURED on the live `runs/e5small-dr-unified-v6` (greedy, eval width 2, seven hours,
+            # GPU 1 at 0% throughout): supply was SIX, all six of them questions, against a ceiling
+            # of `min(depth 2, card_lane_width(greedy) 1)` = 1. `6 < 1` refused the raw lane — the
+            # only producer that can fill a second evaluation lane — on every turn from t+12.6m,
+            # when the opening memo registered them. Admission itself was fine: with the session's
+            # real `consumed_inflight` the running node correctly subtracted to 0.
+            #
+            # THE PREMISE ABOVE WENT FALSE and this clause is the correction. "Over-counting only
+            # makes the run prefetch LESS, which is the safe direction" held when it was written,
+            # before directions became first-class board rows: over-counting by six does not
+            # prefetch less, it prefetches never, and the count grows with every later memo. Across
+            # the box each run carries 3-7 questions (v2 5, v3 4, v4 5, v6 6, rl-v6 7, rl-v7 3,
+            # rl-v8 5, rl-v9 5), so every run began by filling its own ceiling with unbuildable rows.
+            #
+            # BY KIND, NEVER BY READINESS — the coarseness this docstring insists on is untouched.
+            # `card_is_direction` reads ACTION OWNERSHIP, the same rule the board, the fold and the
+            # UI use; a WORK item that merely fails a freshness fence this turn still counts, which
+            # is what keeps the v4 defect closed.
+            continue
         if getattr(card, "status", None) != "proposed":
             continue                       # built, running, dropped: no longer waiting
         if getattr(card, "verdict", None) != "open":
