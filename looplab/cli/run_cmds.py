@@ -88,26 +88,14 @@ def _refuse_wrap_up_engine_that_could_propose(eng) -> None:
 def _budget_leaf(exc: BaseException, _depth: int = 0):
     """The `BudgetExceeded` inside `exc`, however deeply a task group wrapped it — or None.
 
-    Bounded depth: an exception group can nest, and a cycle in `__cause__`/`__context__` (which a
-    caller can construct) must not turn a terminal-event handler into a hang.
+    The definition moved to `core/errors.py::budget_stop_leaf` when the engine acquired a second
+    caller for it (`Engine._drain_inflight_evaluation`, which has to recognise the SAME wrapped
+    leaf one frame inside `Engine.run` in order to let a paid-for evaluation land its terminal).
+    This name stays as the local spelling every call site here already uses.
     """
-    from looplab.core.llm import BudgetExceeded
+    from looplab.core.errors import budget_stop_leaf
 
-    if _depth > 8 or exc is None:
-        return None
-    if isinstance(exc, BudgetExceeded):
-        return exc
-    for inner in list(getattr(exc, "exceptions", ()) or ()):
-        found = _budget_leaf(inner, _depth + 1)
-        if found is not None:
-            return found
-    for attr in ("__cause__", "__context__"):
-        inner = getattr(exc, attr, None)
-        if inner is not None and inner is not exc:
-            found = _budget_leaf(inner, _depth + 1)
-            if found is not None:
-                return found
-    return None
+    return budget_stop_leaf(exc, _depth)
 
 
 def _run_engine_guarded(eng: Engine):

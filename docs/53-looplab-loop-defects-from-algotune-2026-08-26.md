@@ -274,8 +274,53 @@ and an experiment with a `score.log` on disk is **not** pending.
 
 ## 5. A completed evaluation is discarded when the ceiling lands
 
-    OPEN[scored-node-lost-when-the-budget-ceiling-fires]
-    proof:absent:drain_inflight_evaluation@looplab/engine/orchestrator.py
+**CLOSED 2026-08-26.** The item was right and understated: counted over ALL twenty task-arms
+rather than the eight-arm scored corpus, **five task-arms each lost one scored node — five in
+total**, not two.
+
+| task-arm | node dirs | `score.log` | `node_evaluated` | the score that was thrown away | champion |
+|---|---|---|---|---|---|
+| `integer_factorization` | 4 | 4 | **3** | 4.0958 | 8.3255 |
+| `spectral_clustering` | 2 | 2 | **1** | 0.0 (invalid) | 0.0 |
+| `max_clique_cpsat` | 7 | 7 | **6** | 0.0 (invalid) | 31.664 |
+| `min_dominating_set` | 3 | 3 | **2** | 1.0804 | 7.2265 |
+| `multi_dim_knapsack` | 5 | 5 | **4** | 2.8004 | 2.8586 |
+
+The honest-bound sentence below no longer holds either: `multi_dim_knapsack` threw away 2.8004
+against a champion of 2.8586 — a 2 % gap, well inside single-measurement noise. That one could
+have chosen a different champion.
+
+**The mechanism, and it is exact rather than inferred.** All five event tails are the same five
+rows — `node_eval_started`, `workspace_seeded`, `research_attempted`, one research `llm_usage`, a
+long silence, the ceiling — and every `score.log` mtime falls 24–190 s AFTER the research call that
+crossed the ceiling and 1–3 s BEFORE `finalize_step{begun}`.
+
+The last paid call is the overlapped deep research spawned beside the eval. It raises
+`BudgetExceeded` out of the CardSession's background group, while the eval — which since F1f lives
+in the RUN-scoped group, strictly outer — is still inside `await anyio.to_thread.run_sync(...)`.
+That hop is `abandon_on_cancel=False`, so anyio ignores the cancellation until the worker thread
+finishes: the subprocess ran to completion and wrote its score, and the cancel landed at the first
+checkpoint after it returned, between the eval finishing and its single `node_evaluated` append.
+**Cancelling saved nothing. It only destroyed the record.**
+
+`Engine.run` now drains an in-flight evaluation before re-raising, from inside the eval task group
+— the one instant its children are neither cancelled nor gone — and only when the escaping
+exception carries a `BudgetExceeded` leaf. The speculation-off path had the same defect one frame
+lower and gets a deferred-stop sink tested at the only choke every admission passes through.
+`budget_stop_leaf` moved to `core/errors.py` so the engine and the CLI cannot drift on what "the
+ceiling" means. The hard stop is untouched: same exception object, same message, same
+`run_finished {"reason": "budget_exhausted"}`, and no LLM call is reachable from the drain.
+
+**Two risks stated rather than hidden.** The drain is unbounded in wall clock — a ceiling hit
+during a ten-hour training now waits for it instead of exiting, which is the point, and Ctrl-C
+still cuts it because it is deliberately not shielded. And the `run()`-level drain is correct only
+because the eval group is run-scoped: a refactor moving evals back inside the session group would
+make it too late again, and nothing red would say so.
+
+2180 budget/finalize/orchestrator/eval/research tests green; seven mutations were used, including
+the one that proves the run still terminates.
+
+The original finding:
 
 **Measured:** `integer_factorization` has 4 node directories, 4 `score.log` files and **3**
 `node_evaluated` events; `spectral_clustering` has 2, 2 and **1**. In both cases the evaluation
