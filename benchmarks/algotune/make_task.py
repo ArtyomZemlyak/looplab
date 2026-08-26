@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -107,13 +108,27 @@ ROLE_SPLIT = (
 # `pow(g,x,p) == h`). What it cannot do is measure the SCORE -- the graded instances are not on the
 # machine and it has no way to produce them -- and the transcripts show the search was about
 # exactly that: instance sizes and timings.
-DELIVER = (
+# THE FALSE HALF, kept verbatim under `--deliver` so the campaign that ran on it stays
+# reproducible, and REPLACED by `MEASURE` under `--full-context`.
+#
+# Its premise was checked against the reference arm on 2026-08-26 and does not hold. "The instances
+# you are graded on are not on this machine" -- the train split IS on this machine
+# (`.hf_datasets/oripress__AlgoTune/data/<task>/<task>_T100ms_n<N>_size100_train.jsonl`, 100
+# instances), it is the split every node is already scored on, and AlgoTuner's own agent is handed
+# the resulting `Speedup: X` with `Valid Solutions: Y%` between 17 and 61 times per task, plus
+# `eval_input` 207-429 times and `profile` 58-194 times. We told our arm the metric was unknowable
+# and it did the only thing left: it invented instance sizes and timed those. `convex_hull`'s real
+# n is 267 021; the probes that chose its champion ran at n = 100, 1 000 and 10 000.
+_DELIVER_NO_MEASURE = (
     " YOU CANNOT MEASURE YOUR OWN SCORE, AND YOU ARE NOT MEANT TO. The instances you are graded on "
     "are not on this machine and you cannot generate them; the speedup comes from the evaluator, "
     "which runs after you finish. So timing your own guesses against invented inputs measures "
     "something else -- your guess about the input -- and no amount of it brings the real number "
     "closer. (Correctness is different and you CAN check it: build a few instances yourself and "
     "verify the contract holds. Do that briefly, then stop.) "
+)
+
+_DELIVER_WRITE = (
     "YOUR OUTPUT IS THE FILE. A session that ends without writing solver.py has produced NOTHING -- "
     "not a partial result, not a finding, nothing the loop can use -- and it is thrown away. Write "
     "a correct implementation EARLY, while you still have room, and improve it after; a working "
@@ -124,6 +139,171 @@ DELIVER = (
     "instance sizes, PICK A REASONABLE ASSUMPTION, write it into the code as a threshold or a "
     "fallback, say so in your summary, and let the evaluation tell you whether it was right. That "
     "answer is worth more than any estimate you can make here, and it costs one experiment."
+)
+
+DELIVER = _DELIVER_NO_MEASURE + _DELIVER_WRITE
+
+
+# ---------------------------------------------------------------- --full-context
+
+# What the arena hands its OWN agent, which we had been withholding. Every number below is READ
+# FROM THE DATASET, never typed in: a hand-written size goes stale in the direction that silently
+# misinforms, which is the failure this clause exists to end.
+_DATASET_RE = re.compile(
+    r"^(?P<task>.+)_T(?P<ms>\d+)ms_n(?P<n>\d+)_size(?P<size>\d+)_(?P<subset>train|test)\.jsonl$")
+
+
+def train_dataset(root: Path, task: str) -> Path | None:
+    """The train split's file, or None. TEST IS NEVER RETURNED and never mounted."""
+    base = root / ".hf_datasets" / "oripress__AlgoTune" / "data" / task
+    if not base.is_dir():
+        return None
+    for path in sorted(base.glob(f"{task}_T*ms_n*_size*_train.jsonl")):
+        if _DATASET_RE.match(path.name):
+            return path
+    return None
+
+
+def _instance_shape(path: Path, limit: int = 4000) -> str:
+    """The STRUCTURE of one instance -- keys, types, lengths -- not its contents.
+
+    A prompt cannot carry 100 instances and must not try; what the agent is missing is the SHAPE,
+    which is what decides the algorithm. Values are described, never quoted, so this cannot become
+    a channel for memorising answers.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            record = json.loads(fh.readline() or "{}")
+    except Exception:                                # noqa: BLE001 - shape is a nicety, not a gate
+        return ""
+    # `solve(problem)` receives the RECORD'S `problem` value, not the record. The record also
+    # carries `k` (the size, already stated) and `seed`, and describing those as part of the input
+    # would send the reader looking for fields the solver never sees.
+    first = record.get("problem", record) if isinstance(record, dict) else record
+
+    def describe(value, depth: int = 0) -> str:
+        if depth > 3:
+            return type(value).__name__
+        # EXTERNAL ARRAYS ARE RESOLVED, not reported as the pointer that stands for them. The first
+        # version of this printed `points: {__type__: str, npy_path: str}` for `convex_hull` -- a
+        # description that tells the reader the input is a two-key dict of strings when it is a
+        # (267021, 2) float64 array. Misinforming about the shape is the exact failure this clause
+        # was added to end, so it had to be fixed before it shipped.
+        kind = value.get("__type__") if isinstance(value, dict) else None
+        if kind == "ndarray_ref":
+            try:
+                import numpy
+
+                arr = numpy.load(path.parent / value["npy_path"], mmap_mode="r")
+                return f"ndarray(shape={tuple(arr.shape)}, dtype={arr.dtype})"
+            except Exception:                        # noqa: BLE001 - fall back to the honest name
+                return "ndarray(shape unknown)"
+        if kind == "ndarray_b64":
+            shape = value.get("shape")
+            dtype = value.get("dtype", "?")
+            return f"ndarray(shape={tuple(shape) if shape else '?'}, dtype={dtype})"
+        if kind == "scipy_csr_matrix_ref":
+            # The shape is itself a wrapped tuple ({"__type__": "tuple", "data": [rows, cols]}) on
+            # `sparse_eigenvectors_complex`, and reading it as a sequence yielded the WRAPPER'S KEYS
+            # -- `csr_matrix(shape=('__type__', 'data'))`. Unwrap one level before believing it.
+            shape = value.get("shape")
+            if isinstance(shape, dict) and shape.get("__type__") == "tuple":
+                shape = shape.get("data")
+            ok = isinstance(shape, (list, tuple)) and all(isinstance(x, int) for x in shape)
+            return f"scipy.sparse.csr_matrix(shape={tuple(shape) if ok else '?'})"
+        if kind == "tuple":
+            inner = value.get("data")
+            if isinstance(inner, (list, tuple)):
+                return "(" + ", ".join(describe(x, depth + 1) for x in inner[:8]) + ")"
+            return "tuple"
+        if isinstance(value, dict):
+            items = list(value.items())
+            # A DICT USED AS A MATRIX is described as one. `kcenters` hands solve() a distance map
+            # whose first key alone holds 44 float entries; printing twelve of them tells the reader
+            # nothing the count does not, and buries the second field.
+            if len(items) > 8 and all(isinstance(v, type(items[0][1])) for _, v in items):
+                return (f"{{{len(items)} keys ({describe(items[0][0], depth + 1)}) -> "
+                        f"{describe(items[0][1], depth + 1)}}}")
+            inner = ", ".join(f"{k}: {describe(v, depth + 1)}" for k, v in items[:8])
+            return "{" + inner + ("" if len(items) <= 8 else f", +{len(items) - 8} more") + "}"
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return "[] (empty)"
+            inner = describe(value[0], depth + 1)
+            # RAGGED LISTS SAY SO. `edge_expansion`'s adjacency list has 4408 entries whose lengths
+            # run from 5 to 32; reporting the first one's length as the shape would tell the reader
+            # the graph is 11-regular, and an algorithm chosen for a regular graph is the wrong
+            # algorithm. Only the length is re-described -- the element type is taken from the first.
+            lengths = {len(x) for x in value if isinstance(x, (list, tuple))}
+            if len(lengths) > 1:
+                head = describe(value[0][0], depth + 2) if value[0] else "?"
+                return (f"[{len(value)} x list[{head}], lengths vary: "
+                        f"{min(lengths)}..{max(lengths)}]")
+            return f"[{len(value)} x {inner}]"
+        if isinstance(value, bool):
+            return "bool"
+        if isinstance(value, int):
+            return "int"
+        if isinstance(value, float):
+            return "float"
+        if isinstance(value, str):
+            return f"str(len {len(value)})"
+        return type(value).__name__
+
+    return describe(first)[:limit]
+
+
+def dataset_clause(root: Path, task: str) -> str:
+    """The instance shape, in the goal, derived from the train split on this machine.
+
+    Item 10 of docs/53: the loop timed probes at sizes it invented because nothing told it the real
+    one. `convex_hull` is n = 267 021 and its champion was chosen from probes at n = 100, 1 000 and
+    10 000 -- three orders of magnitude out, on the task whose whole score is a time.
+    """
+    path = train_dataset(root, task)
+    if path is None:
+        return ""
+    m = _DATASET_RE.match(path.name)
+    assert m is not None                              # train_dataset only returns matching names
+    try:
+        count = sum(1 for _ in path.open(encoding="utf-8", errors="replace"))
+    except OSError:
+        count = 0
+    shape = _instance_shape(path)
+    clause = (
+        " THE INSTANCES, MEASURED FROM THE DATASET ON THIS MACHINE -- not a guess, and not "
+        f"something to re-derive: the graded split is `{m.group('task')}` at **n = {m.group('n')}**, "
+        f"{count or m.group('size')} instances, generated so that the REFERENCE implementation takes "
+        f"about {m.group('ms')} ms on one of them. Your speedup is the reference's total time over "
+        "yours across all of them, so a constant overhead you would ignore at toy sizes is "
+        f"{m.group('ms')} ms of budget per instance here, and an asymptotically better algorithm "
+        "that loses below n = 1 000 may still be the right answer. "
+        "SIZE YOUR OWN CHECKS TO THAT n. A timing you take at n = 100 when the graded n is "
+        f"{m.group('n')} does not measure this task."
+    )
+    if shape:
+        clause += f" One instance has the shape: {shape}."
+    return clause + " "
+
+
+# The clause that REPLACES `_DELIVER_NO_MEASURE`. It states what is now true, and states the cost,
+# because an expensive capability offered without its price is used until the budget is gone.
+MEASURE = (
+    " YOU CAN MEASURE YOUR OWN SCORE, AND YOU SHOULD -- ON THE TRAIN SPLIT, THE SAME ONE EVERY NODE "
+    "IS SCORED ON. `run_dev_command(\"eval_train\")` runs the REAL evaluator over the real "
+    "instances with your currently staged files and prints the same JSON the scorer prints: "
+    "`speedup`, `eval_seconds`, and whether every instance was valid. That is the number, not an "
+    "estimate of it. Use it the way you would use a test: write the simplest correct solver, "
+    "measure, change ONE thing, measure again. "
+    "IT IS EXPENSIVE -- tens of seconds to several minutes of the same machine your solver is "
+    "timed on, and it is charged to this run's wall clock. It is worth that when it settles a "
+    "question you would otherwise guess at, and worth nothing when run twice on the same code. "
+    "A guess you can check in one command is not a guess to write into the summary. "
+    "THE REPORTED SCORE IS ON A SPLIT YOU CANNOT SEE. Train is what you tune against; the champion "
+    "is finally scored on held-out instances from the same generator. So anything that fits the "
+    "train instances SPECIFICALLY -- a lookup table, a hard-coded answer, a threshold tuned to one "
+    "of them -- scores zero where it counts. Make it fast for instances of THIS SHAPE, not for "
+    "these hundred. "
 )
 
 
@@ -391,6 +571,13 @@ def main() -> int:
                          "Composes with the others.")
     ap.add_argument("--deliver", action="store_true",
                     help="Append the YOU CANNOT MEASURE YOUR OWN SCORE clause (see DELIVER).")
+    ap.add_argument("--full-context", action="store_true",
+                    help="Give this arm what the ARENA gives its own agent: the measured instance "
+                         "shape in the goal (see dataset_clause), a read-only mount of the TRAIN "
+                         "split, and a pinned `eval_train` command that runs the real evaluator on "
+                         "the staged files. Replaces the --deliver clause's YOU CANNOT MEASURE half "
+                         "with MEASURE. OFF by default and composable: it CHANGES THE GOAL CARD, so "
+                         "adopt it between arms, never inside one.")
     ap.add_argument("--role-split", action="store_true",
                     help="Append the ONE EXPERIMENT = ONE ALGORITHM clause (see ROLE_SPLIT).")
     args = ap.parse_args()
@@ -417,13 +604,25 @@ def main() -> int:
         solver.write_text(SOLVER_STUB.format(task=args.task), encoding="utf-8")
 
     interpreter = args.python or str(root / ".venv" / "bin" / "python")
+    train_path = train_dataset(root, args.task) if args.full_context else None
+    if args.full_context and train_path is None:
+        # REFUSE rather than silently ship a --full-context task with no context. A flag that
+        # degrades to the old behaviour without saying so is how an arm ends up mislabelled.
+        raise SystemExit(f"--full-context: no train split found for {args.task!r} under "
+                         f"{root / '.hf_datasets'} -- refusing to build a task that claims context "
+                         f"it does not have")
 
     spec = {
         "kind": "repo",
         "id": f"algotune_{args.task}",
         "goal": (GOAL.format(task=args.task)
                  + (ROLE_SPLIT if args.role_split else "")
-                 + (DELIVER if args.deliver else "")
+                 # --full-context swaps the FALSE half of --deliver for the measured facts and the
+                 # capability that makes them checkable. The half that says "write the file early,
+                 # a working solver beats an unwritten plan" is true either way and is kept.
+                 + (dataset_clause(root, args.task) if args.full_context else "")
+                 + ((_DELIVER_WRITE if args.full_context else DELIVER) if args.deliver else "")
+                 + (MEASURE if args.full_context else "")
                  + (ONE_CARD.format(task=args.task) if args.one_card else "")
                  # BANS then PERMISSIONS, in that order and both under the same flag: they are one
                  # statement of what this arena allows, and the half that was missing is the half
@@ -442,6 +641,49 @@ def main() -> int:
         # `looplab_eval.py` refuses to submit them even if they change.
         "edit_surface": ["solver.py", "*.py", "*.pyx", "*.pxd", "setup.py", "pyproject.toml"],
         "protect": [ref_name, "description.txt"],
+        # NO DATA MOUNT, and that is a measured decision rather than caution.
+        #
+        # Mounting the train split was the obvious move and both halves of it fail. (a) PARITY: the
+        # reference agent never reads these files either -- it has `eval_input` (run on an input it
+        # supplies) and `eval` (score on train), and no path to the dataset. Handing ours the
+        # instances would be MORE than parity, in the one direction that matters, since the champion
+        # is graded on held-out instances from the same generator. (b) COST: four of the twenty tasks
+        # store their arrays outside the jsonl as `ndarray_ref` -> `_npy_data/<uuid>.npy`, and that
+        # directory holds BOTH splits' arrays -- 200 files, 816 MB on `convex_hull` alone. Mounting
+        # the directory leaks test; materialising only the train half is ~408 MB per node, and this
+        # loop evaluates nodes concurrently.
+        #
+        # What the agent actually lacked was the SHAPE and a way to MEASURE. It now has both.
+        # THE ARENA'S `eval`, which is the capability the comparison was missing. It runs the SAME
+        # bridge the scorer runs, on the SAME train split, against the Developer's staged files --
+        # so the number it prints is the number, not a proxy for it. The bridge removes its own
+        # `results/<model>-<pid>/` and `reports/evaluate_summary.<pid>.json` on the way out, and
+        # takes the shared baseline cache by default, so an invocation neither litters the
+        # third-party checkout nor re-times the reference against itself.
+        **({"developer_commands": [{
+            "name": "eval_train",
+            "command": [
+                interpreter, str(BRIDGE),
+                "--algotune-root", str(root),
+                "--task", args.task,
+                "--model", "DevEvalTrain",
+                "--solver", "solver.py",
+                "--subset", "train",
+            ] + (["--enforce-rules"] if args.enforce_rules else []),
+            "description": ("Run the REAL evaluator on the train split with your staged files and "
+                            "print its JSON: speedup, eval_seconds, and whether every instance was "
+                            "valid. This is the graded metric on the split nodes are scored on. It "
+                            "costs tens of seconds to several minutes on the machine your solver is "
+                            "timed on."),
+            "cwd": ".",
+            # 600 s IS THE MODEL'S CAP, not a number picked here: `DeveloperCommandSpec` refuses
+            # anything above it, and raising a global safety limit for one task type would be the
+            # wrong direction. It fits: arm B's twenty task-arms scored their nodes on this same
+            # train split in 29.7 to 374.6 s (median ~170 s) against a warm baseline cache. A task
+            # that does not fit loses THIS command, not its score -- the scorer stage keeps its own
+            # `--timeout` (7200 s default) and still produces the node's number.
+            "timeout": 600.0,
+        }]} if args.full_context else {}),
         "eval": {
             # DECLARED AS A ONE-STAGE PIPELINE, not as a bare `command`, and the difference is not
             # cosmetic. `repo_developer.py::_operator_stage_list` reads `eval.stages`; when it is

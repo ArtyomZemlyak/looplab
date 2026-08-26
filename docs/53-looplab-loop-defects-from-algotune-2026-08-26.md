@@ -303,10 +303,30 @@ of nothing. Keyed by the attempt the `.done` marker credits, the real count amon
 **three**. `tests/test_algotune_compare_arms_reports_real_spend.py` carries the wrong version as
 its falsifier.
 
-## 10. We took away the ruler and it built a fake one
+## 10. We took away the ruler and it built a fake one — CLOSED 2026-08-26
 
-    OPEN[we-took-away-the-ruler-and-it-built-a-fake-one]
-    proof:absent:train_feedback@benchmarks/algotune/make_task.py
+The marker is deleted rather than re-pointed: both halves shipped. `make_task.py --full-context`
+now (a) states the measured instance shape in the goal and (b) pins an `eval_train` command that
+runs the real evaluator on the train split against the Developer's staged files. `campaign.sh`
+needed no change -- `MAKE_TASK_ARGS` is a pass-through, so the new arm is one environment variable.
+Guarded by `tests/test_algotune_full_context.py`, whose nine cases each die under a targeted
+mutation (eight tried).
+
+It is OFF BY DEFAULT and that is not timidity: it CHANGES THE GOAL CARD, which is the measurement.
+The twenty arm-B numbers already on disk were produced without it and must not be put in one table
+with numbers produced under it.
+
+What was NOT adopted, and why, because the obvious version of this fix is wrong: the train split is
+on this machine and mounting it read-only was the first design. It fails twice. **Parity** -- the
+reference agent never reads those files either; it has `eval_input` and `eval` and no path to the
+dataset, so handing ours the instances is MORE than parity in the one direction that matters, since
+the champion is graded on held-out instances from the same generator. **Cost** -- four of the twenty
+tasks keep their arrays outside the jsonl in a `_npy_data/` directory holding BOTH splits (200
+files, 816 MB on `convex_hull`); mounting it leaks test, and materialising only the train half is
+~408 MB per node against a loop that evaluates nodes concurrently. What the agent actually lacked
+was the SHAPE and a way to MEASURE.
+
+The original finding, kept because it is the evidence:
 
 Item 1 says the loop times probes at an invented scale. This is **why**, and it is not the model's
 idea. Our own task text tells it, in capitals:
