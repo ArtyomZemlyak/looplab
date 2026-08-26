@@ -27,13 +27,29 @@ export const UNFILED_EXPERIMENTS_ID = '__unfiled_experiments__'
 // A question's set, normalised: sorted, de-duplicated, blank-free. Sorting is what makes the key
 // stable — `{a,b}` and `{b,a}` are one set and must not render as two rows.
 export function conceptSet(card) {
-  // REVIEW 2026-08-25 (P2 contract): the public projection ships `child_concept_tags` specifically
-  // to derive a direction's concept membership from its experiments, but this sole lattice reader
-  // ignores it. Directions without memo-authored `concept_tags` therefore remain permanently
-  // ungrouped even after tagged children arrive. Union the two bounded fields for direction rows.
-  const raw = isRecord(card) && Array.isArray(card.concept_tags) ? card.concept_tags : []
+  // A QUESTION INHERITS THE CONCEPTS OF THE EXPERIMENTS FILED UNDER IT, and until 2026-08-26 this
+  // reader ignored the field that says so. `card_ledger.py:2930-2933` computes `child_concept_tags`
+  // as the union over every child — deliberately written there and never onto `concept_tags`, whose
+  // `concept_source` provenance records who AUTHORED a membership and may not be handed a derived
+  // union. This function read only the authored field, so a question with no memo-authored tags
+  // stayed permanently ungrouped even after tagged children arrived.
+  //
+  // THE OPERATOR REPORTED THE WHOLE CONSEQUENCE AT ONCE — "the cards are filed nowhere, where is the
+  // hierarchy, where do concepts attach to questions, and why do Directions and Research look the
+  // same" — and it is one cause: an empty set is a subset of nothing useful, so NO nesting relation
+  // exists, every row falls to the ungrouped bucket, and the ladder degenerates into exactly the flat
+  // parent->child list the Directions tab drew. Measured on `runs/e5small-dr-unified-v7`: five
+  // questions, ALL with `concept_tags = []`, one of them carrying `child_concept_tags` of NINE ids
+  // from the experiment filed under it — the union present, populated, and unread.
+  //
+  // DIRECTION ROWS ONLY. An experiment's tags are its OWN claim about what it touches; unioning a
+  // child's would be meaningless here (an experiment owns no children) and, the day it did, would
+  // make a card appear to touch everything its siblings do.
+  const authored = isRecord(card) && Array.isArray(card.concept_tags) ? card.concept_tags : []
+  const inherited = cardIsDirection(card) && isRecord(card) && Array.isArray(card.child_concept_tags)
+    ? card.child_concept_tags : []
   const seen = new Set()
-  for (const tag of raw) {
+  for (const tag of [...authored, ...inherited]) {
     if (typeof tag === 'string' && tag.trim()) seen.add(tag.trim())
   }
   return [...seen].sort()

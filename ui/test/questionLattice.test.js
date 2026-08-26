@@ -275,3 +275,80 @@ test('unfiledExperiments is total over junk', () => {
   assert.deepEqual(unfiledExperiments(null), [])
   assert.deepEqual(unfiledExperiments([null, 'x', { no_id: 1 }]), [])
 })
+
+// --------------------------------------------------------------------------- //
+// A question inherits the concepts of the experiments filed under it (2026-08-26).
+//
+// The operator reported four symptoms at once — cards filed nowhere, no hierarchy, no concepts on
+// questions, and Research looking identical to the Directions tab — and they are ONE cause:
+// `conceptSet` read only the AUTHORED `concept_tags` and ignored `child_concept_tags`, the union the
+// fold computes over a question's children. With every set empty there is no subset relation, so
+// every row falls to the ungrouped bucket and the ladder flattens into the parent->child list
+// Directions drew.
+//
+// Measured on `runs/e5small-dr-unified-v7`: five questions, ALL `concept_tags = []`, one carrying
+// `child_concept_tags` of NINE ids — the union present, populated and unread.
+// --------------------------------------------------------------------------- //
+
+function _question(id, { tags = [], childTags = [] } = {}) {
+  return {
+    id, statement: id, seed_statement: id,
+    concept_tags: tags, child_concept_tags: childTags,
+    // THE UI'S KIND IS THE SERVER-PUBLISHED `card_kind`, not `selection_provenance` — that is what
+    // `cardLineageModel.js::cardKind` reads, and a fixture carrying the python-side field instead
+    // renders as an EXPERIMENT and inherits nothing. Driving these caught exactly that.
+    card_kind: 'direction',
+  }
+}
+
+function _experiment(id, { tags = [], childTags = [] } = {}) {
+  return {
+    id, statement: id, seed_statement: id,
+    concept_tags: tags, child_concept_tags: childTags,
+    card_kind: 'experiment',
+  }
+}
+
+test('a question with no authored tags inherits its children\'s', () => {
+  const q = _question('q-1', { childTags: ['loss/contrastive', 'eval/recall-at-k'] })
+  assert.deepEqual(conceptSet(q), ['eval/recall-at-k', 'loss/contrastive'],
+    'MUTATION: drop `child_concept_tags` from the union and this is [] — the v7 shape, where every ' +
+    'question is ungrouped and the ladder has no hierarchy to draw')
+})
+
+test('authored and inherited tags UNION rather than one replacing the other', () => {
+  const q = _question('q-1', { tags: ['data'], childTags: ['data', 'loss/contrastive'] })
+  assert.deepEqual(conceptSet(q), ['data', 'loss/contrastive'],
+    'the overlap collapses — a set, not a concatenation')
+})
+
+test('an EXPERIMENT does not inherit: its tags are its own claim', () => {
+  const e = _experiment('card-2', { tags: ['loss/contrastive'], childTags: ['data', 'eval'] })
+  assert.deepEqual(conceptSet(e), ['loss/contrastive'],
+    'MUTATION: union unconditionally instead of for direction rows and this gains `data`/`eval` — ' +
+    'a card would appear to touch everything its siblings do')
+})
+
+test('inheritance actually produces the nesting the operator was missing', () => {
+  // The end-to-end property, not the field read: a broad question and a narrower one that shares its
+  // concepts must nest — and BOTH get their sets purely from their children.
+  const rows = latticeRows([
+    _question('broad', { childTags: ['loss/contrastive'] }),
+    _question('narrow', { childTags: ['loss/contrastive', 'training/negative-mining'] }),
+  ])
+  const narrow = rows.find(r => r.id === 'narrow')
+  assert.ok(narrow, 'the narrower question is placed')
+  assert.equal(narrow.parentId, 'broad',
+    'MUTATION: drop the inheritance and both sets are empty, both rows land in the ungrouped ' +
+    'bucket, and depth is 0 for everything — exactly what the operator saw')
+  assert.equal(narrow.depth, 1)
+})
+
+test('a question with neither authored nor inherited tags is still ungrouped', () => {
+  // The honest limit of this fix: on v7 it lights up ONE question, because the other four have no
+  // children AND no authored concepts. Those stay ungrouped, correctly — nothing places them.
+  const rows = latticeRows([_question('bare')])
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].parentId, UNGROUPED_ID,
+    'no concepts from any source means no position in a concept lattice — its own bucket, as before')
+})
