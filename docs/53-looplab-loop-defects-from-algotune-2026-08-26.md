@@ -300,6 +300,50 @@ of nothing. Keyed by the attempt the `.done` marker credits, the real count amon
 **three**. `tests/test_algotune_compare_arms_reports_real_spend.py` carries the wrong version as
 its falsifier.
 
+### 10. OPEN[we-took-away-the-ruler-and-it-built-a-fake-one] `proof:absent:train_feedback@looplab/benchmarks/algotune/make_task.py`
+
+Item 1 says the loop times probes at an invented scale. This is **why**, and it is not the model's
+idea. Our own task text tells it, in capitals:
+
+> YOU CANNOT MEASURE YOUR OWN SCORE, AND YOU ARE NOT MEANT TO. The instances you are graded on are
+> not on this machine and you cannot generate them […] timing your own guesses against invented
+> inputs measures something else — your guess about the input.
+
+Measured against what the arena gives **its own** agent on the same tasks (2026-08-25/26 logs):
+
+| what arm A gets | kcenters | rbf_interp | edge_exp | int_fact | convex_hull |
+|---|---|---|---|---|---|
+| `Speedup: X` + `Valid Solutions: Y%` on the TRAIN set | **61** | 38 | 17 | 52 | 60 |
+| `eval_input` — its solver on a real instance, real timing | 207 | 429 | 296 | — | — |
+| `profile` / `profile_lines` | 58 | 101 | 194 | — | — |
+
+AlgoTuner re-runs the real evaluation after edits and hands the agent back **the grading metric
+itself**, dozens of times per task. Ours is told the metric is unknowable and to stop guessing.
+
+So the sentence is not wrong — timing an invented input really does measure the guess — but the
+conclusion we drew from it was. The fix is not to warn harder. **The baseline gets a train-set
+feedback loop; we removed ours and left the agent nothing to steer by.** Whatever we believed we
+were protecting (train overfitting, evaluation cost) we bought by handing the comparison arm an
+instrument the reference implementation has as standard.
+
+Nothing in AlgoTune's protocol forbids it: train is what the agent is meant to optimise against,
+test is what it is finally scored on, and both arms are already scored on test only. Describing the
+instance distribution to the agent — the thing that would at least make its probes the right size —
+is strictly LESS than what the reference agent is handed.
+
+**How we would fix it, cheapest first.**
+1. Put the instance shape in the task text (n, dtype, count, generation params — all of it is in
+   the arena's dataset descriptor already). Costs nothing, and turns item 1's invented scale into
+   the right one.
+2. Give the loop a **train-subset** evaluation it can call — the bridge already runs exactly this,
+   `looplab_eval.py --subset train`, and the baseline cache makes repeats cheap. Rate-limit it per
+   node rather than forbidding it.
+3. Keep the final number on **test**, as now, so the train loop cannot launder itself into the
+   reported score.
+
+Until 1 is done, every `run_probe` timing in every arm-B transcript is measuring a number the agent
+made up, and we told it to.
+
 ---
 
 ## 10. Order to fix in
