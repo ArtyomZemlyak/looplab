@@ -6626,3 +6626,68 @@ file exists to end. `tests/test_best_of_n.py` drives the broken selection AND th
   code they classify as `check_failed`, an authenticated fact, so the judge is never asked; the
   check-stage judge already names the cause in prose and the vocabulary flattens it. Whether
   `check_failed` should carry that judge's own attribution is the next question of this shape.]
+
+### §0.21 The claim LADDER is designed, mostly already shipped, and its last rule cannot fire yet (2026-08-26)
+
+Two settled design records (operator tasks #57/#58) were taken off the queue to be BUILT and were
+instead re-derived against the tree first. One is largely already in the code; the other's remaining
+rule has no data that could exercise it; the third finding is that a sibling design IS supported by
+the corpus. Nothing was built, deliberately, and the trigger for each is written down.
+
+**The design.** Layers are Concept (subject, hierarchical, cross-run, never a verdict) > Claim
+(falsifiable) > Card (one minimal change) > Node (one attempt). A claim chain is a LADDER of
+sharpenings on two axes at once — the intervention narrows AND the predicted effect strengthens.
+Four propagation rules, three of them prohibitions:
+
+1. support does NOT flow up (a child's success may be owed entirely to what the child added);
+2. refutation does NOT flow up — three failed experiments on specific teachers do not refute
+   "teachers help", because an experiment is always MORE SPECIFIC than a broad claim, so a broad
+   claim can never be tested at its own generality;
+3. refutation flows DOWN as UNDERCUT, never as refutation — a child may be true for a different
+   reason;
+4. therefore a broad claim has NO verdict of its own, only a TALLY of its children.
+
+**Rules 1, 2 and 4 are ALREADY IN THE TREE.** `events/card_ledger.py::_apply_card_verdicts` computes
+each card's verdict as `_evidence_verdict(c.evidence, …)` — the card's OWN evidence and nothing
+else — so neither support nor refutation can flow up any edge; the prohibitions hold by
+construction rather than by a rule anyone enforces. Rule 4 is `core/cards.py::card_child_rollup`,
+whose docstring already states the operator's objection in the operator's own terms: a parent gets
+`17 done · 2 running · 4 no-result` and never a borrowed lane, because "a broad direction would sit
+in **Running** for months because one of two hundred experiments under it happens to be training".
+The own-level/child split the design demands as a recorded FACT also exists: `Card.evidence` is the
+experiments testing THIS claim, `child_rollup.nodes` is the descendants' — two fields, never summed.
+
+**Rule 3 is unimplemented AND unfirable, which is why it was not built.** `undercut` appears nowhere
+in `looplab/` or `ui/src/`. Measured 2026-08-26 by folding every `runs/**/events.jsonl`: **691 cards,
+of which exactly ONE has a child** — ladder depth histogram `{0: 690, 1: 1}` — and **ZERO parents
+carry own-level evidence**. Rule 3 fires when a parent's own experiments refute it and its children
+must be marked undercut; on this corpus no card could ever reach that state. That single edge is
+`card-1 -> does-training-the-champion-recipe-to-completion--50d1e8` on `e5small-dr-unified-v7`,
+created 2026-08-26 21:54, the first parent/child card edge on this box. Building the derivation now
+would ship machinery with zero possible firings, which is the `_MemoOut` inert-field trap (§0.7's
+neighbour) approached from the other side: there a prompt named a field the schema lacked, here the
+code would name a state the board cannot enter.
+
+OPEN[claim-refutation-undercut] refutation does not flow DOWN as undercut — a parent whose own experiments failed leaves its children unmarked; do NOT build until a parent carries own-level evidence proof:absent:undercut@looplab/events/card_ledger.py
+
+**The trigger, stated so nobody has to re-derive it:** build rule 3 when a fold produces a card with
+BOTH `child_card_ids` and a non-empty `evidence`. Until then the ladder is one edge deep and the
+prohibitions that matter are already enforced.
+
+**The SIBLING design is the one the corpus supports.** #58 proposes belief identity =
+{concepts} + metric + direction, against today's `card_ledger.py::_apply_card_beliefs`, which sets
+`c.belief_id = hypothesis_statement_digest(seed)` — a digest of the seed TEXT. Measured over the same
+691 cards: 528 carry `concept_tags`, forming 84 (run, concept-set, direction) groups, and the text
+key splits **18 of the 84** into more than one `belief_id` (distinct ids per group: 66×1, 9×2, 2×3,
+3×4, 3×5, 1×7). So the two keys genuinely disagree on a fifth of the tagged board.
+
+**That is evidence the keys DISAGREE, not evidence the concept key is RIGHT, and the difference is
+the whole risk.** An identical concept SET does not establish an identical BELIEF: two cards tagged
+`loss/contrastive/temperature` may be "temperature 0.05" and "temperature 0.01", which are two
+positions on one axis and not one claim. Merging them is a CLAIM that they are the same belief, and
+a wrong merge pools the evidence of two different experiments under one verdict — strictly worse
+than today's fragmentation, which at least keeps them apart. What would settle it is reading the
+18 split groups and counting how many are genuine restatements versus genuine distinctions; that
+read has not been done and no key should change before it is.
+
+OPEN[belief-identity-text-keyed] belief identity is a digest of the seed TEXT, which splits 18 of 84 concept-equal groups; the semantic key is unbuilt and unvalidated proof:present:hypothesis_statement_digest(seed)@looplab/events/card_ledger.py
