@@ -238,6 +238,10 @@ NO_SPEEDUP_REASONS = (
     "critical_error",      # solver_exception / import_error / memory_error — stopped mid-dataset
     "no_valid_speedups",   # nothing was timed at all
     "baseline_measured_in_pass",  # the arena timed the REFERENCE, not the candidate — see below
+    "baseline_regime_mismatch",   # refused BEFORE measuring: this invocation's regime key is
+                                  # absent while another regime for the same task+subset is on
+                                  # disk, so it would re-time the reference and divide by a
+                                  # different denominator than whoever wrote those entries
     "solver_unloadable",   # their import of our solver.py failed
     "compilation_failed",  # a Cython/pythran/DaCe build step failed
     "no_problems",         # the requested dataset half was empty
@@ -772,6 +776,88 @@ def main() -> int:
             return {}
 
     _baseline_before = _baseline_fingerprint()
+
+    # FAIL IN A SECOND, NOT IN TEN MINUTES OF SILENCE.
+    #
+    # `baseline_measured_in_pass` below is the right refusal and it works -- but it can only speak
+    # AFTER the evaluator returns, and the case that produces it is exactly the case that prevents
+    # the evaluator from returning. Measured twice on 2026-08-26, both times through the pinned
+    # `eval_train` developer command: a wrong `ALGOTUNE_EVAL_WORKERS` picks a different baseline
+    # REGIME, the cache misses, the reference is re-timed (~200 s) on top of the evaluation
+    # (~330 s), the whole thing exceeds the command's 600 s cap and is SIGKILLed. `exit=-9;
+    # TIMEOUT after 600s`, `(no output)`, twice, and the refusal never printed a word.
+    #
+    # The regimes are `__lane{N}r3` at workers <= 1 and `__w{W}x{C}r3` otherwise (see
+    # `AlgoTuner/utils/evaluator/baseline_manager.py`). `w22x1r3` therefore means TWENTY-TWO
+    # workers of one core, not "one eval at a time" -- a misreading that cost this session two
+    # runs and 24 % of a denominator, since the two references sum to 3898 ms and 2976 ms over the
+    # same hundred instances.
+    #
+    # So: if this invocation's regime key is ABSENT while a DIFFERENT regime for the same task and
+    # subset is already on disk, say so now and measure nothing. A cache that is simply empty is
+    # left alone -- a first measurement is legitimate and this must not block it.
+    def _regime_mismatch() -> tuple[str, str] | None:
+        """(key this run would write, keys already there) when they disagree — else None.
+
+        THE RULE IS REPLICATED, NOT IMPORTED, and that is deliberate: the first version imported
+        `AlgoTuner.utils.evaluator.looplab_parallel` and, being written defensively, returned None
+        wherever the arena was not importable — which is every test, so the guard was inert exactly
+        where it would have been proved. `tests/test_algotune_refuses_a_regime_mismatch.py` pins
+        the replica against the arena's own `resolve_workers` whenever that IS importable, so drift
+        is caught without a runtime dependency.
+
+        It uses `args.subset` — what this invocation ASKED for — because the VERIFIED subset is
+        only known after the evaluator has run, which is the ten minutes this guard exists to save.
+        Where the two disagree, `subset_evidence` already says so on its own channel.
+        """
+        # ONLY POLICE A CACHE SOMEBODY DELIBERATELY POINTED AT. `DEFAULT_TIMES_DIR` falls back to
+        # the repo's own `.baseline_times`, which holds a real campaign's 44 entries -- so without
+        # this line the guard reached into that directory during unit tests that never asked for
+        # it, and three of them went red because a replay fixture suddenly refused to score. A
+        # test's behaviour must not depend on the contents of a data directory. The campaign, the
+        # re-score and the pinned `eval_train` command all name the cache explicitly, which is
+        # exactly the population this guard exists for.
+        if not (os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR")
+                or "--baseline-times-dir" in sys.argv):
+            return None
+        raw = (os.environ.get("ALGOTUNE_EVAL_WORKERS") or "").strip().lower()
+        try:
+            cores = max(1, int(os.environ.get("ALGOTUNE_CORES_PER_WORKER") or 1))
+            width = len(os.sched_getaffinity(0))
+        except Exception:                       # noqa: BLE001 - no affinity, no claim
+            return None
+        if raw in ("auto", "max"):
+            workers = max(1, width // cores)
+        else:
+            try:
+                workers = int(raw)
+            except ValueError:
+                workers = 1
+        mine = f"__lane{width}r3" if workers <= 1 else f"__w{workers}x{cores}r3"
+        try:
+            present = sorted(f.name for f in
+                             args.baseline_times_dir.glob(f"{args.task}__{args.subset}__*.json"))
+        except OSError:
+            return None
+        if not present or any(name.endswith(f"{mine}.json") for name in present):
+            return None
+        return mine, ", ".join(present)
+
+    if (_mismatch := _regime_mismatch()) is not None:
+        _mine, _present = _mismatch
+        # `_no_speedup` returns the block's CONTENTS keyed by `no_speedup`; the detail goes inside
+        # it, beside the reason, which is where every other reader of this vocabulary looks.
+        _block = _no_speedup("baseline_regime_mismatch", task=args.task)
+        _inner = _block.get("no_speedup") if isinstance(_block.get("no_speedup"), dict) else _block
+        _inner["detail"] = (
+            f"this invocation would key its baseline {_mine!r}, which is not on disk, while "
+            f"{_present} already is -- so it would re-time the reference in this pass and divide "
+            f"by a different denominator than whoever wrote those entries. Set "
+            f"ALGOTUNE_EVAL_WORKERS to match them ('auto' -> __w<N>x1r3, '1' -> __lane<N>r3).")
+        _emit({"speedup": None, "eval_seconds": 0.0, "subset": args.subset,
+               "no_speedup": _inner if _inner is not _block else _block})
+        return 0
+
 
     started = time.time()
     try:

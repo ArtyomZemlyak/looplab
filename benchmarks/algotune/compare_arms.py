@@ -149,7 +149,7 @@ def _reference_models(summary_path: Path, task: str) -> dict[str, float]:
 NOT_SOLVERS_FAULT = frozenset({
     "critical_error",      # stopped mid-dataset; no complete pass over the instances happened
     "no_valid_speedups",   # nothing was timed at all
-    "baseline_measured_in_pass",  # the arena timed the REFERENCE and never the candidate: the
+    "baseline_measured_in_pass", "baseline_regime_mismatch",  # the arena timed the REFERENCE and never the candidate: the
                            # number it returned (~1.0, and ~1.0 even for a solver that returns
                            # nothing) is about the reference, so it is not evidence about a solver
                            # in either direction
