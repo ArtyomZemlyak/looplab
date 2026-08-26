@@ -830,6 +830,29 @@ class LLMRepoDeveloper:
                 # than falling back to the whole portfolio.
                 tool.bind_state(state)
             extra.append(tool)
+        # THE QUESTION BOARD, for the role that writes the code an experiment runs. Measured
+        # 2026-08-26: this scout set had no reader for it at all — not `RunTools` (Researcher-only),
+        # and `read_run_experiment` here is a FOREIGN-run reader. So the Developer could not see the
+        # question its experiment answers, and the repair path could not see whether a sibling under
+        # the same question had already hit the same wall. A narrow provider rather than granting
+        # `RunTools` wholesale, which would also hand over `list_experiments`, `read_code` and the
+        # rest — a much larger change in what this role may do.
+        #
+        # ABOVE the `if not roots: return extra` below, and that placement is the point: a
+        # developer with no editable roots still repairs, still reasons about what to write, and
+        # still needs to know which question its work answers. Attaching the board after that
+        # early return coupled 'may I read the questions' to 'do I own source to edit', which are
+        # unrelated — and a behavioural test caught it where a source pin would not have.
+        from looplab.tools.question_board import QuestionBoardTools
+        board = QuestionBoardTools()
+        # `_memory_state`, NOT `_state` — the attribute this class actually holds, and the same one
+        # the lessons and cross-run tools are bound from twenty lines up. Binding a name that does
+        # not exist would leave the provider answering "no run state bound" on every call, i.e.
+        # shipped INERT, which is the failure this tree has paid for more than once.
+        state = getattr(self, "_memory_state", None)
+        if state is not None:
+            board.bind_state(state)
+        extra.append(board)
         roots = [e["path"] for e in (getattr(self, "_editables", None) or []) if e.get("path")]
         if not roots:
             return extra

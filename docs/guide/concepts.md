@@ -1239,6 +1239,23 @@ and an index; they see the board's content without either claim contract. Until 
 first list existed, so a card disappeared from the Researcher's view the moment it got a node,
 including a node still running.
 
+**And since 2026-08-26 an agent can ASK for the board, not only be shown it.** `read_questions`
+(`tools/question_board.py`) returns each open research question with its concepts, the experiments
+filed under it, and what each of those measured — the same join the operator's Research ladder
+renders. Before it, a census of the whole tool surface found 83 tools and not one that read the
+questions: the concept tools read the TAXONOMY and `read_research_memo` reads the memo that PRODUCED
+a question. The only channel was the PUSH block below, which is bounded by whatever the brief chooses
+to include and reaches only the roles the engine pushes it to.
+
+The role that was blind is not the obvious one. `RunTools` — `list_experiments`, `read_experiment` —
+is built for the RESEARCHER only; the Developer's scout set had no reader for the board at all, and
+the `read_run_experiment` calls visible in its `stages`/`plan`/`card_build` phases are a FOREIGN-run
+reader. So the role writing an experiment's code could not see the question it answers, and the
+repair path could not see whether a sibling experiment under the same question had already hit the
+same wall. It is wired to both the Researcher's providers and the Developer's scouts as a NARROW
+provider rather than by granting `RunTools` wholesale, which would also hand over `read_code` and the
+rest. It records nothing: every field is already on the Card, and the fold is untouched.
+
 **So does the deep-research memo prompt**, which is the stage that fills the board: both halves render
 from one shared block (`agents/roles.py::board_prompt_lines`), in the same `CARD_ID`/`BELIEF_ID`/
 `SEED_STATEMENT_JSON` spelling, without the claim contract (a memo has no `card_id` field). Until
