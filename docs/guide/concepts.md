@@ -1354,6 +1354,27 @@ raising on it, so repairing that carrier is exactly what makes this reachable. A
 non-list row still yields no concepts for that question, and a question with none is registered
 exactly as it was before any of this shipped.
 
+**The carrier had a SECOND blockage and it was the ENCODING**, found live on the run launched from
+the fix above. That run's first memo came back rich — 10 findings, 11 claims, 64 sources — and the
+console read `deep research: emitted memo kept, 1 field(s) refused for shape: open_questions`, so
+the model answered the question half of the prompt and the engine dropped exactly that answer. The
+emit call's own arguments survive on a `generation` span's `tool_calls[].arguments` (the emit is
+not traced as a `tool` span, which is why no `tool` row shows it), and the shape is
+`"open_questions": "[\"Does training the e5-small backbone past the 1-3 applied epochs …\", …]"` —
+a `str` holding a JSON array of strings where the schema declares `list[str]`. The structure was
+right and the quoting was not.
+
+`agents/deep_research.py::_decoded_json_list` decodes it, on any list-annotated field of the emit
+schema, derived from `model_fields` so a field added later inherits the tolerance. It fails CLOSED
+at two points — the value must be a `str` and the decode must produce a `list` — and healing runs
+BEFORE validation, so the durable row only ever holds the declared type and there is no second
+spelling to read back. That is what separates it from the shape deliberately NOT healed: an
+`[{"question": …, "concepts": […]}]` form would need someone to decide which key is the question,
+and a guess like that is how two spellings of one field enter a durable row. A decode is not a
+guess. Note the span record clips arguments at `core/tracing.py::_TRACE_TOOL_ARGUMENT_CAP` (16,000
+chars), so that memo's `recommended_directions` and `question_concepts` sit past the cut and
+nothing is claimed about them here.
+
 Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the bounded
 `concept_consolidation` rename chain (at most 16 hops) on the base, inherited values, removals and additions
 **before** set subtraction/union. Thus `Model/Transformer` can be removed by `model/transformer`, and

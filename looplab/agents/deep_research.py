@@ -20,9 +20,10 @@ from __future__ import annotations
 
 from typing import Optional
 
+import json
 import logging
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from looplab.agents.loop_options import LoopOptions
 from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
@@ -50,14 +51,94 @@ _STATE_BRIEF_FAILURE_CHARS = 300
 _STATE_BRIEF_RATIONALE_CHARS = 120
 
 
-class _ClaimOut(BaseModel):
+def _decoded_json_list(value: object) -> object:
+    """A list argument the model serialised as a JSON STRING, decoded back to the list it holds.
+
+    MEASURED on `runs/e5small-dr-unified-v7`, from the emit call's own arguments in `spans.jsonl`
+    (a `generation` span's `tool_calls[].arguments` — the emit is not traced as a `tool` span, so
+    this is the only record of what the model actually sent):
+
+        "open_questions": "[\\"Does training the e5-small backbone past the 1-3 applied epochs
+                            (toward the documented 15-60) actually lift recall@100 ...\\", ...]"
+
+    i.e. a `str` holding a JSON array of strings, where the schema declares `list[str]`. The memo
+    was otherwise sound — 10 findings, 11 claims and 64 sources all validated and were kept by the
+    drop-the-offender rung above — and the questions alone were refused and discarded.
+
+    THE MODEL'S OUTPUT WAS NOT WRONG, ITS ENCODING WAS. The questions are well-formed, on-topic and
+    exactly the shape the field wants once the outer quotes come off; nothing about them needed a
+    judgement call. That is what separates this from the shape this rung deliberately does NOT
+    heal: a model returning `[{"question": ..., "concepts": [...]}]` would need someone to decide
+    WHICH key is the question, and a guess like that admits a second spelling of one field into a
+    durable row. A JSON decode is not a guess — it either yields the declared type or it does not.
+
+    So the recovery is deliberately narrow and fails CLOSED at TWO points: the value must be a
+    `str`, and the decode must produce a `list`. Anything else is returned untouched and meets the
+    ordinary refusal, which is what keeps this from becoming a blanket "try to make it fit" —
+    `"not json"`, `'"a string"'` and `'{"a": 1}'` are all still refused, and the decoded elements
+    are handed to pydantic to validate normally.
+
+    THE TYPE CHECK IS THE RULE AND A TEXT CHECK CANNOT SUBSTITUTE FOR IT. The first cut of this
+    guarded with `text.startswith("[")` before decoding, as a fast path. That made the `list` check
+    DEAD: valid JSON opening with `[` is always an array, so nothing could reach the type test and
+    fail it — a mutation replacing the whole clause with a bare `return decoded` passed the entire
+    suite. A heuristic that hides the real rule is worse than the cost it saves, so the decode is
+    attempted on any string and the DECODED TYPE decides.
+
+    Healing happens BEFORE validation, so what reaches the durable row is always the declared
+    `list[...]` and never the string. There is no second spelling to read back.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        decoded = json.loads(value)
+    except (ValueError, TypeError):
+        return value
+    return decoded if isinstance(decoded, list) else value
+
+
+class _StringifiedListTolerant(BaseModel):
+    """Heals a JSON-string-encoded list on ANY list-annotated field of the emit schema.
+
+    ON THE CLASS AND NOT ON THE FIELD, which is this module's own precedent: the sibling rung in
+    `_finalize` records that "ALL-OR-NOTHING WAS THE DEFECT, not the field", and `_MemoOut`'s
+    docstring says any field added later meets the same hazard. Nothing makes `open_questions`
+    special here either — the next memo can stringify `findings` just as easily — so the list of
+    covered fields is DERIVED from `model_fields` rather than written down, and a list field added
+    to either subclass inherits the tolerance without anyone remembering to.
+
+    A value that is already a list is returned untouched, and elements are never decoded: a
+    question whose text happens to read `"[1, 2]"` is a question, not a nested array.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _heal_stringified_lists(cls, data: object) -> object:
+        from typing import get_origin
+
+        if not isinstance(data, dict):
+            return data
+        healed: Optional[dict] = None
+        for name, field in cls.model_fields.items():
+            if name not in data or get_origin(field.annotation) is not list:
+                continue
+            fixed = _decoded_json_list(data[name])
+            if fixed is data[name]:
+                continue
+            if healed is None:
+                healed = dict(data)
+            healed[name] = fixed
+        return data if healed is None else healed
+
+
+class _ClaimOut(_StringifiedListTolerant):
     """D8: one claim with its provenance — which experiments (node ids) and/or sources back it."""
     statement: str = ""
     node_ids: list[int] = Field(default_factory=list)
     urls: list[str] = Field(default_factory=list)
 
 
-class _MemoOut(BaseModel):
+class _MemoOut(_StringifiedListTolerant):
     """Structured shape the LLM fills via `emit` (assembled into a ResearchMemo, validated again)."""
     summary: str = ""
     reasoning: str = ""
