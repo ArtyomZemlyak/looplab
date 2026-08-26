@@ -1669,10 +1669,20 @@ class DataTools:
                 lines.append(f"  {col}: categorical missing={missing:.2f} unique={len(set(present))}")
         return "\n".join(lines)[:self.max_chars]
 
+    # The last clause was added 2026-08-26 and the first three are unchanged, deliberately: the
+    # terminality is load-bearing (see `_asset`) and must survive. What it did NOT survive was a
+    # task that DESCRIBES its input somewhere else. Measured on a `convex_hull` run whose goal
+    # carries `n = 267021` and `ndarray(shape=(267021, 2), dtype=float64)`: the agent asked
+    # `data_schema` twice and was told the task has no data assets "and no name will change that"
+    # — true about this tool, and read as "nothing here knows anything about the input", which the
+    # same prompt contradicts two paragraphs up. Two parts of one card arguing is the failure
+    # `repo_developer.py` already records; saying where the answer IS costs one clause and keeps
+    # the model from spending calls looking for it here.
     _NO_ASSETS = (
         "(this task has NO data assets at all — not zero matching this name, zero in total, and "
         "no name will change that. This tool reads a task's DATASET; a task whose subject is source "
-        "code has none. Nothing here reads source files.)")
+        "code has none. Nothing here reads source files. If this task's INPUT is described at all, "
+        "it is in the goal/brief you were already given — read that, not this tool.)")
 
     def _asset(self, name: Optional[str]) -> str:
         assets = self._assets()
