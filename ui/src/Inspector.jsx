@@ -17,6 +17,8 @@ import { nodeFeasibilityStatus, isSalvagedMetricViolation,
 import { EXTRA_METRIC_CHANNEL_HELP, EXTRA_METRIC_CHANNEL_LABEL,
   extraMetricChannel } from './extraMetrics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
+import { nodeAppliedParams, appliedParamsDivergences, appliedParamsChecked,
+  appliedParamsNotice } from './runIndex.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
   NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, attemptReadRequired, conversationWindow,
@@ -2719,6 +2721,30 @@ export function Metrics({ n, detail, state, runId }) {
     {objectiveCaveated && <div className="muted">
       The ★ objective is marked <b>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</b>.{' '}
       {objectiveSourceHelp(objective)}
+    </div>}
+    {/* WHAT THE NUMBER IS FOR, beside the two footnotes about how it was MEASURED. The run row can
+        only say the slug `params_overridden` (`runIndex.js::bestMetricCaveats`), and until this
+        shipped that was the whole answer an operator got: their champion's coordinates are wrong,
+        and not which knob. The rows have been on `metric_provenance.applied_params` all along.
+        Printed rather than hovered for the same reason as the ★ footnote above — an operator
+        scanning a table does not hover every cell — and the sentence comes from the same call the
+        model owns, so the wording cannot drift from the count. It SURFACES and does not accuse: the
+        Developer deviating from a proposal is legitimate and documented; what would be the defect is
+        the record claiming the declared value. */}
+    {appliedParamsDivergences(nodeAppliedParams(n)).length > 0 && <div className="muted">
+      <b>Declared coordinates that did not run.</b> {appliedParamsNotice(nodeAppliedParams(n))}
+      <ul className="applied-param-divergences">
+        {appliedParamsDivergences(nodeAppliedParams(n)).map(d => <li key={d.param}>
+          <code>{d.param}</code>: declared <b>{fmt(d.declared)}</b> · ran{' '}
+          <b className="warn">{fmt(d.applied)}</b>
+          {d.file ? <span className="muted"> · {d.file}{d.line == null ? '' : `:${d.line}`}
+            {d.match === 'suffix' ? ' (matched by dotted suffix)' : ''}</span> : null}
+        </li>)}
+      </ul>
+      {appliedParamsChecked(nodeAppliedParams(n)) == null && <span className="muted">
+        This record does not say how many coordinates were checked, so it cannot tell you that the
+        rest agreed — only that these did not.
+      </span>}
     </div>}
     {anyUnverified && <div className="muted">
       Rows marked <b>self-reported</b> were taken from the experiment's own stdout with nothing

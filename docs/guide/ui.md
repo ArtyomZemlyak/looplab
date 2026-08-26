@@ -991,7 +991,10 @@ because nothing you can do in the browser makes it stop being true.
 
 **A `salvaged`, `trust-flagged` or `params overridden` pill beside a run's best metric.** The run
 selected on a number its own record carries a caveat about, and the caveat travels with the number so the
-portfolio cannot read it as a plain measurement. There are exactly three, they come from the server
+portfolio cannot read it as a plain measurement. There are FOUR in
+`engine/champion_caveats.py::CHAMPION_CAVEATS` — this page said "exactly three" and omitted
+`mixed_comparability`, which says the run's own evaluated nodes were not all measured against the same
+data, so the champion won a mixed field. They come from the server
 (`best_metric_caveats` on each `/api/runs` row, `engine/champion_caveats.py`), and each names a rung the
 operator set or a fact the engine derived — none of them a bug report. The first two qualify **how** the
 number was measured; the third qualifies **what it is a number for**:
@@ -1006,18 +1009,40 @@ number was measured; the third qualifies **what it is a number for**:
 - **`params overridden`** — the champion's own committed `.py` code assigns a **different** value to a
   parameter its experiment record declares, so the declared configuration is not the one the result was
   produced under. The metric itself was measured normally; what is in question is the recipe beside it.
-  This is the one pill that is non-empty on this box today: `rubertlite-dr-unified-v8` node 3 is that
-  run's champion at 0.762048 with `train.training.batch_size` declared 8192 and `train.py:31` assigning
-  4096 (and `gradient_accumulation_steps` 2 → 4). The engine derives it from the declaration and the
-  bytes it committed and never from anything a model wrote about them; a repair that introduces one also
-  stamps `param_overrides` on its `node_repaired` row, which is what the node's repair history shows.
+  RE-DERIVED 2026-08-26 over all 45 event logs it is the only non-empty pill on this box, and it is no
+  longer one run — **3 of the 42 champions carry it**, including both leading numbers here:
+  `e5small-dr-unified-v2` node 1 (0.793426), `e5small-dr-unified-v4` node 13 (0.793411, declaring
+  batch_size 4096 / learning_rate 0.001 / n_epochs 3 against 2048 / 0.0005 / 1) and
+  `rubertlite-dr-unified-v8` node 3 (0.762048, batch_size 8192 declared / 4096 in `train.py:31`). This
+  page named only the last of the three until that scan; re-derive rather than quoting it.
+  **It has TWO sources and this page used to describe only one**: `declared_param_overrides` reads the
+  committed `.py` by AST, and `applied_params_diverged` reads the APPLIED-configuration record
+  (`runtime/applied_params.py`), whose carriers include YAML/JSON configuration documents. Both v2's and
+  v4's rows cite `vectorsearch/configs/config.yaml`, so a config-file divergence is exactly what fires
+  it. The engine derives it from the declaration and the bytes it committed and never from anything a
+  model wrote about them; a repair that introduces one also stamps `param_overrides` on its
+  `node_repaired` row, which is what the node's repair history shows.
+
+  **The pill is a slug; the DETAIL is on the node's Metrics tab.** The run row can only say the word,
+  which answers "may I reuse this configuration" with "no" and withholds the part that would let the
+  operator act. Under *Reported metrics* the node now prints every diverged coordinate it recorded —
+  the knob, the declared value, the value that ran, and the carrier file and line it was read from —
+  from `runIndex.js::appliedParamsDivergences` over the folded
+  `metric_provenance.applied_params`. It RENDERS and never re-derives: that record was decided at the
+  metric read against carriers the engine staged, and a second opinion formed in the browser would be a
+  different claim wearing the same name. `checked` rides beside the count so "everything else agreed" and
+  "nothing else was looked at" stay distinguishable, and `unresolved`/`conflicts` are counted apart from
+  `diverged` — a coordinate no carrier states, and one two carriers disagree about, are neither
+  divergences nor agreements.
 
 No pill is a claim that anything is wrong with the run: it is the claim that the number in the `best`
 column is not the same kind of evidence as the one beside it, and none of them moves a rank, a champion
 or a selection. **An absent pill is not a certificate either** — `reward_hack_detect` is off by default,
 so the second caveat is silent on most runs; the third is silent on every task whose space declares its
-parameters by bare name (the toy and benchmark spaces), and on a divergence expressed in a config file
-rather than in code. Only what a run RECORDED can be reported. Open the run and read the node's Trust
+parameters by bare name (the toy and benchmark spaces), and on a divergence no carrier the engine can
+read states at all. It is NOT silent on a config-file divergence — this page claimed that until
+2026-08-26 and the corpus refutes it, since the two e5small champions above diverge in
+`config.yaml` and are caveated for it. Only what a run RECORDED can be reported. Open the run and read the node's Trust
 and Metrics tabs before reusing its configuration.
 
 **`EACCES` executing a file under `node_modules` (e.g. esbuild), or `vite: not found`.** Vite's

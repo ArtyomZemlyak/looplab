@@ -75,9 +75,13 @@ export function sourceIntegrityNotice(run = {}) {
 // The THIRD member is not of that pair and the difference is worth keeping straight: `salvaged` and
 // `trust_flagged` qualify HOW the number was measured, while `params_overridden` qualifies WHAT it
 // is a number FOR — the champion's own committed code assigns a different value to a parameter its
-// Idea declares, so the run is publishing a result at coordinates it never occupied. It is the one
-// member that is non-empty on this box's corpus today (v8 node 3, batch_size 8192 declared / 4096 in
-// code, on the champion), which is why the row must be able to say it.
+// Idea declares, so the run is publishing a result at coordinates it never occupied. RE-DERIVED
+// 2026-08-26 over all 45 event logs it is the only NON-EMPTY member on this box, and it is no longer
+// one run: 3 of the 42 champions carry it — e5small-dr-unified-v2 node 1 (0.793426, the best number
+// here), e5small-dr-unified-v4 node 13 (0.793411) and rubertlite-dr-unified-v8 node 3 — which is why
+// the row must be able to say it. This comment said "the one member … (v8 node 3)" until that
+// re-derivation; quote a fresh scan, never this sentence. The DETAIL behind the slug is rendered by
+// `nodeAppliedParams` below, on the node's own Metrics tab.
 //
 // The FOURTH member, `mixed_comparability`, is of the third's kind and not the first pair's: it says
 // the run's own evaluated nodes were not all measured against the same data
@@ -602,6 +606,92 @@ export const comparabilityRecord = (run = {}) => normalizeComparability(run?.bes
 export const nodeComparabilityRecord = (node = {}) => normalizeComparability(
   node?.metric_provenance && typeof node.metric_provenance === 'object'
     ? node.metric_provenance.comparability : null)
+
+// THE APPLIED-CONFIGURATION RECORD, the OTHER member of `metric_provenance` this browser is handed
+// and — until this shipped — the one it dropped. `runs` rows carry `params_overridden` as a SLUG
+// (see `bestMetricCaveats` above): the operator learns THAT the champion's number is filed at
+// coordinates it never occupied and never WHICH knob, while the answer has been sitting on the node
+// payload the whole time. `champion_caveats.py`'s own docstring says the question here is "may I
+// reuse this configuration"; a slug cannot answer it and three lines can.
+//
+// Read one level down off `metric_provenance` for the same reason `nodeComparabilityRecord` is: the
+// fold ignores unknown TOP-LEVEL keys on `node_evaluated`, so a sibling field would be invisible in
+// every replayed state.
+//
+// It RENDERS and never re-derives. `runtime/applied_params.py` decided this record at the metric
+// read, against carriers the engine staged; the browser has neither the workspace nor the authority
+// and a second opinion formed here would be a different claim wearing the same name.
+export function nodeAppliedParams(node = {}) {
+  const provenance = node?.metric_provenance
+  if (!provenance || typeof provenance !== 'object' || Array.isArray(provenance)) return null
+  const record = provenance.applied_params
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null
+  return record
+}
+
+// The divergences THEMSELVES, normalized, in the engine's own order.
+//
+// A row with no `param` is DROPPED: the whole point is naming the knob, and a row that cannot be
+// named would render as an anonymous "something diverged", which is the slug's failure again.
+// `declared`/`applied` are passed through UNTOUCHED — no `||` default, no coercion — because `0`,
+// `false` and the empty string are all real declared values and a falsy-default would silently
+// rewrite the very number the operator came here to read.
+export function appliedParamsDivergences(record) {
+  const raw = record?.diverged
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter(row => row && typeof row === 'object' && !Array.isArray(row)
+      && typeof row.param === 'string' && row.param.trim())
+    .map(row => ({
+      param: row.param.trim(),
+      declared: row.declared,
+      applied: row.applied,
+      file: typeof row.file === 'string' ? row.file : '',
+      line: Number.isInteger(row.line) ? row.line : null,
+      match: typeof row.match === 'string' ? row.match : '',
+    }))
+}
+
+// HOW MANY COORDINATES WERE LOOKED AT — and ABSENT is `null`, never `0`. This is the browser half of
+// the rule `runtime/applied_params.py` states for the record itself: it "always carries `checked`
+// beside `diverged`, because a record that cannot tell 'everything agreed' from 'nothing was looked
+// at' is the same vacuous green the whole rung exists to abolish". A `0` here would publish the
+// second as the first.
+export function appliedParamsChecked(record) {
+  const checked = record?.checked
+  return typeof checked === 'number' && Number.isFinite(checked) ? checked : null
+}
+
+// `unresolved` and `conflicts` are NEITHER divergences NOR agreements and must not be folded into
+// either. A conflicted coordinate is one the engine deliberately left OUT of `applied` because two
+// carriers of the same node disagreed and static bytes cannot order them; an unresolved one is a
+// declaration no carrier states at all. Counting them as divergences would convict the node of a
+// change nobody made; counting them as agreement would be the vacuous green again. `unresolved` is
+// a MAP on the wire (`{"loss.rdrop_alpha": "absent"}`) and `conflicts` is a LIST that is simply
+// ABSENT when empty, so each is measured in its own shape rather than through one guess.
+export function appliedParamsUnsettled(record) {
+  const unresolved = record?.unresolved
+  const conflicts = record?.conflicts
+  return {
+    unresolved: unresolved && typeof unresolved === 'object' && !Array.isArray(unresolved)
+      ? Object.keys(unresolved).length : 0,
+    conflicts: Array.isArray(conflicts) ? conflicts.length : 0,
+  }
+}
+
+// The one sentence the browser prints about diverged coordinates, mirroring the vocabulary of
+// `runtime/applied_params.py`. It SURFACES and never accuses: the Developer deviating from a
+// proposal is legitimate and documented (a real champion's config says so in a comment), and what
+// would be the defect is the record claiming the declared value.
+export function appliedParamsNotice(record) {
+  const rows = appliedParamsDivergences(record)
+  if (!rows.length) return ''
+  const checked = appliedParamsChecked(record)
+  const scope = checked == null ? '' : ` of ${checked} checked`
+  return `${rows.length} declared coordinate${rows.length === 1 ? '' : 's'}${scope} `
+    + `${rows.length === 1 ? 'was' : 'were'} not what ran. The experiment still ran and its number `
+    + 'still counts — but it is filed under parameters the configuration did not use.'
+}
 
 // Does any PAIR in `records` disagree at a shared authority? The one loop both refusals are written
 // on — the cross-RUN one below and the within-RUN one above it — so a change to what "provably
