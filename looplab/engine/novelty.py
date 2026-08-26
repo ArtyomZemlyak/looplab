@@ -488,6 +488,44 @@ class NoveltyGateMixin:
         self._append_proposal_event(EV_NOVELTY_REJECTED, {**audit, "action": action})
         return idea
 
+    @contextmanager
+    def _repropose_phase(self):
+        """Bill the gate's second proposal to `repropose`, not to `novelty`.
+
+        MEASURED, `/var/tmp/looplab-bench/runs-B` (20 AlgoTune task-arms, 2026-08-26): the `novelty`
+        phase carried $1.3151 of $17.6867 in generation spend. Walking each generation's
+        `input_from` chain back to the system prompt that ROOTED it splits that number in two: the
+        adjudicator ("You judge experiment NOVELTY…") is $0.1141 over 231 calls — 0.6 % of the run —
+        and $1.1758 over 257 calls is the Researcher and its claim-verifier, i.e. the whole second
+        proposal `_reject_and_repropose` buys when a rejection lands. On `convex_hull` the split is
+        $0.0026 adjudication against $0.1530 re-proposal, and that $0.1530 is priced exactly like an
+        ordinary `propose` phase on the same task ($0.038–$0.135) because it IS one: same two
+        Researcher chains, same verifier chain.
+
+        WHY THE LABEL IS THE DEFECT. `_paid_progress` opens the `novelty` span so the gate's money is
+        attributable at all (`engine/shared.py`), and `Tracer.span` stamps `phase=<the innermost open
+        operation>` onto every generation underneath. With no span of its own, the re-proposal
+        inherits `novelty` — so every per-phase cost question answers "the novelty gate cost 7.4 % of
+        the run" when the gate cost 0.6 % and the ideas it asked for cost the rest. Two independent
+        readings of this campaign have now drawn a conclusion from that label (doc 53 §2, and
+        `shared.py::_paid_progress`'s own $1.77 note), and the loud version of the error — "two
+        thirds of the budget" — comes from the same money being swept up by a coarser attribution.
+        A phase whose price is 10x its own work is a measurement trap, and the trap is one span deep.
+
+        SPAN ONLY, no `phase_progress` beacon. `events/types.py::PROGRESS_PHASES` already documents
+        that `novelty` "may pay for a whole second proposal", the beacon is the operator's progress
+        strip (the loop IS still inside the gate), and adding a phase there changes exact event
+        counts that `test_end_to_end` and `test_settled_width_pins` pin. The cost channel is spans;
+        this fixes the cost channel and nothing else. It opens no call, changes no verdict and
+        cannot change what `_reject_and_repropose` returns.
+        """
+        tracer = getattr(self, "tracer", None)
+        if tracer is None:                      # tests build `Engine` via `__new__`; observability
+            yield                               # may never decide whether the re-proposal runs
+            return
+        with tracer.span("repropose"):
+            yield
+
     def _repropose_with_feedback(self, repropose, hint: str, idea: Idea, researcher=None) -> Idea:
         """One informed re-propose with the duplicate surfaced as a TRANSIENT `_novelty_feedback`
         directive (shared by the LLM and semantic gates — the set/try/finally-restore discipline
@@ -501,7 +539,8 @@ class NoveltyGateMixin:
         prev = getattr(_r, "_novelty_feedback", "")
         setattr(_r, "_novelty_feedback", hint)
         try:
-            idea2 = repropose()
+            with self._repropose_phase():       # bill this call to `repropose`, not to `novelty`
+                idea2 = repropose()
             if idea2 is not None:
                 idea = idea2
         except BudgetExceeded:

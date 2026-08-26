@@ -86,8 +86,65 @@ had no source for n and picked round numbers. Its own research memo says so in a
 
 ## 2. Two thirds of the budget is spent proving an idea is new
 
-    OPEN[novelty-gate-costs-two-thirds-and-decides-nothing]
-    proof:absent:novelty_budget_share@looplab/engine/novelty.py
+**REFUTED 2026-08-26, both halves, and re-measured independently before this was written.** The
+marker is deleted. What replaced it is a smaller, real defect and one new open item.
+
+**It does not cost two thirds. It costs 0.6 %.** Summed from generation spans across all twenty
+task-arms: `card_build` $6.1620 (34.8 %), `propose` $5.2500 (29.7 %), `plan` $3.3543 (19.0 %),
+`novelty` **$1.3151 (7.4 %)**, `deep_research` $0.8352 (4.7 %). And 7.4 % is still the wrong
+number for the gate, because 89 % of what carries that label is not the gate. Walking every
+generation's `input_from` chain back to the system prompt that ROOTED it: the adjudicator ("You
+judge experiment NOVELTY…") is **$0.1141 over 231 calls — 0.65 % of the run** — while $1.1758 over
+257 calls is the Researcher and its claim-verifier, i.e. the whole second proposal the gate BUYS
+when it rejects one.
+
+**Where "two thirds" came from, reproduced to the cent.** The original reading carried the last
+`phase_progress` with `status="started"` forward over every subsequent `llm_usage`. Only `propose`
+and `novelty` emit that beacon, and `novelty` is the last to start before the loop moves into
+`card_build`, `plan`, the build, the evaluation, research, lessons and the report — none of which
+emit one. So every dollar spent after the gate closed banked to it.
+
+**And it decides.** Eleven `novelty_rejected` events (not six): ten `reproposed`, one
+`budget_exceeded`, zero kept. `reproposed` is stamped only when the proposal digest CHANGED, and
+recomputing that digest over each `node_created` payload confirms it in **ten of ten** — the idea
+that got built is never the idea the gate rejected. The verdict is binding.
+
+**A cheap similarity check will not replace it**, and that is measured rather than assumed: scoring
+proposed-against-nearest-prior offline over all 49 adjudicator prompts, TF-IDF cosine does not
+separate (duplicates 0.466–0.779, novel 0.344–0.716); the best oracle threshold reaches 0.80
+accuracy only by admitting 4 of 11 duplicates and rejecting 6 of 38 good proposals. The duplicates
+are `bincount` vs `csr matvec`, `argsort` vs `zip/sort` — textually distinct descriptions of one
+algorithm. `options.py` ships `novelty_semantic` off; that default is now measured.
+
+### 2a. FIXED[repropose-billed-to-the-gate-that-asked-for-it] `proof:present:_repropose_phase@looplab/engine/novelty.py`
+
+The real defect is one span deep. `_paid_progress` opens the `novelty` span so the gate's money is
+attributable at all, and `Tracer.span` stamps `phase=<innermost open operation>` on every
+generation beneath it — so the re-proposal, having no span of its own, inherited `novelty`. A phase
+whose recorded price is ten times its own work is a measurement trap, and this campaign fell into
+it twice: this section, and `shared.py::_paid_progress`'s own $1.77 note. `_repropose_phase()` now
+opens a nested `repropose` span. Span only, no `phase_progress` beacon — the loop IS still inside
+the gate, and that table's exact rows are pinned by `test_end_to_end` / `test_settled_width_pins`.
+It opens no call and cannot change a verdict.
+
+### 2b. The item this one uncovered
+
+    OPEN[llm-calls-that-open-no-span-at-all]
+    proof:absent:spanless_llm_usage@looplab/engine/shared.py
+
+**$2.3214 across 916 calls — 11.6 % of arm B's money — appears in `llm_usage` events and in NO
+generation span.** Spans account for $17.6867 of the $20.0081 the event log records. Almost all of
+it is `card_build` and `hyp_prioritize`. Every per-phase question asked of the span channel is
+therefore answered over 88 % of the money, and the missing 12 % is concentrated in the single
+largest consumer. This is the same class of error as 2a — a cost channel that is silently partial —
+and it is the one to fix before any further conclusion is drawn about where the loop's money goes.
+
+**What survives of the original complaint.** Nothing here says the spend is well allocated:
+19 node evaluations for $8.029 on the 8-task corpus is $0.42 per measurement against the reference
+arm's $0.0175. But the money to re-target is `card_build` (34.8 %) and `plan` (19.0 %), not the
+gate.
+
+The original finding, kept as the evidence that was refuted:
 
 **Measured across the eight task-arms**, attributing every `llm_usage` to the enclosing
 `phase_progress`:
