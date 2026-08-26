@@ -11,6 +11,15 @@ its `stages`/`plan`/`card_build` phases are a FOREIGN-run reader. So the role wr
 experiment's code could not see the question it answers.
 
 Every assertion below has an input that makes it fail; the mutations are named in the messages.
+
+WHY THESE TESTS DID NOT CATCH THE CONTRACT BREAK, recorded because it is the reusable part: every one
+of them called `.execute(...)` — the name the provider happened to define — so they confirmed MY OWN
+NAMING rather than the contract's. `tools/_base.py::ToolProvider` requires `execute`, the protocol is
+STRUCTURAL ("no provider inherits this"), and the mismatch surfaced only when a live agent
+dispatched: the first run to load this provider lost its entire deep-research stage to
+"(deep research unavailable: 'QuestionBoardTools' object has no attribute 'execute')".
+A test that drives the method the object defines can never find that. `test_tool_provider_contract.py`
+is the guard that can.
 """
 from __future__ import annotations
 
@@ -49,7 +58,7 @@ def test_a_question_lists_its_experiments_and_what_they_measured():
                   concepts=["loss/contrastive"]),
         _experiment("card-0", "q-distill", delta=0.021),
         _experiment("card-1", "q-distill", status="running", verdict="open"),
-    ).call("read_questions", {})
+    ).execute("read_questions", {})
 
     assert "QUESTION_ID=q-distill" in out
     assert "Does distillation help recall?" in out
@@ -62,14 +71,14 @@ def test_a_question_lists_its_experiments_and_what_they_measured():
 
 def test_an_UNMEASURED_experiment_reads_as_absent_and_never_as_zero():
     """A run that produced no number and one that produced no improvement are different findings."""
-    out = _bound(_question("q1"), _experiment("card-0", "q1", delta=None)).call("read_questions", {})
+    out = _bound(_question("q1"), _experiment("card-0", "q1", delta=None)).execute("read_questions", {})
     assert "delta=—" in out, "MUTATION: default a missing best_delta to 0.0 and this goes red"
     assert "delta=+0" not in out
 
 
 def test_a_question_with_NO_experiment_says_so_rather_than_being_omitted():
     """It is the most actionable row on the board — the same choice the operator's ladder makes."""
-    out = _bound(_question("q-open")).call("read_questions", {})
+    out = _bound(_question("q-open")).execute("read_questions", {})
     assert "q-open" in out
     assert "no experiment filed under this yet" in out, (
         "MUTATION: skip childless questions and this goes red — filtering them out hides exactly "
@@ -78,7 +87,7 @@ def test_a_question_with_NO_experiment_says_so_rather_than_being_omitted():
 
 def test_an_EXPERIMENT_is_never_listed_as_a_question():
     """The kind is read from ACTION OWNERSHIP, the same rule the board, the fold and the UI use."""
-    out = _bound(_experiment("card-0", "")).call("read_questions", {})
+    out = _bound(_experiment("card-0", "")).execute("read_questions", {})
     assert "QUESTION_ID" not in out
     assert "no research question registered" in out
 
@@ -86,7 +95,7 @@ def test_an_EXPERIMENT_is_never_listed_as_a_question():
 def test_an_EMPTY_board_is_reported_as_a_state_and_not_as_an_error():
     """Before the opening memo a healthy run has no questions; saying "none" as though something
     were missing would misreport its first minutes — and v7 spent 90 of them in exactly that state."""
-    out = _bound().call("read_questions", {})
+    out = _bound().execute("read_questions", {})
     assert "not produced any" in out
     assert "error" not in out.lower()
 
@@ -100,26 +109,26 @@ def test_asking_for_ONE_question_returns_its_children_in_full():
     kids = [_experiment(f"c{i:02d}", "q1", delta=float(i) / 1000) for i in range(12)]
     tool = _bound(_question("q1"), *kids)
 
-    whole = tool.call("read_questions", {})
+    whole = tool.execute("read_questions", {})
     assert "more experiment(s) under this question" in whole, (
         "MUTATION: remove the clip receipt and a partial listing reads as complete")
     assert 'read_questions(question_id="q1")' in whole, (
         "the remedy must be a call the caller has NOT already spent — log_tools rule 3")
 
-    one = tool.call("read_questions", {"question_id": "q1"})
+    one = tool.execute("read_questions", {"question_id": "q1"})
     assert "c11" in one, "naming the question returns every child"
     assert "more experiment(s)" not in one
 
 
 def test_an_UNKNOWN_question_id_is_refused_by_name():
-    out = _bound(_question("q1")).call("read_questions", {"question_id": "nope"})
+    out = _bound(_question("q1")).execute("read_questions", {"question_id": "nope"})
     assert "no question with id" in out and "nope" in out
 
 
 def test_it_is_TOTAL_over_junk_and_over_an_unbound_provider():
     tool = QuestionBoardTools()
-    assert "no run state bound" in tool.call("read_questions", {})
-    assert "unknown tool" in _bound().call("something_else", {})
+    assert "no run state bound" in tool.execute("read_questions", {})
+    assert "unknown tool" in _bound().execute("something_else", {})
 
 
 def test_BOTH_wirings_exist_and_the_developer_binds_the_attribute_it_actually_has():
@@ -155,7 +164,7 @@ def test_BOTH_wirings_exist_and_the_developer_binds_the_attribute_it_actually_ha
         raise AssertionError(f"_scout_tools must build with a bare developer: {exc!r}") from exc
     board = next((p for p in providers if isinstance(p, QuestionBoardTools)), None)
     assert board is not None, "the board provider must be in the Developer's scout set"
-    assert "QUESTION_ID=q1" in board.call("read_questions", {}), (
+    assert "QUESTION_ID=q1" in board.execute("read_questions", {}), (
         "MUTATION: bind `_state` instead of `_memory_state` and this answers 'no run state bound'")
 
 

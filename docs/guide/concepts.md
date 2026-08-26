@@ -1295,7 +1295,16 @@ prompt already says which field to use, and inferring the filing would mint a li
 
 **And since 2026-08-26 an agent can ASK for the board, not only be shown it.** `read_questions`
 (`tools/question_board.py`) returns each open research question with its concepts, the experiments
-filed under it, and what each of those measured — the same join the operator's Research ladder
+filed under it, and what each of those measured. **It shipped BROKEN and the failure is worth
+knowing**: the provider defined `call` where `tools/_base.py::ToolProvider` requires `execute`, and
+that protocol is STRUCTURAL — its own docstring says "no provider inherits this" — so nothing checked
+it at import or at construction. The first run that loaded the provider lost its whole deep-research
+stage on the first dispatch, its memo reading `(deep research unavailable: 'QuestionBoardTools'
+object has no attribute 'execute')` with zero findings, zero directions and zero questions. Ten unit
+tests passed throughout, because every one of them called `.call(...)` — the name the object defined
+— so they confirmed the author's naming rather than the contract's. `tests/test_tool_provider_contract.py`
+is the guard that can see it: a class-wide scan where anything offering `specs` owes `execute`, plus
+a driven dispatch, since `hasattr` is satisfied by the wrong name being right — the same join the operator's Research ladder
 renders. Before it, a census of the whole tool surface found 83 tools and not one that read the
 questions: the concept tools read the TAXONOMY and `read_research_memo` reads the memo that PRODUCED
 a question. The only channel was the PUSH block below, which is bounded by whatever the brief chooses

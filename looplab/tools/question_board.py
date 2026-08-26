@@ -88,7 +88,14 @@ class QuestionBoardTools:
                                                 "(omit for the whole board)"}}),
         ]
 
-    def call(self, name: str, args: dict) -> str:
+    # `execute`, NOT `call`. `tools/_base.py::ToolProvider` is a STRUCTURAL protocol — "no provider
+    # inherits this" — so a wrong name is checked by nothing at import or construction and surfaces
+    # only when a live agent dispatches. Shipped as `call` in b5302649 and measured on the first run
+    # that loaded it: the deep-research stage died on dispatch and its memo read
+    # "(deep research unavailable: 'QuestionBoardTools' object has no attribute 'execute')" — zero
+    # findings, zero directions, zero questions, the run's whole research input gone. Ten unit tests,
+    # the neighbourhood suite and a clean import all passed, because none of them dispatched.
+    def execute(self, name: str, args: dict) -> str:
         if name != "read_questions":
             return f"unknown tool: {name}"
         state = self.state
