@@ -265,6 +265,58 @@ def _instance_shape(path: Path, limit: int = 4000) -> str:
     return describe(first)[:limit]
 
 
+# The same cache `looplab_eval.py::DEFAULT_TIMES_DIR` resolves, by the same rule, so the goal
+# card and the scorer cannot end up reading different directories.
+BASELINE_TIMES_DIR = Path(
+    os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR")
+    or (Path(__file__).resolve().parent / ".baseline_times")
+)
+
+
+def measured_reference_ms(task: str, subset: str = "train",
+                          times_dir: Path | None = None) -> tuple[float, float] | None:
+    """The reference's MEASURED per-instance milliseconds on this box, as (low, high) medians.
+
+    THE FILE NAME IS NOT A MEASUREMENT. `convex_hull_T100ms_n267021_size100_train.jsonl` says the
+    dataset's builder chose n so the reference took ~100 ms *on the machine that built it*. On this
+    box the same reference is 39.0 ms per instance in the campaign's own regime
+    (`convex_hull__train__w22x1r3.json`, median 40.07) and 29.3 ms serially in a 22-core lane
+    (`convex_hull__train__lane22r3.json`, median 29.45) -- 2.5x to 3.4x away from the file name.
+
+    Measured harm, `fullctx-probe` 2026-08-26: the goal card quoted 100 ms as "MEASURED FROM THE
+    DATASET ON THIS MACHINE -- not a guess, and not something to re-derive". The Researcher then
+    sized its whole proposal against it ("filter cost is ~2 gemms = 4ms vs ~100ms reference",
+    "Expected: ~8-15x"), and the solver it produced measured 29.9 ms/instance in its own probe --
+    about 1.0x against the ruler its nodes are scored on. It also used 100 ms to compute that
+    `eval_train` "should be ~15 s", so when that command hit its 600 s cap the run spent a further
+    eight minutes probing `is_solution` to explain a timeout that had another cause entirely.
+
+    One file per REGIME (lane width / worker pool), and this process cannot know which regime the
+    scorer will run in -- it is not `taskset`-ed the way the run is. So every regime's median is
+    read and the SPREAD is returned; the caller states a range when the regimes disagree rather
+    than picking one and calling it the number. Returns None when nothing has been measured.
+    """
+    root = Path(times_dir) if times_dir is not None else BASELINE_TIMES_DIR
+    medians: list[float] = []
+    try:
+        paths = sorted(root.glob(f"{task}__{subset}__*.json")) + \
+            [root / f"{task}__{subset}.json"]
+    except OSError:
+        return None
+    for path in paths:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        vals = sorted(float(v) for v in raw.values()
+                      if isinstance(v, (int, float)) and float(v) > 0) if isinstance(raw, dict) else []
+        if vals:
+            medians.append(vals[len(vals) // 2])
+    if not medians:
+        return None
+    return (min(medians), max(medians))
+
+
 def dataset_clause(root: Path, task: str) -> str:
     """The instance shape, in the goal, derived from the train split on this machine.
 
@@ -282,13 +334,41 @@ def dataset_clause(root: Path, task: str) -> str:
     except OSError:
         count = 0
     shape = _instance_shape(path)
+    # THE REFERENCE TIME IS MEASURED OR IT IS NOT STATED. The first version of this clause read
+    # `T100ms` out of the file name and printed it under "MEASURED FROM THE DATASET ON THIS
+    # MACHINE -- not a guess". It is a guess: it is the target the machine that BUILT the dataset
+    # hit, and on this box the same reference is 40.07 ms (campaign regime) or 29.45 ms (serial
+    # lane) -- 2.5x to 3.4x away. Measured harm on `fullctx-probe`, 2026-08-26: 360 occurrences of
+    # the wrong number in one 90-minute run, a proposal sized against it ("~4 ms filter vs ~100 ms
+    # reference, expected 8-15x") whose solver measured 29.9 ms/instance -- about 1.0x on the ruler
+    # its nodes are scored on -- and eight further minutes spent explaining an `eval_train` timeout
+    # the same 100 ms had made look inexplicable. A clause written against misinformation about the
+    # task was the misinformation.
+    measured = measured_reference_ms(task, "train")
+    if measured is not None:
+        lo, hi = measured
+        cost = (f"THE REFERENCE COSTS **{lo:.0f}-{hi:.0f} ms** PER INSTANCE ON THIS BOX -- the "
+                if abs(hi - lo) >= 1.0 else
+                f"THE REFERENCE COSTS **{hi:.0f} ms** PER INSTANCE ON THIS BOX -- the ")
+        cost += ("median of the per-instance reference timings the scorer itself divides by, not a "
+                 f"number read off the dataset's file name (that name says {m.group('ms')} ms, "
+                 "which is the target the machine that BUILT the dataset hit). ")
+        if abs(hi - lo) >= 1.0:
+            cost += ("The range is the lane regimes this box scores in; assume the slower end is "
+                     "not yours. ")
+        budget = f"{hi:.0f} ms"
+    else:
+        cost = (f"The dataset's name says the reference took about {m.group('ms')} ms per instance "
+                "ON THE MACHINE THAT BUILT IT -- nothing here has measured this box, so treat that "
+                "as an order of magnitude and not as your denominator. ")
+        budget = f"{m.group('ms')} ms"
     clause = (
         " THE INSTANCES, MEASURED FROM THE DATASET ON THIS MACHINE -- not a guess, and not "
         f"something to re-derive: the graded split is `{m.group('task')}` at **n = {m.group('n')}**, "
-        f"{count or m.group('size')} instances, generated so that the REFERENCE implementation takes "
-        f"about {m.group('ms')} ms on one of them. Your speedup is the reference's total time over "
+        f"{count or m.group('size')} instances. " + cost +
+        "Your speedup is the reference's total time over "
         "yours across all of them, so a constant overhead you would ignore at toy sizes is "
-        f"{m.group('ms')} ms of budget per instance here, and an asymptotically better algorithm "
+        f"{budget} of budget per instance here, and an asymptotically better algorithm "
         "that loses below n = 1 000 may still be the right answer. "
         "SIZE YOUR OWN CHECKS TO THAT n. A timing you take at n = 100 when the graded n is "
         f"{m.group('n')} does not measure this task."

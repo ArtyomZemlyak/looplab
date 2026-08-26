@@ -304,3 +304,73 @@ def test_one_eval_train_call_cannot_cost_half_the_developer_session(tmp_path):
         "the model is offered an expensive tool without being told what it is charged against")
     assert "write the solver FIRST" in goal
     assert "ends with no file written has produced nothing" in goal
+def _times(root: Path, task: str, subset: str, regime: str, ms: float) -> Path:
+    d = root / ".baseline_times"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{task}__{subset}__{regime}.json"
+    path.write_text(json.dumps({str(i): ms for i in range(100)}), encoding="utf-8")
+    return d
+
+
+def test_the_reference_time_is_this_boxs_measurement_when_one_exists(tmp_path, monkeypatch):
+    """The filename's `T100ms` is the DATASET BUILDER's machine, not this one.
+
+    Live numbers, 2026-08-26: `convex_hull_T100ms_n267021_size100_train.jsonl` names 100 ms, and
+    the per-instance reference timings the scorer divides by are 40.07 ms median
+    (`convex_hull__train__w22x1r3.json`) and 29.45 ms (`convex_hull__train__lane22r3.json`). The
+    goal card asserted the 100 ms as "MEASURED FROM THE DATASET ON THIS MACHINE -- not a guess, and
+    not something to re-derive", so the Researcher sized its proposal against a reference 2.5-3.4x
+    more expensive than the real one and predicted "~8-15x" for a solver its own probe measured at
+    29.9 ms/instance -- about 1.0x on the ruler its nodes are scored on.
+    """
+    root = _root(tmp_path, task="demo")
+    _times(tmp_path / "cache", "demo", "train", "w22x1r3", 40.07)
+    monkeypatch.setenv("ALGOTUNE_BASELINE_CACHE_DIR", str(tmp_path / "cache" / ".baseline_times"))
+    spec = _build(tmp_path, "--deliver", "--full-context", root=root)
+    assert isinstance(spec, dict), spec
+    goal = spec["goal"]
+    assert "40 ms" in goal, f"the measured reference time never reached the goal:\n{goal[:2600]}"
+    assert "100 ms of budget per instance" not in goal, (
+        "the per-instance budget is still quoted from the dataset's file name")
+    assert "MEASURED FROM THE DATASET ON THIS MACHINE -- not a guess" in goal, (
+        "the SIZE is still read from the dataset and that half of the claim is true")
+
+
+def test_an_unmeasured_box_attributes_the_number_instead_of_claiming_it(tmp_path, monkeypatch):
+    """With nothing measured the target may still be quoted -- but as the builder's number."""
+    monkeypatch.setenv("ALGOTUNE_BASELINE_CACHE_DIR", str(tmp_path / "empty"))
+    spec = _build(tmp_path, "--deliver", "--full-context")
+    goal = spec["goal"]
+    assert "about 100 ms" in goal, "the only number there is must still be offered"
+    assert "ON THE MACHINE THAT BUILT IT" in goal, (
+        "an unmeasured target is being passed off as this machine's reference time")
+    assert "order of magnitude" in goal
+
+
+def test_regimes_that_disagree_are_shown_as_a_range(tmp_path, monkeypatch):
+    """This process is not `taskset`-ed the way the run is, so it cannot know which regime scores
+    the nodes. Picking one median and calling it THE number would restate the original defect with
+    a smaller error; the spread is the honest answer."""
+    _times(tmp_path / "cache", "demo", "train", "w22x1r3", 40.07)
+    _times(tmp_path / "cache", "demo", "train", "lane22r3", 29.45)
+    monkeypatch.setenv("ALGOTUNE_BASELINE_CACHE_DIR", str(tmp_path / "cache" / ".baseline_times"))
+    goal = _build(tmp_path, "--deliver", "--full-context")["goal"]
+    assert "29-40 ms" in goal, goal[:2600]
+    assert "the slower end is not yours" in goal
+
+
+def test_the_file_names_number_is_attributed_to_whoever_measured_it(tmp_path, monkeypatch):
+    """Naming both numbers without saying whose is worse than naming one.
+
+    The card quotes the measured per-instance cost AND the dataset's `T<N>ms`. If the second is
+    printed bare, the reader has two candidate denominators and no rule; the run that produced this
+    finding sized its whole proposal against the wrong one 360 times. The sentence that says the
+    file name is the BUILDING machine's target is what makes the pair readable, so it is pinned.
+    """
+    monkeypatch.setenv("ALGOTUNE_BASELINE_CACHE_DIR", str(_times(tmp_path / "c", "demo", "train",
+                                                                 "w22x1r3", 40.07)))
+    spec = _build(tmp_path, "--deliver", "--full-context")
+    goal = spec["goal"]
+    assert "40 ms" in goal
+    assert "the target the machine that BUILT the dataset hit" in goal, (
+        "the file name's number is printed without saying whose machine it describes")
