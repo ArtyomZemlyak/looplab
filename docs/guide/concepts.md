@@ -1239,6 +1239,21 @@ and an index; they see the board's content without either claim contract. Until 
 first list existed, so a card disappeared from the Researcher's view the moment it got a node,
 including a node still running.
 
+**A DIRECTION IS NEVER A CLAIM, and since 2026-08-26 that is enforced rather than only asked for.**
+`agents/roles.py::bind_idea_to_board_card` resolves two independent edges against the same visible
+board — `card_id` (a claim on a work item) and `parent_card_id` (a filing under a question) — and
+until then a direction could become either one. Both resolution paths reached it: a proposal naming a
+`DIRECTION_ID` in `card_id` bound to it (and had its own `hypothesis` overwritten by the direction's
+broad seed statement), and so did the SEED FALLBACK, which is the path that fires on a **compliant**
+proposal. The direction block asks the model to propose an experiment that moves the direction
+forward and file it with `parent_card_id`; a model that does exactly that and echoes the direction's
+wording as its own `hypothesis` matched the direction, and the self-edge guard below then saw
+`parent.id == chosen.id` and nulled the parent — turning a correct filing into a claim on the
+question and destroying the direction→experiment edge. `chosen` is now nulled for a direction after
+both resolution paths and BEFORE the self-edge test, which is what lets the parent survive. A
+direction named in `card_id` is nulled and deliberately NOT re-routed into `parent_card_id`: the
+prompt already says which field to use, and inferring the filing would mint a link nobody authored.
+
 **And since 2026-08-26 an agent can ASK for the board, not only be shown it.** `read_questions`
 (`tools/question_board.py`) returns each open research question with its concepts, the experiments
 filed under it, and what each of those measured — the same join the operator's Research ladder

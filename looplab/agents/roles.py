@@ -965,6 +965,13 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
     because a direction is exactly the row a `card_id` claim must NOT resolve to (it owns no action,
     so claiming it would hand the engine an unbuildable work item — the failure the two prompt
     blocks were split to prevent).
+
+    A direction named in `card_id` is NULLED, not re-routed into `parent_card_id`. Re-routing would
+    read better on the case where the model plainly meant to file — but it infers intent from a
+    field the prompt explicitly told it not to use, and it would mint a link no one authored while
+    looking like one the model chose. Nulling is what this function already does with any `card_id`
+    it cannot honour: the proposal keeps its OWN hypothesis (a claim overwrites it with the card's
+    seed statement) and the experiment stands as a root.
     """
     by_id = {card.id: card for card in cards}
     # RESOLVE THE CLAIM FIRST — the self-edge test must compare against the card this proposal will
@@ -972,15 +979,26 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
     # is matched to a card by its SEED STATEMENT can name that same card as its parent, and against
     # the raw `idea.card_id` (None) the guard sees no self edge and emits `card_id ==
     # parent_card_id` into the durable payload for the fold to drop silently.
-    # REVIEW 2026-08-25 (P1 correctness): visibility is not enough here. Both the direct id lookup
-    # and the seed fallback can select a direction even though this function's contract explicitly
-    # says a direction must never become `card_id`. A non-compliant proposal can therefore reserve
-    # an action-less card. Null `chosen` when `card_is_direction(chosen)` and cover both resolution
-    # paths with direction fixtures.
     chosen = by_id.get(idea.card_id) if idea.card_id else None
     if chosen is None and idea.hypothesis:
         matches = [card for card in cards if card.seed_statement == idea.hypothesis]
         chosen = matches[0] if len(matches) == 1 else None
+    # A DIRECTION IS NEVER A CLAIM — said in the docstring above, said in the prompt block that
+    # renders directions, and until 2026-08-26 enforced NOWHERE: visibility was the only test, so
+    # both resolution paths above could hand back a row that owns no action. Placed AFTER both of
+    # them because they are two ways of reaching the same wrong row, and BEFORE the self-edge test
+    # below because that ordering is the entire fix.
+    #
+    # THE SEED FALLBACK IS THE DANGEROUS PATH, and it fires on a COMPLIANT proposal. The direction
+    # block instructs the model to "propose ONE concrete minimal-change experiment that would move
+    # it forward and return its DIRECTION_ID in `parent_card_id`"; a model that does exactly that
+    # and echoes the direction's wording as its `hypothesis` matched the direction HERE, and the
+    # self-edge guard then saw `parent.id == chosen.id` and nulled the parent. Driven at 7d406cc2:
+    # `parent_card_id="card-7"` in, `card_id='card-7' parent_card_id=None` out. The filing became a
+    # claim on the question and the direction->experiment edge (#66, live on v7) was destroyed on
+    # the one path the prompt actively invites. Nulling `chosen` first is what lets the parent live.
+    if chosen is not None and card_is_direction(chosen):
+        chosen = None
     parent = by_id.get(idea.parent_card_id) if idea.parent_card_id else None
     # A card names its parent, never itself. The fold refuses a self edge anyway, but nulling it
     # here keeps the durable payload from carrying a link the board will silently drop.

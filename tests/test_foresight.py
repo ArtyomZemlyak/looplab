@@ -6,8 +6,8 @@ from __future__ import annotations
 from looplab.agents.roles import (
     _state_brief, bind_idea_to_board_card, next_board_prompt_cards,
 )
-from looplab.core.models import (Card, Event, Idea, Node, NodeStatus, RunState,
-                                 hypothesis_id)
+from looplab.core.models import (Card, CardSelectionProvenance, Event, Idea, Node, NodeStatus,
+                                 RunState, hypothesis_id)
 from looplab.events.replay import fold
 from looplab.search.best_of_n import BestOfNDeveloper
 from looplab.search.foresight import ForesightPanelResearcher, rank, verified_report
@@ -235,8 +235,22 @@ def _state_with_open_hyps(statements):
         cid = hypothesis_id(s)   # 1 card = 1 hypothesis: cid == hypothesis_id(seed_statement)
         # Populate ONLY the Card board so these tests genuinely PIN the card board as the source — a
         # regression that read state.hypotheses again would leave the board empty and fail.
+        #
+        # THESE ARE WORK ITEMS, AND SAYING SO IS NOT DECORATION. `Card.selection_provenance`
+        # DEFAULTS to a present object with `action_source="none"`, so a bare `Card(...)` is a
+        # DIRECTION by `core/cards.py::card_kind_of` — a row that owns no executable action, which
+        # `board_prompt_lines` renders under "cannot be run as they stand" and never offers a
+        # CARD_ID for. `card_kind_of`'s conservative "an unknown/None card reads as an experiment"
+        # branch is unreachable from this construction, because the default is not None. Every test
+        # below binds a CLAIM (`idea.card_id`), which only a work item can carry, so the fixture has
+        # to stamp what the FOLD stamps for one — `events/card_ledger.py` adds the cid to
+        # `action_owned_cards` and a post-pass derives this; a directly-built Card skips that pass.
+        # `search/scorer_fidelity.py::_ready_card` is the production spelling of the same fixture.
         st.cards[cid] = Card(id=cid, seed_statement=s, statement=s, verdict="open",
-                             status="proposed", evidence=[])
+                             status="proposed", evidence=[],
+                             selection_provenance=CardSelectionProvenance(
+                                 action_source="card_added", action_owner_count=1,
+                                 action_complete=True, freshness="current"))
     return st
 
 
