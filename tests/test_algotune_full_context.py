@@ -88,9 +88,15 @@ def test_the_false_clause_is_gone_and_the_true_half_stays(tmp_path):
         "--deliver's true half -- write the solver early -- was thrown out with its false half")
 
 
-def test_without_the_flag_the_goal_is_what_the_campaign_ran(tmp_path):
-    """The falsifier for a change that quietly rewrites the arm already measured."""
-    spec = _build(tmp_path, "--deliver")
+def test_the_opt_out_reproduces_the_goal_the_campaign_ran(tmp_path):
+    """The falsifier for a change that quietly rewrites the arm already measured.
+
+    `--full-context` became the DEFAULT on 2026-08-26 -- the reference agent is shown the graded
+    metric 17-61 times per task, so withholding it was a handicap applied to one arm, not a neutral
+    default. But the twenty numbers taken without it must stay reproducible, and that is what
+    `--no-full-context` is for. If this test goes red, those numbers can no longer be regenerated.
+    """
+    spec = _build(tmp_path, "--deliver", "--no-full-context")
     goal = spec["goal"]
     assert "YOU CANNOT MEASURE YOUR OWN SCORE" in goal
     assert "YOU CAN MEASURE" not in goal
@@ -176,7 +182,7 @@ def test_the_card_does_not_argue_with_itself_about_the_size(tmp_path):
 
 def test_role_split_without_the_flag_is_unchanged(tmp_path):
     """The falsifier: the arm already measured must keep the wording it ran on."""
-    spec = _build(tmp_path, "--deliver", "--role-split")
+    spec = _build(tmp_path, "--deliver", "--role-split", "--no-full-context")
     assert "nobody here knows yet (the problem sizes, how much memory a table would take)" in \
         spec["goal"]
 
@@ -199,3 +205,40 @@ def test_every_role_gets_the_description_not_only_the_developer(tmp_path):
                  "ndarray(shape=(4408, 2), dtype=float64)", 'run_dev_command("eval_train")'):
         assert fact in brief, f"{fact!r} never reaches the developer's system prompt"
     assert f"Goal: {task.goal}" in brief, "the goal is no longer carried whole into the brief"
+
+
+def test_full_context_is_what_you_get_without_asking(tmp_path):
+    """The default IS the feature. Measured on this benchmark's own logs: the reference agent gets
+    `Speedup: X` with `Valid Solutions: Y%` on the train split 17-61 times per task, `eval_input`
+    207-429 times and `profile` 58-194 times. A default that withholds the instance size and any
+    way to measure is a handicap applied to one arm, and the loop's answer to it was to invent
+    sizes -- `convex_hull` is n = 267 021 and its champion was chosen from probes at n = 100,
+    1 000 and 10 000."""
+    spec = _build(tmp_path, "--deliver", "--one-card")
+    goal = spec["goal"]
+    assert "n = 4408" in goal, "the default no longer carries the measured size"
+    assert "YOU CANNOT MEASURE" not in goal
+    assert [c["name"] for c in spec.get("developer_commands") or []] == ["eval_train"]
+
+
+def test_a_missing_split_warns_by_default_and_refuses_when_demanded(tmp_path):
+    """Two different failures, and conflating them costs either way. Now that the default is ON, a
+    hard failure would break every task whose split is not on this machine; but `--full-context`
+    typed on the command line still means "I require this"."""
+    import subprocess
+    import sys as _sys
+
+    root = _root(tmp_path, with_dataset=False)
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    base = [_sys.executable, str(SCRIPT), "--algotune-root", str(root),
+            "--task", "demo", "--out-dir", str(out), "--deliver"]
+
+    implicit = subprocess.run(base, capture_output=True, text=True, timeout=180)
+    assert implicit.returncode == 0, implicit.stderr
+    assert "no train split found" in implicit.stderr, "it degraded in silence"
+    assert "building WITHOUT it" in implicit.stderr
+
+    demanded = subprocess.run(base + ["--full-context"], capture_output=True, text=True, timeout=180)
+    assert demanded.returncode != 0, "an explicit --full-context accepted a task with no context"
+    assert "refusing" in demanded.stderr

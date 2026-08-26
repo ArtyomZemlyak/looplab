@@ -39,8 +39,18 @@ Recorded first, so nothing downstream rests on them.
 
 ## 1. The loop times the wrong size
 
-    OPEN[probe-timing-runs-at-an-invented-scale]
-    proof:absent:instance_size@looplab/tools/run_tools.py
+**CLOSED 2026-08-26.** The marker is deleted, not re-pointed, and the proof it carried is
+withdrawn deliberately: it named `looplab/tools/run_tools.py`, and putting instance-size knowledge
+into the generic probe tool is the wrong place for it -- that tool serves every task type, most of
+which have no such thing. The owner ruled it out of scope explicitly.
+
+What was actually wrong was the goal card, and that is fixed: `make_task.py` states the measured
+instance shape and pins `eval_train`, and since this commit BOTH ARE THE DEFAULT. The reference
+agent is shown the graded metric on the train split 17-61 times per task; withholding it from ours
+was never a neutral default, it was a handicap applied to one arm, and inventing sizes was the
+loop's rational answer to it. `--no-full-context` still reproduces the card the measured arm ran on.
+
+The original finding, kept as the evidence:
 
 **Measured.** `convex_hull`'s dataset is `convex_hull_T100ms_n267021_size100_train.jsonl` —
 **n = 267 021**. The timing probes that decided its champion ran at **n = 100, 1 000 and 10 000**.
@@ -177,8 +187,18 @@ the work is paid for either way.
 
 ## 6. Nothing is measured twice, and the champion is chosen from single draws
 
-    OPEN[champion-chosen-from-unrepeated-measurements]
-    proof:absent:trials@looplab/engine/champion_caveats.py
+**CLOSED 2026-08-26 as NOT A DEFECT — the owner's call, recorded with its reasoning so it is not
+re-raised.** Repetition is a policy choice, and on this benchmark the policy is already paid for
+elsewhere: every score is the aggregate over 100 instances, the champion is selected on train and
+then scored again on a held-out test split, so a number that survives to the table has been taken
+twice over two different sets of instances. Adding per-node trials would buy variance reduction on
+a quantity that is already an average of a hundred, at a cost measured in the run's only scarce
+resource.
+
+The observation stands and may matter for a DIFFERENT task type -- one whose metric is a single
+noisy measurement rather than an aggregate. It is written down here for that case, not for this one.
+
+The original finding:
 
 `evaluate.py` already writes `"trials": res.trials or []` — the mechanism exists. It is never
 populated, and `champion_caveats.py`, which is what guards a champion switch, does not read it.

@@ -582,13 +582,24 @@ def main() -> int:
                          "Composes with the others.")
     ap.add_argument("--deliver", action="store_true",
                     help="Append the YOU CANNOT MEASURE YOUR OWN SCORE clause (see DELIVER).")
-    ap.add_argument("--full-context", action="store_true",
+    # ON BY DEFAULT since 2026-08-26. It was introduced off, on the principle that a change to the
+    # goal card is a change to the measurement and belongs between arms rather than inside one --
+    # which is still true, and is why `--no-full-context` exists and why the twenty arm-B numbers
+    # taken without it are not comparable to numbers taken with it.
+    #
+    # What changed is the judgement of what the BASELINE is. This benchmark's reference agent is
+    # shown the graded metric on the train split 17-61 times per task, plus `eval_input` 207-429
+    # times and `profile` 58-194 times on real instances. Withholding the instance size and any way
+    # to measure was not a neutral default -- it was a handicap we applied to one arm only, and the
+    # loop's answer to it was to invent sizes: `convex_hull` is n = 267 021 and the probes that
+    # chose its champion ran at n = 100, 1 000 and 10 000. The default now gives the agent what it
+    # is legitimately allowed to know, and the OPT-OUT is the thing you reach for deliberately.
+    ap.add_argument("--full-context", action=argparse.BooleanOptionalAction, default=True,
                     help="Give this arm what the ARENA gives its own agent: the measured instance "
-                         "shape in the goal (see dataset_clause), a read-only mount of the TRAIN "
-                         "split, and a pinned `eval_train` command that runs the real evaluator on "
-                         "the staged files. Replaces the --deliver clause's YOU CANNOT MEASURE half "
-                         "with MEASURE. OFF by default and composable: it CHANGES THE GOAL CARD, so "
-                         "adopt it between arms, never inside one.")
+                         "shape in the goal (see dataset_clause) and a pinned `eval_train` command "
+                         "that runs the real evaluator on the staged files, replacing the "
+                         "--deliver clause's YOU CANNOT MEASURE half with MEASURE. ON by default; "
+                         "`--no-full-context` reproduces the goal card the 2026-08-24 arm B ran on.")
     ap.add_argument("--role-split", action="store_true",
                     help="Append the ONE EXPERIMENT = ONE ALGORITHM clause (see ROLE_SPLIT).")
     args = ap.parse_args()
@@ -617,11 +628,20 @@ def main() -> int:
     interpreter = args.python or str(root / ".venv" / "bin" / "python")
     train_path = train_dataset(root, args.task) if args.full_context else None
     if args.full_context and train_path is None:
-        # REFUSE rather than silently ship a --full-context task with no context. A flag that
-        # degrades to the old behaviour without saying so is how an arm ends up mislabelled.
-        raise SystemExit(f"--full-context: no train split found for {args.task!r} under "
-                         f"{root / '.hf_datasets'} -- refusing to build a task that claims context "
-                         f"it does not have")
+        # REFUSE when it was ASKED FOR, WARN when it is merely the default. A flag that degrades
+        # without saying so is how an arm ends up mislabelled -- but now that the default is ON,
+        # hard-failing would also break every task whose split is not on this machine, which is a
+        # different and worse failure. `--full-context` explicitly on the command line still means
+        # "I require this", and the exit code still says so.
+        asked = any(a == "--full-context" for a in sys.argv[1:])
+        message = (f"--full-context: no train split found for {args.task!r} under "
+                   f"{root / '.hf_datasets'}")
+        if asked:
+            raise SystemExit(message + " -- refusing to build a task that claims context it does "
+                                       "not have")
+        print(message + " -- building WITHOUT it (pass --full-context to make this fatal)",
+              file=sys.stderr)
+        args.full_context = False
 
     spec = {
         "kind": "repo",
