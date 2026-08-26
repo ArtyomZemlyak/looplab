@@ -554,17 +554,83 @@ and converts them with a ratio calibrated in-process from calls this gateway its
 median error against `tiktoken` over 93 request-sized blocks of the campaign's own text, 15.2 % at
 p90. With no priced call yet it returns 0 and says `unmeasured` rather than guessing.
 
-### 9a. STILL OPEN — and it is the half that actually cost the money
+### 9a. CLOSED 2026-08-26 — the half that actually cost the money
 
-    OPEN[an-aborted-stream-is-retried-ten-times]
-    proof:absent:abort_is_not_retryable@benchmarks/meter/proxy.py
+The marker is deleted rather than re-pointed: `abort_is_not_retryable` and a `--delta-ceiling` are
+in `benchmarks/meter/proxy.py`, with `tests/test_meter_delta_ceiling_is_not_retryable.py` as the
+falsifier. What follows is the finding, re-measured, and the decision.
 
-The client never parsed the body at ALL. `rbf_interpolation`'s arena log holds 53 `OpenAIException`
-lines — three per event, one per aborted meter row, seventeen distinct errors — each at abort+~1808
-s. An errored call never reaches AlgoTuner's cost extraction, so no frame of any shape could have
-been read. What turned one nine-hour cut into seventeen was the outer **10-attempt retry loop**, not
-a budget. Across the campaign: **131 aborted streams, $6.55, and 61.9 hours of wall clock.** The
-highest-leverage guard is on the retry of an aborted stream, and it is not written yet.
+**The numbers, re-derived.** `meter/meter.jsonl` at 9,235 rows: **134 aborted streams, $6.646 and
+62.85 h**. The three numbers this section was written with reproduce exactly at the 131st abort —
+$6.552 and 61.91 h — so they were right and the campaign has simply added three more since. 113 of
+the 134 are arm A on the stream-adapted path; 21 are arm B streaming; 116 of them ended between
+1,795 s and 1,825 s.
+
+**The cut is not the cost; the RETRY of the cut is, and that is now measured rather than asserted.**
+Grouped by `(arm, task, attempt)` in arrival order the 134 aborts form 44 consecutive runs, and four
+of those runs are 23, 23, 16 and 15 long — **77 aborts on four task-arms**. Arm B's longest run is
+2. Over the same log:
+
+| counterfactual | aborts | wall saved | money saved |
+|---|---|---|---|
+| keep only the first abort of each run | 44 | **43.34 h (69 %)** | **$4.55 (68 %)** |
+| 135,000-delta ceiling alone | 134 | 16.27 h (26 %) | $1.94 (29 %) |
+| both | 44 | **48.67 h (77 %)** | **$5.19 (78 %)** |
+
+So the multiplier is worth two and a half times the per-call cap that 9b proposed, and it is a
+CLIENT loop: `AlgoTuner/interfaces/llm_interface.py` wraps the call in `for attempt in range(10)` /
+`except (RateLimitError, APIError, APIConnectionError)`. Its logs show litellm's own classifier
+getting it right — `LiteLLM API non-retryable error` — and the layer above overriding it on the same
+exception, 72 times across the campaign's logs, with five runs reaching `Exceeded max retries (10)`.
+
+**Nothing honest makes that loop stop.** Its only escape is a substring match on a payment/quota
+list (`"402"`, `"insufficient credits"`, `"quota exceeded"`, …), so making an abort non-retryable by
+STATUS or ERROR SHAPE means asserting something false about the account. And the status is not ours
+to choose anyway: the 200 and the headers are on the wire long before the cut happens.
+
+**What is honest is to stop the call being an error.** It is not one. The request partially
+succeeded, 150k–245k tokens were generated, and this meter has already billed them. Delivered as
+what it is — a truncated completion with a finish reason, a price and the `data: [DONE]` sentinel —
+a loop that retries *errors* has nothing to catch. That is `abort_is_not_retryable`.
+
+**The delta ceiling is in, and its job is not the 26 %.** It is what makes the refusal RELIABLE. The
+proxy can only hand back a complete ending on a call it is still holding; when the gateway ends the
+generation, what reaches the client is whatever the dying socket leaves behind — 31 of the 134 rows
+carry a `BrokenPipeError` from trying to answer a client that had already gone. A cut the meter
+chooses is complete and identical every time. 135,000 clears arm A's largest complete answer
+(132,269 deltas) and arm B's (126,559), so it fires on nothing in the recorded corpus; the ceiling
+also closes the upstream socket, which is where the wall clock is actually saved.
+
+**A third thing was wrong and only the real client found it: the minted frames were UNREADABLE on a
+cut that landed inside an SSE event.** SSE events are separated by a BLANK LINE, and the proxy
+forwards line by line, so a stream that stops between a `data:` line and its terminator leaves the
+event OPEN. Everything minted afterwards is then glued in as a second `data:` line of the same
+event, a conformant parser concatenates the two payloads, and `json.loads` reports `Extra data:
+line 2 column 1`. Driving arm A's own litellm 1.97.0 at the pre-fix proxy in front of an upstream
+that dies mid-event: **`MidStreamFallbackError` wrapping an `APIConnectionError`** — one of the
+three types AlgoTuner's ten-attempt loop catches. Same upstream, patched proxy: no exception, 32
+chunks, the usage read correctly. The frames 2afb287c added were right and could not be read, which
+on the wire is the same as absent. The proxy now closes the event before minting into it, and
+`_sse_events` in the test splits on the blank line rather than filtering `data:` lines, because a
+line filter is blind to exactly this and passed the broken version.
+
+**Measured against arm A's own litellm 1.97.0, and the one thing this does NOT explain.** With the
+patch, that litellm raises nothing on any cut shape that could be constructed — streaming, streaming
+with `include_usage`, and adapted; 40, 500 and 220,000 deltas; content-only and reasoning-only;
+upstream ending cleanly, on a bare FIN, mid-event, and cut by the ceiling — and reports the
+synthetic usage and cost correctly in every case. What is still **not reproduced** is arm A's
+production exception itself (`APIError: OpenAIException - `, empty message, 3–33 s AFTER the meter
+row was written). Three facts bound it. The live proxy (PID 2450834, started 2026-08-24 10:11) runs
+the pre-2afb287c code and 0 of the 134 rows carry the new prompt-token basis, so every recorded
+abort predates even the two-frame fix. The mid-event failure above is reproduced only on the
+STREAMING transport, and arm A is adapted, where partial lines are dropped silently. And 31 of the
+134 aborts carry a `BrokenPipeError` — including 15/15 on `integer_factorization/a3` and 13/13
+across `kcenters/a3,a4`, three of the retry-storm task-arms — which means the client had already
+gone; those are the 600 s client timeout that `config.yaml` raised to 1900 on 2026-08-25, a
+different cause with a fix already in. That leaves the `rbf_interpolation`, `pde_heat1d` and
+`sparse_eigenvectors_complex` runs (56 aborts, no broken pipe) unexplained. The residual risk is
+stated rather than papered over: if their exception has a cause outside the salvage path, the
+ceiling bounds it to one call per 135,000 deltas but does not remove it.
 
 ### 9b. `max_tokens` — analysed and REJECTED, and my own proposed value was wrong
 
@@ -592,7 +658,9 @@ only `content` acts on a plausible half-answer where today it raises.
 **The alternative worth having** is a proxy-side DELTA CEILING: stop forwarding after N deltas and
 emit the same cut-plus-usage frames. It never enters the request, produces the identical observable
 the gateway's own 1 800 s cut produces, is symmetric by construction, and at 135 000 has zero
-measured false positives in either arm. Not implemented here.
+measured false positives in either arm. **Implemented 2026-08-26** — see 9a, which also records why
+it went in as the SECOND half of that fix and not the first: on its own it recovers 26 % of the
+wall clock, against 69 % for not being retried.
 
 The original finding:
 

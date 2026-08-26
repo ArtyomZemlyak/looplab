@@ -16,7 +16,8 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from looplab.core.advisory_payloads import sanitize_report_payload
-from looplab.events.digest import experiments_digest, node_metric, node_theme
+from looplab.events.digest import (experiments_digest, metric_scored_invalid, node_metric,
+                                   node_theme)
 from looplab.core.models import NodeStatus, RunState
 
 
@@ -51,13 +52,20 @@ def _report_context(state: RunState) -> str:
     direction = state.direction
     best = state.best()
     n_fail = sum(1 for n in state.nodes.values() if n.status is NodeStatus.failed)
+    # The second half of that count, for the reason `digest.metric_scored_invalid` states: a node the
+    # eval REFUSED to score is `evaluated` with a real 0.0 and was folded into the healthy total, so
+    # this line told the report writer a run of nothing-but-invalid solvers had zero failures. Same
+    # omit-when-zero rule as the working set's headline.
+    n_invalid = sum(1 for n in state.nodes.values() if metric_scored_invalid(n))
     dir_note = "lower is better" if direction == "min" else "higher is better"
     lines = [
         f"Goal: {state.goal or state.task_id}",
         f"Direction: {direction} ({dir_note})",
         f"Status: {'finished' if state.finished else 'running'}"
         + (f" ({state.stop_reason})" if state.stop_reason else ""),
-        f"Nodes: {len(state.nodes)} — {len(state.evaluated_nodes())} evaluated, {n_fail} failed.",
+        f"Nodes: {len(state.nodes)} — {len(state.evaluated_nodes())} evaluated, {n_fail} failed"
+        + (f", {n_invalid} scored but INVALID (the eval refused to time them)." if n_invalid
+           else "."),
     ]
     if best is not None:
         m = node_metric(best)

@@ -676,6 +676,154 @@ def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
     return RepairVerification(REPAIR_UNMET, claims, convicting)
 
 
+# --- Repair ATTRIBUTION: the triage's prose is a proposal, the artefact is the truth -------------
+# Doc 53 §3, the REPAIR half of `stored-plan-diverges-from-shipped-artefact`. `_triage_crash` runs
+# BEFORE the repair session opens — `engine/evaluate.py` line ~2584 against the `_repair` call at
+# ~2878 — and everything it authors (`rationale`, and since 2026-08-20 `reason_summary` and
+# `reason_findings`) is a PRESCRIPTION written against the crash, not a description of the fix. The
+# engine then stamps that prose onto `node_repaired` beside the `files` the session produced, and
+# the row reads as one coherent account. It is not one, and it can be flatly contradictory.
+#
+# THE SPECIMEN, `runs-B/count_riemann_zeta_zeros` node 0 attempt 1 — the ONLY `node_repaired` row in
+# the twenty-arm corpus, so the mechanism is 1 for 1 there and unconditional in code. Triage
+# prescribed a capitulation: "replace the whole port with a direct call to mp.nzeros(t) … This
+# yields a valid scored submission (speedup ~1.0)". The session did the opposite — it KEPT the
+# mpmath port and moved the precision work onto a private `mp.clone()` — and the node then scored
+# **6.0212**. The record credits the triage for a fix that contradicted it.
+#
+# THAT IS THE LOOP WORKING, so this RECORDS and does not prevent, exactly as `plan_step_attribution`
+# does for the build half. A repair that overrides its triage on evidence is doing its job; what was
+# missing is any way for a later reader to tell that it did.
+#
+# AND NO DETERMINISTIC RUNG GRADES THAT PROSE — measured, not assumed, because the obvious fix is to
+# point `verify_repair` at the shipped bytes instead of the diff. On this row `verify_repair`
+# answers `unstated` with `unmet: []`: `claimed_tokens` extracts nothing, because `mp.nzeros` and
+# `mp.prec` carry no underscore and no mid-word case, so `_IDENT_RE` — which exists precisely to
+# refuse bare words — cannot see them. Widening it to dotted names does not rescue the check
+# either: the SHIPPED file contains the literal strings `mp.nzeros` and `mp.prec` in its own
+# docstrings ("Exact port of mpmath.mp.nzeros with…", "the global mp.prec is never touched"), so a
+# substring test over source would score the capitulation as DELIVERED. A rung that reads prose
+# against prose-bearing source is a false-clean machine. So what is recorded here is byte-anchored
+# and makes no claim about meaning.
+#: How many LINES of a pre-existing file the repair may compare, per side. The comparison is over
+#: lines and not characters for two reasons, and the first is a hard bound rather than a preference:
+#: `SequenceMatcher` is quadratic in the sequence length, and on the repetitive input source code IS
+#: (`autojunk` off, see `_kept_ratio`) a 20 kB character-wise ratio measures **37 seconds** on this
+#: box against 0.02 s for the same file line-wise — unaffordable inside the attempt loop, which runs
+#: this once per changed file. The second is that "how much of the file is still standing" is a
+#: question about lines anyway. 1 500 lines per side bounds the worst case near 0.2 s; over it both
+#: sides are truncated, which can only move `kept` toward 0 (under-crediting retention) and never
+#: invent a similarity that is not there.
+_ATTRIBUTION_DIFF_LINES = 1_500
+#: Path-list bounds for a durable event column, same rule as `PARAM_OVERRIDE_CAP`: under-report,
+#: never mis-report.
+_ATTRIBUTION_PATH_CAP = 12
+_ATTRIBUTION_LIST_CAP = 24
+
+
+def _kept_ratio(before: str, after: str) -> float:
+    """How much of `before` is still standing in `after`: the LINE-wise `SequenceMatcher` ratio.
+
+    NOT a semantic measure and deliberately not presented as one. It answers the one question the
+    specimen turns on — did this repair REPLACE the file it was told to replace, or patch it? — with
+    a number a reader can check by eye against the two blobs. `autojunk=False` because source is
+    full of lines that repeat in more than 1 % of a file (`    return`, blank lines, `    else:`)
+    and the heuristic discards exactly those, which makes two near-identical files look unrelated —
+    the opposite of what this measures. See `_ATTRIBUTION_DIFF_LINES` for the bound and for why the
+    comparison is over lines.
+    """
+    a = (before or "").splitlines()[:_ATTRIBUTION_DIFF_LINES]
+    b = (after or "").splitlines()[:_ATTRIBUTION_DIFF_LINES]
+    if not a and not b:
+        return 1.0
+    return round(difflib.SequenceMatcher(None, a, b, autojunk=False).ratio(), 3)
+
+
+def named_files(*texts) -> tuple:
+    """Every file path the triage's own prose names, deduplicated and ordered.
+
+    The SAME `_FILE_RE` `claimed_tokens` uses, and only that one: a path carries an extension, which
+    is the one thing in a rationale that is unambiguously a reference to the tree. No identifier, no
+    quoted phrase, nothing that needs a reading. Pure and total.
+    """
+    out: list = []
+    seen: set = set()
+    for text in texts:
+        for m in _FILE_RE.finditer(text if isinstance(text, str) else ""):
+            tok = m.group(0)
+            if tok not in seen:
+                seen.add(tok)
+                out.append(tok)
+    return tuple(out)
+
+
+def repair_attribution(*, prose, prev_files, prev_code, files, code, changed, deleted) -> dict:
+    """Reconcile the triage's PRESCRIPTION against the artefact the repair session shipped.
+
+    `prose` is every string the triage authored that lands on this row (rationale, reason_summary);
+    `prev_files`/`prev_code` are the node as the triage saw it; `files`/`code` are what the session
+    committed; `changed`/`deleted` are `_repair_change_set`'s deltas. Pure, total, byte-anchored —
+    it runs inside the attempt loop on model-authored inputs of arbitrary shape and every input is
+    an answer, never a raise.
+
+    The record it returns, and what each field is FOR:
+
+      `prose_authored`  — the constant `before_repair`. The fact the row never stated: the words
+                          beside `files` were written before the session that produced them, so they
+                          are a proposal. Everything else here exists to let a reader check it.
+      `wrote`           — per path the session actually changed BY CONTENT, `kept`: how much of the
+                          pre-repair file survives (`_kept_ratio`), or `new: true` when there was no
+                          pre-image. On the specimen this reads `solver.py kept 0.725` under a
+                          rationale that says "replace the whole port with a direct call to
+                          mp.nzeros(t)" — the divergence, in a number.
+      `deleted`         — paths this repair removed.
+      `unattributed`    — shipped paths the session did NOT touch. The direct analogue of
+                          `adapters/repo_developer.py::plan_step_attribution`'s field of that name:
+                          `node_repaired.files` is the Developer's whole working set, not its delta,
+                          so a reader who assumes the row's prose describes its `files` is wrong
+                          about these paths twice over.
+      `named`           — the paths the triage prose names.
+      `unnamed`         — the paths the repair wrote that the prose never mentions.
+
+    NOTHING HERE IS A VERDICT. There is no `superseded` flag, and its absence is a decision: the one
+    corpus specimen would not trip any honest byte-anchored rule for it (the prose names `solver.py`
+    and the repair wrote `solver.py`; the contradiction is in the meaning, which the block comment
+    above shows is not deterministically readable). Inventing a boolean that misses the case it was
+    built for would be worse than the gap. `verify_repair` keeps its own, narrower question — did
+    the DIFF contain what the rationale named — and this adds no rung to it.
+    """
+    prev_files = dict(prev_files or {})
+    files = dict(files or {})
+    changed_paths = sorted({str(c) for c in (changed or ())})
+    rows: list = []
+    for path in changed_paths[:_ATTRIBUTION_PATH_CAP]:
+        before, after = prev_files.get(path), files.get(path)
+        if before is None:
+            rows.append({"path": path, "new": True})
+        elif after is None:
+            # Changed but absent from the shipped set: the delta says it moved and the working set
+            # says it is gone, which is a DELETE the caller passed through `changed`. Reported as
+            # what it is rather than compared against nothing.
+            rows.append({"path": path, "removed": True})
+        else:
+            rows.append({"path": path, "kept": _kept_ratio(before, after)})
+    # The whole-file artifact has no path and is reported under the one spelling `changed_region`
+    # already uses, so a reader meets a single name for the source that has none.
+    if (code or "") != (prev_code or ""):
+        rows.append({"path": _WHOLE_FILE, "new": True} if not (prev_code or "")
+                    else {"path": _WHOLE_FILE, "kept": _kept_ratio(prev_code, code)})
+    touched = set(changed_paths)
+    named = named_files(*(prose or ()))
+    return {
+        "prose_authored": "before_repair",
+        "wrote": rows,
+        "deleted": sorted(str(d) for d in (deleted or ()))[:_ATTRIBUTION_LIST_CAP],
+        "unattributed": sorted(p for p in files if p not in touched)[:_ATTRIBUTION_LIST_CAP],
+        "named": list(named)[:_ATTRIBUTION_LIST_CAP],
+        "unnamed": sorted(touched - set(named))[:_ATTRIBUTION_LIST_CAP],
+    }
+
+
 # --- The declared-parameter override rung (see the module docstring) -----------------------------
 # A declared key must be DOTTED to be checkable. `train.training.batch_size` is a path into a config
 # object; `lr` is a word, and a rung that convicted on a bare word would fire on any local of that

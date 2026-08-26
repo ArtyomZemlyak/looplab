@@ -113,7 +113,7 @@ from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagn
 # `REPAIR_VERDICTS` would let those three disagree silently.
 from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, PARAM_OVERRIDE_CAP, REPAIR_VERDICTS,
                                           changed_region, declared_param_overrides, inert_streak,
-                                          verify_repair)
+                                          repair_attribution, verify_repair)
 
 # How many repair calls may answer with something that is not Python before the loop calls it a
 # provider failure rather than a truncation. NOT operator-settable and deliberately small: this is
@@ -3005,6 +3005,22 @@ class EvaluateMixin:
                 _param_overrides = [o.as_row() for o in declared_param_overrides(
                     node.idea.params, repaired_files, code=new_code,
                     baseline_files=prev_files, baseline_code=node.code or "")]
+                # AND WHO WROTE WHAT THIS ROW SHIPS. A third question, asked of the same inputs and
+                # answering the one thing the row could never say about itself: `triage` was
+                # produced HUNDREDS of lines above this, before `self._repair` opened a session, so
+                # `rationale` and `reason_summary` are a PRESCRIPTION against the crash and not a
+                # description of `files`. Stamped as one column beside them so a later reader can
+                # tell the proposal from the artefact — see `repair_verify.repair_attribution`, and
+                # `adapters/repo_developer.py::plan_step_attribution` for the build half of the same
+                # item. It records and refuses to judge: a repair that overrides its triage on
+                # evidence is the loop working (on `runs-B/count_riemann_zeta_zeros` that override
+                # is the difference between the prescribed "speedup ~1.0" and the 6.0212 the node
+                # actually scored), and the prose is not deterministically gradable anyway.
+                _attribution = repair_attribution(
+                    prose=(triage.get("rationale", ""), _summary or ""),
+                    prev_files=prev_files, prev_code=node.code or "",
+                    files=repaired_files, code=new_code,
+                    changed=changed, deleted=new_deleted)
                 async with self._write_lock:
                     repair_payload = {
                         "node_id": node_id, "generation": generation,
@@ -3088,6 +3104,11 @@ class EvaluateMixin:
                         # MARKED `resolved: false` and KEPT: the finding stands on its own text, and
                         # a reader owed the summary above is not owed a working link.
                         **({"reason_findings": _findings} if _findings else {}),
+                        # WHOSE WORDS THESE ARE AND WHAT THE SESSION ACTUALLY WROTE. Additive and
+                        # fold-ignored (invariant #5), and NOT omitted when thin: `prose_authored`
+                        # is the fact the row exists to state, and a row that carries the triage's
+                        # prose owes it whether or not anything else in the block is interesting.
+                        "attribution": _attribution,
                         # The wall-clock of the eval this repair answers. Additive (invariant #5);
                         # the fold ignores it. It is what makes the COST floor durable across a
                         # resume — see `_durable_repair_seconds`, which sums these rows, and

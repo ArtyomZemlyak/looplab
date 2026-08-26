@@ -593,6 +593,24 @@ class UnifiedAgent(WrapsDeveloper):
         model at all is a different branch (`triage._rule_triage`, which stamps the unforgeable
         `DIAGNOSIS_UNAVAILABLE_KEY`) and is unchanged byte for byte.
 
+        EVERYTHING THIS CALL AUTHORS IS A PROPOSAL, and the durable record used to present it as a
+        description (doc 53 §3, the repair half). This runs BEFORE the repair session opens —
+        `engine/evaluate.py` calls `_triage_crash` some three hundred lines above its `_repair` —
+        so `rationale`, `reason_summary` and `reason_findings` are all written against the CRASH,
+        by a judge that has read logs and code and has changed nothing. The engine then stamps them
+        onto `node_repaired` beside the `files` the session produced, and the row reads as one
+        account. `runs-B/count_riemann_zeta_zeros` node 0 is the corpus specimen and the only
+        `node_repaired` row in twenty arms: this call prescribed a capitulation ("replace the whole
+        port with a direct call to mp.nzeros(t) … speedup ~1.0"), the session kept the mpmath port
+        on a private `mp.clone()` instead, and the node scored 6.0212. The record credited the
+        triage for a fix that contradicted it.
+
+        NOTHING IS PREVENTED AND NOTHING HERE CHANGED. A repair that overrides its triage on
+        evidence is the loop working, and no deterministic rung grades this prose anyway — see
+        `engine/repair_verify.py::repair_attribution`, which measures why and which now stamps the
+        provenance (`prose_authored: before_repair`) and what the session actually wrote onto the
+        same row, so a later reader can tell the proposal from the artefact.
+
         NEITHER degradation path answers "repair", and they answer DIFFERENT things: `_finalize`'s
         out-of-enum branch says `unreadable` (the model is alive, this node stops) and `_fallback`
         says `unanswerable` with the engine-side transport marker (the endpoint is gone, the run

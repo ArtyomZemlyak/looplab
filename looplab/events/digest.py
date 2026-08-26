@@ -418,6 +418,41 @@ def metric_account(n, max_chars: int = ACCOUNT_CHARS, *, brief: bool = False) ->
     return text if len(text) <= limit else text[:max(1, limit - 1)].rstrip() + "\u2026"
 
 
+def metric_scored_invalid(n) -> bool:
+    """Did this node's eval REFUSE to score it — i.e. is its number a non-answer?
+
+    `True` exactly when the node's final metric line carries the `no_<metric key>` block
+    `metric_account` renders: the producer saying "the number beside this is not a number". Same
+    rule, same nine-of-fifty-six discrimination on `runs-B` (see the block comment above
+    `_last_json_object`); this is the PREDICATE half of what that renderer already reads, hoisted
+    so a caller that counts nodes does not have to parse the prose it renders.
+
+    WHY IT EXISTS (doc 53 §4a, `an-invalid-node-is-counted-as-zero-failed`). Every surface that
+    counts outcomes counted a node by its STATUS, and a node whose solver was wrong on some
+    instances is `NodeStatus.evaluated` with `metric=0.0` — so `spectral_clustering`'s only
+    experiment, which the arena refused to time because two of a hundred answers were rejected by
+    the task's own `is_solution`, was announced to every subsequent prompt as `1 experiment(s), 0
+    failed`. It is not a failure (nothing crashed, the metric is real and was measured) and it is
+    emphatically not a healthy zero either, and the headline said the second. Measured over the 20
+    finished arms of `runs-B`: 9 of 56 `node_evaluated` rows carry such a block, spread over 6 of
+    the 20 arms, and NOT ONE arm produced a `node_failed` event — so every one of those six ran to
+    the end under a literal "0 failed".
+
+    RENDER-ONLY, and that boundary is the same one `metric_account` states and
+    `tests/test_metric_account_on_the_default_read_path.py` pins: this reads text the candidate's
+    own eval wrote, so it may make a count HONEST and may never make a decision. Nothing here
+    touches status, feasibility, selection or the failure taxonomy — in particular
+    `agents/strategist.py::failure_rate`, which IS a decision path (`ctx.failure_rate > 0.4`
+    narrows the search), keeps counting `NodeStatus.failed` and nothing else.
+
+    A node that FAILED is never invalid-instead: it has a taxonomy entry already and the two counts
+    must partition, or the headline would charge one node twice.
+    """
+    if getattr(n, "status", None) is NodeStatus.failed:
+        return False
+    return bool(_account_block(n)[0])
+
+
 def trial_line(t) -> str:
     extra = f"  ({fmt_num(t.seconds)}s)" if getattr(t, "seconds", None) else ""
     return f"{fmt_params(t.params)} → {fmt_num(t.metric)}{extra}"
@@ -817,11 +852,18 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     # below did not).
     live = [n for n in nodes.values() if not n.tombstoned]
     n_fail = sum(1 for n in live if n.status is NodeStatus.failed)
+    # …and the count the headline used to fold into "healthy". See `metric_scored_invalid`: a node
+    # the eval REFUSED to score is neither a failure nor a measured zero, and calling it neither was
+    # what let `spectral_clustering` read its own 98/100-valid solver as a verdict on the idea.
+    n_invalid = sum(1 for n in live if metric_scored_invalid(n))
     # The headline counts LIVE nodes for the same reason: it used `len(nodes)`, which still includes
     # tombstoned ones, while n_fail and every listing below exclude them — so right after a §6.3
     # delete the "N experiment(s)" total described a larger search than anything else in this digest,
     # and the model was told it had already tried more than it could see.
-    lines = [f"\nSearch so far — {len(live)} experiment(s), {n_fail} failed:"]
+    # The clause is OMITTED when the count is zero, so a run with nothing invalid renders the
+    # historical headline byte for byte — the new words appear only where they are the truth.
+    invalid = f", {n_invalid} invalid (scored, but the eval refused to time it)" if n_invalid else ""
+    lines = [f"\nSearch so far — {len(live)} experiment(s), {n_fail} failed{invalid}:"]
 
     winners = top_nodes(state, top_k)
     if winners:

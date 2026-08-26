@@ -36,8 +36,14 @@ GATEWAY cut without one is priced from the content deltas it forwarded plus a pr
 from the request (`PromptTokens`), labelled `cost_basis: estimated_from_deltas`; a stream that
 produced neither is recorded `metered=false` -- never as $0.
 
+A stream that runs past `--delta-ceiling` content deltas (135,000 by default) is ended BY THIS
+PROXY, with the same frames and the same price, and the upstream socket is closed so the generation
+stops being billed. That is a cut this file chooses rather than one it survives, and the difference
+is the point: see `abort_is_not_retryable`. The ceiling never enters the request.
+
 That synthetic frame is SENT TO THE CLIENT, in the two-chunk shape `stream_options.include_usage`
-uses -- the cut on a chunk with the `finish_reason`, the price on a chunk with `choices: []`. It
+uses -- the cut on a chunk with the `finish_reason`, the price on a chunk with `choices: []`,
+followed by the `data: [DONE]` sentinel every OpenAI-compatible client ends a stream on. It
 has to be that shape and not one combined chunk: measured 2026-08-26 against arm A's own litellm
 1.97.0, a chunk carrying both is dropped, and with `include_usage` on litellm mints a
 `Usage(prompt_tokens=0, completion_tokens=0)` of its own instead. That is how a ceiling comes to
@@ -134,6 +140,62 @@ HOP_BY_HOP = {
 # the meter row and to a human reading either -- and the half of this fix arm A's ACCOUNTANT reads
 # is the `usage` beside it, never this word.
 STREAM_TRUNCATED_FINISH_REASON = "truncated"
+
+# HOW MANY CONTENT DELTAS THIS METER WILL FORWARD BEFORE IT ENDS THE CALL ITSELF. 0 disables it.
+#
+# Measured on `meter/meter.jsonl` (9,235 rows, campaign of 2026-08-20..26). 8,830 streams completed
+# with the gateway's own usage frame; their delta counts are p99 2,577 / max 132,269 for arm A and
+# p99 24,939 / max 126,559 for arm B. 135,000 is above BOTH maxima, so on the whole recorded corpus
+# it truncates zero complete answers in either arm -- which is the property `max_tokens` could not
+# have (doc 53 9b: a cap low enough to matter cut 7.7 % of arm B against 0.06 % of arm A).
+#
+# It is deliberately a DELTA COUNT and not a clock. A wall ceiling low enough to pay for itself has
+# measured false positives -- at 900 s it cuts two complete arm-A calls and two arm-B ones, and arm
+# A's largest legitimate completion ran 1,204 s -- because "slow" and "runaway" are the same
+# observable in seconds and different observables in tokens.
+DELTA_CEILING_DEFAULT = 135_000
+
+
+def abort_is_not_retryable(model: str, usage: dict, *, stamp: int) -> tuple[list, list]:
+    """The ending that makes a cut generation an ANSWER rather than an exception.
+
+    Returns `(frames, wire)` -- the same three-part ending twice, once as objects for the
+    reassembling (non-streaming) client and once as SSE bytes for the streaming one.
+
+    WHY A SHAPE, AND NOT A STATUS OR AN ERROR. The measured cost of this defect is not the cut, it
+    is the RETRY of the cut: 134 aborted streams in `meter/meter.jsonl` hold $6.65 and 62.9 h, and
+    77 of them sit in four CONSECUTIVE runs of 15-23 on one task-arm each. Arm B's longest such run
+    is 2. The multiplier is arm A's client-side loop, and reading it settles what the proxy can and
+    cannot do about it: `AlgoTuner/interfaces/llm_interface.py` catches
+    `(RateLimitError, APIError, APIConnectionError)` and retries TEN times, and its only escape is a
+    substring match on a payment/quota list (`"402"`, `"insufficient credits"`, `"quota exceeded"`,
+    ...). No HTTP status and no error body makes that loop stop -- litellm's own classifier already
+    logged `LiteLLM API non-retryable error` for every one of these and was overridden by the layer
+    above it. Five runs in the campaign's logs reached `Exceeded max retries (10)`.
+    The only shape that would stop it is a claim about the ACCOUNT that is not true, so the retry
+    cannot be refused honestly.
+    What can be done honestly is to stop making the call an error. It is not one: the request
+    partially SUCCEEDED, the tokens were generated and this meter has already billed them. So the
+    cut is delivered as what it is -- a truncated completion with a finish reason and a price -- and
+    a loop that retries errors has nothing to catch.
+
+    THE THIRD PART IS THE ONE THAT WAS MISSING. `data: [DONE]` is the sentinel every
+    OpenAI-compatible client ends a stream on, and until this function existed the proxy's cut ended
+    without it: two minted chunks and then the body simply stopped. The two frames alone are what
+    2afb287c fixed and they are preserved exactly -- the cut on a chunk carrying `finish_reason` and
+    no usage, the price on a chunk with `choices: []`, because `stream_options.include_usage` reads
+    usage only off the empty-choices chunk. This adds the sentinel behind them.
+    """
+    cut = {"id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
+           "created": stamp,
+           "choices": [{"index": 0, "delta": {},
+                        "finish_reason": STREAM_TRUNCATED_FINISH_REASON}]}
+    priced = {"id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
+              "created": stamp, "choices": [], "usage": usage}
+    wire = [b"data: " + json.dumps(cut).encode() + b"\n\n",
+            b"data: " + json.dumps(priced).encode() + b"\n\n",
+            b"data: [DONE]\n\n"]
+    return [cut, priced], wire
 
 
 class Pricing:
@@ -748,6 +810,36 @@ class Handler(BaseHTTPRequestHandler):
         # run's own accounting was short four calls on one task and never said so. A budget that
         # silently under-counts is worse than one that stops early: the arm looks cheap.
         deltas = 0
+        # THE METER'S OWN CEILING, and the reason it exists is not the money it caps.
+        #
+        # Cutting at N deltas saves 26 % of those 62.9 h on its own (recomputed over the same log at
+        # N=135,000); refusing the RETRY saves 69 %. The ceiling is here because it is what makes the
+        # refusal RELIABLE. `abort_is_not_retryable` can only be delivered on a call this proxy is
+        # still holding: when the GATEWAY ends the generation, what reaches the client is whatever
+        # the dying socket leaves behind, and this proxy is in the salvage business by then --
+        # 31 of the 134 recorded aborts carry a `BrokenPipeError` from trying. When the METER ends
+        # it, the ending is chosen, complete and identical every time. Together they are 78 % of the
+        # money and 77 % of the clock on the recorded corpus.
+        #
+        # It never enters the request: `max_tokens` is a generation parameter and this module does
+        # not rewrite requests (doc 53 9b). The client sees exactly the observable the gateway's own
+        # ~1800 s cut already produces, so nothing downstream learns a new shape.
+        ceiling = int(getattr(self.server, "delta_ceiling", DELTA_CEILING_DEFAULT) or 0)
+        # Did THIS PROXY end the call, as opposed to watching the gateway end it? The two are priced
+        # the same way and are the same observable to a client, and they are still different events:
+        # one is a runaway generation we stopped, the other is a gateway we outlived. A row that
+        # could not tell them apart would make the ceiling's own false-positive rate unmeasurable.
+        cut_by_meter = False
+        # THE LAST TWO BYTES THIS PROXY PUT ON THE WIRE, and they decide whether a minted frame is
+        # readable at all. SSE events are separated by a BLANK LINE, and `for line in resp` hands
+        # that blank line over as a line of its own -- so a stream that stops between a `data:` line
+        # and its terminator leaves the event OPEN. Anything minted after it is then glued into the
+        # previous event as a second `data:` line, the two payloads are concatenated, and a
+        # conformant parser reports `Extra data: line 2 column 1`. Measured 2026-08-26 against arm
+        # A's own litellm 1.97.0: that is a `MidStreamFallbackError` wrapping an
+        # `APIConnectionError` -- one of the three exception types AlgoTuner's ten-attempt loop
+        # retries. The frames were correct and unreadable, which is the same thing as absent.
+        wire_tail = b""
         try:
             for line in resp:
                 out = line
@@ -781,6 +873,20 @@ class Handler(BaseHTTPRequestHandler):
                         prompt_basis = "reported_by_upstream"
                         out = b"data: " + json.dumps(frame).encode() + b"\n"
                 emit(out)
+                wire_tail = (wire_tail + out)[-2:]
+                # AFTER the frame is forwarded, never instead of it: a delta this proxy has already
+                # counted and already priced must reach the client, or the ceiling would bill for
+                # tokens it swallowed. `usage_frame_seen` excludes the one case where cutting could
+                # destroy evidence -- the gateway has closed the books, so there is nothing left to
+                # protect the client from and the synthesis below would not run anyway.
+                if ceiling and deltas >= ceiling and not usage_frame_seen:
+                    cut_by_meter = True
+                    break
+            if cut_by_meter:
+                # STOP PAYING FOR TOKENS NOBODY WILL SEE. The whole saving is here: the generation
+                # runs until someone hangs up, so the socket goes NOW rather than after the frames
+                # are built. `finally` closes it again, which is a no-op.
+                resp.close()
             if usage_frame_seen:
                 pass                            # the gateway priced it; nothing to estimate
             elif not basis and deltas:
@@ -840,6 +946,18 @@ class Handler(BaseHTTPRequestHandler):
                 if per_token is not None:
                     usage["meter_chars_per_prompt_token"] = round(per_token, 4)
                     usage["meter_prompt_calibration_calls"] = cal_calls
+                if cut_by_meter:
+                    # SAY WHO CUT IT, in the frame and not only in the log. The completion count
+                    # stops being a floor on the gateway's generation here and becomes an exact
+                    # count of what this proxy forwarded, and a client's accountant that read the
+                    # sentence above without this one would understate the same call twice.
+                    usage["meter_cut_by"] = "delta_ceiling"
+                    usage["meter_delta_ceiling"] = ceiling
+                    usage["meter_completion_tokens_basis"] = "counted_from_forwarded_deltas_at_ceiling"
+                    usage["meter_note"] = (
+                        f"the meter stopped forwarding at its delta ceiling of {ceiling}; the "
+                        "generation was still running upstream and was not billed beyond this "
+                        f"point. prompt_tokens is {prompt_basis}")
 
                 # TWO FRAMES, NOT ONE, AND THAT IS THE WHOLE FIX ON THE STREAMING SIDE. A single
                 # frame carrying BOTH a populated `choices` array and a `usage` block is not the
@@ -859,19 +977,21 @@ class Handler(BaseHTTPRequestHandler):
                 # client is being collected for, so the adapted (non-streaming) client got a body
                 # with no `usage` at all and a null finish reason -- a truncated answer arriving as a
                 # clean 200 with nothing for that arm's accountant to read.
-                stamp = int(time.time())
-                cut = {"id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
-                       "created": stamp,
-                       "choices": [{"index": 0, "delta": {},
-                                    "finish_reason": STREAM_TRUNCATED_FINISH_REASON}]}
-                priced = {"id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
-                          "created": stamp, "choices": [], "usage": usage}
+                #
+                # AND THE SENTINEL BEHIND THEM. `abort_is_not_retryable` owns all three parts and
+                # the reasoning for them; what matters here is that a cut leaves through ONE door,
+                # so the streamed client and the reassembled one cannot end differently.
+                frames, wire = abort_is_not_retryable(model, usage, stamp=int(time.time()))
                 if collect_for_client:
-                    collected.append(cut)
-                    collected.append(priced)
+                    collected.extend(frames)    # `[DONE]` is a wire sentinel, not a frame
                 else:
-                    emit(b"data: " + json.dumps(cut).encode() + b"\n\n")
-                    emit(b"data: " + json.dumps(priced).encode() + b"\n\n")
+                    # CLOSE THE EVENT THE STREAM DIED INSIDE, before minting into it. See
+                    # `wire_tail`: without this the first minted frame is swallowed by the last
+                    # forwarded one and the client raises where it used to be handed an answer.
+                    if wire_tail and not wire_tail.endswith(b"\n\n"):
+                        emit(b"\n" if wire_tail.endswith(b"\n") else b"\n\n")
+                    for payload in wire:
+                        emit(payload)
             emit(b"")           # terminating zero-length chunk
             if collect_for_client:
                 # ONE body, built from the frames, with the usage frame this proxy already priced
@@ -895,10 +1015,24 @@ class Handler(BaseHTTPRequestHandler):
             row["prompt_tokens_basis"] = prompt_basis
         if basis == "estimated_from_deltas":
             row["prompt_chars"] = prompt_chars
-            row["note"] = ("upstream ended the stream with no usage frame after "
-                           f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas (a FLOOR)"
-                           f" and a prompt of {pin} tokens ({prompt_basis})")
+            # `stream_aborted` STAYS TRUE FOR BOTH CAUSES and the cause goes in its own key.
+            # Downstream the flag means "this call was truncated and priced from deltas" --
+            # `compare_arms.py` counts money on it -- and a ceiling cut is exactly that. Which of
+            # the two happened is a different question, so it gets a different field rather than a
+            # changed meaning for an existing one: making `stream_aborted` mean "gateway only"
+            # would silently drop ceiling cuts out of every spend column that already reads it.
             row["stream_aborted"] = True
+            if cut_by_meter:
+                row["stream_cut_by"] = "meter_delta_ceiling"
+                row["meter_delta_ceiling"] = ceiling
+                row["note"] = (f"the meter cut this stream at its {ceiling}-delta ceiling after "
+                               f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
+                               f"(EXACT for what was forwarded, a floor for what upstream generated)"
+                               f" and a prompt of {pin} tokens ({prompt_basis})")
+            else:
+                row["note"] = ("upstream ended the stream with no usage frame after "
+                               f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
+                               f"(a FLOOR) and a prompt of {pin} tokens ({prompt_basis})")
         elif not basis and row.get("error"):
             # THE ROW MUST NOT CONTRADICT ITSELF. The synthesis above lives inside the `try`, so any
             # exception while forwarding -- a client that hung up is the one that happens; five
@@ -932,6 +1066,11 @@ class Server(ThreadingHTTPServer):
         # Everything else on this object is assigned by `main()` (or by a test); this one is not,
         # because a missing calibrator would price an abort at zero prompt tokens in silence.
         self.prompt_scale = PromptTokens()
+        # ON BY DEFAULT, and that is the decision, not an oversight. A guard against a runaway
+        # generation that has to be switched on is not a guard: the 62.9 h in this module's
+        # docstring were spent by a proxy that had every other protection and no ceiling. `main()`
+        # and tests may reassign it; `0` disables it.
+        self.delta_ceiling = DELTA_CEILING_DEFAULT
 
     # A CLIENT HANGING UP IS NOT AN INCIDENT. `http.server` prints a full traceback for every
     # exception in a handler thread, and an httpx/aiohttp connection pool closes idle keep-alive
@@ -974,6 +1113,11 @@ def main() -> int:
                          "The gateway publishes x-litellm-key-rpm-limit: 50.")
     ap.add_argument("--max-retries", type=int, default=5,
                     help="429 retries absorbed here instead of by each framework's own policy")
+    ap.add_argument("--delta-ceiling", type=int,
+                    default=int(os.environ.get("METER_DELTA_CEILING", DELTA_CEILING_DEFAULT)),
+                    help="stop forwarding a stream after this many content deltas and close it as "
+                         "a truncated, priced answer (0 = never). Above both arms' largest measured "
+                         "complete answer, so it is symmetric by construction")
     args = ap.parse_args()
 
     if not args.upstream:
@@ -989,6 +1133,7 @@ def main() -> int:
     server.meter = Meter(args.log or None)
     server.limiter = RateLimiter(args.rpm)
     server.max_retries = args.max_retries
+    server.delta_ceiling = max(0, args.delta_ceiling)
     # Corporate gateway is inside the perimeter; the box's http_proxy is for the outside world.
     server.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -998,6 +1143,7 @@ def main() -> int:
           f"fetched_at={pricing.fetched_at}", flush=True)
     print(f"[meter] log {args.log or '(none)'}", flush=True)
     print(f"[meter] rpm cap {args.rpm or 'unlimited'} | 429 retries {args.max_retries}", flush=True)
+    print(f"[meter] delta ceiling {server.delta_ceiling or 'off'}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
