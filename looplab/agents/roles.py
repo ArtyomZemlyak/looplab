@@ -304,7 +304,16 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     # every attempt of every node — the feature silently ceasing to exist, with nothing red anywhere,
     # and the only visible symptom a repair loop that keeps failing at `train` for reasons it already
     # correctly diagnosed.
-    "last_rollback_stage")
+    "last_rollback_stage",
+    # WHICH BOUND ENDED THE SESSION ("time" / "turns"), "" when it finished on its own terms. Same
+    # registry argument as `last_rollback_stage` above and the same falsy default, so a one-sided
+    # rename would read as "no session was ever cut short" on every node — which is exactly the
+    # reading this attribute exists to stop being the only one available. `tool_loop.py` has
+    # announced this through `on_budget` since it was written and nothing subscribed; measured over
+    # `runs/`, 12 of the 12 `inert` repairs in the corpus ran past their wall clock and 0 of the 65
+    # that finished inside it are inert, so `inert` alone cannot tell "decided not to edit" from
+    # "ran out of clock mid-investigation".
+    "last_budget_exhausted")
 RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
 
 # Duck-typed attributes that answer "does building one node make provider calls at all?" — the seam

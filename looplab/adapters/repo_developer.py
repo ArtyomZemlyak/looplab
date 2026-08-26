@@ -668,6 +668,28 @@ class LLMRepoDeveloper:
                        else _REPO_DEV_SYSTEM_BODY)
         return render(self.prompts, "repo_developer_system_body", default)
 
+    def _note_session_budget(self, payload) -> None:
+        """Remember WHICH bound ended a session, for the durable row to carry.
+
+        Passed as an EXPLICIT keyword and never folded into `_session_opts`'s bundle:
+        `loop_options.py` requires `LOOP_OPTION_FIELDS` and `EXPLICIT_ONLY_LOOP_ARGS` to PARTITION
+        the loop's keyword-only parameters, and a name reachable BOTH ways raises a duplicate-keyword
+        `TypeError` that the loop's own containment `except` swallows — silently degrading an agentic
+        phase to a non-agentic one, which is the defect that partition exists to prevent.
+
+        Best-effort exactly like `_note_budget`'s own contract: this fires on the way to a salvage
+        emit, so a raise here would turn a rescued answer into a crash. `kind` is `"time"` or
+        `"turns"` — kept apart because they are different failures with different remedies, and only
+        one of them has ever fired on this box (turns has never bound: ~131 calls of 500 on the node
+        that motivated this).
+        """
+        try:
+            kind = str((payload or {}).get("kind") or "").strip()
+        except Exception:  # noqa: BLE001 — an observer may not break the salvage path
+            return
+        if kind:
+            self.last_budget_exhausted = kind[:32]
+
     def _session_opts(self, *, max_turns=None, time_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
         a model that keeps writing/exploring without ever emitting `done` fails cleanly with the code
@@ -767,7 +789,8 @@ class LLMRepoDeveloper:
             run_phase(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write)),
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
-                      fallback=lambda m: "", **self._session_opts())
+                      fallback=lambda m: "", on_budget=self._note_session_budget,
+                      **self._session_opts())
         except Exception as e:  # noqa: BLE001
             return f"(step {idx} error: {e})"
         return ""
@@ -1389,7 +1412,7 @@ class LLMRepoDeveloper:
                 self.client, read_only, messages, self._stages_emit_spec(),
                 label="Developer·stages", next_label="the plan & implement phases",
                 finalize=_finalize, fallback=lambda m: [], validate=_validate,
-                **self._session_opts()) or []
+                on_budget=self._note_session_budget, **self._session_opts()) or []
         except Exception:  # noqa: BLE001 — a failed stages phase degrades to the operator cmd alone
             return []
 
@@ -1404,6 +1427,26 @@ class LLMRepoDeveloper:
         # nobody asked it to. Every early return below (including the `except` that mints the
         # developer-error sentinel) therefore leaves it "" rather than the previous call's answer.
         self.last_rollback_stage = ""
+        # WHICH BOUND ENDED THE SESSION, or "" for one that finished on its own terms. Cleared here
+        # for the same shared-instance reason as the line above — a sibling node's exhaustion must
+        # never be read as this node's.
+        #
+        # `tool_loop.py` has computed and announced this since it was written ("TELL SOMEONE …
+        # presenting a cut-short investigation as a finished one is how 'the assistant hangs around
+        # 40 tool uses and then something odd comes back' reads to an operator who was never told the
+        # turn ran out of wall clock") and NOTHING SUBSCRIBED: `on_budget` appeared outside
+        # `tool_loop.py` only in `loop_options.py`'s registry. Measured over `runs/`, pairing each
+        # `inline_repair` session with its own verdict: 12 of the 12 `inert` repairs in the whole
+        # corpus ran past `session_time_budget_s`, and 0 of the 65 that finished inside it are inert.
+        # So `inert` — "the change set was empty" — has been doing double duty as an undiagnosed
+        # proxy for "ran out of clock", and the two have opposite remedies.
+        #
+        # The same failure is already on the record one phase over: the `stages` session's own
+        # comment describes reading "for the whole budget, never reached declare_stages, and silently
+        # degraded to 'no stages declared' … observed live". That was fixed by widening the clamp;
+        # this records it instead, because the repair bound is not obviously wrong (median repair =
+        # 151 s, 13 % of it) and a bound nobody can see the effect of cannot be argued about.
+        self.last_budget_exhausted = ""
         # Resolved ONCE for the whole node: operator `cmd.stages` make declare_stages refuse (P12)
         # and drive the stage notes below; data-mount names make mount refusals honest.
         op_stages = self._operator_stage_list()
@@ -1568,7 +1611,8 @@ class LLMRepoDeveloper:
                     run_phase(self.client, tools, messages, self._emit_spec(),
                               label="Developer·implement", handoff=False,
                               finalize=lambda a: (a or {}).get("summary", ""),
-                              fallback=lambda m: "", **self._session_opts())
+                              fallback=lambda m: "", on_budget=self._note_session_budget,
+                      **self._session_opts())
             else:
                 # repair / toy single session — terminal, so no summary (and repair isn't in a scope
                 # anyway when it runs inline during eval; the debug-operator repair gets an empty ledger).
@@ -1584,7 +1628,8 @@ class LLMRepoDeveloper:
                           self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
                           finalize=_finish,
-                          fallback=lambda m: "", **self._session_opts())
+                          fallback=lambda m: "", on_budget=self._note_session_budget,
+                      **self._session_opts())
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)
             self.last_deleted = list(write.deleted)

@@ -839,6 +839,21 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   that is usually wrong is a line the judge learns to discount. What is deliberately still `unmet`:
   a rationale that names the broken component and then edits a different file. That is a diagnosis
   rather than a promise, but "you said the bug was in X and did not touch X" is worth saying.
+  **And since 2026-08-26 the row also says whether the session was CUT SHORT.** `verified` reports
+  what the repair did to the tree; it cannot report why a diff was empty, and the two readings —
+  "the agent looked and decided no edit was warranted" and "the agent was still reading when the
+  clock stopped" — have opposite remedies. Measured over every run here, pairing each
+  `inline_repair` session with its own verdict: **12 of the 12 `inert` repairs in the corpus ran past
+  `session_time_budget_s` (1200 s), and 0 of the 65 that finished inside it are inert** — so `inert`
+  had become an undiagnosed proxy for "ran out of clock". Nothing needed deriving: `tool_loop.py`
+  has announced this through its `on_budget` observer since it was written, and no caller subscribed.
+  `node_repaired.budget_exhausted` now carries which bound ended it (`time` or `turns`, kept apart
+  because only one of them has ever fired here), omitted entirely for a session that finished on its
+  own terms — an absent key means "not cut short", not "nobody looked". Additive and fold-ignored;
+  `INERT_REPAIR_LIMIT` is untouched, so which nodes stop repairing does not change. The budget itself
+  was deliberately NOT raised: the median repair uses 151 s, 13 % of it, and a bound whose effect
+  nobody can see cannot be argued about — recording it is what makes "how many truncated repairs were
+  one edit away?" answerable from the record.
 - **ablation-driven refinement** — neutralize a parameter (or a whole code block with
   `ablate_code_blocks`) to find the highest-impact lever, then refine it (`ablate_every`).
 - **merge / ensemble** — recombine two parents: a param mean, or a code-recombination ensemble

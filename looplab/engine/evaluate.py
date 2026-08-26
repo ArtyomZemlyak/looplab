@@ -2808,6 +2808,13 @@ class EvaluateMixin:
                 # `await` would risk picking up a sibling node's answer and re-running an expensive
                 # stage on THIS node that nobody asked for.
                 _rollback_ask = str(getattr(self.developer, "last_rollback_stage", "") or "").strip()
+                # WHICH BOUND ENDED THE SESSION, snapshotted HERE for exactly the reason the line
+                # above is: the developer is shared across concurrent evals, so reading it after the
+                # next `await` could attribute a sibling node's exhaustion to this one. Bounded and
+                # coerced because it rides a durable row; empty for a session that finished on its
+                # own terms, which is the common case (median repair uses 13 % of its clock).
+                _budget_exhausted = str(
+                    getattr(self.developer, "last_budget_exhausted", "") or "").strip()[:32]
                 # THE DEVELOPER SAYING "I DO NOT KNOW HOW TO FIX THIS" (F8). The first of the two
                 # signals the operator asked for, and the one that already existed as a capability
                 # and had no way to be expressed: a Developer that knew it was beaten could only
@@ -2936,6 +2943,23 @@ class EvaluateMixin:
                         # because it is model-derived text riding in an event payload.
                         "verified": _verification.verdict,
                         "unmet": list(_verification.unmet[:12]),
+                        # WHY THE DIFF WAS EMPTY, when the answer is one the ENGINE holds. `verified`
+                        # says WHAT the repair did to the tree; this says whether the session that
+                        # produced it was CUT SHORT. Measured over `runs/` by pairing each
+                        # `inline_repair` session with its own verdict: 12 of the 12 `inert` repairs
+                        # in the corpus ran past `session_time_budget_s`, and 0 of the 65 that
+                        # finished inside it are inert — so `inert` alone has been an undiagnosed
+                        # proxy for "ran out of clock", and "the agent decided no edit was warranted"
+                        # and "the agent was still reading when the budget ended" have opposite
+                        # remedies. `tool_loop.py` computed and announced this all along
+                        # (`_note_budget`) and nothing subscribed.
+                        #
+                        # OMITTED WHEN EMPTY, exactly like `param_overrides` below and for the stated
+                        # reason: an absent key on an old row means "nobody looked", which is not the
+                        # same fact as "looked and the session was not cut short". Additive and
+                        # fold-ignored (invariant #5); no metric, champion, selectability or
+                        # violation moves on it, and `INERT_REPAIR_LIMIT` is untouched.
+                        **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
                         # A DECLARED COORDINATE THIS REPAIR MOVED, if any. Additive and fold-ignored
                         # (invariant #5), and OMITTED when empty rather than written as `[]`: an
                         # absent key on an old row means "nobody looked", which is not the same fact
@@ -3034,6 +3058,11 @@ class EvaluateMixin:
                     "changed": _changed_col,
                     "verified": _verification.verdict,
                     "unmet": list(_verification.unmet[:12]),
+                    # Same fact, same omit-when-empty rule, same reason as the durable row above:
+                    # `_format_repair_log` renders this row and the rebuilt one identically, so a
+                    # divergence here would show one node two different histories depending on
+                    # whether the process had resumed.
+                    **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
                     # Same omit-when-empty rule as the durable row above, and for the same reason:
                     # `_format_repair_log` renders this row and the rebuilt one identically, so a
                     # `[]` here and an absent key there would render two different histories for
