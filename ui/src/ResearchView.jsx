@@ -45,6 +45,10 @@ export default function ResearchView({ cards, state, renderCard }) {
   // one-knob experiment a lattice position it has no business holding, since its concepts are a
   // fact about the work rather than a question anyone asked.
   const questions = useMemo(() => all.filter(cardIsDirection), [all])
+  // REVIEW 2026-08-25 (P2 semantics): `all` contains both directions and experiments, and the fold
+  // permits a direction to carry `parent_card_id`. Without a kind filter, a nested question is
+  // counted, labelled and rendered below as an experiment while also appearing in the lattice.
+  // Keep only !cardIsDirection children here, or render nested directions as questions explicitly.
   const childrenByParent = useMemo(() => {
     const out = new Map()
     for (const card of all) {
