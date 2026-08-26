@@ -482,6 +482,15 @@ def test_fold_stamps_priority_and_keeps_trace():
 def test_fold_priority_only_stamped_on_open_cards():
     # a card ranked while OPEN that later gains evidence and resolves must NOT keep a stale priority
     # (models.py contract: priority is None once the card isn't open).
+    #
+    # THE VERDICT HERE IS `tested`, NOT `supported`, AND THE CHANGE WAS DELIBERATE. A single node with
+    # no parents has nothing to be better THAN, and `card_ledger.py::_card_evidence_verdict`'s
+    # `base is not None` clause now refuses to mint support where no comparison exists — see its own
+    # comment for the cost of the old behaviour, measured on `runs/e5small-dr-unified-v5`: card-0 read
+    # `supported` on node 0 (one node in the whole run), the Researcher wrote "that's odd" in its
+    # trace and spent the next proposal re-implementing what the board claimed was already done.
+    # This test predates that and asserted the wrong half; its SUBJECT — that a resolved card drops
+    # its stale priority — is untouched, which is why the assertion is re-pointed rather than deleted.
     s0, s1 = "s0 becomes best", "s1 stays open"
     id0, id1 = hypothesis_id(s0), hypothesis_id(s1)
     st = fold([
@@ -491,9 +500,44 @@ def test_fold_priority_only_stamped_on_open_cards():
         Event(type="hypothesis_ranked", data={"order": [id0, id1], "confidence": 0.5}),
         Event(type="node_created", data={"node_id": 1, "operator": "draft",
                                          "idea": {"operator": "draft", "hypothesis": s0}}),
-        Event(type="node_evaluated", data={"node_id": 1, "metric": 0.9}),   # node 1 becomes best -> s0 supported
+        Event(type="node_evaluated", data={"node_id": 1, "metric": 0.9}),   # first measurement, no base
     ])
-    assert st.cards[id0].verdict == "supported" and st.cards[id0].priority is None
+    assert st.cards[id0].verdict == "tested", (
+        "a first measurement is `tested` — evaluated without improvement — because there was nothing "
+        "to improve ON; MUTATION: drop the `base is not None` conjunct in `_card_evidence_verdict` "
+        "and this reads `supported`, the verdict that cost v5 a duplicate card")
+    assert st.cards[id0].priority is None, (
+        "THE SUBJECT OF THIS TEST: the card resolved, so its stale ranking must be dropped")
+    assert st.cards[id1].verdict == "open" and st.cards[id1].priority == 1
+
+
+def test_fold_drops_priority_on_a_genuinely_SUPPORTED_card_too():
+    """The other resolved verdict, which the test above no longer reaches.
+
+    Added with the `tested` correction: re-pointing that assertion left `supported` — the verdict
+    that DOES require a comparison — covered by nothing at all, so the priority rule was only ever
+    proven for one of the two ways a card resolves. Here the card's second node genuinely beats its
+    own parent, which is what `base is not None` exists to require.
+    """
+    s0, s1 = "s0 improves on its parent", "s1 stays open"
+    id0, id1 = hypothesis_id(s0), hypothesis_id(s1)
+    st = fold([
+        Event(type="run_started", data={"run_id": "r", "task_id": "t", "direction": "max"}),
+        Event(type="hypothesis_added", data={"statement": s0}),
+        Event(type="hypothesis_added", data={"statement": s1}),
+        Event(type="hypothesis_ranked", data={"order": [id0, id1], "confidence": 0.5}),
+        Event(type="node_created", data={"node_id": 1, "operator": "draft",
+                                         "idea": {"operator": "draft", "hypothesis": s0}}),
+        Event(type="node_evaluated", data={"node_id": 1, "metric": 0.5}),
+        Event(type="node_created", data={"node_id": 2, "operator": "improve", "parent_ids": [1],
+                                         "idea": {"operator": "improve", "hypothesis": s0}}),
+        Event(type="node_evaluated", data={"node_id": 2, "metric": 0.9}),   # 0.9 > its parent's 0.5
+    ])
+    assert st.cards[id0].verdict == "supported", (
+        "MUTATION: make node 2 a root (drop `parent_ids`) and this falls to `tested` — there is then "
+        "no base to beat, which is the whole rule")
+    assert st.cards[id0].priority is None, (
+        "and a SUPPORTED card drops its stale ranking exactly like a tested one")
     assert st.cards[id1].verdict == "open" and st.cards[id1].priority == 1
 
 
