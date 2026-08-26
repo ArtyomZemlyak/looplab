@@ -242,3 +242,37 @@ def test_a_missing_split_warns_by_default_and_refuses_when_demanded(tmp_path):
     demanded = subprocess.run(base + ["--full-context"], capture_output=True, text=True, timeout=180)
     assert demanded.returncode != 0, "an explicit --full-context accepted a task with no context"
     assert "refusing" in demanded.stderr
+
+
+def test_the_eval_train_command_carries_the_same_ruler_as_the_scorer(tmp_path, monkeypatch):
+    """Caught on the first real invocation, 2026-08-26 07:53, and it is the whole point of the tool.
+
+    The dev command runs in a sandbox that does NOT carry the campaign's environment. Without
+    `ALGOTUNE_EVAL_WORKERS` the bridge takes the SERIAL path and keys its baseline
+    `<task>__train__lane22r3`, while the campaign's own warm entry is `<task>__train__w22x1r3`.
+    So the command missed the cache and re-timed the reference IN THE SAME PASS -- 44 cache files
+    became 45 -- which the bridge answers with `speedup: null` + `baseline_measured_in_pass`. A
+    measurement tool that measures on a different ruler than the scorer, and then cannot return a
+    number, is worse than no tool.
+    """
+    monkeypatch.setenv("ALGOTUNE_EVAL_WORKERS", "1")
+    monkeypatch.setenv("ALGOTUNE_BASELINE_CACHE_DIR", "/tmp/some-cache")
+    monkeypatch.delenv("ALGOTUNE_MIN_TIMEOUT_S", raising=False)
+
+    spec = _build(tmp_path, "--deliver", "--full-context")
+    env = (spec["developer_commands"][0]).get("env") or {}
+    assert env.get("ALGOTUNE_EVAL_WORKERS") == "1", (
+        f"the command runs on a different ruler than the scorer: {env}")
+    assert env.get("ALGOTUNE_BASELINE_CACHE_DIR") == "/tmp/some-cache"
+    assert "ALGOTUNE_MIN_TIMEOUT_S" not in env, (
+        "an absent key must not be fabricated — a task built outside a campaign has no ruler to "
+        "inherit")
+
+
+def test_no_ruler_in_the_environment_pins_nothing(tmp_path, monkeypatch):
+    """The falsifier for a fix that invents defaults: a task built outside a campaign must not be
+    handed a ruler nobody chose."""
+    for key in ("ALGOTUNE_EVAL_WORKERS", "ALGOTUNE_BASELINE_CACHE_DIR", "ALGOTUNE_MIN_TIMEOUT_S"):
+        monkeypatch.delenv(key, raising=False)
+    spec = _build(tmp_path, "--deliver", "--full-context")
+    assert not ((spec["developer_commands"][0]).get("env") or {}), spec["developer_commands"][0]

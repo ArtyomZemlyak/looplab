@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import shutil
 import sys
@@ -709,6 +710,23 @@ def main() -> int:
                             "costs tens of seconds to several minutes on the machine your solver is "
                             "timed on."),
             "cwd": ".",
+            # THE RULER, PINNED INTO THE COMMAND, because the sandbox does not carry it.
+            #
+            # Caught on the first real invocation, 2026-08-26 07:53: the dev command ran without
+            # `ALGOTUNE_EVAL_WORKERS`, so the bridge took the SERIAL path and keyed its baseline
+            # `convex_hull__train__lane22r3` -- while the campaign's own entry, already on disk,
+            # is `convex_hull__train__w22x1r3`. It therefore MISSED a warm cache and re-timed the
+            # reference IN THE SAME PASS: 44 cache entries became 45, and the bridge's own guard
+            # answers that with `speedup: null` + `baseline_measured_in_pass`. So the capability
+            # both cost ~200 s more than it needed to AND could not return a number.
+            #
+            # Read from THIS process's environment at build time, which is the campaign's own
+            # value, so the command measures on exactly the ruler the scorer stage measures on --
+            # the whole point of offering it. Absent keys are simply not pinned: a task built
+            # outside a campaign has no ruler to inherit and must not be given a fabricated one.
+            "env": {k: os.environ[k] for k in (
+                "ALGOTUNE_EVAL_WORKERS", "ALGOTUNE_BASELINE_CACHE_DIR", "ALGOTUNE_MIN_TIMEOUT_S",
+            ) if os.environ.get(k)},
             # 600 s IS THE MODEL'S CAP, not a number picked here: `DeveloperCommandSpec` refuses
             # anything above it, and raising a global safety limit for one task type would be the
             # wrong direction. It fits: arm B's twenty task-arms scored their nodes on this same
