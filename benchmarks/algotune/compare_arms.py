@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -359,6 +360,80 @@ def _run_reached_its_ceiling(final_dir: Path, arm: str, task: str) -> bool:
     return bool(ceiling) and spent >= ceiling
 
 
+def _scored_attempt(final_dir: Path | None, arm: str, task: str) -> str | None:
+    """Which attempt produced the number this table prints, per campaign.sh's own marker.
+
+    The marker records `attempt=aN`. Only that attempt's spend is the price of the reported score;
+    the rest is the cost of the outages, which is a different question and is not asked here.
+    """
+    if final_dir is None:
+        return None
+    marker = final_dir / f"{arm}-{task}.done"
+    try:
+        text = marker.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = re.search(r"\battempt=(\S+)", text)
+    return m.group(1) if m else None
+
+
+def metered_spend(meter: Path) -> dict[tuple[str, str, str], tuple[float, float]]:
+    """What each task-arm ACTUALLY cost, from the metering proxy's ledger.
+
+    Returns {(arm, task, attempt): (spent, uncounted)}. KEYED BY ATTEMPT, and that is not a
+    detail: two gateway outages on 2026-08-25 forced whole task-arms to be re-run, and their
+    abandoned attempts are still in the ledger with their numbers already thrown away. Summing a
+    task across attempts turns a legitimate relaunch into an overspend -- it reported nine
+    offenders against the five that a per-attempt count finds, inventing `convex_hull` ($2.077
+    across two attempts, neither over $1.02) out of nothing. The caller pairs this with the
+    attempt named in the `.done` marker, which is the only attempt whose score is reported.
+
+    `uncounted` is the part spent on streams the
+    upstream ended WITHOUT a usage frame. That distinction is the whole reason this exists:
+
+    AlgoTuner (arm A) prices a call from the response's `usage` block, so a stream that dies
+    before the usage frame costs it NOTHING in its own ledger while the gateway charges for every
+    forwarded delta. Its `spend_limit` therefore fires late. Measured on 2026-08-26: five of arm
+    A's fifteen finished task-arms crossed the $1.00 ceiling, `rbf_interpolation` reaching $2.009
+    with $1.006 of it invisible -- seventeen consecutive ~1808 s runaway streams of ~220k tokens
+    each, over nine hours, that its ledger recorded as free. Its own log closes the case: "Spend
+    limit of $1.0000 reached. Current spend: $1.0025".
+
+    LoopLab (arm B) prices from THIS ledger, so aborted streams consume its budget like any other
+    call: 20 of 20 task-arms landed at or under $1.011, none over. The asymmetry is not a
+    difference between the two loops -- it is a difference in what each one is able to see.
+
+    A pair where one arm silently drew twice the budget is not a fair pair, and the table must not
+    present it as one. An unreadable or absent ledger yields {} and the table simply makes no such
+    claim, which is the safe direction.
+    """
+    out: dict[tuple[str, str], list[float]] = {}
+    try:
+        lines = meter.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        arm, task, attempt = d.get("arm"), d.get("task"), d.get("attempt") or "?"
+        if not arm or not task:
+            continue
+        try:
+            cost = float(d.get("cost") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        slot = out.setdefault((arm, task, attempt), [0.0, 0.0])
+        slot[0] += cost
+        if d.get("stream_aborted"):
+            slot[1] += cost
+    return {k: (v[0], v[1]) for k, v in out.items()}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -371,6 +446,13 @@ def main() -> int:
                          "arm A -- the header says so.")
     ap.add_argument("--model-fragment", default="v4-flash",
                     help="Substring identifying OUR model inside agent_summary.json.")
+    ap.add_argument("--meter", type=Path, default=None,
+                    help="The metering proxy's ledger (meter.jsonl). Defaults to "
+                         "<final-dir>/../meter/meter.jsonl. Used to report what each task-arm "
+                         "ACTUALLY cost, which is not what either loop's own ledger believes.")
+    ap.add_argument("--budget-usd", type=float, default=1.0,
+                    help="The per-task spend ceiling both arms were given. A task-arm whose "
+                         "METERED spend exceeds it by more than 5%% is named under the table.")
     ap.add_argument("--reference", action="store_true",
                     help="Also print the shipped reference models per task (context, not controls).")
     args = ap.parse_args()
@@ -469,6 +551,39 @@ def main() -> int:
     if wall_cut:
         print(f"{len(wall_cut)} task-arm(s) were cut at the WALL CLOCK (rc=124) rather than by the "
               f"budget, so their scores are shown but left out of the mean: " + ", ".join(wall_cut))
+    # WHAT THE PAIR ACTUALLY COST. Printed for every run, not only when something is wrong: a
+    # comparison at "the same $1 budget" is a claim about money, and a claim about money that is
+    # never checked against the meter is a claim about a config file.
+    meter_path = args.meter or (args.final_dir.parent / "meter" / "meter.jsonl"
+                                if args.final_dir else None)
+    spend = metered_spend(meter_path) if meter_path else {}
+    if spend:
+        ceiling = args.budget_usd
+        over = []
+        for task, _, _, _, _ in rows:
+            for arm in ("A", "B"):
+                attempt = _scored_attempt(args.final_dir, arm, task)
+                if attempt is None:            # no marker -> no reported score -> nothing to judge
+                    continue
+                spent, uncounted = spend.get((arm, task, attempt), (0.0, 0.0))
+                if ceiling > 0 and spent > ceiling * 1.05:
+                    over.append((task, arm, spent, uncounted))
+        totals = {arm: sum(v[0] for (a, _, _), v in spend.items() if a == arm)
+                  for arm in ("A", "B")}
+        print(f"\nmetered spend: arm A ${totals.get('A', 0.0):.2f}, arm B "
+              f"${totals.get('B', 0.0):.2f} (the proxy's ledger, not either loop's own).")
+        if over:
+            over.sort(key=lambda r: -r[2])
+            print(f"{len(over)} task-arm(s) drew MORE than the ${ceiling:.2f} ceiling they were "
+                  f"given, so those pairs are NOT matched on budget:")
+            for task, arm, spent, uncounted in over:
+                tail = (f", ${uncounted:.3f} of it on streams that ended with no usage frame and "
+                        f"so cost that loop's own ledger nothing"
+                        if uncounted > 0.05 * ceiling else "")
+                print(f"  {task:<{width - 2}} arm {arm}  ${spent:.3f}{tail}")
+        else:
+            print(f"every task-arm stayed within 5% of its ${ceiling:.2f} ceiling.")
+
     unfinished = sorted(t for t, _, _, _, st in rows if st in ("unfinished", "refused"))
     if unfinished:
         print(f"{len(unfinished)} task-arm(s) have no .done marker from campaign.sh and are still "

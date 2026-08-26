@@ -252,6 +252,56 @@ them should be traded away for throughput:
 
 ---
 
+## 9a. The one the CAMPAIGN found, not the transcripts
+
+### 9. OPEN[a-ceiling-only-as-honest-as-the-usage-frame] `proof:absent:stream_aborted@looplab/benchmarks/algotune/compare_arms.py`
+
+**Measured 2026-08-26, mid-campaign.** The two arms were given the same `$1.00` per task. They did
+not spend the same `$1.00`.
+
+| | task-arms finished | median metered spend | max | over ceiling by >5% |
+|---|---|---|---|---|
+| arm A (AlgoTuner) | 15 | $1.011 | **$2.009** | 5 attempts, **3 of them the SCORED attempt** |
+| arm B (LoopLab) | 20 | $1.003 | $1.011 | 0 |
+
+The cause is not thrift and not greed. It is *what each loop is able to see*:
+
+* AlgoTuner prices a call from the response's `usage` block. A stream the gateway ends **without**
+  a usage frame therefore costs its ledger **nothing**, however many tokens crossed the wire.
+* LoopLab prices from the metering proxy, which sums forwarded deltas. The same aborted stream
+  costs it exactly what it cost.
+
+`rbf_interpolation` is the clean specimen. Between 17:51 and 02:48 it made **seventeen consecutive
+calls**, each running ~1808 s and forwarding ~220 000 tokens, each ended upstream with no usage
+frame. Nine hours, **$1.006**, no usable output. Its own log then closes the case at 03:46:
+`Spend limit of $1.0000 reached. Current spend: $1.0025` — while the meter had it at **$2.009**.
+
+Ninety-seven arm-A calls (4.6 % of them) carry `stream_aborted`, and they hold **25.8 %** of arm
+A's money. Arm B has $1.114 of the same aborted streams — counted, so they consumed budget like
+any other call instead of arriving free.
+
+**Why this is LoopLab's problem and not only AlgoTuner's.** It is not: LoopLab's ceiling held. What
+is ours is that **the comparison table printed those pairs side by side and said nothing**, so a
+pair where one side silently drew twice the budget read as a matched pair. Fixed in this commit:
+`compare_arms.py` now reports metered spend per arm and names every task-arm that drew more than
+its ceiling, with how much of it was invisible to that loop's own ledger.
+
+**How we would fix the underlying thing.** The proxy already computes `estimated_from_deltas` when
+upstream dies; it just never tells the client. Appending a synthetic `usage` frame to the client's
+stream on abort would make any usage-frame-priced loop — AlgoTuner, and anything else pointed at
+this gateway — see the money it actually spent. **Not applied while a campaign is running**:
+changing the meter mid-run changes the ruler. It is the first thing to do after.
+
+**A trap this cost us, recorded because it nearly shipped.** The first version of the check summed
+a task across *attempts*. Two gateway outages had forced whole task-arms to be re-run, and those
+abandoned attempts sit in the ledger with their scores already discarded — so the check reported
+**nine** offenders, inventing `convex_hull` ($2.077 across two attempts, neither above $1.02) out
+of nothing. Keyed by the attempt the `.done` marker credits, the real count among scored arms is
+**three**. `tests/test_algotune_compare_arms_reports_real_spend.py` carries the wrong version as
+its falsifier.
+
+---
+
 ## 10. Order to fix in
 
 By measured cost, not by how bad each sounds:
