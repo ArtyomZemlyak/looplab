@@ -252,9 +252,12 @@ them should be traded away for throughput:
 
 ---
 
-## 9a. The one the CAMPAIGN found, not the transcripts
+## The two the CAMPAIGN found, not the transcripts
 
-### 9. OPEN[a-ceiling-only-as-honest-as-the-usage-frame] `proof:absent:stream_aborted@looplab/benchmarks/algotune/compare_arms.py`
+## 9. A ceiling is only as honest as the usage frame
+
+    OPEN[a-ceiling-only-as-honest-as-the-usage-frame]
+    proof:absent:synthesised_usage_frame@benchmarks/meter/proxy.py
 
 **Measured 2026-08-26, mid-campaign.** The two arms were given the same `$1.00` per task. They did
 not spend the same `$1.00`.
@@ -300,7 +303,10 @@ of nothing. Keyed by the attempt the `.done` marker credits, the real count amon
 **three**. `tests/test_algotune_compare_arms_reports_real_spend.py` carries the wrong version as
 its falsifier.
 
-### 10. OPEN[we-took-away-the-ruler-and-it-built-a-fake-one] `proof:absent:train_feedback@looplab/benchmarks/algotune/make_task.py`
+## 10. We took away the ruler and it built a fake one
+
+    OPEN[we-took-away-the-ruler-and-it-built-a-fake-one]
+    proof:absent:train_feedback@benchmarks/algotune/make_task.py
 
 Item 1 says the loop times probes at an invented scale. This is **why**, and it is not the model's
 idea. Our own task text tells it, in capitals:
@@ -346,7 +352,7 @@ made up, and we told it to.
 
 ---
 
-## 10. Order to fix in
+## 11. Order to fix in
 
 By measured cost, not by how bad each sounds:
 
