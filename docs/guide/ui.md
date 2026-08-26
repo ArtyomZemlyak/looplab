@@ -319,9 +319,8 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   `trust_gate` to `gate`/`block` (or pick the `thorough` profile) to make a **high-precision** flag
   ineligible to win or seed breeding/confirmation. Broad critic/perfect-score warnings remain advisory;
   `critic:hardcoded_metric` is the narrow high-precision critic exception.
-- **Cards board** — three views over one card population, chosen by the **Group the board by** bar,
-  and they answer three different questions. **Lanes** is the kanban below. **Directions** groups
-  experiments under the direction card that owns them, one flat parent→child level. **Research** is
+- **Cards board** — two views over one card population, chosen by the **Group the board by** bar,
+  and they answer two different questions. **Lanes** is the kanban below. **Research** is
   the question LADDER: rows are the run's questions, nested by *concept-set inclusion* — a question
   about `{distill, llm}` sits under both `{distill}` and `{llm}`, indented one rung under each.
   Four rules an operator should know it follows, none of them cosmetic. A question with two broader
@@ -339,9 +338,13 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   view. Below the ladder, **Not filed under any question** holds the experiments no question claims:
   they have no position in a concept lattice, so they are a section beside it rather than a row
   inside it, and the section is rendered only when occupied. Between the ladder and that section
-  every card the wire carried is drawn somewhere — the property that lets the Directions tab be
-  retired without losing rows, since its own "Not filed under any direction" group was previously
-  the only surface that had them. A question the run **closed** (status `dropped`, or verdict `abandoned`) is **dimmed in
+  every card the wire carried is drawn somewhere — the property on which the **Directions** tab was
+  retired (2026-08-26) without losing a row, since its own "Not filed under any direction" group had
+  been the only other surface holding them. Directions grouped experiments under the direction that
+  owns them, one flat parent→child level; the ladder reads the *same* `parent_card_id` edge and adds
+  the concept-set nesting, so it was a strict superset rather than a substitute — which is why the
+  tab could go rather than being kept beside it. The grouping choice is not persisted, so no operator
+  is left holding a selection that no longer exists. A question the run **closed** (status `dropped`, or verdict `abandoned`) is **dimmed in
   place, never removed**: it is part of the chain that explains its neighbours, and there is no
   "hide closed" control for that reason. Beside it the view says whether the closure rests on
   anything — at least one sharper question below it, or at least one experiment of its own that

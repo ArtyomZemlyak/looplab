@@ -27,8 +27,8 @@ import {
   resolveSelectedCard,
 } from './cardBoardModel.js'
 import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
-import { CARD_KIND_DIRECTION, UNFILED_GROUP_ID, cardIsDirection, cardLineageViews,
-  cardProposalDrift, directionGroups, rollupChips, splitBoardByKind } from './cardLineageModel.js'
+import { CARD_KIND_DIRECTION, cardIsDirection, cardLineageViews,
+  cardProposalDrift, rollupChips, splitBoardByKind } from './cardLineageModel.js'
 import ResearchView from './ResearchView.jsx'
 import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
 import { nodeTraceSubject } from './traceSurfaceModel.js'
@@ -1170,51 +1170,6 @@ function _CardKanban({
     attempts={attemptsByCard?.get(card.id) || null}
     attemptCoverage={cardAttemptCoverage(
       attemptsByCard?.get(card.id) || [], receipts[card.id])} />
-  const groups = directionGroups(visibleCards, _cardOrder)
-  const directionsBoard = <div className="card-directions" role="region"
-    aria-label="Research directions and the experiments under them">
-    {groups.map(group => {
-      const unfiled = group.id === UNFILED_GROUP_ID
-      const headId = `card-direction-${encodeURIComponent(group.id)}`
-      const chips = unfiled ? [] : rollupChips(group.direction?.child_rollup)
-      // The server's own count, which is EXACT even where `child_card_ids` clipped and where the
-      // 256-card wire cap kept a child off this page entirely.
-      const rollupTotal = Number.isSafeInteger(group.direction?.child_rollup?.children)
-        ? group.direction.child_rollup.children : 0
-      return <section key={group.id} className="card-direction" aria-labelledby={headId}>
-        <header className="card-direction-h">
-          <h3 id={headId}>
-            {unfiled ? 'Not filed under any direction' : (
-              _cardText(group.direction?.statement) || group.direction?.id)}
-          </h3>
-          {!unfiled && <span className={'chip' + (cardIsDirection(group.direction) ? ' chip-direction' : '')}>
-            {cardIsDirection(group.direction) ? 'direction' : 'experiment'}
-          </span>}
-          {/* The counts, and NOT a status lane — see the comment above this block. */}
-          {chips.map(chip => <span key={chip.key} className="chip muted">{chip.label}</span>)}
-          {unfiled && <span className="chip muted">
-            {group.children.length} experiment{group.children.length === 1 ? '' : 's'}
-          </span>}
-        </header>
-        {/* A direction with no experiment yet is the most actionable row on this view, so it keeps
-            its section and says so rather than being filtered out for being empty.
-            THE EMPTINESS SENTENCE READS THE SAME SOURCE AS THE CHIPS ABOVE IT. It used to be
-            decided from `group.children.length` — what this page can SEE — while the chips came
-            from the server's `child_rollup`, so a direction whose children are off the 256-card
-            wire cap or behind a filter rendered "40 experiments" and "no experiment proposed
-            against this yet" on the SAME ROW. When the two disagree the rollup wins and the row
-            says the children exist but are not on this page, which is a third and true statement. */}
-        {group.children.length > 0
-          ? <div className="card-direction-rows">{group.children.map(renderCard)}</div>
-          : (rollupTotal > 0
-            ? <div className="muted card-empty">
-                {rollupTotal} experiment{rollupTotal === 1 ? '' : 's'} under this direction, none on this page
-              </div>
-            : <div className="muted card-empty">no experiment proposed against this yet</div>)}
-      </section>
-    })}
-    {groups.length === 0 && <div className="muted card-empty">no work items yet</div>}
-  </div>
   // The question ladder. `visibleCards` and `renderCard` are the SAME inputs the other two views
   // draw from, so a filter or a control applied on one board reaches this one too rather than the
   // view growing its own quietly-different population.
@@ -1237,7 +1192,6 @@ function _CardKanban({
   const groupingBar = <div className="toolbar card-grouping" role="group"
     aria-label="Group the board by">
     {[['lanes', 'Lanes', 'lifecycle status — what the machine is doing now'],
-      ['directions', 'Directions', 'research directions and the experiments filed under them'],
       ['research', 'Research', 'the ladder of questions, each one narrowing the one above it'],
     ].map(([key, label, hint]) => <button key={key} type="button" title={hint}
       className={'btn sm' + (grouping === key ? ' primary' : '')}
@@ -1273,7 +1227,7 @@ function _CardKanban({
           {questionNotice}
         </div>
         {addBar}
-        {grouping === 'research' ? researchBoard : (grouping === 'directions' ? directionsBoard : board)}
+        {grouping === 'research' ? researchBoard : board}
       </div>
       {detailOpen && pane?.compact && <button type="button" className="workspace-scrim"
         tabIndex={-1} onClick={closeDetails} aria-label="Close work item details" />}
@@ -1320,7 +1274,7 @@ function _CardKanban({
     {groupingBar}
     {questionNotice}
     {addBar}
-    {grouping === 'research' ? researchBoard : (grouping === 'directions' ? directionsBoard : board)}
+    {grouping === 'research' ? researchBoard : board}
   </Panel>
 }
 
