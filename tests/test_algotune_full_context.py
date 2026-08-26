@@ -276,3 +276,31 @@ def test_no_ruler_in_the_environment_pins_nothing(tmp_path, monkeypatch):
         monkeypatch.delenv(key, raising=False)
     spec = _build(tmp_path, "--deliver", "--full-context")
     assert not ((spec["developer_commands"][0]).get("env") or {}), spec["developer_commands"][0]
+
+
+def test_one_eval_train_call_cannot_cost_half_the_developer_session(tmp_path):
+    """Measured on both probe attempts, 2026-08-26, and it is why neither wrote a file.
+
+    The Developer's session is bounded at 1200 s of wall clock it cannot see. `eval_train` was
+    pinned at the model's 600 s cap, so a single hung call cost HALF of it — and that is exactly
+    what happened twice: one `run_dev_command` of 600 s returning `exit=-9` and `(no output)`,
+    795 s and 730 s of the 1200 s gone into tools, ZERO nodes in ninety minutes against 29 minutes
+    to first node for the same task without this command.
+
+    450 s clears the slowest real evaluation observed on this split (374.6 s) by 20 % and caps a
+    hung one at 37 % of the session. It does not make the tool safe — two bad calls still end a
+    session — so the clause must also SAY what it costs.
+    """
+    spec = _build(tmp_path, "--deliver", "--full-context")
+    cmd = (spec["developer_commands"] or [{}])[0]
+    session_budget = 1200.0
+    assert cmd["timeout"] <= 0.4 * session_budget, (
+        f"one call can take {cmd['timeout']}s of a {session_budget}s session")
+    assert cmd["timeout"] >= 374.6, (
+        "it no longer clears the slowest evaluation actually observed on this split")
+
+    goal = spec["goal"]
+    assert "CHARGED TO A CLOCK YOU CANNOT SEE" in goal, (
+        "the model is offered an expensive tool without being told what it is charged against")
+    assert "write the solver FIRST" in goal
+    assert "ends with no file written has produced nothing" in goal

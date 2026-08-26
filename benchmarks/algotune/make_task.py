@@ -307,9 +307,13 @@ MEASURE = (
     "`speedup`, `eval_seconds`, and whether every instance was valid. That is the number, not an "
     "estimate of it. Use it the way you would use a test: write the simplest correct solver, "
     "measure, change ONE thing, measure again. "
-    "IT IS EXPENSIVE -- tens of seconds to several minutes of the same machine your solver is "
-    "timed on, and it is charged to this run's wall clock. It is worth that when it settles a "
-    "question you would otherwise guess at, and worth nothing when run twice on the same code. "
+    "IT IS EXPENSIVE, AND IT IS CHARGED TO A CLOCK YOU CANNOT SEE. A real evaluation of this task "
+    "takes roughly half a minute to six minutes on the same machine your solver is timed on, and "
+    "your whole session is bounded at twenty minutes of wall clock -- so ONE call can be a third "
+    "of everything you have, and a call that hangs takes that whether or not it answers. Budget it "
+    "like that: write the solver FIRST, measure ONCE when you have something worth measuring, and "
+    "never twice on the same code. A session that spends its clock measuring and ends with no file "
+    "written has produced nothing at all. "
     "A guess you can check in one command is not a guess to write into the summary. "
     "THE REPORTED SCORE IS ON A SPLIT YOU CANNOT SEE. Train is what you tune against; the champion "
     "is finally scored on held-out instances from the same generator. So anything that fits the "
@@ -727,13 +731,23 @@ def main() -> int:
             "env": {k: os.environ[k] for k in (
                 "ALGOTUNE_EVAL_WORKERS", "ALGOTUNE_BASELINE_CACHE_DIR", "ALGOTUNE_MIN_TIMEOUT_S",
             ) if os.environ.get(k)},
-            # 600 s IS THE MODEL'S CAP, not a number picked here: `DeveloperCommandSpec` refuses
-            # anything above it, and raising a global safety limit for one task type would be the
-            # wrong direction. It fits: arm B's twenty task-arms scored their nodes on this same
-            # train split in 29.7 to 374.6 s (median ~170 s) against a warm baseline cache. A task
-            # that does not fit loses THIS command, not its score -- the scorer stage keeps its own
-            # `--timeout` (7200 s default) and still produces the node's number.
-            "timeout": 600.0,
+            # 450 s, AND THE NUMBER IS THE SESSION'S, NOT THIS COMMAND'S.
+            #
+            # 600 s was the model's cap (`DeveloperCommandSpec` refuses more) and it fit the work:
+            # arm B's twenty task-arms scored their nodes on this same train split in 29.7 to
+            # 374.6 s against a warm cache. What it did NOT fit is the clock it is spent against.
+            # The Developer's session has a 1200 s time budget it cannot see, so one call that runs
+            # to the cap costs HALF the session -- and measured on both probe attempts, 2026-08-26,
+            # that is exactly what happened: a single `run_dev_command` of 600 s returning
+            # `exit=-9` and `(no output)`, 795 s and 730 s of the 1200 s gone into tools, and NEITHER
+            # attempt wrote a file. Zero nodes in ninety minutes, against 29 minutes to first node
+            # for the same task without this command.
+            #
+            # 450 s clears the slowest observed real evaluation by 20 % and caps a hung one at 37 %
+            # of the session instead of 50 %. It does not make the tool safe -- two bad calls still
+            # end a session -- and the real repair is telling the Developer what its clock is,
+            # which is a change to the session contract rather than to this task.
+            "timeout": 450.0,
         }]} if args.full_context else {}),
         "eval": {
             # DECLARED AS A ONE-STAGE PIPELINE, not as a bare `command`, and the difference is not
