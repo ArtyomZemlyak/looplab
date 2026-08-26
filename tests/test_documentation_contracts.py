@@ -81,7 +81,10 @@ def test_index_mentions_every_numbered_document():
     #   as the fifth: the LATER-merged trio is renumbered, to 50/51/52, keeping master's three in
     #   place because they are cross-referenced from `train_monitor.py` and from each other while
     #   ours were referenced only from `benchmarks/algotune/` and from one another.
-    assert len(numbered) == 52, "the derived numbered-document inventory changed"
+    #   52 -> 53 (2026-08-26): doc 53, the AlgoTune campaign read as evidence about our own
+    #   loop. No collision this time — 53 was free, and the row went into the index in the
+    #   same change that moved this number, which is the whole point of the literal.
+    assert len(numbered) == 53, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
