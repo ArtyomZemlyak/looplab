@@ -91,9 +91,18 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
          no more.
 
     Order is preserved and the memo's own repeats collapse against each other, so `admit(open, ds)`
-    is idempotent under re-running the same memo. Everything dropped is still recorded — the memo
-    body and the `hint` row carry the full `recommended_directions` list — so nothing is LOST here;
-    what is refused is the board row, which is the resource that was overflowing.
+    is idempotent under re-running the same memo. Everything dropped is still recorded — the MEMO
+    BODY carries every `recommended_direction`, and `read_research_memo` renders them in full — so
+    nothing is LOST here; what is refused is the board row, which is the resource that was
+    overflowing.
+
+    THAT SENTENCE USED TO SAY "the memo body and the `hint` row carry the full list", AND THE HINT
+    HALF WAS FALSE. The hint carries the first `DEEP_RESEARCH_HINT_DIRECTIONS` of them (see
+    `deep_research_hint_text`), so on `runs/e5small-dr-unified-v7`'s third memo — 8 directions, the
+    only one of that run's three with any content — directions 6-8 reached the hint not at all. It
+    is a bounded PUSH, not the record, and reading it as the record is how "nothing is lost" gets
+    believed by whoever next decides a drop is safe. The memo body genuinely is the record, which is
+    why the corrected sentence names it alone.
     """
     seen = {normalized_belief_key(s) for s in open_statements if str(s or "").strip()}
     admitted: list[str] = []
@@ -109,6 +118,31 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
         seen.add(key)
         admitted.append(text)
     return admitted
+
+
+# HOW MANY DIRECTIONS THE PUSHED HINT CARRIES — a bound on a PROMPT, not on the record.
+# CLAIM[deep-research-hint-carries-five] the `hint` row carries the FIRST FIVE recommended
+# directions, never all of them; the memo body is what carries every one.
+# decided:line:DEEP_RESEARCH_HINT_DIRECTIONS&&5@looplab/engine/research_cadence.py
+#
+# Measured on `runs/e5small-dr-unified-v7`: its third memo (the only one of three with content)
+# returned 8 directions, so three of them reached the hint not at all. Deliberately NOT raised to
+# cover that memo — the hint is spliced into a prompt, `agents/hints.py` filters on its prefix, and
+# a push that grows with whatever the model happened to return is how a brief becomes a wall of
+# text. The remedy for a reader that wants them all is `read_research_memo`, which renders the
+# directions IN FULL, not a bigger push.
+DEEP_RESEARCH_HINT_DIRECTIONS = 5
+
+
+def deep_research_hint_text(directions: Iterable) -> str:
+    """The pushed hint's exact text — hoisted so the bound above is a rule and not a slice.
+
+    Byte-identical to the inline `DEEP_RESEARCH_HINT_PREFIX + "; ".join(directions[:5])` it replaces;
+    the prefix is load-bearing (`agents/hints.py` FILTERS on it, which is how a row whose `source`
+    stamp predates that field is still recognised), so it is never spelled separately.
+    """
+    return DEEP_RESEARCH_HINT_PREFIX + "; ".join(
+        list(directions)[:DEEP_RESEARCH_HINT_DIRECTIONS])
 
 
 def question_concept_rows(questions: Iterable, per_question: Iterable) -> dict[str, list]:
@@ -558,7 +592,7 @@ class ResearchCadenceMixin:
             # whose `source` stamp is missing (a log older than the field) is recognised by this
             # text alone, so the two must not be spelled separately.
             self.store.append(EV_HINT, {
-                "text": DEEP_RESEARCH_HINT_PREFIX + "; ".join(directions[:5]),
+                "text": deep_research_hint_text(directions),
                 "source": "deep_research"})
             # P1: also register each direction as an OPEN hypothesis so a deep-research idea is
             # tracked to a verdict (was fire-and-forget) — it accrues evidence when a matching node

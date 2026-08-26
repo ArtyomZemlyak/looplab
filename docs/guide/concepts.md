@@ -1304,7 +1304,14 @@ were written. The prompt half is paired with an engine-side bound at the append 
 (`engine/research_cadence.py::admit_research_beliefs`): a direction whose case- and
 whitespace-normalized statement already names an open belief is not registered, and the open belief
 board is capped at five distinct rows — the same window the prompts can show. Everything refused is
-still recorded in the memo body and in the standing `hint`; what is refused is only the board row.
+still recorded **in the memo body** — `read_research_memo` renders the directions in full — and what
+is refused is only the board row. The standing `hint` is a bounded PUSH and not the record: it
+carries the first `DEEP_RESEARCH_HINT_DIRECTIONS` (5) directions, so a memo that returns more leaves
+the rest out of it. That distinction was documented the other way round until 2026-08-26, when
+`runs/e5small-dr-unified-v7`'s third memo — 8 directions, the only one of that run's three with any
+content — put three of them in neither the hint nor the board. The bound is deliberately not raised:
+the hint is spliced into a prompt and `agents/hints.py` filters on its prefix, so a push that grows
+with whatever the model returned is how a brief becomes a wall of text.
 Near-duplicate *wording* is not caught here on purpose: over that run's statements a token-overlap
 rule scores its best pair across two genuinely different experiments, so paraphrase identity stays
 the agentic consolidation cadence's job.
