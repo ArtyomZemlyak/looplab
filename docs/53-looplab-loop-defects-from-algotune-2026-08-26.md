@@ -399,8 +399,67 @@ them should be traded away for throughput:
 
 ## 9. A ceiling is only as honest as the usage frame
 
-    OPEN[a-ceiling-only-as-honest-as-the-usage-frame]
-    proof:absent:synthesised_usage_frame@benchmarks/meter/proxy.py
+**PART CLOSED, PART REFUTED, PART STILL OPEN — 2026-08-26.** The marker above is deleted because
+its proof was simply wrong: the proxy was ALREADY minting a synthetic usage frame and already
+delivering it. I recorded as missing a thing that existed. Two measured reasons it bought nothing:
+
+**The wire shape.** The frame put `usage` on the same chunk as a populated `choices` array. The
+`stream_options.include_usage` convention — which every OpenAI-compatible client follows — reads
+`usage` off the chunk whose `choices` is EMPTY. Measured against real litellm 1.97.0 from AlgoTune's
+own venv: it reports `usage=None` for that shape, and with `include_usage` set it mints its own
+`Usage(prompt_tokens=0, completion_tokens=0)` — a zero the proxy never sent. Arm B was unaffected
+only because `core/llm.py` takes `usage` off any chunk at all.
+
+**The prompt side was a false measurement, not an under-report, and it is the expensive half.**
+Across arm A's 1 773 complete streams the prompt is **97.3 %** of metered spend ($13.93 of $14.31;
+median prompt 42 698 tokens against median completion 537). Priced properly the aborts add **$1.20
+to their $6.44 — 18.6 %**. So the old frame captured 0 % of an abort's true cost and the new one
+captures ~81 %. No tokenizer exists in a stdlib-only proxy, so it counts prompt CHARACTERS exactly
+and converts them with a ratio calibrated in-process from calls this gateway itself priced — 6.5 %
+median error against `tiktoken` over 93 request-sized blocks of the campaign's own text, 15.2 % at
+p90. With no priced call yet it returns 0 and says `unmeasured` rather than guessing.
+
+### 9a. STILL OPEN — and it is the half that actually cost the money
+
+    OPEN[an-aborted-stream-is-retried-ten-times]
+    proof:absent:abort_is_not_retryable@benchmarks/meter/proxy.py
+
+The client never parsed the body at ALL. `rbf_interpolation`'s arena log holds 53 `OpenAIException`
+lines — three per event, one per aborted meter row, seventeen distinct errors — each at abort+~1808
+s. An errored call never reaches AlgoTuner's cost extraction, so no frame of any shape could have
+been read. What turned one nine-hour cut into seventeen was the outer **10-attempt retry loop**, not
+a budget. Across the campaign: **131 aborted streams, $6.55, and 61.9 hours of wall clock.** The
+highest-leverage guard is on the retry of an aborted stream, and it is not written yet.
+
+### 9b. `max_tokens` — analysed and REJECTED, and my own proposed value was wrong
+
+I suggested `max_tokens: 16384` on the grounds that arm A's largest legitimate completion was
+5 795 tokens. **That number was p99.9, not the maximum.** The real maximum is **132 269** — a
+`pde_heat1d` call at 06:37 on 2026-08-26 that ran 1 204 s and returned a proper usage frame — and
+arm B's p99 is 25 856 with a maximum of 128 572. The cap I proposed would have truncated real
+answers, and far more of arm B's than arm A's.
+
+| cap | aborts cut | runaway saved | complete calls truncated |
+|---|---|---|---|
+| 2 048 | 127/130 | $6.43 | **1 928 / 8 691** |
+| 8 192 | 127/130 | $6.21 | **550 / 8 691** |
+| 32 768 | 126/130 | $5.34 | 46 / 8 691 |
+| 135 000 | 106/130 | $1.91 | 0 / 8 691 |
+
+Rejected for four reasons. It is **not parity-neutral**: at 8 192 it cuts 7.7 % of arm B's calls
+against 0.06 % of arm A's, 37× asymmetric, and `config.yaml` untied `max_tokens: 8192` on
+2026-08-22 for exactly that. A cap low enough to matter has a measured false-positive rate; one
+high enough to be safe recovers 29 %. `max_tokens` is a generation parameter and injecting it
+breaks the proxy's stated contract. And the risk is sharper than I put it: the answer would return
+200 + usage + `finish_reason: "length"`, which litellm passes through unmapped, so a client reading
+only `content` acts on a plausible half-answer where today it raises.
+
+**The alternative worth having** is a proxy-side DELTA CEILING: stop forwarding after N deltas and
+emit the same cut-plus-usage frames. It never enters the request, produces the identical observable
+the gateway's own 1 800 s cut produces, is symmetric by construction, and at 135 000 has zero
+measured false positives in either arm. Not implemented here.
+
+The original finding:
 
 **Measured 2026-08-26, mid-campaign.** The two arms were given the same `$1.00` per task. They did
 not spend the same `$1.00`.

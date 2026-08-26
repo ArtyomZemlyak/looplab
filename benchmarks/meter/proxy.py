@@ -32,9 +32,17 @@ both arms (see `RateLimiter`), because the endpoint's own limit is shared and ea
 otherwise absorb it with its own private backoff.
 
 A streamed response is forwarded frame by frame and priced from its usage frame; a stream the
-GATEWAY cut without one is priced from the content deltas it forwarded, labelled
-`cost_basis: estimated_from_deltas`; a stream that produced neither is recorded `metered=false`
--- never as $0.
+GATEWAY cut without one is priced from the content deltas it forwarded plus a prompt side recovered
+from the request (`PromptTokens`), labelled `cost_basis: estimated_from_deltas`; a stream that
+produced neither is recorded `metered=false` -- never as $0.
+
+That synthetic frame is SENT TO THE CLIENT, in the two-chunk shape `stream_options.include_usage`
+uses -- the cut on a chunk with the `finish_reason`, the price on a chunk with `choices: []`. It
+has to be that shape and not one combined chunk: measured 2026-08-26 against arm A's own litellm
+1.97.0, a chunk carrying both is dropped, and with `include_usage` on litellm mints a
+`Usage(prompt_tokens=0, completion_tokens=0)` of its own instead. That is how a ceiling comes to
+fire at twice the real spend -- `rbf_interpolation` logged `Spend limit of $1.0000 reached. Current
+spend: $1.0025` while this meter had it at $2.009.
 
     OPEN[meter-delta-estimator-is-uncalibrated] `estimated_from_deltas` charges ONE token per
     content delta; this proxy's own log says that is low by a length-dependent factor. Over 4,874
@@ -159,6 +167,97 @@ class Pricing:
             float(self.default.get("output_per_token", 0.0)),
             self.basis + "-default-fallback",
         )
+
+
+def _prompt_chars(body: bytes) -> int:
+    """Characters of prompt this request carries, counted the SAME way on every call.
+
+    The count itself is exact -- the proxy is holding the request -- and it is deliberately a
+    CHARACTER count, not a token count: this file is a standalone stdlib script and has no tokenizer
+    for the model behind the gateway, so any token number it produced from the text alone would be a
+    guess. What the character count is for is `PromptTokens` below, which turns it into tokens using
+    a ratio measured from this endpoint's OWN priced calls.
+
+    `messages` + `tools` are counted rather than the whole body because the rest of a request
+    (model, temperature, stream_options) is not prompt and does not scale with it. The exact
+    definition matters less than its STABILITY: the same function feeds the calibration and the
+    estimate, so the JSON punctuation it includes cancels out of the ratio.
+    """
+    if not body:
+        return 0
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return len(body)
+    if not isinstance(payload, dict):
+        return len(body)
+    parts = [json.dumps(payload[key], ensure_ascii=False)
+             for key in ("messages", "tools", "functions", "system", "prompt") if key in payload]
+    return sum(len(part) for part in parts) if parts else len(body)
+
+
+class PromptTokens:
+    """How many characters of request the gateway's tokenizer puts in one prompt token.
+
+    WHY THIS EXISTS. A stream the gateway cuts at ~1800 s carries no usage frame, so the proxy
+    prices it from the deltas it forwarded -- the COMPLETION side. The prompt side was reported as
+    `prompt_tokens: 0`, and that is not a floor, it is a false measurement: the prompt was submitted
+    and processed before the first token came back, and on this campaign it is where the money is.
+    Measured 2026-08-26 over `meter/meter.jsonl`: across arm A's 1,773 complete streams the prompt
+    side is **97.3 %** of metered spend ($13.93 of $14.31), median prompt 42,698 tokens against a
+    median completion of 537. On the 129 ABORTED streams -- where the completion side is a 190k-token
+    runaway -- the missing prompt side is still **18.6 %** of what they cost ($1.20 on top of $6.44,
+    21.5 % for arm A alone), estimated by charging each abort the prompt of the nearest complete call
+    in its own task-arm.
+
+    So there are three options and no fourth: report 0 (wrong by the whole prompt), report nothing
+    (wrong by the whole call, which is the defect), or measure the ratio. This measures it, from
+    traffic that is ALREADY PRICED by the gateway's own usage frames -- the same in-process
+    calibration the delta estimator's open item says is derivable and defers.
+
+    IT IS AN ESTIMATE AND IT SAYS SO. Validated 2026-08-26 against `tiktoken` cl100k over 93
+    request-sized blocks of this campaign's own prompt text (arm-A logs and AlgoTuner sources):
+    per-request chars/token spans 4.05 (p05) to 5.51 (p95) around a pooled 4.91, and predicting each
+    block's token count from the POOLED ratio is 6.5 % out at the median, 15.2 % at p90, 31.2 % worst
+    case. That is the residual after the systematic part -- the tokenizer's own density -- has been
+    measured away, which is exactly what calibrating in-process removes and a hard-coded constant
+    would not. Against `prompt_tokens: 0` being 100 % out, it is the better instrument; against the
+    gateway's own frame it is not, which is why the synthetic frame names its basis in its own
+    fields instead of letting a reader assume the number was reported.
+
+    WITH NO SAMPLE IT DOES NOT GUESS. `estimate()` returns 0 and the basis `unmeasured` until this
+    process has seen at least one priced call, so a proxy restarted into a cut stream under-reports
+    rather than invents.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.chars = 0
+        self.tokens = 0
+        self.calls = 0
+
+    def observe(self, chars: int, prompt_tokens: int) -> None:
+        """Fold one call the GATEWAY priced into the ratio. Anything else is not evidence."""
+        if chars <= 0 or prompt_tokens <= 0:
+            return
+        with self._lock:
+            self.chars += chars
+            self.tokens += prompt_tokens
+            self.calls += 1
+
+    def estimate(self, chars: int) -> tuple[int, str, float | None, int]:
+        """`(prompt_tokens, basis, chars_per_token, calibrating_calls)`.
+
+        `basis` is `measured_by_upstream`'s absence made explicit: `estimated_from_request_chars`
+        when there is a ratio, `unmeasured` when there is not -- and in the second case the token
+        count is 0, never a number this file made up.
+        """
+        with self._lock:
+            chars_total, tokens_total, calls = self.chars, self.tokens, self.calls
+        if chars <= 0 or calls <= 0 or tokens_total <= 0 or chars_total <= 0:
+            return 0, "unmeasured", None, calls
+        per_token = chars_total / tokens_total
+        return max(1, int(round(chars / per_token))), "estimated_from_request_chars", per_token, calls
 
 
 def _header_cost(headers: dict) -> float | None:
@@ -514,6 +613,9 @@ class Handler(BaseHTTPRequestHandler):
                     usage["cost"] = cost
                 usage["cost_basis"] = basis
                 usage["cost_source"] = self.server.pricing.fetched_at
+                # The gateway just told us how many tokens this exact prompt was. That is the only
+                # evidence there is for what a character is worth here, and it is free.
+                self.server.prompt_scale.observe(_prompt_chars(body), pin)
                 out = json.dumps(data).encode()
                 row.update({
                     "prompt_tokens": pin, "completion_tokens": pout, "cost": cost,
@@ -583,6 +685,10 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = {"ts": time.time(), "arm": arm, "task": task, "attempt": attempt, "path": tail,
                "model": model, "stream": True}
+        # Counted from the request the proxy is HOLDING, before anything upstream can go wrong with
+        # it. This is the only prompt-side evidence that survives a cut, so it is taken up front
+        # rather than looked for later among objects the abort path may not have.
+        prompt_chars = _prompt_chars(req.data or b"")
         if collect_for_client:
             # The client is NOT expecting SSE. Frames are collected here and answered as one
             # JSON body, so nothing about this is visible to it except that the call did not
@@ -627,6 +733,9 @@ class Handler(BaseHTTPRequestHandler):
         pin = pout = 0
         cost = 0.0
         basis = ""
+        # Where `prompt_tokens` in the row below came from. Empty until something establishes it, so
+        # a row can never imply the gateway reported a prompt count it did not.
+        prompt_basis = ""
         # Did the GATEWAY send a usage frame? Its own flag rather than `bool(basis)`, because the
         # synthesis below overwrites `basis` and the reassembled body has to be able to tell "the
         # provider closed the books on this call" from "we closed them for it".
@@ -668,6 +777,8 @@ class Handler(BaseHTTPRequestHandler):
                             usage["cost"] = cost
                         usage["cost_basis"] = basis
                         usage["cost_source"] = self.server.pricing.fetched_at
+                        self.server.prompt_scale.observe(prompt_chars, pin)
+                        prompt_basis = "reported_by_upstream"
                         out = b"data: " + json.dumps(frame).encode() + b"\n"
                 emit(out)
             if usage_frame_seen:
@@ -700,31 +811,67 @@ class Handler(BaseHTTPRequestHandler):
                 # the old comment described, so the number is not corrected here: the open item
                 # in this module's docstring holds the measurement and says why it is deferred.
                 rate_in, rate_out, est_basis = self.server.pricing.rate(model or "")
-                pin, pout = 0, deltas
-                cost = deltas * rate_out
+                # THE PROMPT SIDE IS NOT ZERO AND MUST NOT SAY IT IS. `prompt_tokens: 0` used to
+                # stand here. It is not the honest floor the completion side is -- it is a false
+                # measurement, and on this campaign it is the false one that matters: arm A's prompt
+                # side is 97.3 % of its metered spend, and charging each of the 129 aborts the prompt
+                # of the nearest complete call in its own task-arm puts $1.20 on top of their $6.44.
+                # See `PromptTokens` for the ratio, its calibration and its measured error.
+                pin, prompt_basis, per_token, cal_calls = self.server.prompt_scale.estimate(
+                    prompt_chars)
+                pout = deltas
+                cost = pin * rate_in + deltas * rate_out
                 basis = "estimated_from_deltas"
+                usage = {
+                    "prompt_tokens": pin, "completion_tokens": deltas,
+                    "total_tokens": pin + deltas,
+                    "cost": cost, "cost_basis": basis,
+                    "cost_source": self.server.pricing.fetched_at,
+                    # EVERY NUMBER ABOVE NAMES WHERE IT CAME FROM, in the frame itself rather than
+                    # only in this proxy's log, because the reader that has to act on it is the
+                    # client's accountant and it never sees the log.
+                    "meter_prompt_tokens_basis": prompt_basis,
+                    "meter_prompt_chars": prompt_chars,
+                    "meter_completion_tokens_basis": "counted_from_forwarded_deltas",
+                    "meter_note": "upstream ended the stream without a usage frame; "
+                                  "completion_tokens is a FLOOR counted from forwarded deltas and "
+                                  f"prompt_tokens is {prompt_basis}",
+                }
+                if per_token is not None:
+                    usage["meter_chars_per_prompt_token"] = round(per_token, 4)
+                    usage["meter_prompt_calibration_calls"] = cal_calls
+
+                # TWO FRAMES, NOT ONE, AND THAT IS THE WHOLE FIX ON THE STREAMING SIDE. A single
+                # frame carrying BOTH a populated `choices` array and a `usage` block is not the
+                # shape an OpenAI-compatible client reads usage out of, and measured 2026-08-26
+                # against arm A's own litellm 1.97.0 it is silently dropped: streaming that frame
+                # gives `usage=None`, and streaming it with `stream_options={"include_usage": true}`
+                # gives a MINTED `Usage(prompt_tokens=0, completion_tokens=0)` with no cost -- the
+                # client's accountant reading a zero this proxy never sent. The conformant shape is
+                # the one `include_usage` itself uses: the cut arrives on a chunk with the
+                # `finish_reason` and no usage, then the price arrives on a chunk with `choices: []`.
+                # Both survive `_reassemble` (finish from the first, usage from the second), and arm
+                # B, which reads `usage` off ANY chunk (`looplab/core/llm.py`, `if ev.usage`), is
+                # unaffected either way.
+                #
                 # BUILT ONCE, DELIVERED BY WHICHEVER ROUTE THE CLIENT IS ON. Writing it through
                 # `emit()` alone is how it came to be lost: `emit()` returns immediately when the
                 # client is being collected for, so the adapted (non-streaming) client got a body
-                # with no `usage` at all and a null finish reason — a truncated answer arriving as a
-                # clean 200 with nothing for that arm's accountant to read. That is the very leak the
-                # estimate exists to close, one layer up, and it was untested because the fake
-                # upstream in the guard test always sent a usage frame.
-                estimate = {
-                    "id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
-                    "choices": [{"index": 0, "delta": {},
-                                 "finish_reason": STREAM_TRUNCATED_FINISH_REASON}],
-                    "usage": {
-                        "prompt_tokens": 0, "completion_tokens": deltas, "total_tokens": deltas,
-                        "cost": cost, "cost_basis": basis,
-                        "cost_source": self.server.pricing.fetched_at,
-                        "meter_note": "upstream ended the stream without a usage frame; "
-                                      "completion_tokens is a FLOOR counted from forwarded deltas"},
-                }
+                # with no `usage` at all and a null finish reason -- a truncated answer arriving as a
+                # clean 200 with nothing for that arm's accountant to read.
+                stamp = int(time.time())
+                cut = {"id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
+                       "created": stamp,
+                       "choices": [{"index": 0, "delta": {},
+                                    "finish_reason": STREAM_TRUNCATED_FINISH_REASON}]}
+                priced = {"id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
+                          "created": stamp, "choices": [], "usage": usage}
                 if collect_for_client:
-                    collected.append(estimate)
+                    collected.append(cut)
+                    collected.append(priced)
                 else:
-                    emit(b"data: " + json.dumps(estimate).encode() + b"\n\n")
+                    emit(b"data: " + json.dumps(cut).encode() + b"\n\n")
+                    emit(b"data: " + json.dumps(priced).encode() + b"\n\n")
             emit(b"")           # terminating zero-length chunk
             if collect_for_client:
                 # ONE body, built from the frames, with the usage frame this proxy already priced
@@ -744,9 +891,13 @@ class Handler(BaseHTTPRequestHandler):
                     "completion_tokens": pout, "cost": cost, "cost_basis": basis,
                     "metered": bool(basis)})
         row["deltas_seen"] = deltas
+        if prompt_basis:
+            row["prompt_tokens_basis"] = prompt_basis
         if basis == "estimated_from_deltas":
+            row["prompt_chars"] = prompt_chars
             row["note"] = ("upstream ended the stream with no usage frame after "
-                           f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas (a FLOOR)")
+                           f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas (a FLOOR)"
+                           f" and a prompt of {pin} tokens ({prompt_basis})")
             row["stream_aborted"] = True
         elif not basis and row.get("error"):
             # THE ROW MUST NOT CONTRADICT ITSELF. The synthesis above lives inside the `try`, so any
@@ -773,6 +924,14 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     address_family = socket.AF_INET
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # PER SERVER, not per class: a class attribute would let one test's traffic calibrate the
+        # next test's estimate, and two proxies pointed at two gateways share one tokenizer ratio.
+        # Everything else on this object is assigned by `main()` (or by a test); this one is not,
+        # because a missing calibrator would price an abort at zero prompt tokens in silence.
+        self.prompt_scale = PromptTokens()
 
     # A CLIENT HANGING UP IS NOT AN INCIDENT. `http.server` prints a full traceback for every
     # exception in a handler thread, and an httpx/aiohttp connection pool closes idle keep-alive
