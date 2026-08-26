@@ -308,8 +308,54 @@ the campaign driver had to learn the difference from the exit code instead.
 
 ## 8. Nothing is retained between runs
 
-    OPEN[no-lesson-survives-a-run]
-    proof:absent:write_lessons@looplab/engine/claim_steward.py
+**CLOSED 2026-08-26**, and the item's own evidence was wrong in three places while its conclusion
+was right for a different reason. Marker deleted.
+
+**What the corpus actually says** (all 20 task-arms, re-counted independently): `lessons.jsonl`
+exists for **four** tasks, not none, with one lesson each and four matching `lessons_distilled`
+events. But `meta_notes.jsonl`, `cases.jsonl` and `skills/` exist for **zero of twenty**, and the
+only finalize steps anywhere in the corpus are `begun` / `report_begun` / `report` / `abandoned` —
+no `reflection`, no `case`, no `budget`, no `diversity`. Eleven runs reached finalization and all
+eleven closed the same way.
+
+**The mechanism, and it is not where this section looked.** `_recover_scoped_terminal` appends
+`finalization_finished` — which clears `finalization_pending()` — and marks the scope abandoned,
+while `_scope_is_effective_terminal` excludes the guarded-abort class by construction. So
+`should_finalize` is False on that pass and on every later one, and `finalize_run`'s ENTIRE
+checklist goes with it. Run-end reflection — the meta-note, the distilled cross-run lessons, the
+auto-skill cards, i.e. everything a LATER run could read — lives in that checklist.
+
+That made it the ORDINARY outcome rather than an edge case, because a budgeted run is supposed to
+end exactly there.
+
+**It is NOT fixed by naming the ceiling `budget_exhausted` (§7), and believing otherwise was the
+trap.** That reason is in `GUARDED_ABORT_REASONS` deliberately: `reason == "error"` never meant
+"crashed", it meant "written by the outer handler rather than the engine's clean finish", and six
+protocol sites need the distinction. Renaming it changed nothing here. The reflection is now run
+inside `_recover_scoped_terminal` instead, guarded so it can never wedge a terminal, gated on the
+scope's own `reflection` marker so a resume neither re-spends it nor duplicates a note. Its two
+effects were ALREADY allow-listed by `finalize_scope_quiescent` — the protocol had anticipated this
+call site. That also repairs the case this section was nominally about: a genuine crash used to
+cost the run its memory too.
+
+**Three pieces of the original evidence do not survive.** "No `lessons.jsonl`" — false over twenty;
+the eight-task sample happened to contain none of the four. "A lock without a payload suggests a
+failing write" — false: those locks are taken by a READER,
+`governance_health.py::project_governed_sources`, unconditionally. "The machinery runs and writes
+nothing" — the eleven sub-millisecond `lessons_distill` spans on `edge_expansion` are the cadence
+gate returning; where it opens, the span runs 4.8–8.7 s and the write succeeds.
+
+**And one thing is not a defect at all.** No two task-arms share a store: `campaign.sh` gives each
+its own `LOOPLAB_MEMORY_DIR`, deliberately, so arm B could not reach task 12 with eleven prior runs
+to read while the reference arm has no equivalent. Cross-run transfer was never on trial here.
+Left alone.
+
+2100 finalization/budget/lesson/scope tests green; removing the reflection call turns the new tests
+red, including one written for the `budget_exhausted` reason the ceiling actually writes — a test
+covering only `"error"` would have gone on passing while every real budgeted run kept losing its
+memory.
+
+The original finding:
 
 **Measured:** every task's `memory/` holds `lessons.jsonl.lock` and **no `lessons.jsonl`**;
 `knowledge/` is empty in all eight. The `spans.jsonl` shows `lessons_distill`, `lessons_refresh`

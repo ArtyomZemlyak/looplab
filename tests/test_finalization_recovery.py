@@ -853,6 +853,55 @@ def test_scoped_error_finish_converges_and_does_not_loop(tmp_path):
     assert st.finished and not st.finalization_pending()
 
 
+def test_error_terminal_still_writes_the_run_end_reflection(tmp_path):
+    """doc 53 §8 `no-lesson-survives-a-run`: an error terminal must not cost the run its MEMORY.
+
+    A budgeted run stops on `llm_budget_usd` with `reason="error"`, `_recover_scoped_terminal`
+    closes that scope as `abandoned/error_terminal`, and `should_finalize` is then False forever —
+    so `finalize_run`'s checklist, which is where run-end reflection (meta-note + distilled
+    cross-run lessons + auto-skills) lives, never ran. Measured on the 20-task AlgoTune arm-B
+    corpus: 11 runs reached finalization, all 11 closed here, and `memory/meta_notes.jsonl` exists
+    for none of them. Reflection must run exactly ONCE on this path, and stay once across resumes
+    (it is paid), without re-opening or duplicating the terminal.
+    """
+    import looplab.engine.finalize as mod
+    from looplab.engine.finalize import incomplete_finalize_scope
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    (run_dir / "task.snapshot.json").write_text("{}", encoding="utf-8")
+    scope = "finalize:0badc0de00000000"
+    begun = store.append("finalize_step", {
+        "scope": scope, "step": "begun",
+        "finish_data": {"reason": "error",
+                        "error": "LLM spend ceiling reached: $1.0107 of the $1.0000 set by "
+                                 "`llm_budget_usd`."},
+        "finish_report_planned": False})
+    store.append("run_finished", {
+        "reason": "error",
+        "error": "LLM spend ceiling reached: $1.0107 of the $1.0000 set by `llm_budget_usd`.",
+        "finalize_scope": scope, "after_seq": begun.seq, "finalization_required": True})
+    eng = _EngineStub(run_dir)
+
+    baseline = sum(e.type == "run_finished" for e in store.read_all())
+    for _ in range(5):                          # each iteration models one resume
+        mod.finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    # THE POINT: the run distilled its memory even though its terminal was an error.
+    assert eng.reflection_calls == 1, "run-end reflection was skipped on an error terminal"
+    events = store.read_all()
+    steps = [e.data for e in events if e.type == "finalize_step" and e.data.get("scope") == scope]
+    assert any(d.get("step") == "reflection" for d in steps), steps
+    # ...and the convergence contract R8-A1 still holds: one terminal, scope closed, not pending.
+    assert sum(e.type == "run_finished" for e in events) == baseline
+    assert any(d.get("step") == "abandoned" for d in steps), steps
+    assert incomplete_finalize_scope(events) is None
+    st = fold(events)
+    assert st.finished and not st.finalization_pending()
+
+
 def test_a_never_converging_cost_refresh_degrades_instead_of_wedging(tmp_path, monkeypatch):
     """A permanently-failing usage reconcile must not block completion forever.
 
@@ -989,6 +1038,257 @@ def test_error_recovery_never_acknowledges_a_finish_belonging_to_another_scope(t
                                    "finish_data": {"reason": "error"}})
     # A LATER bare fallback error finish lands, carrying no scope of its own.
     foreign = store.append("run_finished", {"reason": "error", "error": "fallback wrap-up failed"})
+    (run_dir / "task.snapshot.json").write_text("{}", encoding="utf-8")
+
+    events = store.read_all()
+    state = fold(events)
+    assert state.last_finish_seq == foreign.seq, "precondition: the foreign finish is the latest"
+    assert _scope_finish_event(events, "finish:own").seq == own.seq
+
+    eng = _EngineStub(run_dir)
+    _recover_scoped_terminal(eng, events, state, "finish:own")
+
+    acknowledged = [
+        event.data.get("finish_seq") for event in eng.store.read_all()
+        if event.type == "finalization_finished"]
+    assert foreign.seq not in acknowledged, (
+        "an older scope acknowledged a later foreign finish — that boundary is now closed without "
+        "ever having run its own finalize checklist")
+    # The scoped attempt still closes itself, so recovery converges instead of spinning.
+    assert any(event.type == "finalize_step"
+               and event.data.get("scope") == "finish:own"
+               and event.data.get("step") == "abandoned"
+               for event in eng.store.read_all())
+
+
+def test_finalize_own_card_enrichment_does_not_abandon_its_scope(tmp_path):
+    """`card_enriched` inside an open scope is the finalization's OWN effect, not a foreign event.
+
+    `finalize_run` calls `_sync_card_enrichments` between the scope's `begun` claim and
+    `_publish_completion`, and that appends FOLDED `card_enriched` events. While the type was absent
+    from `finalize_scope_quiescent`'s allow-list, a crash in that window made the wrap-up's own write
+    read as foreign: quiescence went False, `incomplete_finalize_scope` went None, and for a scoped
+    finish WITHOUT `finalization_required` — exactly the old scoped-log population this predicate
+    exists for — `should_finalize` never fired again, so the llm_cost roll-up and completion markers
+    were lost forever. Same failure class REPLAY-1 closed for reflection_note/lessons_distilled.
+    """
+    from looplab.engine.finalize import finalize_scope_quiescent, incomplete_finalize_scope
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    finish = store.append("run_finished", {"reason": "aborted", "finalize_scope": "abort:3"})
+    store.append("finalize_step", {"scope": "abort:3", "step": "begun",
+                                   "after_seq": finish.seq})
+    store.append("reflection_note", {"note": "wrapping up"})
+    events = store.read_all()
+    assert finalize_scope_quiescent(events, "abort:3") is True
+    assert incomplete_finalize_scope(events) == "abort:3"
+
+    store.append("card_enriched", {"id": "card-1", "footprint": {"gpus": 1}})
+    events = store.read_all()
+    assert finalize_scope_quiescent(events, "abort:3") is True, (
+        "the wrap-up's own card enrichment must not read as a foreign event")
+    assert incomplete_finalize_scope(events) == "abort:3", (
+        "the scope must stay recoverable, or its cost roll-up and completion markers are lost")
+
+    # A genuinely foreign domain event still invalidates the stale decision.
+    store.append("node_created", {"node_id": 9, "operator": "draft", "idea": {"operator": "draft"}})
+    assert finalize_scope_quiescent(store.read_all(), "abort:3") is False
+
+
+def test_a_budget_exhausted_terminal_writes_it_too(tmp_path):
+    """The reason the ceiling ACTUALLY writes since docs/53 §7 — the same path, the modern label.
+
+    `budget_exhausted` is in `GUARDED_ABORT_REASONS` on purpose: `reason == "error"` never meant
+    "crashed", it meant "written by the outer handler rather than the engine's clean finish", and
+    six protocol sites need that preserved. So renaming the ceiling did NOT restore the checklist,
+    and a test that only covers `"error"` would go on passing while every real budgeted run kept
+    losing its memory.
+
+    A budgeted run stops on `llm_budget_usd` with `reason="error"`, `_recover_scoped_terminal`
+    closes that scope as `abandoned/error_terminal`, and `should_finalize` is then False forever —
+    so `finalize_run`'s checklist, which is where run-end reflection (meta-note + distilled
+    cross-run lessons + auto-skills) lives, never ran. Measured on the 20-task AlgoTune arm-B
+    corpus: 11 runs reached finalization, all 11 closed here, and `memory/meta_notes.jsonl` exists
+    for none of them. Reflection must run exactly ONCE on this path, and stay once across resumes
+    (it is paid), without re-opening or duplicating the terminal.
+    """
+    import looplab.engine.finalize as mod
+    from looplab.engine.finalize import incomplete_finalize_scope
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    (run_dir / "task.snapshot.json").write_text("{}", encoding="utf-8")
+    scope = "finalize:0badc0de00000000"
+    begun = store.append("finalize_step", {
+        "scope": scope, "step": "begun",
+        "finish_data": {"reason": "budget_exhausted",
+                        "error": "LLM spend ceiling reached: $1.0107 of the $1.0000 set by "
+                                 "`llm_budget_usd`."},
+        "finish_report_planned": False})
+    store.append("run_finished", {
+        "reason": "budget_exhausted",
+        "error": "LLM spend ceiling reached: $1.0107 of the $1.0000 set by `llm_budget_usd`.",
+        "finalize_scope": scope, "after_seq": begun.seq, "finalization_required": True})
+    eng = _EngineStub(run_dir)
+
+    baseline = sum(e.type == "run_finished" for e in store.read_all())
+    for _ in range(5):                          # each iteration models one resume
+        mod.finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    # THE POINT: the run distilled its memory even though its terminal was an error.
+    assert eng.reflection_calls == 1, "run-end reflection was skipped on an error terminal"
+    events = store.read_all()
+    steps = [e.data for e in events if e.type == "finalize_step" and e.data.get("scope") == scope]
+    assert any(d.get("step") == "reflection" for d in steps), steps
+    # ...and the convergence contract R8-A1 still holds: one terminal, scope closed, not pending.
+    assert sum(e.type == "run_finished" for e in events) == baseline
+    assert any(d.get("step") == "abandoned" for d in steps), steps
+    assert incomplete_finalize_scope(events) is None
+    st = fold(events)
+    assert st.finished and not st.finalization_pending()
+
+
+def test_a_never_converging_cost_refresh_degrades_instead_of_wedging(tmp_path, monkeypatch):
+    """A permanently-failing usage reconcile must not block completion forever.
+
+    `_drain_outbox` leaves `complete=False` FOREVER for an undecodable/foreign `.json` record (it is
+    never removed) and for a same-id event whose payload differs, so `emit_llm_cost` returns False on
+    every pass and the staleness boundary never advances. Gating `requirements_complete` on it then
+    means `finalization_finished` is NEVER written and the run re-runs the whole finalize body —
+    including the PAID stewards — on every resume, inverting emit_llm_cost's own contract
+    ("telemetry never aborts domain finalization"). Bounded retries then a DISCLOSED shortfall.
+    """
+    import looplab.engine.finalize as finalize_module
+    from looplab.engine.finalize import finalize_run
+
+    run_dir = tmp_path / "run"
+    _terminal_store(run_dir)
+    eng = _EngineStub(run_dir)
+
+    monkeypatch.setattr(finalize_module, "emit_llm_cost", lambda engine, **kw: False)
+    monkeypatch.setattr(finalize_module, "_llm_cost_rollup_stale", lambda *a, **k: True)
+
+    for _ in range(finalize_module._COST_REFRESH_MAX_ATTEMPTS + 2):
+        finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    steps = [e.data for e in eng.store.read_all() if e.type == "finalize_step"]
+    failed = [d for d in steps if d.get("step") == "llm_cost_refresh_failed"]
+    assert failed, "each failed attempt must leave a durable receipt"
+    assert len(failed) <= finalize_module._COST_REFRESH_MAX_ATTEMPTS, "retries must be BOUNDED"
+    closed = [d for d in steps if d.get("step") == "llm_cost"]
+    assert closed, "after the bounded retries the step must close so the run can terminate"
+    assert any(d.get("degraded") for d in closed), "the shortfall must be DISCLOSED, not silent"
+
+
+def test_one_failing_steward_cannot_disable_the_others_and_leaves_a_receipt(tmp_path, monkeypatch):
+    """Concept curation, claim curation and task faceting are INDEPENDENT governance outputs.
+
+    They used to share a single try/except, so a concept-ledger exception skipped claim and
+    task-facet governance entirely while the run still published complete — one subsystem silently
+    disabling the others. Each now has its own boundary plus a `finalize_step` receipt (a DIAGNOSTIC
+    event, so fold state is untouched), which is what distinguishes "this task genuinely has no
+    facets" from "faceting never ran".
+    """
+    import looplab.engine.finalize as finalize_module
+
+    run_dir = tmp_path / "isolated-stewards"
+    _terminal_store(run_dir)
+    eng = _EngineStub(run_dir)
+    eng._cross_run_curation = True
+    ran: list[str] = []
+
+    def explode(_state):
+        ran.append("concept")
+        raise RuntimeError("concept ledger unavailable")
+
+    eng._store_concept_curation = explode
+    eng._store_claim_curation = lambda _state: ran.append("claim")
+    eng._store_task_facets = lambda _state: ran.append("facets")
+
+    monkeypatch.setattr(finalize_module, "emit_llm_cost", lambda *_a, **_k: True)
+    final = finalize_module.finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    assert ran == ["concept", "claim", "facets"], (
+        "a failing steward still short-circuits the independent ones that follow it")
+    assert not final.finalization_pending()      # completion is never blocked by a steward
+
+    receipts = {
+        event.data.get("step"): event.data.get("outcome")
+        for event in eng.store.read_all()
+        if event.type == "finalize_step" and event.data.get("step") in {
+            "concept_curation", "claim_curation", "task_facets"}
+    }
+    assert receipts == {
+        "concept_curation": "error",
+        "claim_curation": "completed",
+        "task_facets": "completed",
+    }, receipts
+    failure = next(event for event in eng.store.read_all()
+                   if event.type == "finalize_step"
+                   and event.data.get("step") == "concept_curation")
+    assert "concept ledger unavailable" in failure.data.get("error", "")
+
+
+def test_finalize_receipts_preserve_bounded_steward_outcomes(tmp_path, monkeypatch):
+    """A steward's successful call is not proof that governance work completed.
+
+    Production stewards deliberately catch provider/storage errors so finalization can continue. Their
+    bounded return value must reach the diagnostic receipt instead of being flattened to ``completed``.
+    """
+    import looplab.engine.finalize as finalize_module
+
+    run_dir = tmp_path / "truthful-steward-receipts"
+    _terminal_store(run_dir)
+    eng = _EngineStub(run_dir)
+    eng._cross_run_curation = True
+    eng._store_concept_curation = lambda _state: "unavailable"
+    eng._store_claim_curation = lambda _state: "error"
+    eng._store_task_facets = lambda _state: "already-governed"
+
+    monkeypatch.setattr(finalize_module, "emit_llm_cost", lambda *_a, **_k: True)
+    final = finalize_module.finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    assert not final.finalization_pending()
+    receipts = {
+        event.data.get("step"): event.data.get("outcome")
+        for event in eng.store.read_all()
+        if event.type == "finalize_step" and event.data.get("step") in {
+            "concept_curation", "claim_curation", "task_facets"}
+    }
+    assert receipts == {
+        "concept_curation": "unavailable",
+        "claim_curation": "error",
+        "task_facets": "already-governed",
+    }
+
+
+def test_error_recovery_never_acknowledges_a_finish_belonging_to_another_scope(tmp_path):
+    """An older scope must not stamp `finalization_finished` on a LATER, foreign finish.
+
+    `state.last_finish_seq` is the GLOBAL latest finish. A bare fallback error finish — one
+    `finalize_scope_quiescent` deliberately ignores — can land while an older scope is still being
+    recovered, and acknowledging it would close that boundary without it ever running its own
+    checklist. Only a finish this scope actually owns may be acknowledged.
+    """
+    from looplab.engine.finalize import _recover_scoped_terminal, _scope_finish_event
+
+    run_dir = tmp_path / "foreign-finish"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    # The scope under recovery: its own error finish, explicitly stamped.
+    own = store.append("run_finished", {
+        "reason": "budget_exhausted", "error": "first wrap-up failed",
+        "finalization_required": True, "finalize_scope": "finish:own"})
+    store.append("finalize_step", {"scope": "finish:own", "step": "begun",
+                                   "finish_data": {"reason": "budget_exhausted"}})
+    # A LATER bare fallback error finish lands, carrying no scope of its own.
+    foreign = store.append("run_finished", {"reason": "budget_exhausted", "error": "fallback wrap-up failed"})
     (run_dir / "task.snapshot.json").write_text("{}", encoding="utf-8")
 
     events = store.read_all()
