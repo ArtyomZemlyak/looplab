@@ -111,6 +111,40 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
     return admitted
 
 
+def question_concept_rows(questions: Iterable, per_question: Iterable) -> dict[str, list]:
+    """Join each question to ITS OWN concept row: `question_concepts[i]` describes `questions[i]`.
+
+    PURE and shared on purpose (CLAUDE.md §0.8 measured the alternative: four implementations of one
+    claim/verdict join, and every drift was between the copies). Two callers — the deep-research memo
+    and, since #72, the Researcher's own registered questions — and a positional join that disagrees
+    with itself files a question under a concept set belonging to a different question.
+
+    THE ORDER IS THE WHOLE FUNCTION. Blanks are skipped AFTER the index is read, never before. The
+    in-place version filtered them out first and then enumerated the SHORTENED list, so every
+    question after a blank took its predecessor's row: driven with `["", "q2"]` and
+    `[["loss/contrastive"], ["training/negative-mining"]]`, q2 was filed under `loss/contrastive`.
+    That misplaces the row in the question lattice, which keys on the concept SET.
+
+    LATENT WHEN FIXED, and the zero is worth keeping: over every event log on the box — 173 memos
+    carrying an `open_questions` list — 0 contained a blank and 0 carried `question_concepts` at all,
+    because the field could not reach the durable row until `_assemble` stopped raising on it
+    (7d406cc2). Repairing that carrier is exactly what made this reachable.
+
+    Checked, not trusted: a short, missing or non-list row simply yields no concepts for that
+    question, and a question with none is registered exactly as it was before any of this shipped.
+    """
+    rows = list(per_question or [])
+    joined: dict[str, list] = {}
+    for index, question in enumerate(questions or []):
+        statement = str(question or "").strip()
+        if not statement:
+            continue
+        row = rows[index] if index < len(rows) else None
+        if isinstance(row, list) and row:
+            joined[statement] = row
+    return joined
+
+
 def is_pure_belief(card) -> bool:
     """A board row that owns no ACTION — the Card equivalent of the old open hypothesis.
 
@@ -538,17 +572,11 @@ class ResearchCadenceMixin:
                 # mean nothing). Checked, not trusted: a mis-aligned or short list simply yields no
                 # concepts for that question, and a question with none is registered exactly as it
                 # was before this shipped.
-                # REVIEW 2026-08-25 (P1 attribution): removing blanks before `enumerate` shifts the
-                # positional `question_concepts` join. For ["", "q2"] with [["c1"], ["c2"]], q2
-                # receives c1. Enumerate the original open_questions, read the same-index concept row,
-                # and only then skip an empty statement.
-                raw_questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()]
-                per_question = memo_d.get("question_concepts") or []
-                by_statement = {}
-                for index, statement in enumerate(raw_questions):
-                    row = per_question[index] if index < len(per_question) else None
-                    if isinstance(row, list) and row:
-                        by_statement[str(statement).strip()] = row
+                # The order rule and its driven counter-example live in `question_concept_rows`,
+                # which is shared with the Researcher's own registered questions — a positional join
+                # spelled twice is a join that will disagree with itself.
+                by_statement = question_concept_rows(
+                    memo_d.get("open_questions") or [], memo_d.get("question_concepts") or [])
                 for direction in self._admissible_beliefs(questions[:5]):
                     concepts = by_statement.get(str(direction).strip())
                     self.store.append(EV_HYPOTHESIS_ADDED, {

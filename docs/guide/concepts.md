@@ -1285,6 +1285,20 @@ Near-duplicate *wording* is not caught here on purpose: over that run's statemen
 rule scores its best pair across two genuinely different experiments, so paraphrase identity stays
 the agentic consolidation cadence's job.
 
+**A question is filed under ITS OWN concepts**, and the positional join that does it
+(`engine/research_cadence.py::question_concept_rows`) is one shared pure function rather than a rule
+each caller re-spells. `question_concepts[i]` describes `open_questions[i]`, so a blank statement is
+skipped **after** its index is read: filtering blanks first and enumerating the shortened list gave
+every question after a blank its predecessor's row — driven with `["", "q2"]` against
+`[["loss/contrastive"], ["training/negative-mining"]]`, `q2` was filed under `loss/contrastive`. That
+is not a mislabelling but a misplacement, because a question's concept SET is its position in the
+question lattice. It has never fired on this box, and the zero is evidence rather than comfort: of
+173 memos carrying an `open_questions` list, **0** contain a blank and **0** carry
+`question_concepts` at all — the field could not reach the durable row until `_assemble` stopped
+raising on it, so repairing that carrier is exactly what makes this reachable. A short, missing or
+non-list row still yields no concepts for that question, and a question with none is registered
+exactly as it was before any of this shipped.
+
 Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the bounded
 `concept_consolidation` rename chain (at most 16 hops) on the base, inherited values, removals and additions
 **before** set subtraction/union. Thus `Model/Transformer` can be removed by `model/transformer`, and
