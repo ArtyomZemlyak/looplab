@@ -116,10 +116,30 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
                 continue
             # An outer invocation guard can record the exception raised after ``begun``. It must not
             # steal the original terminal intent; recovery republishes the exact staged payload.
-            if str(data.get("reason") or "").lower() == "error":
+            if is_guarded_abort(data.get("reason")):
                 continue
         return False
     return True
+
+
+# THE GUARDED-ABORT CLASS, and why it is a predicate rather than a literal in six places.
+#
+# `reason == "error"` never meant "this run crashed". It means "this terminal event was written by
+# `cli/run_cmds.py::_run_engine_guarded`'s outer handler rather than by the engine's own clean
+# finish", and the finalization protocol keys on that distinction: an outer invocation guard may
+# record the exception raised after `begun`, and it must not steal the original terminal intent.
+#
+# Reaching the operator's spend ceiling travels that same path while being the DESIGNED end of a
+# budgeted run, so `run_finished` now names it `budget_exhausted` -- measured on the 2026-08-24
+# campaign, all eleven finishes in `runs-B` said `error` and every one was the ceiling, zero
+# genuine failures. Introducing that reason WITHOUT this predicate would have flipped all six
+# protocol checks at once and made a guarded abort look like a clean engine finish.
+GUARDED_ABORT_REASONS = ("error", "budget_exhausted")
+
+
+def is_guarded_abort(reason) -> bool:
+    """True when a `run_finished` reason was written by the guarded-abort path."""
+    return str(reason or "").lower() in GUARDED_ABORT_REASONS
 
 
 def incomplete_finalize_scope(events) -> str | None:
@@ -139,7 +159,7 @@ def incomplete_finalize_scope(events) -> str | None:
         )
         is_finished = (
             event.type == EV_RUN_FINISHED
-            and str(data.get("reason") or "").lower() != "error"
+            and not is_guarded_abort(data.get("reason"))
             and _adjacent_claim(event)
         )
         scope = data.get("scope") if is_begun else data.get("finalize_scope")

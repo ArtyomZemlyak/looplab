@@ -85,6 +85,31 @@ def _refuse_wrap_up_engine_that_could_propose(eng) -> None:
     raise wrap_up_lift_refusal(kind, getattr(eng, "wrap_up_degradation_warning", None))
 
 
+def _budget_leaf(exc: BaseException, _depth: int = 0):
+    """The `BudgetExceeded` inside `exc`, however deeply a task group wrapped it — or None.
+
+    Bounded depth: an exception group can nest, and a cycle in `__cause__`/`__context__` (which a
+    caller can construct) must not turn a terminal-event handler into a hang.
+    """
+    from looplab.core.llm import BudgetExceeded
+
+    if _depth > 8 or exc is None:
+        return None
+    if isinstance(exc, BudgetExceeded):
+        return exc
+    for inner in list(getattr(exc, "exceptions", ()) or ()):
+        found = _budget_leaf(inner, _depth + 1)
+        if found is not None:
+            return found
+    for attr in ("__cause__", "__context__"):
+        inner = getattr(exc, attr, None)
+        if inner is not None and inner is not exc:
+            found = _budget_leaf(inner, _depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
 def _run_engine_guarded(eng: Engine):
     """Drive the engine loop to completion, funneling any fatal abort into a terminal event.
     Shared by `run` and `resume` (previously duplicated verbatim in both)."""
@@ -114,7 +139,30 @@ def _run_engine_guarded(eng: Engine):
             error_text = str(e)[:500]
         except BaseException:  # an adversarial __str__ must not replace the root exception
             error_text = type(e).__name__
-        error = {"reason": "error", "error": error_text}
+
+        # REACHING THE CEILING IS THE DESIGNED END OF A BUDGETED RUN, NOT A CRASH.
+        #
+        # Measured on the 2026-08-24 campaign: ALL ELEVEN `run_finished` rows in `runs-B` carry
+        # `reason: "error"`, and every one of them is the spend ceiling -- zero genuine failures.
+        # A reader keying on the class cannot tell a healthy budgeted finish from a crash, and the
+        # campaign driver had to learn the difference from an exit code instead. `stop_account.py`
+        # already repairs this at READ time by printing the sentence; this repairs it at write time
+        # so a programmatic reader does not have to grep prose.
+        #
+        # THE SEARCH IS RECURSIVE because of the very wrapping this function's docstring describes:
+        # anything raised inside the eval task group escapes as the GROUP's "unhandled errors in a
+        # TaskGroup (1 sub-exception)", and the leaf message never reaches this event. Walking the
+        # group recovers both the class AND the sentence, so a ceiling hit inside a concurrent eval
+        # is recorded the same way as one on the serial path -- previously it would not have been.
+        budget = _budget_leaf(e)
+        if budget is not None:
+            try:
+                error_text = str(budget)[:500]
+            except BaseException:                       # noqa: BLE001 - keep the class at minimum
+                error_text = type(budget).__name__
+            error = {"reason": "budget_exhausted", "error": error_text}
+        else:
+            error = {"reason": "error", "error": error_text}
         try:
             events = eng.store.read_all()
             current = fold(events)

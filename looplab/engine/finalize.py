@@ -26,7 +26,7 @@ from looplab.events.eventstore import EventStoreConcurrencyError
 # finalization WRITER lives, and every existing caller/patch path keeps resolving here.
 from looplab.events.finalize_scope import (  # noqa: F401
     _adjacent_claim, _finalize_begun, _scope_has_step, finalize_scope_quiescent,
-    incomplete_finalize_scope)
+    incomplete_finalize_scope, is_guarded_abort)
 # The step vocabulary and the `budget` receipt shape are the PROTOCOL, shared with every reader —
 # `search/speculation_quality.py` refuses calibration evidence whose finalization does not match it
 # exactly, and `search` may not import the engine (doc 25 SE-01).
@@ -97,7 +97,7 @@ def _scope_terminal(events, scope: str):
             for event in reversed(events)
             if event.type == EV_RUN_FINISHED
             and (event.data or {}).get("finalize_scope") == scope
-            and str((event.data or {}).get("reason") or "").lower() != "error"
+            and not is_guarded_abort((event.data or {}).get("reason"))
             and _adjacent_claim(event)
         ),
         None,
@@ -169,7 +169,7 @@ def _scope_is_effective_terminal(events, state: RunState, scope: str) -> bool:
     data = event.data or {}
     return (
         data.get("finalize_scope") == scope
-        and str(data.get("reason") or "").lower() != "error"
+        and not is_guarded_abort(data.get("reason"))
         and _adjacent_claim(event)
     )
 
@@ -539,7 +539,7 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
     # forever and strand the run as non-terminal in every projection — strictly worse than the narrow
     # mis-acknowledgement this guard exists to prevent. Only a finish proven to be someone else's is
     # skipped.
-    if str(finish_data.get("reason") or "").lower() == "error":
+    if is_guarded_abort(finish_data.get("reason")):
         _own_finish = _scope_finish_event(events, scope)
         _finish_is_foreign = (_own_finish is not None
                               and _own_finish.seq != state.last_finish_seq)
@@ -653,7 +653,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
     legacy_initial = bool(
         not entry_finished
         and completed.finished
-        and str(finish_data.get("reason") or "").lower() != "error"
+        and not is_guarded_abort(finish_data.get("reason"))
     )
     should_finalize = bool(completed.finalization_pending() or scoped_terminal or legacy_initial)
 

@@ -217,8 +217,28 @@ the cheapest action available (item 2).
 
 ## 7. A run that ends on the ceiling is recorded as an error
 
-    OPEN[spend-ceiling-recorded-as-run-error]
-    proof:absent:budget_exhausted@looplab/engine/finalize.py
+**CLOSED 2026-08-26.** `run_finished` now names the disposition `budget_exhausted`, with the
+sentence kept in `error`. The measurement was worse than this section recorded: not five of eight
+but **eleven of eleven** finishes under `runs-B` said `error`, and every one was the ceiling —
+zero genuine failures in the whole campaign.
+
+THE FIX AS THIS SECTION PROPOSED IT WOULD HAVE BROKEN THE ENGINE, and that is worth keeping.
+`reason == "error"` never meant "this run crashed". It means "this terminal event was written by
+`cli/run_cmds.py::_run_engine_guarded`'s outer handler rather than by the engine's own clean
+finish", and six sites in `finalize.py`/`finalize_scope.py` key on exactly that to avoid stealing a
+terminal intent. A distinct reason introduced without teaching them would have made a guarded abort
+look like a clean engine finish. So the reason is distinct AND the class is now a predicate,
+`is_guarded_abort`, with a test that fails if a seventh site ever spells the literal again.
+
+It also closed a hole the old code could not see at all: `_run_engine_guarded`'s own docstring
+records that anything raised inside the eval task group escapes as the GROUP's "unhandled errors in
+a TaskGroup (1 sub-exception)", so a ceiling hit on the concurrent path reached the event with
+neither its class nor its sentence. The search is now recursive through exception groups and cause
+chains, depth-bounded so a constructed cycle cannot hang a terminal-event handler.
+
+1276 finalization/budget/scope tests green; three mutations each turn the new tests red.
+
+The original finding:
 
 Five of the eight task-arms ended with `run_finished {"reason": "error", "error": "LLM spend
 ceiling reached: $1.00xx of the $1.0000…"}`. Reaching the budget is the **designed** terminal state
