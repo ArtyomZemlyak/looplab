@@ -1239,6 +1239,30 @@ and an index; they see the board's content without either claim contract. Until 
 first list existed, so a card disappeared from the Researcher's view the moment it got a node,
 including a node still running.
 
+**The Researcher can now RECORD a question it is not pursuing** — `Idea.open_questions`, with
+`Idea.question_concepts` aligned by position, both carried on the emit schema the proposer reads.
+Until this field only deep research and the operator could put a question on the board: the
+Researcher could ANSWER a direction (`parent_card_id`) and, since `read_questions`, READ the board,
+and had no way to ASK. A question noticed mid-proposal and left in `rationale` prose is read by
+nothing. It is an **output field and deliberately not a tool**, because the engine is the sole writer
+of domain events (invariant #1) — and `EV_HYPOTHESIS_ADDED`'s membership in `BACKGROUND_APPENDABLE`
+does not license a tool-thread append, since that membership exists for the concurrent research task
+whose safety argument is "appending *fewer* rows moves no reader's position".
+
+Registering a question is **free**: the field is in no digest, so two proposals differing only in the
+questions they file are the same executable action — a Researcher that had to spend its proposal to
+record a question would record none. It is also *tolerant where the concept envelope is strict*: a
+malformed value heals to empty instead of raising, because a question is worth strictly less than
+the experiment carrying it, and the opposite choice is what discarded two complete deep-research
+passes over one flat list. A blank statement KEEPS its slot in the payload — position is the join —
+and is dropped only by `question_concept_rows` (after its index is read) and by
+`admit_research_beliefs` (from the board). **The engine-side append is not wired yet** — the open-item
+marker for it is declared once, on the field itself in `core/models.py`, and the reason it is staged
+rather than inlined is that `EV_HYPOTHESIS_ADDED` is FOLDED: appending it inside a reservation's
+authority CAS window moves `speculation._proposal_authority_seq`'s max-seq compare and discards a
+proposal the run has already paid for, which is the hazard invariant #1 records for
+`train_monitor_alert`.
+
 **A DIRECTION IS NEVER A CLAIM, and since 2026-08-26 that is enforced rather than only asked for.**
 `agents/roles.py::bind_idea_to_board_card` resolves two independent edges against the same visible
 board — `card_id` (a claim on a work item) and `parent_card_id` (a filing under a question) — and

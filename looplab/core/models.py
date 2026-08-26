@@ -576,6 +576,14 @@ class NodeStatus(str, Enum):
     failed = "failed"        # ran but produced no usable metric
 
 
+# DURABLE-PAYLOAD hygiene for `Idea.open_questions`, not a policy about the board. The board cap is
+# `engine/research_cadence.py::admit_research_beliefs`, which is derived from the prompt window every
+# reader can actually show; re-stating that number here is exactly how two caps come to disagree, so
+# these are deliberately LOOSER and answer only "how much may one proposal write into node_created".
+_REGISTERED_QUESTION_LIMIT = 8
+_REGISTERED_QUESTION_CHARS = 500
+
+
 class Idea(BaseModel):
     """A proposed experiment: which operator, what parameters, why."""
     operator: str
@@ -668,6 +676,68 @@ class Idea(BaseModel):
             "of minimal-change experiments is tracked to a shared verdict. Never put a DIRECTION_ID "
             "in card_id, and never name this experiment's own card here."),
     )
+    # QUESTIONS THIS PROPOSAL IS NOT PURSUING — the Researcher's own channel for "I noticed something
+    # worth investigating and it is not what I am proposing now". Until this shipped only deep
+    # research and the operator could put a question on the board: the Researcher could ANSWER a
+    # direction (`parent_card_id`) and, through `read_questions`, READ the board, and had no way to
+    # ASK. A noticed-but-unpursued question left in `rationale` prose is read by nothing.
+    #
+    # AN OUTPUT FIELD AND DELIBERATELY NOT A TOOL. Engine invariant #1: the engine is the sole writer
+    # of domain events, so a role returns a value and the ENGINE appends. A `register_question` tool
+    # would append `EV_HYPOTHESIS_ADDED` from inside a tool call on the role's own thread, and that
+    # event's membership in `BACKGROUND_APPENDABLE` does not license it — that membership exists for
+    # the concurrent RESEARCH TASK, whose safety argument is "appending FEWER rows moves no reader's
+    # position", not "any thread may append".
+    #
+    # Advisory, nullable and additive with reader-side defaults (invariant #5), exactly like
+    # `card_id`/`parent_card_id`: it rides `durable_idea_payload` -> `node_created` ->
+    # `Idea(**d["idea"])` for free, and an old log that carries neither key folds identically. NOT
+    # part of any digest — `IDEA_PROPOSAL_DIGEST_V1_FIELDS` and the card action digests are fixed
+    # tuples that do not name it, so two proposals differing only in the questions they file are the
+    # same executable action. That is what makes asking FREE, which is the whole point: a Researcher
+    # that had to spend its proposal to record a question would record none.
+    #
+    # OPEN[researcher-questions-not-appended] the CARRIER ships here and no engine path reads it yet,
+    # so a registered question rides `node_created` and becomes no board row.
+    # proof:absent:idea_registered_questions@looplab/engine/research_cadence.py
+    #
+    # WHY IT IS STAGED rather than inlined: `EV_HYPOTHESIS_ADDED` is FOLDED, so appending it from the
+    # main task inside a reservation's window moves `speculation._proposal_authority_seq`'s max-seq
+    # CAS and discards a proposal the run has already PAID for — the exact hazard invariant #1
+    # records for `train_monitor_alert`. The append must land outside that window, reuse
+    # `research_cadence.admit_research_beliefs` (so the two writers agree about a full board) and
+    # `question_concept_rows` (so both spell the positional join once). Shipping the carrier alone is
+    # the "stamped and nothing consumes it" shape this repo has paid for before, which is exactly why
+    # it wears a marker instead of a promise.
+    #
+    # The proof is over the FIX'S OWN SYMBOL (CLAUDE.md tier 1) and NOT over the string
+    # `open_questions`: that literal already occurs in `research_cadence.py`'s memo path and
+    # docstrings, so an `absent:` predicate on it is false the day it is written — the guard caught
+    # exactly that, along with the slug being declared in three files instead of one.
+    # `idea_registered_questions` exists nowhere yet; the commit that adds it turns this proof red,
+    # and a red guard here means the item SHIPPED, so delete the marker. The predicate is ONE
+    # whitespace-free token by construction — the guard splits on space, so `absent:def foo@path`
+    # parses as the predicate `absent:def`, which it rejected.
+    open_questions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional. Research questions you noticed but are NOT pursuing in this experiment — "
+            "each a broad question worth its own investigation later, not a restatement of what you "
+            "are proposing now. They become open research directions on the board that you or a "
+            "later experiment can file work under; nothing is run because you listed it here."),
+    )
+    # WHAT EACH QUESTION IS ABOUT, positionally aligned with `open_questions` — the same shape and
+    # the same join as `ResearchMemo.question_concepts`, resolved by the one shared
+    # `engine/research_cadence.py::question_concept_rows`. A question's concept SET is its position
+    # in the question lattice, so a question with no concepts is registered and lands ungrouped
+    # rather than being refused.
+    question_concepts: list[list[str]] = Field(
+        default_factory=list,
+        description=(
+            "Optional. Concept ids for each entry of open_questions, aligned by POSITION: "
+            "question_concepts[i] describes open_questions[i]. Same axis/slug vocabulary as "
+            "`concepts`. Omit rather than guess — a question with no concepts is still registered."),
+    )
     # Hypothesis-card Kanban (docs/23, Layer 1b): the Researcher-PROPOSED resource footprint for this
     # experiment — {gpus, gpu_mem_mib, ...}. Audit-only in Layer 1 (surfaced on the card as proposed_by=
     # 'researcher'); the Developer FINALIZES it and the bin-packing scheduler CONSUMES it only in Layer 4.
@@ -687,6 +757,83 @@ class Idea(BaseModel):
         if not card_id or len(card_id) > 256 or not card_id.isprintable():
             return None
         return card_id
+
+    @field_validator("question_concepts", mode="before")
+    @classmethod
+    def _read_question_concept_rows(cls, value):
+        """The ROW SHAPE has to be healed HERE, and driving it is what proved that.
+
+        A `mode="before"` validator that merely checks the OUTER type is not enough: pydantic then
+        validates each element against `list[str]` and raises on a flat `["loss/contrastive", ...]`
+        BEFORE any `mode="after"` hook runs. That is exactly the 7d406cc2 defect — the only
+        `list[list[str]]` in a schema, a model returning the natural flat shape, and the whole
+        payload lost — reproduced in the field added to prevent it, and it survived until the shape
+        was actually fed through the model rather than reasoned about.
+
+        A flat row becomes an EMPTY row rather than being dropped: POSITION IS THE JOIN, so removing
+        it would shift every later question onto its neighbour's concepts (c438f1c9, one layer down).
+        """
+        if not isinstance(value, list):
+            return []
+        return [row if isinstance(row, list) else []
+                for row in value[:_REGISTERED_QUESTION_LIMIT]]
+
+    @field_validator("open_questions", mode="before")
+    @classmethod
+    def _read_registered_questions(cls, value):
+        """HEAL, never raise — and `IdeaEmission` deliberately does NOT override this with a strict
+        twin, which is the one design decision in this field worth arguing.
+
+        The concept envelope beside it IS strict on the emission path, because a wrong membership
+        corrupts the concept graph and the model must be asked to try again. The opposite is true
+        here, and 7d406cc2 is the measurement: `_MemoOut.question_concepts` was the only
+        `list[list[str]]` in that schema, a model returned the natural FLAT shape, and the strict
+        finalizer discarded nine good fields with it — two complete deep-research passes, 203 tool
+        calls and 64 sources, thrown away over a decoration. Registering a question is strictly
+        less valuable than the experiment carrying it, so a malformed value costs the QUESTION and
+        never the proposal.
+
+        Bounded here rather than at the append site because this rides a DURABLE payload: a model
+        that returns two hundred questions must not write two hundred of them into `node_created`.
+        The bound is deliberately loose — `engine/research_cadence.py::admit_research_beliefs` owns
+        the real board cap, and duplicating that number here is how the two come to disagree.
+        """
+        if not isinstance(value, list):
+            return []
+        return value[:_REGISTERED_QUESTION_LIMIT]
+
+    @field_validator("open_questions", mode="after")
+    @classmethod
+    def _bounded_question_statements(cls, value):
+        """Bound each statement WITHOUT changing the list's length — position is the join.
+
+        The first cut of this dropped unusable entries, and driving it caught the consequence
+        immediately: `["q1", "", "q3"]` became a 2-entry list while `question_concepts` still held
+        3 rows, so "q3" joined to row 1. That is c438f1c9's defect re-created inside the validator
+        written to carry its fix — the same trap, one layer up, and reasoning about it was not what
+        found it.
+
+        So an unusable entry becomes `""` and KEEPS its slot.
+        `engine/research_cadence.py::question_concept_rows` is the one place blanks are skipped, and
+        it skips them AFTER reading the index; `admit_research_beliefs` drops them from the board.
+        Neither ever sees a shifted list.
+        """
+        bounded = []
+        for item in value:
+            text = str(item or "").strip()
+            bounded.append(text[:_REGISTERED_QUESTION_CHARS] if text and text.isprintable() else "")
+        return bounded
+
+    @field_validator("question_concepts", mode="after")
+    @classmethod
+    def _bounded_question_concepts(cls, value):
+        # The row SHAPE is already healed in `_read_question_concept_rows`; this only bounds the ids
+        # inside each row. An emptied row is KEPT — `question_concept_rows` reads it as "no concepts
+        # for that question", exactly as it reads a missing one, and keeping it holds the position.
+        return [[text[:_REGISTERED_QUESTION_CHARS] for text in
+                 (str(item or "").strip() for item in row[:64])
+                 if text and text.isprintable()]
+                for row in value]
 
     @field_validator("footprint", mode="before")
     @classmethod
