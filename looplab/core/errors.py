@@ -127,3 +127,39 @@ def credential_cause(exc: BaseException) -> str:
     silently merging it with an unrelated one.
     """
     return str(getattr(exc, "cause_detail", None) or exc)
+
+
+def budget_stop_leaf(exc: BaseException | None, _depth: int = 0) -> BaseException | None:
+    """The `BudgetExceeded` inside `exc`, however deeply a task group wrapped it — or None.
+
+    ONE definition, because two callers now have to agree on it and they are on opposite sides of
+    the run. `cli/run_cmds.py::_run_engine_guarded` asks it at the very END, to record the ceiling
+    as `run_finished {"reason": "budget_exhausted"}` instead of a crash; `engine/orchestrator.py::
+    Engine._drain_inflight_evaluation` asks it one frame INSIDE `Engine.run`, to let an evaluation
+    that is already burning land its terminal before the ceiling tears the eval task group down. A
+    second, hand-synced copy would drift, and the direction it would drift in is the expensive one:
+    the engine-side copy failing to recognise a wrapped leaf silently reinstates the very defect
+    the drain exists to remove, with nothing going red.
+
+    It lives HERE rather than in either caller because `core` imports nothing above itself, so
+    this is the only module both the CLI and the engine may import (the same argument the
+    `OperatorRefusal` marker at the top of this file is placed on).
+
+    Bounded depth: an exception group can nest, and a cycle in `__cause__`/`__context__` (which a
+    caller can construct) must not turn a terminal-event handler into a hang.
+    """
+    if _depth > 8 or exc is None:
+        return None
+    if isinstance(exc, BudgetExceeded):
+        return exc
+    for inner in list(getattr(exc, "exceptions", ()) or ()):
+        found = budget_stop_leaf(inner, _depth + 1)
+        if found is not None:
+            return found
+    for attr in ("__cause__", "__context__"):
+        inner = getattr(exc, attr, None)
+        if inner is not None and inner is not exc:
+            found = budget_stop_leaf(inner, _depth + 1)
+            if found is not None:
+                return found
+    return None

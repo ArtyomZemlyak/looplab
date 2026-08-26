@@ -24,6 +24,7 @@ from typing import NamedTuple, Optional
 
 import anyio
 
+from looplab.core.errors import budget_stop_leaf
 from looplab.core.llm import BudgetExceeded
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
@@ -179,6 +180,52 @@ class SpeculationAuthorizationError(RunStartPinError):
 
 class SettledWidthPinError(RunStartPinError):
     """A resume explicitly spells a concurrency width other than the one ``run_started`` pinned."""
+
+
+class _DeferredBudgetStop:
+    """A task-group facade that DEFERS a background task's `BudgetExceeded` instead of letting it
+    cancel that group's siblings -- used by `_dispatch_evals` for exactly one caller,
+    `_spawn_research`.
+
+    THE DEFECT IT CLOSES is the one `Engine._drain_inflight_evaluation` documents from the campaign
+    artefacts, seen on the OTHER dispatch path.  Under Card speculation the evaluation lives in the
+    run-scoped `eval_tg`, so the ceiling reaches it only at `Engine.run` and a drain there is enough.
+    Under `_dispatch_evals` (speculation off -- a supported configuration) the evaluation is awaited
+    INSIDE the same `bg_tg` the overlapped research runs in, so a research task that raises cancels
+    the evaluation directly, at the first checkpoint after its shielded worker thread returns: the
+    score is on disk and its `node_evaluated` is never written.  Same loss, one frame lower.
+
+    IT DOES NOT WEAKEN THE STOP, and the three things that make that true are all outside this
+    class.  (a) `_dispatch_evals` re-raises the captured exception the instant its evaluations have
+    joined -- unconditionally, unwrapped, with its own message, so the CLI still records
+    `run_finished {"reason": "budget_exhausted"}`.  (b) Both admission loops test the sink BEFORE
+    starting another evaluation, so a deferred stop starts no new work; it only finishes work
+    already paid for.  (c) Nothing in the drain window can spend anyway: `CostAccountant.add` is
+    already over the ceiling, so the very next priced call raises again.
+
+    Only `start_soon` is intercepted.  Everything else -- `cancel_scope` above all, which
+    `_dispatch_evals`'s `finally` uses to stop the repeating research loop -- is the real group's.
+    """
+
+    __slots__ = ("_tg", "_sink")
+
+    def __init__(self, tg, sink: list):
+        self._tg = tg
+        self._sink = sink
+
+    def start_soon(self, func, *args) -> None:
+        sink = self._sink
+
+        async def _capture() -> None:
+            try:
+                await func(*args)
+            except BudgetExceeded as exc:
+                sink.append(exc)         # re-raised by `_dispatch_evals` once the evals have joined
+
+        self._tg.start_soon(_capture)
+
+    def __getattr__(self, name):
+        return getattr(self._tg, name)
 
 
 # Bounded aging for continuous eval dispatch (`_dispatch_evals`). After this many consecutive
@@ -1568,6 +1615,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         self._eval_task_group = eval_tg
                         try:
                             return await self._run_with_llm_broker()
+                        except BaseException as escaping:
+                            # THE CEILING MUST NOT DISCARD WORK IT HAS ALREADY PAID FOR.  See
+                            # `_drain_inflight_evaluation` for the measurement and the whole
+                            # argument; the raise below is unconditional, so the hard stop is
+                            # unchanged in class, message and timing-relative-to-finalization.
+                            await self._drain_inflight_evaluation(escaping)
+                            raise
                         finally:
                             self._eval_task_group = None
                 except BaseExceptionGroup as group:
@@ -1597,6 +1651,53 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     _LOG.warning(
                         "trace exporter did not stop before lifecycle release; pending rows were "
                         "abandoned behind the trace-writer fence")
+
+    async def _drain_inflight_evaluation(self, escaping: BaseException) -> None:
+        """Let an evaluation that is ALREADY BURNING land its terminal before the spend ceiling
+        tears the run-scoped eval task group down.  No-op for every other failure.
+
+        THE DEFECT, measured on the 2026-08-24 campaign (`runs-B`).  Five of the twenty task-arms
+        finished with one more `score.log` on disk than they had `node_evaluated` events:
+        `integer_factorization` 4 node dirs / 4 score.logs / **3** events (the lost score was
+        4.0958), `spectral_clustering` 2/2/**1**, `max_clique_cpsat` 7/7/**6**,
+        `min_dominating_set` 3/3/**2** (1.0804), `multi_dim_knapsack` 5/5/**4** (2.8004, against a
+        champion of 2.8586 -- the closest call in the corpus).  The event tails are identical in all
+        five: `node_eval_started` -> `workspace_seeded` -> `research_attempted` -> ONE research
+        `llm_usage` -> a long gap while the evaluation runs -> the ceiling.  The evaluation FINISHED
+        and wrote its score to disk; the loop never saw a result it had already paid for.
+
+        THE MECHANISM.  `_spawn_research`'s task raises `BudgetExceeded` out of the CardSession's
+        `bg_task_group`, so it reaches `Engine.run` while the evaluation -- which lives in the
+        RUN-scoped `eval_tg`, a strictly outer group -- is still in its worker thread.  That thread
+        hop is `abandon_on_cancel=False`, i.e. shielded, so the eval is not abandoned: it runs to
+        completion and writes `score.log`.  The cancellation is delivered at the NEXT checkpoint,
+        which is inside `engine/evaluate.py` between the eval returning and its single
+        `EV_NODE_EVALUATED` append.  Nothing was saved by cancelling -- the compute was already
+        spent -- and the one durable record of it was lost.
+
+        THE FIX IS THE ORDERING, NOT THE STOP.  Draining here happens BEFORE `async with eval_tg`
+        exits, which is the only instant at which the children are neither cancelled nor already
+        gone.  `Engine.run`'s `raise` is unconditional and untouched, so the run still stops with
+        the same exception, the same message and the same `run_finished
+        {"reason": "budget_exhausted"}`; `finalize_run` then computes its champion and its budget
+        summary over a log that includes the node instead of one that silently omits it.
+
+        WHY THIS COSTS NOTHING IT SHOULD NOT.  The drain starts NO new work: `_drain_adopted_evals`
+        is a poll over `_eval_inflight`, the sessions have already returned, and no LLM call is
+        reachable from it -- so the ceiling cannot be crossed by a further dollar while it waits.
+        The wait is bounded by the evaluation the run had already committed to, which is the same
+        barrier the clean finish at `_run_with_llm_broker`'s exit and the abort gate at
+        `_settle_terminal_gate` both already pay, for the same stated reason (the run is ending,
+        there is no GPU left to idle).  Deliberately NOT shielded: an operator Ctrl-C is a real
+        cancellation and must still cut the wait short, and if this task is somehow entered with a
+        cancellation already pending the first `anyio.sleep` re-raises it and we fall through to
+        `raise` -- i.e. exactly today's behaviour, never worse.
+        """
+        if budget_stop_leaf(escaping) is None:
+            return                            # an ordinary crash keeps today's teardown, untouched
+        if not self._evals_inflight():
+            return                            # nothing paid for is in flight -- no barrier to pay
+        await self._drain_adopted_evals()
 
     def _enter_run(self) -> bool:
         """Authorize re-entry, recover, ACK and set up: everything before the first loop turn.
@@ -4250,6 +4351,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 await anyio.to_thread.run_sync(
                     functools.partial(self._research_attempt_step, snap, trig, manual=False))
             except BudgetExceeded:
+                # Still raises, and still ends the run. What it no longer does is DISCARD the
+                # evaluation it was overlapping: `_dispatch_evals` hands this method a
+                # `_DeferredBudgetStop` facade, so the raise is captured and re-raised one join
+                # later, once that evaluation has landed its terminal. Under Card speculation the
+                # eval is in the run-scoped group instead and `Engine.run` drains it
+                # (`_drain_inflight_evaluation`). Either way the stop is unchanged; only the order
+                # is.
                 raise
             except Exception:  # noqa: BLE001 — never let deep research disturb the eval
                 pass
@@ -4390,6 +4498,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 raise                        # cooperative cancellation (evals joined) — must propagate
             except BudgetExceeded:
                 raise                        # global hard stop; never turn it into a retry tick
+                                             # (captured, not cancelled, when `_dispatch_evals`
+                                             # spawned this loop — see `_DeferredBudgetStop`)
             except Exception:  # noqa: BLE001 — an advisory tick hiccup must not disturb the eval
                 next_sleep = base
                 continue
@@ -4406,12 +4516,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # own; the evals run in / under it and, once they JOIN, the `finally` cancels `bg_tg` to stop
         # the loop. The one-shot path (repeat off, == today) is NOT cancelled — `bg_tg` waits for the
         # single memo to finish exactly as the pre-refactor single group did (byte-identical).
+        #
+        # The ceiling belongs before STARTING an evaluation, not before RECORDING one: the sink
+        # below holds a background `BudgetExceeded` until the evaluations it overlaps have landed
+        # their terminals, and this method re-raises it the moment they have.  See
+        # `_DeferredBudgetStop` for why that does not weaken the hard stop.
+        budget_stop: list[BaseException] = []
         async with anyio.create_task_group() as bg_tg:
-            self._spawn_research(bg_tg, state)
+            self._spawn_research(_DeferredBudgetStop(bg_tg, budget_stop), state)
             try:
                 if self._eval_parallel <= 1:
                     limiter = anyio.CapacityLimiter(1)
                     for a in evals:
+                        if budget_stop:
+                            break        # the ceiling fired: finish what is running, start nothing
                         cur = fold(self.store.read_all())
                         if self._skip_if_aborted(a, cur):
                             continue
@@ -4573,6 +4691,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             if max_es is not None and cur.total_eval_seconds >= max_es:
                                 slots.release()
                                 break
+                            # …and the SPEND ceiling, for the same reason.  THE ONLY gate this
+                            # branch needs, and deliberately not a second one at the top of the
+                            # producer loop: `slots.acquire()` sits unconditionally between that top
+                            # and the scan below, so EVERY route to an admission — a fresh turn, a
+                            # `continue` after an unsatisfiable head, a genuine refill wait — passes
+                            # through here.  A top-of-loop copy would be unreachable-first and
+                            # therefore untestable, which is how a gate rots.  It is also the place
+                            # the stop actually lands: the refill wait is where this loop spends
+                            # nearly all of its time, and the overlapped research crosses the ceiling
+                            # while a sibling is mid-eval.
+                            if budget_stop:
+                                slots.release()
+                                break
                             # Scan for the first candidate whose complete footprint fits *now*.  A
                             # GPU-heavy head may wait while an explicit CPU node (gpus=0) behind it
                             # starts; reservation and release both use the condition-protected pool.
@@ -4684,6 +4815,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # test Engine defaults to one-shot (no cancel), == today.
                 if getattr(self, "_concurrent_research_repeat", False):
                     bg_tg.cancel_scope.cancel()
+        # THE HARD STOP, paid in full and one join later than it used to be.  Reached only when the
+        # body above did not already raise something of its own, and unconditional when it is: the
+        # run ends here with the same exception object the accountant raised, so its class, its
+        # sentence and the `run_finished {"reason": "budget_exhausted"}` derived from it are
+        # byte-identical to before.  What changed is that the evaluations it overlapped are now IN
+        # the log it stops over.
+        if budget_stop:
+            raise budget_stop[0]
 
     # ------------------------------- strategist cadence (extracted to engine/strategy.py)
     # The A7 strategist-consultation + coverage-snapshot cluster (`_strategy_core`,
