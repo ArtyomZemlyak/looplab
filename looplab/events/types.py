@@ -432,7 +432,13 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
         "propose",     # the Researcher's proposal call — the long, wholly invisible one: it runs
                        # BEFORE `node_building` is appended, so until it returns the UI has no node
                        # to draw at all and the strip falls through to "Planning next experiment…".
-        "novelty",     # `_apply_novelty_gate`, which may pay for a whole second proposal
+        "novelty",     # `_apply_novelty_gate`, which may pay for a whole second proposal — and that
+                       # second proposal is NOT this phase's money. It gets its own nested
+                       # `repropose` SPAN (`engine/novelty.py::_repropose_phase`), because on
+                       # runs-B it was 87 % of everything stamped `novelty` and reading the label
+                       # as the gate's price is how doc 53 §2 got opened. No beacon for it: the
+                       # loop IS still inside the gate, and this table's exact rows are pinned by
+                       # `test_end_to_end` / `test_settled_width_pins`.
         "reserve",     # `_reserve_node_build` — the Card plan + the `node_building` append
         "implement",   # the Developer's implement call
         # NO `repair` phase. One existed for exactly one day: it bracketed `developer.repair` inside

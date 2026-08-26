@@ -19,9 +19,10 @@ shared reference. Total measured spend on those eight: **$8.029**.
 
 ---
 
-## 0. Three claims that did NOT survive re-measurement
+## 0. Four claims that did NOT survive re-measurement
 
-Recorded first, so nothing downstream rests on them.
+Recorded first, so nothing downstream rests on them. The fourth was this document's OWN item 2 and
+is the largest of them: see there.
 
 * **"LoopLab never profiles / constant factors are invisible to the loop."** False. Of **492
   `run_probe` calls** across the eight task-arms, **197 (40.0 %) contain a timing harness**
@@ -34,6 +35,10 @@ Recorded first, so nothing downstream rests on them.
   citation is not. `"trials"` appears in exactly one shape (`"trials":[]`, inside `node_evaluated`)
   and only in three task-arms, so it is not the universal marker it was quoted as. What IS
   universal is that **no score in the corpus was measured twice** — item 6.
+* **"The novelty gate is 66.3 % of the budget and every rejection was overridden."** False on both
+  counts, and the method that produced it is reproduced and named in item 2. The gate's own
+  adjudication is **$0.1141 of $17.6867 (0.6 %)** over the full 20-arm corpus; all 10 completed
+  rejections changed the idea that was built. `REFUTED` — item 2.
 
 ---
 
@@ -74,38 +79,111 @@ had no source for n and picked round numbers. Its own research memo says so in a
 
 ---
 
-## 2. Two thirds of the budget is spent proving an idea is new
+## 2. The novelty gate cost 0.6 %, and every rejection changed the idea that got built
 
-    OPEN[novelty-gate-costs-two-thirds-and-decides-nothing]
-    proof:absent:novelty_budget_share@looplab/engine/novelty.py
+    REFUTED[novelty-gate-costs-two-thirds-and-decides-nothing]
+    FIXED[repropose-billed-to-the-gate-that-asked-for-it]
+    proof:present:_repropose_phase@looplab/engine/novelty.py
 
-**Measured across the eight task-arms**, attributing every `llm_usage` to the enclosing
-`phase_progress`:
+**This item was wrong in both halves, and the way it was measured is why.** Re-derived 2026-08-26
+over all **20** finished task-arms in `runs-B`, summing `attributes.cost` on `spans.jsonl`
+generation spans (never estimating from call counts).
 
-| phase | spend | share |
+### The 66.3 % was an attribution artefact
+
+The original table came from carrying the LAST `phase_progress` with `status="started"` forward
+over every subsequent `llm_usage`. Only `propose` and `novelty` emit that beacon, and `novelty` is
+the last one to start before the loop moves on to `card_build`, `plan`, the build, the evaluation,
+`deep_research`, the lessons pass and the report — none of which emit one. So every dollar spent
+after the gate closed, until the NEXT proposal opened, was banked to `novelty`. That method
+reproduces the published table to the cent ($5.3241 / $2.2750 / $0.4302 of $8.0293, 24 phases,
+16 538 s), which is how it was identified. Attributing the same events to the innermost OPEN phase
+instead gives `novelty` $0.8323 on the same corpus — 10.4 %, not 66.3 %.
+
+Read off the spans, which carry an explicit `phase` per generation:
+
+| phase | spend (20 arms) | share |
 |---|---|---|
-| `novelty` | **$5.324** | **66.3 %** |
-| `propose` | $2.275 | 28.3 % |
-| everything else (incl. every evaluation) | $0.430 | 5.4 % |
+| `card_build` | $6.1620 | 34.8 % |
+| `propose` | $5.2500 | 29.7 % |
+| `plan` | $3.3543 | 19.0 % |
+| **`novelty`** | **$1.3151** | **7.4 %** |
+| `deep_research` | $0.8352 | 4.7 % |
+| everything else | $0.7701 | 4.4 % |
+| **total** | **$17.6867** | |
 
-24 novelty phases, **16 538 s = 4.6 h** of wall clock. They produced **6 `novelty_rejected`
-verdicts, and all 6 carry a `repropose` action** — every rejection was overridden and the idea was
-built anyway. The gate consumed two thirds of the money and changed nothing that was built.
+Per task the novelty share is min **0.1 %** (`count_riemann_zeta_zeros`, $0.0013), median **2.1 %**
+(`max_clique_cpsat`, $0.0160), max **33.3 %** (`edge_expansion`, $0.2717). The 20 arms also emit
+$20.0081 of `llm_usage`; $2.3214 of it never opened a generation span at all (952 calls, almost all
+`card_build` and `hyp_prioritize` — a separate defect), and only $0.0100 of that residue sits near
+`novelty`. Against the larger denominator the gate is 6.6 %.
 
-**19 node evaluations for $8.029 — $0.42 per measurement.** The counterpart arm bought 54–57
-full-dataset evaluations for $1.00 ($0.0175 each) and won two tasks purely on micro-optimisations
-that only a cheap measurement can find.
+### 87 % of what IS labelled `novelty` is a second proposal, not adjudication
 
-**Fix.**
+`Tracer.span` stamps the innermost open OPERATION onto every generation beneath it, and
+`_repropose_with_feedback` — the paid second call `_reject_and_repropose` makes on a rejection — had
+no span of its own, so it inherited `novelty`. Walking each generation's `input_from` chain back to
+the system prompt that ROOTED it (the chain, never the compressed `input` alone) splits the
+$1.3151:
 
-1. **Cap the gate by budget share, not by satisfaction.** A hard ceiling (5 %? 10 %?) after which
-   novelty returns "unknown, proceed" is strictly better than the current behaviour, which is to
-   spend two thirds and then proceed anyway.
-2. **Make a rejection binding or remove it.** A verdict that is always overridden is a tax. Either
-   `novelty_rejected` blocks the build (and the proposer must produce something else), or the phase
-   is demoted to an advisory note produced *inside* `propose` at no extra call.
-3. **Re-target the money at evaluation.** The loop's own scoreboard shows the exchange rate: at
-   $0.0175/eval the current novelty budget buys ~300 additional measurements.
+| rooted at | spend | calls |
+|---|---|---|
+| "You are an ML researcher…" + its claim verifier | **$1.1758** | 257 |
+| "You judge experiment NOVELTY…" | **$0.1141** | 231 |
+| unresolved / concept tagger | $0.0252 | 16 |
+
+**The gate's own adjudication is $0.1141 across 71 invocations — 0.6 % of the run, $0.0016 an
+invocation.** 49 reached the adjudicator; the other 22 returned free (20 of them are each task's
+first proposal, where `state.nodes` is empty and there is nothing to compare against). On `convex_hull` the split is $0.0026 adjudication against $0.1530 re-proposal, and that
+$0.1530 is priced exactly like an ordinary `propose` phase on the same task ($0.038–$0.135): two
+Researcher chains plus one verifier chain, identical shape. It is a proposal, billed to the gate
+that asked for it.
+
+### It decided something every time
+
+**11 `novelty_rejected` verdicts** (not 6) across 8 tasks, all `kind="llm"`: 10 carry
+`action="reproposed"`, 1 `action="budget_exceeded"`. **Zero `kept`.** `action` does not mean "the
+rejection was overridden" — `_reject_and_repropose` sets `reproposed` only when the proposal digest
+CHANGED, i.e. the Researcher came back with a different idea. Recomputing `idea_proposal_digest`
+over the `node_created` payload of all 10 confirms it independently: **in 10 of 10 the idea that was
+built is not the idea the gate rejected.** The gate is called once per proposal (one
+`_paid_progress("novelty")` per node candidate, comparing against up to 25 prior nodes in one
+prompt) — never once per sibling pair.
+
+### A cheap similarity check does not substitute for it
+
+The 49 adjudicator prompts recoverable from the span roots carry both the proposed idea and the
+prior-node rows. Scoring proposed-vs-nearest-prior offline: TF-IDF cosine separates DUP (min 0.466,
+median 0.614, max 0.779) from NOVEL (min 0.344, median 0.523, max 0.716) not at all — the best
+oracle-chosen threshold reaches 0.80 accuracy by admitting 4 of 11 duplicates AND rejecting 6 of 38
+good proposals. Token Jaccard is worse (4 of 11 caught). The reason is in the verdict texts: the
+duplicates are `bincount` vs `csr matvec`, `argsort` vs `zip/sort`, `scipy norm='ortho'` vs manual
+scaling — textually different descriptions of the same algorithm. The gate is judging algorithmic
+equivalence, which is what an embedding cannot see. `options.py` already ships `novelty_semantic`
+(cosine at 0.92) OFF; that default is now measured, not assumed.
+
+### What was actually fixed
+
+The defect is the LABEL, and it is one span deep. `_repropose_phase` (`engine/novelty.py`) opens a
+nested `repropose` operation span around the `repropose()` call, so the second proposal is billed to
+`repropose` and `novelty` reads as what the gate itself cost. Span only — no `phase_progress`
+beacon, because the loop IS still inside the gate and this table's exact rows are pinned by
+`test_end_to_end` / `test_settled_width_pins`. It opens no call, changes no verdict, and cannot
+change what `_reject_and_repropose` returns.
+`tests/test_novelty_repropose_phase.py` pins the split; reverting `_repropose_phase` makes it read
+$0.1556 under `novelty` where $0.0026 is owed, which is this defect in miniature.
+
+This is the SECOND reading of this campaign to bill a proposal to the gate: `shared.py::
+_paid_progress` records an earlier $1.77 "the novelty gate" note from `runs-armb`. A phase whose
+reported price is 10x its own work will keep producing wrong conclusions for as long as it is
+mislabelled.
+
+### What survives
+
+Nothing here says the loop's spend is well allocated. **19 node evaluations for $8.029 is still
+$0.42 per measurement** against the counterpart arm's $0.0175, and the money to re-target is
+`card_build` ($6.16, 34.8 %) and `plan` ($3.35, 19.0 %) — not the gate. That is a real item and it
+is not this one.
 
 ---
 
