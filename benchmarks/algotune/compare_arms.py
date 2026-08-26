@@ -311,6 +311,17 @@ def marker_state(final_dir: Path | None, arm: str, task: str) -> str:
             return "done"
         if "state=wall_cut" in text or "rc=124" in text:
             return "wall_cut"
+        # A TASK-ARM THE OPERATOR SKIPPED IS NOT ONE THAT FINISHED, and the difference has to
+        # survive into the table. `campaign.sh::already_measured` skips on ANY non-empty marker
+        # that is not a wall cut, so writing one is how a running campaign is told to stop taking
+        # new work without touching the driver a live bash is reading. That mechanism is right; it
+        # just leaves a marker that looks exactly like a completed run to every later reader.
+        # Measured need, 2026-08-26: five CP-SAT task-arms were skipped by decision, and without
+        # this branch the summary would have counted them among the finished and listed none of
+        # them as absent. The pair is already excluded from the means -- `agent_summary.json`
+        # carries no score for a task that never ran -- so what this adds is the WORD for it.
+        if "state=operator_skip" in text:
+            return "skipped"
         return "done"
     if (final_dir / f"{arm}-{task}.refused").exists():
         return "refused"
@@ -503,7 +514,14 @@ def main() -> int:
         if va is not None and state_a == "wall_cut":
             why = why or "arm A cut at the wall clock (rc=124), not by the budget"
         cut = "wall_cut" in (state, state_a)
-        rows.append((task, va, vb, why, "wall_cut" if cut else state))
+        # THE ROW'S STATE HAS TO SPEAK FOR BOTH ARMS. It used to carry arm B's marker alone, with
+        # arm A's consulted only for the wall-cut flag two lines up -- so an arm-A `operator_skip`
+        # reached the table as arm B's `done` and the "skipped" line never printed. The wall-cut
+        # precedence is unchanged (a clock beats bookkeeping); a skip on either side is named when
+        # neither arm was cut.
+        skipped = "skipped" in (state, state_a)
+        rows.append((task, va, vb, why,
+                     "wall_cut" if cut else ("skipped" if skipped else state)))
         # A wall-cut row on EITHER side is PRINTED (above) and not PAIRED: the mean is the one number
         # a reader takes away, and it may only contain task-arms that ran to the ceiling they are
         # compared at. Which arm hit the clock does not change that.
@@ -584,6 +602,11 @@ def main() -> int:
         else:
             print(f"every task-arm stayed within 5% of its ${ceiling:.2f} ceiling.")
 
+    skipped = sorted(t for t, _, _, _, st in rows if st == "skipped")
+    if skipped:
+        print(f"{len(skipped)} task-arm(s) were SKIPPED by the operator and never ran, so this "
+              f"table is over {len(rows) - len(skipped)} of {len(rows)} tasks: "
+              + ", ".join(skipped))
     unfinished = sorted(t for t, _, _, _, st in rows if st in ("unfinished", "refused"))
     if unfinished:
         print(f"{len(unfinished)} task-arm(s) have no .done marker from campaign.sh and are still "
