@@ -406,8 +406,29 @@ def test_the_default_ceiling_clears_both_arms_largest_measured_complete_answer()
     the other is not a meter setting, it is a handicap -- the reason doc 53 9b rejected `max_tokens`
     and the reason this number may not quietly drift downwards to make a table look better.
     """
-    assert proxy.DELTA_CEILING_DEFAULT >= LARGEST_COMPLETE_ARM_A
-    assert proxy.DELTA_CEILING_DEFAULT >= LARGEST_COMPLETE_ARM_B
+    assert proxy.DELTA_CEILING_VALUE >= LARGEST_COMPLETE_ARM_A
+    assert proxy.DELTA_CEILING_VALUE >= LARGEST_COMPLETE_ARM_B
+
+
+def test_the_ceiling_is_off_unless_someone_asks_for_it():
+    """An instrument that changes the ruler is CHOSEN, never inherited.
+
+    This reverses the value the ceiling shipped with hours earlier, and the reason is a live fact
+    about this box rather than a principle. `benchmarks/watchdog.sh` runs on a 300 s loop, pings
+    `/healthz`, and calls `meter/start_meter.sh --restart` when it fails. With the ceiling defaulting
+    ON, ANY transient proxy failure re-meters the remainder of a running campaign through a
+    different instrument, and the task-arms before and after the blip are priced by two rulers --
+    the exact failure docs/53 was opened over. The watchdog was running (pid 3249487) beside a
+    23-hour campaign while the on-disk proxy already carried the new code and the loaded process
+    did not.
+
+    Off, the runaway runs to its own end and is priced the way it always was. Turning it on is one
+    flag, and the NEXT campaign is where it belongs -- the same rule `rules_clause` states for the
+    goal card: adopt between arms, never inside one.
+    """
+    assert proxy.DELTA_CEILING_DEFAULT == 0, (
+        "the ceiling defaults on again; a watchdog restart would change the ruler mid-campaign")
+    assert proxy.DELTA_CEILING_VALUE > 0, "the value to switch ON must still be a real one"
 
 
 def test_the_ceiling_can_be_switched_off_and_then_the_gateway_decides(meter):

@@ -153,7 +153,25 @@ STREAM_TRUNCATED_FINISH_REASON = "truncated"
 # measured false positives -- at 900 s it cuts two complete arm-A calls and two arm-B ones, and arm
 # A's largest legitimate completion ran 1,204 s -- because "slow" and "runaway" are the same
 # observable in seconds and different observables in tokens.
-DELTA_CEILING_DEFAULT = 135_000
+# THE VALUE, when the ceiling is switched on. It clears the largest COMPLETE answer either arm has
+# produced -- 132,269 forwarded deltas on arm A, 126,559 on arm B -- so nothing a model finished
+# saying is ever cut. At 8,192 it would be 2 arm-A calls against 468 arm-B ones, which is a
+# 37x asymmetric handicap between the two arms of a comparison.
+DELTA_CEILING_VALUE = 135_000
+
+# OFF UNLESS ASKED, and this reverses the value it shipped with a few hours ago. The ceiling is a
+# CHANGE TO THE RULER: a stream it cuts is priced differently from one the gateway cut. This box
+# runs `benchmarks/watchdog.sh` on a 300 s loop, which pings `/healthz` and calls
+# `meter/start_meter.sh --restart` when it fails -- so a default-on ceiling means ANY transient
+# proxy failure silently re-meters the rest of a live campaign with a different instrument, and
+# task-arms before and after the blip are priced by two rulers. That is not hypothetical: the
+# watchdog is running right now (pid 3249487) beside a 23-hour campaign, and the on-disk file
+# already carries this code while the loaded process does not.
+#
+# An instrument that changes the measurement is CHOSEN, never inherited -- the same rule
+# `rules_clause` states for the goal card: adopt between arms, never inside one. Turn it on with
+# `--delta-ceiling 135000` or `METER_DELTA_CEILING=135000` for the NEXT campaign.
+DELTA_CEILING_DEFAULT = 0
 
 
 def abort_is_not_retryable(model: str, usage: dict, *, stamp: int) -> tuple[list, list]:
