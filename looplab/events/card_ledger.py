@@ -446,8 +446,32 @@ def _record_setter_ids(nodes: dict[int, Node], direction: str) -> set[int]:
     return setters
 
 
+def _record_establisher_id(nodes: dict[int, Node]) -> int | None:
+    """The ONE node in `_record_setter_ids` that beat nothing — the run's first SOTA, or None.
+
+    `_record_setter_ids` folds two different events into one set: a node that ESTABLISHES the first
+    record (`running is None`) and a node that BEATS a standing one. Only the second is evidence
+    that anything improved, and this names the first so `_evidence_verdict` can tell them apart.
+
+    Derived HERE rather than proxied by "does the node have a feasible parent", which is what the
+    first cut of that distinction used. The two agree only on a run whose lineage is a chain: a ROOT
+    node that beats a standing sibling record has no parent and is a genuine advance, and under
+    card-driven selection most proposals ARE root drafts, so the proxy told the Researcher its best
+    experiment had improved on nothing. Same loop and same guards as `_record_setter_ids`, because
+    a second reading of "which node is first" is how the two come to disagree about it. Takes no
+    `direction`: which node is FIRST is a fact about creation order, and the comparison that needs a
+    direction is the one this node is defined by not having made.
+    """
+    for n in sorted(nodes.values(), key=lambda x: x.id):
+        if (n.status is NodeStatus.evaluated and n.feasible and n.metric is not None
+                and not n.tombstoned):
+            return n.id
+    return None
+
+
 def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direction: str,
                       record_setters: set[int], is_abandoned: bool,
+                      *, record_establisher: int | None,
                       ) -> tuple[float | None, str, bool]:
     """Compute (best_delta, status, supported) for one hypothesis/card from its evidence nodes.
 
@@ -474,8 +498,8 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
             best_delta = delta if best_delta is None else max(best_delta, delta)
             if better(n.metric, base):
                 supported = True
-        # A RECORD SET OVER NOTHING IS NOT SUPPORT, and `base is not None` is the whole of that
-        # distinction. `record_setters` deliberately includes the node that ESTABLISHES the first
+        # A RECORD SET OVER NOTHING IS NOT SUPPORT, and the ESTABLISHER is the whole of that
+        # distinction. `record_setters` deliberately includes the node that establishes the first
         # SOTA — which on every run is node 0, by being the only node — so this clause used to
         # declare the OPENING hypothesis of every run `supported` with `best_delta=None`, i.e.
         # borne out against nothing at all.
@@ -492,7 +516,15 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
         # after something overtakes it, which is the board bug its comment describes. What it no
         # longer does is mint a verdict where no comparison exists. Such a card lands on `tested`
         # ("evaluated without improvement"), which is exactly true of a first measurement.
-        if n.id in record_setters and base is not None:
+        #
+        # The test is `is not the establisher`, and it was `base is not None` — a PARENT — for one
+        # day. Those two agree only on a run whose lineage is a chain. A ROOT node that beats a
+        # standing sibling record has no parent and IS a genuine advance, and under card-driven
+        # selection most proposals are root drafts: with the parent proxy, a run whose best
+        # experiment was a fresh draft read `tested`, i.e. the board told the Researcher its best
+        # result had improved on nothing. That is the same class of board lie in the other
+        # direction, and this rung exists to remove it, not to swap it.
+        if n.id in record_setters and n.id != record_establisher:
             supported = True
     pending = [n for n in ev if n.status is NodeStatus.pending]
     if is_abandoned:
@@ -2001,6 +2033,10 @@ def _apply_card_verdicts(
     # 3) record-setters (sticky SOTA advancers) — the SAME pure helper the hypotheses use, so a card's
     #    verdict is byte-identical to its hash-joined hypothesis.
     _record_setters = _record_setter_ids(st.nodes, st.direction)
+    # …and the ONE of them that beat nothing. Derived once per fold beside the set it partitions,
+    # never per card: the two must be read off the same `st.nodes` or they disagree about which
+    # node was first.
+    _record_establisher = _record_establisher_id(st.nodes)
 
     # 4) verdict per card via the SHARED helper (open/testing/supported/tested/abandoned). `is_abandoned`
     #    mirrors the hypothesis: a shadow card keyed by the hypothesis id inherits the abandoned override.
@@ -2008,7 +2044,8 @@ def _apply_card_verdicts(
         c.best_delta, c.verdict, _ = _evidence_verdict(
             c.evidence, st.nodes, st.direction, _record_setters,
             any(control_id in st.hypotheses_abandoned
-                for control_id in control_ids.get(c.id, {c.id})))
+                for control_id in control_ids.get(c.id, {c.id})),
+            record_establisher=_record_establisher)
 
 
 def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) -> dict[str, dict]:
@@ -2062,8 +2099,25 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
         if prior is None:
             continue
         prior_index = prior.get("_event_index")
-        if type(prior_index) is int and prior_index < raw_index:
-            dropped.pop(cid, None)
+        if not (type(prior_index) is int and prior_index < raw_index):
+            continue
+        # A REOPEN MAY ONLY UNDO AN OPERATOR'S OWN DROP. `st.cards_dropped` holds TWO authorities:
+        # the operator's `card_dropped` and the engine's `card_auto_dropped`, folded by one handler
+        # into one list — so an unqualified pop let an operator override the engine's own lifecycle
+        # retirement. `card_reservation._record_node_less_card` mints a Card and auto-drops it in a
+        # single `append_many` precisely so a REJECTED proposal is retained for audit and never
+        # live; reopening one put it back on the selectable board. Worse, `_drop_card_once` is
+        # idempotent by HISTORY — it refuses to re-plan a drop for a card any drop receipt already
+        # names — so the engine could never retire it again: permanently un-droppable by its owner.
+        #
+        # Fail-closed on an unattributed receipt, which is the same reading the card itself already
+        # publishes (`dropped_by` defaults to "engine" three lines below). "operator" is the
+        # established spelling of this authority — `engine/resources.py` and `engine/evaluate.py`
+        # both gate on exactly it — and `control_validation` stamps it server-side, so it cannot be
+        # forged by the payload.
+        if str(prior.get("dropped_by") or prior.get("by") or "engine") != "operator":
+            continue
+        dropped.pop(cid, None)
     for cid, d in dropped.items():
         c = cards.get(cid)
         if c is not None:

@@ -772,10 +772,24 @@ class Idea(BaseModel):
 
         A flat row becomes an EMPTY row rather than being dropped: POSITION IS THE JOIN, so removing
         it would shift every later question onto its neighbour's concepts (c438f1c9, one layer down).
+
+        THE ELEMENTS INSIDE A ROW NEED THE SAME TREATMENT, and healing only the row shape left the
+        defect half-fixed: pydantic validates each row against `list[str]` and raises on
+        `[["distill/teacher", 2]]` — a well-formed row with one non-string id — before
+        `_bounded_question_concepts` (mode="after") can coerce anything. So the whole proposal was
+        still lost over an advisory decoration, which is the outcome the paragraph above says must
+        not happen. The dead giveaway that element healing was always intended and unreachable is
+        that the after-validator does `str(item or "")` on values pydantic has already guaranteed
+        are `str`.
+
+        A non-string ID is DROPPED rather than blanked, and that is the opposite of the row rule
+        because the join is different: a row's position joins it to a question, while the ids WITHIN
+        a row are an unordered set. Coercing `2` to `"2"` would register a concept named "2" on the
+        concept graph, which is worse than not registering one.
         """
         if not isinstance(value, list):
             return []
-        return [row if isinstance(row, list) else []
+        return [[item for item in row if isinstance(item, str)] if isinstance(row, list) else []
                 for row in value[:_REGISTERED_QUESTION_LIMIT]]
 
     @field_validator("open_questions", mode="before")
@@ -797,10 +811,21 @@ class Idea(BaseModel):
         that returns two hundred questions must not write two hundred of them into `node_created`.
         The bound is deliberately loose — `engine/research_cadence.py::admit_research_beliefs` owns
         the real board cap, and duplicating that number here is how the two come to disagree.
+
+        "HEAL, never raise" needs the ELEMENTS too, and for one day it healed only the outer type:
+        pydantic then validated each entry against `str` and raised on `["ok", 3]`, and on the very
+        ordinary `[{"question": …, "why": …}]` a model returns when asked for research questions —
+        so the whole proposal was lost exactly as in 7d406cc2. A non-string becomes `""` and KEEPS
+        its slot, because position is the join with `question_concepts`; the blank is then dropped
+        from the board by `admit_research_beliefs`, which is the same treatment an unusable string
+        already gets one validator down. Deliberately NO key-guessing on a dict: picking `question`
+        or `statement` out of it would be this validator inventing content, and a question nobody
+        wrote is worse on the board than one that was never registered.
         """
         if not isinstance(value, list):
             return []
-        return value[:_REGISTERED_QUESTION_LIMIT]
+        return [item if isinstance(item, str) else ""
+                for item in value[:_REGISTERED_QUESTION_LIMIT]]
 
     @field_validator("open_questions", mode="after")
     @classmethod

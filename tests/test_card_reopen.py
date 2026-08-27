@@ -131,3 +131,60 @@ def test_the_normalizer_mirrors_the_drops_shape():
     assert out.get("by") == "operator", (
         "`by`, not `dropped_by`: the shared receipt reads either, and `dropped_by` on a REOPEN row "
         "would be a lie to whoever reads the log")
+
+
+def _board(rows):
+    """Fold a minimal card log and return the single card it builds."""
+    import pathlib
+    import tempfile
+
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+
+    run_dir = pathlib.Path(tempfile.mkdtemp())
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "max"})
+    store.append("card_added", {"id": "card-x", "statement": "s", "source": "researcher"})
+    for event_type, payload in rows:
+        store.append(event_type, payload)
+    return fold(store.read_all()).cards["card-x"]
+
+
+_OPERATOR_DROP = ("card_dropped", {"id": "card-x", "reason": "not now", "dropped_by": "operator"})
+_ENGINE_DROP = ("card_auto_dropped", {"id": "card-x", "reason": "rejected", "dropped_by": "engine"})
+_REOPEN = ("card_reopened", {"id": "card-x", "reason": "back", "by": "operator"})
+
+
+def test_a_reopen_may_not_undo_the_ENGINES_own_retirement():
+    """`st.cards_dropped` holds TWO authorities and one handler folds both into it.
+
+    `card_reservation._record_node_less_card` mints a Card and auto-drops it in a single
+    `append_many` precisely so a REJECTED proposal is retained for audit and never live. An
+    unqualified supersede put that proposal back on the selectable board — and because
+    `_drop_card_once` is idempotent by HISTORY (it refuses to re-plan a drop for a card any drop
+    receipt already names), the engine could then never retire it again: permanently un-droppable
+    by its own owner.
+    """
+    card = _board([_ENGINE_DROP, _REOPEN])
+    assert str(card.status) == "dropped" and card.dropped_by == "engine"
+
+
+def test_a_reopen_still_undoes_the_operators_own_drop():
+    """The counter-assertion — the fix must not cost the control the operator asked for by name."""
+    card = _board([_OPERATOR_DROP, _REOPEN])
+    assert str(card.status) != "dropped" and card.dropped_by is None
+
+
+def test_an_UNATTRIBUTED_drop_fails_closed():
+    """A receipt with no authority renders as the engine's (`dropped_by` defaults to "engine" in
+    the same function), so it must not be reopenable either — a hand-written or pre-stamping row is
+    not evidence that an operator stopped the work."""
+    card = _board([("card_dropped", {"id": "card-x", "reason": "?"}), _REOPEN])
+    assert str(card.status) == "dropped"
+
+
+def test_drop_reopen_drop_is_still_expressible():
+    """Last receipt wins by `_event_index`, and the fix must not have made the switch one-way."""
+    card = _board([_OPERATOR_DROP, _REOPEN,
+                   ("card_dropped", {"id": "card-x", "reason": "again", "dropped_by": "operator"})])
+    assert str(card.status) == "dropped" and card.dropped_by == "operator"

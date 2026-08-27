@@ -581,11 +581,18 @@ class ResearchCadenceMixin:
         # it did — absence means "this memo did not draw the distinction", never "it has no
         # questions".
         questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()] or directions
-        # REVIEW 2026-08-25 (P1 delivery): hypothesis delivery is accidentally coupled to legacy
-        # hint delivery. A schema-valid memo may supply `open_questions` while leaving the redundant
-        # `recommended_directions` field empty; `questions` is then non-empty, but this outer gate
-        # suppresses every EV_HYPOTHESIS_ADDED append. Gate EV_HINT on `directions` and hypothesis
-        # registration on `questions` independently (or reconstruct the compatibility field).
+        # TWO CHANNELS, TWO GATES, and they were one until 2026-08-27. The legacy hint projection
+        # is keyed on `recommended_directions` and the board registration on `questions`, but both
+        # sat under `if directions:` — so a schema-valid memo that filled `open_questions` and left
+        # the redundant compatibility field empty (it is optional, defaults to `[]`, and the prompt
+        # asks for it only as a union of the two new lists) suppressed EVERY `EV_HYPOTHESIS_ADDED`
+        # append. The run paid for a think-hard deep-research pass and the board stayed empty.
+        #
+        # The hint stays on `directions` alone rather than falling back to `questions`: it is the
+        # replay-compatibility projection, prompt rendering already filters its source, and the live
+        # signal travels on the memo/open-hypothesis channels. Widening it would put new text into
+        # old logs' channel for no reader. Where a memo drew no distinction `questions` falls back
+        # to `directions`, so every log already on disk folds byte-identically.
         if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
             # The prefix comes from `agents/hints.py`, which FILTERS on it — a deep-research row
@@ -594,29 +601,29 @@ class ResearchCadenceMixin:
             self.store.append(EV_HINT, {
                 "text": deep_research_hint_text(directions),
                 "source": "deep_research"})
-            # P1: also register each direction as an OPEN hypothesis so a deep-research idea is
-            # tracked to a verdict (was fire-and-forget) — it accrues evidence when a matching node
-            # runs, and shows on the board as an open question the search should resolve.
-            if self._track_hypotheses:
-                assert EV_HYPOTHESIS_ADDED in BACKGROUND_APPENDABLE   # see the method-level note
-                # THE JOIN, carried to the durable row. `question_concepts[i]` describes
-                # `open_questions[i]` — POSITIONAL alignment, which is why it is resolved against
-                # the memo's own question list rather than against `questions` (which falls back to
-                # `recommended_directions` for a memo that drew no distinction, where the positions
-                # mean nothing). Checked, not trusted: a mis-aligned or short list simply yields no
-                # concepts for that question, and a question with none is registered exactly as it
-                # was before this shipped.
-                # The order rule and its driven counter-example live in `question_concept_rows`,
-                # which is shared with the Researcher's own registered questions — a positional join
-                # spelled twice is a join that will disagree with itself.
-                by_statement = question_concept_rows(
-                    memo_d.get("open_questions") or [], memo_d.get("question_concepts") or [])
-                for direction in self._admissible_beliefs(questions[:5]):
-                    concepts = by_statement.get(str(direction).strip())
-                    self.store.append(EV_HYPOTHESIS_ADDED, {
-                        "statement": direction, "source": "deep_research",
-                        "at_node": memo.at_node,
-                        **({"concepts": concepts} if concepts else {})})
+        # P1: register each question as an OPEN hypothesis so a deep-research idea is tracked to a
+        # verdict (was fire-and-forget) — it accrues evidence when a matching node runs, and shows
+        # on the board as an open question the search should resolve.
+        if questions and self._track_hypotheses:
+            assert EV_HYPOTHESIS_ADDED in BACKGROUND_APPENDABLE   # see the method-level note
+            # THE JOIN, carried to the durable row. `question_concepts[i]` describes
+            # `open_questions[i]` — POSITIONAL alignment, which is why it is resolved against
+            # the memo's own question list rather than against `questions` (which falls back to
+            # `recommended_directions` for a memo that drew no distinction, where the positions
+            # mean nothing). Checked, not trusted: a mis-aligned or short list simply yields no
+            # concepts for that question, and a question with none is registered exactly as it
+            # was before this shipped.
+            # The order rule and its driven counter-example live in `question_concept_rows`,
+            # which is shared with the Researcher's own registered questions — a positional join
+            # spelled twice is a join that will disagree with itself.
+            by_statement = question_concept_rows(
+                memo_d.get("open_questions") or [], memo_d.get("question_concepts") or [])
+            for direction in self._admissible_beliefs(questions[:5]):
+                concepts = by_statement.get(str(direction).strip())
+                self.store.append(EV_HYPOTHESIS_ADDED, {
+                    "statement": direction, "source": "deep_research",
+                    "at_node": memo.at_node,
+                    **({"concepts": concepts} if concepts else {})})
 
     def _admissible_beliefs(self, directions: list) -> list[str]:
         """Read the open belief board and apply `admit_research_beliefs` to this memo's directions.

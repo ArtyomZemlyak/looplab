@@ -19,7 +19,8 @@ ONLY because of a baseless record, every one of them a parentless draft (`eviden
 from __future__ import annotations
 
 from looplab.core.models import Idea, Node, NodeStatus
-from looplab.events.card_ledger import _evidence_verdict, _record_setter_ids
+from looplab.events.card_ledger import (
+    _evidence_verdict, _record_establisher_id, _record_setter_ids)
 
 
 def _node(nid: int, metric: float, parents=()) -> Node:
@@ -30,7 +31,8 @@ def _node(nid: int, metric: float, parents=()) -> Node:
 def _verdict(nodes, evidence, direction="max"):
     by_id = {n.id: n for n in nodes}
     return _evidence_verdict(evidence, by_id, direction,
-                             _record_setter_ids(by_id, direction), False)
+                             _record_setter_ids(by_id, direction), False,
+                             record_establisher=_record_establisher_id(by_id))
 
 
 def test_the_first_node_of_a_run_is_TESTED_and_not_supported():
@@ -78,5 +80,51 @@ def test_direction_min_reads_the_same_way():
 def test_a_card_with_evidence_that_never_evaluated_stays_open():
     """Untouched by this change, and pinned so the tightening cannot have widened `open`."""
     pending = Node(id=0, operator="draft", idea=Idea(operator="draft"), status=NodeStatus.pending)
-    _, status, supported = _evidence_verdict([0], {0: pending}, "max", set(), False)
+    _, status, supported = _evidence_verdict([0], {0: pending}, "max", set(), False,
+                                             record_establisher=None)
     assert status == "testing" and supported is False
+
+
+def test_a_ROOT_node_that_beat_the_standing_record_is_still_supported():
+    """The over-correction this rung shipped for one day, and the reason the discriminator is the
+    ESTABLISHER and not a parent.
+
+    Nodes 1 and 2 are both parentless drafts; node 2 scores 0.9 against node 1's 0.5, i.e. it
+    advanced the run's SOTA — it is the run's champion. Keyed on `base is not None` it read
+    `tested`, "evaluated without improvement", because it happened to have no parent. Under
+    card-driven selection most proposals ARE root drafts, so the board told the Researcher its best
+    experiment had improved on nothing — the same class of lie as the baseless `supported` above,
+    pointed the other way.
+    """
+    nodes = [_node(1, 0.5), _node(2, 0.9)]
+    best_delta, status, supported = _verdict(nodes, [2])
+    assert status == "supported" and supported is True
+    # …while the one that beat nothing keeps the verdict this module was written to give it.
+    assert _verdict(nodes, [1])[1] == "tested"
+    # No parent means no PARENT delta, and inventing one from the sibling record would make
+    # `best_delta` two different measurements under one name.
+    assert best_delta is None
+
+
+def test_a_ROOT_record_beater_stays_supported_after_being_overtaken():
+    """Stickiness ISOLATED to the record clause, which no other test reaches.
+
+    Every other stickiness case in the suite runs through the parent branch — a node that beat its
+    own parent is supported by that alone, so it proves nothing about this clause. Here all three
+    nodes are roots: node 2 can only be supported by having beaten the standing 0.5, and node 3
+    then overtakes it. Without the sticky flag the card would flip supported->tested the moment
+    node 3 landed, which is the board bug the clause was written for.
+    """
+    nodes = [_node(1, 0.5), _node(2, 0.9), _node(3, 1.2)]
+    _, status, supported = _verdict(nodes, [2])
+    assert status == "supported" and supported is True
+
+
+def test_the_establisher_is_the_first_node_that_could_hold_a_record():
+    """Not simply `min(nodes)`: a node that failed, is infeasible, has no metric or is tombstoned
+    never enters `_record_setter_ids`' loop, so it cannot be the thing a later node beat."""
+    infeasible = Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=0.99,
+                      status=NodeStatus.evaluated, feasible=False)
+    by_id = {n.id: n for n in [infeasible, _node(1, 0.5), _node(2, 0.9)]}
+    assert _record_establisher_id(by_id) == 1
+    assert _record_establisher_id({}) is None

@@ -116,3 +116,45 @@ def test_absence_is_silence_and_the_field_round_trips():
     back = Idea(**idea.model_dump())
     assert back.open_questions == [_Q1] and back.question_concepts == [["training/x"]], (
         "it rides durable_idea_payload -> node_created -> Idea(**d['idea']) like parent_card_id")
+
+
+def test_a_malformed_ELEMENT_costs_the_question_and_never_the_proposal():
+    """Defect 1 above was fixed for the ROW and not for what is INSIDE a row.
+
+    `mode="before"` healed `list[list[str]]`'s outer and row shapes, and pydantic then validated
+    each row's elements and raised on `[["distill/teacher", 2]]` — a perfectly well-formed row with
+    one non-string id — before `_bounded_question_concepts` (mode="after") could coerce anything.
+    Same for `open_questions`: `["ok", 3]`, and the very ordinary `[{"question": …, "why": …}]` a
+    model returns when asked for research questions. Every one of those raised, so
+    `agent.py::_validate_emit` bounced the emit and `_finalize` degraded to
+    `Idea(operator, params={}, rationale=…)` — params, card_id, parent_card_id, hypothesis, space
+    and footprint all discarded over an advisory decoration. That is 7d406cc2's ALL-OR-NOTHING loss,
+    re-created one field over, in the field written to carry its fix.
+    """
+    idea = Idea(operator="sweep", params={"lr": 0.001}, rationale="r",
+                question_concepts=[["distill/teacher", 2]],
+                open_questions=["ok", 3, {"question": "q", "why": "w"}])
+
+    assert idea.params == {"lr": 0.001}, "MUTATION: drop the element healing and this is {}"
+    assert idea.question_concepts == [["distill/teacher"]], (
+        "a non-string ID is DROPPED, not blanked — the ids within a row are an unordered set, so "
+        "coercing 2 to '2' would register a concept named '2' on the graph")
+    assert idea.open_questions == ["ok", "", ""], (
+        "a non-string QUESTION keeps its slot as a blank — position is the join with "
+        "question_concepts, and admit_research_beliefs drops the blank from the board")
+
+
+def test_the_STRICT_producer_schema_heals_these_too():
+    """`IdeaEmission` is strict about `card_id`/`concepts`/`footprint` and deliberately inherits
+    these two validators unchanged — so the Researcher's own emit path gets the same tolerance.
+    Pinned because a strict twin added later would silently restore the all-or-nothing loss."""
+    emission = IdeaEmission.model_validate({
+        "operator": "sweep", "params": {"lr": 0.001}, "concept_mode": "full", "concepts": [],
+        "card_id": "card-3", "parent_card_id": "card-7",
+        "open_questions": ["does a stronger teacher help", 3],
+        "question_concepts": [["distill/teacher", 2]],
+    })
+    assert emission.params == {"lr": 0.001}
+    assert (emission.card_id, emission.parent_card_id) == ("card-3", "card-7")
+    assert emission.question_concepts == [["distill/teacher"]]
+    assert emission.open_questions == ["does a stronger teacher help", ""]
