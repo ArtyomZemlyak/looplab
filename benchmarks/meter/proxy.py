@@ -638,11 +638,12 @@ class Handler(BaseHTTPRequestHandler):
             self._proxy_stream(req, arm, task, attempt, tail, model, t0, collect_for_client=True)
             return
 
+        tally = {"attempts": 1, "queued_s": 0.0}
         attempts, queued_s = 1, 0.0
         try:
             # No proxy env: the gateway is reached directly, and http_proxy is set on this box
             # for the outside world. urlopen would otherwise send corporate traffic through it.
-            resp, attempts, queued_s = self._open_upstream(req)
+            resp, attempts, queued_s = self._open_upstream(req, tally)
             with resp:
                 status = resp.status
                 raw = resp.read()
@@ -651,6 +652,8 @@ class Handler(BaseHTTPRequestHandler):
             raw = exc.read()
             status = exc.code
             resp_headers = {k: v for k, v in (exc.headers or {}).items()}
+            # The tuple above never bound: take what the retry loop actually did.
+            attempts, queued_s = tally["attempts"], tally["queued_s"]
         except Exception as exc:  # noqa: BLE001 - upstream failures are data, not crashes
             self._fail(502, f"upstream {type(exc).__name__}: {exc}", arm, task, attempt, t0)
             return
@@ -722,12 +725,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, out, resp_headers)
 
 
-    def _open_upstream(self, req):
+    def _open_upstream(self, req, tally: dict | None = None):
         """Shape, send, and absorb a 429 the way BOTH arms should have it absorbed.
 
         Returns (response, attempts, waited_s) or raises. A 429 is retried here with the endpoint's
         own `Retry-After` when it sends one, so neither framework's private retry policy becomes
         part of the measurement.
+
+        `tally` IS THE COUNT THAT SURVIVES THE RAISE. Both callers used to bind the returned tuple,
+        which means a request that was retried five times and then failed was written down as
+        `attempts: 1, queued_s: 0.0` -- a false statement about exactly the calls a retry counter
+        exists to count. Anything passed here is updated in place, before each attempt and after
+        each sleep, so the row can be honest on the failure path too.
         """
         limiter = self.server.limiter
         attempts = 0
@@ -735,6 +744,8 @@ class Handler(BaseHTTPRequestHandler):
         while True:
             attempts += 1
             waited += limiter.acquire()
+            if tally is not None:
+                tally["attempts"], tally["queued_s"] = attempts, waited
             try:
                 return self.server.opener.open(req, timeout=self.server.timeout), attempts, waited
             except urllib.error.HTTPError as exc:
@@ -750,6 +761,8 @@ class Handler(BaseHTTPRequestHandler):
                 exc.close()
                 time.sleep(delay)
                 waited += delay
+                if tally is not None:
+                    tally["queued_s"] = waited
 
     def _proxy_stream(self, req, arm: str, task: str, attempt: str, tail: str, model: str,
                       t0: float, *, collect_for_client: bool = False) -> None:
@@ -775,11 +788,15 @@ class Handler(BaseHTTPRequestHandler):
             # time out at nginx's 300 s read window.
             row["stream_adapted"] = True
         collected: list = []
+        tally = {"attempts": 1, "queued_s": 0.0}
         try:
-            resp, attempts, queued_s = self._open_upstream(req)
+            resp, attempts, queued_s = self._open_upstream(req, tally)
             row.update({"attempts": attempts, "queued_s": round(queued_s, 2)})
         except urllib.error.HTTPError as exc:
             raw = exc.read()
+            # Set INSIDE the try above, so a failure used to leave both fields absent entirely.
+            row.update({"attempts": tally["attempts"],
+                        "queued_s": round(tally["queued_s"], 2)})
             row.update({"status": exc.code, "metered": False,
                         "latency_ms": round((time.time() - t0) * 1000, 1),
                         "upstream_error": raw[:400].decode("utf-8", "replace")})
