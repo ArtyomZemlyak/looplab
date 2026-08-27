@@ -23,15 +23,22 @@ import ast
 import pathlib
 
 from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS, WrapsDeveloper
+from tests._source_scan import iter_trees
 
 _ENGINE = pathlib.Path(__file__).resolve().parents[1] / "looplab" / "engine"
 
 
 def _attrs_read_off_the_facade() -> set[str]:
-    """Registry members the engine reads with `getattr(self.developer, "<name>", …)`."""
+    """Registry members the engine reads with `getattr(self.developer, "<name>", …)`.
+
+    Through `_source_scan.iter_trees` rather than a local `rglob`: the shared walk owns the decoding
+    (`utf-8-sig`, `errors="replace"`) that keeps a BOM'd file from raising `SyntaxError` out of an
+    unrelated scan, and it skips `.ipynb_checkpoints` autosaves that would report the PAST as a
+    present violation. `tests/test_source_scan_helper.py` is the guard that says so.
+    """
     found: set[str] = set()
-    for path in _ENGINE.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
+    for path, tree in iter_trees(_ENGINE):
+        for node in ast.walk(tree):
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "getattr" and len(node.args) >= 2):
                 continue
