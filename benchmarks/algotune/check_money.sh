@@ -35,11 +35,21 @@ for name, path in (("8801 шлюз", "meter/meter.jsonl"), ("8802 openrouter", "
     print("  %-16s за %.0f ч: вызовов %d, $%.4f, НЕУДАЧ %d | %s" % (
         name, hours, len(new), spent, len(bad), when))
     if bad:
+        # КОГДА БЫЛА ПОСЛЕДНЯЯ НЕУДАЧА — вторая половина того же урока. Окно в час держит и то, что
+        # кончилось сорок минут назад: 27.08 в 09:56 эта сводка показала 12 отказов 403 у glm53f, и
+        # я пошёл их расследовать, а все они лежали в 09:00-09:14, до перезапуска счётчика, после
+        # которого их ноль. Возраст последнего ВЫЗОВА тут уже печатается с утра; возраст последней
+        # НЕУДАЧИ отсутствовал, и именно он отвечает на вопрос «это сейчас или это уже прошло».
+        newest = max(float(x["ts"]) for x in bad)
+        print("      последняя неудача %s, %.0f мин назад" % (
+            time.strftime("%H:%M:%S", time.localtime(newest)), (time.time() - newest) / 60))
         c = collections.Counter(
             "%s %s" % (x.get("arm"), (str(x.get("error")).split(":")[0] if x.get("error") else x.get("status")))
             for x in bad)
         for k, v in c.most_common(8):
-            print("      %-42s %d" % (k, v))
+            g = [x for x in bad if ("%s %s" % (x.get("arm"), (str(x.get("error")).split(":")[0] if x.get("error") else x.get("status")))) == k]
+            print("      %-42s %3d  последняя %s" % (
+                k, v, time.strftime("%H:%M:%S", time.localtime(max(float(x["ts"]) for x in g)))))
     # то, что видел бы наивный фильтр
     naive = [x for x in new if str(x.get("status")) != "200"]
     if len(naive) != len(bad):
