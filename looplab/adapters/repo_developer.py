@@ -956,12 +956,16 @@ class LLMRepoDeveloper:
                                            "assert": {"type": "string", "description":
                                                       "ONE line stating what this stage's success "
                                                       "MEANS, checkable against what the stage prints "
-                                                      "— e.g. 'hard negatives mined for at least 90% "
-                                                      "of the training queries' or 'all 30 epochs "
-                                                      "completed and a checkpoint saved'. State the "
-                                                      "WORK, never the result quality: 'the metric "
-                                                      "beats 0.85' is not a stage condition (the "
-                                                      "search ranks results, this does not)."}}}},
+                                                      "— e.g. 'negatives.parquet written with at "
+                                                      "least n_negatives negatives on every row' or "
+                                                      "'all 30 epochs completed and a checkpoint "
+                                                      "saved'. State the WORK, never the result "
+                                                      "quality: 'the metric beats 0.85' is not a "
+                                                      "stage condition (the search ranks results, "
+                                                      "this does not). Assert what the stage "
+                                                      "CONTROLS; a numeric bar you have not measured "
+                                                      "on this data is a guess that fails correct "
+                                                      "artifacts — print such a quantity instead."}}}},
                             "required": ["name", "command"]}}},
                         ["stages"])
 
@@ -1342,11 +1346,36 @@ class LLMRepoDeveloper:
             "  • `files`: the workdir-relative paths this stage WRITES. The engine checks after the "
             "stage that each exists, is non-empty, and was written by THIS run of the stage.\n"
             "  • `assert`: ONE line stating what this stage's success MEANS, phrased so it can be "
-            "checked against what the stage PRINTS — 'hard negatives mined for at least 90% of the "
-            "training queries', 'all 30 epochs completed and a best-val checkpoint saved', 'embeddings "
-            "written for every document in the corpus'. State the WORK, not the result quality: 'recall "
-            "beats 0.85' is not a stage condition — the search ranks results, this only asks whether the "
-            "stage did its job.\n"
+            "checked against what the stage PRINTS — 'negatives.parquet written with at least "
+            "n_negatives negatives on every row', 'all 30 epochs completed and a best-val checkpoint "
+            "saved', 'embeddings written for every document in the corpus'. State the WORK, not the "
+            "result quality: 'recall beats 0.85' is not a stage condition — the search ranks results, "
+            "this only asks whether the stage did its job.\n"
+            # THE EXAMPLE HERE IS LOAD-BEARING AND THIS ONE WAS MEASURED WRONG. It used to read "hard
+            # negatives mined for at least 90% of the training queries", and that exact sentence is
+            # in 28 of the 33 numeric asserts this corpus has ever produced — the model was not
+            # inventing a bar, it was COPYING the one it was shown, which is why 6 different runs
+            # converged on the same number. On this data the true figure is 41.8 % (908,121 of
+            # 2,170,069): `add_negatives` inner-joins mined ids to product names and drops the rest
+            # BY DESIGN, and the champion (0.7934) was trained on exactly that. So the shipped
+            # example refused the recipe that produced this box's best result — verified on
+            # e5small-dr-unified-v8 node 1, which mined a valid 2,732,976-row parquet, failed its own
+            # gate, and was abandoned after two repairs with the engine's own diagnostician calling
+            # it `check_false_positive` and being right.
+            #
+            # THE REPLACEMENT IS NOT A SMALLER NUMBER, IT IS A DIFFERENT KIND OF CLAIM: every row
+            # carrying its n_negatives is a property the stage CONTROLS and can guarantee; the share
+            # of queries that survive a downstream join is an OUTCOME of the data it does not. A
+            # stage that mines 1 % still fails this loudly, which is the whole point of `expect` two
+            # paragraphs up. The sentence below says the rule outright, because an example alone is
+            # what got copied last time.
+            "A numeric bar you have NOT measured on THIS data is a guess, and a guess in an `assert` "
+            "fails stages whose artifact is correct. Assert the property the stage CONTROLS (every "
+            "row has its negatives; the checkpoint exists; the file covers the ids it claims) and "
+            "PRINT the quantity you do not control (coverage, survival rate, class balance) as "
+            "information. If you genuinely need a bar on an outcome, measure it first — read the "
+            "code that produces the number, or run the smallest probe that answers it — and say in "
+            "the assert what you measured it against.\n"
             "Write the `assert` against a number the stage will actually print; the implement phase then "
             "has to make the stage print it (and assert it in code). Declare `expect` for EVERY stage "
             "you can, and especially for any stage whose script you will NOT be able to edit later "

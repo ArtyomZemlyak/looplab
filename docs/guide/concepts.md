@@ -1375,6 +1375,29 @@ guess. Note the span record clips arguments at `core/tracing.py::_TRACE_TOOL_ARG
 chars), so that memo's `recommended_directions` and `question_concepts` sit past the cut and
 nothing is claimed about them here.
 
+**The `assert` EXAMPLE the Developer is shown is load-bearing, and the shipped one was measured
+wrong.** Reading `looplab_stages.json` out of every `node_created` row, 33 agent-authored
+`expect.assert` strings carry a numeric threshold and **about 28 are the same sentence** — *"hard
+negatives mined for at least 90% of the training queries"* — across six independent runs. That is
+not invention converging: it was the worked example in BOTH channels, `_stages_user` and the
+`declare_stages` tool schema's `assert` description. The model copied what it was shown.
+
+On this data the bar is wrong by more than 2×. `add_negatives` inner-joins mined ids to product names
+and drops the rest **by design**, so the real figure is 41.8 % (908,121 of 2,170,069) and the champion
+(0.7934) was trained on exactly that — the shipped example refused the recipe that produced this box's
+best result. Verified on `e5small-dr-unified-v8` node 1: it mined a valid 2,732,976-row parquet,
+failed its own gate, and was abandoned after two repairs, with the engine's own diagnostician
+returning `check_false_positive` and being right.
+
+**The replacement is a different KIND of claim, not a smaller number.** "Every row has its
+`n_negatives`" is a property the stage CONTROLS; "90 % of queries survive a downstream join" is an
+OUTCOME of the data it does not. Both channels now carry the property-shaped example, and
+`_stages_user` states the rule outright — assert what you control, PRINT what you do not, and if you
+genuinely need a bar on an outcome, measure it first and say what you measured it against — because
+an example alone is what got copied last time. `validate_stages` is deliberately NOT changed to
+reject thresholds: the distinction is semantic, so a syntactic refusal would either miss the bad bars
+or kill the good ones, and a stage that mines 1 % must still fail loudly.
+
 **A repair that DESCRIBES an edit it never made is bounced once, inside the session.** Measured on
 `runs/e5small-dr-unified-v8` node 1: two inline-repair sessions spent 51 minutes and 108 tool calls
 (`read_file` 50, `run_probe` 26, `grep` 21) with **zero** `edit_file`/`write_file`/`declare_stages`,
