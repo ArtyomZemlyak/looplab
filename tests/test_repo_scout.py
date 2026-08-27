@@ -105,16 +105,25 @@ def test_developer_wires_reused_scout_with_overlay(tmp_path):
     write = RepoWriteTools(surface=["**/*.py"], protected=[],
                            editables=[{"name": ".", "path": str(tmp_path)}])
     scouts = dev._scout_tools(write)
-    assert len(scouts) == 1 and isinstance(scouts[0], RepoScoutTools)
-    names = {sp["function"]["name"] for sp in scouts[0].specs()}
+    # BY TYPE, not by count. `_scout_tools` composes several providers now — the question board
+    # joined it unconditionally — and a bare `len(...) == 1` made this test a tripwire on the SIZE
+    # of that set rather than on the property it was written for, which is that the repo scout is
+    # exposed, bound to the editable roots, and reading through the write tools' staged overlay.
+    repo_scouts = [t for t in scouts if isinstance(t, RepoScoutTools)]
+    assert len(repo_scouts) == 1, "exactly one repo scout, reused rather than re-implemented"
+    scout = repo_scouts[0]
+    names = {sp["function"]["name"] for sp in scout.specs()}
     assert {"read_file", "grep", "find_files", "list_dir"} <= names
-    assert "--lr" in scouts[0].execute("grep", {"pattern": "add_argument"})   # reads the disk repo
+    assert "--lr" in scout.execute("grep", {"pattern": "add_argument"})   # reads the disk repo
     # a write flows through the SHARED files dict into the scout's overlay
     write.execute("write_file", {"path": "entry.py", "content": "STAGED = 2\n"})
-    assert "STAGED" in scouts[0].execute("read_file", {"path": "entry.py"})
-    # no editables -> no scout (a bare/legacy developer degrades gracefully)
+    assert "STAGED" in scout.execute("read_file", {"path": "entry.py"})
+    # no editables -> no REPO SCOUT (a bare/legacy developer degrades gracefully). Deliberately not
+    # "no providers at all" any more: the question board is attached ABOVE that early return, on the
+    # stated ground that a developer with no source to edit still repairs and still needs to know
+    # which question its work answers.
     dev._editables = []
-    assert dev._scout_tools(write) == []
+    assert [t for t in dev._scout_tools(write) if isinstance(t, RepoScoutTools)] == []
 
 
 def test_staged_deletion_hidden_from_scouts(tmp_path):

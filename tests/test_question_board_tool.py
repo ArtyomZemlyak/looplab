@@ -148,7 +148,13 @@ def test_BOTH_wirings_exist_and_the_developer_binds_the_attribute_it_actually_ha
     tree = ast.parse(dev.strip().replace("\n    ", "\n"))
     names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
     assert "QuestionBoardTools" in names, "the Developer must build the provider"
-    assert "QuestionBoardTools" in inspect.getsource(factory), "the researcher half must exist too"
+    # The researcher half by AST too. It was `"QuestionBoardTools" in inspect.getsource(factory)` —
+    # a positive substring pin over a whole module, satisfiable by a comment reading
+    # `# QuestionBoardTools` anywhere in it, in a test whose own docstring says it is driven by AST
+    # because comments are not AST nodes. The Developer half two lines up already did it right.
+    factory_names = {n.id for n in ast.walk(ast.parse(inspect.getsource(factory)))
+                     if isinstance(n, ast.Name)}
+    assert "QuestionBoardTools" in factory_names, "the researcher half must exist too"
 
     # DRIVEN, not pinned. A source check for "_memory_state" is VACUOUS here and I shipped one:
     # that name already appears in this same function for the lessons and cross-run tools, so

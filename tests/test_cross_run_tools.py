@@ -345,7 +345,11 @@ def test_repo_developer_scouts_omit_cross_run_when_off(tmp_path):
     d._cross_run_read_tools = False
     d._cross_run_memory_dir = str(tmp_path)
     d._editables = []
-    assert d._scout_tools() == []                          # off -> byte-identical to before
+    # The property is that the CROSS-RUN reader is absent, not that the provider list is empty:
+    # `_scout_tools` also composes the question board, unconditionally and by design. Asserting the
+    # empty list made this a tripwire on the size of that set, and it went red the day the board
+    # landed while the property it guards was never in question.
+    assert [t for t in d._scout_tools() if isinstance(t, CrossRunTools)] == []
 
 
 # --------------------------------------------------------------------------- #

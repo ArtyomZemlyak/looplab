@@ -1448,11 +1448,55 @@ class WrapsDeveloper:
         fn = getattr(self._wrapped, "audit_extra", None)
         return fn() if callable(fn) else {}
 
+    def bind_state(self, state, parent=None) -> None:
+        """Forward the run-state binding to the wrapped developer.
+
+        `engine/node_build.py` binds with `getattr(developer, "bind_state", None)` on the FACADE,
+        and under the shipped default (`Settings.unified_agent`) the facade is a `UnifiedAgent` —
+        a wrapper, which had no `bind_state`. So the `getattr` answered None, nothing was called,
+        and `LLMRepoDeveloper._memory_state` stayed None for the whole run: the Developer's
+        `QuestionBoardTools` answered "no run state bound" on every call and its `CrossRunTools`
+        (`audience="run"`) answered nothing, both shipped INERT under the default config. The
+        provider-side comment beside that wiring warns about binding a name that does not exist;
+        this is the same failure one layer up, where the NAME was right and the object reading it
+        was the wrapper.
+
+        A no-op when the wrapped developer has none, which is most of them (draft, offline,
+        template), so this only ever forwards a binding somebody asked for.
+        """
+        fn = getattr(self._wrapped, "bind_state", None)
+        if not callable(fn):
+            return
+        # `tools/_base.py`'s contract is `bind_state(state, parent=None)`, but a developer is not a
+        # ToolProvider and nothing obliges it to take the second argument — so a one-argument
+        # implementation must not become a TypeError that kills the build.
+        try:
+            fn(state, parent)
+        except TypeError:
+            fn(state)
+
     def _sync_audit(self) -> None:
-        """Mirror the wrapped developer's per-call files and resource estimate onto this wrapper."""
+        """Mirror the wrapped developer's per-call outputs onto this wrapper.
+
+        EVERY member of `DEVELOPER_OUTPUT_ATTRS` the engine reads off `self.developer` has to be
+        here, and two were not. `last_rollback_stage` and `last_budget_exhausted` are set on the
+        INNER developer by `adapters/repo_developer.py`, while `engine/evaluate.py` reads them off
+        the FACADE — and under the shipped default (`Settings.unified_agent`) the engine's developer
+        is a `UnifiedAgent`, i.e. a wrapper. Both have a FALSY default at their reader, so the
+        omission did not fail: every `node_repaired` row recorded "no rollback was requested" and
+        "the session finished on its own terms", which is precisely the reading each attribute was
+        added to stop being the only one available. `tests/test_developer_output_forwarding.py`
+        derives the required set from the engine's own `getattr` sites.
+
+        `last_seed` / `last_run` / `last_patch` are deliberately NOT mirrored: `ValidatingDeveloper`
+        reads them off `self.inner` directly, so a wrapper copy would be a second spelling with no
+        reader. `last_report` is a read-through property above for the same reason.
+        """
         self.last_files = getattr(self._wrapped, "last_files", {}) or {}
         self.last_deleted = getattr(self._wrapped, "last_deleted", []) or []
         self.last_footprint = getattr(self._wrapped, "last_footprint", None)
+        self.last_rollback_stage = getattr(self._wrapped, "last_rollback_stage", "") or ""
+        self.last_budget_exhausted = getattr(self._wrapped, "last_budget_exhausted", "") or ""
 
 
 # --------------------------------------------------------------------------- #

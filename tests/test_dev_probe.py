@@ -564,7 +564,11 @@ def test_the_probe_reaches_every_developer_phase_through_the_one_composition_poi
     library imports declares a pipeline around a library that is not there."""
     names = [s["function"]["name"] for t in _developer(True)._scout_tools(None) for s in t.specs()]
     assert "run_probe" in names
-    assert [s["function"]["name"] for t in _developer(False)._scout_tools(None) for s in t.specs()] == []
+    # The OFF assertion is about `run_probe`, not about the provider list being empty: the question
+    # board composes here too and is not gated on this setting. Asserting emptiness made the test a
+    # tripwire on every future provider, and it went red the day the board landed.
+    off = [s["function"]["name"] for t in _developer(False)._scout_tools(None) for s in t.specs()]
+    assert "run_probe" not in off
 
 
 def test_the_setting_off_restores_the_previous_system_prompt_byte_for_byte():
