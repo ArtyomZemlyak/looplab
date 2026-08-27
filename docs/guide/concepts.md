@@ -1375,6 +1375,30 @@ guess. Note the span record clips arguments at `core/tracing.py::_TRACE_TOOL_ARG
 chars), so that memo's `recommended_directions` and `question_concepts` sit past the cut and
 nothing is claimed about them here.
 
+**A repair that DESCRIBES an edit it never made is bounced once, inside the session.** Measured on
+`runs/e5small-dr-unified-v8` node 1: two inline-repair sessions spent 51 minutes and 108 tool calls
+(`read_file` 50, `run_probe` 26, `grep` 21) with **zero** `edit_file`/`write_file`/`declare_stages`,
+then emitted *"FIX: changed mine_stage.py … Updated looplab_stages.json expect.assert to match."*
+`node_repaired.changed` was `[]`. The diagnosis was right — it matched the engine's own
+`check_false_positive` — and only the application was missing; two such attempts hit
+`INERT_REPAIR_LIMIT` and abandoned a node holding valid mined negatives. The wiring was checked and
+is fine (the repair path composes the write tools), and the probe was ruled out (0 of 26 probes
+contain a write).
+
+`engine/repair_verify.py::repair_claimed_without_writing` is the rule and
+`adapters/repo_developer.py`'s repair session is its one caller, through the same `validate=` seam
+`_declare_stages_phase` uses to bounce a malformed manifest. It fires only when BOTH halves hold —
+the write tool's own ledger shows nothing added, changed or deleted this session, AND the summary
+names something concrete a diff could have contained — so an honest *"no code change is needed"*
+answer is left alone, which matters because refusing to edit is sometimes correct. It is **one-shot**:
+a second bounce would spend the session arguing instead of editing.
+
+**It can never reach the `inert` verdict, and that separation is the point.** `inert` stays decided
+on bytes with the rationale unread, because it is the only verdict the loop acts on and a
+text-derived signal that could move it would let a model write its way out of `INERT_REPAIR_LIMIT`.
+This rung reads the text *inside* the session, where steering is the entire purpose, and touches no
+durable record.
+
 Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the bounded
 `concept_consolidation` rename chain (at most 16 hops) on the base, inherited values, removals and additions
 **before** set subtraction/union. Thus `Model/Transformer` can be removed by `model/transformer`, and

@@ -1623,11 +1623,41 @@ class LLMRepoDeveloper:
                     if error:
                         self.last_rollback_stage = str((a or {}).get("rollback_stage", "")).strip()[:64]
                     return (a or {}).get("summary", "")
+
+                # A REPAIR THAT DESCRIBES AN EDIT IT NEVER MADE gets ONE chance to actually make it.
+                # Measured on v8 node 1: 51 minutes, 108 tool calls, zero writes, and an emit naming
+                # two files it had "changed" — the diagnosis correct, the application absent, and the
+                # node abandoned after the second such attempt. The byte fact comes from the write
+                # tool's own ledger, never from the summary; the rule is in
+                # `engine/repair_verify.py::repair_claimed_without_writing` beside the claim
+                # vocabulary it reuses. This CANNOT reach the `inert` verdict, which stays decided on
+                # bytes with the rationale unread so that no wording can steer the one verdict the
+                # loop acts on.
+                _files_before = dict(write.files)
+                _deleted_before = list(write.deleted)
+                _bounced = []
+
+                def _validate_repair(args):
+                    # ONE-SHOT. A second bounce would spend the session arguing instead of editing,
+                    # and the model has already been told exactly what to do; `agent_emit_force`
+                    # bounds the loop but must not be what stops this.
+                    if not error or _bounced:
+                        return None
+                    if write.files != _files_before or write.deleted != _deleted_before:
+                        return None                     # it wrote something — nothing to say
+                    from looplab.engine.repair_verify import repair_claimed_without_writing
+                    refusal = repair_claimed_without_writing(
+                        (args or {}).get("summary", ""), wrote=False)
+                    if not refusal:
+                        return None                     # claimed nothing concrete — a legitimate
+                    _bounced.append(True)               # "no change needed" answer is left alone
+                    return refusal
+
                 repair_verdict = run_phase(
                           self.client, tools, messages,
                           self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
-                          finalize=_finish,
+                          finalize=_finish, validate=_validate_repair,
                           fallback=lambda m: "", on_budget=self._note_session_budget,
                       **self._session_opts())
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
