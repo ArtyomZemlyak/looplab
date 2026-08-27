@@ -105,3 +105,33 @@ def test_a_developer_with_no_binding_is_a_no_op():
         pass
 
     _Facade(_Bare()).bind_state("STATE")     # must not raise
+
+
+def test_a_TypeError_from_inside_the_callee_is_not_retried():
+    """The arity fallback is decided from the SIGNATURE, not by catching TypeError around the call.
+
+    A `TypeError` raised from inside the callee's own body is indistinguishable at the boundary from
+    an arity mismatch, so a `try: fn(state, parent) except TypeError: fn(state)` would run a state
+    binding TWICE on a developer whose bind_state merely happened to raise one.
+    """
+    calls = []
+
+    class _Raises:
+        def bind_state(self, state, parent=None):
+            calls.append(state)
+            raise TypeError("raised from inside the body")
+
+    import pytest
+    with pytest.raises(TypeError):
+        _Facade(_Raises()).bind_state("STATE")
+    assert calls == ["STATE"], "bound once, not retried"
+
+
+def test_the_parent_is_forwarded_when_the_developer_takes_one():
+    class _Two:
+        def bind_state(self, state, parent=None):
+            self.got = (state, parent)
+
+    inner = _Two()
+    _Facade(inner).bind_state("STATE", "PARENT")
+    assert inner.got == ("STATE", "PARENT")

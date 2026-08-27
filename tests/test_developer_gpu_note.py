@@ -45,9 +45,17 @@ def _idea(footprint=None) -> Idea:
     return Idea(**kwargs)
 
 
-def test_the_note_states_the_exact_device_count():
+def test_the_note_states_the_declared_device_count():
+    """The count, and — since 2026-08-27 — the fact that it is a CEILING rather than a grant.
+
+    This asserted "EXACTLY N", which is what the note said and what it could not know: the granting
+    authority is `engine/resources.py::_resource_request_for_node`, which applies an operator
+    `resource_pin` and CLAMPS to the detected pool, so a declared 4 on a two-GPU box is granted 2.
+    Neither input is reachable from an adapter. The ceiling is what the Developer needs anyway —
+    the failure being prevented is starting MORE processes than the fence admits.
+    """
     note = _dev()._gpu_footprint_note(_idea({"gpus": 2}))
-    assert "EXACTLY 2 GPUs" in note, (
+    assert "DECLARED 2 GPUs AND WILL GET AT MOST THAT MANY" in note, (
         "MUTATION: return '' unconditionally and this goes red — which is the state that let v6 "
         "author a 2-process launcher against a 1-GPU fence")
     assert "--num_processes" in note, (
@@ -57,8 +65,8 @@ def test_the_note_states_the_exact_device_count():
 
 def test_a_single_device_reads_as_singular_and_names_the_failure_it_prevents():
     note = _dev()._gpu_footprint_note(_idea({"gpus": 1}))
-    assert "EXACTLY 1 GPU." in note, "MUTATION: drop the plural branch -> '1 GPUs'"
-    assert "GPUs" not in note.split("EXACTLY 1 GPU.")[0] + "EXACTLY 1 GPU."
+    assert "DECLARED 1 GPU AND" in note, "MUTATION: drop the plural branch -> '1 GPUs'"
+    assert "GPUs" not in note.split("DECLARED 1 GPU AND")[0]
     # The consequence, in the words the log will actually print, so the role can connect the
     # instruction to the crash it is avoiding.
     assert "invalid device ordinal" in note
@@ -91,13 +99,13 @@ class _Carrier:
 def test_a_BOOL_is_not_a_device_count():
     """`isinstance(True, int)` is True in Python, so this needs an explicit refusal.
 
-    A footprint of `{"gpus": true}` states no count at all; announcing "EXACTLY 1 GPU" about it
-    would be the engine inventing a fence width out of a flag.
+    A footprint of `{"gpus": true}` states no count at all; announcing "1 GPU" about it would be
+    the engine inventing a fence width out of a flag.
     """
     assert _dev()._gpu_footprint_note(_Carrier({"gpus": True})) == "", (
         "MUTATION: relax `type(raw) is int` to `isinstance(raw, int)` and this goes red")
     # And the guard must not have become a blanket refusal on the way.
-    assert "EXACTLY 3 GPUs" in _dev()._gpu_footprint_note(_Carrier({"gpus": 3}))
+    assert "DECLARED 3 GPUs" in _dev()._gpu_footprint_note(_Carrier({"gpus": 3}))
 
 
 def test_the_model_ALSO_refuses_a_bool_footprint_one_layer_up():

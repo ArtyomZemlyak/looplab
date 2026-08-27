@@ -10,6 +10,7 @@ the real loop (draft -> run -> evaluate -> improve -> select) deterministically.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import random
 from typing import Optional, Protocol
@@ -1468,12 +1469,16 @@ class WrapsDeveloper:
         if not callable(fn):
             return
         # `tools/_base.py`'s contract is `bind_state(state, parent=None)`, but a developer is not a
-        # ToolProvider and nothing obliges it to take the second argument — so a one-argument
-        # implementation must not become a TypeError that kills the build.
+        # ToolProvider and nothing obliges it to take the second argument, so a one-argument
+        # implementation must not become a TypeError that kills the build. Decided from the
+        # SIGNATURE rather than by catching TypeError around the call: a `TypeError` raised from
+        # INSIDE the callee's own body is indistinguishable from an arity mismatch at the boundary,
+        # and retrying on it would run a state binding twice.
         try:
-            fn(state, parent)
-        except TypeError:
-            fn(state)
+            accepts_parent = len(inspect.signature(fn).parameters) >= 2
+        except (TypeError, ValueError):     # a builtin/C callable exposes no signature
+            accepts_parent = False
+        fn(state, parent) if accepts_parent else fn(state)
 
     def _sync_audit(self) -> None:
         """Mirror the wrapped developer's per-call outputs onto this wrapper.
