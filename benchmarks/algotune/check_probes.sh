@@ -130,8 +130,25 @@ for run in sorted(glob.glob(os.path.join(root, "model-probes/*/runs/*/run"))
             print("       ПАДЕНИЕ УЗЛА %s node=%s: %s" % (
                 time.strftime("%H:%M:%S", time.localtime(e["ts"])), d.get("node_id"),
                 str(d.get("error") or d.get("reason"))[:150]))
-    # то, что прячется в тексте
-    degraded = [e for e in ev if "unavailable" in json.dumps(e.get("data") or {})]
+    # ТОЧНАЯ ФОРМА, А НЕ ПОДСТРОКА ПО ВСЕМУ СОБЫТИЮ. Искали "unavailable" где угодно в data — и
+    # ловили прозу самой модели: 27.08 в 10:42:24 у fxKcenters это слово стояло внутри `rationale`
+    # узла ("...unavailable..." в рассуждении о контракте задачи), счётчик же показал в эту минуту
+    # пятнадцать вызовов подряд со статусом 200. Отказ шлюза, дошедший до цикла, выглядит иначе:
+    # это memo деградировавшего исследования, начинающееся с "(deep research unavailable:".
+    degraded = []
+    for e in ev:
+        d = e.get("data") or {}
+        memo = (d.get("memo") or {}) if isinstance(d.get("memo"), dict) else {}
+        text = " ".join(str(memo.get(k) or "") for k in ("summary", "verdict", "error"))
+        # Вторая форма того же: финальный отчёт, который не смогли сгенерировать. У него нет memo,
+        # деградация лежит в content.verdict — «(report generation failed: The model provider
+        # returned an error.)» при заголовке «(report unavailable)». Сузив до memo, я потерял
+        # именно её, а это настоящий отказ, а не проза.
+        content = (d.get("content") or {}) if isinstance(d.get("content"), dict) else {}
+        report = " ".join(str(content.get(k) or "") for k in ("headline", "verdict"))
+        if ("unavailable:" in text or "provider failed" in text
+                or "report generation failed" in report):
+            degraded.append(e)
     if degraded:
         print("       ОТКАЗ ШЛЮЗА ДОШЁЛ ДО ЦИКЛА: %d раз (напр. %s)" % (
             len(degraded), time.strftime("%H:%M:%S", time.localtime(degraded[-1]["ts"]))))
