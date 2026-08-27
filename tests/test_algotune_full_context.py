@@ -107,7 +107,11 @@ def test_the_opt_out_reproduces_the_goal_the_campaign_ran(tmp_path):
 def test_the_measurement_is_reachable_and_is_the_train_split(tmp_path):
     spec = _build(tmp_path, "--deliver", "--full-context")
     cmds = spec.get("developer_commands") or []
-    assert [c["name"] for c in cmds] == ["eval_train"], cmds
+    # `profile` joined it on 2026-08-27 -- the arena's agent has had a line profiler all along
+    # (`AlgoTuner/utils/profiler.py`, `line_profiler` 5.0.2 in the scoring venv) and ours had no way
+    # to see WHERE its time went. Pinned by `test_algotune_profile_command.py`; this test is about
+    # the MEASUREMENT command, so it names it rather than indexing position 0.
+    assert [c["name"] for c in cmds] == ["eval_train", "profile"], cmds
     argv = cmds[0]["command"]
     assert "--subset" in argv and argv[argv.index("--subset") + 1] == "train", argv
     assert "looplab_eval.py" in " ".join(argv), "it must run the SAME bridge the scorer runs"
@@ -122,7 +126,7 @@ def test_the_spec_validates_as_a_repo_task(tmp_path):
 
     spec = _build(tmp_path, "--deliver", "--full-context")
     task = RepoTask.model_validate(spec)
-    assert [c.name for c in task.developer_commands] == ["eval_train"]
+    assert [c.name for c in task.developer_commands] == ["eval_train", "profile"]
 
 
 def test_an_external_array_is_described_as_an_array(tmp_path):
@@ -218,7 +222,7 @@ def test_full_context_is_what_you_get_without_asking(tmp_path):
     goal = spec["goal"]
     assert "n = 4408" in goal, "the default no longer carries the measured size"
     assert "YOU CANNOT MEASURE" not in goal
-    assert [c["name"] for c in spec.get("developer_commands") or []] == ["eval_train"]
+    assert [c["name"] for c in spec.get("developer_commands") or []] == ["eval_train", "profile"]
 
 
 def test_a_missing_split_warns_by_default_and_refuses_when_demanded(tmp_path):
