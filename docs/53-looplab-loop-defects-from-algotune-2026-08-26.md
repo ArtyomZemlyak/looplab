@@ -260,11 +260,47 @@ that only a cheap measurement can find.
 
 ## 3. The plan is stored; the artefact is what ran
 
-    OPEN[stored-plan-diverges-from-shipped-artefact]
-    proof:absent:plan_superseded@looplab/agents/unified_agent.py
+**CLOSED 2026-08-27, and the status line above it was STALE, not the code.** The marker is deleted.
+The line it replaces — *"STAYS OPEN — the build half is now RECORDED, the repair half is not"* —
+was written by `4b771574` at 09:01 on 2026-08-26. The repair half landed four hours later in
+`5f253594` (13:02), and that commit updated only §9a/§9b of this document. §4a was left stale by
+the same commit for the same reason. A status line nobody re-derives is wrong in both directions;
+this one had been wrong in the "still broken" direction for a day.
 
-**STAYS OPEN — the build half is now RECORDED, the repair half is not.** The proof is unchanged
-because `triage_crash` is not reached by this work.
+**Verified rather than taken from a commit message.** `engine/repair_verify.py::repair_attribution`
+replayed over the corpus's single real `node_repaired` row — `runs-B/count_riemann_zeta_zeros`
+node 0, the only one in thirty run dirs — against that node's own `node_created` pre-image:
+
+```
+{"prose_authored": "before_repair",
+ "wrote": [{"path": "solver.py", "kept": 0.725}],
+ "deleted": [], "unattributed": [], "named": ["solver.py"], "unnamed": []}
+```
+
+under a rationale reading *"the minimal safe repair … is to call `mp.nzeros(t)` directly, removing
+all tampering"* — while the shipped file KEPT 72.5 % of the mpmath port that rationale prescribed
+deleting, and scored 6.0212. That is the section's own specimen, and the divergence is now a number
+on the row.
+
+**And the wiring is falsified, not just the function.**
+`tests/test_repair_attribution.py::test_the_engine_stamps_it_on_node_repaired` drives a real inline
+repair end to end; deleting `"attribution": _attribution` from `engine/evaluate.py`'s payload turns
+it red with `KeyError: 'attribution'` (re-run here, not taken on trust).
+
+**The proof token was mis-pointed from the start and is deleted rather than re-pointed.**
+`plan_superseded` was never going to appear in `agents/unified_agent.py`: that file authors the
+triage PROMPT, and the reconciliation lives in `adapters/repo_developer.py::plan_step_attribution`
+(build half) and `engine/repair_verify.py::repair_attribution` (repair half). Nor is there a
+`superseded` boolean on the repair side, and that absence is a decision recorded at the site: the
+one corpus specimen would not trip any honest byte-anchored rule for it — the prose names
+`solver.py` and the repair wrote `solver.py`, and the contradiction is in the MEANING. A flag that
+misses the case it was built for is worse than the gap.
+
+**One sibling row noted and deliberately not changed**, so a later reader does not think it was
+missed: the `salvage_cause_fix` `node_repaired` row (`engine/evaluate.py:1731`) also ships `files`
+beside a sentence, and carries no `attribution`. It is not an instance of this item — that sentence
+is ENGINE-authored at record time, not a model prescription written before the session — and the
+row already carries `changed`. Zero such rows exist in the thirty-run corpus.
 
 **The item was right and too narrow: there are TWO plans, and the durable record holds the wrong
 one.** The CARD's rationale is authored by the Researcher BEFORE any repo read, and nothing rewrites
