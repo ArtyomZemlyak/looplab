@@ -2260,7 +2260,8 @@ def build_router(srv) -> APIRouter:
                                    "The node was reset while its metric evidence was being read.")
         return {"node_id": nid, "attempt": current_attempt, "metrics": m}
 
-    def _settle_window_anchor(rd: Path, before: Optional[str]) -> Optional[str]:
+    def _settle_window_anchor(rd: Path, before: Optional[str], *, nid: int,
+                              generation: int) -> Optional[str]:
         """Settle `?before=` for BOTH per-node trace surfaces, or refuse it.
 
         The anchor is what turned the node trace window from a tail into something an operator can
@@ -2269,14 +2270,13 @@ def build_router(srv) -> APIRouter:
 
         * ABSENT/blank means "no anchor" — the tail, the behaviour every caller had before this
           existed;
-        * anything else that does not resolve to a span of this run is REFUSED, never degraded to the
-          tail. Degrading would answer with the node's NEWEST spans while the surface still labels
-          them with the episode the operator picked, which is the one failure worse than an empty
-          panel — the same reasoning `ui/src/traceProjection.js::traceForAttempt` states for a
-          historical attempt. It is also the `limit` rule's own logic: a paging control that quietly
-          ignores its argument is exactly how a dead pager looks from the outside. The remedy is a
-          real one (re-read the episode map, whose anchors come from this same index), so this is an
-          actionable 409 rather than a dead end.
+        * anything else that does not resolve inside the selected NODE LIFECYCLE is REFUSED, never
+          degraded to the tail. Run-global membership is not enough: spans.jsonl file offsets are
+          global, so another node's valid id would cut this node at a foreign position and publish a
+          plausible wrong prefix under the episode label the operator picked. Degrading would answer
+          with the node's NEWEST spans under that same label. Both are worse than an empty panel — the
+          same reasoning `ui/src/traceProjection.js::traceForAttempt` states for a historical attempt.
+          The remedy is real (re-read this experiment's episode map), so this is an actionable 409.
         """
         from looplab.events.span_index import get_index
         from looplab.events.traceview import settle_trace_anchor
@@ -2284,12 +2284,13 @@ def build_router(srv) -> APIRouter:
             return None
         anchor = settle_trace_anchor(before)
         idx = get_index(rd / "spans.jsonl") if anchor is not None else None
-        if anchor is None or idx is None or not idx.has_span(anchor):
+        if (anchor is None or idx is None
+                or not idx.has_node_span(nid, anchor, generation=generation)):
             raise HTTPException(409, {
                 "code": "trace_anchor_unknown",
                 "before": anchor,
-                "message": "That step is not in this run's trace index, so the window cannot be "
-                           "placed on it.",
+                "message": "That step is not in this experiment lifecycle's trace, so the window "
+                           "cannot be placed on it.",
                 "remediation": "Reload this experiment's episodes and pick one again.",
             })
         return anchor
@@ -2334,9 +2335,6 @@ def build_router(srv) -> APIRouter:
         rd = _run_dir(run_id)
         before_generation = _begin_trace_read(
             rd, expected_generation, reading="its node trace", subject="its node trace")
-        # Settled AFTER the run fence and before the read: resolving it consults the span index, and
-        # a read whose run has already been replaced has no business building one.
-        anchor = _settle_window_anchor(rd, before)
         observed_attempt = _cached_node_attempt(rd, nid)
         current_attempt = observed_attempt if observed_attempt is not None else 0
         # Setup/pseudo-node and legacy trace rows have no folded lifecycle marker and therefore use
@@ -2354,6 +2352,9 @@ def build_router(srv) -> APIRouter:
             raise _attempt_cas_409(nid, attempt, current_attempt,
                                    "The node was reset before its trace was read.")
         attempt = current_attempt if attempt is None else attempt
+        # Settle only after the requested lifecycle is known: an anchor is valid for this exact
+        # node/attempt, not merely because the same id exists somewhere in the run-wide index.
+        anchor = _settle_window_anchor(rd, before, nid=nid, generation=attempt)
         # 0/absent settles to the default inside `node_trace_view` — the one settle rule owns it, so
         # this route does not get a second opinion about what an unrequested window means.
         payload = _node_trace(rd, nid, cap=limit, attempt=attempt, before=anchor)
@@ -2775,9 +2776,6 @@ def build_router(srv) -> APIRouter:
         rd = _run_dir(run_id)
         before_generation = _begin_trace_read(
             rd, expected_generation, reading="its node conversation", subject="its conversation")
-        # Settled AFTER the run fence and before the read: resolving it consults the span index, and
-        # a read whose run has already been replaced has no business building one.
-        anchor = _settle_window_anchor(rd, before)
         # An EXPLICIT EARLIER attempt is a HISTORICAL READ, served as asked and echoed back — the
         # same rule as the span-tree twin above, because these are the two VIEWS of one trace
         # surface and the Inspector's attempt picker switches between them over one selection.  The
@@ -2796,6 +2794,9 @@ def build_router(srv) -> APIRouter:
         # fencing the node's CURRENT one exactly as before — so a reset landing under the read is
         # still a 409, for a historical selection too.
         read_attempt = current_attempt if attempt is None else attempt
+        # Settle only after the requested lifecycle is known; a foreign node/generation's real span id
+        # must not cut this node's globally ordered source rows at a plausible but unrelated position.
+        anchor = _settle_window_anchor(rd, before, nid=nid, generation=read_attempt)
 
         from looplab.events.traceview import (
             TRACE_CONVERSATION_SPAN_CAP, build_conversation, load_spans, settle_node_span_cap)

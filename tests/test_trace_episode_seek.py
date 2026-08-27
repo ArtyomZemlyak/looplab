@@ -306,6 +306,40 @@ def test_an_anchor_the_server_cannot_place_is_refused_not_answered_with_the_tail
             assert response.json()["before"] is None
 
 
+def test_a_real_anchor_from_another_node_or_lifecycle_is_still_refused(tmp_path):
+    """Run-global span membership is not enough to caption a per-node seek.
+
+    File row numbers are global. Before the node/lifecycle fence, either valid id below passed the
+    route check and `_anchored` cut node 0's rows at that foreign offset, returning a plausible wrong
+    window instead of the selected episode. Both trace readings must reject the same two identities.
+    """
+    pytest.importorskip("fastapi")
+    client, _spans = _repaired_node(tmp_path, repairs=SMALL_REPAIRS)
+    foreign = [
+        {
+            "trace_id": "node-one-trace", "span_id": "node-one-anchor", "parent_id": None,
+            "run_id": "demo", "name": "create_node", "kind": "operation", "start": 9999.0,
+            "duration_s": 1.0, "status": "OK",
+            "attributes": {"node_id": 1, "generation": 0}, "events": [],
+        },
+        {
+            "trace_id": "node-zero-next-lifecycle", "span_id": "attempt-one-anchor",
+            "parent_id": None, "run_id": "demo", "name": "create_node", "kind": "operation",
+            "start": 10000.0, "duration_s": 1.0, "status": "OK",
+            "attributes": {"node_id": 0, "generation": 1}, "events": [],
+        },
+    ]
+    with (tmp_path / "demo" / "spans.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write("".join(json.dumps(row) + "\n" for row in foreign))
+
+    for suffix in ("/trace", "/conversation"):
+        for anchor in ("node-one-anchor", "attempt-one-anchor"):
+            response = client.get(
+                f"/api/runs/demo/nodes/0{suffix}", params={"attempt": 0, "before": anchor})
+            assert response.status_code == 409, (suffix, anchor, response.text)
+            assert response.json()["detail"]["code"] == "trace_anchor_unknown"
+
+
 def test_a_validator_never_carries_one_anchor_s_body_to_another(tmp_path):
     """The conditional read is per REPRESENTATION, and an anchor is part of one.
 
