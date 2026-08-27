@@ -59,6 +59,28 @@ def _alive(run_dir: str) -> bool:
     return False
 
 
+# ВОЗРАСТ ПОСЛЕДНЕГО ВЫЗОВА, А НЕ ТОЛЬКО ПОСЛЕДНЕГО СОБЫТИЯ. Прогон, который исправно звонит и
+# исправно получает 403, не порождает событий — и по «тишине» неотличим от зависшего. 27.08 в 08:56
+# у glm53f журнал событий был стар на 2185 с (порог простоя 2400), а вызовы шли каждые 30 с и все
+# отвергались. Две колонки рядом отвечают на разные вопросы: «цикл продвинулся?» и «он вообще жив?».
+def _last_call(label):
+    best = 0.0
+    for led in ("meter/meter.jsonl", "meter/meter-gemini.jsonl"):
+        path = os.path.join(root, led)
+        if not os.path.exists(path):
+            continue
+        for line in open(path, encoding="utf-8", errors="replace"):
+            if '"%s"' % label not in line:
+                continue
+            try:
+                ts = float(json.loads(line).get("ts") or 0)
+            except ValueError:
+                continue
+            if ts > best:
+                best = ts
+    return best
+
+
 def expand(path):
     """Физические строки -> настоящие события, с разворотом пакетных конвертов."""
     out = []
@@ -91,9 +113,11 @@ for run in sorted(glob.glob(os.path.join(root, "model-probes/*/runs/*/run"))
                 scores.append((os.path.basename(os.path.dirname(f)), d.get("speedup"), d.get("eval_seconds")))
     good = [s for _, s, _ in scores if s is not None]
     alive = _alive(run)
-    print("  %-10s %s $%.3f  %2d узл  лучший %-9s  тишина %.0fс" % (
+    lc = _last_call("Bfull" if label == "fullctx" else label)
+    print("  %-10s %s $%.3f  %2d узл  лучший %-9s  событие %.0fс назад | вызов %s" % (
         label, "жив " if alive else "стоп", spend, len(scores),
-        max(good) if good else None, time.time() - ev[-1]["ts"] if ev else -1))
+        max(good) if good else None, time.time() - ev[-1]["ts"] if ev else -1,
+        ("%.0fс назад" % (time.time() - lc)) if lc else "не было"))
     if scores:
         print("       " + "  ".join("%s=%s" % (n.replace("node_", "n"), s) for n, s, _ in scores))
     for n, s, e in scores:
