@@ -166,8 +166,44 @@ every paid call, "no span is open" and "nothing is traced" are the same observat
 
 ### 2c. The one it uncovered
 
-    OPEN[a-span-can-vanish-between-close-and-flush]
-    proof:absent:span_flush_receipt@looplab/core/tracing.py
+**CLOSED 2026-08-27, and the item's own NAME was wrong.** The marker is deleted. Nothing vanished
+between close and flush: the span never reached the exporter's queue, because the exporter was
+already terminal when the span opened. Cause established, and it is one frame, not a race.
+
+**Re-measured first, over all thirty run dirs** (`runs-B` + `model-probes` + `fullctx-probe`, with
+the crash-atomic `__looplab_event_batch_v1__` packets expanded): **15** `report_generated` rows name
+a `span_id` that is in no artifact -- 11 under `runs-B`, exactly as recorded, plus `fxKcenters`,
+`gpt56luna`, `opus5` and the fullctx probe. All 15 are `trigger="finish"`, and all 15 belong to a
+run whose `run_finished` is the ceiling (`error` on the older arm, `budget_exhausted` after §7). No
+run that ended otherwise lost one.
+
+**The mechanism.** `Engine.run`'s `finally` retires the exporter -- one lifetime per run, terminal
+so that a straggler closing later is REJECTED rather than appended behind a trace reset/clear. A
+ceiling hit does not end there: it escapes `Engine.run`, and `cli/run_cmds.py::_run_engine_guarded`'s
+outer handler then writes the terminal AND buys the finish report, several frames above that
+`finally`. `AsyncJsonlSpanExporter.export` refuses the post-shutdown row and records the drop with
+`durable=False` -- deliberately, so a dead exporter can never be resurrected as a receipt writer --
+so the refusal leaves nothing on disk at all. Right for a background straggler; wrong for the run's
+own terminal report, which is synchronous, on the main thread, and still inside the engine lock.
+
+**Reproduced end to end before the fix**, real `Engine` + real exporter + a `_run_with_llm_broker`
+that raises `BudgetExceeded`: `report_generated` carried `span_id=71bcb6b78f90bc75`, `spans.jsonl`
+held zero rows, and the exporter's own counters read `dropped_shutdown: 1, loss_receipts: 0` -- the
+corpus signature exactly.
+
+**So the LIFETIME moved and the FENCE did not.** The owner that writes the terminal owns the trace:
+`_run_engine_guarded` calls `Engine.defer_trace_retirement()` and runs `retire_tracer()` in its own
+`finally`, inside the same lock scope `Engine.run` held. Nothing about the barrier, the
+abandon-on-timeout or the writer guard changed.
+`tests/test_finish_report_span_survives_the_ceiling.py` carries three cases and each dies under its
+own mutation: dropping the deferral reproduces the missing span; dropping the retirement lets a
+post-owner straggler onto disk; deferring by DEFAULT leaves every directly-driven `Engine.run`
+(server, TUI, ~40 tests) with a live writer behind the lifecycle lock. Two existing tests were
+scaffolding on the old shape and are updated to the real property -- the source pin now asserts
+BOTH that `run`'s `finally` reaches the retirement AND that the retirement is still a bounded
+`shutdown`, which a single relocated assertion would not have.
+
+The original finding:
 
 Eleven finish-report spans were opened, their ids reached the events, and the records are absent
 from `spans.jsonl`, `.spans-append.jsonl` AND `trace.json`, with no exporter-loss receipt anywhere
@@ -176,7 +212,7 @@ in the corpus. The corpus splits cleanly 20 of 20: **all 11 runs that lost the s
 its $0.0067 -- a barrier that returns while leaving an accepted span off disk is a hole in the
 record, not an accounting rounding error.
 
-The original finding:
+The finding that uncovered it:
 
 **$2.3214 across 916 calls — 11.6 % of arm B's money — appears in `llm_usage` events and in NO
 generation span.** Spans account for $17.6867 of the $20.0081 the event log records. Almost all of

@@ -1263,6 +1263,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                  lifecycle_fence=True),
                              run_id=self.run_dir.name,
                              capture_llm_io=self._trace_llm_io)
+        # Who ends that lifetime. False => `Engine.run`'s own `finally`, which is right whenever the
+        # coroutine returning IS the end of the run. A caller that still traces afterwards -- the
+        # CLI's guarded-abort handler, which buys the finish report AFTER `run()` has raised -- calls
+        # `defer_trace_retirement()` and owns `retire_tracer()` instead.
+        self._trace_retirement_deferred = False
         # Task assets (e.g. the dataset) materialized into each node's sandbox workdir.
         assets = getattr(task, "assets", None)
         self._assets: dict = assets() if callable(assets) else {}
@@ -1635,22 +1640,66 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # exception case and let a genuine multi-failure group through as itself.
                     raise _sole_task_group_error(group) from None
         finally:
-            # Engine.run owns exactly one exporter lifetime. Always make its final barrier terminal:
-            # a background span that closes after return must be rejected rather than append behind
-            # reset/clear. Shutdown drains accepted work and, on its bounded timeout, atomically
-            # abandons anything that has not crossed the lifecycle writer fence. Python still cannot
-            # interrupt an in-progress filesystem call; a crossed writer keeps the fence until done.
-            _trace_shutdown = getattr(getattr(self, "tracer", None), "shutdown", None)
-            if callable(_trace_shutdown):
-                try:
-                    _stopped = bool(_trace_shutdown(
-                        timeout_millis=TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS))
-                except Exception:  # noqa: BLE001 - never mask cancellation/domain failure in finally
-                    _stopped = False
-                if not _stopped:
-                    _LOG.warning(
-                        "trace exporter did not stop before lifecycle release; pending rows were "
-                        "abandoned behind the trace-writer fence")
+            # ONE exporter lifetime per run, and it must end before the lifecycle lock may be
+            # released: a background span that closes after that point would append behind a
+            # reset/clear instead of being rejected.  `retire_tracer` is that terminal barrier.
+            #
+            # It is DEFERRED when the caller will still trace after this coroutine returns
+            # (`defer_trace_retirement`).  `cli/run_cmds.py::_run_engine_guarded` is exactly that
+            # caller: its outer handler writes the terminal AND buys the finish report, several
+            # frames above this `finally`.  See `defer_trace_retirement` for the measurement.
+            # `getattr` rather than the attribute: `Engine.__new__(Engine)` probes and embedding
+            # stubs never run `__init__`, and an engine that never declared an owner keeps the
+            # original behaviour -- retire here.
+            if not getattr(self, "_trace_retirement_deferred", False):
+                self.retire_tracer()
+
+    def defer_trace_retirement(self) -> None:
+        """Hand this run's exporter lifetime to the caller, which MUST call `retire_tracer`.
+
+        THE DEFECT, measured on the 2026-08-24 campaign (docs/53 §2c). Fifteen `report_generated`
+        rows across the 30-run corpus (eleven of them under `runs-B`) carry a `span_id` whose span
+        is in NO artifact -- not `spans.jsonl`, not `.spans-append.jsonl`, not `trace.json` -- and
+        no `looplab.exporter.loss` receipt anywhere names the loss. The corpus splits cleanly: every
+        one of them is the `trigger="finish"` report of a run that ended on the spend ceiling, and
+        every run that ended otherwise kept its report span.
+
+        THE CAUSE, and it is NOT "a span vanished between close and flush" as the item was filed.
+        The span never reached the exporter's queue at all. A ceiling hit escapes `Engine.run`, so
+        this `finally` retires the exporter; the CLI's guarded handler THEN opens
+        `tracer.span("report")` on the way to `run_finished`. `AsyncJsonlSpanExporter.export`
+        refuses a post-shutdown row and records the drop with `durable=False` -- deliberately, so a
+        terminal exporter cannot be resurrected as a receipt writer behind a trace reset. Refusing
+        AND leaving no receipt is right for a straggler from a background thread; it is wrong for
+        the run's own terminal report, which is synchronous, on the main thread, and still inside
+        the engine lock.
+
+        SO THE LIFETIME MOVES, NOT THE FENCE. The owner that writes the terminal owns the trace, and
+        it still retires it inside the same lock scope `Engine.run` held. Nothing about the barrier,
+        the abandon-on-timeout or the writer guard changes; a span that closes after the OWNER is
+        done is refused exactly as before.
+        """
+        self._trace_retirement_deferred = True
+
+    def retire_tracer(self) -> None:
+        """Make the exporter's final barrier terminal. Idempotent: `shutdown` is one-shot.
+
+        Drains accepted work and, on its bounded timeout, atomically abandons anything that has not
+        crossed the lifecycle writer fence. Python still cannot interrupt an in-progress filesystem
+        call; a crossed writer keeps the fence until it is done.
+        """
+        _trace_shutdown = getattr(getattr(self, "tracer", None), "shutdown", None)
+        if not callable(_trace_shutdown):
+            return
+        try:
+            _stopped = bool(_trace_shutdown(
+                timeout_millis=TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS))
+        except Exception:  # noqa: BLE001 - never mask cancellation/domain failure in finally
+            _stopped = False
+        if not _stopped:
+            _LOG.warning(
+                "trace exporter did not stop before lifecycle release; pending rows were "
+                "abandoned behind the trace-writer fence")
 
     async def _drain_inflight_evaluation(self, escaping: BaseException) -> None:
         """Let an evaluation that is ALREADY BURNING land its terminal before the spend ceiling

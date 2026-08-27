@@ -100,7 +100,33 @@ def _budget_leaf(exc: BaseException, _depth: int = 0):
 
 def _run_engine_guarded(eng: Engine):
     """Drive the engine loop to completion, funneling any fatal abort into a terminal event.
-    Shared by `run` and `resume` (previously duplicated verbatim in both)."""
+
+    THIS FUNCTION OWNS THE RUN'S TRACE LIFETIME, because it owns the run's TERMINAL. Its outer
+    handler writes `run_finished` and buys the finish report several frames above `Engine.run`'s own
+    `finally`, so leaving the exporter to be retired there put the report span outside the tracer's
+    life: measured on the campaign corpus, fifteen `report_generated` rows name a `span_id` that is
+    in no artifact and in no loss receipt, and every one of them is a ceiling-terminated run
+    (docs/53 §2c, `Engine.defer_trace_retirement`). The retirement is the same terminal barrier at
+    the same lock scope -- only later than the frame that used to run it.
+
+    Shared by `run` and `resume` (previously duplicated verbatim in both).
+    """
+    _defer = getattr(eng, "defer_trace_retirement", None)
+    if callable(_defer):
+        _defer()
+    try:
+        return _drive_engine_to_terminal(eng)
+    finally:
+        # Unconditional: a refusal that never entered the loop must not leave a live exporter behind
+        # the lifecycle lock either. `retire_tracer` is idempotent and a no-op on a stub engine.
+        _retire = getattr(eng, "retire_tracer", None)
+        if callable(_retire):
+            _retire()
+
+
+def _drive_engine_to_terminal(eng: Engine):
+    """The guarded drive itself. Split out only so `_run_engine_guarded` can wrap it in the
+    trace-lifetime `finally` above without re-indenting the terminal-recovery body."""
     _refuse_wrap_up_engine_that_could_propose(eng)
     started = time.time()
     try:
