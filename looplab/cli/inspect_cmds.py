@@ -198,7 +198,6 @@ def tokens(run_dir: Path = typer.Argument(...),
 
     from looplab.events.eventstore import read_jsonl_lenient_with_health
     from looplab.events.token_spend import token_spend_by_phase
-    from looplab.events.types import EV_LLM_USAGE
 
     ev_path = run_dir / "events.jsonl"
     sp_path = run_dir / "spans.jsonl"
@@ -212,8 +211,15 @@ def tokens(run_dir: Path = typer.Argument(...),
     if ev_path.exists():
         store = EventStore(ev_path)
         _echo_log_integrity(store, run_dir)
-        ledger_total = sum(int((e.data or {}).get("total_tokens") or 0)
-                           for e in store.read_all() if e.type == EV_LLM_USAGE)
+        # THROUGH THE FOLD, not a hand sum over `llm_usage` rows. `replay._on_llm_usage` carries two
+        # rules a `sum(...)` does not, and both change the number this command reconciles against:
+        # it DE-DUPLICATES by `usage_id` — `engine/costs.py` appends from an outbox drain and a
+        # reconcile retry, so duplicate rows are expected by design and the fold's dedup is the proof
+        # — and it starts from the legacy `EV_LLM_COST` compatibility base, without which a
+        # pre-ledger run reports `ledger: 0` and a residual that is entirely negative. Over-counting
+        # here does not merely misprint the denominator: `residual` is the whole point of the
+        # command, and this is its subtrahend.
+        ledger_total = int((fold(store.read_all()).llm_cost or {}).get("total_tokens") or 0)
 
     if not sp_path.exists():
         typer.echo(f"ledger total: {ledger_total or 0:,} tokens")

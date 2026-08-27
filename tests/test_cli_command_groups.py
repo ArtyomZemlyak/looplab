@@ -60,7 +60,15 @@ GROUPS = {
                      # 4 on unknown), and a refusal derived from two runs' own logs is a diagnostic,
                      # not a durable claim. It is not in `governance_cmds` for exactly the reason
                      # that group exists: it spends no money and authors no cross-run memory.
-                     "landlock-check", "stage-dups", "parser-stats", "comparability"},
+                     # `tokens` and `repair-candidates` are the same contract once more, and
+                     # both landed WITHOUT being added here — this guard was red on master
+                     # for three days, which is the drift it exists to catch. `tokens` folds
+                     # this run's own `llm_usage` ledger and reads its own `spans.jsonl`;
+                     # `repair-candidates` reads this run's own repair ledger and RANKS,
+                     # deciding nothing. Neither calls a model, writes anything, or touches a
+                     # cross-run store — the three clauses that keep the rest of this set here.
+                     "landlock-check", "stage-dups", "parser-stats", "comparability",
+                     "tokens", "repair-candidates"},
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",

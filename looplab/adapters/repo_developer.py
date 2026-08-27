@@ -1027,6 +1027,22 @@ class LLMRepoDeveloper:
         nothing, kills nothing and moves no selection, so it has nothing a legacy-snapshot default
         would need to hold back. Empty when the footprint states no integer count — a role told
         "some GPUs" is worse off than one told nothing, and this must never guess.
+
+        IT READS THE DECLARATION AND NOT THE GRANT, and the sentence now says so. The granting
+        authority is `engine/resources.py::_resource_request_for_node`, which resolves an operator
+        `resource_pin` through `core/cards.py::effective_card_footprint` and then CLAMPS to the
+        detected pool — so a footprint of 4 on a two-GPU box is granted 2 while this read still says
+        4, reproducing the exact `invalid device ordinal` this note exists to prevent with the
+        engine's own prose as the cause. Neither input is reachable from an adapter: the pin is the
+        Card's and the pool is the Engine's `_gpu_ids`. Stating the declaration and naming what can
+        reduce it keeps every case the note was written for (all 132 recorded footprints on this box
+        are `{"gpus": 1}`, so the clamp bites on none of them) without asserting a number this side
+        cannot know. The exact fix is a stamp from the engine, the shape
+        `proposal_cues.py::_stamp_gpu_budget_hint` already uses for the Researcher.
+        CLAIM[developer-gpu-note-is-the-declaration] the device count in the Developer prompt is the
+        DECLARED footprint, not the grant — the grant clamps it to the detected pool and applies any
+        operator resource pin.
+        decided:`line:def _resource_request_for_node&&resource_pin@looplab/engine/resources.py`
         """
         gpus = None
         try:
@@ -1042,13 +1058,13 @@ class LLMRepoDeveloper:
             return ""
         if gpus is None:
             return ""
-        return (f"\n\nTHIS NODE GETS EXACTLY {gpus} GPU{'' if gpus == 1 else 's'}. "
-                f"`CUDA_VISIBLE_DEVICES` is fenced to {'that device' if gpus == 1 else 'those devices'} "
-                "before your stages run, so a launcher that starts more processes than that dies on "
-                "the first one that asks for a device outside the fence "
-                "(`CUDA error: invalid device ordinal`), after the earlier stages have already been "
-                f"paid for. Size every `--num_processes` / `--nproc_per_node` / `--gpus` to {gpus}, "
-                "and put the per-device batch size where it fits that many.")
+        return (f"\n\nTHIS NODE IS DECLARED {gpus} GPU{'' if gpus == 1 else 's'} AND WILL GET AT MOST "
+                f"THAT MANY. `CUDA_VISIBLE_DEVICES` is fenced to the granted "
+                f"{'device' if gpus == 1 else 'devices'} before your stages run, so a launcher that "
+                "starts more processes than that dies on the first one that asks for a device "
+                "outside the fence (`CUDA error: invalid device ordinal`), after the earlier stages "
+                f"have already been paid for. Size every `--num_processes` / `--nproc_per_node` / "
+                f"`--gpus` to {gpus} or fewer, and put the per-device batch size where it fits.")
 
     def _time_budget_note(self) -> str:
         """The operator's per-eval WALL-CLOCK budget, for the role that actually spends it (docs/29 F1h).
