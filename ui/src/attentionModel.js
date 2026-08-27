@@ -37,10 +37,12 @@ const COPY = Object.freeze({
   finalization_stalled: ['Finalization needs recovery', 'The engine stopped before durable wrap-up completed.', 'Open Events'],
   stalled: ['Run engine stopped', 'No engine process is advancing this run.', 'Open Events'],
   train_monitor: ['Training looks broken', 'The live-log monitor judged this training likely wasted. Open the run to inspect the log and verdict.', 'Inspect training'],
-  // REVIEW 2026-08-25 (P2 operability): the fallback below always wins: normalizeRunAttention never
-  // reads raw.detail, so the server's exact overrun and wall hours are discarded from both the UI and
-  // desktop notification. Preserve the untrusted-prose boundary by publishing bounded numeric fields
-  // (for example overrun_hours and wall_hours) and formatting them locally here.
+  // OPEN[overrun-detail-never-read] the fallback below ALWAYS wins: `normalizeRunAttention` never
+  // reads `raw.detail`, so the server's measured overrun and wall hours are discarded from both
+  // this card and the desktop notification, and the operator is told an experiment will miss its
+  // wall without being told by how much. Keep the untrusted-prose boundary — publish bounded
+  // NUMERIC fields (overrun_hours, wall_hours) and format them here.
+  // proof:`present:train_overrun: ['Experiment will miss its wall'@ui/src/attentionModel.js`
   // The server sends the measured hours in `detail`; this is the fallback shown when it does not.
   train_overrun: ['Experiment will miss its wall', 'This experiment is projected to be killed by its own deadline before it finishes. Raise the wall or stop it.', 'Inspect training'],
   asha: ['ASHA rank warning', 'Inspect the live curve. Automatic stopping requires peers at the same declared progress.', 'Inspect experiment'],

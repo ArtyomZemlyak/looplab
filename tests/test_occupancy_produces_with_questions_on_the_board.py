@@ -62,7 +62,7 @@ def test_six_questions_no_longer_fill_a_ceiling_of_one():
         "MUTATION: drop the kind clause in `unconsumed_card_inventory` and this reads 6 — the live "
         "v6 number that refused every prefetch for seven hours")
     assert supply < ceiling, (
-        "and the GATE must open: this is the conjunct at speculation.py:2558 that decides whether "
+        "and the GATE must open: this is the `_prefetch_supply_used` conjunct that decides whether "
         "the raw lane may mint work for a second evaluation lane")
 
 

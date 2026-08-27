@@ -8,7 +8,7 @@ seven hours in, GPU 0 at 100% and GPU 1 at 0% for all of it):
     _speculation_depth_used(state, consumed_inflight={(0,0)}) = 0   <- admission works
     unconsumed_card_inventory(state, exclude=…)               = 6   <- the six QUESTIONS
     _prefetch_supply_used                                     = 6
-    guard at `speculation.py:2558`:  6 < 1                    -> False
+    guard `speculation.py::_prefetch_supply_used`:  6 < 1     -> False
 
 So the raw lane — the only producer that can fill a second evaluation lane — is refused on every
 turn from the moment the opening memo registers its questions, which is t+12.6m on that run. The

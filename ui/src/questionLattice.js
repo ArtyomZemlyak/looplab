@@ -28,7 +28,7 @@ export const UNFILED_EXPERIMENTS_ID = '__unfiled_experiments__'
 // stable — `{a,b}` and `{b,a}` are one set and must not render as two rows.
 export function conceptSet(card) {
   // A QUESTION INHERITS THE CONCEPTS OF THE EXPERIMENTS FILED UNDER IT, and until 2026-08-26 this
-  // reader ignored the field that says so. `card_ledger.py:2930-2933` computes `child_concept_tags`
+  // reader ignored the field that says so. `looplab/events/card_ledger.py::_apply_card_lineage` computes `child_concept_tags`
   // as the union over every child — deliberately written there and never onto `concept_tags`, whose
   // `concept_source` provenance records who AUTHORED a membership and may not be handed a derived
   // union. This function read only the authored field, so a question with no memo-authored tags
@@ -74,11 +74,12 @@ export function isStrictSubset(outer, inner) {
 // strict subset of `{a,b,c}` too — hanging the row under both would draw one subtree at two depths
 // and double every number rolled up through it. A candidate parent survives only when no OTHER
 // candidate sits strictly between it and the child.
-// REVIEW 2026-08-25 (P1 availability): multi-parent expansion enumerates root-to-node paths, not
-// cards. A valid public payload containing every non-empty subset of eight concepts has 255 cards
-// but emits 109,600 placements (sum C(8,k)*k!). `latticeRollups` then scans all placements once per
-// placement through `descendantIds`, approaching 12 billion prefix checks and freezing the browser.
-// Bound placements, choose a canonical placement, or aggregate on the DAG without materialising paths.
+// OPEN[lattice-placement-explosion] multi-parent expansion enumerates root-to-node PATHS, not
+// cards, so a valid public payload of 255 cards (every non-empty subset of eight concepts) emits
+// 109,600 placements — sum C(8,k)*k! — and `latticeRollups` scans all of them once per placement
+// through `descendantIds`, approaching 12 billion prefix checks and freezing the browser. Bound
+// the placements, elect a canonical one, or aggregate on the DAG without materialising paths.
+// proof:`present:for (const kid of kids) emit(kid, depth@ui/src/questionLattice.js`
 export function latticeRows(cards, { order } = {}) {
   const sort = typeof order === 'function'
     ? order
