@@ -142,3 +142,97 @@ def test_a_hostile_eval_cannot_spend_the_headline():
     line = json.dumps({"speedup": 0.0, "no_speedup": {"reason": junk, "evaluator_verdict": junk}})
     head = digest.experiments_digest(_state(_node(0, tail=line))).splitlines()[1]
     assert len(head) < 200 and "zzzz" not in head, head
+
+
+# ------------------------------------------------------------------ the champion line (§4a, half 2)
+#
+# The headline count above was the FIRST of the three contradictions §4a measured. The SECOND is the
+# line directly above it in every proposal prompt: `agents/roles.py::_state_brief` opens with
+# `Best so far: node N metric=<x>`, and `<x>` was a bare `0.0` whether the run measured a genuine
+# zero or the arena refused to time the solver at all.
+#
+# MEASURED over the thirty run dirs (runs-B + model-probes + fullctx-probe, crash-atomic
+# `__looplab_event_batch_v1__` packets expanded): 340 renders of that line, **16 of them naming a
+# node whose own eval had refused to score it** -- 9 on `spectral_clustering` (i.e. ALL of them: the
+# arm never proposed anything under a different champion), 3 on `rectanglepacking`, 2 each on the
+# `gpt56luna` and `sol1` probes. The literal bytes in `spectral_clustering`'s `spans.jsonl` are
+# `Best so far: node 0 metric=0.0 params={}`, over a `score.log` that says 98/100 valid.
+
+def _brief(state, parent=None) -> str:
+    from looplab.agents.roles import _state_brief
+    return _state_brief(state, parent)
+
+
+def _champion_state(tail: str, metric=0.0) -> RunState:
+    st = _state(_node(0, tail=tail, metric=metric))
+    st.best_node_id = 0
+    return st
+
+
+def test_the_champion_line_says_the_number_is_not_a_score():
+    """`spectral_clustering`'s nine proposal prompts, over the record they were written from."""
+    line = [ln for ln in _brief(_champion_state(_SCORE_LINE)).splitlines()
+            if ln.startswith("Best so far:")][0]
+    assert line.startswith("Best so far: node 0 metric=0.0 params={}"), line
+    assert digest.UNSCORED_LABEL in line, line
+    # The eval's OWN verdict, not a label we invented for it: the arm read 0.0 as "the idea is
+    # wrong" while its record said "the idea is right and two answers were rejected".
+    assert "98/100 valid" in line, line
+
+
+def test_the_parent_line_carries_it_too():
+    """The same untruth from the parent's side. It names an invalid node ZERO times in the corpus
+    (108 `Refine from node` renders, none of them invalid) and gets the clause anyway, because it is
+    the same builder reading the same predicate -- a fix that covers only the line that happened to
+    fire is a fix that reopens on the next corpus."""
+    st = _champion_state(_SCORE_LINE)
+    line = [ln for ln in _brief(st, st.nodes[0]).splitlines()
+            if ln.startswith("Refine from node")][0]
+    assert digest.UNSCORED_LABEL in line, line
+
+
+def test_a_measured_zero_is_still_just_a_zero():
+    """The falsifier for "render the clause whenever the metric is 0.0". A healthy node that really
+    scored zero is a RESULT; relabelling it would be the same defect pointed the other way, and it
+    would fire on 47 of the corpus's 56 evaluated rows instead of 9."""
+    st = _champion_state(_HEALTHY_LINE, metric=0.0)
+    line = [ln for ln in _brief(st).splitlines() if ln.startswith("Best so far:")][0]
+    assert line == "Best so far: node 0 metric=0.0 params={}", line
+
+
+def test_a_healthy_champion_line_is_byte_identical():
+    """Nothing moves where the clause is not true -- the prompt is a contract."""
+    st = _champion_state(_HEALTHY_LINE, metric=1.1013)
+    line = [ln for ln in _brief(st).splitlines() if ln.startswith("Best so far:")][0]
+    assert line == "Best so far: node 0 metric=1.1013 params={}", line
+
+
+def test_the_clause_is_render_only_and_the_champion_does_not_move():
+    """`state.best()` returns the same node it returned before, with the same metric and status: the
+    prompt gets a truer sentence, the search gets no new rule."""
+    st = _champion_state(_SCORE_LINE)
+    before = (st.best().id, st.best().metric, st.best().status, st.best_node_id)
+    _brief(st, st.nodes[0])
+    assert (st.best().id, st.best().metric, st.best().status, st.best_node_id) == before
+
+
+def test_a_hostile_eval_cannot_spend_the_prompt():
+    """The clause rides a line that already carries the params dict, so it takes the BRIEF account
+    (ACCOUNT_LINE_CHARS), not the 600-char block `read_experiment` renders."""
+    junk = "z" * 50_000
+    tail = json.dumps({"speedup": 0.0, "no_speedup": {"reason": junk, "evaluator_verdict": junk}})
+    line = [ln for ln in _brief(_champion_state(tail)).splitlines()
+            if ln.startswith("Best so far:")][0]
+    assert len(line) < 200, len(line)
+
+
+def test_both_renders_of_the_one_fact_use_the_one_vocabulary():
+    """The headline and the champion line are two renders of a single fact. They are built in
+    different packages (`events` and `agents`), which is exactly how two names for one thing get
+    into one prompt -- so the label is a module constant and this asserts the prompt agrees with
+    itself."""
+    out = _brief(_champion_state(_SCORE_LINE))
+    head = [ln for ln in out.splitlines() if ln.startswith("Search so far")][0]
+    champ = [ln for ln in out.splitlines() if ln.startswith("Best so far:")][0]
+    assert "1 invalid" in head and "refused to time it" in head, head
+    assert "refused to time it" in champ, champ

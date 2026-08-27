@@ -956,12 +956,19 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
 def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
                  hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None,
                  *, for_proposal: bool = True, memo_verdicts: bool = False) -> str:
+    # Function-local for the same reason as the `experiments_digest` import below: `agents` may not
+    # take a module-level edge on `events`. `unscored_metric_clause` is the ONE spelling of "the
+    # eval refused to produce this number" (doc 53 §4a) — the headline count and this line are two
+    # renders of one fact and must not drift into two vocabularies.
+    from looplab.events.digest import unscored_metric_clause
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
     if best is not None:
-        lines.append(f"Best so far: node {best.id} metric={best.metric} params={best.idea.params}")
+        lines.append(f"Best so far: node {best.id} metric={best.metric} params={best.idea.params}"
+                     + unscored_metric_clause(best))
     if parent is not None:
-        lines.append(f"Refine from node {parent.id}: params={parent.idea.params} metric={parent.metric}")
+        lines.append(f"Refine from node {parent.id}: params={parent.idea.params} metric={parent.metric}"
+                     + unscored_metric_clause(parent))
     # PART V (B): a delta author cannot subtract from an invisible reference. Surface the run base and
     # effective primary-parent membership, bounded so a malformed taxonomy cannot consume the role context.
     # Replay uses the union of all actual parents for a merge; the proposal role sees the primary parent

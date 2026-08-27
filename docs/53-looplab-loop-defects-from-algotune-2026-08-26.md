@@ -321,9 +321,9 @@ quote that sha.
 
 ## 4. The validity verdict exists, is good, and is off the default path
 
-**PART-FIXED 2026-08-26.** The marker is deleted for fix 1; fixes 2 and 3 in the body below (an
-invalid node counted as `0 failed`, and a memo built from a pre-eval snapshot) are untouched and
-are re-opened as §4a.
+**PART-FIXED 2026-08-26, the rest 2026-08-27.** The marker was deleted for fix 1; fixes 2 and 3 in
+the body below (an invalid node counted as `0 failed`, and a memo built from a pre-eval snapshot)
+were re-opened as §4a. §4a is now closed and the memo half is §4b.
 
 **In plain words, because the section did not manage it.** When our solver is scored, the bridge
 prints one JSON line. If the solver is wrong on even one of the hundred instances the arena refuses
@@ -366,10 +366,42 @@ over `spans.jsonl` — the same class of error this document exists to catch. Th
 `speedup: null` rules violation travels `looplab_failure_reason`, fails the node, and
 `read_experiment` already rendered `failure=`.
 
-### 4a. STILL OPEN — the two halves the fix does not touch
+### 4a. CLOSED 2026-08-27 — the two counting halves
 
-    OPEN[an-invalid-node-is-counted-as-zero-failed]
-    proof:absent:invalid_is_not_healthy@looplab/events/digest.py
+The marker is deleted. It covered THREE contradictions in one prompt and they closed in two steps,
+so both are recorded here with their own measurements. (The third, the memo, is §4b.)
+
+**Half one, the headline, landed 2026-08-26 in `5f253594` and this document was never updated —
+which is exactly the drift the marker convention exists to catch.** `digest.metric_scored_invalid`
+plus a third count on the working-set headline: 9 of 56 `node_evaluated` rows over 6 of the 20
+arms carry a `no_<metric key>` block, `node_failed` fires zero times campaign-wide, and 61 renders
+of a literal "0 failed" sat over a board holding an invalid experiment. Counted SEPARATELY rather
+than as failed — calling it failed is the same untruth pointed the other way, and
+`strategist.failure_rate` is a real decision path. A grep test keeps the predicate out of nine
+decision modules.
+
+**Half two, the champion line, lands now.** `agents/roles.py::_state_brief` opens every proposal
+prompt with `Best so far: node N metric=<x>`, and `<x>` was a bare `0.0` whether the run measured a
+genuine zero or the arena refused to time the solver at all — the two facts a proposer must not
+confuse, rendered identically one line above the headline that had just learned to tell them apart.
+
+**Measured over all thirty run dirs** (`runs-B` + `model-probes` + `fullctx-probe`, crash-atomic
+packets expanded): **340 renders of that line, 16 of them naming a node whose own eval had refused
+to score it.** Nine are the WHOLE of `spectral_clustering` — the arm never proposed anything under
+a different champion, and the literal bytes in its `spans.jsonl` are `Best so far: node 0
+metric=0.0 params={}` over a `score.log` reading 98/100 valid — plus 3 on `rectanglepacking` and 2
+each on the `gpt56luna` and `sol1` probes. The `Refine from node N … metric=` line just below is
+the same untruth from the parent's side; it names an invalid node **0** times in this corpus and
+gets the clause anyway, because a fix that covers only the line that happened to fire is a fix that
+reopens on the next corpus.
+
+`digest.unscored_metric_clause` is the ONE spelling — the headline and the champion line are two
+renders of one fact and are built in different packages, which is how two vocabularies for one
+thing get into one prompt. Render-only, the boundary `metric_account` states and
+`test_nothing_that_decides_reads_the_predicate` enforces: `state.best()` returns exactly the node it
+returned before. Four mutations turn the new tests red, including the one that matters most —
+relaxing the predicate to "the metric is 0.0" fires on 47 of the corpus's 56 evaluated rows instead
+of 9.
 
 The original finding:
 
@@ -392,6 +424,29 @@ and an experiment with a `score.log` on disk is **not** pending.
 2. Count an invalid node as **failed** in the run summary.
 3. Build the research memo from state at generation time, not from a snapshot taken before the
    in-flight evaluation lands.
+
+### 4b. The third contradiction — the memo that denies a result already on the board
+
+    OPEN[a-memo-is-quoted-as-current-after-the-result-it-denies]
+    proof:absent:memo_snapshot_cue@looplab/core/advisory_payloads.py
+
+`spectral_clustering`'s own event log, timestamps relative to `run_started`:
+
+| seq | t | event |
+|---|---|---|
+| 128 | 2052.8 s | `node_eval_started` node=0 |
+| 130 | 2052.9 s | `research_attempted` trigger=cadence at_node=1 |
+| 144 | 2109.1 s | `node_evaluated` node=0 **metric=0.0** |
+| 155 | 2365.7 s | `research_completed` trigger=cadence at_node=1 |
+
+The memo was COMPUTED from the state at 2052.9 s and RECORDED **256 seconds after node 0's result
+was on disk**, opening *"experiment #0 (deterministic-baseline-replication) is still pending, so
+there are no measured results yet — the memo's 6 claims are all UNSUPPORTED because they cite no
+experiment."* `_state_brief` then pushes that sentence into every later prompt as the "Latest
+deep-research takeaway", directly beneath a working set showing the result it denies.
+
+**Measured over the thirty run dirs: 78 of 119 completed memos (65.5 %)** were appended after at
+least one `node_evaluated` their snapshot could not contain, on 28 of the 30 runs.
 
 ---
 

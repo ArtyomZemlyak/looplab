@@ -453,6 +453,43 @@ def metric_scored_invalid(n) -> bool:
     return bool(_account_block(n)[0])
 
 
+#: What a number the eval refused to produce is CALLED, wherever one is rendered beside a metric.
+#: One spelling, because the surfaces that show it live in different packages and the whole defect
+#: was a metric shown WITHOUT it.
+UNSCORED_LABEL = "NOT SCORED (the eval refused to time it)"
+
+
+def unscored_metric_clause(n) -> str:
+    """The clause that must ride beside a metric the eval REFUSED to produce — `""` otherwise.
+
+    WHY IT EXISTS (doc 53 §4a, the half `metric_scored_invalid` does not reach). The headline count
+    was the FIRST of the three contradictions that section measured; the champion line is the
+    second. `agents/roles.py::_state_brief` opens every proposal prompt with `Best so far: node N
+    metric=<x>`, and `<x>` is a bare `0.0` whether the run measured a genuine zero or the arena
+    refused to time it — the two facts a proposer must not confuse, rendered identically.
+
+    MEASURED over the thirty run dirs: 340 renders of that line, **16 of them naming a node whose
+    own eval had refused to score it**. Nine are the WHOLE of `spectral_clustering` — every proposal
+    that arm ever made opened with `Best so far: node 0 metric=0.0 params={}` over a solver its own
+    `score.log` records as 98/100 valid — plus 3 on `rectanglepacking` and 2 each on the `gpt56luna`
+    and `sol1` probes. The `Refine from node N … metric=` line just below is the same untruth from
+    the parent's side; it names an invalid node 0 times in this corpus and gets the clause anyway,
+    because it is the same builder reading the same predicate.
+
+    RENDER-ONLY, the boundary `metric_account` states and
+    `tests/test_an_invalid_node_is_not_zero_failed.py::test_nothing_that_decides_reads_the_predicate`
+    enforces: this reads text the candidate's own eval wrote. It may make a rendered number honest;
+    it may never move a metric, a status, a champion or the failure taxonomy. `state.best()` still
+    returns exactly the node it returned before, and the prompt still shows exactly that node.
+    """
+    if not metric_scored_invalid(n):
+        return ""
+    # The predicate is true only when the block parsed, so the account is never empty — and it is
+    # the BRIEF form, bounded to ACCOUNT_LINE_CHARS, because this rides a prompt line that already
+    # carries the params dict.
+    return f" — {UNSCORED_LABEL}: {metric_account(n, brief=True)}"
+
+
 def trial_line(t) -> str:
     extra = f"  ({fmt_num(t.seconds)}s)" if getattr(t, "seconds", None) else ""
     return f"{fmt_params(t.params)} → {fmt_num(t.metric)}{extra}"
