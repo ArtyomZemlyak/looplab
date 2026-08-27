@@ -287,6 +287,69 @@ test('the steps control pages past the episode-map ceiling to the earliest row',
   }
 })
 
+test('a failed initial episode map can be retried without closing the Trace tab', async () => {
+  const dom = installDom()
+  installObserver()
+  let episodeReads = 0
+  const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status,
+    headers: { get: () => null }, json: async () => body })
+  globalThis.fetch = async url => {
+    const path = String(url)
+    if (path.includes('/conversation')) return response(conversationPage(512))
+    if (path.includes('/episodes')) {
+      episodeReads += 1
+      return episodeReads === 1
+        ? response({ detail: 'temporarily unavailable' }, 503)
+        : response(episodePage({ anchors: ['r1'] }))
+    }
+    return response({})
+  }
+
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react-dom/test-utils')
+    const container = dom.window.document.getElementById('root')
+    const root = createRoot(container)
+    const settle = async () => {
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)) })
+    }
+    const props = traceProps({
+      n: { id: 7, attempt: 0, status: 'done', trace: { nodes: [],
+        projection: { total_spans: 20, visible_spans: 10, omitted_spans: 10 } } },
+    })
+    await act(async () => { root.render(React.createElement(Trace, props)) })
+    await settle()
+
+    const steps = [...container.querySelectorAll('.trace-episodes > button')]
+      .find(button => /steps/.test(button.textContent))
+    await act(async () => { steps.click() })
+    await settle()
+    assert.equal(episodeReads, 1)
+    assert.ok(container.querySelector('.trace-episodes-body [role="alert"]') != null,
+      'a failed map is an observation error, not an empty-history receipt')
+    const retry = [...container.querySelectorAll('.trace-episodes-body button')]
+      .find(button => button.textContent.trim() === 'retry steps')
+    assert.ok(retry != null, 'the first-read failure must have an in-place recovery control')
+
+    await act(async () => { retry.click() })
+    await settle()
+    assert.equal(episodeReads, 2)
+    assert.ok(container.querySelector('.trace-episodes-body select') != null,
+      'a successful retry must replace the failure with the real episode picker')
+    assert.equal(container.querySelectorAll('.trace-episodes-body [role="alert"]').length, 0)
+
+    await act(async () => { root.unmount() })
+  } finally {
+    await vite.close()
+    dom.window.close()
+  }
+})
+
 test('at the ceiling the operator gets the COUNT, not another sentinel', async () => {
   const dom = installDom()
   const observer = installObserver()
@@ -356,7 +419,7 @@ test('at the ceiling the operator gets the COUNT, not another sentinel', async (
   }
 })
 
-test('lazy span detail sends and validates the run generation before commit', async () => {
+test('lazy span detail validates both run generation and span identity before commit', async () => {
   const dom = installDom()
   const generation = 'a'.repeat(64)
   const foreignGeneration = 'b'.repeat(64)
@@ -364,6 +427,8 @@ test('lazy span detail sends and validates the run generation before commit', as
   const outcomes = [
     { run_generation: foreignGeneration, span_id: 'generation-one', kind: 'generation',
       attributes: { output: 'foreign detail must never render' }, projection: {} },
+    { run_generation: generation, span_id: 'generation-two', kind: 'generation',
+      attributes: { output: 'foreign span detail must never render' }, projection: {} },
     { run_generation: generation, span_id: 'generation-one', kind: 'generation',
       attributes: { output: 'current detail rendered' }, projection: {} },
   ]
@@ -410,6 +475,16 @@ test('lazy span detail sends and validates the run generation before commit', as
       .find(node => node.textContent.trim() === 'Retry trace')
     await act(async () => {
       retry.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    })
+    await settle()
+    assert.doesNotMatch(container.textContent, /foreign span detail must never render/)
+    assert.match(container.textContent, /Trace detail unavailable/i,
+      'a same-generation response for another span must still be refused')
+
+    const retrySpan = [...container.querySelectorAll('button')]
+      .find(node => node.textContent.trim() === 'Retry trace')
+    await act(async () => {
+      retrySpan.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
     })
     await settle()
     assert.match(container.textContent, /current detail rendered/)
@@ -511,17 +586,21 @@ test('the earlier steps stay reachable without a mouse, and a failed widen keeps
     }
   })
 
-test('conversation fallback is lifecycle-scoped while a same-lifecycle widen keeps last-good evidence',
+test('conversation fallback is lifecycle-scoped and an unavailable wider envelope keeps last-good evidence',
   async () => {
     const dom = installDom()
-    let fail = false
+    let failure = null
     const response = body => ({ ok: true, status: 200, headers: { get: () => null },
       json: async () => body })
     globalThis.fetch = async url => {
       const path = String(url)
       if (path.includes('/logs')) return response({})
-      if (fail) throw new Error('offline')
-      return response(conversationPage(512, 1))
+      if (failure === 'offline') throw new Error('offline')
+      if (failure === 'unavailable') {
+        return response({ node_id: '7', attempt: 0, stages: [],
+          projection: { unavailable: true } })
+      }
+      return response(conversationPage(512, 200))
     }
 
     const vite = await createServer({
@@ -538,7 +617,7 @@ test('conversation fallback is lifecycle-scoped while a same-lifecycle widen kee
       const container = dom.window.document.getElementById('root')
       const root = createRoot(container)
       const props = { subject: nodeTraceSubject(7, 0), runId: 'demo', working: false,
-        spanLimit: 512, reloadNonce: 0 }
+        spanLimit: 512, reloadNonce: 0, onLoadMore: () => {} }
       const settle = async () => {
         await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
       }
@@ -547,13 +626,16 @@ test('conversation fallback is lifecycle-scoped while a same-lifecycle widen kee
       await settle()
       assert.match(container.textContent, /turn 0/)
 
-      fail = true
+      failure = 'unavailable'
       await act(async () => { root.render(React.createElement(
         Conversation, { ...props, spanLimit: 1024 })) })
       await settle()
       assert.match(container.textContent, /turn 0/,
-        'a failed wider representation may retain evidence from the same lifecycle')
+        'an explicit unavailable wider representation must retain same-lifecycle evidence')
+      assert.ok(container.querySelector('.trace-reach-failed') != null,
+        'the retained payload must expose the failed wider read rather than looking freshly widened')
 
+      failure = 'offline'
       await act(async () => { root.render(React.createElement(
         Conversation, { ...props, spanLimit: 1024, reloadNonce: 1 })) })
       assert.doesNotMatch(container.textContent, /turn 0/,
@@ -968,3 +1050,99 @@ test('the span-tree view pages through /trace, and only once the operator asks',
     dom.window.close()
   }
 })
+
+test('a historical span-tree failure is unavailable, auto-retries, and never borrows current detail',
+  async () => {
+    const dom = installDom()
+    installObserver()
+    const callbacks = new Map()
+    let nextTimer = 1
+    const previousSetInterval = globalThis.setInterval
+    const previousClearInterval = globalThis.clearInterval
+    Object.defineProperty(globalThis, 'setInterval', {
+      configurable: true, writable: true,
+      value: callback => { const id = nextTimer++; callbacks.set(id, callback); return id },
+    })
+    Object.defineProperty(globalThis, 'clearInterval', {
+      configurable: true, writable: true, value: id => callbacks.delete(id),
+    })
+    let traceReads = 0
+    const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status,
+      headers: { get: () => null }, json: async () => body })
+    globalThis.fetch = async url => {
+      const path = String(url)
+      if (path.includes('/conversation')) return response(conversationPage(512, 1))
+      if (/\/nodes\/7\/trace\?/.test(path)) {
+        traceReads += 1
+        if (traceReads === 1) return response({ detail: 'offline' }, 503)
+        return response({
+          node_id: 7, attempt: 0, before: null,
+          nodes: [{ span_id: 'historical-span', name: 'implement', kind: 'operation',
+            start: 0, duration_s: 1, attributes: {}, events: [], children: [] }],
+          rollup: { generations: 0, tools: 0, tokens: {} },
+          projection: { schema: 2, truncated: false, total_spans: 1,
+            visible_spans: 1, omitted_spans: 0 },
+        })
+      }
+      return response({})
+    }
+
+    const vite = await createServer({
+      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+      server: { middlewareMode: true },
+    })
+    try {
+      const { TraceSurface } = await vite.ssrLoadModule('/src/Inspector.jsx')
+      const { nodeTraceSubject } = await vite.ssrLoadModule('/src/traceSurfaceModel.js')
+      const { createRoot } = await import('react-dom/client')
+      const { act } = await import('react-dom/test-utils')
+      const container = dom.window.document.getElementById('root')
+      const root = createRoot(container)
+      const settle = async () => {
+        await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+      }
+      await act(async () => {
+        root.render(React.createElement(TraceSurface, {
+          subject: nodeTraceSubject(7, 0), runId: 'demo', working: false,
+          // This is the CURRENT attempt's unreadable detail. The selected historical attempt may
+          // neither borrow it as evidence nor inherit its failure after its own page succeeds.
+          detail: { attempt: 1, payload: { nodes: [], projection: { unavailable: true } } },
+          detailUnavailable: true,
+        }))
+      })
+      await settle()
+      const spanTree = [...container.querySelectorAll('button')]
+        .find(button => button.textContent.trim() === 'span tree')
+      await act(async () => { spanTree.click() })
+      await settle()
+
+      assert.equal(traceReads, 1)
+      assert.ok(container.querySelector('.resource-error') != null,
+        'a failed sole historical read must render as unavailable')
+      assert.match(container.textContent, /retrying automatically/i)
+      assert.doesNotMatch(container.textContent, /No execution spans|No observations were recorded/,
+        'a failed observation must never fall through to a positive empty claim')
+      assert.doesNotMatch(container.textContent, /showing confirmed spans/i,
+        'there are no confirmed spans when the historical first read failed')
+      assert.equal(callbacks.size, 1, 'a finished one-shot page gets one bounded retry timer')
+
+      await act(async () => { for (const callback of [...callbacks.values()]) callback() })
+      await settle()
+      assert.equal(traceReads, 2, 'the timer must re-read the same historical page')
+      assert.ok(container.querySelector('.span-row') != null,
+        'the successful historical retry must reach the span tree')
+      assert.equal(container.querySelectorAll('.resource-error').length, 0,
+        'current-attempt detail failure must not hide a successful historical page')
+
+      await act(async () => { root.unmount() })
+    } finally {
+      await vite.close()
+      Object.defineProperty(globalThis, 'setInterval', {
+        configurable: true, writable: true, value: previousSetInterval,
+      })
+      Object.defineProperty(globalThis, 'clearInterval', {
+        configurable: true, writable: true, value: previousClearInterval,
+      })
+      dom.window.close()
+    }
+  })

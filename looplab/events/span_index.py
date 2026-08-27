@@ -958,6 +958,21 @@ class SpanIndex:
         with self._rlock:
             return str(sid) in self.by_sid
 
+    def has_node_span(self, node_id, sid, *, generation: Optional[int] = None) -> bool:
+        """Can ``sid`` place a window inside this exact node lifecycle?
+
+        ``has_span`` answers only whether an id belongs to the RUN. That is insufficient for the
+        per-node ``?before=`` routes: accepting another node's (or another generation's) real id cuts
+        this node's ordered rows at a foreign global file offset and returns a plausible but wrongly
+        captioned window. Resolve membership through the same node/generation selection the eventual
+        trace read uses, so validation and projection cannot disagree about the anchor's scope.
+        """
+        if sid is None:
+            return False
+        with self._rlock:
+            row = self.by_sid.get(str(sid))
+            return row is not None and row in self._rows_for_node(node_id, generation)
+
     def _anchored(self, rows: list[int], before) -> list[int]:
         """Cut an ordered row selection at its anchor. Caller holds ``_rlock``.
 

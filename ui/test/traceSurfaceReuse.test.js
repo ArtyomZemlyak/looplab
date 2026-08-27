@@ -322,6 +322,62 @@ test('the node’s research disclosure is the SAME surface, given the full width
   }
 })
 
+test('the node research disclosure recovers in place after its first card-trace read fails', async () => {
+  let cardReads = 0
+  const paths = []
+  const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status,
+    headers: { get: () => null }, json: async () => body })
+  globalThis.fetch = async url => {
+    const path = String(url)
+    paths.push(path)
+    if (path.includes('/cards/card-many/trace')) {
+      cardReads += 1
+      return cardReads === 1
+        ? response({ detail: 'temporarily unavailable' }, 503)
+        : response(CARD_TRACE)
+    }
+    if (/\/nodes\/4\/conversation/.test(path)) {
+      return response(conversationBody(
+        { node_id: '4', attempt: 0 }, 'implement', 'the developer wrote code'))
+    }
+    if (/\/by_trace\/[^/]+\/conversation/.test(path)) {
+      return response(conversationBody(
+        { trace_id: PROPOSE_TRACE_ID }, 'propose', 'the researcher argued'))
+    }
+    return response({})
+  }
+  const view = await mount(async vite => {
+    const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
+    return React.createElement(Trace, {
+      n: { id: 4, attempt: 0, status: 'done', trace: { nodes: [], projection: {} },
+        idea: { card_id: 'card-many' } },
+      runId: 'run-1', expectedGeneration: null, expectedTraceRevision: null, live: null,
+      working: false, onReload: () => {}, detailStatus: 'ready', reloadPending: false,
+      clearScope: 'run-1:4:0:trace-clear', clearRecoveryStore: { current: new Map() },
+      recoverClearState: null, clearRecoverySignal: null, publishClearRecovery: () => {},
+    })
+  })
+  try {
+    await view.click(view.buttonWith('research'))
+    await view.waitFor(
+      () => view.buttonIn('.trace-research-body', 'retry research trace') != null,
+      'the research retry control')
+    assert.equal(cardReads, 1)
+    assert.match(view.container.querySelector('.trace-research-body')?.textContent || '',
+      /Trace unavailable for this work item/i)
+
+    await view.click(view.buttonIn('.trace-research-body', 'retry research trace'))
+    await view.waitFor(() => /Researcher · propose/.test(view.container.textContent),
+      'the retried research trace')
+    assert.equal(cardReads, 2)
+    assert.ok(paths.some(path => path.includes(`/by_trace/${PROPOSE_TRACE_ID}/conversation`)),
+      'the successful retry must continue into the shared readable trace surface')
+    assert.equal(view.buttonIn('.trace-research-body', 'retry research trace'), undefined)
+  } finally {
+    await view.close()
+  }
+})
+
 test('the design system really does leave a bare .seg button unpainted', () => {
   // The mechanism behind (3), stated once so the assertion above is not folklore: `.seg` is a
   // CONTAINER rule — the background lives on `.seg button` and on the scoped `.conv-toggle .seg` —
