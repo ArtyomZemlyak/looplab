@@ -538,6 +538,37 @@ attempt N cannot read attempt N-1's curve as its own. That snapshot is why the l
 at the top of every attempt rather than lazily at the failure — by then there is no "before" left to
 take.
 
+### Why the kill bar is a bar and not a ladder
+
+`train_monitor_kill_confidence` is 0.8, and a `broken` verdict under it does nothing. That looks
+wasteful on a node the watchdog has already doubted several times, and on `runs/e5small-dr-unified-v8`
+node 2 it demonstrably was: three sub-bar `broken` verdicts — **0.70 at 08:31:58, 0.65 at 08:44:38,
+0.70 at 08:56:39** — and the kill only came with the 0.90 at 09:07:14. **36 minutes of GPU ran under
+a watchdog that already believed the node broken three times.**
+
+The obvious answer is to kill on *K consecutive* sub-bar `broken` verdicts. It was measured against
+every alert this box has recorded — 259 `train_monitor_alert` rows over 35 node-generations, 114 of
+them `broken` — and it is **refused**. Only four node-generations ever reach two or more consecutive
+sub-0.8 `broken` verdicts, and a K=3 ladder fires on three of them:
+
+| run | node | the sub-bar streak | what the node did |
+|---|---|---|---|
+| `rubertlite-dr-unified-v6` | 1 | 0.62, 0.62, 0.75 | **recorded 0.715142** |
+| `e5small-dr-unified-v4` | 3 | 0.75, 0.70, 0.75 | **recorded 0.790898** |
+| `e5small-dr-unified-v8` | 2 | 0.70, 0.65, 0.70 | failed `not_learning` |
+| `e5small-dr-unified-v4` | 12 | 0.62, 0.70 | `idea_rejected` — never trained |
+
+**Two good nodes destroyed per node saved**, and one of the two carries the strongest number in its
+neighbourhood. The fourth row is not evidence either way: that node never trained. So the 36 minutes
+are real, and they are the *price* of that ratio rather than an argument against it — a low-confidence
+`broken` verdict on this box is far more often a slow start than a dead run.
+
+What would change the answer is a signal that separates those rows from each other. The trajectory
+veto is the existing attempt and it is consulted on every one of them. Until something does separate
+them, the bar stays a bar: the `broken-verdict-ladder` decline in `engine/train_monitor.py` carries
+the number, and lowering `train_monitor_kill_confidence` is the same trade bought at a worse price, since
+it discards the confidence signal entirely instead of counting it.
+
 ### And since 2026-08-27 the look has a wall
 
 The turn grant that came with those tools is additive **over a finite budget**, and the shipped

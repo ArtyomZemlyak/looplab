@@ -2640,8 +2640,14 @@ class TrainingMonitorMixin:
         except Exception:  # noqa: BLE001 - advisory history lookup; the live monitor still proceeds
             pass
         llm_calls = 0
-        # Phase 3 arming state. `broken_streak` counts CONSECUTIVE confident-broken verdicts about the
-        # same stage log; `armed_key` is the log they were about, so a stage change (train.log ->
+        # Phase 3 arming state. `broken_streak` counts CONSECUTIVE `broken` verdicts about the
+        # same stage log — ANY of them, at ANY confidence: the increment below is
+        # `if verdict.status == "broken"` and never reads the number. This comment said
+        # "confident-broken" until 2026-08-27 and that was wrong in a way that matters, because
+        # it makes the two kill conjuncts look like one. They are independent: repetition is
+        # satisfied by sub-bar verdicts, and the confidence bar is what actually holds the gun.
+        # On `runs/e5small-dr-unified-v8` node 2 the streak reached 3 across verdicts of 0.70,
+        # 0.65 and 0.70 while nothing was armed to fire; `armed_key` is the log they were about, so a stage change (train.log ->
         # score.log) can never let two different subjects confirm each other. `armed_at` is set only
         # when the KILL GATE actually arms (a broken verdict about a kill-eligible log) and is what
         # licenses the changed-digest bypass; with `arm_looks` it bounds how long and how expensively
@@ -2875,6 +2881,38 @@ class TrainingMonitorMixin:
                         # the wrong direction to fail in, and it matters much more now that
                         # `train_monitor_kill` defaults to True. Mirrors the identical rule in
                         # `asha_monitor.py`; a non-numeric knob falls back to the schema default.
+                        # REPETITION IS ALREADY REQUIRED, AND IT IS NOT THE THING HOLDING THE GUN.
+                        # `should_monitor_kill` needs `broken_streak >= confirm_ticks` AND this
+                        # confidence bar, and the streak counts ANY `broken` verdict at any
+                        # confidence (see its increment). So the tempting fix — "kill once the
+                        # verdict has repeated K times" — is already shipped, and what would
+                        # actually change behaviour is DROPPING or LOWERING the confidence conjunct
+                        # so repetition alone can fire. That is the thing measured and refused here.
+                        #
+                        # `runs/e5small-dr-unified-v8` node 2 drew three `broken` verdicts
+                        # under the bar — 0.70 at 08:31:58, 0.65 at 08:44:38, 0.70 at 08:56:39 —
+                        # before the 0.90 kill at 09:07:14, so 36 minutes of GPU ran under a
+                        # watchdog that already believed the node broken three times. The obvious
+                        # answer is "kill on K consecutive sub-bar broken verdicts". It was measured
+                        # against every alert this box has recorded and it is REFUSED:
+                        #
+                        #   rubertlite-dr-unified-v6 node 1   0.62, 0.62, 0.75  ->  recorded 0.715142
+                        #   e5small-dr-unified-v4    node 3   0.75, 0.70, 0.75  ->  recorded 0.790898
+                        #   e5small-dr-unified-v8    node 2   0.70, 0.65, 0.70  ->  failed not_learning
+                        #   e5small-dr-unified-v4    node 12  0.62, 0.70        ->  idea_rejected,
+                        #                                                          never trained
+                        #
+                        # Two good nodes destroyed per node saved, and one of the two carries the
+                        # strongest number in its neighbourhood. The 36 minutes are real and are the
+                        # PRICE of that ratio, not an argument against it. What would change the
+                        # answer is a signal that separates those rows — the trajectory veto already
+                        # tried, and it is consulted on every one of them.
+                        #
+                        # DECLINED[broken-verdict-ladder] killing by accumulation of sub-bar `broken`
+                        # verdicts. measured: 4 node-generations in `runs/` reach 2+ consecutive
+                        # sub-0.8 `broken` verdicts across all 259 alerts; a K=3 ladder fires on 3 of
+                        # them and TWO recorded real metrics (0.715142, 0.790898) against ONE true
+                        # positive — docs/guide/llm-and-agents.md
                         _kc = getattr(self, "_train_monitor_kill_confidence", 0.8)
                         threshold = (float(_kc) if isinstance(_kc, (int, float))
                                      and not isinstance(_kc, bool) else 0.8)
