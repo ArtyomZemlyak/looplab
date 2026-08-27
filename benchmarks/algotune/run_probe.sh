@@ -151,9 +151,22 @@ LOOPLAB_MEMORY_DIR="$OUT/runs/$TASK/memory" LOOPLAB_KNOWLEDGE_DIR="$OUT/runs/$TA
     --out "$OUT/runs/$TASK/run" --backend llm --max-nodes 20 >> "$OUT/run.log" 2>&1
 say "прогон rc=$? за $(( $(date +%s) - S ))с"
 
-CH=$(ls -t "$OUT/runs/$TASK/run"/nodes/*/solver.py 2>/dev/null | head -1)
+# ЧЕМПИОНА ВЫБИРАЕТ СВЁРТКА СОБЫТИЙ, А НЕ ВРЕМЯ ФАЙЛА. Здесь стояло `ls -t … | head -1` — самый
+# СВЕЖИЙ solver.py, — и это не то же самое, что лучший. На пробе `convex_hull` 27.08 узел 0 имел
+# train-оценку 3.7777, узел 1 — 2.7342, а `ls -t` вернул узел 1, потому что он записан позже
+# (06:00:53 против 04:30:53). На тесте померили его: 2.7829. Настоящий чемпион на тесте не
+# измерялся вообще, и весь день это число докладывалось как результат пробы.
+# Кампания так не делает: `campaign.sh:768` зовёт `extract_champion.py --run-dir`, который читает
+# свёртку и знает `state.best()`. Проба обязана выбирать так же, иначе она меряет не то, что цикл
+# счёл лучшим, — то есть меряет не цикл.
+if python "$ROOT/looplab/benchmarks/algotune/extract_champion.py" \
+     --run-dir "$OUT/runs/$TASK/run" --out "$OUT/champion_solver.py" >> "$LOG" 2>&1; then
+  CH="$OUT/champion_solver.py"
+else
+  CH=""
+fi
 say "чемпион: ${CH:-НЕТ}"
-[ -n "$CH" ] && cp "$CH" "$OUT/champion_solver.py" && (
+[ -n "$CH" ] && (
   cd "$OUT" && taskset -c "$LANE" "$ROOT/AlgoTune/.venv/bin/python" \
     "$ROOT/looplab/benchmarks/algotune/looplab_eval.py" --algotune-root "$ROOT/AlgoTune" \
     --task "$TASK" --model "$LABEL" --solver champion_solver.py --subset test \
