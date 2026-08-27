@@ -514,6 +514,87 @@ def timing_clause(root: Path) -> str:
 
 
 
+# THE PRICE THE CARD QUOTED WAS NOT MEASURED, AND IT ARGUED AGAINST THE CAPABILITY IT WAS ATTACHED
+# TO. The retired sentence said an evaluation runs from half a minute to six minutes, that one call
+# could therefore be a third of the whole session, and that the model should measure once and never
+# twice on the same code. It is quoted VERBATIM in `tests/test_algotune_eval_cost_clause.py` and
+# deliberately not here: it is a negative pin, and a commented-out copy would satisfy the substring
+# the pin forbids.
+#
+# MEASURED, 2026-08-27, over every `eval_train` call this harness has on disk -- the `run_dev_command`
+# tool spans in `fullctx-probe*/runs/*/run/spans.jsonl` and `model-probes/*/runs/*/run/spans.jsonl`,
+# 56 calls in 10 runs: 54 completed, median 39.6 s, min 28.5 s, max 79.9 s. The scorer's own
+# `eval_seconds` from the same runs' `nodes/*/score.log` agrees (28.6-80 s per task). Against the
+# 1200 s the Developer's session is bounded at, that is 3 %, not a third. The two calls that did NOT
+# complete are the six-minute end of the old sentence: both hit the THEN-600 s cap, both returned
+# `exit=-9` and `(no output)`, and the cap is 450 s now.
+#
+# WHY THE OVERSTATEMENT COSTS SCORE. AlgoTuner's agent is handed this same number automatically after
+# every edit -- 57 evaluations on `convex_hull` alone (`grep -c '^Speedup: ' campaign-final/
+# A-convex_hull.log`). Ours, in the ten runs that had the command at all, called it 1 to 13 times,
+# median 4.5, and the card is what taught it to ration: a paragraph that says a measurement costs a
+# third of the session and must never be repeated is a paragraph that says do not use this tool.
+#
+# What replaces it keeps the honest half -- the clock is real, a hung call returns nothing, and a
+# session that writes no file has produced nothing -- and drops the arithmetic that was wrong. The
+# numbers are stated as MEASURED CONSTANTS with their provenance above, because unlike the reference
+# time and the instance shape there is nothing on this box to derive them from at build time: the
+# cost of an evaluation is a property of runs that have not happened yet. The cap and the session
+# budget ARE derivable and are derived.
+#
+# CHANGING THIS CHANGES THE MEASUREMENT. The probes running right now already have their cards built
+# and are unaffected, but the next batch is comparable only with itself -- the same rule
+# `rules_clause` states for its own additions: adopt between arms, never inside one.
+
+# The `eval_train` ceiling, in ONE place: the card quotes it and the developer command is pinned at
+# it, so the sentence the model reads and the timeout that kills it cannot drift apart. 450 s clears
+# the slowest evaluation observed on this split (374.6 s) by 20 % and caps a hung call at 37 % of the
+# session rather than the 50 % the model's own 600 s cap allowed.
+DEV_EVAL_TIMEOUT_S = 450.0
+
+
+def session_budget_s() -> float | None:
+    """The Developer session's wall-clock ceiling, from the engine that enforces it.
+
+    Read from `Settings` rather than typed, because the card's whole point here is the RATIO between
+    one call and the session, and a hand-copied 1200 would keep being quoted after the default moved.
+    None when this generator is run somewhere `looplab` is not importable -- and then the card states
+    the seconds and skips the fraction, rather than inventing a denominator.
+    """
+    try:
+        from looplab.core.config import Settings
+    except Exception:                            # noqa: BLE001 - no engine here, no claim about it
+        return None
+    budget = float(getattr(Settings(), "developer_session_time_budget_s", 0.0) or 0.0)
+    return budget if budget > 0 else None
+
+
+def eval_cost_sentence() -> str:
+    """What one `eval_train` call actually costs, and what follows from that."""
+    budget = session_budget_s()
+    share = (f", so one call is about {round(100 * 40.0 / budget):.0f} % of your session and not a "
+             f"third of it" if budget else "")
+    bounded = (f"against a Developer session bounded at {budget:.0f} s of wall clock"
+               if budget else "against a Developer session bounded by a wall clock nobody shows you")
+    return (
+        "IT COSTS ABOUT 40 SECONDS, AND IT IS CHARGED TO A CLOCK YOU CANNOT SEE. Measured over the "
+        "54 completed `eval_train` calls this harness has on record on this box: 40 s median, 29 s "
+        f"fastest, 80 s slowest, {bounded}{share}. MEASURING IS THE CHEAPEST INFORMATION HERE -- the "
+        "agent this arm is compared against is handed the same number automatically after EVERY "
+        "edit it makes, 57 times on one task, and that is the loop you are up against. So: write "
+        "the solver FIRST -- the simplest correct one -- then measure, change ONE thing, measure "
+        "again. Two things do get expensive, and both are measured rather than feared. A call is "
+        f"KILLED at {DEV_EVAL_TIMEOUT_S:.0f} s and a killed call returns nothing at all, not a "
+        "partial result (it has happened twice, under an older 600 s cap: `exit=-9`, `(no output)`, "
+        "half a session gone each time). And the evaluation runs YOUR solver over every instance, so "
+        "a solver much slower than the reference makes the call itself slower -- on one task the "
+        "node whose solver came out at 0.06x took 62 s where the other 28 nodes took 39-40 s. "
+        "Neither is a reason to measure less; both are reasons to keep the clock in mind and to end "
+        "the session with a FILE. A session that spends its clock measuring and ends with no file "
+        "written has produced nothing at all. "
+    )
+
+
 # The clause that REPLACES `_DELIVER_NO_MEASURE`. It states what is now true, and states the cost,
 # because an expensive capability offered without its price is used until the budget is gone.
 MEASURE = (
@@ -523,13 +604,7 @@ MEASURE = (
     "`speedup`, `eval_seconds`, and whether every instance was valid. That is the number, not an "
     "estimate of it. Use it the way you would use a test: write the simplest correct solver, "
     "measure, change ONE thing, measure again. "
-    "IT IS EXPENSIVE, AND IT IS CHARGED TO A CLOCK YOU CANNOT SEE. A real evaluation of this task "
-    "takes roughly half a minute to six minutes on the same machine your solver is timed on, and "
-    "your whole session is bounded at twenty minutes of wall clock -- so ONE call can be a third "
-    "of everything you have, and a call that hangs takes that whether or not it answers. Budget it "
-    "like that: write the solver FIRST, measure ONCE when you have something worth measuring, and "
-    "never twice on the same code. A session that spends its clock measuring and ends with no file "
-    "written has produced nothing at all. "
+    "{cost}"
     "A guess you can check in one command is not a guess to write into the summary. "
     # THE SECOND HALF OF THE SAME REPAIR, and it is cheap where the first is expensive.
     #
@@ -544,8 +619,8 @@ MEASURE = (
     "line profiler, and prints the hottest lines of your own code with hits, milliseconds and "
     "share of the run. It instruments every function in the files you wrote, so a helper's inner "
     "loop is named, not hidden behind the line that called it. IT IS CHEAP: a fixed ~1.3 s plus "
-    "three runs of your own solve() (cold, warm, profiled) on that one instance -- against half a "
-    "minute to six minutes for `eval_train`, which runs it over a hundred. So profile freely and "
+    "three runs of your own solve() (cold, warm, profiled) on that one instance -- against the "
+    "tens of seconds of `eval_train`, which runs it over a hundred. So profile freely and "
     "measure rarely. It profiles ONE instance and reports no speedup and no validity -- it tells "
     "you where your time is, never whether you are winning. "
     "THE REPORTED SCORE IS ON A SPLIT YOU CANNOT SEE. Train is what you tune against; the champion "
@@ -972,7 +1047,7 @@ def main() -> int:
                  # starts. See `timing_clause`.
                  + (timing_clause(root) if args.full_context else "")
                  + ((_DELIVER_WRITE if args.full_context else DELIVER) if args.deliver else "")
-                 + (MEASURE if args.full_context else "")
+                 + (MEASURE.format(cost=eval_cost_sentence()) if args.full_context else "")
                  + (ONE_CARD.format(task=args.task) if args.one_card else "")
                  # BANS then PERMISSIONS, in that order and both under the same flag: they are one
                  # statement of what this arena allows, and the half that was missing is the half
@@ -1064,7 +1139,7 @@ def main() -> int:
             # of the session instead of 50 %. It does not make the tool safe -- two bad calls still
             # end a session -- and the real repair is telling the Developer what its clock is,
             # which is a change to the session contract rather than to this task.
-            "timeout": 450.0,
+            "timeout": DEV_EVAL_TIMEOUT_S,
         }, {
             "name": "profile",
             "command": [
