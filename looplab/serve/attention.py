@@ -17,6 +17,7 @@ import math
 import time
 from typing import Iterable
 
+from looplab.core.fitness import finite_metric
 from looplab.core.models import Event, NodeStatus
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.replay import fold
@@ -78,14 +79,20 @@ def _integer(value) -> int | None:
 def _number(value, *, positive: bool = False) -> float | None:
     """A finite float off an untrusted event row, or None. `positive=True` also rejects <= 0.
 
-    `bool` is excluded explicitly: `isinstance(True, int)` is True and `float(True)` is 1.0, so a
+    THROUGH `core/fitness.py::finite_metric`, the named home for this rule — whose own docstring
+    records that two modules had each written it out privately and were unified there. A local copy
+    was a fifth, in a module that may freely import `core`, and it was not merely redundant: the
+    shared one also survives a JSON integer too large for a float (`10**400` in a hand-edited row),
+    which the local `float(value)` raised `OverflowError` on, out of a projection whose whole
+    contract is that untrusted rows degrade rather than break the feed.
+
+    `bool` exclusion comes with it: `isinstance(True, int)` is True and `float(True)` is 1.0, so a
     row carrying `overrun_beyond_grace_s: true` would otherwise read as a one-second overrun and
-    open an attention item nobody can act on.
+    open an attention item nobody can act on. Only the `positive` clause is local, because it is
+    this module's question and not a fact about metrics.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    if not math.isfinite(number):
+    number = finite_metric(value)
+    if number is None:
         return None
     return number if not positive or number > 0 else None
 
