@@ -1648,10 +1648,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # (`defer_trace_retirement`).  `cli/run_cmds.py::_run_engine_guarded` is exactly that
             # caller: its outer handler writes the terminal AND buys the finish report, several
             # frames above this `finally`.  See `defer_trace_retirement` for the measurement.
-            # `getattr` rather than the attribute: `Engine.__new__(Engine)` probes and embedding
-            # stubs never run `__init__`, and an engine that never declared an owner keeps the
-            # original behaviour -- retire here.
-            if not getattr(self, "_trace_retirement_deferred", False):
+            # BOTH lookups are defensive, and the second is not paranoia: `Engine.run` is borrowed
+            # by host stubs that are not Engines at all (`tests/test_budget_ceiling_drains_the_
+            # inflight_eval.py::_RunHost`) and by `Engine.__new__(Engine)` probes that never ran
+            # `__init__`. The code this replaced was defensive for exactly that reason
+            # (`getattr(getattr(self, "tracer", None), "shutdown", None)`); moving the guard inside
+            # `retire_tracer` left the METHOD lookup itself unguarded, and those three drain tests
+            # caught it. `hasattr` rather than a local alias, so the call site keeps the literal the
+            # source pin in `tests/test_async_trace_exporter.py` reads.
+            if not getattr(self, "_trace_retirement_deferred", False) \
+                    and hasattr(self, "retire_tracer"):
                 self.retire_tracer()
 
     def defer_trace_retirement(self) -> None:
