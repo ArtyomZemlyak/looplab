@@ -323,7 +323,7 @@ def _bounded_card_added_receipt(d: dict) -> dict | None:
     # the board and the folded child's parent was None with every direction childless.
     # NOT a node id — this is a CARD id, so it takes the same string bound as a card's own id
     # rather than `_card_replay_node_id` one line above it.
-    parent_card_id = _bounded_card_ref(d.get("parent_card_id"))
+    parent_card_id = _card_id(d.get("parent_card_id"))
     if parent_card_id is not None:
         rec["parent_card_id"] = parent_card_id
     scored_against = _card_replay_node_id(d.get("scored_against"))
@@ -681,19 +681,25 @@ def _proposal_card_concept_source(
     )
 
 
-def _bounded_card_ref(value: object) -> str | None:
-    """One card id as a foreign key, or None. SHAPE only — existence is not knowable from one row.
+def _bounded_card_ref(value) -> str | None:
+    """One ENRICHMENT ref as a foreign key, or None — a memo/lesson/claim id, not a card id.
 
-    The same bound `_seed_cards_from_receipts` applies to a card's own id (non-empty, <= 256 chars),
-    so an edge can never name something that could not itself be a card id. Printability is required
-    because these ids are rendered into prompts and a terminal.
+    RESTORED to its original contract on 2026-08-27 after a card-lineage change narrowed it for a
+    new caller: the bound went 400 -> 256, and refusing a padded value (`value != value.strip()`)
+    became silently STRIPPING one. This helper folds `research_origin`, `lesson_refs` and
+    `claim_refs` on logs already on disk, so both edits changed replay OUTPUT for rows nobody was
+    editing — a legacy ref of 257-400 chars started folding to `None` and vanishing, and a
+    whitespace-padded ref that the rule deliberately REFUSED began resolving to a stripped id, which
+    is the treat-display-edits-as-identity failure the card-id rules elsewhere warn about. (Only
+    LEGACY rows: a `modern` row must additionally be a `sha256:` digest ref, far under either bound.)
+
+    The card-id shape it was narrowed for is `_card_id`, which already spells exactly that rule; the
+    `parent_card_id` edge calls it directly.
     """
-    if not isinstance(value, str):
+    if (not isinstance(value, str) or not value or value != value.strip()
+            or len(value) > 400 or not value.isprintable()):
         return None
-    ref = value.strip()
-    if not ref or len(ref) > 256 or not ref.isprintable():
-        return None
-    return ref
+    return value
 
 
 def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
@@ -787,7 +793,7 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
     # and its `action_owner_missing` blocker would silently turn into `action_receipt_incomplete`.
     # The edge is validated for SHAPE here and for legality (self-edge, cycle, unknown target,
     # merged-away target) in `_apply_card_lineage`, which is the only place that can see every card.
-    parent_card_id = _bounded_card_ref(d.get("parent_card_id"))
+    parent_card_id = _card_id(d.get("parent_card_id"))
     if parent_card_id is not None:
         snapshot["parent_card_id"] = parent_card_id
     return snapshot, owns_action
