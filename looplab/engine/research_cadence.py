@@ -23,6 +23,7 @@ from typing import Iterable, Optional
 
 from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
+from looplab.core.advisory_payloads import MAX_SUPERSEDED_NODE_REFS
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.jsonutil import canonical_json_digest
@@ -405,8 +406,33 @@ class ResearchCadenceMixin:
             sig = research_memo_sig(memo)
             if last_sig is not None and sig == last_sig:
                 return sig, False
-            self._record_deep_research(memo, trigger=trigger, manual=manual, attempt_id=attempt_id)
+            self._record_deep_research(
+                memo, trigger=trigger, manual=manual, attempt_id=attempt_id,
+                superseded=self._results_since_snapshot(state))
             return sig, True
+
+    def _results_since_snapshot(self, snapshot: RunState) -> dict:
+        """Which evaluated nodes landed while THIS think was running — `{"nodes": […], "count": n}`.
+
+        The memo was computed from `snapshot`; the provider call then ran for minutes. Everything
+        that finished in that window is invisible to the memo and visible to every prompt that will
+        quote it, so the gap is stamped ON the memo rather than left for a reader to infer from two
+        timestamps. See `core/advisory_payloads.py::memo_snapshot_cue` for the measurement —
+        including why "fold fresh at generation time", the repair doc 53 §4a proposed, recovers
+        nothing: the snapshot is already fresh when the call starts.
+
+        Best-effort and never raising: a fold that fails yields an EMPTY receipt, which renders the
+        historical line unchanged. Degrading to "no claim" is the right direction here — the clause
+        exists to stop a memo asserting more than it knows, and a receipt invented from a failed
+        read would do exactly that.
+        """
+        try:
+            known = {n.id for n in snapshot.evaluated_nodes()}
+            fresh = fold(self.store.read_all())
+            landed = sorted(n.id for n in fresh.evaluated_nodes() if n.id not in known)
+        except Exception:  # noqa: BLE001 - research is advisory; a diagnostic may not stall a memo
+            return {"nodes": [], "count": 0}
+        return {"nodes": landed[:MAX_SUPERSEDED_NODE_REFS], "count": len(landed)}
 
     def _record_research_attempt(self, state: RunState, *, trigger: str,
                                  manual: bool) -> Optional[str]:
@@ -469,14 +495,20 @@ class ResearchCadenceMixin:
     # future selection-affecting append here fail fast instead of racing the event order.
     @in_llm_lane("deep_research")
     def _record_deep_research(self, memo, *, trigger: str, manual: bool,
-                              attempt_id: Optional[str] = None) -> None:
+                              attempt_id: Optional[str] = None,
+                              superseded: Optional[dict] = None) -> None:
         """Append the memo to the event log. Called from BOTH the main-task cadence AND the
         concurrent research task — see the note above; every append here must stay in
         BACKGROUND_APPENDABLE.
 
         `attempt_id` closes this think's paid-attempt receipt (`_record_research_attempt`). Absent
         for `repeat` passes and for any caller that predates the receipt, in which case the trigger
-        gates fall back to counting recorded memos alone — exactly the old behavior."""
+        gates fall back to counting recorded memos alone — exactly the old behavior.
+
+        `superseded` is `_results_since_snapshot`'s receipt: the results that landed while the
+        provider was answering. Stamped INSIDE the memo payload, because the fold keeps only
+        `d["memo"]` and this fact has to reach the prompt that quotes the summary. `None` (every
+        caller that predates it) and an empty receipt both leave the payload byte-identical."""
         from looplab.core.advisory_payloads import (
             research_claim_ref,
             research_memo_ref,
@@ -490,6 +522,12 @@ class ResearchCadenceMixin:
         # this durable writer must explicitly carry the original pre-cap denominator across sanitizers.
         if getattr(memo, "claims_receipt", None) is not None:
             memo_payload["claims_receipt"] = memo.claims_receipt
+        # ENGINE-DERIVED, so it goes on before the verifier and before the id is minted, exactly
+        # like `verification` below: the memo id is the hash of the FINAL canonical payload, and a
+        # fact added after it would be carried by a memo whose id does not cover it. Only stamped
+        # when non-empty, so a memo that superseded nothing keeps the historical bytes.
+        if superseded and (superseded.get("count") or superseded.get("nodes")):
+            memo_payload["snapshot_superseded"] = superseded
         memo_d = sanitize_research_memo_payload(memo_payload)
         # D8 · decoupled Verifier: check the memo's claims against their CITED evidence before the
         # memo is recorded — synthesis is the documented weak link (Kosmos: 57.9% accurate).

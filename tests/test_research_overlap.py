@@ -109,7 +109,8 @@ class _LoopStub(ResearchCadenceMixin):
         self.attempts.append(trigger)
         return f"attempt-{len(self.attempts)}"
 
-    def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None):
+    def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None,
+                              superseded=None):
         self.recorded.append((research_memo_sig(memo), trigger))
         self.recorded_attempts.append(attempt_id)
 

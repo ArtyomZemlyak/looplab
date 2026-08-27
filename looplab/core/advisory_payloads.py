@@ -741,6 +741,68 @@ def memo_verdict_cue(memo) -> str:
             "nothing verifies the summary itself]")
 
 
+#: How many node ids a snapshot-superseded receipt carries. It rides ONE prompt line beside a
+#: 300-character summary, so it takes the node-ref bound rather than the claim bound.
+MAX_SUPERSEDED_NODE_REFS = MAX_RESEARCH_NODE_REFS
+
+
+def snapshot_superseded_receipt(value) -> dict:
+    """Canonicalize the ENGINE-DERIVED "results that landed after this memo's snapshot" receipt.
+
+    `{"nodes": [id, …], "count": n}` — the evaluated nodes whose results were on disk when the memo
+    was RECORDED and absent from the state it was COMPUTED from. `count` is the true total and
+    `nodes` the bounded sample, so a long list is truncated rather than under-reported.
+
+    Engine-derived like `verification`, and it rides INSIDE the memo payload for the same reason:
+    `events/replay.py::_on_research_completed` folds only `d["memo"]` into `state.research`, so a
+    fact stamped on the event envelope alone could never reach the prompt that quotes the summary.
+    """
+    src = value if isinstance(value, dict) else {}
+    raw, total, shape_known = _bounded_source(src.get("nodes"))
+    nodes = [n for n in itertools.islice(raw, MAX_SUPERSEDED_NODE_REFS)
+             if type(n) is int and 0 <= n <= (1 << 63) - 1]
+    declared = src.get("count")
+    count = (declared if type(declared) is int and 0 <= declared <= _MAX_ADVISORY_COUNT
+             else (total if shape_known else len(nodes)))
+    # A `count` below the ids actually retained would make the clause claim fewer results than it
+    # goes on to name — the one arithmetic a reader would catch on sight.
+    return {"nodes": nodes, "count": max(count, len(nodes))}
+
+
+def memo_snapshot_cue(memo) -> str:
+    """ONE bracketed clause saying a memo SUMMARY predates results already on the board — `""` when
+    it does not, which is the only case where the historical line is reproduced byte for byte.
+
+    WHY (doc 53 §4a, the third of its three contradictions). A deep-research think is COMPUTED from
+    a state snapshot and RECORDED when the provider returns, and on this workload that gap is
+    minutes. On `spectral_clustering` the memo was computed 0.1 s after `node_eval_started`, node
+    0's result landed 56 s later, and the memo was appended **256 s after that**, opening with
+    *"experiment #0 … is still pending, so there are no measured results yet"*. `_state_brief` then
+    pushed that sentence into every later prompt as the "Latest deep-research takeaway" — beside a
+    working set showing the very result it denied. The prompt contradicted itself.
+
+    MEASURED over the thirty run dirs: **78 of 119** completed memos (65.5 %) were appended after at
+    least one `node_evaluated` their snapshot could not contain — 78 results in total. And the
+    obvious repair, "fold fresh at generation time", was measured and does NOT work: across 131
+    `research_attempted` receipts the snapshot's own node count disagreed with the log **0 times**,
+    so the snapshot is fresh when the call STARTS and goes stale while it runs. Nothing can make a
+    memo see the future; what the record can do is stop presenting it as current.
+
+    Pure, total, and it decides nothing: a string built from a folded payload."""
+    receipt = memo.get("snapshot_superseded") if isinstance(memo, dict) else None
+    if not isinstance(receipt, dict):
+        return ""
+    nodes = [n for n in (receipt.get("nodes") or []) if type(n) is int]
+    count = receipt.get("count")
+    count = count if type(count) is int and count > 0 else len(nodes)
+    if count <= 0:
+        return ""
+    named = ", ".join(f"#{n}" for n in nodes[:MAX_SUPERSEDED_NODE_REFS])
+    which = f" ({named}{', …' if count > len(nodes) else ''})" if named else ""
+    return (f" [WRITTEN BEFORE {count} experiment result(s){which} landed — this memo could not "
+            "see them; the working set above is the current board]")
+
+
 def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dict:
     """Canonicalize a model-, tool-, or legacy-event research memo."""
     src = payload if isinstance(payload, dict) else {}
@@ -769,6 +831,11 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
         out["verification"] = _verification(
             src["verification"], verification_budget, verification_items)
         budget[0] -= allowance - verification_budget[0]
+    if "snapshot_superseded" in src:
+        # Engine-derived and TINY (ids and one int), so it takes no slice of the shared text budget
+        # and cannot be crowded out by model narrative — a receipt that vanishes under a long memo
+        # is a receipt that is absent exactly when the memo is worth doubting.
+        out["snapshot_superseded"] = snapshot_superseded_receipt(src["snapshot_superseded"])
     raw_claims, claims_total, claims_shape_known = _bounded_source(src.get("claims"))
     for claim in itertools.islice(raw_claims, MAX_RESEARCH_CLAIMS):
         if not isinstance(claim, dict):

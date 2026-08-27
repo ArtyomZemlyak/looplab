@@ -425,12 +425,31 @@ and an experiment with a `score.log` on disk is **not** pending.
 3. Build the research memo from state at generation time, not from a snapshot taken before the
    in-flight evaluation lands.
 
-### 4b. The third contradiction — the memo that denies a result already on the board
+### 4b. CLOSED 2026-08-27 — the memo that denies a result already on the board
 
-    OPEN[a-memo-is-quoted-as-current-after-the-result-it-denies]
-    proof:absent:memo_snapshot_cue@looplab/core/advisory_payloads.py
+The marker is deleted, and **the fix this section asked for was measured and does NOT work**, which
+is the most useful thing here. Fix 3 above says "build the research memo from state at generation
+time". Across **131** `research_attempted` receipts the snapshot's own node count disagrees with
+the log **0 times**: the snapshot is already fresh when the provider call STARTS, and goes stale
+while it RUNS. Re-folding one line earlier recovers nothing at all. A memo cannot see the future.
 
-`spectral_clustering`'s own event log, timestamps relative to `run_started`:
+**What the record can do is stop presenting it as current.** `_results_since_snapshot` diffs the
+evaluated nodes at RECORD time against the ones the memo was COMPUTED from and stamps
+`snapshot_superseded` inside the memo payload — inside, because
+`events/replay.py::_on_research_completed` folds only `d["memo"]` into `state.research`, so a fact
+on the event envelope alone could never reach the prompt that quotes the summary. Engine-derived
+and minted before the memo id, exactly like `verification`. `memo_snapshot_cue` then rides the
+"Latest deep-research takeaway" line, UNGATED unlike the verdict cue beside it: without it the
+prompt contradicts itself, since the working set two lines up already shows the result the memo
+denies. Empty when nothing was superseded, so the 41 memos that overlapped nothing render the
+historical bytes.
+
+Four mutations turn the new tests red: not recording the receipt; counting the whole board instead
+of the delta against the memo's own snapshot (which would make every memo on a mature run claim to
+be stale); dropping the prompt cue; and removing the node-id bound, which lets a hostile receipt
+spend the prompt line. 1514 research/memo/advisory/roles/prompt/replay tests pass.
+
+The original finding — `spectral_clustering`'s own event log, timestamps relative to `run_started`:
 
 | seq | t | event |
 |---|---|---|

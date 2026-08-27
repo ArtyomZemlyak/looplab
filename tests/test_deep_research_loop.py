@@ -683,7 +683,7 @@ def test_spawn_research_records_immediately_via_its_own_task():
     eng._record_research_attempt = lambda snap, *, trigger, manual: (
         attempts.append((trigger, manual)) or "attempt-1")
     eng._record_deep_research = (
-        lambda memo, *, trigger, manual, attempt_id=None:
+        lambda memo, *, trigger, manual, attempt_id=None, superseded=None:
         recorded.append((memo, trigger, manual, attempt_id)))
 
     async def run():

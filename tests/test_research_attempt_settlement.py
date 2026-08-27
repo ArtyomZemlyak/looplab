@@ -251,7 +251,8 @@ def test_the_paid_step_records_under_the_same_call_that_receipts():
             seen.append("compute")
             return types.SimpleNamespace(summary="s", recommended_directions=["d"])
 
-        def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None):
+        def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None,
+                                  superseded=None):
             seen.append(f"record:{attempt_id}")
 
     sig, recorded = _Host()._research_attempt_step(object(), "cadence")
@@ -276,7 +277,8 @@ def test_a_converged_repeat_pass_skips_the_record_without_spending_a_gate():
         def _compute_deep_research(self, state, trigger, *, trace=True):
             return memo
 
-        def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None):
+        def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None,
+                                  superseded=None):
             self.records += 1
 
     host = _Host()

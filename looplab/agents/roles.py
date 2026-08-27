@@ -14,7 +14,7 @@ import json
 import random
 from typing import Optional, Protocol
 
-from looplab.core.advisory_payloads import memo_verdict_cue
+from looplab.core.advisory_payloads import memo_snapshot_cue, memo_verdict_cue
 from looplab.core.models import (Idea, IdeaEmission, Node, RunState,
                                  developer_artifact_footprint, hypothesis_statement_digest,
                                  normalize_researcher_footprint)
@@ -1026,8 +1026,19 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
         # wrote the verdicts before the memo was ever appended) and states a fact about the CHECK, so
         # it widens what the role SEES and nothing it trusts: no metric, champion, selectability or
         # violation can move, and no model's own text decides its own verdict (docs/36).
+        #
+        # `memo_snapshot_cue` is UNGATED, unlike the verdict cue beside it, and the reason is that
+        # without it this prompt contradicts itself. A memo is computed from a state snapshot and
+        # recorded when the provider returns; measured over the thirty AlgoTune run dirs, 78 of 119
+        # memos were appended after a result their snapshot could not contain. On
+        # `spectral_clustering` this line pushed "experiment #0 … is still pending, so there are no
+        # measured results yet" into every later prompt — 256 s after node 0's 0.0 landed, and
+        # directly beneath a working set that showed it. The clause is engine-derived, empty
+        # whenever nothing was superseded (so a run with no overlap renders the historical bytes),
+        # and states a fact about WHEN the memo was written, never about whether it is right.
         lines.append("Latest deep-research takeaway"
-                     + (memo_verdict_cue(research[-1]) if memo_verdicts else "") + ": "
+                     + (memo_verdict_cue(research[-1]) if memo_verdicts else "")
+                     + memo_snapshot_cue(research[-1]) + ": "
                      + " ".join(str(research[-1]["summary"]).split())[:300]
                      # channel-neutral: a plain researcher has no tools, so state that the depth is
                      # recorded rather than commanding a `read_research_memo` call it can't make.
