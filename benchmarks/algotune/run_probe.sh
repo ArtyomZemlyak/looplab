@@ -43,7 +43,7 @@
 # как-то запустится дважды, второй запуск откажется, а не продолжит тратить чужой бюджет.
 main() {
 set -u
-MODEL="$1"; LABEL="$2"; LANE="$3"; TASK="${4:-edge_expansion}"; METER="${5:-http://127.0.0.1:8802}"
+MODEL="$1"; LABEL="$2"; LANE="$3"; TASK="${4:-edge_expansion}"; METER="${5:-http://127.0.0.1:8802}"; BUDGET="${6:-1.00}"
 ROOT=/var/tmp/looplab-bench
 OUT=$ROOT/model-probes/$LABEL
 LOG=$OUT/probe.log
@@ -131,7 +131,7 @@ fi
 export ALGOTUNE_BASELINE_CACHE_DIR="$ROOT/looplab/benchmarks/algotune/.baseline_times"
 export ALGOTUNE_EVAL_WORKERS=auto
 export ALGOTUNE_MIN_TIMEOUT_S=120
-export LOOPLAB_LLM_BUDGET_USD=1.00
+export LOOPLAB_LLM_BUDGET_USD="$BUDGET"
 
 python3 "$ROOT/looplab/benchmarks/algotune/make_task.py" --algotune-root "$ROOT/AlgoTune" \
     --task "$TASK" --out-dir "$OUT/ws" --deliver --one-card --enforce-rules >> "$LOG" 2>&1 \
@@ -144,7 +144,7 @@ export LOOPLAB_LLM_API_KEY_BASE_URL="$LOOPLAB_LLM_BASE_URL"
 export OPENAI_BASE_URL="$LOOPLAB_LLM_BASE_URL"
 export OPENAI_API_KEY=meter
 
-say "===== $MODEL на $TASK, полоса $LANE, бюджет \$1.00 ====="
+say "===== $MODEL на $TASK, полоса $LANE, бюджет \$$BUDGET ====="
 S=$(date +%s)
 LOOPLAB_MEMORY_DIR="$OUT/runs/$TASK/memory" LOOPLAB_KNOWLEDGE_DIR="$OUT/runs/$TASK/knowledge" \
   taskset -c "$LANE" python -m looplab.cli run "$OUT/ws/algotune_$TASK.json" \
