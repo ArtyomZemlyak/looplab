@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -546,10 +547,32 @@ def rules_clause(root: Path) -> str:
     # stable across runs; `gc.get_objects` sits in here beside the three builtins because the
     # validator matches it by the same dotted-name rule.
     disallowed = sorted(getattr(TamperingDetector, "DISALLOWED_CALLS", ()) or ())
+    # THE GLOSS USED TO SAY THE OPPOSITE OF WHAT THE VALIDATOR DOES, and it cost more than any
+    # missing rule ever did. It read: "the arena refuses runtime code generation ... so an idea that
+    # turns on generating and compiling specialised code is not one it can accept, however fast the
+    # result would be." The table behind it is `DISALLOWED_CALLS`, and it holds BUILTIN CALLS —
+    # `compile`, `eval`, `exec`, `gc.get_objects`. It says nothing about a JIT.
+    #
+    # RUN AGAINST THE REAL `check_code_for_tampering` 2026-08-27:
+    #     a solver decorated `@njit(cache=True, fastmath=True)`   -> accepted, no violation
+    #     a `setup.py` calling `cythonize("fast.pyx")`            -> accepted, no violation
+    #     `compile("x+1", "<s>", "eval")` then `eval(...)`        -> "Calling compile is not
+    #                                                                allowed in solver code"
+    # And `numba` sits in this same validator's `PROTECTED_MODULES` beside numpy, scipy and ortools,
+    # i.e. the arena lists it among the libraries a solver is expected to import.
+    #
+    # WHAT THE FALSE GLOSS BOUGHT: across arm B's twenty runs and the probes, the models raise numba
+    # or Cython 1,204 times and talk themselves out of it every time — "might be considered runtime
+    # codegen (forbidden: no compile/eval/exec)", "Cython/numba (not available, and arena
+    # restricts)". Not one of our twenty champions compiles anything. Of the seventeen published
+    # champions for `convex_hull`, NINE do, and they are the strongest ones.
     calls = (" No call to " + ", ".join(f"`{c}`" for c in disallowed) +
-             " — the arena refuses runtime code generation and harness introspection outright, so "
-             "an idea that turns on generating and compiling specialised code is not one it can "
-             "accept, however fast the result would be." if disallowed else "")
+             " — those are BUILTINS, and the ban is on calling them: the arena refuses code the "
+             "solver assembles from strings at run time, and refuses harness introspection. It is "
+             "NOT a ban on compilation. A JIT or an ahead-of-time compiler is an ordinary library "
+             "here: `@numba.njit` on a hot loop, or a `.pyx` with a `setup.py`, breaks no rule — "
+             "numba is on the arena's own protected-library list, next to numpy and scipy."
+             if disallowed else "")
     return (" ARENA RULES FOR THE SUBMITTED SOLVER, enforced by this benchmark's own validator "
             "before anything is scored — a solver that breaks one is not scored low, it is NOT "
             "SCORED: no `import ctypes` (directly or through `__import__`), no reading or writing "
@@ -621,6 +644,59 @@ def reference_libraries(ref: Path) -> list[str]:
     return sorted(r for r in roots
                   if r and r != "__future__" and not r.startswith("AlgoTune")
                   and r not in sys.stdlib_module_names)
+
+
+
+def toolchain_clause(root: Path, interpreter: str) -> str:
+    """What is actually importable in the interpreter that SCORES, with versions, measured now.
+
+    The card named the data shape and the reference time and stopped there, and the models filled
+    the silence with a guess that cost score. Across arm B's twenty runs and the probes they raise
+    numba or Cython 1,204 times and reject it every time in one of two ways -- "Alternative: use
+    numba? Not available probably", "Cython/numba (not available, and arena restricts)". Both are
+    false. `AlgoTune/.venv` carries numba 0.67.0 and cython 3.2.9, and the arena's own validator
+    accepts an `@njit` solver (checked by running `check_code_for_tampering` on one).
+
+    The cost of the silence: not one of our twenty champions compiles anything, while NINE of the
+    seventeen published champions for `convex_hull` do -- Claude Opus 4.5/4.6, GPT-5.2/5.4,
+    Gemini 2.5/3.1 Pro, R1, GLM-4.5, and Gemini 3 Pro ships a 17-line `.pyx`.
+
+    MEASURED, not listed from a requirements file: each name is imported by the SCORING interpreter
+    and reported only if that import succeeds. A package that is in `requirements.txt` but broken in
+    this venv would otherwise be advertised to the model as a way forward.
+
+    AlgoTuner tells its own agent the same thing and goes further -- its prompt lists thirty
+    packages and adds a paragraph promising that a `.pyx` edit triggers a build. Ours had neither
+    sentence while its bridge already did the build.
+    """
+    names = ("numpy", "scipy", "numba", "cython", "torch", "networkx", "ortools", "sklearn",
+             "sympy", "cvxpy", "numexpr", "bottleneck")
+    probe = (
+        "import importlib\n"
+        "for n in %r:\n"
+        "    try:\n"
+        "        m = importlib.import_module(n)\n"
+        "    except Exception:\n"
+        "        continue\n"
+        "    v = getattr(m, '__version__', '')\n"
+        "    print(n + ('==' + str(v) if v else ''))\n" % (names,)
+    )
+    try:
+        out = subprocess.run([interpreter, "-c", probe], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""                                # no interpreter, no claim about what it holds
+    found = [l.strip() for l in (out.stdout or "").splitlines() if l.strip()]
+    if not found:
+        return ""
+    return (" THE TOOLCHAIN ON THIS BOX, imported just now by the very interpreter that will time "
+            "your solver, so this is a measurement and not a package list: " + ", ".join(found) +
+            ". A compiled inner loop is the single technique that most separates the published "
+            "champions of this benchmark from everything else, and nothing here forbids it: "
+            "`@numba.njit` is an ordinary decorator, and if you write a `.pyx` together with a "
+            "`setup.py`, the harness runs `setup.py build_ext --inplace` over your whole submission "
+            "before scoring it and tells you whether that build succeeded. Reach for it when the "
+            "cost is a Python-level loop over the instance; do not reach for it when the work is "
+            "already inside a library call.")
 
 
 def solution_space_clause(ref: Path, task: str) -> str:
@@ -746,7 +822,12 @@ def main() -> int:
                  # statement of what this arena allows, and the half that was missing is the half
                  # that costs score. See `solution_space_clause`.
                  + (rules_clause(root) if args.enforce_rules else "")
-                 + (solution_space_clause(ref, args.task) if args.enforce_rules else "")),
+                 + (solution_space_clause(ref, args.task) if args.enforce_rules else "")
+                 # The third half of the same statement: after what is banned and what the solution
+                 # space is, WHAT THIS MACHINE ACTUALLY HOLDS. Same flag as the other two because it
+                 # is the same subject -- what this arena allows -- and adopting it mid-arm would
+                 # change the measurement.
+                 + (toolchain_clause(root, interpreter) if args.enforce_rules else "")),
         "direction": "max",
         "editable_path": str(ws),
         # THE SAME SURFACE THE OTHER ARM HAS. `["solver.py"]` was our pin, not the arena's: arm A
