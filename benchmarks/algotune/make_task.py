@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 BRIDGE = Path(__file__).resolve().parent / "looplab_eval.py"
+PROFILER = Path(__file__).resolve().parent / "looplab_profile.py"
 
 SOLVER_STUB = '''from typing import Any
 
@@ -379,6 +380,114 @@ def dataset_clause(root: Path, task: str) -> str:
     return clause + " "
 
 
+# ---------------------------------------------------------------- how the time is TAKEN
+#
+# THE MEASUREMENT PROCEDURE DECIDES WHICH OPTIMISATIONS EXIST, and the card never stated it. Checked
+# against the goal the live probe actually ran on (`fullctx-probe/ws/algotune_convex_hull.json`,
+# 9 221 characters): `warm`, `process`, `minimum`, `cache` and `memo` occur ZERO times in it between
+# them, apart from one "warm start" about CP-SAT. A model reading that card has no way to know
+# whether a JIT's first compile lands on its own clock, and the transcripts show it assuming the
+# worst -- across arm B and the probes numba or Cython is raised 1 204 times and talked out of every
+# time, while NINE of the seventeen published `convex_hull` champions compile something.
+#
+# EVERY SENTENCE BELOW WAS DRIVEN, not read: the arena's own `run_isolated_benchmark` was called on
+# `AlgoTune/.venv/bin/python` (2026-08-27, cores 44-47, `num_runs=3`) against solvers built to
+# expose one fact each.
+#
+#   * `solve()` sleeps 500 ms on its FIRST call and 10 ms afterwards
+#         -> warmup 710.3 ms, timed 210.2 / 210.2 / 210.2 ms   (the first call is not the timed one)
+#   * a 300 ms `time.sleep` at MODULE level
+#         -> warmup 410.2 ms, timed 10.1 ms                    (import is outside both timers)
+#   * a module-level `@njit` kernel first compiled from `__init__`
+#         -> warmup 189.8 ms, timed 0.052 ms                   (the compile is absorbed)
+#   * a `functools.lru_cache` and a module dict, both filled during the warm-up
+#         -> the timed call sees `currsize=1, hits=0` and a dict of length 1
+#            (the lru_cache was emptied, the dict was not)
+#
+# The code behind them, so the sentence and the harness can be checked against each other:
+# `isolated_benchmark.py:838` warms up on `warmup_problem`, `:1011` times the call on
+# `timed_problem`, `:909` empties the four cache attribute names, `:976-979` calls `cache_clear()`
+# on every `functools` wrapper it finds, `:1585` reduces the runs with `min(timed_times_ns)`; and
+# `evaluation_orchestrator.py:394` divides the baseline by `timing.min_ms`, so the MINIMUM is what
+# the score is built from. The run count is `benchmark.runs` in the arena's config
+# (`main.py:928` reads it into `RUNS`, `solver_executor.py:207` passes it as `num_runs`).
+#
+# DERIVED, both numbers, for the reason `rules_clause` is derived from the validator's tables: an
+# arena retimed to measure once instead of three times, or one that renames the caches it clears,
+# has to change this sentence rather than quietly make it false. No config, no claim.
+#
+# It rides with `--full-context` because it is the same KIND of statement as `dataset_clause` and
+# `MEASURE` -- a measured fact about the ruler, not a rule about what the arena permits -- and
+# because that flag is ON, so the correction ships. ADDING IT CHANGES THE GOAL CARD, i.e. changes
+# the measurement: adopt it between arms, never inside one.
+_CACHE_ATTRS_RE = re.compile(r"for cache_attr in \[([^\]]+)\]")
+_BENCH_RUNS_RE = re.compile(r"^benchmark:\s*$.*?^\s+runs:\s*(\d+)\s*$", re.MULTILINE | re.DOTALL)
+
+
+def benchmark_runs(root: Path) -> int | None:
+    """`benchmark.runs` from the arena's own config -- how many times each instance is timed.
+
+    Read with a regex rather than a YAML parse so this generator keeps its stdlib-only imports; the
+    key is one integer under one top-level block and the pattern is anchored on both.
+    """
+    try:
+        text = (root / "AlgoTuner" / "config" / "config.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = _BENCH_RUNS_RE.search(text)
+    if not m:
+        return None
+    runs = int(m.group(1))
+    return runs if runs > 0 else None
+
+
+def cleared_cache_attrs(root: Path) -> list[str]:
+    """The Solver class attributes `isolated_benchmark` EMPTIES between the warm-up and the timed
+    call, read out of the list literal it iterates. `[]` when that loop is gone or has moved."""
+    try:
+        text = (root / "AlgoTuner" / "utils" / "isolated_benchmark.py").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    m = _CACHE_ATTRS_RE.search(text)
+    if not m:
+        return []
+    return [name for name in re.findall(r"[\"\']([^\"\']+)[\"\']", m.group(1)) if name]
+
+
+def timing_clause(root: Path) -> str:
+    """HOW the number is taken, derived from the arena's config and its benchmark module."""
+    runs = benchmark_runs(root)
+    if runs is None:
+        return ""
+    clause = (
+        " HOW YOUR TIME IS TAKEN, and it decides which optimisations exist. Every instance is "
+        "measured in a FRESH PROCESS which imports your module, calls `Solver().solve()` once on a "
+        "DIFFERENT instance as an UNTIMED WARM-UP, and only then calls `Solver().solve()` on the "
+        f"graded instance with the clock running. That process is rebuilt {runs} times per instance "
+        f"and your time is the FASTEST of the {runs}, so one noisy run costs you nothing. "
+        "What that buys you, each of these measured on this box by running the arena's own "
+        "`run_isolated_benchmark` on a solver written to expose it: "
+        "A FIRST-CALL COST IS PAID BY THE WARM-UP AND NEVER REACHES YOUR NUMBER -- import-time work, "
+        "a JIT's first compile, a table you build lazily: the warm-up pays it and the timed call "
+        "finds it done. Measured: a solver whose `@numba.njit` kernel compiles on first use warms up "
+        "in 190 ms and TIMES AT 0.05 ms. "
+    )
+    attrs = cleared_cache_attrs(root)
+    if attrs:
+        named = ", ".join(f"`{a}`" for a in attrs)
+        clause += (
+            "SOME STATE IS WIPED BETWEEN THE TWO CALLS, AND NOT ALL OF IT: before the timed call the "
+            f"harness empties any Solver class attribute named {named} and calls `cache_clear()` on "
+            "every `functools` cache it can reach, and anything under another name survives. "
+            "Measured: an `lru_cache` filled during the warm-up came back EMPTY, a module-level dict "
+            "filled beside it came back FULL. That is not a way to precompute the answer -- the "
+            "warm-up runs on a DIFFERENT instance and the graded one is solved once -- but work that "
+            "does not depend on the instance can be done before the clock starts. "
+        )
+    return clause
+
+
+
 # The clause that REPLACES `_DELIVER_NO_MEASURE`. It states what is now true, and states the cost,
 # because an expensive capability offered without its price is used until the budget is gone.
 MEASURE = (
@@ -396,6 +505,23 @@ MEASURE = (
     "never twice on the same code. A session that spends its clock measuring and ends with no file "
     "written has produced nothing at all. "
     "A guess you can check in one command is not a guess to write into the summary. "
+    # THE SECOND HALF OF THE SAME REPAIR, and it is cheap where the first is expensive.
+    #
+    # `eval_train` says THAT the solver is slow. It cannot say WHERE, and the arena's agent has
+    # never had to guess: `profile` and `profile_lines` are in its system prompt
+    # (`campaign-final/A-convex_hull.log:181`) and it calls them 58-194 times per task. Measured
+    # 2026-08-27: `line_profiler` 5.0.2 is installed in the very venv our scores are computed in.
+    # The price is stated here for the same reason `eval_train`'s is -- both were measured, not
+    # estimated: `convex_hull`, whole command, three solves plus dataset load, 1.06 s wall.
+    " YOU CAN ALSO SEE WHERE THE TIME GOES. `run_dev_command(\"profile\")` runs your staged "
+    "`solver.py` on ONE REAL train instance -- the full graded size, not a toy -- under a "
+    "line profiler, and prints the hottest lines of your own code with hits, milliseconds and "
+    "share of the run. It instruments every function in the files you wrote, so a helper's inner "
+    "loop is named, not hidden behind the line that called it. IT IS CHEAP: a fixed ~1.3 s plus "
+    "three runs of your own solve() (cold, warm, profiled) on that one instance -- against half a "
+    "minute to six minutes for `eval_train`, which runs it over a hundred. So profile freely and "
+    "measure rarely. It profiles ONE instance and reports no speedup and no validity -- it tells "
+    "you where your time is, never whether you are winning. "
     "THE REPORTED SCORE IS ON A SPLIT YOU CANNOT SEE. Train is what you tune against; the champion "
     "is finally scored on held-out instances from the same generator. So anything that fits the "
     "train instances SPECIFICALLY -- a lookup table, a hard-coded answer, a threshold tuned to one "
@@ -815,6 +941,10 @@ def main() -> int:
                  # capability that makes them checkable. The half that says "write the file early,
                  # a working solver beats an unwritten plan" is true either way and is kept.
                  + (dataset_clause(root, args.task) if args.full_context else "")
+                 # WHAT the instances are, then HOW they are timed -- the second is what decides
+                 # whether the first one's per-instance overhead can be paid before the clock
+                 # starts. See `timing_clause`.
+                 + (timing_clause(root) if args.full_context else "")
                  + ((_DELIVER_WRITE if args.full_context else DELIVER) if args.deliver else "")
                  + (MEASURE if args.full_context else "")
                  + (ONE_CARD.format(task=args.task) if args.one_card else "")
@@ -909,6 +1039,44 @@ def main() -> int:
             # end a session -- and the real repair is telling the Developer what its clock is,
             # which is a change to the session contract rather than to this task.
             "timeout": 450.0,
+        }, {
+            "name": "profile",
+            "command": [
+                interpreter, str(PROFILER),
+                "--algotune-root", str(root),
+                "--task", args.task,
+                "--solver", "solver.py",
+                "--subset", "train",
+            ],
+            "description": ("Line-by-line profile of your staged solver.py on ONE real train "
+                            "instance at the full graded size. Prints the hottest lines of your "
+                            "own code -- hits, milliseconds, share of the run -- across every "
+                            "function in the files you wrote. Costs a fixed ~1.3 s plus three "
+                            "runs of your solve() on that one instance. It reports no speedup and "
+                            "no validity: use eval_train for those."),
+            "cwd": ".",
+            # NO RULER TO PIN. `eval_train` inherits ALGOTUNE_EVAL_WORKERS and the baseline cache
+            # because it computes a RATIO against the reference and a ratio is meaningless off the
+            # ruler it was taken on. This command computes no ratio: it times one solve against
+            # itself and reports shares of it. The baseline cache is never touched, so an
+            # invocation cannot warm, cool or corrupt the denominator the scorer uses -- which is
+            # the whole reason it is safe to offer as the cheap one.
+            "env": {},
+            # 150 s, DERIVED FROM THE SCRIPT'S OWN CEILING RATHER THAN CHOSEN.
+            #
+            # The script gives each of its three solves (cold, warm, profiled) 45 s and prints a
+            # PARTIAL profile on expiry, so its own worst case is 3 x 45 s plus setup. Setup was
+            # measured 2026-08-27 across all twenty campaign tasks: instance load is 0.03-0.45 s
+            # (convex_hull, the 816 MB one, is 0.45 s because the arrays are memmapped) and the
+            # whole command on convex_hull is 1.06 s wall. A deliberately non-terminating solver
+            # with `--solve-timeout 3` took 10.23 s = 3 x 3 s + 1.2 s, which fixes the overhead at
+            # ~1.3 s; 3 x 45 + 1.3 = 136.3 s, and 150 s clears that by 10 %.
+            #
+            # The number is small ON PURPOSE and the session clock is why. `eval_train` is 450 s
+            # against a 1200 s session the Developer cannot see, so two bad calls end it. This one
+            # is 12.5 % of the session at its ceiling and ~0.1 % in practice, which is what makes
+            # "profile freely, measure rarely" advice the model can actually follow.
+            "timeout": 150.0,
         }]} if args.full_context else {}),
         "eval": {
             # DECLARED AS A ONE-STAGE PIPELINE, not as a bare `command`, and the difference is not
