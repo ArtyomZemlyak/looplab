@@ -343,6 +343,57 @@ _REPO_DEV_PARENT_BLOCK = (
     "edit_file (small SEARCH/REPLACE hunks): change ONLY what this idea requires and "
     "keep everything else as-is. Do NOT rebuild the solution from scratch and do NOT "
     "re-write whole files that only need a small change.\n\n")
+# --- the between-steps MEASUREMENT (doc 53 item 10, the LoopLab half) ------------------------
+#
+# MEASURED, 2026-08-27, over the eleven AlgoTune model probes in `/var/tmp/looplab-bench/
+# model-probes/*/runs/*/run/spans.jsonl`. The engine already evaluates EVERY node it builds --
+# `node_created` and `node_evaluated` are 1:1 in every probe (12/12 on `sol10`, 11/11 on
+# `gpt56luna`; the two shortfalls are runs the spend ceiling cut mid-eval). What the loop does NOT
+# do is let the role that WRITES the code see a number while it is still writing. The parent block
+# below carries `metric=` and reaches only the single-session fallback: across 1,055 `plan_step`
+# generations and 296 `plan` generations in that corpus, the string "PARENT SOLUTION" appears
+# ZERO times. So on the DEFAULT path (`developer_plan_decompose`) every writing session is blind.
+#
+# The model's own answer to being blind is what this costs: of 116 attributed plan steps, 30 (26 %)
+# are titled as a measurement and nothing else -- "Run eval_train and verify speedup", "Measure
+# once with the real evaluator", "Run the real evaluator on the train split" -- and 21 of those 30
+# WROTE NOTHING AT ALL (`noop`). Those 30 steps spent **317 LLM calls** (median 7 per step) and
+# **5,762 s**, i.e. 30 % of all plan-step generations and 36 % of all plan-step wall clock, to buy a
+# subprocess that takes 40 s (`run_dev_command`, n=76, median 39.6 s, p90 45.8 s). A whole bounded
+# session -- system prompt, repo preview, tool loop -- is being spent to press a button.
+#
+# So the command is run BETWEEN steps, by the engine, and its output is handed to the next step.
+# Three properties are deliberate:
+#   * it runs OUTSIDE `run_phase`, so it spends no part of `developer_session_time_budget_s` (1200 s)
+#     -- the step sessions it sits between are median 58.9 s / p90 296.3 s and are not squeezed;
+#   * it does NOT run after the LAST step, which has no consumer: the node goes straight to the
+#     engine's own evaluation, which is the number that counts. 72 of the 116 steps are non-final;
+#   * it is a PROMPT input and nothing else. `DevCommandTools` runs in a disposable candidate tree
+#     it deletes on return, so this cannot write a node file, cannot become `last_files`, and cannot
+#     reach `node_evaluated.metric`. The reported speedup and the champion still come from
+#     `engine/evaluate.py` alone -- see `tests/test_developer_step_feedback.py`.
+#
+# OFF unless the operator names the command (`Settings.developer_step_feedback_command`). Not
+# timidity and not a guess-avoidance ritual: it CHANGES WHAT THE AGENT IS SHOWN, which is the
+# measurement, exactly as `make_task.py --full-context` does (doc 53 item 10), and the arm-B numbers
+# already on disk were produced without it. Choosing the command by heuristic was rejected for the
+# reason `_grader_packages` gives one paragraph up -- a fence that guesses refuses the real thing.
+#
+# The output cap. Measured over the 81 `run_dev_command` results in the probe corpus: median 782
+# chars, p90 2,541, max 2,614 -- so 6,000 clips nothing that has actually been produced and bounds a
+# command whose stderr runs away. `DevCommandTools` already caps the raw streams at 64 KB.
+_STEP_FEEDBACK_CAP = 6000
+_REPO_DEV_STEP_FEEDBACK_BLOCK = (
+    "\n\n=== MEASUREMENT OF THE WORK SO FAR (run for you, automatically) ===\n"
+    "The operator's `{name}` command was run on your working set as it stands after the previous "
+    "step. You did not spend a turn on it and you do not need to run it yourself -- it runs again "
+    "after every step that changes a file, so do NOT spend a step on measuring. Read the numbers "
+    "below and let them decide what this step does.\n{output}\n")
+# The measured starting point, for the sessions that actually write code. `implement_from` already
+# computes it (`parent experiment #N, metric=M`) and the plan/step prompts dropped it on the floor.
+_REPO_DEV_BASELINE_LINE = (
+    "\nMEASURED STARTING POINT: {note}. That is the number your edits have to beat; a change that "
+    "does not move it is not an improvement.\n")
 _REPO_DEV_REPAIR_BLOCK = (
     "\n\nThe PREVIOUS attempt FAILED — fix ONLY the stage that failed (see the error) with "
     "MINIMAL edit_file hunks on the offending file(s) (re-write a file only if it is beyond patching). "
@@ -525,7 +576,8 @@ class LLMRepoDeveloper:
                  session_max_turns: int = 500, session_time_budget_s: float = 1200.0,
                  prompts=None, cross_run_read_tools: bool = False, memory_dir=None,
                  probe: bool = False, probe_timeout_s: float = 60.0,
-                 probe_confine: bool = True, command_runtime=None):
+                 probe_confine: bool = True, command_runtime=None,
+                 step_feedback_command: str = ""):
         self.client = client
         self.task = task
         self.parser = parser
@@ -567,6 +619,12 @@ class LLMRepoDeveloper:
         # read above, once per node build rather than once per phase.
         self._dev_commands = list(rs.get("developer_commands") or [])
         self._command_runtime = command_runtime
+        # The operator-pinned command the plan loop runs BETWEEN steps ("" = the feature is off and
+        # the prompts are byte-identical to what they have always been). Stored as a NAME, resolved
+        # against `_dev_commands` at use time: a name the task does not pin is silently no feedback,
+        # never an invented command -- `DevCommandTools` would refuse it anyway, and turning that
+        # refusal into a prompt block would teach the model that the measurement is broken.
+        self._step_feedback_command = str(step_feedback_command or "").strip()
         self._probe_repo_spec = rs if (probe or self._dev_commands) else None
         self.last_files: dict[str, str] = {}
         self.last_deleted: list[str] = []
@@ -844,7 +902,7 @@ class LLMRepoDeveloper:
                             "required": ["title"]}}},
                         ["steps"])
 
-    def _propose_plan(self, system: str, idea: Idea, write=None) -> list:
+    def _propose_plan(self, system: str, idea: Idea, write=None, baseline_note: str = "") -> list:
         """Plan phase: a READ-ONLY stage — the developer inspects the real code/experiments (it CANNOT
         write here), and its only exit is `propose_plan` (the ordered atomic plan). Returns a list of
         {title, detail}; [] on empty/failure so the caller falls back to one session."""
@@ -860,6 +918,19 @@ class LLMRepoDeveloper:
             "what to change — THEN call propose_plan with an ordered list of ATOMIC, independently-"
             "testable steps, each naming concretely what to change and why. Do NOT guess from the "
             "truncated preview; the implement stage (and update_plan) come next.")
+        # 26 % of the 116 attributed plan steps in the probe corpus are a measurement and nothing
+        # else, and 21 of those wrote no file at all -- 317 LLM calls and 5,762 s spent pressing a
+        # button. When the engine presses it between steps, say so HERE, where the steps are chosen:
+        # a planner that does not know the measurement is free will keep buying it with a session.
+        auto_measured = self._step_feedback_command_name()
+        if auto_measured:
+            plan_user += (
+                "\n\nDo NOT plan a step whose only job is to measure or verify: after EVERY step "
+                f"that changes a file the engine runs the operator's `{auto_measured}` command for "
+                "you and hands the result to the next step. Every step you plan should CHANGE "
+                "something; the numbers arrive on their own.")
+        if baseline_note:
+            plan_user += _REPO_DEV_BASELINE_LINE.format(note=baseline_note)
         # READ-ONLY toolset: repo scouts + env inspection, but NO write tools — the plan stage's only
         # output is the plan. (This used to be tools=None to force convergence, which made the planner
         # work BLIND off the truncated preview; the read_file pagination fix + emit_after/emit_force
@@ -897,8 +968,51 @@ class LLMRepoDeveloper:
                               "detail": str(s.get("detail", "")).strip()})
         return steps
 
+    def _step_feedback(self, write, *, index: int = 0) -> str:
+        """Run the operator-pinned feedback command on the working set and return its rendered output.
+
+        Returns "" for every reason a caller might want a reason for -- no command named, the name is
+        not one the task pinned, no command runtime, the runner raised -- because this is an EXTRA
+        rung and a build must never fail over it. The step it feeds simply gets no measurement block,
+        which is the pre-2026-08-27 behaviour.
+
+        It goes through `DevCommandTools` rather than a private `subprocess` call so the argv, the
+        trust tier, the disposable candidate, the secret screen and the receipts are the SAME ones
+        `run_dev_command` gets. A second spelling of "run the operator's command" is the shape doc 25
+        SE-08 names: the tool would be hardened and this path would not.
+        """
+        name = self._step_feedback_command_name()
+        if not name:
+            return ""
+        from looplab.core import tracing
+        from looplab.tools.dev_commands import DevCommandTools
+        try:
+            tools = DevCommandTools(getattr(self, "_probe_repo_spec", None),
+                                    runtime=getattr(self, "_command_runtime", None), staged=write)
+            with tracing.operation("step_feedback", index=int(index), command=name):
+                result = tools.execute_result("run_dev_command", {"name": name})
+        except Exception:  # noqa: BLE001 — an extra rung never breaks the build it is helping
+            return ""
+        text = str(getattr(result, "content", "") or "")
+        return text[:_STEP_FEEDBACK_CAP]
+
+    def _step_feedback_command_name(self) -> str:
+        """The pinned command this developer may auto-run between steps, or "" when there is none.
+
+        Resolution is against the TASK's own `developer_commands`, not against the setting alone, so
+        an operator who names `eval_train` on a run whose tasks do not pin it gets silence rather
+        than a refusal block in every step prompt."""
+        name = str(getattr(self, "_step_feedback_command", "") or "").strip()
+        if not name:
+            return ""
+        for raw in (getattr(self, "_dev_commands", None) or ()):
+            row = raw.model_dump() if hasattr(raw, "model_dump") else dict(raw)
+            if str(row.get("name") or "") == name:
+                return name
+        return ""
+
     def _run_step(self, idea: Idea, step: dict, idx: int, total: int, write, system: str,
-                  stage_note: str = "") -> str:
+                  stage_note: str = "", baseline_note: str = "", feedback: str = "") -> str:
         """Execute ONE atomic plan step in a FRESH bounded session, on top of the files accumulated so
         far (carried in `write.files`; syntax is validated per write by the write tool). A step's own
         error never aborts the plan — later steps + the eval still run on whatever got written.
@@ -916,6 +1030,16 @@ class LLMRepoDeveloper:
             "Make ONLY the edits THIS step needs with write_file/edit_file — PATCH existing files, don't "
             "regenerate untouched ones — then call done. Do the minimum for this step; later steps handle "
             "the rest. If this is the last step, make sure the eval entrypoint runs end-to-end.")
+        # The two measured facts this session used to be denied: what the parent SCORED (computed by
+        # `implement_from`, and reaching only the single-session fallback until 2026-08-27) and what
+        # the LAST step's edit did to that score. Appended, not spliced, so a run with neither is
+        # byte-identical to the old prompt.
+        if baseline_note:
+            step_user += _REPO_DEV_BASELINE_LINE.format(note=baseline_note)
+        if feedback:
+            step_user += _REPO_DEV_STEP_FEEDBACK_BLOCK.format(
+                name=self._step_feedback_command_name() or "the operator's evaluation",
+                output=feedback)
         messages = [{"role": "system", "content": system}, {"role": "user", "content": step_user}]
         try:
             # implement steps CONSUME the stages/plan briefs, but don't
@@ -1632,7 +1756,7 @@ class LLMRepoDeveloper:
                 steps = []
                 if getattr(self, "_plan_decompose", False):
                     with tracing.operation("plan"):
-                        steps = self._propose_plan(system, idea, write)
+                        steps = self._propose_plan(system, idea, write, baseline_note=base_note)
                 if len(steps) >= getattr(self, "_plan_min_steps", 2):
                     # A step error deliberately can't abort the plan — later steps and the eval still
                     # run on whatever got written. But it must not vanish either: discarded, a later
@@ -1649,12 +1773,17 @@ class LLMRepoDeveloper:
                     # the reconciliation is stamped as `plan_steps` (see `plan_step_attribution`).
                     step_errors: list = []
                     observed: list = []
+                    # The measurement the NEXT step is handed. Empty for step 1 (nothing has been
+                    # edited yet) and re-emptied after every step, so a stale number from two steps
+                    # ago can never be presented as this step's result.
+                    feedback = ""
                     for i, step in enumerate(steps, 1):
                         before, before_deleted = dict(write.files), set(write.deleted)
                         with tracing.operation("plan_step", index=i, total=len(steps),
                                                title=str(step.get("title") or "")[:120]):
                             note = self._run_step(idea, step, i, len(steps), write,
-                                                  system, stage_note=stage_note)
+                                                  system, stage_note=stage_note,
+                                                  baseline_note=base_note, feedback=feedback)
                         # Compare CONTENT, not just presence: `edit_file` patches in place, and a
                         # step that rewrote a file byte-for-byte changed nothing and must not be
                         # credited with authoring it.
@@ -1665,6 +1794,12 @@ class LLMRepoDeveloper:
                             "error": note})
                         if note:
                             step_errors.append(note)
+                        # Measure only when this step actually CHANGED the working set, and never
+                        # after the last step: the final artefact goes straight to the engine's own
+                        # evaluation, so a run here would have no reader and would cost 40 s.
+                        feedback = ""
+                        if i < len(steps) and (observed[-1]["wrote"] or observed[-1]["deleted"]):
+                            feedback = self._step_feedback(write, index=i)
                     with tracing.operation(
                             "plan_steps",
                             **plan_step_attribution(steps, observed, write.files)):

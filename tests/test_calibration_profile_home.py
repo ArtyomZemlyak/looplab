@@ -100,7 +100,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               `check_false_positive` was added to it. The digest below is measured over BOTH,
 #               so it matches neither side's value and re-deriving it is the merge, not a
 #               rubber stamp. Old receipts should stop verifying, for the same reason as above.
-_EXPECTED_DIGEST = "sha256:e68df4f7bd000150a279ca8fcff6a738f5a57ee55438a66d4091db6a2a075310"
+_EXPECTED_DIGEST = "sha256:d1a4daa186318e67cf0f54fa9a6d245b986f272e51ba863cef3aa0a9248979f7"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -397,7 +397,25 @@ _EXPECTED_DIGEST = "sha256:e68df4f7bd000150a279ca8fcff6a738f5a57ee55438a66d4091d
 #               ships ON and FAILS CLOSED, so a replicate calibrated where the kernel offers
 #               Landlock and one calibrated where it does not can spend a different number of
 #               Developer turns on the same node.
-_EXPECTED_FIELD_COUNT = 216
+#   2026-08-27  + developer_step_feedback_command (216 -> 217). The "field set changed too" branch,
+#               and verified by DIFFING THE FIELD SET rather than reading the count, as the
+#               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated assignments
+#               against HEAD reports exactly ['developer_step_feedback_command'] added and []
+#               removed, so no +2/-1 is hiding behind the new integer. The knob names an
+#               operator-pinned developer command the plan loop runs BETWEEN steps, handing its
+#               output to the next step (doc 53 item 10a). INERT for a calibration replicate twice
+#               over: the profile's toy workload is the `solution.py` path, which declares no
+#               `developer_commands` at all, so `_step_feedback_command_name` resolves to "" before
+#               anything is executed; and the replicate's roles come from
+#               `cli/__init__.py::_make_calibration_roles`, which builds no `LLMRepoDeveloper`. The
+#               guard is deliberately not clever enough to exempt an inert knob, and re-pinning is
+#               right rather than merely necessary for the reason `repair_log_tools` above records:
+#               this field decides what a paid role is TOLD, and it also decides whether a node
+#               build spends an extra ~40 s of wall clock per editing step — so a replicate
+#               calibrated with it set and one without are genuinely different. Old receipts SHOULD
+#               stop verifying; `speculation_implementation_digest` hashes every shipped `.py` and
+#               this change moves it regardless.
+_EXPECTED_FIELD_COUNT = 217
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

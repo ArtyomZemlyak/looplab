@@ -1947,6 +1947,20 @@ class Settings(BaseSettings):
     # model that never emits `done` fails cleanly with the code it wrote so far, instead of looping.
     developer_session_max_turns: int = 500
     developer_session_time_budget_s: float = 1200.0  # 20 min wall-clock per developer session
+    # The operator-pinned developer command the plan loop runs BETWEEN steps, handing its output to
+    # the next step ("" = off, and every prompt is byte-identical to what it was). This is our half
+    # of doc 53 item 10: AlgoTuner re-runs the real evaluation after each accepted edit and hands its
+    # agent `Speedup / Valid Solutions / Invalid / Timeouts` for free, 17-61 times per task; ours
+    # evaluates every node it builds (`node_created`:`node_evaluated` is 1:1 in every probe) but the
+    # sessions that WRITE the code never see a number, so the model buys one with a whole plan step
+    # -- 30 of 116 attributed steps in the probe corpus, 317 LLM calls, 5,762 s, for a 40 s command.
+    #
+    # OFF by default because it changes WHAT THE AGENT IS SHOWN, i.e. the measurement, the same
+    # reason `make_task.py --full-context` is off; the twenty arm-B numbers on disk were produced
+    # without it and must not share a table with numbers produced under it. It is a NAME, not a
+    # flag, because nothing in a task marks which pinned command is the scorer and a heuristic that
+    # guessed would run the wrong one; a name the task does not pin is simply no feedback.
+    developer_step_feedback_command: str = ""
     # F2 · The Developer's PROBE (`tools/dev_probe.py`): may it RUN a short Python program against
     # the real environment while it authors? ON by default, because the failure it closes is the
     # Developer inventing a workaround for a question it could have answered — the observed shape

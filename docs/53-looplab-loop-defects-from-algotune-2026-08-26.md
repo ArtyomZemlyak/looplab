@@ -967,6 +967,89 @@ is strictly LESS than what the reference agent is handed.
 Until 1 is done, every `run_probe` timing in every arm-B transcript is measuring a number the agent
 made up, and we told it to.
 
+### 10a. CLOSED 2026-08-27 — the half of item 10 that is OURS, not the card's
+
+Item 10 shipped the two halves that live in `make_task.py`: the instance shape, and an `eval_train`
+command the agent may call. This is the half that lives in the loop, and it was found by looking for
+a defect that turned out not to exist.
+
+*The probe corpus is LIVE and still growing — `sol10` went 35 -> 41 plan steps during this analysis — so every count below is the instant it was taken, 2026-08-27, and re-deriving it later will give larger numbers, not different conclusions.*
+
+**The premise that did NOT survive.** "Our evaluation is agent-initiated, so it may never happen."
+False at the level that matters. Counted over the eleven model probes in
+`/var/tmp/looplab-bench/model-probes/*/runs/*/run/events.jsonl`, `node_created` and `node_evaluated`
+are **1:1 in every one of them** — 12/12 on `sol10`, 11/11 on `gpt56luna`, 4/4 on `ctlEdge`; the
+three shortfalls (`glm53f` 11/10, `solHull` 3/2, `fxSpectral` 2/1) are runs the spend ceiling cut
+mid-evaluation, which is item 5 and not this one. The engine evaluates every node it builds,
+unconditionally, and always has. `run_dev_command` is likewise not unused: 76 calls across the
+corpus, every one of them `eval_train`.
+
+**What is actually wrong** is one rung lower. A *node* is measured; a *step* is not, and a node
+costs ~65 LLM calls (`sol10`: 777 generations, 12 nodes). No session that WRITES code has ever been
+shown a number:
+
+* the parent block that carries `metric=` is built in `_run` and consumed only by the
+  single-session fallback. On the DEFAULT path (`developer_plan_decompose`) the plan and step
+  sessions compose their own user turns and it is dropped: the string `PARENT SOLUTION` appears in
+  **0 of 1,055 `plan_step` generations and 0 of 296 `plan` generations** in the corpus;
+* the evaluation the engine runs lands after the session that could have used it has ended.
+
+**What the blindness costs, measured.** The model's own answer is to spend a plan step on the
+button. Of 116 attributed plan steps (`plan_steps` spans), **30 (26 %) are titled as a measurement
+and nothing else** — "Run eval_train and verify speedup", "Measure once with the real evaluator",
+"Run the real evaluator on the train split" — and **21 of those 30 wrote no file at all** (`noop`).
+Those 30 steps spent **317 LLM calls** (median 7 per step) and **5,762 s**: 30 % of all plan-step
+generations and 36 % of all plan-step wall clock, to buy a subprocess that costs 40 s
+(`run_dev_command`, n = 76, median 39.6 s, mean 37.0, p90 45.8).
+
+**Fixed.** The engine runs the operator-pinned command BETWEEN plan steps and hands its output to
+the next step, and the writing sessions are told what the parent measured. Three properties are
+load-bearing and each has a case that dies without it:
+
+1. it runs OUTSIDE `run_phase`, so it spends none of `developer_session_time_budget_s` (1200 s);
+   the step sessions it sits between are median 58.9 s / p90 296.3 s and are not squeezed;
+2. it runs only after a step that CHANGED a file, and never after the LAST step, whose only reader
+   would be the engine's own evaluation. Priced per run over the eight probes that ran a multi-step
+   plan (non-final steps x 40 s, against each run's own wall clock, and against the wall clock its
+   measurement-only steps already spend):
+
+   | run | wall | plan steps | non-final | added | added % | meas-only steps | their wall | net |
+   |---|---|---|---|---|---|---|---|---|
+   | `ctlEdge` | 15,276 s | 9 | 5 | 200 s | 1.3 % | 4 | 280 s | **-80 s** |
+   | `fxKcenters` | 11,734 s | 8 | 5 | 200 s | 1.7 % | 4 | 1,151 s | **-951 s** |
+   | `fxSpectral` | 8,350 s | 4 | 3 | 120 s | 1.4 % | 2 | 1,417 s | **-1,297 s** |
+   | `glm53f` | 39,514 s | 26 | 16 | 640 s | 1.6 % | 10 | 1,709 s | **-1,069 s** |
+   | `gpt56luna` | 11,506 s | 21 | 12 | 480 s | 4.2 % | 1 | 157 s | +323 s |
+   | `sol1` | 1,028 s | 4 | 2 | 80 s | 7.8 % | 1 | 59 s | +21 s |
+   | `sol10` | 8,601 s | 41 | 27 | 1,080 s | 12.6 % | 7 | 883 s | +197 s |
+   | `solHull` | 2,457 s | 18 | 12 | 480 s | 19.5 % | 4 | 425 s | +55 s |
+   | **total** | 98,466 s | | | **3,280 s** | **3.3 %** | | **6,081 s** | **-2,801 s** |
+
+   Stated honestly in both directions: the GROSS add is 3.3 % of the corpus's wall clock but reaches
+   19.5 % on the shortest run with the longest plan, and it is only net-negative if the
+   measurement-only steps stop being planned — which is why the plan prompt now says the measurement
+   is free, and which is the first thing to check on the next arm rather than assumed here;
+3. it is a PROMPT INPUT AND NOTHING ELSE. It goes through `DevCommandTools`, which runs in a
+   disposable candidate tree it deletes on return, so it cannot write a node file, cannot become
+   `last_files`, and cannot reach `node_evaluated.metric`. The reported speedup and the champion
+   still come from `engine/evaluate.py` alone.
+
+**OFF by default** (`Settings.developer_step_feedback_command`, empty = off), for item 10's own
+reason: it changes WHAT THE AGENT IS SHOWN, which is the measurement, and the twenty arm-B numbers
+on disk were produced without it. The command is named, never guessed — nothing in a task marks
+which pinned command is the scorer, and a heuristic would run the wrong one.
+
+**Not adopted: a train SUBSAMPLE to make it cheaper.** The table above already nets negative on
+five of eight runs, and 3.3 % of corpus wall clock is not what is scarce here — the budget that
+binds these runs is SPEND, and the command costs no tokens. So the only thing a subsample would buy
+is a second, weaker number in circulation next to the real one — and the rule that keeps it out of the reported speedup
+would have to be maintained forever at every site that reads a metric. The cheap number is the same
+number here: the full train evaluation, at the price it actually costs.
+
+Guarded by `tests/test_developer_step_feedback.py`, eight cases, seven mutations tried and every one
+of them red.
+
+
 ---
 
 ## 11. Order to fix in
