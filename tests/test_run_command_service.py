@@ -321,7 +321,10 @@ def test_every_control_event_has_one_explicit_engine_policy():
         "run_concepts",
         "hypothesis_added", "hypothesis_updated",
         # Layer 6 operator Card steering: folded intents never spawn or wake compute.
+        # `card_reopened` is `card_dropped`'s twin — one lifecycle switch, both folded, neither
+        # spawning — and it landed without being added here, so this guard was red on master.
         "card_reprioritized", "card_edited", "card_resource_pinned", "card_dropped",
+        "card_reopened",
     }
 
 
