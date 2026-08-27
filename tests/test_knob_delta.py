@@ -188,3 +188,58 @@ def test_the_code_note_appears_only_when_EVERY_parent_delta_is_zero():
     assert "Δ1 vs #10" in line and "Δ0 vs #11" in line, line
     assert "difference is in CODE" not in line, (
         "one parent matching cannot license 'the difference is in code'")
+
+
+def _renderable(node):
+    """Fill the attributes `_node_line` reads beyond the delta, so a test can drive the real line."""
+    node.status = None
+    node.operator = "improve"
+    node.metric = 0.5
+    node.robust_metric = 0.5
+    node.trials = None
+    node.triage_rationale = ""
+    node.theme = ""
+    node.concepts = []
+    return node
+
+
+def test_an_EMPTY_comparison_makes_no_claim_about_where_the_difference_is():
+    """"Nothing moved" and "there was nothing to compare" are different facts.
+
+    `node_knob_delta` returns `[]` for both, and one `all_zero` flag could not tell them apart — so
+    the digest asserted "the difference is in CODE, not params" into the Researcher's prompt from a
+    comparison that never happened. It is not an edge case on the task family this line was built
+    for: a `params_style: "none"` repo run declares no `Idea.params` at all, so BOTH sides are empty
+    on every node and EVERY node line carried the claim.
+    """
+    from looplab.events.digest import _node_line
+
+    parent = _renderable(_n(3, {}))
+    child = _renderable(_n(9, {}, parents=[3]))
+    line = _node_line(child, SimpleNamespace(nodes={3: parent, 9: child}))
+    assert "difference is in CODE" not in line, (
+        "MUTATION: collapse `compared_any` back into `all_zero` and a positive claim about where "
+        "the difference lies is emitted from two empty coordinate sets")
+    assert "no coordinates recorded" in line, (
+        "and the absence is SAID rather than rendered as a measured Δ0")
+
+
+def test_a_parent_missing_from_the_fold_is_an_absence_not_an_agreement():
+    """The other route to an empty comparison: `node_knob_delta` returns `[]` when the parent is not
+    in `state.nodes`, which a Δ0 render turns into a claim that the two agreed."""
+    from looplab.events.digest import _node_line
+
+    child = _renderable(_n(9, {"a": 1.0}, parents=[3]))
+    line = _node_line(child, SimpleNamespace(nodes={9: child}))
+    assert "difference is in CODE" not in line and "Δ0 vs #3" not in line, line
+    assert "no coordinates recorded" in line
+
+
+def test_a_real_agreement_still_makes_the_claim():
+    """The counter-assertion: the fix must not have silenced the signal the line exists for."""
+    from looplab.events.digest import _node_line
+
+    parent = _renderable(_n(3, {"a": 1.0}))
+    child = _renderable(_n(9, {"a": 1.0}, parents=[3]))
+    assert "Δ0 vs #3 — the difference is in CODE, not params" in _node_line(
+        child, SimpleNamespace(nodes={3: parent, 9: child}))

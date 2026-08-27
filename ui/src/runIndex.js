@@ -698,7 +698,22 @@ export function appliedParamsNotice(record) {
 // different" means cannot reach one surface and miss the other. Absent keys are filtered out before
 // it runs: an absent key is silence, not a second key, and every node and every run on this box has
 // none, so a refusal that counted silence would fire everywhere and mean nothing.
+//
+// The SUBSTRATE is checked first here too, for the same reason it is in `comparability_status`
+// below: two numbers produced from different source trees are not on one scale whatever their input
+// keys say, so a substrate mismatch outranks even a `measured` agreement. It can only ever REFUSE —
+// agreement certifies nothing, because equal code over different data is not the same evaluation —
+// and both sides must carry one, so a missing substrate is silence and every pre-2026-08-24 record
+// reads exactly as it did.
+const substrateMismatch = (left, right) => {
+  const mine = left?.substrate
+  const theirs = right?.substrate
+  return typeof mine === 'string' && typeof theirs === 'string'
+    && !!mine && !!theirs && mine !== theirs
+}
+
 const anyKeyConflict = records => records.some((record, i) => records.slice(i + 1).some((other) => {
+  if (substrateMismatch(record, other)) return true
   const authority = commonAuthority(record, other)
   return !!authority && record.keys[authority] !== other.keys[authority]
 }))
@@ -715,6 +730,12 @@ export function comparabilityStatus(a, b) {
   const left = comparabilityRecord(a)
   const right = comparabilityRecord(b)
   if (!left || !right) return COMPARABILITY_UNKNOWN
+  // FIRST, and it can only refuse — see `substrateMismatch`. The engine grew this discriminator and
+  // this mirror did not follow for three days, so the browser answered SAME for exactly the pair the
+  // engine had just refused: an operator promoting a repair into the editable repo mid-run (which
+  // `looplab repair-candidates` explicitly urges) splits two nodes with identical input keys, and
+  // the run list, RegistryPanel, ParetoPanel and crossRunRank went on ordering them.
+  if (substrateMismatch(left, right)) return COMPARABILITY_DIFFERENT
   const authority = commonAuthority(left, right)
   if (!authority) return COMPARABILITY_UNKNOWN
   if (left.keys[authority] !== right.keys[authority]) return COMPARABILITY_DIFFERENT

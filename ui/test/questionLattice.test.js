@@ -2,6 +2,7 @@
 // obvious simpler implementation — a path tree, a canonical parent, a summed rollup — and each was
 // driven by mutating the module and watching this file go red.
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
   UNGROUPED_ID, conceptSet, descendantIds, isStrictSubset, latticeRollups, latticeRows,
@@ -173,16 +174,18 @@ test('an evidence id that resolves to no node is not counted as measured', () =>
 test("a question's comparability marker comes from its EXPERIMENTS' nodes", () => {
   // A question's own `evidence` is empty by construction, so reading only that field marks nothing
   // on exactly the rows that aggregate the most work.
+  //
+  // THE FIXTURE IS THE WIRE SHAPE, and it was not: these cards carried `child_card_ids`, a field
+  // `serve/public_cards.py::_FIELDS` deliberately never publishes, so this test passed against a
+  // payload production cannot produce while the real one marked nothing on any question. The edge
+  // that IS on the wire is `parent_card_id`, pointing the other way.
   const rec = key => ({ metric_provenance: { comparability: { keys: { measured: key } } } })
   const cards = [
-    q('q1', ['a'], {
-      child_rollup: { children: 2, best_delta: 3, best_card_id: 'e1' },
-      child_card_ids: ['e1', 'e2'],
-    }),
-    q('e1', ['a'], { best_delta: 3, evidence: ['n1'] }),
-    q('e2', ['a'], { best_delta: 1, evidence: ['n2'] }),
+    q('q1', ['a'], { child_rollup: { children: 2, best_delta: 3, best_card_id: 'e1' } }),
+    q('e1', ['a'], { best_delta: 3, evidence: ['n1'], parent_card_id: 'q1' }),
+    q('e2', ['a'], { best_delta: 1, evidence: ['n2'], parent_card_id: 'q1' }),
   ]
-  // Only the question is a lattice row; its experiments are reached through `child_card_ids`.
+  // Only the question is a lattice row; its experiments are reached through the parent edge.
   const rows = latticeRows(cards.slice(0, 1))
   const split = latticeRollups({ nodes: { n1: rec('L'), n2: rec('R') } }, cards, rows).get('q1')
   assert.equal(split.measuredNodes, 2)
@@ -210,8 +213,10 @@ test('a sharper question, or a measured experiment, SUPPORTS the discard', () =>
   const sharperRoll = latticeRollups({ nodes: {} }, bySharper, latticeRows(bySharper)).get('q1')
   assert.equal(questionClosure(bySharper[0], sharperRoll).supported, true)
 
-  const byEvidence = [{ id: 'q1', concept_tags: ['a'], verdict: 'abandoned',
-    child_card_ids: ['e1'] }, { id: 'e1', concept_tags: ['a'], evidence: ['n1'] }]
+  // Same correction as above: the child is reached through its own `parent_card_id`, the field the
+  // wire actually carries.
+  const byEvidence = [{ id: 'q1', concept_tags: ['a'], verdict: 'abandoned' },
+    { id: 'e1', concept_tags: ['a'], evidence: ['n1'], parent_card_id: 'q1' }]
   const rows = latticeRows(byEvidence.slice(0, 1))
   const roll = latticeRollups({ nodes: { n1: { metric: 1 } } }, byEvidence, rows).get('q1')
   const closure = questionClosure(byEvidence[0], roll)
@@ -351,4 +356,30 @@ test('a question with neither authored nor inherited tags is still ungrouped', (
   assert.equal(rows.length, 1)
   assert.equal(rows[0].parentId, UNGROUPED_ID,
     'no concepts from any source means no position in a concept lattice — its own bucket, as before')
+})
+
+test('the model reads no card field the server never publishes', () => {
+  // THE CLASS OF DEFECT, not one instance of it. `cardEvidenceNodes` joined a question to its
+  // experiments through `card.child_card_ids`, which `serve/public_cards.py::_FIELDS` deliberately
+  // does not put on the wire — so in the browser the loop ran zero times, `measuredNodes` was 0 for
+  // every question, and every closed direction was drawn with the red "closed with NOTHING narrower
+  // behind it" chip. The unit tests above passed only because their fixtures supplied the field by
+  // hand, which is how a model can be tested green against a payload production cannot produce.
+  //
+  // Derived from the server's own `_FIELDS` tuple so it tracks the wire rather than restating it.
+  const py = readFileSync(new URL('../../looplab/serve/public_cards.py', import.meta.url), 'utf8')
+  const block = py.split('\n_FIELDS = (')[1].split(')')[0]
+  const published = new Set([...block.matchAll(/"([a-z_]+)"/g)].map(m => m[1]))
+  assert.ok(published.size > 10, 'the _FIELDS read came back too small to be the real tuple')
+  assert.ok(published.has('parent_card_id') && !published.has('child_card_ids'),
+    'sanity: the parent edge is published and the child list is not')
+
+  const src = readFileSync(new URL('../src/questionLattice.js', import.meta.url), 'utf8')
+    .replace(/^\s*\/\/.*$/gm, '')          // a comment naming a field is not a read of it
+  // Every `card.<field>` / `.<field>` read this module performs against a card-shaped object.
+  const known = new Set([...src.matchAll(/\bcard\.([a-z_]+)/g)].map(m => m[1]))
+  const unpublished = [...known].filter(name => !published.has(name))
+  assert.deepEqual(unpublished, [],
+    `${unpublished.join(', ')} are read off a card here and never published by public_cards.py — ` +
+    'each is permanently undefined in the browser')
 })

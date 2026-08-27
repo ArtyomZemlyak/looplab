@@ -12,7 +12,7 @@
 //   * comparability is TRANSPARENT — a question whose descendants were measured against different
 //     baselines says so instead of reporting a "best" across numbers that never met.
 
-import { cardIsDirection, cardParentId } from './cardLineageModel.js'
+import { cardIsDirection, cardLineageIndex, cardParentId } from './cardLineageModel.js'
 import { isRecord } from './panelPrimitives.js'
 import { nodesSplitByComparability } from './runIndex.js'
 
@@ -192,13 +192,23 @@ export function ownBest(card) {
 // the experiments filed under it. A question's own `evidence` is empty by construction (it owns no
 // action), so reading only that field marks nothing on exactly the rows that aggregate the most
 // work, and the comparability of a question's headline number is a fact about the nodes its
-// EXPERIMENTS ran on. `child_card_ids` is clipped at `CARD_CHILD_LIMIT`; the resulting marker is
-// therefore a claim about the children the wire carries, which is also all this view can draw.
-function cardEvidenceNodes(card, byId) {
+// EXPERIMENTS ran on.
+//
+// Reached through the `parent_card_id` EDGE, not through `child_card_ids`. That field is folded
+// onto the Card and `serve/public_cards.py::_FIELDS` deliberately does not publish it, so in the
+// browser it is always `undefined` — the loop below ran zero times, `measuredNodes` was 0 for every
+// question, and `questionClosure` therefore reported every closed direction as unsupported: the red
+// "closed with NOTHING narrower behind it — no experiment of its own produced evidence" chip, drawn
+// over a question answered by three measured runs. `mixedComparability` was dead for the same
+// reason. The unit tests passed only because their fixtures supplied `child_card_ids` by hand.
+//
+// `cardLineageIndex` is the shared inversion of that edge and carries two guards a local rebuild
+// keeps losing: it refuses a SELF edge, and it treats a card whose parent is off the 256-row wire
+// page as a root rather than as a child of an id this page cannot draw.
+function cardEvidenceNodes(card, childrenByParent) {
   const out = Array.isArray(card.evidence) ? [...card.evidence] : []
-  for (const childId of Array.isArray(card.child_card_ids) ? card.child_card_ids : []) {
-    const child = byId.get(String(childId))
-    if (isRecord(child) && Array.isArray(child.evidence)) out.push(...child.evidence)
+  for (const child of childrenByParent.get(card.id) || []) {
+    if (Array.isArray(child.evidence)) out.push(...child.evidence)
   }
   return out
 }
@@ -207,16 +217,26 @@ export function latticeRollups(state, cards, rows) {
   const byId = new Map((Array.isArray(cards) ? cards : [])
     .filter(c => isRecord(c) && c.id).map(c => [String(c.id), c]))
   const nodes = isRecord(state?.nodes) ? state.nodes : {}
+  // ONCE per call, not once per row: the inversion is over the whole card set and does not vary
+  // with the row being rolled up.
+  const { childrenByParent } = cardLineageIndex(cards)
   const out = new Map()
   for (const row of Array.isArray(rows) ? rows : []) {
     const ids = descendantIds(rows, row.rowKey)
     let best = null
     let bestCardId = null
     const measured = []
+    // DEDUPED per row. A node reachable from a question through two paths — its own experiment and
+    // that experiment's parent question, both of which are descendants of this row — was pushed
+    // once per path, so `measuredNodes` counted paths rather than experiments and
+    // `nodesSplitByComparability` (pairwise, O(m^2)) re-compared the same node against itself.
+    const seen = new Set()
     for (const id of [row.id, ...ids]) {
       const card = byId.get(id)
       if (!isRecord(card)) continue
-      for (const nodeId of cardEvidenceNodes(card, byId)) {
+      for (const nodeId of cardEvidenceNodes(card, childrenByParent)) {
+        if (seen.has(String(nodeId))) continue
+        seen.add(String(nodeId))
         const node = nodes[nodeId]
         if (isRecord(node)) measured.push(node)
       }

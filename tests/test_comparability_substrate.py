@@ -132,3 +132,25 @@ def test_the_substrate_digest_is_content_addressed_not_identity():
     assert a["substrate"] == b["substrate"]
     c = comparability_record(task=_TASK, substrate={"repo": "sha", "dirty": []})
     assert a["substrate"] != c["substrate"], "an uncommitted change must move the digest"
+
+
+def test_the_shared_truth_table_holds_on_the_engine_side():
+    """Both halves of the rule read `tests/fixtures/comparability_status_cases.json`.
+
+    `ui/src/runIndex.js::comparabilityStatus` says in its own comment that it mirrors this function
+    "so the browser and the engine can never disagree", and nothing checked it — so when the engine
+    gained the `substrate` discriminator the browser answered SAME for exactly the pairs the engine
+    had begun refusing, and every ranking surface went on ordering them. The browser half reads the
+    same file in `ui/test/comparabilityGate.test.js`.
+    """
+    import json
+    import pathlib
+
+    from looplab.engine.comparability import comparability_status
+
+    cases = json.loads(
+        (pathlib.Path(__file__).resolve().parent / "fixtures"
+         / "comparability_status_cases.json").read_text())["cases"]
+    assert len(cases) >= 8, "the fixture read too small to be the real table"
+    for case in cases:
+        assert comparability_status(case["a"], case["b"]) == case["status"], case["name"]

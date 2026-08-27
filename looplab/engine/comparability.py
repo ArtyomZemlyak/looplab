@@ -309,6 +309,27 @@ def _common_authority(this: dict, other: dict) -> Optional[str]:
     return next((name for name in AUTHORITIES if this_keys.get(name) and other_keys.get(name)), None)
 
 
+def _substrate_mismatch(this: Optional[dict], other: Optional[dict]) -> Optional[tuple[str, str]]:
+    """`(mine, theirs)` when both records name a source tree and the two differ, else `None`.
+
+    ONE spelling, because the substrate is consulted twice — `comparability_status` decides on it and
+    `comparability_notice` prints a sentence about it — and this module's whole stated purpose is
+    that no surface writes a second copy of the rule. Written out twice, a tightening (say, treating
+    a missing substrate as a refusal) would reach the status and leave the notice printing a mismatch
+    the status no longer finds, which is exactly the "cannot be told apart from a bug in this file"
+    failure the `_NOTICES` comment forbids.
+
+    Both sides must carry one: a missing substrate is silence, never "the same tree", which is what
+    keeps every pre-2026-08-24 log reading as it did. It can only ever REFUSE — agreeing here
+    certifies nothing, because equal code over different data is not the same evaluation.
+    """
+    mine = (this or {}).get("substrate")
+    theirs = (other or {}).get("substrate")
+    if isinstance(mine, str) and isinstance(theirs, str) and mine and theirs and mine != theirs:
+        return mine, theirs
+    return None
+
+
 def comparability_status(this: Optional[dict], other: Optional[dict]) -> str:
     """`SAME` | `DIFFERENT` | `UNKNOWN` for two comparability records. Never raises.
 
@@ -331,8 +352,7 @@ def comparability_status(this: Optional[dict], other: Optional[dict]) -> str:
     # through a matching substrate changes nothing below, because equal code with different data is
     # not the same evaluation. Both sides must carry one; a missing substrate is `unknown` and
     # deliberately not "the same", which is what keeps every pre-2026-08-24 log reading as it did.
-    mine, theirs = this.get("substrate"), other.get("substrate")
-    if isinstance(mine, str) and isinstance(theirs, str) and mine and theirs and mine != theirs:
+    if _substrate_mismatch(this, other) is not None:
         return DIFFERENT
     authority = _common_authority(this, other)
     if authority is None:
@@ -378,9 +398,9 @@ def comparability_notice(this: Optional[dict], other: Optional[dict], *,
         # here those keys may be IDENTICAL — the refusal came from the source tree, not from them.
         # Falling through would print "different inferred key" with two `?` placeholders, which is
         # exactly the "cannot be told apart from a bug in this file" failure that comment forbids.
-        mine, theirs = (this or {}).get("substrate"), (other or {}).get("substrate")
-        if isinstance(mine, str) and isinstance(theirs, str) and mine and theirs and mine != theirs:
-            return _SUBSTRATE_NOTICE.format(who=who, theirs=theirs, mine=mine)
+        pair = _substrate_mismatch(this, other)
+        if pair is not None:
+            return _SUBSTRATE_NOTICE.format(who=who, theirs=pair[1], mine=pair[0])
         authority = _common_authority(this or {}, other or {}) or AUTHORITY_INFERRED
         return _NOTICES[DIFFERENT].format(
             who=who, authority=authority,

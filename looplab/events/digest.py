@@ -321,25 +321,47 @@ def _node_line(n, state=None) -> str:
     # claims one knob; node 4 reads Δ3 and its card claims one, which is exactly the confound that
     # made its 0.789365 unable to answer the question it was proposed to answer. Δ0 with a different
     # metric is its own signal — the difference was in CODE, not coordinates.
-    from looplab.core.param_carriers import node_knob_delta, node_params_brief
+    from looplab.core.param_carriers import node_knob_delta, node_params_brief, resolved_params
     params = node_params_brief(n, cap=6)
     delta = ""
     parents = list(getattr(n, "parent_ids", None) or [])
     if parents and state is not None:
         by_id = getattr(state, "nodes", None) or {}
+        # ONCE, not once per parent: `resolved_params` walks the whole ancestor chain building a
+        # fresh dict at every level, and `node_knob_delta` re-derives this same side internally for
+        # each parent it is handed.
+        mine = resolved_params(n, by_id) if by_id else {}
         # EVERY parent, not just the first. A merge descends from two, and reporting only
         # `parents[0]` hides half of what it combined — on the live run node 13 read "Δ0 vs #11"
         # while also descending from #10. (`resolved_params` still resolves through parents[0]
         # alone, because that is the workspace this node inherited; different question.)
         shown = []
-        all_zero = True
+        moved_any = False
+        compared_any = False
         for pid in parents[:3]:
-            moved = node_knob_delta(n, by_id.get(pid), by_id)
-            all_zero = all_zero and not moved
+            parent = by_id.get(pid)
+            moved = node_knob_delta(n, parent, by_id)
+            # "NOTHING MOVED" AND "THERE WAS NOTHING TO COMPARE" ARE DIFFERENT FACTS, and only the
+            # first supports the claim below. `node_knob_delta` returns `[]` for both — for a parent
+            # absent from the fold, and for two nodes that each declare no coordinates at all —
+            # so a single `all_zero` flag read an empty comparison as a measured agreement and
+            # emitted a positive claim about where the difference lay into the Researcher's prompt.
+            # That is not an edge case on the task family this line was built for: `params_style:
+            # "none"` repo runs declare no `Idea.params`, so BOTH sides are empty on every node and
+            # every line asserted it.
+            theirs = resolved_params(parent, by_id) if (parent is not None and by_id) else {}
+            comparable = parent is not None and bool(mine or theirs)
+            compared_any = compared_any or comparable
+            moved_any = moved_any or bool(moved)
+            if not comparable:
+                # Say the absence rather than rendering it as a measured Δ0.
+                shown.append(f"vs #{pid}: no coordinates recorded")
+                continue
             names = ", ".join(k.rsplit(".", 1)[-1] for k in moved[:4])
             more = f" +{len(moved) - 4}" if len(moved) > 4 else ""
             shown.append(f"Δ{len(moved)} vs #{pid}" + (f": {names}{more}" if moved else ""))
-        note = " — the difference is in CODE, not params" if all_zero else ""
+        note = (" — the difference is in CODE, not params"
+                if compared_any and not moved_any else "")
         delta = f" [{'; '.join(shown)}{note}]"
     # Δ BEFORE the coordinates, deliberately: it is the most compressed decision-relevant fact on
     # the line ("did this node test one thing or five?"), and the coordinate list is long enough to

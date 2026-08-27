@@ -427,7 +427,8 @@ which every ranking surface renders as *these are observations, not a ranking* �
 That is the state every task shipped before 2026-08-20 is in.
 
 **The comparability key, and the inversion that is the whole point.** Two numbers may be ordered only
-when their keys agree at an authority that may certify. There are three, strongest first:
+when their keys agree at an authority that may certify, **and no discriminator refuses them outright**
+(see the substrate below). There are three authorities, strongest first:
 
 | authority | material | equality proves | may certify? |
 |---|---|---|---|
@@ -485,6 +486,26 @@ parsed the candidate's config would be deciding comparability from bytes the can
 reach the key by exactly two sanctioned routes: a **file** the operator names in `eval.inputs` (its
 content decides), or a **facet** the operator writes into `comparison_contract` (their word decides, and
 the record says `declared`). Anything else is `unknown`, on purpose, and `unknown` is visible.
+
+**The substrate: a fourth field that is not a fourth authority.** Since 2026-08-24 the record also
+carries `substrate` — a digest of the editable source tree the number was produced on, HEAD *and* the
+uncommitted work (`engine/workspace.py::substrate_fingerprint`). It is a **discriminator**, and the
+distinction is the whole of its design:
+
+* It is checked **first** and can only ever **refuse**. Two numbers produced from different source
+  trees are not on one scale whatever their input keys say, so a substrate mismatch outranks even a
+  `measured` agreement.
+* It **never certifies**. Falling through a matching substrate changes nothing below it, because equal
+  code over different data is not the same evaluation.
+* Both sides must carry one. A missing substrate is silence, never "the same tree", which is what keeps
+  every log written before it shipped reading exactly as it did.
+
+The gesture it exists to catch is an operator promoting a fix into the editable repo mid-run — which
+`looplab repair-candidates` explicitly urges them to do, and which the ordinary way of doing (editing
+the working tree) leaves invisible to a HEAD-only digest. `ui/src/runIndex.js::comparabilityStatus`
+mirrors the same rule, and both halves are driven from one shared truth table
+(`tests/fixtures/comparability_status_cases.json`) so the browser and the engine cannot disagree about
+whether two numbers may be ordered.
 
 **Every stage records what it RAN ON and what it MADE — the stage identity.** Since 2026-08-17 the
 engine derives two facts per stage and writes them onto the `stage_finished` row. Neither gates
