@@ -552,6 +552,66 @@ class ObservationHandle:
 _NULL_OBS = ObservationHandle(None)
 
 
+# --- Untraced-generation reporting ---------------------------------------------------------------
+# MEASURED over two completed runs: `rubertlite-dr-unified-v9` bills 3,103 provider calls and opens
+# 2,815 `generation` spans; v8 bills 5,788 and opens 5,247. Both gaps are 9.3 % of calls — 288 and
+# 541 DISTINCT full-sized chats (prompts 6.7k-16.5k, completions 66-8,032), 6.8 % and 5.0 % of the
+# run's tokens — invisible to `looplab timings`, `looplab tokens`, the conversation view and every
+# other operator trace surface.
+#
+# THE CAUSE IS STRUCTURAL AND IS IN THIS MODULE: `Tracer.span` binds `_current_tracer`, so the tracer
+# is visible to nested code only as a SIDE EFFECT of some outer span already being open. A call made
+# with no operation span open bills through `CostAccountant` and traces nothing. It is NOT a thread
+# problem — driven in isolation, `anyio.to_thread.run_sync` propagates ContextVars and only a bare
+# `threading.Thread` does not.
+#
+# WHICH sites those are could not be found by reading, and four cycles of trying is the evidence: the
+# calls reach the client through role objects and shared funnels (`core/parse.py::forced_structured`,
+# `trust/judge.py::structured_judge`), so grepping for `complete_text` finds the funnel, not the
+# producer. Four candidate causes were eliminated by measurement (stream->blocking fallback,
+# embeddings, retries/keepalive stalls, the llm_parallel build fan-out) and a fifth by arithmetic
+# (the stage checker is 8-14x too small). So the engine names them itself, from the one place that
+# always knows which it is.
+#
+# ONCE PER SITE, at WARNING, and never on the traced path. The no-op branch is rare by construction —
+# a traced run reaches it only for the calls this exists to find — so walking a few frames there
+# costs nothing measurable, and `_untraced_seen` bounds output to one line per distinct caller for
+# the life of the process. It records no run state, appends no event and changes no decision: the
+# answer lands in the run's console log, where one grep ends the investigation.
+_untraced_seen: set = set()
+
+
+def _note_untraced_generation() -> None:
+    """Name the caller of a generation that will emit no span. Never raises."""
+    try:
+        import inspect as _inspect
+        import logging as _logging
+
+        frame = _inspect.currentframe()
+        site = None
+        depth = 0
+        # Walk rather than index a fixed depth: how many frames `contextmanager` inserts is an
+        # implementation detail, and a hard-coded index silently names the wrong file when it moves.
+        while frame is not None and depth < 12:
+            frame = frame.f_back
+            depth += 1
+            if frame is None:
+                break
+            filename = frame.f_code.co_filename
+            if filename.endswith("tracing.py") or "contextlib" in filename:
+                continue
+            site = f"{filename}:{frame.f_lineno} in {frame.f_code.co_name}"
+            break
+        if not site or site in _untraced_seen:
+            return
+        _untraced_seen.add(site)
+        _logging.getLogger(__name__).warning(
+            "untraced LLM generation: no operation span open at %s — this call IS BILLED and will "
+            "appear in no trace surface", site)
+    except Exception:  # noqa: BLE001 — a diagnostic must never break the call it observes
+        return
+
+
 @contextmanager
 def generation(*, op: str, model: str, messages: Optional[list] = None,
                model_parameters: Optional[dict] = None):
@@ -561,6 +621,7 @@ def generation(*, op: str, model: str, messages: Optional[list] = None,
     cost/thinking on the yielded handle. No-op (yields a null handle) when nothing is being traced."""
     tr = _current_tracer.get()
     if tr is None:
+        _note_untraced_generation()
         yield _NULL_OBS
         return
     attrs = {"op": op, "model": model}
