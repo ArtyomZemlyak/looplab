@@ -36,7 +36,7 @@ from looplab.core.concepts import (
 )
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
-                     CARD_CHILD_LIMIT, CARD_LINEAGE_MAX_DEPTH,
+                     CARD_CHILD_LIMIT, CARD_CONCEPT_TAG_LIMIT, CARD_LINEAGE_MAX_DEPTH,
                      card_child_rollup, card_kind_of,
                      CARD_IDEA_CONCEPT_FIELDS,
                      CARD_STATEMENT_MAX_CHARS,
@@ -3012,7 +3012,11 @@ def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases) -> None:
         union: set[str] = set()
         for k in kids:
             union.update(t for t in (cards[k].concept_tags or []) if isinstance(t, str) and t)
-        parent.child_concept_tags = sorted(union)[:64]
+        # The bound is the WIRE's, shared as a constant rather than typed here: this clipped at 64
+        # while `serve/public_cards.py` publishes at 32, so a direction whose children named 33+
+        # distinct concepts published a truncated set AND reported its whole card projection
+        # incomplete — the board-wide "card projection incomplete" banner, on a healthy board.
+        parent.child_concept_tags = sorted(union)[:CARD_CONCEPT_TAG_LIMIT]
 
 
 def _publish_visible_cards(

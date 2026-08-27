@@ -850,6 +850,11 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
 function _CardDetailPane({
   card, receipt, attempts, selectedNodeId, onOpenNode, onSelect, onControl, controlState,
   controlsLocked, renderInspector, state, onRecover, runId = null, expectedGeneration = null,
+  // The lineage view for THIS card. It defaults to `null` on `_CardKanbanCard` and the Research
+  // block is gated on it, so omitting it here silently withheld "answers DIRECTION card-7" from the
+  // one surface built for reading a single card in full — while the lane tiles, which are summaries,
+  // showed it. That is the reverse of where a reader expects the detail.
+  lineage = null,
 }) {
   if (!card) {
     return <div className="card-detail card-detail-empty">
@@ -874,7 +879,7 @@ function _CardDetailPane({
       coverage={cardAttemptCoverage(attempts, receipt)} />
     <_CardKanbanCard card={card} receipt={receipt} presentation="full" state={state}
       controlState={controlState} controlsLocked={controlsLocked} onControl={onControl}
-      onRecover={onRecover} onSelect={onSelect} onClose={null} />
+      onRecover={onRecover} onSelect={onSelect} onClose={null} lineage={lineage} />
     {runId && <_CardTrace card={card} runId={runId} expectedGeneration={expectedGeneration}
       onOpenNode={onOpenNode} attempts={attempts} />}
   </div>
@@ -954,7 +959,16 @@ function _CardKanban({
       return changed ? next : current
     })
   }, [state.cards])
-  const visibleCards = cards.map(card => _cardWithOptimisticControls(card, optim[card.id]))
+  // MEMOIZED, and it is not a micro-optimisation. A fresh array every render changes the identity
+  // of the `cards` prop `ResearchView` receives, and that prop is the root dependency of its whole
+  // memo chain — `all` -> `questions` -> `rows` (`latticeRows`, whose own REVIEW note measures up to
+  // 109,600 placements on a legal 255-card payload) -> `rollups` (`latticeRollups`, a pairwise
+  // comparability split per row). Every one of those recomputed on every render: each 2.5 s run
+  // poll, each keystroke in the add-card draft, each optimistic-control change. The memos were
+  // written and were dead weight.
+  const visibleCards = useMemo(
+    () => cards.map(card => _cardWithOptimisticControls(card, optim[card.id])),
+    [cards, optim])
   // A 'confirmation-unknown' pending (a lost/uncertain submission) MAY never self-clear: if the intent
   // never actually landed, the fold never reflects it and the reconcile effect above never drops it (if
   // it DID land, that effect clears it normally). Because it can hang indefinitely, it must not count
@@ -1195,7 +1209,7 @@ function _CardKanban({
   // ONE walk of the edges for the whole board, mirroring why `attemptsByCard` is hoisted:
   // the per-card `cardLineageView` rebuilds the index from the card list every call, so using it
   // here would be O(cards^2) on a board the wire already lets reach 256 rows.
-  const lineageByCard = cardLineageViews(visibleCards)
+  const lineageByCard = useMemo(() => cardLineageViews(visibleCards), [visibleCards])
   const renderCard = card => <_CardKanbanCard key={card.id} card={card}
     lineage={lineageByCard.get(card.id) || null}
     receipt={isRecord(receipts[card.id]) ? receipts[card.id] : null}
@@ -1297,6 +1311,7 @@ function _CardKanban({
           controlState={selectedCard ? optim[selectedCard.id] : null}
           controlsLocked={readOnly || (globalPending && !(selectedCard && optim[selectedCard.id]?.pending))}
           onRecover={recoverCardControl}
+          lineage={selectedCard ? lineageByCard.get(selectedCard.id) || null : null}
           runId={runId} expectedGeneration={runGeneration || null} />
       </aside>}
     </div>

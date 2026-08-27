@@ -86,3 +86,21 @@ test('the model keeps the direction grouping as a pure function', () => {
   assert.ok(MODEL.includes('export function directionGroups'),
     'still exported and still tested; its removal is its own change')
 })
+
+test('every _CardKanbanCard render passes the lineage view', () => {
+  // DERIVED over the call sites, because the failure mode is silence: `lineage` defaults to `null`
+  // on `_CardKanbanCard` and the Research block is gated on it, so a call site that omits it does
+  // not error — it just withholds "answers DIRECTION card-7" from that surface. `_CardDetailPane`
+  // omitted it, which meant the block appeared on the lane/ladder SUMMARY tiles and not on the one
+  // surface built for reading a single card in full. That is the reverse of where a reader looks.
+  const stripped = SRC.replace(/^\s*\/\/.*$/gm, '')     // a comment naming the prop is not passing it
+  const opens = [...stripped.matchAll(/<_CardKanbanCard\b/g)].map(m => m.index)
+  assert.ok(opens.length >= 2, 'both the lane tile and the detail pane still render one')
+  for (const at of opens) {
+    // The element's own attribute list: up to its closing `/>`.
+    const element = stripped.slice(at, stripped.indexOf('/>', at) + 2)
+    assert.match(element, /\blineage=\{/,
+      `a _CardKanbanCard render at offset ${at} passes no lineage — its Research block is dead:\n`
+      + element)
+  }
+})

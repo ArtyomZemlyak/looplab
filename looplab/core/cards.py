@@ -776,6 +776,17 @@ CARD_KIND_EXPERIMENT = "experiment"
 CARD_KINDS = frozenset({CARD_KIND_DIRECTION, CARD_KIND_EXPERIMENT})
 # How many child ids one parent PUBLISHES. The rollup counts stay exact past this bound.
 CARD_CHILD_LIMIT = 256
+# How many DERIVED concept ids one parent carries in `child_concept_tags`.
+#
+# It is the wire's own lossless bound (`serve/public_cards.py::_MAX_ITEMS`) and not a number of its
+# own, because the two must agree and they did not: the fold unioned up to 64 while the projector
+# clipped at 32, so a direction whose children named 33+ distinct concepts was published truncated
+# AND reported its whole card projection incomplete — surfacing the board-wide "card projection
+# incomplete" banner on a perfectly healthy board. That is the exact collision the comment beside
+# `child_card_ids` says was avoided by keeping THAT list off the wire, reintroduced through its
+# sibling. `tests/test_card_public_projection.py` pins the two to stay equal; `core` may not import
+# `serve`, so the constant lives here (the layer both can read) and the guard enforces the tie.
+CARD_CONCEPT_TAG_LIMIT = 32
 # How deep a lineage chain may be walked. Two levels is the shipped shape (direction -> experiment);
 # the bound exists so a corrupt or hostile log cannot make the fold walk forever.
 CARD_LINEAGE_MAX_DEPTH = 16
@@ -1380,7 +1391,7 @@ class Card(BaseModel):
     # EMPTY FOR A CHILDLESS DIRECTION, honestly rather than conveniently: a question nobody has run
     # an experiment against has no MEASURED concept membership, and deriving one from its wording is
     # a classifier's job, not this fold's. It fills the moment the first child is filed.
-    child_concept_tags: list[str] = Field(default_factory=list, max_length=64)
+    child_concept_tags: list[str] = Field(default_factory=list, max_length=CARD_CONCEPT_TAG_LIMIT)
     # WHICH OF THE TWO THINGS THIS ROW IS (DERIVED, from `selection_provenance.action_source`):
     # `direction` — owns no executable action, so it is a research question children answer;
     # `experiment` — owns one action, the minimal-change hypothesis the engine can actually run.

@@ -25,7 +25,8 @@ making the mutation are named in the assertion messages.
 """
 from __future__ import annotations
 
-from looplab.core.cards import (CARD_CHILD_LIMIT, CARD_KIND_DIRECTION, CARD_KIND_EXPERIMENT,
+from looplab.core.cards import (CARD_CHILD_LIMIT, CARD_CONCEPT_TAG_LIMIT,
+                                CARD_KIND_DIRECTION, CARD_KIND_EXPERIMENT,
                                 CARD_LINEAGE_MAX_DEPTH, Card, CardSelectionProvenance,
                                 card_child_rollup, card_kind_of)
 from looplab.events.card_ledger import _apply_card_lineage, _CardAliases, _CardLedger
@@ -397,4 +398,9 @@ def test_the_union_covers_every_child_even_where_the_id_list_clips():
                              action_source="card_added", action_owner_count=1)))
     cards = _fold([_direction("dir"), *kids])
     assert len(cards["dir"].child_card_ids) == CARD_CHILD_LIMIT, "the id list still clips"
-    assert len(cards["dir"].child_concept_tags) == 64, "the union is bounded at its own cap"
+    # NOT a hard-coded 64 any more, and that number was the defect: the fold unioned at 64 while
+    # `serve/public_cards.py` publishes ref-lists at 32, so any direction above 32 concepts was
+    # published truncated AND reported its whole card projection incomplete. The two caps are now
+    # one constant, tied by `tests/test_card_public_projection.py`.
+    assert len(cards["dir"].child_concept_tags) == CARD_CONCEPT_TAG_LIMIT, (
+        "the union is bounded at the same cap the wire can carry losslessly")

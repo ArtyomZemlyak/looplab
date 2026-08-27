@@ -1103,10 +1103,28 @@ def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan,
     # absorbs needs no human; one that exceeds it will end the node no matter who is watching.
     #
     # Reusing `runtime/sandbox.resolve_deadline_grace` rather than re-deriving is what keeps the two
-    # from drifting: under the AUTO sentinel the grant is 10% of the wall capped at 30 minutes, and
-    # a second copy of that arithmetic here would decide to wake an operator on a bar the rescue no
-    # longer uses. Absent/blank cap => no grace => any projected overrun is beyond it, which is the
-    # fail-closed direction: it can only surface a real projection, never suppress one.
+    # from drifting: under the AUTO sentinel it is 10% of the wall capped at 30 minutes, and a second
+    # copy of that arithmetic here would decide to wake an operator on a bar the rescue no longer
+    # uses.
+    #
+    # KNOW WHAT THIS BAR IS, because the sentence here used to get it backwards. It read "it can only
+    # surface a real projection, never suppress one", which is true only of the `except` below — an
+    # unreadable cap resolving to no grace. The BAR ITSELF suppresses, and it suppresses against a
+    # CEILING rather than a grant: `resolve_deadline_grace` answers the most a stage could ever be
+    # given, while the seconds actually granted are `sandbox._granted_grace`, an LLM deadline judge's
+    # one-shot answer clamped by that ceiling — 0.0 for every way of not answering, and asked only
+    # once, AT the wall. So on a ten-hour stage under the shipped AUTO default there is a 30-minute
+    # band in which a real projected overrun opens no attention item, and if the judge then declines
+    # the node dies on its wall with nothing to show and the operator was never told, in the window
+    # where acting was still cheap.
+    #
+    # OPEN[overrun-grace-bar] the alert bar subtracts a grace CEILING that may never be granted, so a
+    # projected overrun inside it is silently suppressed. The noise it exists to stop is real (a
+    # 40-second overrun on a ten-hour stage is not worth an interrupt), so the fix is a bar keyed on
+    # the PROJECTION's own precision rather than on a discretionary rescue — and nobody has measured
+    # that precision, so the number is not inventable here. `projected_overrun_s` is stamped
+    # unfiltered above either way, so the durable record already holds what the engine knew.
+    # proof:`present:beyond = over - max(0.0, grace)@looplab/engine/train_monitor.py`
     try:
         from looplab.runtime.sandbox import resolve_deadline_grace
         grace = float(resolve_deadline_grace(grace_cap, wall))

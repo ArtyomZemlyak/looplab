@@ -794,3 +794,40 @@ def test_no_card_replay_journal_reaches_the_public_state():
         return isinstance(value, list) and any(_underscored(item) for item in value)
 
     assert not _underscored(state), "a fold-internal `_`-prefixed key reached the public state"
+
+
+def test_the_fold_and_the_wire_agree_about_the_concept_tag_bound():
+    """Two caps on one field is how a healthy board reports itself broken.
+
+    The fold unioned a direction's child concepts at 64 while this projector publishes ref-lists at
+    `_MAX_ITEMS` (32), so a direction whose children named 33+ distinct concepts was published
+    truncated AND had `_field_projection_lossless` fail — which flips the CARD's receipt, which
+    flips the whole board's, which renders `_CardProjectionNotice` ("card projection incomplete")
+    over a run where nothing is wrong. That is exactly the collision `public_cards.py`'s own comment
+    says was avoided by keeping `child_card_ids` off the wire, arriving through its sibling.
+
+    `core` may not import `serve`, so the shared bound lives in `core/cards.py` and this is what
+    ties the two together. It is also the guard for the other direction: raising `_MAX_ITEMS` alone
+    would silently stop publishing concepts the fold no longer collects.
+    """
+    from looplab.core.cards import CARD_CONCEPT_TAG_LIMIT
+    from looplab.serve.public_cards import _MAX_ITEMS
+
+    assert CARD_CONCEPT_TAG_LIMIT == _MAX_ITEMS, (
+        "the fold's `child_concept_tags` union bound and the wire's ref-list bound must be one "
+        "number; when they differ, whichever is larger makes every board above the smaller one "
+        "report an omission it did not choose")
+
+
+def test_a_full_concept_union_still_projects_complete():
+    """Driven, because the constants agreeing is only half of it — the projector must actually
+    certify a field filled to that bound."""
+    from looplab.core.cards import CARD_CONCEPT_TAG_LIMIT
+    from looplab.core.models import Card
+
+    card = Card(id="dir-1", statement="s", card_kind="direction",
+                child_concept_tags=[f"axis/c{i}" for i in range(CARD_CONCEPT_TAG_LIMIT)])
+    projection = public_cards_projection({"dir-1": card}).cards_projection.model_dump()
+    assert projection["complete"] is True
+    assert projection["items"]["dir-1"]["complete"] is True
+    assert projection["items"]["dir-1"]["omissions"] == {}
