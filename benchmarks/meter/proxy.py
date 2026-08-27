@@ -1169,8 +1169,30 @@ def main() -> int:
     server.limiter = RateLimiter(args.rpm)
     server.max_retries = args.max_retries
     server.delta_ceiling = max(0, args.delta_ceiling)
-    # Corporate gateway is inside the perimeter; the box's http_proxy is for the outside world.
-    server.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    # WHICH EGRESS PATH THE UPSTREAM NEEDS IS THE UPSTREAM'S BUSINESS, NOT THIS FILE'S.
+    #
+    # `ProxyHandler({})` — an EMPTY mapping — force-disables proxying for every upstream. That was
+    # written for the corporate gateway, which lives inside the perimeter and must be reached
+    # directly. The second instance of this meter points at `openrouter.ai`, which is outside it, and
+    # inherited the same override: every call went direct, around the box's egress proxy.
+    #
+    # MEASURED 2026-08-27, same endpoint, no API key, eight attempts per cell:
+    #     curl   via 127.0.0.1:18080   0/8 blocked
+    #     urllib via 127.0.0.1:18080   0/8 blocked
+    #     curl   direct                1/8 blocked
+    #     urllib direct                2/8 blocked
+    # A blocked request is `403 {"success": false, "error": "Access denied by security policy."}` —
+    # not OpenRouter's error shape, and it arrives for a request carrying NO credentials at all, so
+    # it is neither the key nor the account. The direct path is filtered; the proxied path is not.
+    # Sustained direct traffic makes it worse: the 8802 meter's refusal rate climbed 13% -> 25% ->
+    # 48% -> 72% -> ~100% across the day and finally stalled two $1 probes at a fifth of their
+    # budget. I spent an hour blaming the key for that.
+    #
+    # The environment already spells the rule correctly — `no_proxy` names the corporate gateway, so
+    # `proxy_bypass('llm-core-olap.samokat.ru')` is True and `proxy_bypass('openrouter.ai')` is
+    # False. So: read it, rather than overriding it. `ProxyHandler()` with no argument does exactly
+    # that, and the gateway still goes direct because the environment says so.
+    server.opener = urllib.request.build_opener(urllib.request.ProxyHandler())
 
     print(f"[meter] {args.host}:{args.port} -> {args.upstream}", flush=True)
     print(f"[meter] pricing {pricing.reference_slug} in={pricing.default.get('input_per_token')} "
