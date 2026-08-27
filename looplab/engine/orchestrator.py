@@ -55,7 +55,8 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_deriv
                                    settle_width, settled_width_refusal)
 from looplab.engine.audit import AuditMixin
 from looplab.engine.cadence import occupancy_due
-from looplab.engine.card_reservation import CardReservationMixin, _BuildReservation
+from looplab.engine.card_reservation import (CardReservationMixin, _BuildReservation,
+                                            _discarded_proposal_text)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
 from looplab.engine.costs import bind_cost_accountants
@@ -5291,6 +5292,41 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     "kind": "card_contract",
                     "reason": "proposal cannot form a bounded native Card action",
                     "action": "dropped",
+                })
+            elif plan.disposition not in {"mint", "reuse", "attach"}:
+                # THE ONLY PLACE A DISCARDED PROPOSAL IS RECEIPTED, and the placement is the
+                # decision. This branch runs immediately after the proposal call and nowhere else,
+                # so it is the one pass that can know a PAID proposal was refused. It returned None
+                # on a non-accepting disposition and the caller (`_create_node_scoped`) then unwound
+                # through `_discard_node_build_telemetry`, which despite its name appends nothing —
+                # its body only nulls the per-role prediction attributes so a later build cannot
+                # emit an abandoned build's ranking. Correct as far as it goes, and exactly why the
+                # loss was invisible. Measured on `runs/e5small-dr-unified-v8`: a propose of 24.1
+                # min / 81 provider calls / 4,270,000 tokens emitted a well-formed one-knob delta
+                # (train.max_seq_length 128 -> 256, citing four file:line locations) and left no
+                # `card_added`, no `card_enriched`, no `hypothesis_added` and no `card_dropped`.
+                #
+                # `card_reservation._reserve_node_build` is DELIBERATELY silent on the same
+                # dispositions: it is also the batch pre-reservation entry point, reached with a
+                # ready-made Idea and no propose behind it, so calling it twice with one idea is the
+                # idempotent retry of a single action and
+                # `test_card_writer_lifecycle::test_batch_prereservations_mint_on_main_thread_and_
+                # dedupe_exact_active_work` pins that it appends nothing. A row there would count a
+                # phantom loss on every exact twin.
+                #
+                # REFUSING THE MINT IS UNCHANGED — a card whose owner is in flight must not be
+                # minted twice. What is fixed is refusing in SILENCE.
+                self._append_proposal_event(EV_NOVELTY_REJECTED, {
+                    "node_id": prospective_node_id, "generation": 0,
+                    "kind": "card_duplicate" if plan.disposition == "duplicate"
+                            else "card_unplannable",
+                    "reason": ("an existing card already owns this action"
+                               if plan.disposition == "duplicate"
+                               else "the card plan named no bounded action"),
+                    "action": "dropped",
+                    "disposition": str(plan.disposition),
+                    "pass": "planner",
+                    "hypothesis": _discarded_proposal_text(linked),
                 })
             return plan.idea if plan.disposition in {"mint", "reuse", "attach"} else None
 

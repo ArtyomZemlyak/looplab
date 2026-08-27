@@ -1235,6 +1235,44 @@ therefore a second card whose statement was byte-identical to the first: the boa
 question twice. `Card.belief_id` / `Card.retry_of` still name that relationship for any card that does
 mint, and every pre-existing log folds unchanged.
 
+A **discarded proposal is receipted.** `_plan_native_card` answers with one of five dispositions —
+`mint`, `reuse`, `attach`, `duplicate`, `invalid` — and until 2026-08-27 only `invalid` left a row
+(`novelty_rejected{kind: "card_contract"}`). `duplicate`, which is what a BUSY BOARD produces when an
+existing card already owns the action, returned `None` two lines below it with nothing written; so did
+the third branch, which fires when an accepted disposition comes back with no `card_id` or no `idea`.
+All three unwind through `audit._discard_node_build_telemetry`, which despite its name appends no
+event — its body only nulls the per-role prediction attributes (`last_hyp_priority`, `last_foresight`,
+`last_foresight_pick`, `last_report`) so a later build cannot emit an abandoned build's ranking.
+
+The cost of that silence is measurable. On `runs/e5small-dr-unified-v8` a propose that ran **24.1
+minutes, 81 provider calls and 4,270,000 tokens** emitted a well-formed one-knob delta — raise
+`train.max_seq_length` 128 → 256 to match the eval's document truncation, citing four `file:line`
+locations — and left no `card_added`, no `card_enriched`, no `hypothesis_added`, and no
+`card_dropped` anywhere in the log. The next propose spent 148 calls and returned a *different*
+hypothesis, so the idea was not recovered; it was lost, and nothing in the record said so.
+
+The receipt lands in **exactly one place**, and which one is the load-bearing part.
+`_prepare_node_idea._link` runs immediately after the proposal call and nowhere else, so it is the
+only pass that can know a *paid* proposal was refused; it writes `novelty_rejected` with
+`kind: "card_duplicate"` or `kind: "card_unplannable"`, `pass: "planner"`, the `disposition` that
+produced it, and the proposal's `hypothesis` bounded to 400 chars — the same bound the fold applies
+to a `rationale`, so an audit row can never outgrow what is kept beside it.
+
+`_reserve_node_build` stays **silent**, deliberately. It is also the batch pre-reservation entry
+point, called with a ready-made Idea and no propose behind it, so calling it twice with the same idea
+is the idempotent retry of one action — and
+`test_card_writer_lifecycle::test_batch_prereservations_mint_on_main_thread_and_dedupe_exact_active_work`
+pins that such a re-reservation appends nothing at all. A row there would count a phantom loss on
+every exact twin. (A first version of this change did append there; that test caught it.)
+
+`novelty_rejected` rather than a new event type, because the fold appends it to `st.novelty_events`
+with no schema switch, so a new `kind` is additive under invariant #5 and every existing reader
+tolerates it.
+
+**Refusing the mint is unchanged and right** — a card whose owner is in flight must not be minted
+twice. What changed is that refusing in silence is no longer possible, so the cost is countable and
+the idea recoverable by a reader instead of re-derived by a later paid propose.
+
 Attaching is **opt-in at each build site**, and the ordinary build spine is the only one that opts in.
 An operator `inject_node` never attaches: an attach writes no `card_added`, so it would discard both the
 `source: "operator"` receipt and the `implementation_ref` that binds a human's ready-made code. Nor may
