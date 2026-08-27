@@ -260,6 +260,11 @@ def test_only_an_engine_side_marker_admits_the_provider_outage_verdict():
 
     ua = UnifiedAgent.__new__(UnifiedAgent)
     ua._pilot_client, ua._pilot_tools, ua._loop_opts, ua.prompts = object(), None, {}, None
+    # `__new__` skips `__init__`, so the triage wall has to be spelled here. Set EXPLICITLY rather
+    # than reached through a `getattr(..., 0.0)` at the call site: a defensive default there would
+    # let a genuinely unwired `triage_time_budget_s` read as 'no wall configured' instead of
+    # failing loudly. 0.0 = unlimited, which is this test's historical behaviour byte for byte.
+    ua._triage_time_budget_s = 0.0
 
     class _N:
         id, code = 0, "x = 1"
@@ -688,6 +693,11 @@ def test_the_agent_fallbacks_fail_closed_and_do_it_DIFFERENTLY():
 
     ua = UnifiedAgent.__new__(UnifiedAgent)
     ua._pilot_client, ua._pilot_tools, ua._loop_opts, ua.prompts = object(), None, {}, None
+    # `__new__` skips `__init__`, so the triage wall has to be spelled here. Set EXPLICITLY rather
+    # than reached through a `getattr(..., 0.0)` at the call site: a defensive default there would
+    # let a genuinely unwired `triage_time_budget_s` read as 'no wall configured' instead of
+    # failing loudly. 0.0 = unlimited, which is this test's historical behaviour byte for byte.
+    ua._triage_time_budget_s = 0.0
 
     class _N:
         id, code = 0, "x = 1"

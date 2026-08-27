@@ -93,7 +93,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
-_EXPECTED_DIGEST = "sha256:8b43ea226cbe85ef9608d801d6942adbb4972fc8a83d4157c4fe34c777820212"
+_EXPECTED_DIGEST = "sha256:d7b686b8ba554c8a0c167d990b11cf54f72190721516c7b0217b0d90abf167ef"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -393,7 +393,15 @@ _EXPECTED_DIGEST = "sha256:8b43ea226cbe85ef9608d801d6942adbb4972fc8a83d4157c4fe3
 #               different envelope. The knob that "does not get to be invisible just because its
 #               default is off" is now not off. Digest re-pinned; field count unchanged at 213,
 #               which is itself the evidence that no field was added or removed alongside it.
-_EXPECTED_FIELD_COUNT = 213
+#   2026-08-27  + triage_time_budget_s (213 -> 214). The "field set changed too" branch, and
+#               verified by DIFFING THE FIELD SET rather than reading the count, as the
+#               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated assignments
+#               against master reports exactly [triage_time_budget_s] added and [] removed, so no
+#               +1/-1 pair is hiding behind the new integer. Old receipts SHOULD stop verifying:
+#               the knob puts a 20-minute wall-clock ceiling on a crash-triage call that had none,
+#               and a speculation receipt measured while one failure could hold the eval thread for
+#               88 minutes was measured in a different envelope.
+_EXPECTED_FIELD_COUNT = 214
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

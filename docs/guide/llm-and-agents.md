@@ -538,6 +538,53 @@ attempt N cannot read attempt N-1's curve as its own. That snapshot is why the l
 at the top of every attempt rather than lazily at the failure — by then there is no "before" left to
 take.
 
+### And since 2026-08-27 the look has a wall
+
+The turn grant that came with those tools is additive **over a finite budget**, and the shipped
+configuration on this box is `agent_max_turns = 0`. What was left bounding the triage loop was
+`agent_emit_after`/`agent_emit_force` — 300/500 **turns**, sized for the pilot's self-driving loop —
+and the `StuckDetector`, which by its own docstring catches 1-cycles and 2-cycles and leaves "exotic
+longer cycles" to those backstops.
+
+`runs/e5small-dr-unified-v8` node 2 fell straight through all three. Its `train` stage timed out at
+09:07:19 and the engine did not return to work until 11:07:32: **88.3 min of triage (206 provider
+calls, 19,156,560 tokens), then 31.9 min of the already-bounded repair**, with both H200s at 0% the
+whole time. What the 88 minutes bought was one 663-line file — `training/loss.py`, read 78 times
+through 34 distinct windows, the identical twelve-window sweep repeating verbatim **six times**, 664
+of its 667 lines served five times or more — while the transcript grew 14,548 → 160,671 prompt
+tokens and all 206 calls re-sent it.
+
+That round-robin shape was **already known and already answered with a nudge**: `tool_loop`'s
+`_REPEAT_NOTE` appends *"this exact call has now run k× this phase with an IDENTICAL result"*, on the
+stated reasoning that "we only TELL the model it is repeating itself so it can stop on its own". It
+fired **57 times inside this one triage** and the model did not stop. `Settings.triage_time_budget_s`
+is that rung escalated from informing to bounding, on evidence that informing was tried first — not
+instead of it.
+
+It is not a one-off either. The **same node's second triage**, measured while this was being
+written, ran **48.2 min** (then 38.4 min of repair) before node 2 was abandoned — 4.2× the worst
+decision in the entire prior corpus, on an independent draw. Two decisions, 136.5 minutes of triage
+on one node; the ceiling makes it 40.
+
+The number is 1200 s and it is measured: across the **124 triage decisions** in the eight runs that
+carry `spans.jsonl`, the worst prior triage wall is **11.6 min** and the worst prior call count is
+**91**. A 20-minute ceiling therefore fires on none of them, and would have cut this one at 20 min
+instead of 88. It is deliberately the same number as `developer_session_time_budget_s`: triage and
+the repair it hands to run one after the other on the same eval-blocking thread.
+
+Two things it deliberately is not. It is **not a `min()`** with a configured budget — an operator who
+sets a finite `agent_time_budget_s` keeps their number, for the same reason `0 + n` may not turn
+their "no turn cap" into a cap. And it is **not a lost verdict**: `drive_tool_loop`'s time exit
+announces the budget through its `on_budget` observer — so the operator is told the investigation was
+cut short, and `node_repaired.budget_exhausted` records which bound ended it — and then forces the
+emit from everything gathered. The triage still answers; it stops browsing.
+
+A session-scoped *"this exact call+result has been served m times"* rung was measured and **refused**,
+recorded here so it is not re-proposed: over 2,472 tool-using sessions the max-serve distribution is
+`{1: 1782, 2: 285, 3: 181, 4: 100, 5: 48, 6: 35, ≥7: 41}`, and this pathological session's own max is
+**5** — lower than 41 healthy sessions. At `m=3` it fires on 259 of the 586 sessions with ≥40 calls.
+The signal does not separate them; wall clock does.
+
 **It widens what the judge can SEE and nothing it can decide.** The verdict vocabulary is still
 `repair` / `abandon` / `reject_idea`, both fail-closed degradations above are unchanged, and the
 terminal below the triage call still carries the eval's own authenticated failure `reason`. Nothing

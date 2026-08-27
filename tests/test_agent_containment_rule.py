@@ -179,9 +179,9 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
     seen = {}
 
     def spy(_self, messages, emit_spec, finalize, fallback, *, state=None, bind_state=True,
-            transport_fallback=None, extra_tools=None, extra_turns=0):
+            transport_fallback=None, extra_tools=None, extra_turns=0, wall_when_unbounded=0.0):
         seen.update(state=state, bind_state=bind_state, extra_tools=extra_tools,
-                    extra_turns=extra_turns)
+                    extra_turns=extra_turns, wall=wall_when_unbounded)
         # The two degradations must arrive as two DIFFERENT callables: the loop's no-emit fallback
         # says `unreadable` (the endpoint answered), the transport one says `unanswerable` and
         # carries the marker. One callable for both is how a prose-answering live endpoint paused a
@@ -194,6 +194,10 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
     agent._pilot_client = object()
     agent._pilot_tools = None
     agent.prompts = {}
+    # Set explicitly rather than reached through a `getattr(..., 0.0)` at the call site: this object
+    # skips `__init__` on purpose, and a defensive default there would let a genuinely unwired
+    # `triage_time_budget_s` pass as "no wall configured" instead of failing loudly.
+    agent._triage_time_budget_s = 0.0
     node = type("N", (), {"id": 1, "code": ""})()
     agent.triage_crash(node, "boom", 1)
     assert (seen["state"], seen["bind_state"]) == (None, False), (
@@ -202,6 +206,9 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
     # `self._pilot_tools` itself and `self._loop_opts` unchanged — the historical request byte for
     # byte (`engine/train_monitor.py::repair_log_tools`, `Settings.repair_log_tools`).
     assert seen["extra_tools"] is None
+    # ...and the triage wall is FORWARDED, not defaulted inside the helper: an agent configured with
+    # no wall must reach it with 0, so `Settings.triage_time_budget_s = 0` really means unlimited.
+    assert seen["wall"] == 0.0
     from looplab.engine.triage import (TRIAGE_TRANSPORT_FAILURE_KEY, UNANSWERABLE_TRIAGE_ACTION,
                                        UNREADABLE_TRIAGE_ACTION, is_transport_failure_verdict)
     assert seen["no_emit"]["action"] == UNREADABLE_TRIAGE_ACTION

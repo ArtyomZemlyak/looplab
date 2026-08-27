@@ -1893,6 +1893,59 @@ class Settings(BaseSettings):
     # model that never emits `done` fails cleanly with the code it wrote so far, instead of looping.
     developer_session_max_turns: int = 500
     developer_session_time_budget_s: float = 1200.0  # 20 min wall-clock per developer session
+    # THE SAME FINITE CEILING FOR THE CRASH/TIMEOUT TRIAGE JUDGE, and it exists because the
+    # "read-only agents are safe unbounded" assumption above was measured FALSE on a live run.
+    # `runs/e5small-dr-unified-v8` node 2 died at 09:07:19 and the engine did not return to work
+    # until 11:07:32 — 2h00m with both H200s at 0%. The split: triage 88.3 min / 206 provider calls
+    # / 19,156,560 tokens, then the (already bounded) repair 31.9 min / 46 calls. What the triage
+    # spent it on was ONE 663-line file — `training/loss.py`, swept top-to-bottom SIX times, the
+    # identical 12-window sequence repeating verbatim, 664 of its 667 lines re-served >= 5 times —
+    # while the transcript grew 14.5k -> 160.7k prompt tokens and every one of the 206 calls re-sent
+    # all of it.
+    #
+    # FOUR EXISTING BOUNDS, EACH MEASURABLY OUT OF REACH, which is why this is a new one and not a
+    # retune of an old one:
+    #   * `StuckDetector` catches 1-cycles and 2-cycles; its docstring says so out loud. The longest
+    #     CONSECUTIVE identical (action, observation) run in that session was 2, against a threshold
+    #     of 4. It could not fire.
+    #   * Exact adjacent p-cycle detection would not have helped either: other tools interleave, so
+    #     the first exact repeat at ANY period 1..20 lands at tool call 248 of 278.
+    #   * The round-robin gap was already known and answered with a NUDGE — `tool_loop._REPEAT_NOTE`,
+    #     "we only TELL the model it is repeating itself so it can stop on its own". It fired 57
+    #     times inside this one triage and the model did not stop. That is the escalation this
+    #     ceiling is: from informing to bounding, on evidence that informing was tried first.
+    #   * `agent_emit_after`/`agent_emit_force` (300/500) are TURN counts sized for the pilot's
+    #     self-driving loop. 206 turns fits comfortably inside both, so 88 minutes of dark GPU sat
+    #     entirely within a "healthy" turn budget. Wall clock is the quantity that hurts here and
+    #     nothing was measuring it.
+    #
+    # NOT A ONE-OFF. The SAME node's second triage, measured while this fix was being written, ran
+    # 48.2 min (then 38.4 min of repair) before the node was abandoned — 4.2x the worst prior
+    # decision in the whole corpus, on an independent draw. Two decisions, 136.5 min of triage; this
+    # ceiling would have made it 40.
+    #
+    # WHY 1200, and why it is not a guess: across the 124 triage decisions in the eight runs that
+    # carry `spans.jsonl`, the worst prior triage wall is 11.6 min and the worst prior call count is
+    # 91. A 20-minute ceiling therefore fires on NONE of them, and would have cut this one at 20 min
+    # instead of 88 — ~68 minutes of GPU returned. It is deliberately the same number as
+    # `developer_session_time_budget_s` above: triage and the repair it hands off to sit on the same
+    # eval-blocking thread, one after the other, and two different walls on one blocked thread would
+    # be a number nobody could explain.
+    #
+    # 0 = unlimited, and an operator who sets a finite `agent_time_budget_s` keeps THEIR number: the
+    # ceiling applies only when the loop is otherwise unwalled (see `unified_agent._pilot_emit`,
+    # which refuses to convert an operator's "no cap" into a cap for the same reason).
+    #
+    # Hitting it is not a lost verdict. `drive_tool_loop`'s time exit calls `_note_budget(..., "time")`
+    # so the operator is TOLD the investigation was cut short, then `_salvage_emit()` forces the emit
+    # from everything gathered — the triage still answers, it just stops browsing.
+    #
+    # NO `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` ROW, deliberately, on `memo_verdict_cue`'s ground: that
+    # map exists so a resume cannot SILENTLY ADD paid calls or mount a treatment an old run never
+    # consented to. A wall can only ever remove calls, never add one, and it mounts no intervention,
+    # changes no concurrency and no selection policy. A resumed run gains nothing it did not consent
+    # to; it only stops paying for a sweep it was already paying for.
+    triage_time_budget_s: float = 1200.0
     # F2 · The Developer's PROBE (`tools/dev_probe.py`): may it RUN a short Python program against
     # the real environment while it authors? ON by default, because the failure it closes is the
     # Developer inventing a workaround for a question it could have answered — the observed shape

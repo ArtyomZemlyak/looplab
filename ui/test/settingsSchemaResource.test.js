@@ -100,7 +100,16 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   paragraph prescribes rather than by bumping the number: the catalogue was 183 keys and
   //   removing exactly `train_monitor_contract` gave back 182, so this is one real addition
   //   with nothing renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 183)
+  //   183 -> 184 (2026-08-27): `triage_time_budget_s` — the wall-clock ceiling on ONE
+  //   crash/timeout triage call, the operator's only handle on a loop that BLOCKS the eval
+  //   thread with the GPU dark behind it. FOURTEENTH occurrence, and the Python guard caught
+  //   it first for the tenth consecutive time. Verified as the paragraph prescribes rather
+  //   than by bumping the number: the catalogue was 184 keys and removing exactly
+  //   `triage_time_budget_s` gave back 183, so this is one real addition with nothing renamed
+  //   away underneath it.
+  assert.equal(Object.keys(schema.fieldByKey).length, 184)
+  assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
+  assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')
   assert.equal(schema.fieldByKey.gpu_footprint_cue.default, true)
   assert.equal(schema.fieldByKey.cadence_while_evaluating.type, 'bool')

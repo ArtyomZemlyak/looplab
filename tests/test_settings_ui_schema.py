@@ -100,7 +100,14 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 183
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 184
+    # 216 -> 217 Settings and 183 -> 184 catalogued rows on 2026-08-27: `triage_time_budget_s`, the
+    # wall-clock ceiling on ONE crash/timeout triage call. A row rather than an uncurated omission
+    # because it is the operator's only handle on a loop that BLOCKS the eval thread with the GPU
+    # dark behind it, and because 0 = unlimited is what this box ran until now: `e5small-dr-unified-v8`
+    # node 2 spent 88.3 min and 206 provider calls re-sweeping one 663-line file INSIDE a healthy
+    # turn budget, which is the shape no turn count can see. It carries the same 1200 as
+    # `developer_session_time_budget_s` because the two bound consecutive phases of one thread.
     # 218 -> 219 Settings and 182 -> 183 catalogued rows on 2026-08-20:
     # `train_monitor_contract`, whether the live training-log watchdog is shown the stage's
     # own declared contract (`expect.assert` / `expect.files`) and the engine's reading of
@@ -159,7 +166,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # (there is no container filesystem to make read-only), so a form row would offer every operator
     # a knob that does nothing on their box, and the operators who DO run the container tiers set
     # them together in a config file.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 216
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 217
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

@@ -298,6 +298,8 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
                         stage_clients=extra_clients, prompts=getattr(researcher, "prompts", None),
                         agent_max_turns=getattr(settings, "agent_max_turns", 0),
                         agent_time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
+                        # The triage judge's own wall, latent unless the shared one above is 0.
+                        triage_time_budget_s=getattr(settings, "triage_time_budget_s", 1200.0),
                         loop_opts=loop_opts_from_settings(settings))   # B1 stuck + C1 plan + C2 summary
 
 

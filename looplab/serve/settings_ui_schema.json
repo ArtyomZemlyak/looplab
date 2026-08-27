@@ -996,6 +996,14 @@
      "default": 1200.0,
      "placeholder": "1200",
      "help": "Wall-clock ceiling per repo-Developer session (default 1200 = 20 min)."
+    },
+    {
+     "key": "triage_time_budget_s",
+     "label": "↳ crash-triage time budget (s)",
+     "type": "float",
+     "default": 1200.0,
+     "placeholder": "1200",
+     "help": "Wall-clock ceiling for ONE crash/timeout triage call — the same 20 minutes as the session above, because triage and the repair it hands to sit on the same eval-blocking thread. Applied only when the shared agent time budget is 0 (unlimited); a finite one is yours and is never shortened. It exists because the turn ceilings meant to bound this loop are sized in TURNS: e5small-dr-unified-v8 node 2 spent 88 minutes and 206 provider calls re-sweeping one 663-line file with both GPUs idle, inside a healthy turn budget. Hitting it is not a lost verdict — the loop reports the cut and forces the emit from what it gathered. 0 = unlimited."
     }
    ]
   },
