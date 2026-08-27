@@ -25,7 +25,15 @@ for name, path in (("8801 шлюз", "meter/meter.jsonl"), ("8802 openrouter", "
     # ПРАВИЛО ПРОКСИ, дословно: proxy.py:416
     bad = [x for x in new if int(x.get("status") or 0) >= 400 or x.get("error")]
     spent = sum(float(x.get("cost") or 0) for x in new)
-    print("  %-16s за %.0f ч: вызовов %d, $%.4f, НЕУДАЧ %d" % (name, hours, len(new), spent, len(bad)))
+    # КОГДА БЫЛ ПОСЛЕДНИЙ ВЫЗОВ — часть ответа, а не украшение. Окно в час включает и то, что
+    # кончилось пятьдесят минут назад, и дважды подряд (27.08, два обхода) я принимал хвост
+    # завершившейся пробы за неопознанную активность на шлюзе. Сводка обязана сказать читателю,
+    # что окно уже остыло.
+    last = max((float(x["ts"]) for x in new), default=0.0)
+    when = ("последний вызов %s, %.0f мин назад" % (
+        time.strftime("%H:%M:%S", time.localtime(last)), (time.time() - last) / 60)) if new else "тишина"
+    print("  %-16s за %.0f ч: вызовов %d, $%.4f, НЕУДАЧ %d | %s" % (
+        name, hours, len(new), spent, len(bad), when))
     if bad:
         c = collections.Counter(
             "%s %s" % (x.get("arm"), (str(x.get("error")).split(":")[0] if x.get("error") else x.get("status")))
