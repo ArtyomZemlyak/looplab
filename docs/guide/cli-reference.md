@@ -731,6 +731,14 @@ replay never rebuilds and that clearing a trace can destroy. So the ledger is th
 the spans supply the **attribution**, and the gap is printed — exactly as `timings` reconciles span
 durations against the event log's own wall clock.
 
+**Where the residual COMES FROM, and how to find the callers.** The tracer is bound inside
+`Tracer.span`, so `tracing.generation` no-ops when no operation span is open — the call is billed and
+traced nowhere. Since 2026-08-27 the engine names those sites itself: the first time each distinct
+caller reaches that branch it logs one WARNING, `untraced LLM generation: no operation span open at
+<file>:<line> in <function>`. So `grep 'untraced LLM generation' RUN_DIR.console.log` lists every
+producer whose calls are missing from this table, once each. It is a diagnostic only — no event, no
+run state, no decision moves on it.
+
 **Read `residual` before reading the shares.** On the run above it is 6.8 % of the real spend, so
 every `share` is a share of what the spans could attribute and not of what the run actually cost. It
 is **signed**: a negative residual means the spans over-attribute, which happens when a retried
