@@ -96,7 +96,7 @@ def test_a_call_with_no_usage_still_counts_as_a_CALL():
     assert out["rows"][0]["tokens"] == 50
 
 
-@pytest.mark.parametrize("bad", [True, "12", None, float("nan"), float("inf"), -5])
+@pytest.mark.parametrize("bad", [True, None, float("nan"), float("inf"), -5, 1.9, "not a number"])
 def test_a_junk_token_count_contributes_nothing(bad):
     """`isinstance(True, int)` is True, so a bool would silently add 1.
 
@@ -106,6 +106,28 @@ def test_a_junk_token_count_contributes_nothing(bad):
 
     assert out["attributed"] == 0
     assert out["rows"][0]["calls"] == 1, "the call happened even though its count was junk"
+
+
+def test_a_numeric_STRING_count_is_read_the_same_way_the_trace_reads_it():
+    """The token projection is `traceview._safe_token_count`, shared rather than re-spelled.
+
+    A private copy here disagreed with it on the SAME `attributes.usage` field of the SAME
+    `spans.jsonl`: it refused a numeric string (which some providers really do emit), truncated a
+    non-integral 1.9 to 1 where the shared reader refuses it, and — because `x in (inf, -inf)` is
+    False for a large int — returned an over-int64 count verbatim where the shared reader clamps it
+    to 0, which drove `attributed` and therefore `residual`, the one figure this command exists to
+    print, arbitrarily far off. Two readers of one field that disagree make `looplab tokens` and the
+    trace roll-up report different totals for one run with nothing to say which is right.
+    """
+    from looplab.events.traceview import _safe_token_count
+
+    assert token_spend_by_phase([_gen("plan", total="1234")])["attributed"] == 1234
+    assert _safe_token_count("1234") == 1234, "the shared reader is what decides this"
+
+    huge = token_spend_by_phase([_gen("plan", total=10 ** 400)])
+    assert huge["attributed"] == 0, (
+        "MUTATION: re-spell the projection locally with an `in (inf, -inf)` test and a >int64 "
+        "count sails through, making `residual` astronomically negative")
 
 
 def test_the_residual_is_signed_and_absent_means_absent():
@@ -126,10 +148,20 @@ def test_junk_rows_are_counted_and_never_raise():
                                 {"kind": "generation", "attributes": "junk"}])
 
     assert out["attributed"] == 10
-    assert out["damaged"] == 4
     assert out["rows"][0]["phase"] == "plan"
     # The damaged generation still counted as a call under the unattributed bucket.
     assert out["calls"] == 2
+
+    # TWO POPULATIONS, because one number for both let the CLI print a false sentence. The three
+    # non-span rows were genuinely stepped over and contributed nothing; the fourth row IS a
+    # generation span — `kind` read cleanly — so a billed call happened and is counted in `calls`
+    # above, with only its phase and usage lost. Reporting all four as "stepped over" claimed the
+    # fourth had been skipped while `calls` was simultaneously counting it.
+    assert out["damaged"] == 3, (
+        "MUTATION: fold the torn-attributes span back into `damaged` and the CLI's 'damaged span "
+        "rows stepped over' again describes a row it also reports inside `calls`")
+    assert out["torn_attributes"] == 1
+    assert out["damaged"] + out["torn_attributes"] == 4, "and nothing is lost by the split"
 
 
 def test_an_empty_read_says_nothing_rather_than_zero_percent():
@@ -137,3 +169,32 @@ def test_an_empty_read_says_nothing_rather_than_zero_percent():
 
     assert out["rows"] == [] and out["attributed"] == 0 and out["calls"] == 0
     assert out["residual"] is None
+
+
+def test_a_provider_stated_ZERO_total_is_not_re_derived():
+    """`total` is the provider's own figure WHEN IT GIVES ONE — and 0 is a figure.
+
+    `_int(usage.get("total")) or (prompt + completion)` cannot tell "no figure" from "a figure of
+    zero", so a fully cache-served turn — 12,000 prompt tokens, 0 billed — had its billed zero
+    silently replaced by 12,000. That inflates `attributed`, drives `residual` negative, and makes
+    the CLI print "spans over-attribute", blaming a retried provider call for a number this reader
+    invented. The module's own docstring already forbade exactly this substitution.
+
+    MUTATION: restore the `or` -> the first case returns 12000 and `residual` goes negative.
+    """
+    from looplab.events.token_spend import _tokens_of, token_spend_by_phase
+
+    assert _tokens_of({"prompt": 12000, "completion": 0, "total": 0}) == (0, 12000, 0)
+    assert _tokens_of({"prompt": 100, "completion": 50}) == (150, 100, 50), "absent -> sum"
+    assert _tokens_of({"prompt": 100, "completion": 50, "total": 160}) == (160, 100, 50)
+    for junk in (-5, float("nan"), float("inf"), "abc", None, True, [], {}):
+        assert _tokens_of({"prompt": 100, "completion": 50, "total": junk})[0] == 150, (
+            f"a non-figure ({junk!r}) must fall back to the sum, not be trusted as a total")
+
+    out = token_spend_by_phase(
+        [{"kind": "generation", "attributes": {"phase": "propose",
+                                               "usage": {"prompt": 12000, "completion": 0,
+                                                         "total": 0}}}],
+        ledger_total=0)
+    assert out["attributed"] == 0 and out["residual"] == 0, (
+        "a cache-served call must reconcile against the ledger, not over-attribute")

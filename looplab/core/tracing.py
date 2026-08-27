@@ -579,20 +579,47 @@ _NULL_OBS = ObservationHandle(None)
 # the life of the process. It records no run state, appends no event and changes no decision: the
 # answer lands in the run's console log, where one grep ends the investigation.
 _untraced_seen: set = set()
+# Whether THIS PROCESS ever constructed a Tracer. Not every process traces by design — the UI
+# server, `looplab genesis`, the preflight probe and the CLI helper commands all make billed calls
+# with no tracer anywhere, and telling those they "will appear in no trace surface" sends an
+# operator hunting a trace bug in a surface that never had one. The anomaly this reports is a call
+# made inside a run that IS tracing, so a process that never built a Tracer stays silent.
+_tracer_ever_constructed: bool = False
+
+# Infrastructure frames: the tracer's own plumbing plus the SHARED LLM funnels. `generation(...)` is
+# entered from six places and every one is inside `core/llm.py`, so a walk that stops at the first
+# non-tracing frame reports the client every time — which is exactly the uselessness the comment
+# above describes ("grepping for `complete_text` finds the funnel, not the producer"). Skipping the
+# client and the two structured-call funnels lets the walk reach the ROLE that made the call.
+_UNTRACED_SKIP_SUFFIXES = (
+    "core/tracing.py", "core\\tracing.py",
+    "core/llm.py", "core\\llm.py",
+    "core/llm_streaming.py", "core\\llm_streaming.py",
+    "core/llm_toolcall.py", "core\\llm_toolcall.py",
+    "core/llm_transient.py", "core\\llm_transient.py",
+    "core/parse.py", "core\\parse.py",
+    "trust/judge.py", "trust\\judge.py",
+)
 
 
 def _note_untraced_generation() -> None:
-    """Name the caller of a generation that will emit no span. Never raises."""
+    """Name the PRODUCER of a generation that will emit no span. Never raises."""
+    if not _tracer_ever_constructed:
+        return
     try:
         import inspect as _inspect
         import logging as _logging
 
         frame = _inspect.currentframe()
-        site = None
+        chain: list = []          # frames outside the tracer, nearest first — the funnel, then up
+        site = None               # the first frame outside the shared funnels: the producer
         depth = 0
         # Walk rather than index a fixed depth: how many frames `contextmanager` inserts is an
         # implementation detail, and a hard-coded index silently names the wrong file when it moves.
-        while frame is not None and depth < 12:
+        # Keep walking PAST the client/funnels rather than breaking at the first survivor — the
+        # break is what collapsed every distinct producer onto one `core/llm.py` line and, because
+        # `_untraced_seen` is keyed on it, silenced the second and every later producer entirely.
+        while frame is not None and depth < 24:
             frame = frame.f_back
             depth += 1
             if frame is None:
@@ -600,14 +627,23 @@ def _note_untraced_generation() -> None:
             filename = frame.f_code.co_filename
             if filename.endswith("tracing.py") or "contextlib" in filename:
                 continue
-            site = f"{filename}:{frame.f_lineno} in {frame.f_code.co_name}"
+            where = f"{filename}:{frame.f_lineno} in {frame.f_code.co_name}"
+            if len(chain) < 4:
+                chain.append(where)
+            if any(filename.endswith(s) for s in _UNTRACED_SKIP_SUFFIXES):
+                continue
+            site = where
             break
+        # All-infrastructure (a funnel called from another funnel, or a walk that ran out of depth):
+        # report what we have rather than nothing, so the call is still counted somewhere.
+        if not site:
+            site = chain[0] if chain else None
         if not site or site in _untraced_seen:
             return
         _untraced_seen.add(site)
         _logging.getLogger(__name__).warning(
             "untraced LLM generation: no operation span open at %s — this call IS BILLED and will "
-            "appear in no trace surface", site)
+            "appear in no trace surface (via %s)", site, " <- ".join(chain) or "?")
     except Exception:  # noqa: BLE001 — a diagnostic must never break the call it observes
         return
 
@@ -1852,7 +1888,10 @@ class Tracer:
         # while the bridge is absent so a real provider installed before this run is discovered.
         # Keep the resolved tracer on the instance: a later process-global change cannot alter an
         # already-running LoopLab tracer halfway through its span tree.
-        global _OTEL
+        global _OTEL, _tracer_ever_constructed
+        # This process traces. Until one of these exists, an untraced billed call is the DESIGN
+        # (the UI server, genesis, preflight, the CLI helpers) and not the anomaly worth a WARNING.
+        _tracer_ever_constructed = True
         sdk_disabled = _otel_sdk_disabled()
         if not sdk_disabled and _OTEL is None:
             try:

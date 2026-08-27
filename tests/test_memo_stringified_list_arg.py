@@ -185,3 +185,144 @@ def test_the_finalizer_keeps_the_questions_instead_of_refusing_them():
 
     assert len(memo.open_questions) == 2, "the questions must reach the memo, not be refused"
     assert memo.findings == ["f1"], "the fields that always validated must still be kept"
+
+
+# --- ELEMENT healing: the same all-or-nothing, one level down ------------------------------------
+# `_finalize` keeps every field that validated, but pydantic refuses a `list[str]` field ENTIRELY
+# over ONE `None` inside it — so a memo emitting `["q1", null, "q2"]` loses both real questions and
+# the board stays empty, which is the outcome the drop-the-offender rung was written to end.
+
+
+def test_one_null_element_does_not_cost_the_whole_question_list():
+    """MUTATION: delete the `list[str]` branch of `_healed_list_elements` -> pydantic refuses the
+    field, `_finalize` drops it, and BOTH real questions are lost over a single null."""
+    out = _MemoOut.model_validate(
+        {"open_questions": ["Does distillation help?", None, "Does temperature matter?"]})
+
+    assert out.open_questions == ["Does distillation help?", "", "Does temperature matter?"]
+
+
+def test_a_blanked_question_KEEPS_ITS_SLOT_because_position_is_the_join():
+    """`question_concepts[i]` describes `open_questions[i]`, so dropping the bad element would put
+    every later question on its neighbour's concepts — `core/models.py::_read_registered_questions`
+    argues this from c438f1c9 and this surface must not decide it differently.
+
+    MUTATION: `[i for i in value if isinstance(i, str)]` -> the lists are 2 and 3 long, and
+    "Does temperature matter?" silently inherits `["loss/contrastive"]`.
+    """
+    out = _MemoOut.model_validate({
+        "open_questions": ["Does distillation help?", None, "Does temperature matter?"],
+        "question_concepts": [["distill/teacher"], ["junk"], ["loss/contrastive"]],
+    })
+
+    assert len(out.open_questions) == len(out.question_concepts) == 3
+    assert out.question_concepts[2] == ["loss/contrastive"], "the join must not shift"
+
+
+def test_a_concept_ID_is_DROPPED_where_a_question_is_blanked():
+    """The opposite rule, and deliberately so: a row's ids are an unordered SET, and coercing `2`
+    to `"2"` would register a concept named "2" on the graph — worse than registering none.
+
+    MUTATION: blank the ids instead of dropping -> `["distill/teacher", ""]`.
+    """
+    out = _MemoOut.model_validate({"question_concepts": [["distill/teacher", 2], ["loss/x"]]})
+
+    assert out.question_concepts == [["distill/teacher"], ["loss/x"]]
+
+
+def test_a_row_of_the_WRONG_SHAPE_is_left_for_the_rung_that_REPORTS_it():
+    """The one place this healer deliberately differs from `core/models.py`, and the reason is the
+    surrounding machinery rather than the data.
+
+    There, blanking a flat row to `[]` is the only way to keep anything at all. Here `_finalize`
+    already refuses just the offending key, keeps the other nine fields and LOGS what it dropped —
+    so healing the whole-shape case trades a VISIBLE refusal for a silent empty. The first cut of
+    this rung did exactly that: `question_concepts: ["flat"]` became `[[], []]`, every concept gone
+    and nothing said, which `_finalize`'s own docstring forbids in as many words. It was caught by
+    `tests/test_memo_keeps_what_validated.py`, and this is that property from the healer's side.
+
+    MUTATION: `else []` instead of `else row` -> the field validates as empty rows, `_finalize`
+    never names it, and the loss becomes invisible.
+    """
+    with pytest.raises(ValidationError):
+        _MemoOut.model_validate({"question_concepts": ["flat"]})
+    with pytest.raises(ValidationError):
+        _MemoOut.model_validate({"question_concepts": [["ok"], None]})
+
+
+def test_a_repaired_element_is_SAID_OUT_LOUD(caplog):
+    """Healing keeps more than refusing does, but a malformed memo is still a fact about the
+    model's output — the same reason `_finalize` and `_admissible_beliefs` log what they discard.
+
+    MUTATION: drop the WARNING -> element repair becomes the invisible loss this whole rung was
+    corrected for, one level below the field-level refusal that IS reported.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        _MemoOut.model_validate({"open_questions": ["a", None], "findings": ["f"]})
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "open_questions" in logged and "repaired" in logged
+    assert "findings" not in logged, "a field that arrived clean must not be reported"
+
+    # A DECODE is not a repair: `_decoded_json_list` fails closed unless the decode yields a list,
+    # so it is a lossless re-reading of exactly what the model sent and announcing it would be noise.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        _MemoOut.model_validate({"open_questions": '["a", "b"]'})
+    assert not caplog.records, "a clean stringified list loses nothing and must stay quiet"
+
+
+def test_a_junk_node_id_is_dropped_rather_than_fabricated():
+    """`node_ids` is an unordered evidence set with no positional join, so a bad element is dropped;
+    coercing it would FABRICATE a citation, which is what `trust/memo_verify.py` exists to catch.
+    `isinstance(True, int)` is True and a bool is not a node id.
+
+    MUTATION: keep bools -> `node_ids == [1, True, 3]` and a claim cites node 1 twice.
+    """
+    out = _ClaimOut.model_validate({"statement": "c", "node_ids": [1, None, True, "x", 3]})
+
+    assert out.node_ids == [1, 3]
+
+
+def test_the_two_healings_COMPOSE_in_the_only_order_that_works():
+    """A field arriving as a JSON STRING has no elements to inspect until the decode has run, so
+    element healing is only reachable after `_decoded_json_list`.
+
+    MUTATION: heal elements BEFORE decoding -> the value is still a `str`, the element branch is
+    skipped, and the null inside refuses the field exactly as before.
+    """
+    out = _MemoOut.model_validate({"open_questions": '["a", null, "b"]'})
+
+    assert out.open_questions == ["a", "", "b"]
+
+
+def test_a_clean_payload_is_returned_untouched():
+    """Identity, not equality: the validator must leave a well-formed emit byte-identical rather
+    than rebuilding it, so nothing about a healthy memo depends on this rung having run."""
+    from looplab.agents.deep_research import _healed_list_elements
+
+    clean = ["a", "b"]
+    assert _healed_list_elements(list[str], clean) is clean
+    assert _healed_list_elements(list[list[str]], [["x"]]) == [["x"]]
+    # A shape the rung deliberately does NOT heal — what a healed nested model would be is a guess.
+    nested = [{"statement": "c"}]
+    assert _healed_list_elements(list[_ClaimOut], nested) is nested
+
+
+def test_the_annotations_are_matched_by_EQUALITY_and_never_by_identity():
+    """`list[str] is list[str]` is FALSE — every subscription builds a fresh `types.GenericAlias` —
+    so an identity test makes every branch unreachable and the whole rung inert with nothing red.
+    That was the first cut here, and it is the same shape as `_decoded_json_list`'s dead
+    `startswith` fast path recorded above.
+
+    MUTATION: `==` -> `is` in `_healed_list_elements` -> this fails and so does every element test.
+    """
+    from looplab.agents.deep_research import _healed_list_elements
+
+    assert list[str] is not list[str], "the premise: identity does not hold for a GenericAlias"
+    # So the branch must be reachable through a SEPARATELY CONSTRUCTED annotation object, which is
+    # exactly what `model_fields[...].annotation` hands it at runtime.
+    annotation = _MemoOut.model_fields["open_questions"].annotation
+    assert annotation is not list[str] and annotation == list[str]
+    assert _healed_list_elements(annotation, ["a", None]) == ["a", ""]

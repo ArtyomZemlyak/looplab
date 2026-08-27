@@ -116,9 +116,16 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
     believed by whoever next decides a drop is safe. The memo body genuinely is the record, which is
     why the corrected sentence names it alone.
     """
-    seen = {normalized_belief_key(s) for s in open_statements if str(s or "").strip()}
-    occupied = (set(seen) if counted is None
-                else {normalized_belief_key(s) for s in counted if str(s or "").strip()})
+    # ONE spelling of "usable statements, keyed", used for both populations. Written out twice, the
+    # dedup universe and the cap-occupancy set are keyed by two expressions that a later change to
+    # what counts as a usable statement (a length bound inside `normalized_belief_key`, blank
+    # detection moving off `str(s or "").strip()`) can update independently — which is the two
+    # populations silently disagreeing again, the exact failure `counted` was added to fix.
+    def _keys(statements) -> set:
+        return {normalized_belief_key(s) for s in statements if str(s or "").strip()}
+
+    seen = _keys(open_statements)
+    occupied = set(seen) if counted is None else _keys(counted)
     admitted: list[str] = []
     for direction in directions:
         text = str(direction or "").strip()
@@ -633,7 +640,17 @@ class ResearchCadenceMixin:
             # spelled twice is a join that will disagree with itself.
             by_statement = question_concept_rows(
                 memo_d.get("open_questions") or [], memo_d.get("question_concepts") or [])
-            for direction in self._admissible_beliefs(questions[:5]):
+            # NO INTAKE TRUNCATION, and the bare `5` that used to be here was wrong twice over.
+            # `DEEP_RESEARCH_OPEN_BELIEF_CAP` is DERIVED from `BOARD_PROMPT_CARDS` precisely so
+            # raising the prompt window cannot leave a stale literal behind (see its comment), and
+            # this line reintroduced the literal it was written to abolish. Worse, truncating HERE
+            # happens BEFORE `admit_research_beliefs` dedups: a memo whose first five questions are
+            # all already open registered ZERO cards while question six was genuinely new and there
+            # was room for it — the same "the run paid for a think-hard pass and the board stayed
+            # empty" outcome this cadence's own cap fix was written for. `admit_research_beliefs`
+            # owns both the dedup universe and the cap, and it bounds its OUTPUT, so handing it the
+            # whole list is what lets the cap mean what it says.
+            for direction in self._admissible_beliefs(questions):
                 concepts = by_statement.get(str(direction).strip())
                 self.store.append(EV_HYPOTHESIS_ADDED, {
                     "statement": direction, "source": "deep_research",

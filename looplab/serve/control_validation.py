@@ -1329,6 +1329,30 @@ def _precondition_card(state, event_type: str, data: dict, envelope) -> Optional
             "refresh the Card board; a terminal Card no longer accepts edits, priority or "
             "resource pins",
         )
+    # A REOPEN THE FOLD WILL DECLINE MUST BE REFUSED HERE, not accepted and then quietly ignored.
+    # Only an operator's own drop is undoable — an engine `card_auto_dropped` retires a rejected
+    # proposal and reopening one put it back on the selectable board permanently, since
+    # `_drop_card_once` is idempotent by history and could never retire it again. `_apply_card_drops`
+    # has always refused that; nothing here did, so the POST returned 2xx, `card_reopened` was
+    # appended, a success toast fired, and the browser's optimistic `proposed` was never reconciled
+    # away because it waits on a status change the fold never makes. A refusal rolls it back.
+    #
+    # `card.reopenable` is the FOLD'S OWN ANSWER and is deliberately not re-derived here: it is not
+    # `dropped_by == "operator"`, which reads only the HEAD receipt and so passes for an operator
+    # drop written over an engine one. Two spellings of this rule is how the server comes to accept
+    # exactly what replay throws away, which is the defect being closed.
+    #
+    # Scoped to a card that IS dropped: a reopen of a live card has nothing to undo, the fold treats
+    # it as a no-op, and turning that into a 4xx would be a contract change nothing asked for.
+    if (event_type == EV_CARD_REOPENED and getattr(card, "status", None) == "dropped"
+            and not getattr(card, "reopenable", False)):
+        return _error(
+            "card_reopen_not_permitted",
+            f"the Card target {card_id!r} was stopped by the engine, and only an operator's own "
+            "drop can be reopened",
+            "refresh the Card board; an engine retirement is part of the run's own lifecycle and "
+            "is not an operator control",
+        )
     if event_type == EV_CARD_RESOURCE_PINNED:
         gpus = data.get("gpus")
         memory = data.get("gpu_mem_mib")

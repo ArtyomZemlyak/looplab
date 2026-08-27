@@ -12,6 +12,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
+import { cardReopenable } from '../src/cardBoardModel.js'
+
 const SRC = readFileSync(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
 const MODEL = readFileSync(new URL('../src/cardLineageModel.js', import.meta.url), 'utf8')
 
@@ -103,4 +105,36 @@ test('every _CardKanbanCard render passes the lineage view', () => {
       `a _CardKanbanCard render at offset ${at} passes no lineage — its Research block is dead:\n`
       + element)
   }
+})
+
+test('only an OPERATOR drop can be reopened', () => {
+  // The fold has always said so — `card_ledger._apply_card_drops` skips any reopen whose prior
+  // receipt is not `dropped_by: "operator"`. The board did not, and offered the control on any
+  // dropped card. The click then succeeded end to end (2xx, `card_reopened` appended, toast, an
+  // optimistic `status: 'proposed'`) while the fold refused it — and because `cardControlReflected`
+  // waits for a status change that never comes, the override was never reconciled and a retired
+  // card rendered as live until reload.
+  //
+  // THE FOLD'S OWN ANSWER WINS. `Card.reopenable` is stamped by `_apply_card_drops` and published
+  // beside `dropped_by`; the board may not hold a second opinion about a rule replay decides.
+  // MUTATION: read `dropped_by` first -> the laundered row below reads reopenable.
+  assert.equal(cardReopenable({ id: 'c1', status: 'dropped', dropped_by: 'operator', reopenable: true }), true)
+  assert.equal(cardReopenable({ id: 'c2', status: 'dropped', dropped_by: 'engine', reopenable: false }), false)
+  // The case a mirror of the head author gets WRONG: an operator `card_dropped` written over the
+  // engine's `card_auto_dropped` reads "operator" while the engine's retirement still stands.
+  assert.equal(
+    cardReopenable({ id: 'c5', status: 'dropped', dropped_by: 'operator', reopenable: false }), false,
+    'the published flag must beat the head receipt author')
+
+  // …and the author rule survives ONLY as the pre-2026-08-27 fallback, for a payload minted before
+  // the field existed. MUTATION: drop the fallback -> every old row loses the control it should have.
+  assert.equal(cardReopenable({ id: 'c6', status: 'dropped', dropped_by: 'operator' }), true)
+  // An UNATTRIBUTED receipt reads as the engine's — the fail-closed direction, and the same default
+  // `card_ledger._drop_author` takes, so the two sides cannot disagree about an old row.
+  assert.equal(cardReopenable({ id: 'c3', status: 'dropped' }), false)
+  assert.equal(cardReopenable({ id: 'c4', status: 'dropped', dropped_by: '' }), false)
+  assert.equal(cardReopenable(null), false)
+  // A non-boolean `reopenable` is NOT a published answer — a truthy string must not authorize the
+  // control, so the fallback decides and the head author is read as it always was.
+  assert.equal(cardReopenable({ id: 'c7', status: 'dropped', dropped_by: 'engine', reopenable: 'yes' }), false)
 })

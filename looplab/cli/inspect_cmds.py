@@ -226,10 +226,29 @@ def tokens(run_dir: Path = typer.Argument(...),
         typer.echo("no spans.jsonl — the ledger records totals only, so the split is unavailable.")
         raise typer.Exit(2)
 
-    rows, health = read_jsonl_lenient_with_health(sp_path)
+    # THE SAME READER SETTINGS `timings` USES on the same file, and the `errors` one is not
+    # cosmetic: `jsonlio.read_jsonl_lenient`'s own docstring names it ("the spans reader uses
+    # 'replace' — a mid-file mojibake byte must cost one span, not the whole timings report").
+    # Under the default "strict" a single invalid UTF-8 byte raises `UnicodeDecodeError`, which the
+    # reader quarantines — so a generation span `timings` reads and charges, `tokens` dropped, and
+    # its tokens came back out as `residual … unattributed by any span`, i.e. reported as a fact
+    # about the ledger rather than about this command's own reader.
+    rows, health = read_jsonl_lenient_with_health(sp_path, loads=_json.loads, errors="replace")
     out = token_spend_by_phase(rows, ledger_total=ledger_total)
+    unreadable = int(health.get("invalid_lines") or 0)
     if not out["rows"]:
-        typer.echo("no generation spans found; nothing to attribute.")
+        # SAY WHAT WAS LOST BEFORE GIVING UP. A torn `spans.jsonl` — the routine shape after a
+        # killed engine process — parses to zero rows, and exiting here printed neither the ledger
+        # total nor the damage count, so the one message the operator got ("no generation spans
+        # found") named the record rather than the reader and read identically to a run that simply
+        # never traced. Both facts are already in hand at this point.
+        typer.echo(f"ledger total: {ledger_total or 0:,} tokens")
+        if unreadable or out["damaged"]:
+            typer.echo(f"no generation spans could be read; {unreadable + out['damaged']} damaged "
+                       f"span row(s) stepped over — the split is unavailable because spans.jsonl is "
+                       f"unreadable, not because the run made no calls.")
+        else:
+            typer.echo("no generation spans found; nothing to attribute.")
         raise typer.Exit(2)
 
     shown = out["rows"][:top] if top and top > 0 else out["rows"]
@@ -260,10 +279,19 @@ def tokens(run_dir: Path = typer.Argument(...),
     # after a killed engine process leaves a torn tail) printed no damage line at all and its lost
     # tokens were reported as `residual … unattributed by any span`, i.e. as a fact about the ledger
     # rather than about the reader. `token_spend_by_phase` counts only the rows it was HANDED, so it
-    # cannot see a line that never parsed; this is the half that can.
-    unreadable = int(health.get("invalid_lines") or 0)
+    # cannot see a line that never parsed; this is the half that can. (`unreadable` is resolved up
+    # beside the read itself, because the zero-rows exit owes the operator the same disclosure and
+    # used to return before ever reaching this line.)
+    # TWO POPULATIONS, and summing them printed a false sentence about one of them. A line that
+    # never parsed and a row that was not a span at all really were stepped over and contribute
+    # nothing; a generation span with a torn `attributes` map is COUNTED in `calls` above and only
+    # its phase and usage are lost. Reporting the sum as "stepped over" claimed the third kind had
+    # been skipped while the `attributed … over N generation spans` line was already counting it.
     if out["damaged"] or unreadable:
         typer.echo(f"damaged span rows stepped over: {out['damaged'] + unreadable}")
+    if out.get("torn_attributes"):
+        typer.echo(f"generation spans with unreadable attributes: {out['torn_attributes']} "
+                   f"(counted as calls above, attributed to no phase)")
 
 
 @app.command()

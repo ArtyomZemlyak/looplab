@@ -1364,6 +1364,45 @@ class WrapsResearcher:
         return getattr(self._delegate, "space_hint", "")
 
 
+def bind_state_on(target, state, parent=None) -> None:
+    """Call `target.bind_state` with whichever arity it declares; a no-op when it has none.
+
+    `tools/_base.py`'s contract is `bind_state(state, parent=None)`, but a developer is not a
+    ToolProvider and nothing obliges it to take the second argument, so a one-argument
+    implementation must not become a TypeError that kills the build. Decided from the SIGNATURE
+    rather than by catching TypeError around the call: a `TypeError` raised from INSIDE the callee's
+    own body is indistinguishable from an arity mismatch at the boundary, and retrying on it would
+    run a state binding twice.
+
+    A FREE FUNCTION because two callers need it and they bind different objects — the forwarder
+    below binds whatever it wraps, and `UnifiedAgent` binds every per-stage backend it holds. A
+    second spelling of the arity rule is how one of them comes to call a developer wrong.
+
+    The signature is asked to BIND the call, never merely COUNTED. A count answers `>= 2` for
+    `bind_state(self, state, **kw)` and for `bind_state(self, state, *, parent=None)` — the natural
+    way to write "accepted and ignored" — and then makes the positional two-argument call that
+    raises the exact `TypeError` this function exists to avoid, out of an unguarded forwarder and
+    into `node_build._implement`, killing the build. It answers `1` for `bind_state(self, *args)`
+    and silently drops `parent` on a callee that wanted it. `Signature.bind` decides by KIND, which
+    is the property actually in question, and the three attempts are ordered widest-first so a
+    callee that can take `parent` either way still gets it."""
+    fn = getattr(target, "bind_state", None)
+    if not callable(fn):
+        return
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):     # a builtin/C callable exposes no signature
+        fn(state)
+        return
+    for args, kwargs in (((state, parent), {}), ((state,), {"parent": parent}), ((state,), {})):
+        try:
+            sig.bind(*args, **kwargs)
+        except TypeError:
+            continue
+        fn(*args, **kwargs)
+        return
+
+
 class WrapsDeveloper:
     """Forwarding half of the Developer-WRAPPER contract (`ValidatingDeveloper`,
     `BestOfNDeveloper`, `UnifiedAgent`). A wrapper composes an inner Developer and must stay
@@ -1465,20 +1504,7 @@ class WrapsDeveloper:
         A no-op when the wrapped developer has none, which is most of them (draft, offline,
         template), so this only ever forwards a binding somebody asked for.
         """
-        fn = getattr(self._wrapped, "bind_state", None)
-        if not callable(fn):
-            return
-        # `tools/_base.py`'s contract is `bind_state(state, parent=None)`, but a developer is not a
-        # ToolProvider and nothing obliges it to take the second argument, so a one-argument
-        # implementation must not become a TypeError that kills the build. Decided from the
-        # SIGNATURE rather than by catching TypeError around the call: a `TypeError` raised from
-        # INSIDE the callee's own body is indistinguishable from an arity mismatch at the boundary,
-        # and retrying on it would run a state binding twice.
-        try:
-            accepts_parent = len(inspect.signature(fn).parameters) >= 2
-        except (TypeError, ValueError):     # a builtin/C callable exposes no signature
-            accepts_parent = False
-        fn(state, parent) if accepts_parent else fn(state)
+        bind_state_on(self._wrapped, state, parent)
 
     def _sync_audit(self) -> None:
         """Mirror the wrapped developer's per-call outputs onto this wrapper.

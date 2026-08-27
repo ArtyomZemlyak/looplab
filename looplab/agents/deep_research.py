@@ -97,8 +97,80 @@ def _decoded_json_list(value: object) -> object:
     return decoded if isinstance(decoded, list) else value
 
 
+def _healed_list_elements(annotation: object, value: object) -> object:
+    """One BAD ELEMENT must not cost the whole field, mirroring `core/models.py`'s rules exactly.
+
+    THE FIELD-LEVEL DROP IS THE SAME DEFECT ONE LEVEL DOWN. `_finalize` says "ALL-OR-NOTHING WAS
+    THE DEFECT, not the field" and then keeps every field that validated — but pydantic refuses a
+    `list[str]` field ENTIRELY over a single `None` or `2` inside it, so a memo emitting
+    `["Does distillation help?", null, "Does temperature matter?"]` loses BOTH real questions and
+    the board stays empty. That is the run paying for a think-hard pass and getting nothing, which
+    is the outcome the drop-the-offender rung was written to end.
+
+    THE THREE RULES ARE NOT A PREFERENCE — each is already argued and measured in
+    `core/models.py`, and re-deciding them here is how the two surfaces come to disagree about one
+    model's output:
+      * `list[str]`: a non-string becomes `""` and KEEPS ITS SLOT. Position is the join —
+        `question_concepts[i]` describes `open_questions[i]` — so dropping would shift every later
+        question onto its neighbour's concepts (`_read_registered_questions`, c438f1c9). A blank
+        is filtered by every downstream reader (`sanitize_research_memo_payload` blanks it too,
+        and `admit_research_beliefs` skips it) so nothing empty reaches the board.
+      * `list[list[str]]`: a non-string ID inside a ROW THAT IS ALREADY A LIST is DROPPED — a row's
+        ids are an unordered SET, and coercing `2` to `"2"` would register a concept named "2" on
+        the graph, which is worse than not registering one (`_read_question_concept_rows`).
+      * `list[int]`: a non-int is DROPPED. `_ClaimOut.node_ids` is an unordered evidence set with
+        no positional join, blanking has no meaning in it, and coercing junk would FABRICATE a
+        node citation — the one thing `trust/memo_verify.py` exists to catch.
+
+    A ROW OF THE WRONG SHAPE IS DELIBERATELY NOT HEALED, and this is the one place the rule differs
+    from `core/models.py` — for a reason that is about the SURROUNDING MACHINERY, not the data.
+    There, blanking a flat row to `[]` is the only way to keep anything at all. HERE there is a
+    better rung already: `_finalize` refuses just the offending key, keeps the other nine fields and
+    LOGS what it dropped. The first cut of this healer mapped a flat row to `[]` and thereby traded
+    that VISIBLE refusal for a silent empty — `question_concepts: ["flat"]` became `[[], []]`, every
+    concept gone and nothing said — which is precisely what `_finalize`'s own docstring forbids
+    ("NOT SILENT … this defect survived two runs precisely because nothing said anything").
+    `tests/test_memo_keeps_what_validated.py` caught it. So the whole-shape case falls through to
+    the rung that reports it, and only losses that rung CANNOT see are healed here.
+
+    …and those are still said out loud. Healing keeps more than refusing does, but a memo that
+    arrives malformed is a fact about the model's output, so every heal logs the field and the count
+    at WARNING — the same reason `_finalize` and `_admissible_beliefs` log what they discard.
+
+    Every other annotation (`list[_ClaimOut]`) is returned untouched: what a healed element of a
+    nested model would be is a guess, and a guess admits a second spelling of one field into a
+    durable row — the boundary `_decoded_json_list` already draws.
+
+    Returns `value` ITSELF when nothing moved, so the caller can test identity and leave an
+    untouched payload byte-identical.
+
+    The annotations are matched with `==` and NEVER with `is`. `list[str] is list[str]` is FALSE —
+    each subscription builds a fresh `types.GenericAlias` — so an identity test makes every branch
+    below unreachable and the whole rung inert with nothing red, which is the shape of defect this
+    module keeps recording (`_decoded_json_list`'s own dead `startswith` fast path, one function
+    up). Driving a real `null` through `_MemoOut` is what caught it here.
+    """
+    if not isinstance(value, list):
+        return value
+    if annotation == list[str]:
+        healed = [item if isinstance(item, str) else "" for item in value]
+    elif annotation == list[list[str]]:
+        # A non-list row is left EXACTLY as it arrived, so pydantic still refuses the field and
+        # `_finalize` still names it in its WARNING. See the docstring: healing it here would make
+        # the loss invisible, which is strictly worse than the refusal it replaces.
+        healed = [[i for i in row if isinstance(i, str)] if isinstance(row, list) else row
+                  for row in value]
+    elif annotation == list[int]:
+        # `isinstance(True, int)` is True and a bool is not a node id; `type(...) is int` is the
+        # same test `sanitize_research_memo_payload` makes of these very values.
+        healed = [item for item in value if type(item) is int]
+    else:
+        return value
+    return value if healed == value else healed
+
+
 class _StringifiedListTolerant(BaseModel):
-    """Heals a JSON-string-encoded list on ANY list-annotated field of the emit schema.
+    """Heals a JSON-string-encoded list — and its ELEMENTS — on any list field of the emit schema.
 
     ON THE CLASS AND NOT ON THE FIELD, which is this module's own precedent: the sibling rung in
     `_finalize` records that "ALL-OR-NOTHING WAS THE DEFECT, not the field", and `_MemoOut`'s
@@ -107,8 +179,14 @@ class _StringifiedListTolerant(BaseModel):
     covered fields is DERIVED from `model_fields` rather than written down, and a list field added
     to either subclass inherits the tolerance without anyone remembering to.
 
-    A value that is already a list is returned untouched, and elements are never decoded: a
-    question whose text happens to read `"[1, 2]"` is a question, not a nested array.
+    TWO HEALINGS, IN THIS ORDER, because the second only becomes reachable once the first has run:
+    a field arriving as `"[\\"a\\", null]"` is a `str`, so there are no elements to inspect until
+    the decode has produced the list. `_decoded_json_list` heals the ENCODING (the value is not a
+    list at all) and `_healed_list_elements` heals what is INSIDE it.
+
+    A value that is already a list keeps its encoding untouched, and elements are never DECODED: a
+    question whose text happens to read `"[1, 2]"` is a question, not a nested array. Healing an
+    element is the opposite operation — it removes something unusable, it never interprets.
     """
 
     @model_validator(mode="before")
@@ -119,15 +197,29 @@ class _StringifiedListTolerant(BaseModel):
         if not isinstance(data, dict):
             return data
         healed: Optional[dict] = None
+        repaired: list[str] = []
         for name, field in cls.model_fields.items():
             if name not in data or get_origin(field.annotation) is not list:
                 continue
-            fixed = _decoded_json_list(data[name])
-            if fixed is data[name]:
+            original = data[name]
+            decoded = _decoded_json_list(original)
+            fixed = _healed_list_elements(field.annotation, decoded)
+            if fixed is original:
                 continue
             if healed is None:
                 healed = dict(data)
             healed[name] = fixed
+            # Only the ELEMENT repair is reported. A decode is a lossless re-reading of exactly what
+            # the model sent (`_decoded_json_list` fails closed unless the decode yields a list), so
+            # announcing it would be noise; dropping or blanking an element loses something, and
+            # anything the engine discards has to be visible — the rule `_finalize` states and that
+            # this healer's first cut broke by silently emptying a field the rung used to name.
+            if fixed is not decoded:
+                repaired.append(name)
+        if repaired:
+            _LOG.warning(
+                "deep research: %d malformed element(s) repaired in emitted field(s): %s — the "
+                "field is kept, the unusable entries are not", len(repaired), ", ".join(repaired))
         return data if healed is None else healed
 
 

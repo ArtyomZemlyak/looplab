@@ -50,7 +50,14 @@ _FIELDS = (
     "created_at_node", "rationale", "evidence", "discarded_nodes", "best_delta", "merged_into",
     "aliases",
     "belief_aliases",
-    "dropped_reason", "dropped_by", "parent_id", "parent_ids", "parent_generations",
+    # `reopenable` rides BESIDE `dropped_by` and is not derivable from it, which is the whole reason
+    # it is on the wire: `dropped_by` names the author of the HEAD drop receipt, and an operator
+    # `card_dropped` written over an engine `card_auto_dropped` makes that read "operator" while the
+    # engine's retirement still stands. The browser gated its Reopen control on the head author and
+    # therefore offered a gesture the fold declines — 2xx, an appended event, a success toast, and an
+    # optimistic `proposed` that is never reconciled because it waits on a status change that never
+    # comes. This publishes the FOLD's own answer so the board cannot hold a second opinion.
+    "dropped_reason", "dropped_by", "reopenable", "parent_id", "parent_ids", "parent_generations",
     "scored_against", "scored_against_generation", "scored_against_empty", "operator",
     "params", "applied_params", "applied_params_node",
     "space", "eval_profile", "eval_timeout", "concept_tags", "priority", "pinned",
@@ -1017,7 +1024,8 @@ _FIELD_KINDS: dict[str, _FieldKind] = {
     **{name: _ref_list_kind() for name in _REF_LIST_FIELDS},
     **{name: _int_list_kind() for name in _INT_LIST_FIELDS},
     **{name: _bool_kind()
-       for name in ("actionable", "selection_ready", "scored_against_empty", "pinned")},
+       for name in ("actionable", "selection_ready", "scored_against_empty", "pinned",
+                    "reopenable")},
     "statement": _statement_kind(),
     "seed_statement": _statement_kind(),
     "identity": _FieldKind(_card_identity, _card_identity_lossless),

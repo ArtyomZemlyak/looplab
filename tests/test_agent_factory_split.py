@@ -75,20 +75,28 @@ def test_neither_module_is_a_god_module_again():
     """A BACKSTOP for the real property above, which is the domain split — this file's own header
     says the finding's headline "was the header, not the line count".
 
-    `agents/factory.py`'s cap went 520 -> 560 on 2026-08-27, and the reason is the distinction the
-    cap exists to make. It crossed 520 by SEVEN lines: one provider added to `_shared_providers`
-    plus the paragraph saying why (`QuestionBoardTools`). Wiring a provider into the composition
-    root is that module doing its job, not regaining a second domain — which is what happened to
-    `adapters/tasks.py` and what the tests above actually check. Punishing the root for composing
-    would incentivise deleting the rationale comment to fit, and comments are load-bearing here.
+    `agents/factory.py`'s cap went 520 -> 530 on 2026-08-27, and the reason it moved AT ALL is the
+    distinction the cap exists to make. It crossed 520 by five lines: one provider added to
+    `_shared_providers` plus the paragraph saying why (`QuestionBoardTools`). Wiring a provider into
+    the composition root is that module doing its job, not regaining a second domain — which is what
+    happened to `adapters/tasks.py` and what the tests above actually check. Punishing the root for
+    composing would incentivise deleting the rationale comment to fit, and comments are load-bearing
+    here.
 
-    The headroom is deliberately small. If it is spent again, the answer is an EXTRACTION and the
-    candidate is already visible: `make_roles` is 222 lines, nearly half the file, and
-    `_shared_providers` (75) is a coherent unit — "the providers every agentic role shares" — that
-    would move cleanly behind its existing re-export. Raise this number a third time and the guard
-    means nothing.
+    THE SIZE OF THE RAISE IS THE WHOLE DISCIPLINE, and the first cut of this got it wrong: it went
+    to 560, buying 35 lines of headroom for a 5-line overrun while the sibling cap next to it runs
+    at ONE (399 of 400). A cap raised seven times further than the change needed is not a cap that
+    moved, it is a cap that stopped being consulted — which is exactly what the last paragraph of
+    this docstring warns about, one paragraph above where it happened. The rule: a raise pays for
+    the lines actually spent and nothing more, so the NEXT overrun is a decision somebody has to
+    make rather than slack somebody already banked.
+
+    If it is spent again, the answer is an EXTRACTION and the candidate is already visible:
+    `make_roles` is 222 lines, nearly half the file, and `_shared_providers` (75) is a coherent
+    unit — "the providers every agentic role shares" — that would move cleanly behind its existing
+    re-export. Raise this number a third time and the guard means nothing.
     """
-    for rel, cap in (("adapters/tasks.py", 400), ("agents/factory.py", 560)):
+    for rel, cap in (("adapters/tasks.py", 400), ("agents/factory.py", 530)):
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 

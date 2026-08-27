@@ -161,6 +161,37 @@ export function cardStatus(card) {
   return cardText(card?.status) || 'unknown'
 }
 
+// WHO retired the card, defaulting to the engine — mirroring
+// `events/card_ledger.py::_drop_author`, which is what the fold decides the reopen with. An
+// unattributed receipt reads as the engine's on both sides, the fail-closed direction.
+export function cardDropAuthor(card) {
+  return cardText(card?.dropped_by) || 'engine'
+}
+
+// May the operator put this stopped Card back on the board?
+//
+// ONLY an operator-authored drop is undoable, and the fold has always said so — `_apply_card_drops`
+// skips any reopen whose prior receipt is not the operator's. The board did not: it offered "Reopen
+// this Card" on ANY dropped card, including one the engine auto-dropped for a rejected proposal.
+// The click then succeeded end to end — the POST returned 2xx, `card_reopened` was appended and a
+// "Card reopened" toast fired while the fold refused it — and since `cardControlReflected` waits
+// for `card.status !== 'dropped'`, which never comes, the optimistic patch was never reconciled
+// away and the retired card rendered as live until a reload.
+//
+// THE FOLD'S OWN ANSWER, not a mirror of it. `dropped_by` names the author of the HEAD receipt, and
+// `st.cards_dropped` carries both authorities: an operator `card_dropped` landing on top of the
+// engine's `card_auto_dropped` reads "operator" while an engine retirement still stands underneath,
+// so a browser rule keyed on the author offers the control for exactly the case replay throws away.
+// `Card.reopenable` is stamped by `_apply_card_drops` and published beside `dropped_by`, so the
+// board and the fold cannot hold two opinions.
+//
+// The author rule survives ONLY as the pre-2026-08-27 fallback, for a payload minted before the
+// field existed: absent, it is the best answer available and is right in every case but that one.
+export function cardReopenable(card) {
+  if (typeof card?.reopenable === 'boolean') return card.reopenable
+  return cardDropAuthor(card) === 'operator'
+}
+
 export function cardStatusLabel(status) {
   return String(status).split(/[-_]/).filter(Boolean)
     .map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ') || 'Other'

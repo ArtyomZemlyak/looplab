@@ -1665,13 +1665,25 @@ class LLMRepoDeveloper:
                     # ONE-SHOT. A second bounce would spend the session arguing instead of editing,
                     # and the model has already been told exactly what to do; `agent_emit_force`
                     # bounds the loop but must not be what stops this.
+                    #
+                    # The shot is only spent where it can be SPENT: `drive_tool_loop` calls a
+                    # validator on a forced emit only when a turn remains to act on the refusal
+                    # (`_accept_forced(may_retry=…)`). On the terminal salvages the emit is accepted
+                    # unvalidated instead — rejecting there dropped the summary and `rollback_stage`
+                    # on the floor and left `repair_verdict` empty, which is how a rung meant to buy
+                    # one more edit came to cost the whole repair record.
                     if not error or _bounced:
                         return None
-                    if write.files != _files_before or write.deleted != _deleted_before:
-                        return None                     # it wrote something — nothing to say
+                    # ONE place decides "did this session write anything", and it is the `wrote`
+                    # parameter the rule's own docstring says owns it. Testing it here and then
+                    # passing the literal `False` stated the byte fact twice and left the parameter
+                    # unreachable outside tests — so a second caller reading that docstring would
+                    # get a different answer from the one the repair loop gets.
                     from looplab.engine.repair_verify import repair_claimed_without_writing
                     refusal = repair_claimed_without_writing(
-                        (args or {}).get("summary", ""), wrote=False)
+                        (args or {}).get("summary", ""),
+                        wrote=(write.files != _files_before
+                               or write.deleted != _deleted_before))
                     if not refusal:
                         return None                     # claimed nothing concrete — a legitimate
                     _bounced.append(True)               # "no change needed" answer is left alone

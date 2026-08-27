@@ -48,9 +48,13 @@ export default function ResearchView({ cards, state, renderCard }) {
   // OPEN[nested-direction-counted-as-experiment] `all` holds both kinds and the fold permits a
   // DIRECTION to carry `parent_card_id`, so with no kind filter a nested question is counted,
   // labelled and rendered below as an experiment while also appearing in the lattice as a
-  // question — one card, two contradictory readings on one screen. Keep only !cardIsDirection
-  // children here, or render a nested direction explicitly as the question it is.
-  // proof:`present:const childrenByParent = useMemo(@ui/src/ResearchView.jsx`
+  // question — one card, two contradictory readings on one screen. Filter the children by KIND
+  // here, or render a nested direction explicitly as the question it is.
+  // The falsifier is the FIX's own symbol and not this loop's opening line: a kind filter is added
+  // INSIDE the body, so `present:` on the `useMemo` line survives its own fix and would leave the
+  // marker stuck open — the tier-3 misuse CLAUDE.md admits only where the marker IS the item.
+  // Either fix has to CALL the kind predicate, which today is imported and used point-free.
+  // proof:`absent:cardIsDirection(@ui/src/ResearchView.jsx`
   const childrenByParent = useMemo(() => {
     const out = new Map()
     for (const card of all) {
@@ -67,7 +71,11 @@ export default function ResearchView({ cards, state, renderCard }) {
   // the Directions tab's "Not filed under any direction" group stays the only surface that has it —
   // which is exactly why that tab cannot be retired until this exists.
   const unfiled = useMemo(() => unfiledExperiments(all), [all])
-  const rollups = useMemo(() => latticeRollups(state, all, rows), [state, all, rows])
+  // `state?.nodes`, not `state`: `latticeRollups` reads nothing else off the run state, while
+  // `useRunState` replaces the whole snapshot object on every 2.5 s poll. Depending on `state` paid
+  // the full rollup — now real work, since `cardEvidenceNodes` started returning evidence — for
+  // every poll that appended only a span, a comment or a cost row and moved no node at all.
+  const rollups = useMemo(() => latticeRollups(state, all, rows), [state?.nodes, all, rows])
   const byRowKey = useMemo(() => new Map(rows.map(r => [r.rowKey, r])), [rows])
 
   // Every concept any question names, for the filter. Sorted, so the list does not reorder itself

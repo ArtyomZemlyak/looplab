@@ -215,12 +215,15 @@ function cardEvidenceNodes(card, childrenByParent) {
 }
 
 export function latticeRollups(state, cards, rows) {
-  const byId = new Map((Array.isArray(cards) ? cards : [])
-    .filter(c => isRecord(c) && c.id).map(c => [String(c.id), c]))
   const nodes = isRecord(state?.nodes) ? state.nodes : {}
   // ONCE per call, not once per row: the inversion is over the whole card set and does not vary
-  // with the row being rolled up.
-  const { childrenByParent } = cardLineageIndex(cards)
+  // with the row being rolled up. `byId` comes from the SAME index rather than being rebuilt five
+  // lines up — `cardLineageIndex` already filters with the identical `isRecord(card) && card.id`
+  // predicate and returns it, so the local copy was a second full pass and a second Map over the
+  // same array — on a call the lattice-placement-explosion note above already flags as hot. (That
+  // slug is NOT repeated as a marker here: the open-item index is one declaration per slug, and a
+  // second `OPEN[` token in a comment about it is a duplicate declaration, not a cross-reference.)
+  const { byId, childrenByParent } = cardLineageIndex(cards)
   const out = new Map()
   for (const row of Array.isArray(rows) ? rows : []) {
     const ids = descendantIds(rows, row.rowKey)

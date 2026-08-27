@@ -18,7 +18,7 @@ import os
 import secrets
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -3194,7 +3194,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # P0-5 dirty-input enumeration: which repo files were uncommitted at start
                             # (repo tasks only; a clean/non-repo run records []). Provenance on top of
                             # the workspace content hash in `wf`.
-                            "dirty_inputs": (self._dirty_inputs(wf) if self._repo_spec else []),
+                            # The source PATHS, not `wf` — `wf` is keyed by label and this reads its
+                            # keys as paths (see `workspace.workspace_source_paths`).
+                            "dirty_inputs": (self._dirty_inputs(self.workspace.workspace_source_paths())
+                                             if self._repo_spec else []),
                             # T2 trust enforcement: recorded here so the pure fold applies the same
                             # gate on replay/resume (config isn't available to `replay.fold`). Absent in
                             # old logs -> "audit" -> byte-identical legacy selection.
@@ -6165,7 +6168,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         from looplab.search.speculation_quality import speculation_environment_fingerprint
         return speculation_environment_fingerprint()
 
-    def _dirty_inputs(self, wf: "dict | None") -> list:
+    def _dirty_inputs(self, sources: "Iterable[str] | None") -> list:
         """P0-5 dirty-input enumeration: for each git-repo workspace source, the uncommitted-file LIST
         (`git status --porcelain`) plus a bounded DIGEST of the actual diff vs HEAD (`git diff HEAD`) —
         the EXPLICIT record of which inputs differ from a clean checkout AND a content fingerprint of
@@ -6186,7 +6189,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             path that is genuinely a run INPUT should be mounted as a `data:` source, where
             `_shallow_fingerprint` covers it outside git's ignore rules.
           * Multiple sources under one repo share a single diff (computed once per resolved root).
-        Bounded output: <=500 porcelain lines x 200 chars, and one capped digest per repo root."""
+        Bounded output: <=500 porcelain lines x 200 chars, and one capped digest per repo root.
+
+        `sources` is an iterable of FILESYSTEM PATHS — never the workspace fingerprint, whose keys are
+        the `editable:<name>` LABELS this function would resolve to `Path(".")`. A dict still works
+        (iterating one yields its keys) so the four tests that pass `{path: {}}` are unchanged, but
+        callers should hand it `workspace.workspace_source_paths()`."""
         import os
         import subprocess
         import time
@@ -6235,7 +6243,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         out: list = []
         digests: dict = {}                                          # resolved-root -> digest (once)
-        for src in sorted((wf or {}).keys()):
+        for src in sorted(sources or ()):
             try:
                 p = Path(src)
                 root = str(p if p.is_dir() else p.parent)

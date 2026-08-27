@@ -101,3 +101,72 @@ def test_the_verdict_tier_is_untouched():
     assert v.claims == (), "inert carries no text-derived list, by design"
     assert v.unmet == ()
     assert v.actionable is True, "inert is still the verdict the loop may act on"
+
+
+# --- the FORCED-emit paths -------------------------------------------------------------------
+# The rung above is delivered through `drive_tool_loop`'s `validate=` seam, and until this was
+# driven, NONE of the forced-emit exits delivered it. `_accept_forced` called `validate`, discarded
+# the returned string, and returned `(False, None)`; three of the four exits then `break` straight to
+# `fallback`, which the repair path binds to `lambda m: ""`. So on the exit that MEASURABLY dominates
+# the corpus — 12 of the 12 inert repairs ran past `session_time_budget_s` — the rung fired, consumed
+# its one shot, said nothing to the model, and additionally destroyed the summary and the
+# `rollback_stage` the emit carried.
+
+def _loop(monkeypatch, *, forced_summary, exit_kind, validate):
+    """Drive the REAL `drive_tool_loop` to one of its forced-emit exits."""
+    from looplab.agents import tool_loop
+
+    monkeypatch.setattr(tool_loop, "_force_emit",
+                        lambda *a, **k: {"summary": forced_summary, "rollback_stage": "train"})
+
+    seen: list = []
+
+    class _Client:
+        def chat(self, messages, tool_specs, tool_choice="auto"):
+            seen.append(messages[-1].get("content", ""))
+            return {"content": "here is my prose answer", "tool_calls": []}
+
+    spec = {"type": "function", "function": {"name": "done", "parameters": {}}}
+    out = tool_loop.drive_tool_loop(
+        _Client(), None, [{"role": "user", "content": "go"}], spec,
+        max_turns=(1 if exit_kind == "exhausted" else 4),
+        finalize=lambda a: (a or {}).get("summary", ""),
+        fallback=lambda m: "", validate=validate)
+    return out, seen
+
+
+def test_budget_exhaustion_keeps_the_repair_instead_of_discarding_it(monkeypatch):
+    """A terminal salvage has no turn left to spend on a bounce, so it must ACCEPT.
+
+    MUTATION: validate on the exhausted exit -> `fallback` returns "", `repair_verdict` is empty,
+    `last_rollback_stage` is never set from the emit, and `is_developer_stuck` can never fire. That
+    is strictly worse than an unverified summary, which `inert`/`unmet` already grade on bytes.
+    """
+    out, _ = _loop(monkeypatch, forced_summary=_V8_SUMMARY, exit_kind="exhausted",
+                   validate=lambda a: repair_claimed_without_writing(
+                       (a or {}).get("summary", ""), wrote=False))
+
+    assert out == _V8_SUMMARY, "the terminal salvage must keep the emit it paid for"
+
+
+def test_the_prose_exit_delivers_the_REFUSAL_not_a_generic_nudge(monkeypatch):
+    """The one exit that loops back is the one that can honour a bounce — and it must say WHY.
+
+    MUTATION: nudge with `nudge_prompt` -> the model is told only "call emit again", never that it
+    claimed an edit it did not make, so the one chance the rung buys is spent on a turn that cannot
+    use it.
+    """
+    shots: list = []
+
+    def _validate(args):
+        if shots:
+            return None                      # one-shot, exactly like `_validate_repair`
+        shots.append(True)
+        return repair_claimed_without_writing((args or {}).get("summary", ""), wrote=False)
+
+    out, seen = _loop(monkeypatch, forced_summary=_V8_SUMMARY, exit_kind="prose", validate=_validate)
+
+    assert any("mine_stage.py" in m for m in seen), (
+        "the refusal must reach the model; a generic nudge throws the reason away")
+    assert any("edit_file" in m for m in seen)
+    assert out == _V8_SUMMARY, "after the bounce the retry's emit is accepted"

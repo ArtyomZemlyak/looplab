@@ -490,14 +490,17 @@ def unconsumed_card_inventory(state: RunState, *, exclude: "Collection[str]" = (
             # UI use; a WORK item that merely fails a freshness fence this turn still counts, which
             # is what keeps the v4 defect closed.
             #
+            # The falsifier below is the FIX's own symbol. `present:` on this clause was tier-3
+            # misuse: a fix ADDS a condition beside it and the clause survives, so the marker would
+            # stay open after it shipped — while any real fix has to read the blocker BY NAME.
+            #
             # OPEN[receiptless-work-reads-as-question] a card whose ownership receipt is MISSING or
             # AMBIGUOUS earns the same `action_source: "none"` as a genuine question, so this clause
-            # files a BROKEN WORK ITEM as a direction and it leaves both the supply count and the
-            # buildable board with nothing reporting it. Its blockers say `action_owner_missing` /
-            # `action_owner_ambiguous`; nothing here reads them. Closing it needs a signal that does
-            # not exist yet, not a looser reading of this one — the skip is what closed a measured
-            # seven-hour starvation.
-            # proof:`present:if card_is_direction(card):@looplab/search/card_selection.py`
+            # files a BROKEN WORK ITEM as a direction, with neither the supply count nor the
+            # buildable board reporting it. The card's own blockers name both cases; nothing here
+            # reads either. Closing it needs a signal that does not exist yet, not a looser reading
+            # of this one — the skip is what closed a measured seven-hour starvation.
+            # proof:`absent:action_owner_missing@looplab/search/card_selection.py`
             continue
         if getattr(card, "status", None) != "proposed":
             continue                       # built, running, dropped: no longer waiting

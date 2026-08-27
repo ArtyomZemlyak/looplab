@@ -13,8 +13,8 @@ from looplab.engine.resources import ResourceSchedulingMixin  # noqa: E402
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError  # noqa: E402
 from looplab.events.replay import fold  # noqa: E402
 from looplab.events.types import (  # noqa: E402
-    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_MERGED, EV_CARD_REPRIORITIZED,
-    EV_CARD_RESOURCE_PINNED,
+    EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_MERGED,
+    EV_CARD_REOPENED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
 )
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS  # noqa: E402
 from looplab.serve.public_cards import public_cards  # noqa: E402
@@ -223,6 +223,94 @@ def test_terminal_card_rejects_mutation_but_allows_redrop(tmp_path):
     assert RunCommandService._collaboration_precondition(
         state, EV_CARD_DROPPED,
         {"id": "card-1", "reason": "again", "dropped_by": "operator"}) is None
+
+
+def _reopen_error(state, card_id="card-1"):
+    return RunCommandService._collaboration_precondition(
+        state, EV_CARD_REOPENED, {"id": card_id, "reason": "resume", "source": "operator"})
+
+
+def test_a_reopen_the_fold_will_decline_is_REFUSED_rather_than_quietly_ignored(tmp_path):
+    """The append-time guard had no clause for `card_reopened` at all, so the two halves disagreed.
+
+    Only an operator's own drop is undoable — an engine `card_auto_dropped` retires a REJECTED
+    proposal, and `_drop_card_once` is idempotent by history, so a reopened one could never be
+    retired again. `_apply_card_drops` has always refused it; the server accepted it, appended the
+    event, returned 2xx and fired a success toast, and the browser's optimistic `proposed` was then
+    never reconciled away because it waits on a status change the fold never makes. The retired card
+    rendered as live until a reload.
+    """
+    rd, store = _seed(tmp_path)
+    store.append(EV_CARD_AUTO_DROPPED, {"id": "card-1", "reason": "stale proposal"})
+    state = fold(store.read_all())
+    assert state.cards["card-1"].status == "dropped"
+
+    error = _reopen_error(state)
+    assert error is not None and error["code"] == "card_reopen_not_permitted", (
+        "MUTATION: drop the EV_CARD_REOPENED clause from `_precondition_card` and this returns None "
+        "— the append lands, the operator is told it worked, and replay throws it away")
+
+
+def test_an_operator_drop_is_still_reopenable_through_the_guard(tmp_path):
+    """The control's real job must survive the refusal above."""
+    rd, store = _seed(tmp_path)
+    store.append(EV_CARD_DROPPED,
+                 {"id": "card-1", "reason": "owner decision", "dropped_by": "operator"})
+    state = fold(store.read_all())
+
+    assert state.cards["card-1"].reopenable is True
+    assert _reopen_error(state) is None
+
+
+def test_the_guard_reads_the_FOLD_and_not_the_head_receipt_author(tmp_path):
+    """The laundering path, which is exactly where a `dropped_by == "operator"` guard would pass.
+
+    `EV_CARD_DROPPED` is deliberately excluded from the lifecycle refusal above, so an operator may
+    write their own drop over the engine's. That makes the HEAD receipt read "operator" while an
+    engine retirement still stands underneath — two individually legitimate API calls that together
+    would launder a rejected proposal back onto the selectable board, permanently.
+    """
+    rd, store = _seed(tmp_path)
+    store.append(EV_CARD_AUTO_DROPPED, {"id": "card-1", "reason": "stale proposal"})
+    store.append(EV_CARD_DROPPED,
+                 {"id": "card-1", "reason": "mine now", "dropped_by": "operator"})
+    state = fold(store.read_all())
+
+    card = state.cards["card-1"]
+    assert card.dropped_by == "operator", "the head receipt really is the operator's"
+    assert card.reopenable is False, (
+        "MUTATION: derive the guard from `dropped_by` instead of from the fold's own answer, and "
+        "the server accepts precisely the reopen replay discards")
+    assert _reopen_error(state) is not None
+
+
+def test_a_reopen_of_a_LIVE_card_keeps_its_tolerant_no_op_contract(tmp_path):
+    """Scoped to a card that IS dropped. A reopen of a live card has nothing to undo, the fold
+    treats it as a no-op, and turning that into a 4xx would be a contract change nothing asked for —
+    `reopenable` is False there because there is nothing to reopen, which is not a refusal."""
+    rd, store = _seed(tmp_path)
+    state = fold(store.read_all())
+
+    assert state.cards["card-1"].status != "dropped"
+    assert state.cards["card-1"].reopenable is False
+    assert _reopen_error(state) is None
+
+
+def test_the_folds_answer_reaches_the_wire_beside_the_head_author(tmp_path):
+    """`reopenable` is not derivable from anything else the DTO carries, which is why it ships.
+
+    MUTATION: drop it from `_FIELDS` and the board is back to mirroring `dropped_by`, i.e. back to
+    offering the control for the one case the fold declines.
+    """
+    rd, store = _seed(tmp_path)
+    store.append(EV_CARD_AUTO_DROPPED, {"id": "card-1", "reason": "stale proposal"})
+    store.append(EV_CARD_DROPPED,
+                 {"id": "card-1", "reason": "mine now", "dropped_by": "operator"})
+    state = fold(store.read_all())
+
+    wire = public_cards(state.cards)
+    assert wire["card-1"]["dropped_by"] == "operator"
+    assert wire["card-1"]["reopenable"] is False
 
 
 def test_operator_overlays_win_without_mutating_seed_or_action_footprint(tmp_path):

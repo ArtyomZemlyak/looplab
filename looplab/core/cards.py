@@ -1410,6 +1410,22 @@ class Card(BaseModel):
     belief_aliases: list[str] = Field(default_factory=list)
     dropped_reason: Optional[str] = None
     dropped_by: Optional[str] = None                    # operator | engine | freshness | novelty
+    # WOULD THE FOLD ACCEPT A REOPEN OF THIS CARD RIGHT NOW? DERIVED by `_apply_card_drops` on every
+    # fold and never carried by an event — it is the fold's own answer, stamped and then published
+    # so the two surfaces that must agree with it (the append-time guard and the board's affordance)
+    # read it instead of each re-deriving one.
+    #
+    # `dropped_by` cannot answer it and that is the whole reason this exists. It names the author of
+    # the HEAD receipt, and `st.cards_dropped` holds two authorities folded by one handler: an
+    # operator `card_dropped` landing on top of the engine's `card_auto_dropped` makes the head read
+    # "operator" while an engine retirement still stands underneath. `control_validation` used to
+    # have no clause here at all, so a reopen POST returned 2xx, appended the event and fired a
+    # success toast while the fold declined it — and because the browser's optimistic patch waits
+    # for a status change that never arrives, the retired Card rendered as live until a reload.
+    #
+    # False on a card that is not dropped: there is nothing to reopen, which is not the same as a
+    # refusal, so the server keeps treating that as the tolerant no-op it always was.
+    reopenable: bool = False
     # Prospective parent anchor — the Layer-5 freshness gate re-derives improve/merge legality for a
     # not-yet-built card against state.best()/rank_by_metric[:2]/breedable_nodes().
     parent_id: Optional[int] = None

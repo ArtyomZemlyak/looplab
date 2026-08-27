@@ -22,6 +22,7 @@ import {
   cardAttemptSummary, cardInt as _cardInt, cardLanes as _cardLanes,
   cardNodes as _cardNodes, cardNumber as _cardNumber, cardOrder as _cardOrder,
   cardRows as _cardRows, cardStatus as _cardStatus, cardStatusLabel as _cardStatusLabel,
+  cardReopenable as _cardReopenable,
   cardText as _cardText, cardLessons as _cardLessons, cardOrigin as _cardOrigin,
   cardSelectionBlock,
   resolveSelectedCard,
@@ -625,7 +626,7 @@ function _CardKanbanCard({
           work and reopening resumes one, so presenting them with the same weight would be wrong in
           both directions. Until this shipped a drop was TERMINAL — the card stayed visible in the
           `dropped` lane, unactionable, with no event in the vocabulary that could return it. */}
-      {_cardStatus(card) === 'dropped' && <form className="card-control-form"
+      {_cardStatus(card) === 'dropped' && _cardReopenable(card) && <form className="card-control-form"
         onSubmit={event => { event.preventDefault(); reopen() }}>
         <label><span>Reopen reason (optional)</span><input className="text" value={reopenReason}
           maxLength={400} aria-label={`Reopen reason for ${card.id}`} disabled={busy}
@@ -2089,7 +2090,12 @@ export function CardWorkspace({
   readOnly = false,
 }) {
   const [, setRecoveryEpoch] = useState(0)
-  const cards = _cardRows(state)
+  // MEMOIZED, because `cardRows` returns a fresh array of freshly-spread objects every call.
+  // The `visibleCards` memo below (and, through it, the whole `all -> questions -> rows ->
+  // rollups` chain in ResearchView) deps on this array's IDENTITY, so an unmemoized call here
+  // busted it on every parent re-render — a card click, a pane change, a `readOnly` toggle —
+  // and not only when `state` actually moved. That is the entire lattice cost, per click.
+  const cards = useMemo(() => _cardRows(state), [state])
   const projection = isRecord(state?.cards_projection) ? state.cards_projection : null
   const hasAuthoritativeCards = cards.length > 0 || (_cardInt(projection?.total) ?? 0) > 0
     || projection?.source_valid === false
@@ -2115,7 +2121,12 @@ export function CardWorkspace({
 
 export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose, onToast }) {
   const [, setRecoveryEpoch] = useState(0)
-  const cards = _cardRows(state)
+  // MEMOIZED, because `cardRows` returns a fresh array of freshly-spread objects every call.
+  // The `visibleCards` memo below (and, through it, the whole `all -> questions -> rows ->
+  // rollups` chain in ResearchView) deps on this array's IDENTITY, so an unmemoized call here
+  // busted it on every parent re-render — a card click, a pane change, a `readOnly` toggle —
+  // and not only when `state` actually moved. That is the entire lattice cost, per click.
+  const cards = useMemo(() => _cardRows(state), [state])
   const projection = isRecord(state?.cards_projection) ? state.cards_projection : null
   // A non-empty/omitted/invalid Card projection is authoritative. With no Cards at all, preserve the
   // hypothesis add/abandon workflow for older logs and for a run before its first Card is minted.

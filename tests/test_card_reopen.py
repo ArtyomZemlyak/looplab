@@ -188,3 +188,43 @@ def test_drop_reopen_drop_is_still_expressible():
     card = _board([_OPERATOR_DROP, _REOPEN,
                    ("card_dropped", {"id": "card-x", "reason": "again", "dropped_by": "operator"})])
     assert str(card.status) == "dropped" and card.dropped_by == "operator"
+
+
+def test_an_operator_drop_OVER_an_engine_drop_does_not_launder_it_reopenable():
+    """The authority gate may not be read off the HEAD receipt, because the operator can write it.
+
+    `dropped` is last-receipt-wins across BOTH authorities, and
+    `control_validation._precondition_card` deliberately EXCLUDES `EV_CARD_DROPPED` from its
+    terminal-lifecycle refusal so "an operator keeps authority over the DROP itself on a terminal
+    Card". Those two facts compose: the operator appends their own `card_dropped` over the engine's
+    `card_auto_dropped`, the head receipt now reads `dropped_by: "operator"`, and a gate that
+    consults only the head lets the very next `card_reopened` pop the entry — putting a REJECTED
+    proposal back on the selectable board, permanently, since `_drop_card_once` is idempotent by
+    history and can never retire it again.
+
+    Two API calls, both individually legitimate. The gate has to read the drop HISTORY.
+    """
+    card = _board([_ENGINE_DROP, _OPERATOR_DROP, _REOPEN])
+    assert str(card.status) == "dropped", (
+        "MUTATION: gate the reopen on `dropped[cid]`'s own `dropped_by` instead of on whether ANY "
+        "engine-authored receipt precedes the reopen, and this reads `proposed` — an engine "
+        "retirement laundered into a reopenable one by writing a drop over it")
+
+
+def test_the_engine_drop_still_blocks_when_it_lands_BETWEEN_an_operator_drop_and_a_reopen():
+    """Ordering, not merely presence: the engine's retirement precedes this reopen and stands."""
+    card = _board([_OPERATOR_DROP, _ENGINE_DROP, _REOPEN])
+    assert str(card.status) == "dropped"
+
+
+def test_an_engine_drop_AFTER_a_reopen_does_not_retroactively_refuse_it():
+    """The complement, so the gate is an ordering rule and not a blanket ban on the card.
+
+    The reopen at index N is judged against the receipts that PRECEDE it; a later engine drop is a
+    later drop, and last-receipt-wins already applies it.
+    """
+    card = _board([_OPERATOR_DROP, _REOPEN])
+    assert str(card.status) != "dropped", "the reopen itself is unaffected"
+    later = _board([_OPERATOR_DROP, _REOPEN, _ENGINE_DROP])
+    assert str(later.status) == "dropped" and later.dropped_by == "engine", (
+        "and the engine drop that follows it lands normally")

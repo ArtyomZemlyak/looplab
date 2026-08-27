@@ -129,6 +129,33 @@ class WorkspaceSeeder:
                 srcs[f"ref:{ref['name']}"] = _shallow_fingerprint(ref["path"])
         return srcs
 
+    def workspace_source_paths(self) -> list[str]:
+        """The real filesystem paths behind `workspace_fingerprint`'s LABEL keys.
+
+        The fingerprint keys on `editable:<name>` / `data:<name>` / `ref:<name>` because it is READ
+        BY LABEL. `orchestrator._dirty_inputs` keys on the PATH — it does `Path(src)` and runs
+        `git -C <root> status --porcelain` — so handing it the fingerprint MAP resolved every source
+        to `Path("editable:foo").parent`, i.e. `"."`, the engine's own CWD. Two records were wrong
+        for the one reason: `run_started.dirty_inputs` enumerated LoopLab's own checkout (or, off a
+        git tree, nothing at all) instead of the operator's repo, and `substrate_fingerprint` — whose
+        entire job is to notice a fix promoted into the editable tree mid-run — read CLEAN for every
+        such promotion and let `comparability` answer SAME across it.
+
+        ONE derivation of "which trees are this run's sources", so the label spelling and the path
+        spelling cannot drift apart again. Same sources, same order, as the fingerprint above.
+        """
+        if not self._e._repo_spec:
+            return []
+        paths: list[str] = []
+        for ed in self._e._repo_spec.get("editables", []):
+            paths.append(str(ed["path"]))
+        for _name, spec in self._e._repo_spec.get("data", {}).items():
+            paths.append(str(spec["path"] if isinstance(spec, dict) else spec))
+        for ref in self._e._repo_spec.get("references", []):
+            if ref.get("mount"):
+                paths.append(str(ref["path"]))
+        return paths
+
     def substrate_fingerprint(self) -> dict:
         """The editable source tree a NUMBER was produced on — HEAD *and* the uncommitted work.
 
@@ -152,9 +179,27 @@ class WorkspaceSeeder:
         if not base:
             return {}
         try:
-            dirty = self._e._dirty_inputs(base)
+            # The PATHS, never `base`: `base` is keyed by LABEL and `_dirty_inputs` reads its keys as
+            # filesystem paths — see `workspace_source_paths` for what that cost.
+            dirty = self._e._dirty_inputs(self.workspace_source_paths())
         except Exception:  # noqa: BLE001 — an unreadable tree contributes no dirty evidence
             dirty = None
+        # "COULD NOT READ" IS NOT "NOTHING TO READ", and returning `base` for both said the second
+        # about the first. `base` IS the spelling of a clean tree — the argument is spelled out
+        # sixteen lines below for the sibling digest-failure branch — so a node whose
+        # `git status --porcelain` raised (an index.lock, a mid-rebase tree, an EIO on the geesefs
+        # mount this box measures 105-950 ms absent-file `lstat`s on) recorded itself as CLEAN and
+        # then read SAME against a genuinely clean one, which is exactly the confidently-wrong
+        # record this discriminator exists to refuse. Only a successfully read, EMPTY enumeration
+        # may return `base`.
+        #
+        # It shares the `"unknown"` marker with that branch rather than minting a second word,
+        # because the two mean the same thing to every reader: the engine cannot say what this tree
+        # held. Note the marker is a CONSTANT, so two unreadable trees still compare equal to each
+        # other — it makes them refusable against a CLEAN tree, which is the case that was wrong,
+        # and nothing here can distinguish two trees it failed to read.
+        if dirty is None:
+            return {**base, "dirty": "unknown"}
         if not dirty:
             return base
         # A DIGEST of the enumeration, not the enumeration: the caller hashes this into one opaque

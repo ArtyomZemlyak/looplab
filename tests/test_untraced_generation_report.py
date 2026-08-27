@@ -36,17 +36,38 @@ def caplines():
     prior = log.level
     log.setLevel(logging.WARNING)
     tracing._untraced_seen.clear()
+    # This process traces: the reporter is deliberately silent in one that never built a Tracer
+    # (the UI server, genesis, preflight), so every test below has to opt in explicitly.
+    was_constructed = tracing._tracer_ever_constructed
+    tracing._tracer_ever_constructed = True
     try:
         yield buf
     finally:
         log.removeHandler(handler)
         log.setLevel(prior)
         tracing._untraced_seen.clear()
+        tracing._tracer_ever_constructed = was_constructed
 
 
 def _untraced_call():
     with tracing.generation(op="chat", model="m"):
         pass
+
+
+def _make_funnel(filename: str):
+    """A function whose frame claims to live at `filename`.
+
+    The production shape is `role -> core/llm.py::complete_text -> generation(...)`, and NOTHING in
+    the tree calls `generation` from anywhere but the client. A test that calls it directly from the
+    test module therefore exercises a frame shape production never has — which is why the original
+    walk (break at the first non-tracing frame) passed here while naming only `core/llm.py` in every
+    real run. Compiling with a chosen filename reproduces the real stack without importing the
+    client or making a provider call.
+    """
+    ns: dict = {}
+    exec(compile("def funnel(gen):\n    with gen(op='chat', model='m'):\n        pass\n",
+                 filename, "exec"), ns)
+    return ns["funnel"]
 
 
 def test_an_untraced_generation_names_its_caller(caplines):
@@ -84,6 +105,54 @@ def test_two_DIFFERENT_sites_both_report(caplines):
 
     assert out.count("untraced LLM generation") == 2
     assert "_untraced_call" in out and "_other_caller" in out
+
+
+def test_it_names_the_PRODUCER_and_not_the_shared_client_funnel(caplines):
+    """The deliverable is WHICH role billed the untraced call, and the client is never the answer.
+
+    Every `generation(...)` call site in the tree is inside `core/llm.py`, so a walk that stops at
+    the first frame outside `tracing.py` reports `core/llm.py::complete_text` for all of them — the
+    funnel the module docstring says grepping already finds. Worse, `_untraced_seen` is keyed on that
+    string, so producers two onward are silenced entirely.
+
+    MUTATION: `break` at the first non-tracing frame -> `site` is the client, `role_alpha` and
+    `role_beta` never appear, and the second call logs nothing at all.
+    """
+    funnel = _make_funnel("/srv/looplab/looplab/core/llm.py")
+
+    def role_alpha():
+        funnel(tracing.generation)
+
+    def role_beta():
+        funnel(tracing.generation)
+
+    role_alpha()
+    role_beta()
+    out = caplines.getvalue()
+
+    assert out.count("untraced LLM generation") == 2, (
+        "each distinct PRODUCER must report; keying on the shared funnel collapses them to one")
+    assert "role_alpha" in out and "role_beta" in out
+    for line in out.splitlines():
+        named = line.split("no operation span open at ", 1)[1].split(" —")[0]
+        assert "core/llm.py" not in named, f"named the funnel, not the producer: {named}"
+    # The funnel is still worth printing — it says HOW the producer reached the client — but it
+    # rides the `via` chain, which is not what the dedup key or the headline is built from.
+    assert "via" in out and "core/llm.py" in out
+
+
+def test_a_process_that_never_traced_stays_silent(caplines):
+    """`Tracer` is constructed in exactly one place. The UI server, `looplab genesis`, preflight and
+    the CLI helpers all bill provider calls with no tracer anywhere, by design.
+
+    MUTATION: drop the `_tracer_ever_constructed` guard -> those surfaces log up to six WARNINGs
+    telling the operator the call "will appear in no trace surface", and a trace bug is filed
+    against a surface that never had one.
+    """
+    tracing._tracer_ever_constructed = False
+    _untraced_call()
+
+    assert caplines.getvalue() == ""
 
 
 def test_a_TRACED_generation_reports_nothing(caplines, tmp_path):

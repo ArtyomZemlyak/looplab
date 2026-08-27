@@ -559,15 +559,36 @@ def node_knob_delta(node, parent, nodes_by_id=None) -> list[str]:
     means the same card still describes the experiment; non-empty means it does not.
 
     Returns sorted paths, both directions (added, removed and changed). Empty when there is no
-    parent, or when nothing moved."""
+    parent, or when nothing moved — see `node_knob_comparison` when those must be told apart, which
+    is what the "empty intersection" reading two paragraphs up silently depends on."""
+    return node_knob_comparison(node, parent, nodes_by_id)[0]
+
+
+def node_knob_comparison(node, parent, nodes_by_id=None) -> tuple[list[str], bool]:
+    """`node_knob_delta`'s paths, plus whether a comparison was POSSIBLE at all.
+
+    "Nothing moved" and "there was nothing to compare" are different facts and the bare list cannot
+    distinguish them: it is `[]` for a missing parent, for two nodes that each declare no
+    coordinates, AND for a genuine measured agreement. Only the last supports a positive claim
+    about where two experiments differ, and that is not an edge case — on a `params_style: "none"`
+    repo run NEITHER side declares coordinates on ANY node, so every comparison is the empty kind.
+
+    `comparable` is False when there is no parent, or when neither side resolves to a single
+    coordinate. The DISTINCTION LIVES HERE, beside the delta it qualifies, rather than at a caller:
+    re-deriving it outside means re-walking the ancestor chain (`resolved_params` builds a fresh
+    dict at every level, to a depth bound of 64) a third time per parent for a fact this function
+    already holds — and the next caller re-derives it again, or forgets to and repeats the claim.
+    Same shape as `core/cards.py::card_proposal_drift` one module over.
+    """
     if parent is None:
-        return []
+        return [], False
     if nodes_by_id:
         a = resolved_params(node, nodes_by_id)
         b = resolved_params(parent, nodes_by_id)
+        moved = sorted({k for k in set(a) | set(b) if a.get(k) != b.get(k)})
     else:
         # No lineage to resolve against: compare the child's OWN paths only. Absence on either side
         # is "inherited", so a path the child never mentions cannot be a change it made.
         a, b = effective_params(node), effective_params(parent)
-        return sorted({k for k in a if a.get(k) != b.get(k)})
-    return sorted({k for k in set(a) | set(b) if a.get(k) != b.get(k)})
+        moved = sorted({k for k in a if a.get(k) != b.get(k)})
+    return moved, bool(a or b)

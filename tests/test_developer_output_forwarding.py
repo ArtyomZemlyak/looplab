@@ -142,3 +142,33 @@ def test_the_parent_is_forwarded_when_the_developer_takes_one():
     inner = _Two()
     _Facade(inner).bind_state("STATE", "PARENT")
     assert inner.got == ("STATE", "PARENT")
+
+
+def test_every_parameter_KIND_that_can_take_a_parent_gets_one():
+    """The arity rule is decided by BINDING the call, never by COUNTING parameters.
+
+    `len(signature.parameters) >= 2` is true of `(state, **kw)` and of `(state, *, parent=None)` —
+    the natural way to write "accepted and ignored" — and then makes the positional two-argument
+    call that raises the very TypeError the rule exists to avoid, out of an unguarded forwarder and
+    into `node_build._implement`. It is false of `(*args)`, which silently drops a `parent` the
+    callee would have taken.
+
+    MUTATION: `accepts_parent = len(inspect.signature(fn).parameters) >= 2` -> `_KwArgs` and
+    `_KeywordOnly` raise TypeError and `_StarArgs` records `None`.
+    """
+    class _KwArgs:
+        def bind_state(self, state, **kw):
+            self.got = (state, kw.get("parent"))
+
+    class _KeywordOnly:
+        def bind_state(self, state, *, parent=None):
+            self.got = (state, parent)
+
+    class _StarArgs:
+        def bind_state(self, *args):
+            self.got = (args[0], args[1] if len(args) > 1 else None)
+
+    for cls in (_KwArgs, _KeywordOnly, _StarArgs):
+        inner = cls()
+        _Facade(inner).bind_state("STATE", "PARENT")
+        assert inner.got == ("STATE", "PARENT"), f"{cls.__name__} did not receive the parent"

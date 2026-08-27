@@ -712,23 +712,14 @@ const substrateMismatch = (left, right) => {
     && !!mine && !!theirs && mine !== theirs
 }
 
-const anyKeyConflict = records => records.some((record, i) => records.slice(i + 1).some((other) => {
-  if (substrateMismatch(record, other)) return true
-  const authority = commonAuthority(record, other)
-  return !!authority && record.keys[authority] !== other.keys[authority]
-}))
-
-// Do these NODES carry provably different keys? The within-run refusal, for a panel that orders or
-// dominates one run's own nodes against each other.
-export const nodesSplitByComparability = (nodes = []) => anyKeyConflict(
-  (Array.isArray(nodes) ? nodes : []).map(nodeComparabilityRecord).filter(Boolean))
-
-// The tri-state, mirroring `engine/comparability.py::comparability_status` so the browser and the
-// engine can never disagree about whether two numbers may be ordered. Reflexivity is NOT assumed:
-// two absent records are `unknown`, not `same`.
-export function comparabilityStatus(a, b) {
-  const left = comparabilityRecord(a)
-  const right = comparabilityRecord(b)
+// THE PAIR DECISION, over already-extracted records. Split out so there is ONE of it: the tri-state
+// below and the conflict scan underneath both answer "may these two be ordered", and they were two
+// separate spellings of it — which is how the `substrate` discriminator came to be added to
+// `comparabilityStatus` and to this scan on different days, and why the shared truth-table fixture
+// (`tests/fixtures/comparability_status_cases.json`) could only ever reach one of them. Now a rule
+// added here reaches the run list's metric sort, RegistryPanel, ParetoPanel, crossRunRank AND the
+// per-node Pareto split on the same commit, and the fixture drives all of them.
+function statusOfRecords(left, right) {
   if (!left || !right) return COMPARABILITY_UNKNOWN
   // FIRST, and it can only refuse — see `substrateMismatch`. The engine grew this discriminator and
   // this mirror did not follow for three days, so the browser answered SAME for exactly the pair the
@@ -740,6 +731,22 @@ export function comparabilityStatus(a, b) {
   if (!authority) return COMPARABILITY_UNKNOWN
   if (left.keys[authority] !== right.keys[authority]) return COMPARABILITY_DIFFERENT
   return COMPARABILITY_CERTIFYING.has(authority) ? COMPARABILITY_SAME : COMPARABILITY_UNKNOWN
+}
+
+// A conflict is exactly a PROVEN difference — `unknown` fails open, as everywhere else in this file.
+const anyKeyConflict = records => records.some((record, i) => records.slice(i + 1).some(
+  other => statusOfRecords(record, other) === COMPARABILITY_DIFFERENT))
+
+// Do these NODES carry provably different keys? The within-run refusal, for a panel that orders or
+// dominates one run's own nodes against each other.
+export const nodesSplitByComparability = (nodes = []) => anyKeyConflict(
+  (Array.isArray(nodes) ? nodes : []).map(nodeComparabilityRecord).filter(Boolean))
+
+// The tri-state, mirroring `engine/comparability.py::comparability_status` so the browser and the
+// engine can never disagree about whether two numbers may be ordered. Reflexivity is NOT assumed:
+// two absent records are `unknown`, not `same`.
+export function comparabilityStatus(a, b) {
+  return statusOfRecords(comparabilityRecord(a), comparabilityRecord(b))
 }
 
 // Does this set of RUNS contain a pair whose keys are provably different? The cross-run refusal.

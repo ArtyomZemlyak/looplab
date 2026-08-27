@@ -153,4 +153,20 @@ test('the browser half of the rule matches the engine, case for case', () => {
       comparabilityStatus({ best_metric_comparability: a }, { best_metric_comparability: b }),
       status, name)
   }
+
+  // AND THE SECOND PAIR-RULE, over the SAME table. `comparabilityConflict` /
+  // `nodesSplitByComparability` run their own scan (`anyKeyConflict`) rather than calling the
+  // tri-state, so before they shared `statusOfRecords` a discriminator could be added to
+  // `comparabilityStatus`, go green on both suites against this fixture, and never reach the
+  // run-list conflict banner, RegistryPanel, crossRunRank or the per-node Pareto split — which is
+  // the three-day engine/browser divergence this fixture exists to end, one function over.
+  // A conflict is exactly a PROVEN difference; `unknown` fails open everywhere in this module.
+  for (const { name, a, b, status } of cases) {
+    assert.equal(
+      comparabilityConflict([
+        { id: 'r1', task_id: 't', best_metric_comparability: a },
+        { id: 'r2', task_id: 't', best_metric_comparability: b }]),
+      status === COMPARABILITY_DIFFERENT,
+      `${name} (conflict scan must agree with the tri-state)`)
+  }
 })

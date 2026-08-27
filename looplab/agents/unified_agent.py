@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from looplab.agents.roles import WrapsDeveloper, forward_hints
+from looplab.agents.roles import WrapsDeveloper, bind_state_on, forward_hints
 # `BudgetExceeded` is no longer named here — the propagate-vs-degrade rule moved into
 # `tool_loop.resilient`, which owns it (doc 25 AG-06). Re-exported for any importer that
 # reached it through this module.
@@ -119,6 +119,30 @@ class UnifiedAgent(WrapsDeveloper):
         # researcher that actually reads them.
         forward_hints(self, self.researcher)
         return self.researcher.propose(state, parent)
+
+    def bind_state(self, state, parent=None) -> None:
+        """Bind the run state to EVERY per-stage Developer backend, not just the active one.
+
+        The inherited forwarder binds `self._wrapped`, which is `_active_developer` — the delegate
+        of the LAST code-producing call, since only `_for_stage` ever reassigns it. Every engine
+        caller binds BEFORE the call it is about (`engine/node_build.py` does `bind_state(state)`
+        and then `repair_from(...)` three lines later), so with `repair_developer` configured — an
+        operator giving implement and repair different stage models — the binding for a repair
+        landed on the IMPLEMENT developer, and the repair Developer's `QuestionBoardTools` went on
+        answering "no run state bound". After that repair the active delegate is the repair
+        developer, so the NEXT implement's bind landed there instead and the implement developer
+        kept a stale `RunState`: with a split model, each stage was bound to the other one.
+
+        Binding all of them is not a widening — a `RunState` is the RUN's, not a stage's, and the
+        backends are exactly the objects this facade may delegate a code stage to. It also makes
+        the binding independent of call ORDER, which is what the bug really was.
+        """
+        seen = []
+        for dev in (self.developer, self.repair_developer):
+            if dev is None or any(dev is s for s in seen):
+                continue                # `repair_developer=None` is the default: one backend, once
+            seen.append(dev)
+            bind_state_on(dev, state, parent)
 
     # ----------------------------------------------------------- Developer
     def _for_stage(self, stage: str):

@@ -425,6 +425,25 @@ def _bounded_card_drop_receipt(d: dict) -> dict | None:
     return rec
 
 
+def _sota_eligible(n: Node) -> bool:
+    """May this node's metric take part in the run's SOTA at all?
+
+    ONE spelling, because `_record_setter_ids` and `_record_establisher_id` both answer "which node
+    is first" and the second one's own docstring says why that matters: "a second reading of 'which
+    node is first' is how the two come to disagree about it" — and then the predicate was written
+    out twice anyway. The moment a clause is added to one (this repo already maintains populations a
+    SOTA rule plausibly grows into — `metric_salvage.unreliable_metric_ids`, the trust gate's
+    `flagged_node_ids`), `record_establisher` names a node no longer in `record_setters`, NO member
+    is excluded by `_evidence_verdict`'s `n.id != record_establisher` test, and the "a record set
+    over nothing is not support" rung silently reverts to calling the opening hypothesis of every
+    run `supported` with `best_delta=None` — with nothing red.
+
+    §6.3: a deleted node must not set the board's SOTA.
+    """
+    return (n.status is NodeStatus.evaluated and n.feasible and n.metric is not None
+            and not n.tombstoned)
+
+
 def _record_setter_ids(nodes: dict[int, Node], direction: str) -> set[int]:
     """The run-global set of node ids that ADVANCED the run's SOTA — sticky evidence.
 
@@ -438,8 +457,7 @@ def _record_setter_ids(nodes: dict[int, Node], direction: str) -> set[int]:
     setters: set[int] = set()
     running: float | None = None
     for n in sorted(nodes.values(), key=lambda x: x.id):
-        if (n.status is NodeStatus.evaluated and n.feasible and n.metric is not None
-                and not n.tombstoned):              # §6.3: a deleted node must not set the board's SOTA
+        if _sota_eligible(n):
             if running is None or better(n.metric, running):
                 setters.add(n.id)                   # first node ESTABLISHES the SOTA, or a later node
                 running = n.metric                  # BEATS the standing record — either is a real advance
@@ -457,14 +475,15 @@ def _record_establisher_id(nodes: dict[int, Node]) -> int | None:
     first cut of that distinction used. The two agree only on a run whose lineage is a chain: a ROOT
     node that beats a standing sibling record has no parent and is a genuine advance, and under
     card-driven selection most proposals ARE root drafts, so the proxy told the Researcher its best
-    experiment had improved on nothing. Same loop and same guards as `_record_setter_ids`, because
-    a second reading of "which node is first" is how the two come to disagree about it. Takes no
+    experiment had improved on nothing. Same loop as `_record_setter_ids` and the SAME guard object
+    (`_sota_eligible`) rather than a retyped copy of it, because a second reading of "which node is
+    first" is how the two come to disagree about it — and a docstring saying so beside a duplicated
+    predicate is not what stops that. Takes no
     `direction`: which node is FIRST is a fact about creation order, and the comparison that needs a
     direction is the one this node is defined by not having made.
     """
     for n in sorted(nodes.values(), key=lambda x: x.id):
-        if (n.status is NodeStatus.evaluated and n.feasible and n.metric is not None
-                and not n.tombstoned):
+        if _sota_eligible(n):
             return n.id
     return None
 
@@ -2054,6 +2073,18 @@ def _apply_card_verdicts(
             record_establisher=_record_establisher)
 
 
+def _drop_author(receipt: dict) -> str:
+    """Who a drop receipt is attributed to, defaulting to the engine.
+
+    ONE spelling, because three readers ask it and they must not drift: the reopen gate's
+    "may this be undone", the engine-retirement history it is checked against, and the
+    `Card.dropped_by` the board publishes. `dropped_by` is the current key and `by` the legacy
+    one; an unattributed receipt reads as the engine's, which is the fail-closed direction for
+    every one of the three.
+    """
+    return str(receipt.get("dropped_by") or receipt.get("by") or "engine")
+
+
 def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) -> dict[str, dict]:
     cards = ledger.cards
 
@@ -2061,6 +2092,15 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
     #    visible (like an abandoned hypothesis) — lifecycle `status` shows the 'dropped' lane. Historical
     #    engine-authored `card_dropped` rows are already normalized into the same bounded receipt list.
     dropped: dict[str, dict] = {}
+    # EVERY engine-authored drop this card has ever carried, by `_event_index`. `dropped` is
+    # LAST-RECEIPT-WINS over BOTH authorities, so it cannot answer "did the engine ever retire this
+    # card" — an operator `card_dropped` landing after a `card_auto_dropped` overwrites the entry
+    # and the engine's retirement becomes invisible to any reader of `dropped` alone. The reopen
+    # gate below is exactly such a reader, so it needs the history rather than the head.
+    # A receipt whose index is unusable is recorded as `None` and treated as blocking: an
+    # unordered engine retirement cannot be proven to precede or follow anything, and the
+    # conservative answer on this gate is the one the surrounding comments already take.
+    engine_drop_indices: dict[str, list] = {}
     for d in st.cards_dropped:
         raw_id = d.get("id")
         bounded_id = _card_id(raw_id)
@@ -2079,6 +2119,8 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
         cid = aliases.canon_at(bounded_id, drop_index)
         if cid:
             dropped[cid] = d
+            if _drop_author(d) != "operator":
+                engine_drop_indices.setdefault(cid, []).append(drop_index)
     # A REOPEN SUPERSEDES AN EARLIER DROP, and only an earlier one. Resolution is LAST RECEIPT WINS
     # by `_event_index`, so drop / reopen / drop is expressible and a replay of the same log gives
     # the same board every time. Until this shipped, `cards_dropped` accumulated and nothing ever
@@ -2121,7 +2163,20 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
         # established spelling of this authority — `engine/resources.py` and `engine/evaluate.py`
         # both gate on exactly it — and `control_validation` stamps it server-side, so it cannot be
         # forged by the payload.
-        if str(prior.get("dropped_by") or prior.get("by") or "engine") != "operator":
+        if _drop_author(prior) != "operator":
+            continue
+        # …AND THE HEAD RECEIPT IS NOT THE WHOLE AUTHORITY QUESTION. `dropped` is last-wins across
+        # both authorities, and `control_validation._precondition_card` deliberately EXCLUDES
+        # `EV_CARD_DROPPED` from its terminal-lifecycle refusal so "an operator keeps authority over
+        # the DROP itself on a terminal Card". Those two facts compose into a laundering path: the
+        # engine appends `card_auto_dropped` for a rejected proposal, the operator appends their own
+        # `card_dropped` over it (server-stamped `dropped_by: "operator"`), and the head receipt now
+        # reads as theirs — so the check above passes and the `pop` below removes the ENGINE's
+        # retirement too. That is precisely the state the comment above calls unrecoverable, since
+        # `_drop_card_once` is idempotent by HISTORY and can never re-retire the card.
+        # So an engine drop is undone by NOTHING: if any engine-authored receipt precedes this
+        # reopen, the drop stands, whoever wrote the most recent row.
+        if any(i is None or i < raw_index for i in engine_drop_indices.get(cid, ())):
             continue
         dropped.pop(cid, None)
     for cid, d in dropped.items():
@@ -2129,7 +2184,14 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
         if c is not None:
             reason = str(d.get("reason", "") or "")[:400]
             c.dropped_reason = reason or None
-            c.dropped_by = str(d.get("dropped_by") or d.get("by") or "engine")
+            c.dropped_by = _drop_author(d)
+            # PUBLISH THE GATE'S OWN ANSWER, so the server's refusal and the board's affordance read
+            # the fold rather than each re-deriving it — `Card.reopenable` says why that matters.
+            # A future reopen's `_event_index` is greater than every receipt already folded (the log
+            # is append-only), so "an engine drop exists for this card" and "an engine drop precedes
+            # the next reopen" are the same statement, and the loop above already holds it.
+            c.reopenable = (_drop_author(d) == "operator"
+                            and not engine_drop_indices.get(cid))
     return dropped
 
 

@@ -409,7 +409,25 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   **not** behind the danger disclosure the drop lives in: ending a line of work and resuming one
   should not be presented with the same weight. A reopen carrying no event index leaves the drop
   standing, which is the fail-closed direction — the fold stamps an index on every receipt it writes,
-  so a missing one means a hand-written or pre-upgrade row. The Card board stores work items; `belief_id` groups retries or other cards
+  so a missing one means a hand-written or pre-upgrade row.
+  **Only an OPERATOR's drop can be reopened, and only the board can say so.** The fold has always
+  refused a reopen over an engine `card_auto_dropped` receipt — an engine retirement is a decision
+  the run made about its own supply, not a control the operator holds — but the board offered the
+  affordance on *any* stopped Card, where the request returns 2xx, the event is appended and a
+  success toast fires while the fold declines it; because the optimistic patch waits for a status
+  change that never arrives, the retired Card then rendered as live until a reload. The control is
+  now shown exactly where the gesture can succeed, and the append-time guard refuses the rest with
+  `card_reopen_not_permitted` rather than accepting an event replay discards — a direct API caller
+  and a stale client get a real refusal, which the browser rolls its optimistic field back on.
+  The gate reads the card's **whole drop history and not just the head receipt**: an operator
+  `card_dropped` landing on top of an engine one would otherwise make the pair reopenable and remove
+  the engine's retirement with it, which is unrecoverable — re-retiring is idempotent by history. If
+  any engine-authored drop precedes the reopen, the drop stands, whoever wrote the most recent row.
+  All three surfaces read **one** derivation: the fold stamps `Card.reopenable` and publishes it
+  beside `dropped_by`, because `dropped_by` names only the head receipt's author and so reads
+  `operator` for exactly the laundered pair above. A reopen of a card that is not dropped keeps its
+  tolerant no-op contract — there is nothing to undo, which is not a refusal.
+  The Card board stores work items; `belief_id` groups retries or other cards
   that test the same hypothesis, while the distinct-belief projection avoids duplicate prompt/ranking rows. The
   operator **+ Add** / **abandon** affordances write `hypothesis_added` / `hypothesis_updated` control
   events that seed and update cards.
