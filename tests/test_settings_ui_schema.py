@@ -100,7 +100,14 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 186
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 187
+    # 219 -> 220 Settings and 186 -> 187 catalogued rows on 2026-08-27:
+    # `developer_step_feedback_command`, the operator-pinned command the Developer's plan loop runs
+    # BETWEEN steps so a writing session sees a number (doc 53 item 10, our half). A row rather than
+    # an uncurated omission on this list's usual grounds: "" is the HISTORICAL behaviour and an
+    # operator must be able to get back to it, and it changes a PROMPT — what the agent is SHOWN,
+    # which is the measurement. It also spends real wall clock (~40 s per step that edits a file),
+    # so the switch that buys it has to be visible.
     # 183 -> 186 on 2026-08-21, at the REBASE onto master: three rows this branch authored
     # (`llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`) meeting master's own
     # additions. The count moved by exactly the three, which is the check that the rebase carried
@@ -164,7 +171,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # (there is no container filesystem to make read-only), so a form row would offer every operator
     # a knob that does nothing on their box, and the operators who DO run the container tiers set
     # them together in a config file.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 219
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 220
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

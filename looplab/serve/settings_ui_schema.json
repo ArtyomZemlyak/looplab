@@ -1005,6 +1005,14 @@
      "help": "Wall-clock ceiling per repo-Developer session (default 1200 = 20 min)."
     },
     {
+     "key": "developer_step_feedback_command",
+     "label": "↳ between-steps measurement command",
+     "type": "text",
+     "default": "",
+     "placeholder": "eval_train",
+     "help": "Name of an operator-pinned developer command (task `developer_commands`) that the engine runs BETWEEN plan steps, handing its output to the next step. Empty = off, and every prompt is byte-identical to what it was. The engine already evaluates every node it builds, but the sessions that WRITE the code never see a number, so the model buys one with a whole plan step: measured over the AlgoTune probes, 30 of 116 attributed steps are a measurement and nothing else — 317 LLM calls and 5,762 s for a command that takes 40 s. It runs only after a step that changed a file, never after the last step (whose reader is the engine's own evaluation), and outside the session clock. Its output is PROMPT TEXT ONLY: the command runs in a disposable candidate tree, so nothing it produces can reach the node's files, the reported metric or the champion. OFF by default because it changes what the agent is shown, i.e. the measurement."
+    },
+    {
      "key": "developer_probe_confine",
      "label": "Confine probe reads",
      "type": "bool",

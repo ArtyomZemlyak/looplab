@@ -72,7 +72,14 @@ def test_the_docstrings_now_describe_what_each_module_holds():
 
 
 def test_neither_module_is_a_god_module_again():
-    for rel, cap in (("adapters/tasks.py", 400), ("agents/factory.py", 520)):
+    # `agents/factory.py` 520 -> 521 on 2026-08-27, by exactly one line: the `step_feedback_command`
+    # pass-through for the Developer's between-steps measurement (doc 53 item 10a). The cap is
+    # raised by the minimum rather than given fresh headroom on purpose — the file's own comment
+    # says `make_roles` is the ONE place a setting becomes a role's behaviour, so a knob costs a
+    # line here by design, and the ratchet is what makes the NEXT one argue for its line instead of
+    # spending slack somebody else left. What this guard is actually against is `make_roles`-
+    # adjacent LOGIC coming back, not the wiring the split left here.
+    for rel, cap in (("adapters/tasks.py", 400), ("agents/factory.py", 521)):
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 
