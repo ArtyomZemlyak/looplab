@@ -6133,6 +6133,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _workspace_fingerprint(self) -> dict:
         return self.workspace.workspace_fingerprint()
 
+    def _substrate_fingerprint(self) -> dict:
+        return self.workspace.substrate_fingerprint()
+
     def _setup_manifest(self, wf: "dict | None" = None) -> str:
         """P0-3 content-addressed setup: a stable digest of the MATERIAL the task+data preflight
         verified — the config hash, the workspace fingerprint, and the data-asset provenance. Binds

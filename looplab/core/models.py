@@ -2264,12 +2264,18 @@ class RunState(BaseModel):
                 if not isinstance(path, str):
                     continue
                 entry = by_path.setdefault(path, {"path": path, "nodes": set(), "reasons": {}})
-                entry["nodes"].add(node_id)
+                # A row with no `node_id` (a hand-edited or pre-stamping log) is attributable to no
+                # DISTINCT node, so it may not swell the count: `None` in this set made `node_count`
+                # one higher than the `nodes` list it is rendered beside, and `node_count >= 2` is
+                # the exact conjunct that fires this command's headline "N separate experiments
+                # fixed <path>" recommendation.
+                if node_id is not None:
+                    entry["nodes"].add(node_id)
                 reason = row.get("reason")
                 if isinstance(reason, str):
                     entry["reasons"][reason] = entry["reasons"].get(reason, 0) + 1
         out = [{"path": e["path"],
-                "nodes": sorted(n for n in e["nodes"] if n is not None),
+                "nodes": sorted(e["nodes"]),
                 "node_count": len(e["nodes"]),
                 "reasons": dict(sorted(e["reasons"].items(), key=lambda kv: (-kv[1], kv[0])))}
                for e in by_path.values()]

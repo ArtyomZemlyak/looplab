@@ -103,6 +103,11 @@ class QuestionBoardTools:
             return "no run state bound"
         cards = state.cards
         questions = [c for c in cards.values() if card_is_direction(c)]
+        # BEFORE the narrowing below, because the header answers "what does the board hold", not
+        # "what did you ask me for". Counting after the filter made a single-question read report the
+        # whole board as holding one question — and the caller's own stated use for this tool is
+        # deciding whether there is another question their work belongs under.
+        board_total = len(questions)
         wanted = str(args.get("question_id") or "").strip()
         if wanted:
             questions = [c for c in questions if str(getattr(c, "id", "")) == wanted]
@@ -147,4 +152,9 @@ class QuestionBoardTools:
                     "has not produced any, so there is nothing to file work under")
         # A LIST header, not a string:  uses a str verbatim and leaves the caller to own
         # its newline, which ran the count into the first question's id.
-        return fit_rows([f"open research questions: {len(questions)}"], rows)
+        header = f"open research questions: {board_total}"
+        if wanted:
+            # Say that this answer is one row OF that board, so the reader cannot mistake the
+            # narrowed view for the whole of it.
+            header += f" (showing 1: {wanted})"
+        return fit_rows([header], rows)

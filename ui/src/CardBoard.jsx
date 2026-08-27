@@ -972,7 +972,14 @@ function _CardKanban({
       resources: { saving: 'Pinning Card resources…', success: 'Card resources pinned', failure: 'Could not pin Card resources' },
       drop: { saving: 'Dropping Card…', success: 'Card dropped', failure: 'Could not drop Card' },
       abandon: { saving: 'Abandoning this Card…', success: 'Card abandoned', failure: 'Could not abandon Card' },
+      reopen: { saving: 'Reopening Card…', success: 'Card reopened', failure: 'Could not reopen Card' },
     }[kind]
+    // A kind with no row here is REFUSED by the guard below, and it refuses with the concurrency
+    // message — so a control that reaches the dispatch ladder but not this table reads to the operator
+    // as "another command is in flight" forever. That is how `reopen` shipped unreachable: the event
+    // type, the five control-validation rows, the fold handler and the form all landed, and one absent
+    // row here meant `CONTROL.reopenCard` was never called. `_CARD_CONTROL_KINDS` is the vocabulary
+    // both sides must cover; `ui/test/cardBoardGrouping.test.js` now derives this table from it.
     if (!labels || inFlight.current.size > 0) {
       const message = 'Another Card command is still being submitted for this run.'
       onToast?.(message)

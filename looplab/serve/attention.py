@@ -54,9 +54,20 @@ _ASHA_KILL_REASON = "asha_underperforming"
 # Canonical owner-inbox priority taxonomy.  Keep this on the projection side so the feed router
 # orders the COMPLETE collection before it slices a page; a client-side reorder cannot recover an
 # approval that was pushed beyond the page by a newer, active-but-advisory signal such as ASHA.
+#
+# It must stay a SUPERSET of the kinds this projection emits that `ui/src/attentionModel.js`'s own
+# `NEEDS_ACTION` marks actionable, and not merely by convention: `normalizeRunPage` REFUSES a page
+# whose `active_action_count` is below the count it derives from the page's own rows, and a refused
+# page is treated as stale — so a kind the browser calls actionable and this set omits does not just
+# sort low, it blanks the whole feed for that run. `train_overrun` shipped that way.
+# (`assistant_permission` is deliberately absent: it is the assistant surface's kind, never emitted
+# here, so the client set is a strict superset by construction.)
 ATTENTION_NEEDS_ACTION_KINDS = frozenset({
     "approval", "approval_incomplete", "spec_approval", "failure_spike", "run_failed",
     "finalization_stalled", "stalled", "train_monitor",
+    # The action is time-critical in a way the others are not: the window closes when the wall
+    # arrives, and after that there is nothing left to decide.
+    "train_overrun",
 })
 
 

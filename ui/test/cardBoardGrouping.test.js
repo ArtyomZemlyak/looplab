@@ -47,6 +47,37 @@ test('the symbols the kanban still needs were NOT removed with it', () => {
   }
 })
 
+test('every control kind has a labels row — the gate that shipped `reopen` dead', () => {
+  // DERIVED from both literals, never pinned on either. `cardControl` refuses any kind with no
+  // `labels` row, and it refuses with the CONCURRENCY message — so a missing row does not read as a
+  // missing feature, it reads to the operator as "another Card command is still being submitted",
+  // forever, with no request ever leaving the browser. That is exactly how `reopen` shipped
+  // unreachable: EV_CARD_REOPENED, the five control_validation rows, `_on_card_reopened`, the
+  // supersede clause in `_apply_card_drops` and the form all landed, and one absent row here meant
+  // `CONTROL.reopenCard` was never called.
+  const stripped = SRC.replace(/^\s*\/\/.*$/gm, '')   // a comment may satisfy NEITHER side
+  const vocab = stripped.match(/const _CARD_CONTROL_KINDS = \[([^\]]*)\]/)
+  assert.ok(vocab, 'the control vocabulary is still a literal this test can read')
+  const kinds = [...vocab[1].matchAll(/'([a-z_]+)'/g)].map(match => match[1])
+  assert.ok(kinds.length >= 6, 'and it is not empty — an empty read would pass vacuously')
+
+  const table = stripped.match(/const labels = \{([\s\S]*?)\}\[kind\]/)
+  assert.ok(table, 'cardControl still selects its labels from an object literal keyed by `kind`')
+  const rows = [...table[1].matchAll(/^\s*([a-z_]+):\s*\{/gm)].map(match => match[1])
+
+  assert.deepEqual(rows.slice().sort(), kinds.slice().sort(),
+    'every kind in _CARD_CONTROL_KINDS needs a labels row and every row needs a kind — a kind ' +
+    'missing here is refused before its request is built, and a row with no kind is dead weight')
+})
+
+test('the reopen kind reaches its own transport call', () => {
+  // The other half: a labels row makes the command REACHABLE, and this is what makes it the right
+  // command. Without it, adding the row above would satisfy the derivation while the ladder still
+  // fell through to `CONTROL.dropCard` — i.e. the Reopen button would re-drop the card.
+  assert.ok(SRC.includes("kind === 'reopen'"), 'the dispatch ladder still branches on it')
+  assert.ok(SRC.includes('CONTROL.reopenCard('), 'and reaches the reopen transport')
+})
+
 test('the model keeps the direction grouping as a pure function', () => {
   // Deliberate: `directionGroups` lost its UI consumer, not its correctness, and its own tests still
   // drive it. It is left in place rather than deleted in the same change that removes the tab,

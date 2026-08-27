@@ -160,10 +160,19 @@ class WorkspaceSeeder:
         # A DIGEST of the enumeration, not the enumeration: the caller hashes this into one opaque
         # token, and carrying a few hundred porcelain lines through `metric_provenance` on every
         # node would bloat the durable record for bytes nobody reads back.
-        import hashlib
-        from looplab.core.jsonutil import canonical_json
-        return {**base, "dirty": hashlib.sha256(
-            canonical_json(dirty).encode("utf-8", "replace")).hexdigest()[:16]}
+        #
+        # Through the SHARED tail (`core/jsonutil.py::canonical_json_digest`, doc 25 CO-08) and not a
+        # local `sha256(canonical_json(...))`: the hand-rolled copy called `.encode()` on a value that
+        # `canonical_json` already returns as BYTES, so every dirty tree raised into the call site's
+        # `except Exception: _substrate = None` and recorded no substrate at all — silently absent on
+        # exactly the uncommitted-edit case this function's own docstring says it exists for.
+        from looplab.core.jsonutil import canonical_json_digest
+        digest = canonical_json_digest(dirty)
+        # That tail fails CLOSED (None) for a value with no canonical form. "Dirty, but undigestable"
+        # must not fall back to `base`, because `base` IS the spelling of a clean tree: such a node
+        # would then read SAME against a genuinely clean one, which is the confidently-wrong record
+        # this discriminator exists to refuse. An opaque marker keeps it refusable.
+        return {**base, "dirty": digest[:16] if digest else "unknown"}
 
     def seed_workspace(self, workdir) -> None:
         """RepoTask (ADR-7): materialize the editable repo tree(s) into the eval workdir, plus

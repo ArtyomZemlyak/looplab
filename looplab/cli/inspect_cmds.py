@@ -248,8 +248,16 @@ def tokens(run_dir: Path = typer.Argument(...),
         # so a negative residual is a real state the operator should see rather than a rounding hide.
         typer.echo(f"residual   : {out['residual']:>14,} tokens "
                    f"({'spans over-attribute' if out['residual'] < 0 else 'unattributed by any span'})")
-    if out["damaged"] or getattr(health, "damaged", 0):
-        typer.echo(f"damaged span rows stepped over: {out['damaged'] + int(getattr(health, 'damaged', 0) or 0)}")
+    # `read_jsonl_lenient_with_health` returns a plain DICT, and its damage key is `invalid_lines`.
+    # `getattr(health, "damaged", 0)` was therefore always 0 by two independent routes — a dict has
+    # no such attribute and there is no such key — so an unreadable `spans.jsonl` (the routine shape
+    # after a killed engine process leaves a torn tail) printed no damage line at all and its lost
+    # tokens were reported as `residual … unattributed by any span`, i.e. as a fact about the ledger
+    # rather than about the reader. `token_spend_by_phase` counts only the rows it was HANDED, so it
+    # cannot see a line that never parsed; this is the half that can.
+    unreadable = int(health.get("invalid_lines") or 0)
+    if out["damaged"] or unreadable:
+        typer.echo(f"damaged span rows stepped over: {out['damaged'] + unreadable}")
 
 
 @app.command()

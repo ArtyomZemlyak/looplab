@@ -438,10 +438,18 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
             # The rejected host is echoed back deliberately. It is a value the CLIENT just sent, so
             # returning it discloses nothing it does not already know, and without it the operator
             # cannot tell a proxy hostname from a typo, an IPv6 literal or a stray port.
+            #
+            # `allowed` is deliberately NOT echoed, and that asymmetry is the whole point: this
+            # middleware runs FIRST, before the cross-origin guard and before any owner-token gate,
+            # so anything in this body is readable by any peer that can reach the port with a
+            # `Host:` header. The rejected host is the caller's own; `allowed_hosts` is the
+            # operator's CONFIGURATION — on a real deployment, every internal and public name they
+            # listed in LOOPLAB_UI_HOSTS — and one unauthenticated request would enumerate the set.
+            # The remedy below already names the variable and the value to put in it, so the list
+            # buys the operator nothing it does not already tell them.
             return JSONResponse(
                 {"detail": "untrusted Host header",
                  "host": host or "(absent or unparseable)",
-                 "allowed": sorted(allowed_hosts),
                  "remedy": ("This server only trusts local names by default, which is what closes "
                             "DNS rebinding. To serve it behind a reverse proxy, restart with "
                             "LOOPLAB_UI_HOSTS=" + (host or "<your-public-hostname>")

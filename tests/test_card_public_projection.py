@@ -739,3 +739,58 @@ def test_a_bounded_or_rejected_value_is_never_certified_exact(name, raw):
     projected = _field_value({name: raw}, name)
     bounded = None if projected is _SKIP else projected
     assert _field_projection_lossless(name, raw, bounded) is False
+
+
+def _replay_journal_fields() -> list[str]:
+    """Every `RunState` field that is a LIST OF RECEIPTS the fold keeps for replay.
+
+    Derived from the model rather than listed, because a list is what let `cards_reopened` ship on
+    the wire: the existing coverage asserted `not (INTERNAL_CARD_STATE_FIELDS & state.keys())`,
+    which is self-referential — it proves the set excludes itself and says nothing about a journal
+    that was never added to it.
+    """
+    from looplab.core.models import RunState
+
+    names = []
+    for name, field in RunState.model_fields.items():
+        if not (name.startswith("card_") or name.startswith("cards_")):
+            continue
+        if repr(field.annotation).replace(" ", "") in ("list[dict]", "typing.List[dict]"):
+            names.append(name)
+    return names
+
+
+def test_no_card_replay_journal_reaches_the_public_state():
+    """DRIVEN, not pinned: populate every derived journal with a receipt carrying the fold's own
+    `_event_index` and prove none of it survives the public exclusion.
+
+    `cards_reopened` is the case. It is the same shape as `cards_dropped`, is stamped with the same
+    `_event_index` by `_on_card_reopened`, and was omitted from `INTERNAL_CARD_STATE_FIELDS` when it
+    landed — so an operator reopening cards grew an accumulating journal that rode every ~1s SSE
+    frame and landed in the reviewer read namespace. A journal added to one side of the drop/reopen
+    switch and not the other is exactly the producer-only field that set exists to keep off the wire.
+    """
+    from looplab.core.models import RunState
+
+    journals = _replay_journal_fields()
+    assert len(journals) >= 4, f"the journal derivation read too little: {journals}"
+
+    st = RunState()
+    for name in journals:
+        getattr(st, name).append({"id": "card-1", "reason": "r", "_event_index": 7})
+    state = st.model_dump(mode="json", exclude=INTERNAL_CARD_STATE_FIELDS | {"cards"})
+
+    leaked = sorted(name for name in journals if name in state)
+    assert leaked == [], (
+        f"{leaked} are replay journals still serialized into every owner-state frame, SSE tick and "
+        "review summary — add them to INTERNAL_CARD_STATE_FIELDS")
+
+    # The property behind the name list: no fold-internal key may reach the wire by ANY route, so a
+    # future journal that escapes the derivation above is still caught here.
+    def _underscored(value) -> bool:
+        if isinstance(value, dict):
+            return any(str(k).startswith("_") for k in value) or any(
+                _underscored(v) for v in value.values())
+        return isinstance(value, list) and any(_underscored(item) for item in value)
+
+    assert not _underscored(state), "a fold-internal `_`-prefixed key reached the public state"

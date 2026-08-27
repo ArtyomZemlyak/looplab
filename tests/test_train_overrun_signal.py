@@ -116,3 +116,33 @@ def test_the_new_kind_is_admitted_by_the_client_gate_and_needs_action():
     assert "'train_overrun'" in needs
     copy = text.split("const COPY = Object.freeze({")[1].split("})")[0]
     assert "train_overrun:" in copy, "an admitted kind with no copy row renders blank"
+
+
+def test_the_server_agrees_with_the_client_about_what_needs_action():
+    """DERIVED from both sets, because pinning one member on one side is what let this ship broken.
+
+    `train_overrun` reached the browser's `NEEDS_ACTION` and not the server's
+    `ATTENTION_NEEDS_ACTION_KINDS`, and the consequence is not a sort-order nit:
+    `useAttention.js::normalizeRunPage` REFUSES a page whose `active_action_count` is below the
+    count it derives from that page's own rows, and a refused page is held as stale — so the run's
+    entire attention feed freezes for as long as the item is live. The feature blanked the inbox it
+    was added to populate.
+    """
+    import re
+
+    from looplab.serve.attention import ATTENTION_NEEDS_ACTION_KINDS
+
+    text = (__import__("pathlib").Path(__file__).resolve().parents[1]
+            / "ui" / "src" / "attentionModel.js").read_text()
+    block = text.split("const NEEDS_ACTION = new Set([")[1].split("])")[0]
+    # Strip line comments first: a commented-out member may satisfy neither side of this compare.
+    block = re.sub(r"^\s*//.*$", "", block, flags=re.M)
+    client = {m.group(1) for m in re.finditer(r"'([a-z_]+)'", block)}
+    assert len(client) >= 8, "the client set was read empty — that would pass vacuously"
+
+    # `assistant_permission` is the assistant surface's own kind and is never emitted by
+    # `project_event_attention`, so it is the ONE member the server legitimately does not carry.
+    missing = sorted(client - {"assistant_permission"} - set(ATTENTION_NEEDS_ACTION_KINDS))
+    assert missing == [], (
+        f"{missing} are actionable to the browser and unknown to the server's ordering/count table; "
+        "each one freezes the whole run feed via normalizeRunPage's active_action_count refusal")

@@ -21,6 +21,12 @@ from looplab.core.models import (
 INTERNAL_CARD_STATE_FIELDS = frozenset({
     "cards_added", "cards_merged", "cards_dropped", "cards_enriched", "card_ranking",
     "card_priority_pins", "card_operator_edits", "card_resource_pins",
+    # The other half of the drop/reopen lifecycle switch. It is the same shape as `cards_dropped`,
+    # is stamped with the same fold-internal `_event_index`, and was omitted here when it landed —
+    # so an operator reopening cards grew an accumulating journal that rode every SSE frame and the
+    # reviewer summary. A journal added on one side of a switch and not the other is precisely the
+    # "future producer-only field" this set exists to keep off the wire.
+    "cards_reopened",
 })
 
 PUBLIC_CARD_MAX_COUNT = 256
