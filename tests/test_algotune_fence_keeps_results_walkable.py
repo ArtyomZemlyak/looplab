@@ -35,6 +35,17 @@ def _fenced_tree(tmp_path):
         d = results / model / task
         d.mkdir(parents=True)
         (d / "solver.py").write_text("# a finished solution by another model\n")
+    # THE TREE HAS TO BE A CHECKOUT, because the fence tells a published champion from our own
+    # output by `git ls-files` and not by the shape of its name. The two directories above are
+    # what the fork ships and are COMMITTED here; `RuleCheck-1` is what a run of ours leaves
+    # behind and stays untracked. Before 2026-08-27 the classifier was a list of our prefixes,
+    # and it missed `DevEvalTrain-<pid>` -- a directory the Developer's own `eval_train` creates
+    # for the length of one evaluation -- so the fence would hold a live probe's artifact.
+    subprocess.run(["git", "init", "-q"], cwd=at, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=at, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "published results"], cwd=at, check=True)
+
     ours = results / "RuleCheck-1" / "convex_hull"
     ours.mkdir(parents=True)
     (ours / "solver.py").write_text("# ours\n")
