@@ -25,8 +25,33 @@ AT=${FENCE_ALGOTUNE_ROOT:-/var/tmp/looplab-bench/AlgoTune}
 STATE=${FENCE_STATE:-/var/tmp/looplab-bench/.foreign_results_moved}
 HOLD=${FENCE_HOLD:-/var/tmp/looplab-bench/.foreign_results_held}
 
+# ЧУЖОЕ — ЭТО ТО, ЧТО ОТСЛЕЖИВАЕТ GIT, а не то, чьё имя не попало в список.
+#
+# Раньше здесь стоял перечень наших префиксов (`LoopLab*|diag*|recheck*|REC-*|RuleCheck-*|CTL*`), и
+# он устарел ровно так, как устаревают все такие перечни: арена называет каталог по значению
+# `--model`, а `make_task.py:787` передаёт ей `DevEvalTrain` для команды `eval_train` разработчика.
+# 27.08 в 05:56 на живой машине возник `results/DevEvalTrain-2668122/convex_hull/solver.py` и исчез
+# к 05:57 — он живёт ровно одну оценку. Внутри этого окна `close` унёс бы артефакт работающей пробы
+# в укрытие, а последующий `open` вернул бы его в `results/` как чужого чемпиона.
+#
+# Семнадцать опубликованных каталогов лежат в форке под контролем версий, всё, что оба плеча
+# порождают на ходу, — нет. Проверено на живом дереве: `GPT-5`, `Claude Opus 4.6` и `R1`
+# отслеживаются, `REC-90409` и три `RuleCheck-*` — нет. Новое имя, которое мы придумаем завтра,
+# правки здесь не потребует.
+is_foreign() {  # is_foreign <имя каталога>
+  git -C "$AT" ls-files --error-unmatch -- "results/$1" >/dev/null 2>&1
+}
+
+# БЕЗ GIT ОТЛИЧИТЬ НЕКОГО ОТ КОГО НЕЛЬЗЯ: `ls-files` ответит «не отслеживается» про всё подряд, и
+# забор молча станет пустышкой, отрапортовав `closed 0` с нулевым кодом. Лучше громкий отказ.
+require_git() {
+  git -C "$AT" rev-parse --git-dir >/dev/null 2>&1 || {
+    echo "ОТКАЗ: $AT не git-дерево — чужое от нашего не отличить"; exit 3; }
+}
+
 case "${1:-}" in
   close)
+    require_git
     # THE HOLD DIRECTORY IS THE STATE, and the state file is only a record of it. `close` used to
     # truncate `$STATE` on entry, so calling it twice — which the driver does, because
     # `check_leaks.sh` fences before `run_final.sh` fences again — erased the list of what had been
@@ -43,7 +68,7 @@ case "${1:-}" in
     n=0
     for D in "$AT/results"/*/; do
       B="$(basename "$D")"
-      case "$B" in LoopLab*|diag*|recheck*|REC-*|RuleCheck-*|CTL*) continue ;; esac
+      is_foreign "$B" || continue
       printf '%s\n' "$B" >> "$STATE"
       mkdir -p "$HOLD"
       mv "$D" "$HOLD/$B"; n=$((n+1))
@@ -66,10 +91,11 @@ case "${1:-}" in
     rm -f "$STATE"
     ;;
   check)
+    require_git
     bad=0
     for D in "$AT/results"/*/; do
       B="$(basename "$D")"
-      case "$B" in LoopLab*|diag*|recheck*|REC-*|RuleCheck-*|CTL*) continue ;; esac
+      is_foreign "$B" || continue
       echo "  STILL PRESENT: $B"; bad=1
     done
     [ "$bad" = "0" ] && echo "all foreign result directories are closed" || echo "SOME ARE READABLE"
