@@ -211,6 +211,23 @@ class Solver:
 '''
 
 
+# The `__init__` half. AlgoTuner promises its own agent that "Compilation time of your init function
+# will not count towards your function's runtime"; this is the solver that asks the arena whether
+# that is true of a constructor in general.
+_SOLVER_HEAVY_INIT = r'''
+import time
+
+
+class Solver:
+    def __init__(self):
+        time.sleep(0.20)
+
+    def solve(self, problem, **kwargs):
+        time.sleep(0.01)
+        return {"ok": True}
+'''
+
+
 def _drive(tmp_path: Path, solver: str) -> dict:
     """Run the REAL `run_isolated_benchmark` on `solver` and return its timings."""
     code_dir = tmp_path / "code"
@@ -271,3 +288,47 @@ def test_the_real_arena_is_described_by_the_real_numbers(tmp_path):
     assert f"FASTEST of the {runs}" in clause
     assert module.cleared_cache_attrs(_REAL_ROOT) == ["_cache", "cache", "_memo", "_results"], (
         "the arena renamed the caches it clears; the card's list is derived and must follow")
+
+
+@pytest.mark.skipif(not _REAL_PYTHON.exists(), reason="no AlgoTune venv on this box")
+def test_the_arena_charges_a_constructor_to_every_timed_call(tmp_path):
+    """Tier 1, and a direct contradiction of the arena's OWN prompt line, so it is driven and not
+    argued: `Solver()` is constructed inside the timed region, so a 200 ms `__init__` in front of a
+    10 ms `solve()` must show up as ~210 ms and not as ~10 ms.
+
+    If this ever goes green the other way, the card's sentence is the one that has to change.
+    """
+    out = _drive(tmp_path, _SOLVER_HEAVY_INIT)
+    assert min(out["timed_ms"]) > 150.0, (
+        "the constructor was NOT charged, so the card's `__init__` sentence is wrong: "
+        f"{out['timed_ms']}")
+    assert min(out["timed_ms"]) < 400.0, out
+
+
+@pytest.mark.skipif(not _REAL_PYTHON.exists(), reason="no AlgoTune venv on this box")
+def test_the_card_states_that_the_constructor_is_timed(tmp_path):
+    assert "`__init__` IS ON THE CLOCK" in _goal(tmp_path)
+    assert "constructed INSIDE the timed" in _goal(tmp_path)
+
+
+def test_the_card_does_not_repeat_the_arenas_own_promise_about_init(tmp_path):
+    """NEGATIVE pin, substring on purpose (CLAUDE.md): what must not appear is the TEXT.
+
+    The sentence, verbatim from `campaign-final/A-convex_hull.log:119` (and again at `:459`), which
+    is the system prompt every arm-A run opens with:
+
+        IMPORTANT: Compilation time of your init function will not count towards your function's
+        runtime.
+
+    It is the one line of that prompt this card must not adopt: measured false against this arena's
+    own `run_isolated_benchmark` by the test above, where a 200 ms constructor lands in full on the
+    timed number. This file is the only place it is quoted -- `make_task.py` says what it says
+    without the words, because a commented-out copy would satisfy the substring pinned below.
+    """
+    goal = _goal(tmp_path)
+    for false_promise in ("will not count towards", "does not count towards",
+                          "Compilation time of your init"):
+        assert false_promise not in goal, f"the card repeats the arena's false promise: {false_promise}"
+    source = MAKE_TASK.read_text(encoding="utf-8")
+    for false_promise in ("will not count towards your function", "does not count towards your"):
+        assert false_promise not in source

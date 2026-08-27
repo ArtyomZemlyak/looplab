@@ -420,6 +420,27 @@ def dataset_clause(root: Path, task: str) -> str:
 # `MEASURE` -- a measured fact about the ruler, not a rule about what the arena permits -- and
 # because that flag is ON, so the correction ships. ADDING IT CHANGES THE GOAL CARD, i.e. changes
 # the measurement: adopt it between arms, never inside one.
+# WHY THE `__init__` HALF IS OUR OWN SENTENCE AND NOT THE ARENA'S. AlgoTuner's system prompt --
+# `campaign-final/A-convex_hull.log:119`, repeated at `:459`, i.e. the first thing every arm-A run
+# reads -- promises its agent that the time spent compiling in an init function is not charged to
+# the solver's runtime. The sentence is quoted VERBATIM in
+# `tests/test_algotune_timing_clause.py` and deliberately not here: this file is negatively pinned
+# against it, and a commented-out copy would satisfy the substring the pin forbids.
+#
+# Copying that sentence across was the obvious move and it is WRONG in the general form it states.
+# `isolated_benchmark.py:667` takes its callable from `solver_loader.get_fresh_solve_callable`,
+# whose wrapper (`solver_loader.py:595-607`) does `SolverClass()` and then `.solve(problem)` --
+# INSIDE the region `:1011` times. Driven on this box: a solver with a 200 ms `__init__` in front
+# of a 10 ms `solve()` measures 210.2 / 210.2 / 210.2 ms. A constructor is charged in full, once
+# per timed call.
+#
+# The arena's sentence is nonetheless true for the one case it names, by a mechanism it does not
+# name: the WARM-UP call constructs the solver too, so a compile triggered from `__init__` is paid
+# there and the dispatcher is warm by the timed call (189.8 ms warm-up, 0.052 ms timed). So the
+# card states the MECHANISM instead of the promise -- the warm-up absorbs first-call costs, the
+# constructor runs again on the clock -- which covers the compile case AND the case the arena's
+# wording invites a model to get wrong: moving real per-call setup into `__init__` because a prompt
+# said it was free.
 _CACHE_ATTRS_RE = re.compile(r"for cache_attr in \[([^\]]+)\]")
 _BENCH_RUNS_RE = re.compile(r"^benchmark:\s*$.*?^\s+runs:\s*(\d+)\s*$", re.MULTILINE | re.DOTALL)
 
@@ -471,6 +492,11 @@ def timing_clause(root: Path) -> str:
         "a JIT's first compile, a table you build lazily: the warm-up pays it and the timed call "
         "finds it done. Measured: a solver whose `@numba.njit` kernel compiles on first use warms up "
         "in 190 ms and TIMES AT 0.05 ms. "
+        "`__init__` IS ON THE CLOCK, though. A fresh `Solver()` is constructed INSIDE the timed "
+        "call, so everything the constructor does beyond that one-off compile is charged to every "
+        "measurement. Measured: a 200 ms `__init__` in front of a 10 ms `solve()` is timed at "
+        "210 ms. Setup belongs at module level or behind a first-call guard, where the warm-up "
+        "absorbs it -- not in a constructor that runs again with the clock running. "
     )
     attrs = cleared_cache_attrs(root)
     if attrs:
