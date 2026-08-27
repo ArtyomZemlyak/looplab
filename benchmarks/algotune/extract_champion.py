@@ -72,7 +72,36 @@ def main() -> int:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(content, encoding="utf-8")
-    print(f"champion node {best.id} (metric={best.metric}) -> {args.out}")
+
+    # A CHAMPION STOPPED BEING ONE FILE the moment the goal card allowed compilation, and nothing
+    # here was told. `sol10`'s node 10 committed THREE files -- `solver.py`, `_edge_expansion.pyx`
+    # and a `setup.py` -- scored 261.1071 on train, and then scored 0.0 on TEST: this wrote the
+    # solver alone, `looplab_eval.py` copies whatever sits BESIDE it (`src.parent.iterdir()`), the
+    # `.pyx` and `setup.py` stayed behind in the node directory, no `build_ext` ran, and the
+    # solver's own import fell over with
+    #   `no_speedup: {"reason": "solver_unloadable", ... _edge_expansion_native.py: cannot open
+    #    shared object file: No such file or directory}`
+    # in 3.5 s. The best number this project has produced was thrown away by its own extractor.
+    #
+    # `campaign.sh:768` calls this same script, so a compiled champion would have scored zero in a
+    # campaign too -- silently, since `solver_unloadable` reads like a broken solver.
+    #
+    # The rest of the working set is written BESIDE `--out`, by basename, because that is the
+    # directory the bridge submits. The two files the operator planted are skipped: they are not the
+    # candidate's work, and `looplab_eval.py` refuses to submit them anyway.
+    _PLANTED = ("description.txt",)
+    extra = []
+    for key, body in sorted(files.items()):
+        name = str(key).replace("\\", "/").rsplit("/", 1)[-1]
+        if name == args.out.name or key == args.filename or name.endswith(args.filename):
+            continue
+        if name in _PLANTED or name.startswith("reference_"):
+            continue
+        (args.out.parent / name).write_text(body, encoding="utf-8")
+        extra.append(name)
+
+    print(f"champion node {best.id} (metric={best.metric}) -> {args.out}"
+          + (f" (+{len(extra)} more: {', '.join(extra)})" if extra else ""))
     return 0
 
 
