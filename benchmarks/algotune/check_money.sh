@@ -13,7 +13,7 @@ set -u
 ROOT=${ROOT:-/var/tmp/looplab-bench}
 HOURS=${1:-3}
 python3 - "$ROOT" "$HOURS" <<'PY'
-import json, sys, time, collections, os
+import json, re, sys, time, collections, os
 root, hours = sys.argv[1], float(sys.argv[2])
 T = time.time() - hours * 3600
 for name, path in (("8801 шлюз", "meter/meter.jsonl"), ("8802 openrouter", "meter/meter-gemini.jsonl")):
@@ -23,6 +23,26 @@ for name, path in (("8801 шлюз", "meter/meter.jsonl"), ("8802 openrouter", "
     rows = [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()]
     new = [x for x in rows if float(x["ts"]) >= T]
     # ПРАВИЛО ПРОКСИ, дословно: proxy.py:416
+    def cause(x):
+        """Почему упало. Поле зависит от ВЕТКИ прокси, а не от вида отказа, и это стоило мне
+        ложного вывода: 27.08 два 502 у ctlEdge я назвал «записаны без причины», потому что
+        печатал `error` и получал None. Причина лежала рядом, в `upstream_error` — целиком
+        страница nginx «502 Bad Gateway». `_fail` пишет `error`, ветка HTTPError пишет
+        `upstream_error`; сводка обязана знать обе."""
+        for field in ("error", "upstream_error"):
+            v = x.get(field)
+            if not v:
+                continue
+            text = " ".join(str(v).split())
+            # Ответ шлюза бывает страницей, а не строкой: nginx отдаёт целый html. Заголовок
+            # <title> — это ровно одна фраза, которая нужна («502 Bad Gateway»), а вся разметка
+            # в метке счётчика делает её нечитаемой.
+            m = re.search(r"<title>(.*?)</title>", text, re.I)
+            if m:
+                return "%s (%s)" % (m.group(1).strip(), x.get("status"))
+            return text[:60]
+        return str(x.get("status"))
+
     bad = [x for x in new if int(x.get("status") or 0) >= 400 or x.get("error")]
     spent = sum(float(x.get("cost") or 0) for x in new)
     # КОГДА БЫЛ ПОСЛЕДНИЙ ВЫЗОВ — часть ответа, а не украшение. Окно в час включает и то, что
@@ -43,11 +63,9 @@ for name, path in (("8801 шлюз", "meter/meter.jsonl"), ("8802 openrouter", "
         newest = max(float(x["ts"]) for x in bad)
         print("      последняя неудача %s, %.0f мин назад" % (
             time.strftime("%H:%M:%S", time.localtime(newest)), (time.time() - newest) / 60))
-        c = collections.Counter(
-            "%s %s" % (x.get("arm"), (str(x.get("error")).split(":")[0] if x.get("error") else x.get("status")))
-            for x in bad)
+        c = collections.Counter("%s %s" % (x.get("arm"), cause(x)) for x in bad)
         for k, v in c.most_common(8):
-            g = [x for x in bad if ("%s %s" % (x.get("arm"), (str(x.get("error")).split(":")[0] if x.get("error") else x.get("status")))) == k]
+            g = [x for x in bad if ("%s %s" % (x.get("arm"), cause(x))) == k]
             print("      %-42s %3d  последняя %s" % (
                 k, v, time.strftime("%H:%M:%S", time.localtime(max(float(x["ts"]) for x in g)))))
     # то, что видел бы наивный фильтр
