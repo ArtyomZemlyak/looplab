@@ -163,3 +163,67 @@ def test_both_durable_appends_carry_the_key():
     assert src.count('"budget_exhausted": _budget_exhausted') == 2, (
         "MUTATION: drop either append's key and a resumed run's repair history stops matching the "
         "live one")
+
+
+# --------------------------------------------------------------------------------------------
+# The READ side. The column was written to the durable row AND the in-process one and read back by
+# NEITHER, so the fact this whole rung exists to deliver reached no reader at all.
+# --------------------------------------------------------------------------------------------
+
+def _repaired(attempt: int, **data):
+    from types import SimpleNamespace
+
+    from looplab.events.types import EV_NODE_REPAIRED
+    return SimpleNamespace(type=EV_NODE_REPAIRED,
+                           data=dict(node_id=7, generation=0, attempt=attempt, **data))
+
+
+def test_a_resumed_row_still_carries_which_bound_ended_the_session():
+    """`_durable_repair_ledger` re-shapes rows explicitly and had no `budget_exhausted` case, so a
+    resumed process handed the stop judge a history with the column stripped — while BOTH write
+    sites' comments asserted the live row and the rebuilt one render identically."""
+    from looplab.engine.evaluate import _durable_repair_ledger
+
+    _, rows, _ = _durable_repair_ledger(
+        [_repaired(1, error="boom", fix="f", changed=[], verified="inert",
+                   budget_exhausted="time"),
+         _repaired(2, error="boom", fix="f")], 7, 0)
+    assert rows[0]["budget_exhausted"] == "time"
+    assert "budget_exhausted" not in rows[1], (
+        "absent means absent, exactly as for `verified` and `param_overrides`: an old row means "
+        "'nobody looked', not 'looked and the session was not cut short'")
+
+
+def test_the_judge_is_TOLD_which_bound_and_the_two_families_read_differently():
+    """`changed: nothing` is the same column whether the Developer decided not to edit or was cut
+    off mid-investigation, and those want opposite next moves — which is the distinction this field
+    was added for and which `_format_repair_log` did not render.
+
+    PER KIND, because `_note_session_budget` stores any member of `LOOP_CUTOFF_KINDS` and only two
+    of the five are budget bounds: calling `emit_force` "ran out of clock" would be a confident
+    wrong sentence in the one place this rung exists to stop being wrong.
+    """
+    from looplab.agents.tool_loop import LOOP_CUTOFF_KINDS
+    from looplab.engine.crash_repair import _format_repair_log
+
+    row = dict(attempt=1, error="boom", fix="f", changed=[], verified="inert")
+    clocked = _format_repair_log([{**row, "budget_exhausted": "time"}])
+    assert "RAN OUT OF WALL CLOCK" in clocked
+
+    forced = _format_repair_log([{**row, "budget_exhausted": "emit_force"}])
+    assert "THE LOOP ENDED THIS SESSION ITSELF (emit_force)" in forced
+    assert "CLOCK" not in forced, "a loop cutoff is not a budget bound"
+
+    # Total over the real vocabulary — a sixth kind must render SOMETHING rather than vanish.
+    for kind in LOOP_CUTOFF_KINDS:
+        assert kind in _format_repair_log([{**row, "budget_exhausted": kind}]) or "CLOCK" in \
+            _format_repair_log([{**row, "budget_exhausted": kind}]) or "TURNS" in \
+            _format_repair_log([{**row, "budget_exhausted": kind}]), kind
+
+
+def test_a_row_without_the_column_renders_byte_for_byte_as_before():
+    """Prompt text is a contract: a new fact earns a new sentence and does not reword the old ones."""
+    from looplab.engine.crash_repair import _format_repair_log
+
+    row = dict(attempt=1, error="boom", fix="f", changed=["a.py"], verified="verified")
+    assert "SESSION" not in _format_repair_log([row])

@@ -82,3 +82,53 @@ def test_the_feed_still_shows_a_direction_that_has_children():
                      action_source="card_added", action_owner_count=1))
     st = _board([_direction("d0", "direction 0"), child])
     assert "d0" in {c.id for c in st.open_research_beliefs()}
+
+
+# --------------------------------------------------------------------------------------------
+# The two populations. `open_statements` and `counted` answer different questions, and sharing one
+# list made the cap's (correct) narrowing silently break the duplicate rule.
+# --------------------------------------------------------------------------------------------
+
+_DIRECTION = "Distil from a stronger teacher"
+_RESTATED = "distil from a  stronger   TEACHER"   # case/whitespace variant, same normalized key
+
+
+def test_a_TAKEN_UP_question_is_still_deduplicated_against():
+    """The defect. Freeing a cap slot must not also forget the question exists.
+
+    A direction with children no longer competes for board room — that is the fix `counted` carries.
+    But it is still registered, and a later memo restating it must not mint a SECOND card for the
+    same question: `hypothesis_id` differs on a re-worded statement, so the fold would create one,
+    and because a direction never accrues evidence the open population would then grow without
+    bound past the five-row prompt window.
+    """
+    assert admit_research_beliefs([_DIRECTION], [_RESTATED], counted=[]) == [], (
+        "MUTATION: pass the narrowed list as `open_statements` too and this admits the restatement, "
+        "putting a duplicate of an already-answered question on the board")
+
+
+def test_the_room_a_taken_up_question_frees_goes_to_a_NEW_question():
+    """The counter-assertion — the dedup fix must not cost the cap fix. This is the whole point of
+    narrowing `counted`: `runs/e5small-dr-unified-v5` paid for three think-hard reviews and could
+    register nothing from any of them, because five childless beliefs met a cap of five."""
+    full = [f"question {i}" for i in range(DEEP_RESEARCH_OPEN_BELIEF_CAP)]
+    assert admit_research_beliefs(full, ["a genuinely new question"], counted=full) == [], (
+        "five UNANSWERED questions still fill the board")
+    assert admit_research_beliefs(full, ["a genuinely new question"], counted=[]) == [
+        "a genuinely new question"], "…and questions somebody is working on free their room"
+
+
+def test_an_admitted_direction_immediately_occupies_a_slot():
+    """Otherwise one memo could fill an empty board past the cap in a single pass."""
+    admitted = admit_research_beliefs(
+        [], [f"q{i}" for i in range(DEEP_RESEARCH_OPEN_BELIEF_CAP + 3)], counted=[])
+    assert len(admitted) == DEEP_RESEARCH_OPEN_BELIEF_CAP
+
+
+def test_counted_defaults_to_the_open_list_byte_for_byte():
+    """`counted=None` is the historical rule, so every existing caller and every replayed log is
+    unchanged by the parameter existing."""
+    board = [f"q{i}" for i in range(3)]
+    proposed = ["q1", "a new one", "another"]
+    assert (admit_research_beliefs(board, proposed)
+            == admit_research_beliefs(board, proposed, counted=board))

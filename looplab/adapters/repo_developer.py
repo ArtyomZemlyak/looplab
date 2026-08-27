@@ -678,10 +678,18 @@ class LLMRepoDeveloper:
         phase to a non-agentic one, which is the defect that partition exists to prevent.
 
         Best-effort exactly like `_note_budget`'s own contract: this fires on the way to a salvage
-        emit, so a raise here would turn a rescued answer into a crash. `kind` is `"time"` or
-        `"turns"` — kept apart because they are different failures with different remedies, and only
-        one of them has ever fired on this box (turns has never bound: ~131 calls of 500 on the node
-        that motivated this).
+        emit, so a raise here would turn a rescued answer into a crash.
+
+        `kind` IS THE WHOLE OF `tool_loop.py::LOOP_CUTOFF_KINDS`, not the two this docstring used to
+        name. `_note_budget` fires the same `on_budget` observer for all five — `time`, `turns`,
+        `stuck`, `stalled`, `emit_force` — and this stores whatever arrives, so three of them landed
+        on a durable column two comments described as "which BUDGET ended the session". Only the
+        first two are budget bounds; the other three are the loop ending a session that was not
+        going anywhere, which is a different fact with a different remedy, and
+        `crash_repair.py::_format_repair_log` now says which it was rather than implying a clock.
+        CLAIM[budget-exhausted-vocabulary] the durable `budget_exhausted` column carries any of the
+        five loop cutoff kinds, not only the two budget bounds.
+        decided:`line:LOOP_CUTOFF_KINDS&&emit_force@looplab/agents/tool_loop.py`
         """
         try:
             kind = str((payload or {}).get("kind") or "").strip()

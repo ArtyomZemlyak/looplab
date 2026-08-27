@@ -196,6 +196,29 @@ def _format_repair_log(repair_log) -> str:
                      + ". The declared value is what this node is ranked against its siblings by, "
                        "so if the change was deliberate say so in your rationale; if it was not, "
                        "putting it back is a fix.")
+        # A THIRD independent sentence, and the one `inert` most needs beside it: `changed: nothing`
+        # is the same column whether the Developer LOOKED and decided not to edit or was cut off
+        # mid-investigation, and those want opposite next moves. Measured over `runs/`, 12 of the 12
+        # inert repairs in the corpus ran past `session_time_budget_s` and 0 of the 65 that finished
+        # inside it are inert — so on this box the column is very nearly the explanation for `inert`,
+        # and until now it reached the judge on neither the live row nor the resumed one.
+        #
+        # PER KIND, because `_note_session_budget` stores any member of
+        # `tool_loop.py::LOOP_CUTOFF_KINDS` and only two of the five are budget bounds. Calling
+        # `stuck` or `emit_force` "ran out of clock" would be a confident wrong sentence in the one
+        # place this rung exists to stop being wrong. Appended, never substituted, so a row without
+        # the column renders byte-identically to what this prompt has always been.
+        _cutoff = str(r.get("budget_exhausted") or "").strip()
+        if _cutoff:
+            note += "\n    " + {
+                "time": "THE SESSION RAN OUT OF WALL CLOCK — it did not finish on its own terms, so "
+                        "an empty or thin change set here is where it got to, not what it decided.",
+                "turns": "THE SESSION RAN OUT OF TURNS — it did not finish on its own terms, so an "
+                         "empty or thin change set here is where it got to, not what it decided.",
+            }.get(_cutoff,
+                  f"THE LOOP ENDED THIS SESSION ITSELF ({_cutoff}) rather than the Developer "
+                  "finishing: it stopped without a model-chosen emit, so what this attempt changed "
+                  "is what had been written by then.")
         out.append(
             f"attempt {r.get('attempt')}: failed with — {' '.join(str(r.get('error', '')).split())}\n"
             f"    the fix claimed: {str(r.get('fix', '')).strip() or '(no rationale)'}\n"

@@ -77,7 +77,8 @@ def normalized_belief_key(statement) -> str:
 
 
 def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[str], *,
-                           cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP) -> list[str]:
+                           cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP,
+                           counted: "Iterable[str] | None" = None) -> list[str]:
     """Which of a memo's directions may become OPEN BELIEFS, given the board already open.
 
     PURE and stateable on purpose (CLAUDE.md tier 2): the rule used to be "all five, every memo,
@@ -89,6 +90,17 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
          card at all rather than becoming one the consolidator may or may not get to;
       2. the open board is capped at `cap` DISTINCT beliefs; a memo may fill the remaining room and
          no more.
+
+    TWO POPULATIONS, because the two rules are about different things and sharing one list made the
+    second silently break the first. `open_statements` is the DEDUP universe — every open direction,
+    including ones already being worked on, because restating a question somebody answered is exactly
+    the duplicate rule 1 exists to refuse. `counted` is the subset that OCCUPIES a cap slot, and it
+    is narrower: a direction with children is no longer an unanswered question competing for room.
+    Passing one list for both meant the caller's (correct) narrowing of the cap also removed those
+    directions from `seen`, so a later memo restating one registered a second card for the same
+    question — and, because a direction never accrues evidence, the open population then grew
+    without bound and the five-row prompt window began rotating real questions out of view.
+    `counted=None` means "the same list", i.e. byte-for-byte the historical behaviour.
 
     Order is preserved and the memo's own repeats collapse against each other, so `admit(open, ds)`
     is idempotent under re-running the same memo. Everything dropped is still recorded — the MEMO
@@ -105,6 +117,8 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
     why the corrected sentence names it alone.
     """
     seen = {normalized_belief_key(s) for s in open_statements if str(s or "").strip()}
+    occupied = (set(seen) if counted is None
+                else {normalized_belief_key(s) for s in counted if str(s or "").strip()})
     admitted: list[str] = []
     for direction in directions:
         text = str(direction or "").strip()
@@ -113,9 +127,10 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
         key = normalized_belief_key(text)
         if key in seen:
             continue
-        if len(seen) >= max(0, int(cap)):
+        if len(occupied) >= max(0, int(cap)):
             break
-        seen.add(key)
+        seen.add(key)          # never registered twice, whether or not it holds a slot
+        occupied.add(key)      # …and a newly admitted direction is unanswered, so it holds one
         admitted.append(text)
     return admitted
 
@@ -665,19 +680,27 @@ class ResearchCadenceMixin:
             # question somebody is already working on stops competing for that room. The proposal
             # FEED is untouched — a direction with one child and twelve experiments left to run must
             # still be visible — so this narrows what the cap counts, never what the model sees.
+            # TWO POPULATIONS OUT OF ONE FOLD, and the narrowing belongs to exactly one of them.
+            # `open_statements` is every open direction — the DEDUP universe, because restating a
+            # question somebody is already answering is precisely the duplicate to refuse. `counted`
+            # drops the taken-up ones, because those no longer compete for board room. Handing one
+            # narrowed list to both (which this did for a day) let a later memo register a SECOND
+            # card for a question already under way, and since a direction never accrues evidence the
+            # open population then grew unbounded past the five-row prompt window.
             taken_up = {c.parent_card_id for c in board.cards.values() if c.parent_card_id}
-            open_statements = [c.seed_statement for c in board.open_research_beliefs()
-                               if is_pure_belief(c) and c.id not in taken_up]
+            beliefs = [c for c in board.open_research_beliefs() if is_pure_belief(c)]
+            open_statements = [c.seed_statement for c in beliefs]
+            unanswered = [c.seed_statement for c in beliefs if c.id not in taken_up]
         except Exception:  # noqa: BLE001 — see the docstring: degrade to the pre-bound behaviour
-            open_statements = []
-        admitted = admit_research_beliefs(open_statements, directions)
+            open_statements = unanswered = []
+        admitted = admit_research_beliefs(open_statements, directions, counted=unanswered)
         dropped = len(directions) - len(admitted)
         if dropped:
             # Not silent: the operator reading the log sees a memo whose directions did not all
             # become cards, and the memo body + `hint` row still carry every one of them.
             _LOG.info("deep research: %d of %d recommended direction(s) not registered as beliefs "
                       "(%d already open, cap %d) — the memo and its hint still carry them",
-                      dropped, len(directions), len(open_statements),
+                      dropped, len(directions), len(unanswered),
                       DEEP_RESEARCH_OPEN_BELIEF_CAP)
         return admitted
 

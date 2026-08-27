@@ -513,6 +513,15 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
         if d.get("verified") in REPAIR_VERDICTS:
             row["verified"] = str(d.get("verified"))
             row["unmet"] = [str(u) for u in (d.get("unmet") or [])][:12]
+        # WHICH BOUND ENDED THE SESSION, read back under the same absent-means-absent rule as the two
+        # columns above. It was written to the durable row and to the in-process one and read back by
+        # NEITHER — `_format_repair_log` had no branch for it either — so the fact the whole
+        # `last_budget_exhausted` rung exists to deliver (12 of 12 `inert` repairs in the corpus ran
+        # past their wall clock; 0 of the 65 that finished inside it are inert) reached no reader at
+        # all, and a resumed row lost the key outright while both write sites' comments asserted the
+        # two render identically.
+        if d.get("budget_exhausted"):
+            row["budget_exhausted"] = str(d.get("budget_exhausted"))[:32]
         # The declared-coordinate column, read back under the SAME absent-means-absent rule: this
         # column is written only when non-empty, so a missing key is either an old row or a repair
         # that moved nothing, and `_format_repair_log` renders neither. Rows are re-shaped rather
