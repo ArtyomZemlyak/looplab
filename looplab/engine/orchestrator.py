@@ -1649,9 +1649,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # caller: its outer handler writes the terminal AND buys the finish report, several
             # frames above this `finally`.  See `defer_trace_retirement` for the measurement.
             # BOTH lookups are defensive, and the second is not paranoia: `Engine.run` is borrowed
-            # by host stubs that are not Engines at all (`tests/test_budget_ceiling_drains_the_
-            # inflight_eval.py::_RunHost`) and by `Engine.__new__(Engine)` probes that never ran
-            # `__init__`. The code this replaced was defensive for exactly that reason
+            # by host stubs that are not Engines at all -- `_RunHost` in
+            # `tests/test_budget_ceiling_drains_the_inflight_eval.py` -- and by
+            # `Engine.__new__(Engine)` probes that never ran `__init__`.
+            # The code this replaced was defensive for exactly that reason
             # (`getattr(getattr(self, "tracer", None), "shutdown", None)`); moving the guard inside
             # `retire_tracer` left the METHOD lookup itself unguarded, and those three drain tests
             # caught it. `hasattr` rather than a local alias, so the call site keeps the literal the
