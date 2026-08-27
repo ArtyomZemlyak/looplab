@@ -50,8 +50,11 @@ def _alive(run_dir: str) -> bool:
             continue
         if "looplab.cli" not in " ".join(argv):
             continue
-        for i, a in enumerate(argv):
-            if a == "--out" and i + 1 < len(argv) and os.path.realpath(argv[i + 1]) == want:
+        # ЛЮБОЙ аргумент, а не только тот, что идёт за `--out`: `looplab.cli run` называет каталог
+        # флагом, а `looplab.cli resume` — ПОЗИЦИОННО. Привязка к `--out` показывала возобновлённую
+        # пробу остановленной, пока она делала девять успешных вызовов в минуту.
+        for a in argv:
+            if a and os.path.realpath(a) == want:
                 return True
     return False
 
