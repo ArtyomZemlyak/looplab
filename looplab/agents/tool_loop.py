@@ -636,6 +636,15 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         rung promised was never actually delivered to the model."""
         if forced is None:
             return False, None, ""
+        # OPEN[terminal-forced-emit-skips-hard-validators] every validator is bypassed when a
+        # forced emit lands on an exit with no retry turn.
+        # proof:`line:validate is not None&&may_retry@looplab/agents/tool_loop.py`
+        # REVIEW 2026-08-27 (P1 correctness): `drive_tool_loop` is generic, but this terminal policy
+        # is repair-specific. The stages caller also uses `validate` to enforce the operator's wall
+        # budget, missing inputs and manifest collisions; a terminal forced emit skips all three and
+        # `_finalize` persists anything that is merely shape-valid. The Researcher likewise turns an
+        # empty rejected emit into an ordinary draft instead of its circuit-breaker fallback. Keep
+        # repair-summary salvage as a caller policy, rather than disabling every hard validator here.
         if validate is not None and may_retry:
             try:
                 refusal = validate(forced)    # non-None err string == rejected

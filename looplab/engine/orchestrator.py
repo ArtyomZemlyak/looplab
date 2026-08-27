@@ -4367,6 +4367,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # research_completed/hint/hypothesis_added AFTER _dispatch_evals returns — possibly
                 # past finalize. Waiting for the append (bounded, far shorter than the compute path)
                 # is safer.
+                # OPEN[failed-initial-research-tick-receipted-again] the initial trigger is consumed
+                # only after the entire receipt -> compute -> multi-append record path succeeds.
+                # proof:absent:initial_trigger_consumed@looplab/engine/orchestrator.py
+                # REVIEW 2026-08-27 (P2 durability/cost): if `_record_deep_research` appends
+                # `research_completed` and a later hint/card append raises, this catch retries with
+                # the original cadence/strategist label. The next tick buys the same think again,
+                # writes a second durable receipt and can duplicate the completed memo because
+                # `last_sig` is still empty. Consume the one-shot trigger once its receipt/paid pass
+                # starts, while retaining an explicit status if a pre-receipt failure may retry it.
                 sig, recorded = await anyio.to_thread.run_sync(
                     functools.partial(self._research_attempt_step, snap, trig,
                                       manual=False, last_sig=last_sig),

@@ -230,6 +230,14 @@ def research_memo_sig(memo) -> str:
 
     summary = str(_get("summary") or "").strip()
     directions = [str(d).strip() for d in (_get("recommended_directions") or []) if str(d).strip()]
+    # OPEN[research-memo-signature-omits-split-output] the convergence key still covers only the
+    # legacy compatibility projection, not the two new memo outputs.
+    # proof:`line:blob = summary&&join(directions)@looplab/engine/research_cadence.py`
+    # REVIEW 2026-08-27 (P1 delivery): two valid memos with the same summary and an empty legacy
+    # union hash identically even when their open questions and concrete experiments differ. The
+    # repeated-research loop then treats the later paid answer as converged and never records it.
+    # Include both split lists in a canonical, field-delimited signature; the existing whitespace
+    # normalization can otherwise stay unchanged.
     blob = summary + "\n" + "\n".join(directions)
     return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()[:16]
 
@@ -591,6 +599,14 @@ class ResearchCadenceMixin:
         # It is explicitly model-generated advisory data, not operator authority; prompt rendering
         # filters this source while the research memo/open-hypothesis channels carry the signal.
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
+        # OPEN[next-experiments-never-reach-proposal] the concrete half of the new memo split has no
+        # production reader, so an experiments-only memo steers no later work.
+        # proof:absent:memo_d.get("next_experiments")@looplab/engine/research_cadence.py
+        # REVIEW 2026-08-27 (P1 delivery): the durable model says these entries are left to be
+        # proposed as real work, but this writer reads only the legacy union and open questions. A
+        # schema-valid memo that omits the optional compatibility field therefore appends its paid
+        # `research_completed` row yet emits no hint, card or executable proposal for its concrete
+        # list. Route that list through the real proposal intake (or a dedicated bounded hint).
         # WHAT BECOMES A BOARD ROW is now what the memo itself called a QUESTION, not everything it
         # would try next. `recommended_directions` was described to the model as "specific next
         # experiments to try", so it correctly returned experiments and every one of them landed as
