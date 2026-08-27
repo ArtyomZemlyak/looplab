@@ -16,6 +16,7 @@ looplab replay          Pure fold of the event log → state (read-only)
 looplab readmodel       Rebuild/check readmodel.sqlite — works on a live or crashed run (--check exits 1 if stale)
 looplab speculation-gate Validate paired Card-speculation evidence and publish the rollout receipt
 looplab timings         Wall-clock breakdown per node + run-level, reconciled against the run's duration
+looplab tokens          TOKEN breakdown by phase, reconciled against the durable llm_usage ledger
 looplab stage-dups      Duplicated stage work, and what a cross-node reuse key would have done
 looplab parser-stats    How the structured-output parser actually behaved on this box, per role
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
@@ -694,6 +695,58 @@ reconciliation vs 27.9 min wall clock:
   remainder — work with no span at all, engine bookkeeping, provider waits, and the idle gap while a
   stopped run waits for someone to finalize it. It is reported rather than hidden: a residual you
   can see is a residual you can go and instrument.
+
+### tokens
+
+Where the **tokens** went, by phase — the token twin of [`timings`](#timings)' wall-clock breakdown.
+
+```bash
+looplab tokens RUN_DIR [--top N]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (reads its `events.jsonl` and `spans.jsonl`) |
+| `--top N` | all phases | Show only the N largest phases; the remainder is collapsed into one stated row, never dropped |
+
+```
+        tokens   share   calls         prompt   completion  phase
+    28,027,840   25.8%     522     27,143,339      884,501  plan
+    27,436,262   25.3%     766     26,556,986      879,276  propose
+    19,533,608   18.0%     383     18,640,158      893,450  stages
+    18,636,924   17.2%     558     18,358,746      278,178  card_build
+    12,263,891   11.3%     259     11,729,850      534,041  inline_repair
+       308,166    0.3%      18        288,838       19,328  deep_research
+    …
+
+attributed :    108,534,235 tokens over 2,815 generation spans
+ledger     :    116,504,162 tokens (llm_usage, the durable record)
+residual   :      7,969,927 tokens (unattributed by any span)
+```
+
+**The total and the split come from different files, and that is the design.** `llm_usage` in
+`events.jsonl` is the durable, replayable ledger: it knows the true total and carries **no** phase,
+role or node. The `generation` spans in `spans.jsonl` carry `phase` but live in a sidecar that
+replay never rebuilds and that clearing a trace can destroy. So the ledger is the **denominator**,
+the spans supply the **attribution**, and the gap is printed — exactly as `timings` reconciles span
+durations against the event log's own wall clock.
+
+**Read `residual` before reading the shares.** On the run above it is 6.8 % of the real spend, so
+every `share` is a share of what the spans could attribute and not of what the run actually cost. It
+is **signed**: a negative residual means the spans over-attribute, which happens when a retried
+provider call opens two spans against one billed row, and it is reported rather than clamped.
+
+A generation with no phase is bucketed under `(no phase)`, never dropped — `timings` learned that
+the expensive way, having once hidden 143 of one run's 174 spans by dropping the node-less ones.
+
+**Why the phase is not simply stamped on `llm_usage` instead.** That was the obvious fix and it is
+the wrong one: `engine/costs.py` appends the row from an outbox drain and a reconcile retry loop as
+well as inline, so the phase in context at append time is the phase that *drained* the row, not the
+one that spent the tokens. A confidently wrong attribution on a durable row is worse than an honest
+one derived from the span that actually made the call.
+
+Note this box's provider is unpriced (`cost` 0.0, `priced_calls` 0), so **tokens are the meaningful
+unit here** and the command reports tokens rather than currency.
 
 When a run also carries a `budget` receipt, its `elapsed_s` is printed alongside the computed wall
 clock, flagged when the two differ by more than a second. On a run finalized before LoopLab

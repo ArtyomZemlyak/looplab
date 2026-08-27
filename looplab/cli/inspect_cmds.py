@@ -182,6 +182,77 @@ def _echo_section(title: str, cats: dict, note: str = "") -> None:
 
 
 @app.command()
+def tokens(run_dir: Path = typer.Argument(...),
+           top: int = typer.Option(0, help="only the N largest phases (0 = all)")):
+    """Where the TOKENS went, by phase — the token twin of `timings`' wall-clock breakdown.
+
+    The TOTAL and the SPLIT come from different files on purpose. `llm_usage` in `events.jsonl` is
+    the durable, replayable ledger and knows the true total but carries no phase; the `generation`
+    spans in `spans.jsonl` carry `phase` but live in a sidecar replay never rebuilds. So the ledger
+    is the denominator, the spans supply the attribution, and the gap between them is PRINTED.
+
+    A generation with no phase is bucketed, never dropped. Needs `spans.jsonl` for the breakdown;
+    without it the ledger total is still reported, then exit 2.
+    """
+    import json as _json
+
+    from looplab.events.eventstore import read_jsonl_lenient_with_health
+    from looplab.events.token_spend import token_spend_by_phase
+    from looplab.events.types import EV_LLM_USAGE
+
+    ev_path = run_dir / "events.jsonl"
+    sp_path = run_dir / "spans.jsonl"
+    if not ev_path.exists() and not sp_path.exists():
+        typer.echo(f"no run found at {run_dir} (no events.jsonl or spans.jsonl). {_RUN_DIR_HINT}")
+        raise typer.Exit(2)
+
+    # The DENOMINATOR: the durable ledger's own sum. Read first so a run with tracing off still
+    # learns what it spent, even though it can never learn where.
+    ledger_total = None
+    if ev_path.exists():
+        store = EventStore(ev_path)
+        _echo_log_integrity(store, run_dir)
+        ledger_total = sum(int((e.data or {}).get("total_tokens") or 0)
+                           for e in store.read_all() if e.type == EV_LLM_USAGE)
+
+    if not sp_path.exists():
+        typer.echo(f"ledger total: {ledger_total or 0:,} tokens")
+        typer.echo("no spans.jsonl — the ledger records totals only, so the split is unavailable.")
+        raise typer.Exit(2)
+
+    rows, health = read_jsonl_lenient_with_health(sp_path)
+    out = token_spend_by_phase(rows, ledger_total=ledger_total)
+    if not out["rows"]:
+        typer.echo("no generation spans found; nothing to attribute.")
+        raise typer.Exit(2)
+
+    shown = out["rows"][:top] if top and top > 0 else out["rows"]
+    typer.echo(f"{'tokens':>14}  {'share':>6}  {'calls':>6}  {'prompt':>13}  {'completion':>11}  phase")
+    for row in shown:
+        typer.echo(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
+                   f"{row['prompt']:>13,}  {row['completion']:>11,}  {row['phase']}")
+    if len(shown) < len(out["rows"]):
+        rest = out["rows"][len(shown):]
+        typer.echo(f"{sum(r['tokens'] for r in rest):>14,}  "
+                   f"{100 * sum(r['share'] for r in rest):>5.1f}%  "
+                   f"{sum(r['calls'] for r in rest):>6,}  "
+                   f"{'':>13}  {'':>11}  ({len(rest)} more phase(s), --top {len(shown)})")
+
+    typer.echo("")
+    typer.echo(f"attributed : {out['attributed']:>14,} tokens over {out['calls']:,} generation spans")
+    if out["ledger_total"] is None:
+        typer.echo("ledger     :            n/a  (no readable events.jsonl — no denominator)")
+    else:
+        typer.echo(f"ledger     : {out['ledger_total']:>14,} tokens (llm_usage, the durable record)")
+        # SIGNED and never clamped: a retried provider call opens two spans against one billed row,
+        # so a negative residual is a real state the operator should see rather than a rounding hide.
+        typer.echo(f"residual   : {out['residual']:>14,} tokens "
+                   f"({'spans over-attribute' if out['residual'] < 0 else 'unattributed by any span'})")
+    if out["damaged"] or getattr(health, "damaged", 0):
+        typer.echo(f"damaged span rows stepped over: {out['damaged'] + int(getattr(health, 'damaged', 0) or 0)}")
+
+
+@app.command()
 def timings(run_dir: Path = typer.Argument(...),
             node: Optional[int] = typer.Option(None, help="only this node id")):
     """Where the wall-clock went: per node, then RUN-LEVEL, reconciled against the run's real duration.

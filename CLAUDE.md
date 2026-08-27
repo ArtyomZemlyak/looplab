@@ -22,6 +22,9 @@ looplab run --no-genesis --kind quadratic --goal "min (x-3)^2" --direction min -
 looplab replay runs/demo          # rebuild state from the event log (reproducibility check)
 looplab timings runs/demo         # wall-clock: per node + run-level (from spans.jsonl), reconciled
                                   # against the run's duration (events.jsonl first->last ts), residual named
+looplab tokens runs/demo          # TOKENS by phase (from spans.jsonl), reconciled against the DURABLE
+                                  # llm_usage ledger; residual SIGNED and printed. The build
+                                  # (plan+stages+card_build) measured 61-63% of two real runs.
 looplab ui                        # FastAPI server + React UI (see looplab/serve/)
 ```
 
