@@ -188,11 +188,64 @@ def generate_report(state: RunState, client, *, parser: str = "tool_call", trigg
             raise
         from looplab.serve.assistant import safe_provider_failure
         failure = safe_provider_failure(e)
-        content = _ReportOut(headline="(report unavailable)",
-                             verdict=f"(report generation failed: {failure['message']})").model_dump(mode="json")
+        try:
+            content = _deterministic_report(state, failure["message"])
+        except Exception:  # noqa: BLE001 — a malformed state must still yield a report
+            content = _ReportOut(
+                headline="(report unavailable)",
+                verdict=f"(report generation failed: {failure['message']})").model_dump(mode="json")
     content["at_node"] = len(state.nodes)
     content["trigger"] = trigger
     return sanitize_report_payload(content)
+
+
+
+def _deterministic_report(state: "RunState", message: str) -> dict:
+    """The run's own facts when the writer could not be paid for — not an empty placeholder.
+
+    EVERY run that ends on the budget ceiling loses its report, because finalization runs AFTER the
+    ceiling has fired and the writer's call is refused. Measured 2026-08-27 across the probe corpus:
+    three of three ceiling-terminated runs recorded `headline: "(report unavailable)"`, and the
+    report is the one artefact a human reads to learn what a run found. The runs that went the whole
+    distance are exactly the ones that lose it.
+
+    Reflection already solves this the right way — `finalize.py` notes that `write_reflection_note`
+    "degrades to a deterministic meta-note when the provider is exhausted, which on this path it
+    usually is". The report had no such path and discarded facts `_report_context` had computed one
+    frame earlier.
+
+    The verdict still OPENS with the legacy failure marker, so `advisory_payloads._report_verdict`
+    keeps collapsing a raw exception into its canonical phrase and anything watching for a failed
+    report still sees one. What changes is that the other fields carry the run instead of nothing.
+    """
+    best = state.best()
+    evaluated = len(state.evaluated_nodes())
+    n_fail = sum(1 for n in state.nodes.values() if n.status is NodeStatus.failed)
+    n_invalid = sum(1 for n in state.nodes.values() if metric_scored_invalid(n))
+    if best is not None:
+        headline = (f"#{best.id} is the champion at metric={_g(node_metric(best))} "
+                    f"({best.operator}); written without the model.")
+        champion = (f"Node #{best.id}, operator {best.operator}, params={best.idea.params}, "
+                    f"metric={_g(node_metric(best))} ({state.direction}: "
+                    f"{'lower' if state.direction == 'min' else 'higher'} is better).")
+    else:
+        headline = "No node was evaluated; written without the model."
+        champion = ""
+    summary = (f"{len(state.nodes)} node(s) — {evaluated} evaluated, {n_fail} failed"
+               + (f", {n_invalid} scored but INVALID" if n_invalid else "")
+               + f". Stop reason: {state.stop_reason or 'not recorded'}.")
+    out = _ReportOut(
+        headline=headline,
+        champion_summary=champion,
+        verdict=f"(report generation failed: {message})",
+    ).model_dump(mode="json")
+    # `summary` is not a field of `_ReportOut` — it is the LEGACY single-field shape that
+    # `sanitize_report_payload` still reads and that older logs and finalization receipts render.
+    # Set it directly, because it is where the counts belong and because the verdict cannot carry
+    # them: `advisory_payloads._report_verdict` collapses anything opening with the failure marker
+    # down to its canonical phrase, by design, to keep a raw provider exception out of storage.
+    out["summary"] = summary
+    return out
 
 
 class ReportWriter:

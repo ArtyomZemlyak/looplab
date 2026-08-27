@@ -254,7 +254,12 @@ def test_report_fallback_does_not_persist_provider_exception(tmp_path, monkeypat
     )])
     report = generate_report(state, client=object(), trigger="manual")
 
-    assert report["headline"] == "(report unavailable)"
+    # THE SUBJECT OF THIS TEST IS ITS NAME: the provider exception must not be persisted. The
+    # headline used to be the fixed placeholder and is now built from the run's own state, which
+    # cannot contain the leak; `_assert_safe` below is what actually guards that, over the whole
+    # payload. The verdict still opens with the canonical failure phrase.
+    assert "(report unavailable)" not in report["headline"]
+    assert report["verdict"].lstrip().startswith("(report generation failed:")
     assert "provider" in report["verdict"].lower()
     _assert_safe(report)
 

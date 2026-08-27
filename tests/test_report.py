@@ -86,7 +86,11 @@ def test_generate_report_degrades_offline():
     st = fold([Event(seq=0, type="run_started",
                      data={"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})])
     content = generate_report(st, client=None, parser="tool_call", trigger="manual")
-    assert content["headline"] == "(report unavailable)"
+    # The headline is now ASSEMBLED FROM THE RUN rather than a placeholder: an empty run says so in
+    # words, and a run with a champion names it. What this test is about — never raises, every
+    # structured key present, at_node/trigger stamped — is unchanged and asserted below.
+    assert content["headline"] and "(report unavailable)" not in content["headline"]
+    assert "no node was evaluated" in content["headline"].lower()
     assert content["at_node"] == 0 and content["trigger"] == "manual"
     # all the structured keys are present so the UI can render unconditionally
     for k in ("verdict", "champion_summary", "what_worked", "learnings", "what_didnt",
