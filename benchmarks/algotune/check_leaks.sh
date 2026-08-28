@@ -40,6 +40,17 @@ S=$(ls "$ROOT/AlgoTune/reports"/evaluate_summary.*.json 2>/dev/null | wc -l)
 A=$(ls "$ROOT/AlgoTune/reports/agent_summary.json" 2>/dev/null | wc -l)
 [ "$A" != "0" ] && say "agent_summary.json" "есть — рука A ДОПИШЕТ в него, архивируй"
 
+# The foreign champions: not a leak into a NUMBER, but a warm start an unconfined solver could read.
+# THIS BLOCK LIVED ONLY IN THE OPERATOR'S AD-HOC COPY until 2026-08-28: the two scripts had diverged,
+# the tracked one covered more directories and the untracked one had this check, and each sweep got
+# whichever half it happened to run. A checkout is the version that survives, so it gets both.
+if bash "$ROOT/looplab/benchmarks/algotune/fence_foreign_results.sh" check >/dev/null 2>&1; then
+  say "чужие чемпионы в AlgoTune/results" "закрыты"
+else
+  say "чужие чемпионы в AlgoTune/results" "ЧИТАЕМЫ — закрой перед стартом"
+  BAD=1
+fi
+
 echo "== 6. ЖУРНАЛ МЕТРА (суммы по кампании смешаются)"
 L=$(wc -l < "$ROOT/meter/meter.jsonl" 2>/dev/null || echo 0)
 [ "$L" != "0" ] && { say "meter.jsonl" "$L строк — ротируй"; BAD=1; } || say "meter.jsonl" "пуст"
