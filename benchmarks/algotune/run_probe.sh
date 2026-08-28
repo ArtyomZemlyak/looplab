@@ -101,6 +101,22 @@ PYEOF
 )
 [ "$BUSY" != "0" ] && { say "ОТКАЗ: на полосе $LANE уже $BUSY процесс(ов)"; exit 1; }
 
+# У ЗАДАЧИ ДОЛЖЕН БЫТЬ ДАТАСЕТ. Арена держит на диске ровно двадцать задач кампании
+# (`.hf_datasets/oripress__AlgoTune/data/<task>/<task>_T*ms_n*_size*_{train,test}.jsonl`), а
+# `make_task.py` строит карточку для ЛЮБОГО имени — так что проба на задаче без данных стартует,
+# тратит деньги и не может быть оценена ничем.
+#
+# ЭТО НЕ УМОЗРЕНИЕ: 28.08 в 15:58 я запустил `count_connected_components`, выбрав её по числу
+# опубликованных чемпионов с `.pyx`, и снял через минуту на $0.0042 — датасета у неё нет. Ни один
+# сторож этого не поймал: полоса была свободна, забор закрыт, каталог чист. Проверка стоит один
+# `ls` и снимает целый класс потраченных впустую прогонов.
+DATA_DIR="$ROOT/AlgoTune/.hf_datasets/oripress__AlgoTune/data/$TASK"
+if ! ls "$DATA_DIR"/${TASK}_T*ms_n*_size*_train.jsonl >/dev/null 2>&1; then
+  say "ОТКАЗ: у задачи '$TASK' нет датасета в $DATA_DIR — оценить её нечем."
+  say "       на диске есть: $(ls "$ROOT/AlgoTune/.hf_datasets/oripress__AlgoTune/data" 2>/dev/null | tr '\n' ' ')"
+  exit 1
+fi
+
 # ЗАБОР ДОЛЖЕН БЫТЬ ЗАКРЫТ. В AlgoTune/results лежат чемпионы GPT-5, Claude Opus 4.6, Gemini 3 Pro
 # и ещё четырнадцати моделей — 34 каталога по одним только `edge_expansion` и `convex_hull`. Забор
 # уносит их в укрытие на время прогона.
