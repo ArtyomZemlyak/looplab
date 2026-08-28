@@ -588,3 +588,44 @@ proxy are rate-limit bound", is refuted by measurement: over three hours, **240 
 against 18,427 s of calls on 8803 (1 %)** and 60 s against 18,717 s on 8801 (0 %), with a median
 and p90 of 0.0 s and exactly 3 of 605 calls ever queueing — the same three. Adding proxies or
 raising `--rpm` would buy nothing at this concurrency.
+
+---
+
+## 22 — ds3's 0.0 is settled on the third try: the shared venv was shadowing the candidate's build
+
+§21.8 withdrew "a data shape absent from train" and left the question open. The re-score on a
+proper 22-core lane, with pip present, still returned **0.0 / `evaluator_error` in 28.7 s** — so the
+pip theory was wrong too. `looplab_check.py` then named it in one call:
+
+```
+TypeError: count_cut() takes exactly 3 positional arguments (2 given)
+```
+
+But `cutcounter.pyx` declares `count_cut(list adj, uint8_t[::1] S)` — **two** arguments, and the
+champion calls it with two. They agree. What did not agree was the import: a stale
+`cutcounter.cpython-311-x86_64-linux-gnu.so` sitting in
+`AlgoTune/.venv/lib/python3.11/site-packages`, installed 2026-08-27 19:56, shadowing the
+candidate's own build. Move that one file aside and the same champion is **valid on every
+instance**.
+
+**How it got there is the pip repair of `bee6a83b`.** `evaluate_results.py:266` runs
+`pip install .` over the candidate directory; with no pip it failed harmlessly, with pip it
+succeeds and the extension lands in the SHARED venv and outlives the run. Six were there by
+midday — `cutcounter`, `edge_cut`, `edge_flatten`, `edgecut`, `_fast_cut`, `solver_ext` — five
+within ninety minutes, and one of them, `_kern`, was mine, installed by the very test that verified
+the repair.
+
+Fixed in `d439c966`: the bridge sets `PIP_TARGET` to a per-invocation `mkdtemp` and puts it first
+on `PYTHONPATH`, so pip's own redirect isolates the install and the arena is not patched. Verified
+end to end on a lane: re-evaluating dsPyx's champion left `site-packages` at **12 `.so` files,
+unchanged**, and its `edge_cut` extension landed in `/tmp/looplab-piptarget-75afzws9/` instead.
+
+Three lessons recorded rather than smoothed over. My first two diagnoses of this 0.0 were both
+wrong and both were published. The repair that unlocked the biggest win of the campaign opened a
+contamination channel within the same morning. And the tool that finally named the cause is the
+`check` command built two days earlier for the agent, not for me.
+
+**State of the shared venv:** the stale `cutcounter` was moved aside and my `_kern` deleted. The
+four modules belonging to probes that were live at the time were left in place — removing a module
+a running evaluation might import is a risk with no matching reward, and the redirect stops any
+NEW ones. They should be cleared before the next campaign.
