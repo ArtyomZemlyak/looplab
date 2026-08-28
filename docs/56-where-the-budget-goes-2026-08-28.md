@@ -1062,7 +1062,7 @@ empty. **48 of those answers**, across eight runs, sit within five calls of a `s
 the same run that listed the drafts — same ledger, same moment, opposite story. And `best` is the
 DEFAULT, so it is what a caller that passes no `sort` receives.
 
-The two phases this misinforms are exactly the two whose job is not to re-proposing work already in
+The two phases this misinforms are exactly the two whose job is to avoid re-proposing work already in
 flight, which is the likeliest mechanism behind the duplicate-proposal question left open in §4.
 Fixed in `7c5795af`: the answer now names the count and the way to see them, and only when the
 metric filter is what emptied the list — a `theme=` matching nothing keeps its own honest zero.
