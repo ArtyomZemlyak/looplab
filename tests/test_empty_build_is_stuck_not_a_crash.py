@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from _source_scan import iter_sources
 from looplab.adapters.repo_developer import empty_build_refusal
 from looplab.core.models import is_developer_error, is_developer_stuck
 
@@ -130,9 +131,14 @@ def test_every_module_that_reads_one_spelling_reads_both():
     # COUNTED CALL SITES, not presence: an import of `is_developer_stuck` that nothing calls is
     # exactly the state that let dsFix1's node through, and `node_build.py` was found this way
     # after `speculation.py` had already been fixed by hand.
+    #
+    # The walk itself is `_source_scan.iter_sources`, not a private `rglob`: it decodes with
+    # utf-8-sig and skips the same excluded directories every other guard skips, so a BOM or a
+    # vendored tree cannot make this one guard disagree with its neighbours about what the package
+    # is. `test_source_scan_helper.py::test_no_guard_test_re_derives_the_walk` enforces that, and it
+    # was red on HEAD from 156b991e until 2026-08-28 because this file re-derived the walk.
     offenders = []
-    for path in root.rglob("*.py"):
-        body = path.read_text(encoding="utf-8", errors="replace")
+    for path, body in iter_sources(root):
         calls_error = body.count("is_developer_error(")
         calls_stuck = body.count("is_developer_stuck(")
         # the definitions themselves live in core/models.py and are not consumers

@@ -1273,7 +1273,7 @@ class SpeculationMixin:
             if is_developer_stuck(result.code):
                 # The model ran out of moves on THIS card; the run is not in trouble. Terminalize
                 # the build and let the next speculative action proceed -- no crash record, no
-                # circuit breaker, which is the distinction `core/models.py:943` draws and which
+                # circuit breaker, which is the distinction `core/models.py::DEVELOPER_STUCK_PREFIX` draws and which
                 # the crash branch below would erase.
                 self.store.append(EV_NODE_FAILED, {
                     "node_id": node_id, "generation": generation,

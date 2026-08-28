@@ -5804,7 +5804,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # convicts a fresh build that wrote no candidate, and until 2026-08-28 it spelled that
             # with the CRASH sentinel — so a session that probed 24 times and never called
             # `write_file` paused the whole run through the provider circuit breaker.
-            # `core/models.py:943` already states the rule this violates: "(developer error: …)
+            # `core/models.py::DEVELOPER_STUCK_PREFIX` already states the rule this violates: "(developer error: …)
             # routes to the provider circuit breaker and pauses the RUN, which is exactly the wrong
             # answer for a healthy model that has simply run out of ideas about one node."
             #

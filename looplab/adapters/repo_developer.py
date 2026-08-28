@@ -559,7 +559,7 @@ def empty_build_refusal(*, error, base, base_deleted, files, deleted) -> str:
         # SPELLED AS "STUCK", NOT AS A CRASH, since 2026-08-28. The docstring above already says
         # why: the cause is "a missing forcing function rather than a confused model" and the
         # session ended on its own wall budget with a live provider. `DEVELOPER_ERROR_PREFIX` routes
-        # to the provider circuit breaker and PAUSES the run (`core/models.py:943`), which ended
+        # to the provider circuit breaker and PAUSES the run (`core/models.py::DEVELOPER_STUCK_PREFIX`), which ended
         # dsNew2 at 2 evaluated nodes of 3 and qwen38f at its first — 2 of 106 nodes on the corpus,
         # both of them run-ending, on a gateway that answered every call. The node still dies; the
         # run no longer does. `engine/orchestrator.py` gained the matching branch in the same change.
