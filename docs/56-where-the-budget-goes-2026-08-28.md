@@ -544,3 +544,27 @@ free lane rather than settled by argument.
 
 Until then ds3's 0.0 is an OPEN question, and every place this document leans on it as "a genuine
 solver failure on unseen data" (§4, §15) should be read as unsupported.
+
+**21.9 — §4's zero count was scoped to probes; the conclusion survives the wider sweep and gets
+stronger.** Re-swept `model-probes/**` AND `runs-B/**`: **19 zero-metric node scores, not 7**. But
+`eval_seconds` runs 29.7 s to 329.5 s and **none is under 10 s**, so the finding stands with 19 of
+19 rather than 7 of 7 — there is no ruler refusal anywhere among node evaluations. The missing
+twelve are all campaign runs (spectral_clustering, pde_heat1d, rbf_interpolation,
+sparse_eigenvectors_complex ×3, max_clique_cpsat ×3, rectanglepacking), mostly `invalid_results`.
+
+**21.10 — nine campaign node-0 scores are cold-baseline artefacts and must not be used as a search
+baseline.** All nine evaluations over 300 s in the campaign are `node_0`, all carry
+`baseline_source: in-harness`, and their speedups cluster at 1.0: max_weighted_independent_set
+374.6 s / 1.3467, max_independent_set_cpsat 344.1 / 1.1444, max_clique_cpsat 344.0 / 1.0469,
+queens_with_obstacles 332.2 / 1.0247, max_common_subgraph 330.0 / 0.9808, rectanglepacking
+329.5 / **0.0**. That is the reference being timed in the same pass, on a cache that was cold when
+the campaign opened.
+
+Checked whether it is still live: it is not. Fresh probes evaluate node 0 in **39.2–47.1 s**
+(dsFix1 39.2, dsFix2 40.0, dsPyx 39.4, dsN3b 41.7, dsBud 47.1) against a warm 44-entry cache. The
+`in-harness` string only says the arena's record exposes no cacheable `baseline_time_ms`; it is not
+the same claim as "the reference was timed in this pass".
+
+Consequence for the statistics: any "gain over node 0" computed on the CAMPAIGN slice is inflated,
+because a fake ~1.0 node 0 is trivially beaten. §8 and §21.1 were computed on probes only and are
+unaffected; the plot report pooled both and its 1.05x should be read with this in mind.
