@@ -207,6 +207,110 @@ def token_spend_by_card(spans, card_nodes=None, ledger_total=None) -> dict:
     }
 
 
+def token_spend_by_build(spans, builds) -> dict:
+    """Price each BUILD WINDOW, and separate the ones that minted nothing.
+
+    MEASURED on `e5small-dr-unified-v9`, and it is a DIFFERENT loss from the one
+    `token_spend_by_card` reports: three of that run's twelve builds finished with
+    `card_build_done.skipped == "stale"` and NO `node_id` — card-2 31.6M, card-5 8.5M, card-3 1.2M,
+    41.4M together, 11.8 % of the run. Those builds never minted a node, so the freshness gate never
+    saw them; they are not in the 68.9M the per-card fold flags, except card-3's 1.2M.
+
+    **THE PER-CARD FOLD IS BLIND HERE IN BOTH DIRECTIONS AND THAT IS WHY THIS EXISTS.** Its
+    `wholly_discarded` needs the card to OWN a node, so card-5 — whose only build was skipped, and
+    which has been `selection_ready` ever since — shows no nodes and no flag; and card-2 reads as a
+    healthy 97.6M row while a third of that spend bought a build the engine threw away. The narrow
+    rule is still correct for the question it answers ("was every experiment this card produced
+    discarded before it ran"), so it is NOT widened: a build that minted nothing is a different
+    fact and gets its own line.
+
+    `builds` is `[{card, start, end, skipped, node_id}, ...]` from the caller, which is the only side
+    that can read the durable log — the window is a `card_build_requested` -> `card_build_done` pair
+    and `skipped` is that terminal's own field. A generation is charged to a window when its card
+    matches AND its start lies inside it; the FIRST matching window wins, stated because two windows
+    of one card could in principle overlap and a fold must be deterministic about it either way.
+
+    Returns `{rows, skipped_tokens, skipped_builds, builds, attributed, unwindowed}`. `unwindowed`
+    is every generation token that fell outside every window — `propose`, research and enrichment
+    all legitimately live there — and it is REPORTED rather than dropped, the same rule the phase
+    fold applies to `(no phase)`.
+
+    **This shares the span clock with the event log and that is an assumption, not a proof.**
+    `span["start"]` and an event's `ts` are both wall-clock seconds from the same process, which is
+    what makes the join possible at all; a tracer that ever moved to a monotonic origin would make
+    every window empty rather than wrong, which is the failure direction to prefer.
+    """
+    rows_in = [s for s in spans]
+    parents, card_of = {}, {}
+    for span in rows_in:
+        if not isinstance(span, dict):
+            continue
+        span_id = span.get("span_id")
+        if span_id is None:
+            continue
+        parents[span_id] = span.get("parent_id")
+        attributes = span.get("attributes")
+        if isinstance(attributes, dict):
+            card = attributes.get("card_id")
+            if isinstance(card, str) and card.strip():
+                card_of[span_id] = card
+
+    def _owning_card(span_id):
+        seen = 0
+        while span_id is not None and seen < _CARD_ANCESTRY_HOPS:
+            if span_id in card_of:
+                return card_of[span_id]
+            span_id = parents.get(span_id)
+            seen += 1
+        return None
+
+    windows = []
+    for b in (builds or []):
+        if not isinstance(b, dict):
+            continue
+        start, end = b.get("start"), b.get("end")
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            continue                                   # a window with no bounds prices nothing
+        windows.append({"card": b.get("card"), "start": float(start), "end": float(end),
+                        "skipped": b.get("skipped"), "node_id": b.get("node_id"),
+                        "tokens": 0, "calls": 0})
+
+    attributed = 0
+    unwindowed = 0
+    for span in rows_in:
+        if not isinstance(span, dict) or span.get("kind") != _GENERATION:
+            continue
+        attributes = span.get("attributes")
+        if not isinstance(attributes, dict):
+            attributes = {}
+        total, _prompt, _completion = _tokens_of(attributes.get("usage"))
+        attributed += total
+        start = span.get("start")
+        if not isinstance(start, (int, float)):
+            unwindowed += total                        # untimed: never guessed into a window
+            continue
+        card = _owning_card(span.get("span_id"))
+        hit = None
+        for w in windows:
+            if w["card"] == card and w["start"] <= float(start) <= w["end"]:
+                hit = w
+                break                                  # FIRST match wins, deterministically
+        if hit is None:
+            unwindowed += total
+            continue
+        hit["tokens"] += total
+        hit["calls"] += 1
+    skipped = [w for w in windows if w["skipped"]]
+    return {
+        "rows": windows,
+        "skipped_tokens": sum(w["tokens"] for w in skipped),
+        "skipped_builds": len(skipped),
+        "builds": len(windows),
+        "attributed": attributed,
+        "unwindowed": unwindowed,
+    }
+
+
 def token_spend_by_phase(spans, ledger_total=None) -> dict:
     """Fold parsed span rows into a per-phase token breakdown, reconciled against the ledger.
 

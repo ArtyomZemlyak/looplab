@@ -758,6 +758,7 @@ away. On a card-driven run the command now prints a per-card roll-up under the p
     35,324,049   10.1%     732  3,6 DISCARDED         card-3
     33,557,920    9.6%     593  4,7 DISCARDED         card-4
     10,003,845    2.9%     496  -                     (no card)
+    41,389,065   11.8%          built and SKIPPED as stale, minting no node (3 of 12 builds)
     68,881,969   19.8%          built and never evaluated (2 card(s) discarded before dispatch)
 ```
 
@@ -776,6 +777,21 @@ until this measurement, where one build is 274-458 generations.
 EVERY node it owns was proven an unevaluated discard. A card with no nodes yet is a build in flight,
 not a loss; a card with one discarded node and one that ran was evaluated, and the discarded sibling
 is the prefetch machinery working.
+
+**The two summary lines are DIFFERENT losses and must not be added up carelessly.** `never
+evaluated` is a build that minted a node which the freshness gate then discarded at dispatch.
+`SKIPPED as stale` is a build that finished with `card_build_done.skipped == "stale"` and no
+`node_id` — it never minted a node at all, so the gate never saw it. On `e5small-dr-unified-v9` only
+card-3's 1.2M is in both; net of that overlap, builds that produced no evaluation are **109.0M, 31 %
+of the run**.
+
+The stale line exists because the per-card rule is blind to it in both directions, which is exactly
+how it was found: card-5's only build was skipped, so it owns no node and carries no flag, and
+card-2 reads as a healthy 97.6M row while a third of that spend bought a build the engine threw
+away. Rather than widen `DISCARDED` — which answers a different question and answers it correctly —
+the skipped builds are priced from the durable log's own `card_build_requested` →
+`card_build_done` windows (`events/token_spend.py::token_spend_by_build`), charging a generation to
+a window only when its card matches *and* its start lies inside it.
 
 **How a card is attributed.** A generation span carries no `card_id` — the `card_build` span above it
 does — so each generation is charged to the nearest ancestor that names one (4,478 of that run's

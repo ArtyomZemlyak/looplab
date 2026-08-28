@@ -197,8 +197,8 @@ def tokens(run_dir: Path = typer.Argument(...),
     import json as _json
 
     from looplab.events.eventstore import read_jsonl_lenient_with_health
-    from looplab.events.token_spend import (CARD_UNATTRIBUTED, token_spend_by_card,
-                                            token_spend_by_phase)
+    from looplab.events.token_spend import (CARD_UNATTRIBUTED, token_spend_by_build,
+                                            token_spend_by_card, token_spend_by_phase)
 
     ev_path = run_dir / "events.jsonl"
     sp_path = run_dir / "spans.jsonl"
@@ -306,6 +306,30 @@ def tokens(run_dir: Path = typer.Argument(...),
                 nodes += " DISCARDED"
             typer.echo(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
                        f"{nodes:<21} {row['card']}")
+        # A build that minted NO node is invisible to the rule above, which needs the card to OWN
+        # one — measured on v9, that hid 40.1M tokens (card-2's first build and card-5's only one,
+        # both `skipped: stale`), while card-2's row read as a healthy 97.6M. Priced from the
+        # durable log's own `card_build_requested` -> `card_build_done` windows rather than by
+        # widening `wholly_discarded`, which answers a different question and answers it correctly.
+        builds = []
+        if state is not None:
+            open_req = {}
+            for ev in EventStore(ev_path).read_all():
+                kind = getattr(ev, "type", None) or (ev.get("type") if isinstance(ev, dict) else None)
+                data = getattr(ev, "data", None) or (ev.get("data") if isinstance(ev, dict) else None) or {}
+                ts = getattr(ev, "ts", None) or (ev.get("ts") if isinstance(ev, dict) else None)
+                cid = data.get("card_id")
+                if kind == "card_build_requested":
+                    open_req[cid] = ts
+                elif kind == "card_build_done":
+                    builds.append({"card": cid, "start": open_req.pop(cid, None), "end": ts,
+                                   "skipped": data.get("skipped"), "node_id": data.get("node_id")})
+        by_build = token_spend_by_build(rows, builds)
+        if by_build["skipped_builds"]:
+            share = (100 * by_build["skipped_tokens"] / by_card["attributed"]) if by_card["attributed"] else 0.0
+            typer.echo(f"{by_build['skipped_tokens']:>14,}  {share:>5.1f}%  {'':>6}  "
+                       f"built and SKIPPED as stale, minting no node "
+                       f"({by_build['skipped_builds']} of {by_build['builds']} builds)")
         lost = [r for r in by_card["rows"] if r["wholly_discarded"]]
         if lost:
             spent = sum(r["tokens"] for r in lost)
