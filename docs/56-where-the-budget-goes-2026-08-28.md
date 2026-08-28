@@ -325,3 +325,36 @@ evaluation to learn it, node scored 0.0, work discarded.
 
 This is mechanism evidence, not metric evidence. dsChkKc's 171.15 remains a single draw from a
 distribution that spans 10.58 to 186.33.
+
+---
+
+## 18 — AlgoTuner's "$Y remaining" is litellm's price list, not the bill — and the parity broke in ITS disfavour
+
+Verified end-to-end on the one arm-A run that has exactly one attempt, `gpt-5.6-sol` on
+edge_expansion (`AlgoTune/logs/edge_expansion_gpt-5.6-sol_20260827_135219.log`, ledger `arm=solA`):
+
+| | messages / calls | spend |
+|---|---|---|
+| AlgoTuner's own last budget line | 53 messages | **$0.9959** |
+| our meter, `cost_basis: upstream` on all 54 rows | 54 calls | **$0.5084** |
+
+Same call set, 1.3 M prompt and 14.8 k completion tokens, and a factor of 1.96 between them. The
+cause is in `AlgoTuner/models/lite_llm_model.py:180`: `_extract_cost_from_response` prefers
+`response._hidden_params.response_cost` — **litellm's own price table** — over the `usage.cost` the
+provider reported and our proxy passes through untouched. Our figure is what OpenRouter charged;
+AlgoTuner's is what litellm guessed.
+
+**The consequence is the opposite of a cost advantage.** `spend_limit` is enforced against the
+self-report, so this run stopped believing it had spent $1.00 when it had spent $0.51. Doc 55's
+headline — "the reference harness took 338.26 on test for $0.51" — is right about the money and
+WRONG about the parity it implies: arm A was not more efficient at equal spend, it was given half
+the money and still scored 338.26. That makes the gap in loop shape larger, not smaller.
+
+**What is NOT verified here, and my first attempt at it was wrong.** I tried to extend this across
+arm A by comparing each `A-<task>.log`'s final budget line against the ledger's `arm=A` rows for
+that task, and got a median ratio of 2.87 — an artefact. Arm A was relaunched, so `arm=A` rows for
+a task span EVERY attempt while the log is one attempt: edge_expansion is 447 metered calls against
+124 logged messages. The sub-agent that found this filtered the meter to the last attempt's start
+and reports the deepseek direction as inverted (self-report ~$0.99 against a metered median $1.04,
+max $2.41 on pde_heat1d) — that figure is its measurement, not one I have reproduced, and it is
+recorded as such.
