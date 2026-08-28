@@ -249,7 +249,15 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
          "declared": int,                      # declared coordinates that were comparable at all
          "applied": {key: float},              # what the carrier says each answered coordinate is
          "diverged": [{param, declared, applied, line, match}],
-         "unresolved": {key: "absent" | "ambiguous"},
+         "unresolved": {key: "absent" | "ambiguous" | "conflict"},
+                                               # `absent`/`ambiguous` are `param_carriers`' two words
+                                               # for one document's answer; `conflict` is THIS
+                                               # function's own third (UNRESOLVED_CONFLICT below) and
+                                               # means two carriers each answered once and disagreed.
+                                               # It was missing from this shape until 2026-08-28 while
+                                               # 12 rows carrying it sat in `rubertlite-dr-unified-v8`,
+                                               # so a reader keying on the documented pair dropped a
+                                               # state the record has been emitting for weeks.
          "resolved_refused": str}              # why the stronger tier did not bind, when it did not
 
     Never raises for anything a filesystem or a malformed document can do: a record may not cost a
