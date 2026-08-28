@@ -1947,6 +1947,12 @@ class Settings(BaseSettings):
     # model that never emits `done` fails cleanly with the code it wrote so far, instead of looping.
     developer_session_max_turns: int = 500
     developer_session_time_budget_s: float = 1200.0  # 20 min wall-clock per developer session
+    # Keep the Developer's stage-pipeline guidance in its system prompt. TRUE reproduces the
+    # historical text byte for byte, which `_system_body`'s contract requires for a resumed run.
+    # Turn it OFF for tasks whose eval declares a single stage: measured 2026-08-28 on AlgoTune,
+    # `declare_stages` was called 0 times across six probes while the block cost 4.8-6.0 % of each
+    # $1 run -- 5,001 characters of GPU-training advice to a role with one `score` stage.
+    developer_stage_guidance: bool = True
     # The operator-pinned developer command the plan loop runs BETWEEN steps, handing its output to
     # the next step ("" = off, and every prompt is byte-identical to what it was). This is our half
     # of doc 53 item 10: AlgoTuner re-runs the real evaluation after each accepted edit and hands its

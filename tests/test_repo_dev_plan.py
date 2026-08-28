@@ -498,10 +498,19 @@ def test_a_repo_repair_declaring_it_is_stuck_reaches_the_engine(monkeypatch):
     # because a build that wrote nothing is not a candidate. The property this test guards is
     # untouched; only the shorthand was over-specified. Both sentinels are checked so a future
     # change cannot swap one for the other silently.
+    # UPDATED 2026-08-28 (c11251a1). `empty_build_refusal` now speaks the STUCK spelling rather than
+    # the crash one -- a model that ran out of moves must not pause the RUN through the provider
+    # circuit breaker -- so a fresh implement that wrote nothing legitimately returns A stuck
+    # sentinel. The property this control guards was never "no stuck sentinel"; it is that the
+    # MODEL'S DECLARATION does not travel back from a phase that carries no stuck contract. That is
+    # what is asserted now, and it is strictly the same guard: the refusal's text is the engine's,
+    # the declaration's text is the model's, and only the second one leaking would be the defect.
     calls.clear()
     fresh = dev.implement(idea)
-    assert not is_developer_stuck(fresh), fresh
-    assert DEVELOPER_STUCK_PREFIX not in fresh
+    assert declaration not in fresh, fresh
+    assert "every fix I can think of" not in fresh, fresh
+    assert "no candidate to evaluate" in fresh, (
+        "the empty-build refusal is what a fresh session that wrote nothing must return")
 
 
 def test_the_trace_attributes_each_shipped_file_to_the_step_that_actually_wrote_it(

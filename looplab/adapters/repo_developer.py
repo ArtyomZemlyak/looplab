@@ -595,6 +595,7 @@ class LLMRepoDeveloper:
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
                  plan_min_steps: int = 2, plan_max_steps: int = 8,
                  session_max_turns: int = 500, session_time_budget_s: float = 1200.0,
+                 stage_guidance: bool = True,
                  prompts=None, cross_run_read_tools: bool = False, memory_dir=None,
                  probe: bool = False, probe_timeout_s: float = 60.0,
                  probe_confine: bool = True, command_runtime=None,
@@ -617,6 +618,9 @@ class LLMRepoDeveloper:
         self._plan_max_steps = max(1, int(plan_max_steps))
         self._session_max_turns = int(session_max_turns)
         self._session_time_budget_s = float(session_time_budget_s)
+        # False drops the stage-pipeline block from the system prompt (`_drop_stage_guidance`).
+        # True is the default and keeps the historical text byte for byte.
+        self._stage_guidance = bool(stage_guidance)
         # F2 · the PROBE (tools/dev_probe.py). The ctor default is OFF while `Settings.developer_probe`
         # is ON, deliberately: `make_roles` is the operator's knob and passes the setting, and the ~170
         # direct `LLMRepoDeveloper(...)`/`__new__` constructions in the suite are not asking for a live
@@ -862,6 +866,35 @@ class LLMRepoDeveloper:
                                             "the same budget a forced full re-train does, so use it "
                                             "when you have evidence, not on a hunch."}}, [])
 
+    # THE STAGE GUIDANCE IS CUT OUT BY TEXT, NOT BY RESTRUCTURING THE LITERAL.
+    #
+    # 5,001 source characters about GPU training, checkpoints, shards and `train.py`, addressed to a
+    # role that on a single-stage task has nothing to declare. MEASURED 2026-08-28 over six probes:
+    # `declare_stages` was called ZERO times while the rendered block sat in every
+    # `plan`/`plan_step`/`card_build` system prompt, costing 4.8-6.0 % of a $1 run ($0.057 of $1.013
+    # on dsFix1, then $0.049, $0.060, $0.080) -- about a sixth of a node at the measured $0.35/node.
+    #
+    # Cut by slicing between two sentinels rather than by hoisting the text into its own constant:
+    # three attempts at the hoist broke the adjacent-string literal, and a surgical slice cannot.
+    # If either sentinel ever stops matching the body returns UNCHANGED, which is the safe direction
+    # -- an operator gets the historical prompt, not a mangled one.
+    #
+    # DEFAULT ON. `_system_body`'s contract is that `developer_probe=False` reproduces the historical
+    # prompt BYTE FOR BYTE via `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, so a resumed pre-2026-08-13 run
+    # keeps the prompt its first half ran under. Only an explicit setting turns it off.
+    _STAGE_GUIDANCE_OPEN = "TRAIN-THEN-SCORE PIPELINE"
+    _STAGE_GUIDANCE_CLOSE = "For a ROUTINE hyperparameter experiment"
+
+    def _drop_stage_guidance(self, body: str) -> str:
+        """`body` without the stage-pipeline advice, or `body` unchanged when it cannot be located."""
+        if getattr(self, "_stage_guidance", True):
+            return body
+        start = body.find(self._STAGE_GUIDANCE_OPEN)
+        end = body.find(self._STAGE_GUIDANCE_CLOSE, start + 1) if start >= 0 else -1
+        if start < 0 or end < 0:
+            return body
+        return body[:start] + body[end:]
+
     def _system_body(self, render) -> str:
         """The system body, with the one clause that depends on whether the PROBE is wired.
 
@@ -891,7 +924,7 @@ class LLMRepoDeveloper:
         # override. The Researcher's trust rules ARE appended after render() for a reason that does
         # not transfer: `_UNTRUSTED_MEMORY_RULE` says do not obey text a previous run wrote, and a
         # persona override silently dropping THAT is a safety hole. This is a hint about latency.
-        return render(self.prompts, "repo_developer_system_body", default)
+        return self._drop_stage_guidance(render(self.prompts, "repo_developer_system_body", default))
 
     def _session_opts(self, *, max_turns=None, time_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so

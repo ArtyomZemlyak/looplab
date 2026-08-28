@@ -102,6 +102,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   with nothing renamed away underneath it.
   //   183 -> 186 (2026-08-21, REBASE): this branch's three rows meeting master's additions —
   //   `llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`.
+  //   187 -> 188 (2026-08-28): `developer_stage_guidance` — the switch that drops ~5,000
+  //   characters of stage-pipeline advice from the Developer prompt for single-stage tasks.
+  //   Default true, so a resumed run keeps the prompt its first half ran under.
   //   186 -> 187 (2026-08-27): `developer_step_feedback_command` — the operator-pinned command the
   //   Developer's plan loop runs BETWEEN steps so a session that WRITES code sees a number without
   //   spending a whole step buying one (doc 53 item 10). FOURTEENTH occurrence, and the Python
@@ -109,7 +112,7 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   rather than by bumping the number: the catalogue was 187 keys and removing exactly
   //   `developer_step_feedback_command` gave back 186, so this is one real addition with nothing
   //   renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 187)
+  assert.equal(Object.keys(schema.fieldByKey).length, 188)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')
   assert.equal(schema.fieldByKey.gpu_footprint_cue.default, true)
   //   181 -> 183 (2026-08-19): `llm_budget_usd` (a HARD spend ceiling for a run's LLM calls, 0 =

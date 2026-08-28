@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 187
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 188
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -128,7 +128,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # 2026-08-27: +`developer_step_feedback_command` (row, default ""). The between-steps measurement
 # from doc 53 item 10 — an operator-pinned command the plan loop runs for the Developer so a
 # writing session sees a number without spending a whole step on one.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "1881a113256ab47540cfc8a891f1a731db07536503be05cd8c27f1d257f454cf"
+# 2026-08-28: +`developer_stage_guidance` (row, default true). The Developer's stage-pipeline block
+# is ~5,000 characters about GPU training, checkpoints and train.py; measured over six AlgoTune runs
+# `declare_stages` was called ZERO times while the block cost 4.8-6.0 % of each $1 run. Default TRUE
+# because `_system_body` must reproduce the historical prompt byte for byte for a resumed run; the
+# operator turns it off for tasks whose eval declares one stage.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "bbcd0a3d61d098f69cf017f1d35758fb8ceded84de858d85fb586a0771686513"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

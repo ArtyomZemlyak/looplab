@@ -359,6 +359,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
             plan_max_steps=getattr(settings, "developer_plan_max_steps", 8),
             session_max_turns=getattr(settings, "developer_session_max_turns", 500),
             session_time_budget_s=getattr(settings, "developer_session_time_budget_s", 1200.0),
+            stage_guidance=bool(getattr(settings, "developer_stage_guidance", True)),
             step_feedback_command=getattr(settings, "developer_step_feedback_command", "") or "",
             cross_run_read_tools=getattr(settings, "cross_run_read_tools", False),   # PART V §22 (dev-scoped)
             memory_dir=getattr(settings, "memory_dir", None),
