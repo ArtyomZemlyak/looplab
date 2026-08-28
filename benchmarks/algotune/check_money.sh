@@ -24,8 +24,8 @@ T = time.time() - hours * 3600
 # breaker, so instead a proxy on the CURRENT code runs beside it on 8803 with its own ledger and
 # new probes are pointed there. A ledger this monitor cannot see is money it cannot reconcile,
 # which is the whole reason this list is not hard-coded to the old pair.
-for name, path in (("8801 шлюз (код от 24.08)", "meter/meter.jsonl"),
-                   ("8803 шлюз (текущий код)", "meter/meter-8803.jsonl"),
+for name, path in (("8801 шлюз", "meter/meter.jsonl"),
+                   ("8803 шлюз", "meter/meter-8803.jsonl"),
                    ("8802 openrouter", "meter/meter-gemini.jsonl")):
     p = os.path.join(root, path)
     if not os.path.exists(p):

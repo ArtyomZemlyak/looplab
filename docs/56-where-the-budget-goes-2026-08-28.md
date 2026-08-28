@@ -827,3 +827,32 @@ Two consequences worth stating. Every number metered from here on is computed by
 tree — the retry counter, the aborted-stream classification and the synthetic usage frame all
 match what the repository says they do. And the failure counts I reported all day from 8801 remain
 upper bounds, because that process still classified an aborted stream as an error.
+
+---
+
+## 28 — The ceiling moves on a SECOND task, which is what §25 said still had to be shown
+
+`dsIF` was launched on `integer_factorization` for one reason: of the twenty tasks with data on
+disk, it is the only one that has published `.pyx` champions (three) AND numbers from both campaign
+arms. §25 had just shown the pip repair is irrelevant on kcenters, where nobody compiles, so the
+open question was whether `edge_expansion` was special.
+
+| | AlgoTuner (arm A) | LoopLab campaign (arm B) | **dsIF, node 0** |
+|---|---|---|---|
+| integer_factorization | 9.763 | 9.147 | **97.6644** |
+
+Its first node ships `factor.pyx` + `setup.py`, the solver imports it (10 references), and the
+build passes — checked by compiling it here, not inferred from the score. Ten times the number
+either arm reached in the campaign, on the first node of a $1 run.
+
+Beside it, `dsFix4` node 0 on edge_expansion is **177.8392** with `edge_cut.pyx` + `setup.py`,
+also compiling — the highest FIRST node that task has produced at $1, against a previous node-0
+range of 20.36–37.55.
+
+So the effect is not a property of one task. What §25 established still holds and is the other half
+of the statement: it is a property of tasks where a compiled C extension is the winning technique,
+and kcenters — where every run of eight reaches its ceiling with numba and none has ever written a
+`.pyx` — shows nothing.
+
+Both probes are unfinished and these are train numbers on single nodes. What is settled is the
+mechanism on a second task; the size is not.
