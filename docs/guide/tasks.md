@@ -7,6 +7,60 @@ field to a `TaskAdapter` (`looplab/adapters/tasks.py`). Pass it to `looplab run`
 looplab run path/to/task.json
 ```
 
+## Writing a `goal`: what belongs in it, and what is a leak
+
+A `goal` states the OBJECTIVE and the GROUND TRUTH the agents cannot reach with their own tools.
+Everything else they must find, because a run whose goal already contains the findings is not testing
+the framework — it is replaying an answer.
+
+**Measured on `e5small-v9-task.json`, 2026-08-28.** The goal had grown to 6,409 characters over nine
+revisions. Classified line by line: **6% was the task, 70% was findings the shipped tools would have
+produced, 24% duplicated machinery that already injects the same fact.** One line had rotted into a
+falsehood — it read "this run has already measured … node 0 scored 0.758851; node 1 scored 0.764853",
+and those two numbers belong to `e5small-dr-unified-v4`, four runs earlier. The file had been copied
+forward carrying the sentence. The run reading it had a node 0 of **0.774146** — better than both
+numbers it was being told were its own.
+
+That is the failure mode a long goal always reaches: **a memo is rewritten every cycle and a goal is
+frozen**, so a goal doing the memo's job is wrong the moment the run moves.
+
+### The rule
+
+Put a fact in the goal only if it survives all four questions:
+
+1. **Can an agent read it?** Repo contents, config values, model shape, which argument a trainer
+   passes — the Developer has `read_file` / `grep` over the repo and the model directory. If the goal
+   already says "read the repo", it may not then quote the repo.
+2. **Can an agent measure it?** "Does batch 8192 fit", "how many MiB per example", "does this import"
+   — that is `dev_probe` (F2), which exists precisely so the Developer answers this against the real
+   environment instead of guessing. A measured ceiling in a goal is a spent experiment.
+3. **Can an agent look it up in the record?** Prior-run metrics, what a champion actually ran, whether
+   a recipe helped — `list_sibling_runs`, cross-run priors, `diff_nodes`, and the rendered
+   `applied_params`. Never quote another run's number; name the tool.
+4. **Does the engine already inject it?** The GPU count and per-experiment budget are stamped into the
+   prompt from the width the run launched with; the metric pattern lives in `eval.metric`; a past
+   mistake that cost hours belongs in LESSONS, which reach the repair prompt whole. A goal repeating
+   any of these is a second copy that can disagree with the first.
+
+What is left after those four is short: the objective, where the repo and the artefacts are, the data
+selector, and any **scale or comparability caveat an agent cannot derive** — the one class of claim
+worth its characters, because the tools will happily compare two numbers that were never on one
+scale.
+
+### Keep the pins honest
+
+Every `CLAIM[…] decided:` pin is checked by `python -m looplab.core.claimpin <task.json>` before a
+launch. When you delete goal text you delete its pins with it, and `claimpin` will say
+**"NO PINS AT ALL — nothing was checked here"** rather than pass silently. Do not leave it there: pin
+whatever world-facts the trimmed goal still asserts — normally the paths — and choose a predicate
+whose literal is not itself a finding.
+
+### The dense-retrieval reference goal
+
+`docs/reference/goal-dense-retrieval.md` holds the canonical version. **Change it only when the task
+itself changes**, never to hand a run a result: every addition is a hypothesis the run no longer gets
+to form.
+
 ## Common fields
 
 Every task shares these:
