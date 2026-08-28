@@ -34,6 +34,7 @@ from pathlib import Path
 
 BRIDGE = Path(__file__).resolve().parent / "looplab_eval.py"
 PROFILER = Path(__file__).resolve().parent / "looplab_profile.py"
+CHECKER = Path(__file__).resolve().parent / "looplab_check.py"
 
 SOLVER_STUB = '''from typing import Any
 
@@ -1178,6 +1179,49 @@ def main() -> int:
             # is 12.5 % of the session at its ceiling and ~0.1 % in practice, which is what makes
             # "profile freely, measure rarely" advice the model can actually follow.
             "timeout": 150.0,
+        }, {
+            "name": "check",
+            "command": [
+                interpreter, str(CHECKER),
+                "--reference", f"reference_{args.task}.py",
+                "--solver", "solver.py",
+                "--n", "3",
+            ],
+            "description": ("Run your staged solver on 3 FRESH instances and ask the reference's "
+                            "own is_solution() whether each answer is acceptable -- printing the "
+                            "rejection reason verbatim when it is not. Seconds, not minutes. It "
+                            "reports NO speedup: it answers `would this score at all`, which "
+                            "eval_train answers only after tens of seconds. Use it after every "
+                            "change that could alter what your solver RETURNS, and especially "
+                            "before trading exactness for speed."),
+            "cwd": ".",
+            # WHY THIS EXISTS, measured 2026-08-28 over three independent kcenters probes. Of the
+            # writing sessions' own `run_probe` self-checks: dsKcCtl 55 probes, of which 3 compared
+            # against the reference solve, 1 called is_solution, and 23 timed something; dsFBKc
+            # 42/3/1/13; fxKcenters 55/3/4/28. The sessions were checking SPEED, and the score is
+            # zero unless every instance validates. dsKcCtl's node 1 is the bill: it knowingly
+            # traded exactness for speed, self-checked 55 times, and the ENGINE was the first thing
+            # to say `Solution is not optimal. Found value: 33.955, Optimal value: 33.408` -- 117.9 s
+            # of evaluation to learn it, the node scored 0.0, and its work was discarded. Run
+            # against that same solver, this command reports the invalid instance in 3.7 s with the
+            # reason attached; against node 0's valid champion it reports all-valid.
+            #
+            # The reference agent has had this the whole time and it is not an instruction there but
+            # a COMMAND -- `reference [1,2,3]` and `eval_input [1,2,3]` -- so its model never writes
+            # a validation harness by hand. Ours was handed a blank `run_probe` and wrote timing
+            # loops with it.
+            #
+            # NO RULER PINNED, deliberately, exactly as `profile`. This computes no ratio and never
+            # touches the baseline cache, so it cannot warm, cool or corrupt the denominator the
+            # scorer divides by. It also generates its OWN instances rather than reading the graded
+            # split, so it cannot be mistaken for -- or quietly become -- the score.
+            "env": {},
+            # 120 s. The measured cost is dominated by the FIRST instance (import plus any JIT):
+            # 3.66 s on dsKcCtl node 1 and 2.56 s on node 0, with every later instance at 0.0002 s.
+            # A ceiling of 120 s therefore clears a normal call by ~30x and still caps a
+            # pathological one at 10 % of the 1200 s session -- cheaper than `profile`'s 150 s,
+            # which is the point: this is the one the model should reach for constantly.
+            "timeout": 120.0,
         }]} if args.full_context else {}),
         "eval": {
             # DECLARED AS A ONE-STAGE PIPELINE, not as a bare `command`, and the difference is not

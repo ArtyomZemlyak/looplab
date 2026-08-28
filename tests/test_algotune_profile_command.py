@@ -109,7 +109,7 @@ def test_the_spec_validates_as_a_repo_task(tmp_path):
     from looplab.adapters.repo_task import RepoTask
 
     task = RepoTask.model_validate(_card(tmp_path, "--deliver", "--full-context"))
-    assert [c.name for c in task.developer_commands] == ["eval_train", "profile"]
+    assert [c.name for c in task.developer_commands] == ["eval_train", "profile", "check"]
 
 
 # --------------------------------------------------------------------------- the script itself

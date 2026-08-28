@@ -111,7 +111,7 @@ def test_the_measurement_is_reachable_and_is_the_train_split(tmp_path):
     # (`AlgoTuner/utils/profiler.py`, `line_profiler` 5.0.2 in the scoring venv) and ours had no way
     # to see WHERE its time went. Pinned by `test_algotune_profile_command.py`; this test is about
     # the MEASUREMENT command, so it names it rather than indexing position 0.
-    assert [c["name"] for c in cmds] == ["eval_train", "profile"], cmds
+    assert [c["name"] for c in cmds] == ["eval_train", "profile", "check"], cmds
     argv = cmds[0]["command"]
     assert "--subset" in argv and argv[argv.index("--subset") + 1] == "train", argv
     assert "looplab_eval.py" in " ".join(argv), "it must run the SAME bridge the scorer runs"
@@ -126,7 +126,7 @@ def test_the_spec_validates_as_a_repo_task(tmp_path):
 
     spec = _build(tmp_path, "--deliver", "--full-context")
     task = RepoTask.model_validate(spec)
-    assert [c.name for c in task.developer_commands] == ["eval_train", "profile"]
+    assert [c.name for c in task.developer_commands] == ["eval_train", "profile", "check"]
 
 
 def test_an_external_array_is_described_as_an_array(tmp_path):
@@ -157,7 +157,15 @@ def test_the_test_split_stays_out_of_reach(tmp_path):
         argv = cmd["command"]
         # NOT a bare `"test" not in argv`: pytest's own tmp dir is named after this test, so that
         # spelling failed on the harness rather than on the code. The claim is about the SPLIT.
-        assert "--subset" in argv and argv[argv.index("--subset") + 1] == "train", argv
+        if "--subset" in argv:
+            assert argv[argv.index("--subset") + 1] == "train", argv
+        else:
+            # `check` names NO subset because it reads no split at all -- it regenerates its own
+            # instances from the reference task's generator. That is STRONGER than "--subset
+            # train", so it is pinned as its own claim rather than exempted from this one: a
+            # `check` that grew a subset argument would be the defect this branch exists to catch.
+            assert cmd["name"] == "check", f"unexpected command with no --subset: {cmd['name']}"
+            assert not any(str(a).startswith("--subset") for a in argv), argv
         assert not any(str(a).endswith("_test.jsonl") for a in argv), argv
 
 
@@ -222,7 +230,7 @@ def test_full_context_is_what_you_get_without_asking(tmp_path):
     goal = spec["goal"]
     assert "n = 4408" in goal, "the default no longer carries the measured size"
     assert "YOU CANNOT MEASURE" not in goal
-    assert [c["name"] for c in spec.get("developer_commands") or []] == ["eval_train", "profile"]
+    assert [c["name"] for c in spec.get("developer_commands") or []] == ["eval_train", "profile", "check"]
 
 
 def test_a_missing_split_warns_by_default_and_refuses_when_demanded(tmp_path):
