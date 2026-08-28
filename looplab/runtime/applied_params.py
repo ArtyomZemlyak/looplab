@@ -68,14 +68,21 @@ different code path ignores, an environment variable that wins over the file —
 visible to any reader of bytes. The record says which file it read and what that file said, and a
 `resolved` record says the process wrote it. Absence is silence, never a certificate.
 
-OPEN[applied-config-glob-undeclared] no task on this box declares `applied_config_glob`, so the
-`resolved` tier — the ONLY reader that can see a value the eval process settled for itself — is inert
-and every record here is `committed` authority. It is the `metric_subject` literal-path shape one
-declaration over, and the cost is measurable: `rubertlite-dr-unified-v8` node 8 declares batch 8192 /
-15 epochs, its committed carrier AGREES with the declaration, and the config the process resolved says
-4096 / 8 — a node no reading of committed bytes can ever caveat. Closing it is one line in the repo
-task's `eval.metric`, plus a run that records `authority: "resolved"` on a real node.
-proof:absent:applied_config_glob@examples
+WHY THE `resolved` TIER EARNS ITS COST (shipped 2026-08-28, retiring the
+open item `applied-config-glob-undeclared` — spelled without brackets on purpose: the scanner that
+IS the index matches the bracket form anywhere, so a closed item quoted in prose reads as an open
+one, exactly as `claimpin` cannot tell a pin from a quoted example).
+For most of this repo's life no task declared `applied_config_glob`, so this tier was inert and every
+record bound at `committed`. The cost of that was measurable: `rubertlite-dr-unified-v8` node 8
+declares batch 8192 / 15 epochs, its committed carrier AGREES with the declaration, and the config the
+process resolved says 4096 / 8 — two documents that agree with each other and are both wrong about
+what executed, on a node that scored. `examples/repo_task.json` now declares the glob and
+`tests/test_applied_config_glob_example.py` drives the shipped example end to end, asserting the
+record reaches `authority: "resolved"`; that test is the tier's live proof, not this paragraph.
+The example nests deliberately — `config.json` is flat because that is the human edit surface, the
+trainer resolves it into `train.x`, and since a declared coordinate needs two dotted parts the
+committed carrier CANNOT answer a legal declaration while the resolved one can. That asymmetry is the
+tier, and real trainers reproduce it.
 
 DECLINED[cli-vs-carrier-contradiction] a rung reporting that a stage's `--dotted.path=<n>` argv token
 contradicts the committed carrier's value for the same path. The pair is real and it is exactly the

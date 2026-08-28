@@ -818,6 +818,27 @@ repo task takes the corpus from **7 conflicted records to 0** (39 of the 42 reco
 `resolved`; 2 refuse `ambiguous`, 1 `missing`, all three falling back to `committed` with the reason
 recorded). The defaults argument is secondary to that one.
 
+**The shipped example declares one, so the tier is exercised without a GPU.** `examples/repo_task.json`
+carries `"applied_config_glob": "resolved_config.json"`, `examples/repo_example/ttrain.py` writes that
+file, and `tests/test_applied_config_glob_example.py` drives the pair end to end and asserts the record
+reaches `authority: "resolved"`. Until 2026-08-28 no task on this box declared the key at all, so this
+tier — the only reader that can see a value the eval process settled for itself — had never bound on
+anything.
+
+**Declare the glob at a config that can ANSWER a declaration, which usually means a nested one.** A
+declared coordinate needs at least two dotted parts (`declared_numeric_params`: a bare `lr` is a word,
+not a path), so a config whose keys are flat can never satisfy one and the record will bind nothing
+however correct your glob is. The example is deliberately built this way round: `config.json` is flat
+because that is the human edit surface, the trainer resolves it into `train.x`, and the committed
+carrier therefore *cannot* answer a legal declaration while the resolved one can. That asymmetry is
+the whole reason the tier exists — and it is what a real trainer does anyway, since the shape an
+operator edits is rarely the shape a framework settles.
+
+**Name a path, not a wildcard directory.** Election requires a UNIQUE match: `*.json` in the example's
+workdir matches three files and is refused `ambiguous`, falling back to `committed`. That is the same
+ceiling on guessing the resolver applies everywhere, and why
+`docs/reference/goal-dense-retrieval.md` names an exact path.
+
 **It surfaces and never refuses.** A node that cut its epochs to fit a real time budget did the right
 thing — the champion's own config says so in a comment beside the line — and must still run, still
 record its metric and still be allowed to win. What must not survive is a record attributing that
