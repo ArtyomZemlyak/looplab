@@ -4,6 +4,8 @@
 #
 # The list is not a guess: every entry is a leak this project actually had.
 set -u
+# shellcheck source=benchmarks/algotune/ours.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ours.sh"
 # OPEN[check-leaks-pinned-to-one-box] the leak checker answers "чисто" about directories it never
 # looked at, and flags the repo's own baseline cache as stale.
 # proof:`present:ROOT=/var/tmp/looplab-bench@benchmarks/algotune/check_leaks.sh`
@@ -48,7 +50,13 @@ for D in ws-A ws-B ws-armb ws-deep; do
 done
 
 echo "== 5. ЧУЖОЕ ДЕРЕВО (накопленные каталоги кандидатов и сводки)"
-N=$(ls -d "$ROOT/AlgoTune/results"/LoopLab* "$ROOT/AlgoTune/results"/diag* "$ROOT/AlgoTune/results"/recheck* 2>/dev/null | wc -l)
+N=0
+for _D in "$ROOT/AlgoTune/results"/*/; do
+  [ -d "$_D" ] || continue
+  # SOURCED predicate: this line listed three of the six spellings, so a campaign that left
+  # `REC-<pid>/` behind was reported clean and the next campaign inherited it.
+  result_dir_is_ours "$(basename "$_D")" && N=$((N + 1))
+done
 S=$(ls "$ROOT/AlgoTune/reports"/evaluate_summary.*.json 2>/dev/null | wc -l)
 [ "$N$S" != "00" ] && { say "AlgoTune/results,reports" "$N каталогов, $S сводок"; BAD=1; } || say "AlgoTune/results,reports" "чисто"
 A=$(ls "$ROOT/AlgoTune/reports/agent_summary.json" 2>/dev/null | wc -l)

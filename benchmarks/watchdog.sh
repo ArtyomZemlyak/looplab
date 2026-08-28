@@ -67,9 +67,16 @@ check_once() {
   #     comment block was already about.
   local stall_min="${WATCHDOG_STALL_MIN:-45}"
   local since; since="$(date -d "-${stall_min} minutes" +%Y-%m-%dT%H:%M:%S 2>/dev/null)"
-  local recent; recent=$(find "$ROOT"/campaign* \
+  # -maxdepth, because `-newermt` STATS EVERY FILE IT VISITS and both targets sit at a fixed depth:
+  # a lane log is `$ROOT/campaign*/A-<task>.log` (1) and a run log is
+  # `$ROOT/runs-*/<task>/run/events.jsonl` (3). Unbounded, this walked every historical campaign
+  # tree on the box plus every node workdir under them -- and arm B now plants `build/temp.linux-*/`
+  # object trees in those workdirs, so the walk grows with the very change it runs beside. Every 300 s
+  # for a 35-hour arm, on the box whose whole timing argument is that nothing else disturbs the
+  # pinned cores.
+  local recent; recent=$(find "$ROOT"/campaign* -maxdepth 1 \
       -name '*.log' -newermt "$since" 2>/dev/null | wc -l)
-  local recent_ev; recent_ev=$(find "$ROOT"/runs-* \
+  local recent_ev; recent_ev=$(find "$ROOT"/runs-* -maxdepth 3 \
       -name 'events.jsonl' -newermt "$since" 2>/dev/null | wc -l)
   recent=$((recent + recent_ev))
   local running=0; pgrep -f "campaign[.]sh" > /dev/null && running=1
@@ -104,8 +111,19 @@ check_once() {
   #
   # `owed` is task-arms with a lane LOG and no `.done` marker -- the same predicate `campaign.sh`'s
   # `final_banner` uses for "still owed". Work outstanding and no driver to do it is DEAD, not ok.
-  if [ "$running" = 0 ] && [ "$owed" -gt 0 ]; then
-    notes+=("NO campaign.sh RUNNING and $owed task-arm(s) still owed -- the campaign is DEAD, not done")
+  #
+  # AND `recent`, or this alarm is true at idle by construction. `owed` sums over EVERY discovered
+  # `campaign*` directory, and this box keeps finished and abandoned ones whose markers never move
+  # again -- the comment above says so about `campaign/` itself, and `campaign-paired/` stands at 17
+  # `.done` against 20 logs. So `owed` is permanently > 0, and every tick after the driver exits --
+  # including the normal end of an arm and the whole idle gap before the next one -- printed "the
+  # campaign is DEAD". An alarm that fires whenever nothing is running is not a signal.
+  #
+  # `recent` (logs that grew inside the stall window, already computed above) is what makes this
+  # "the driver died WHILE work was live" rather than "unfinished work exists somewhere". A campaign
+  # abandoned hours ago goes quiet, which is right: it is not news, and the operator has seen it.
+  if [ "$running" = 0 ] && [ "$owed" -gt 0 ] && [ "$recent" -gt 0 ]; then
+    notes+=("NO campaign.sh RUNNING and $owed task-arm(s) still owed, with logs still warm -- the campaign DIED, it did not finish")
   fi
   local spend
   spend=$(python3 -c "
@@ -126,7 +144,15 @@ except Exception: print('?')" 2>/dev/null)
   # So the alarm is on microseconds, and 1 s inside one interval is the line: below it the effect is
   # unmeasurable beside a 30 s evaluation, above it a timing is no longer the solver's alone.
   local thr_us; thr_us=$(awk '/throttled_usec/{print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null)
-  local prev_us; prev_us=$(cat "$ROOT/.throttled_usec" 2>/dev/null || echo "${thr_us:-0}")
+  # An EMPTY file is not a zero. `cat` SUCCEEDS on one, so the `||` fallback never ran, `prev_us`
+  # became "" and bash arithmetic reads an empty-but-set variable as 0 (`set -u` does not catch it)
+  # -- so the delta became the cgroup's THROTTLE SINCE BOOT and this alarm fired every five minutes,
+  # on a machine that was not being throttled at all. An interrupted write, a full or read-only
+  # $ROOT, or a first `echo` that failed all produce that file.
+  local prev_us; prev_us=$(cat "$ROOT/.throttled_usec" 2>/dev/null)
+  case "$prev_us" in
+    ''|*[!0-9]*) prev_us="${thr_us:-0}" ;;
+  esac
   echo "${thr_us:-0}" > "$ROOT/.throttled_usec"
   if [ -n "$thr_us" ] && [ $((thr_us - prev_us)) -gt 1000000 ]; then
     notes+=("THROTTLED $(( (thr_us - prev_us) / 1000 )) ms since the last check — a timing taken now is not the solver's alone")

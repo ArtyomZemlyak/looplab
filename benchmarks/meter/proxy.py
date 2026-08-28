@@ -271,16 +271,29 @@ class Handler(BaseHTTPRequestHandler):
         the old shape would drop a real, paid request out of the ledger -- the one thing this file
         must never do.
 
-        The two are told apart by the segment itself, not by a length count, because both forms have
-        the same number of `/` once the tail is long enough: `/m/A/t/v1/chat/completions` and
-        `/m/A/t/a3/v1/chat` both split into six. `/v1` is where the UPSTREAM path begins, so a
-        fourth segment that is not `v1` is an attempt id and a fourth segment that IS `v1` is the
-        tail. An attempt id may therefore not be spelled `v1`; `campaign.sh` spells them `a<N>`.
+        The two are told apart by WHERE THE UPSTREAM PATH BEGINS, not by a length count, because both
+        forms have the same number of `/` once the tail is long enough: `/m/A/t/v1/chat/completions`
+        and `/m/A/t/a3/v1/chat` both split into six.
+
+        The test is that the REMAINDER starts with `v1`, not merely that the fourth segment does not.
+        Those differ on a shape the repo documents: a client whose `base_url` already carries `/v1`
+        sends `/m/A/task/chat/completions`, whose fourth segment is `chat`. Reading "not v1" as "an
+        attempt id" made that request proxy to `<upstream>/completions` -- a 404 at the gateway --
+        and filed its row under `attempt="chat"`, inventing a bucket the campaign never allocated.
+        A metered call arriving on the short path must be METERED, not refused, which is exactly
+        what that shape stopped being.
+
+        An attempt id may therefore not be spelled `v1`; `campaign.sh` spells them `a<N>`, and it
+        always emits the attempt form WITH `/v1` (`$METER_BASE/m/$ARM/$T/$ATTEMPT/v1`). The residual
+        is the un-emitted `/m/A/t/a3/chat/completions` -- an attempt id with a `/v1`-less tail -- 
+        which reads as no attempt and a tail of `/a3/chat/completions`; nothing in this repo
+        produces it, and guessing would re-open the defect above.
         """
         path = self.path
         if path.startswith("/m/"):
             parts = path.split("/", 5)          # ['', 'm', arm, task, seg, rest]
-            if len(parts) >= 6 and parts[4] != "v1":
+            if (len(parts) >= 6 and parts[4] != "v1"
+                    and (parts[5] == "v1" or parts[5].startswith("v1/"))):
                 return parts[2], parts[3], parts[4], "/" + parts[5]
             if len(parts) >= 5:
                 return parts[2], parts[3], "", "/" + "/".join(parts[4:])
@@ -589,6 +602,7 @@ class Handler(BaseHTTPRequestHandler):
             # time out at nginx's 300 s read window.
             row["stream_adapted"] = True
         collected: list = []
+        answered = False        # did the CLIENT get an HTTP response? see the tail below
         try:
             resp, attempts, queued_s = self._open_upstream(req)
             row.update({"attempts": attempts, "queued_s": round(queued_s, 2)})
@@ -603,6 +617,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._fail(502, f"upstream {type(exc).__name__}: {exc}", arm, task, attempt, t0)
             return
+
+        # Read ONCE from the upstream response, before any frame is parsed: it is a property of the
+        # response, not of any frame, and re-reading it per frame would say the same thing N times.
+        _hdr_cost = _header_cost(dict(resp.headers))
 
         if not collect_for_client:
             self.send_response(resp.status)
@@ -670,7 +688,15 @@ class Handler(BaseHTTPRequestHandler):
                     if isinstance(frame, dict):
                         for ch in (frame.get("choices") or []):
                             d = ch.get("delta") or {}
-                            if d.get("content") or d.get("reasoning_content"):
+                            # `reasoning` too: `_reassemble` above reads BOTH spellings
+                            # (`reasoning_content` here, `reasoning` on an OpenRouter-shaped
+                            # gateway) and two halves of one file disagreeing about what a
+                            # reasoning delta is means a cut reasoning stream in the second
+                            # shape counts ZERO deltas, skips the estimate entirely, and is
+                            # recorded `metered: false, cost: 0.0` -- the silent under-count
+                            # the estimator exists to close.
+                            if (d.get("content") or d.get("reasoning_content")
+                                    or d.get("reasoning")):
                                 deltas += 1
                     if isinstance(frame, dict) and isinstance(frame.get("usage"), dict):
                         usage_frame_seen = True
@@ -681,6 +707,16 @@ class Handler(BaseHTTPRequestHandler):
                             model or frame.get("model", ""))
                         if usage.get("cost") is not None:
                             cost, basis = float(usage["cost"]), "upstream"
+                        elif _hdr_cost is not None:
+                            # THE GATEWAY'S OWN INVOICE, read on this route too. `_header_cost` was
+                            # consulted only in `_proxy`, so with `METER_STREAM_ADAPT=1` the very
+                            # same non-streaming call was priced by IMPUTATION while the unadapted
+                            # one was priced by the header -- a price that depends on the transport,
+                            # which is the difference the adapter exists to remove. Latent today
+                            # (this gateway emits 0.0, which `_header_cost` rightly refuses as "not
+                            # a price") and load-bearing the day it stops being.
+                            cost, basis = _hdr_cost, "upstream-header"
+                            usage["cost"] = cost
                         else:
                             cost = pin * rate_in + pout * rate_out
                             usage["cost"] = cost
@@ -748,7 +784,14 @@ class Handler(BaseHTTPRequestHandler):
                                       "completion_tokens is a FLOOR counted from forwarded deltas"},
                 }
                 if collect_for_client:
-                    collected.append(estimate)
+                    # WITHOUT `id`/`model`. `_reassemble` carries every key it does not handle from
+                    # the LAST frame that had one, so appending the estimate whole replaced the real
+                    # completion's `id` with "meter-estimate" and its `model` with whatever the
+                    # REQUEST asked for -- on exactly the cut calls that most need correlating with
+                    # the gateway's own record. Only `choices` and `usage` are wanted here; both are
+                    # handled explicitly by the reassembler.
+                    collected.append({k: v for k, v in estimate.items()
+                                      if k in ("choices", "usage")})
                 else:
                     emit(b"data: " + json.dumps(estimate).encode() + b"\n\n")
             if done_seen:
@@ -760,12 +803,39 @@ class Handler(BaseHTTPRequestHandler):
                 # exactly what it would have seen either way.
                 whole = json.dumps(self._reassemble(collected)).encode()
                 self._send(resp.status, whole, {"Content-Type": "application/json"})
+                answered = True
             else:
                 self.wfile.flush()
         except Exception as exc:  # noqa: BLE001 - a broken client must not take the server down
             row["error"] = f"{type(exc).__name__}: {exc}"
         finally:
             resp.close()
+
+        # THE ADAPTED ROUTE MUST ALWAYS ANSWER. On the streaming route the headers went out before
+        # the loop, so a mid-stream failure still leaves the client a truncated body it can salvage.
+        # On this route nothing has been written yet and `_send` lives inside the `try`, so an
+        # upstream reset or a decode error returned with NO status line at all: a keep-alive client
+        # (httpx/litellm pool every one of them) blocks until its own timeout, while the ledger
+        # records the call as a 200. Driven 2026-08-25 against an upstream that resets mid-chunk.
+        #
+        # The partial reassembly is sent rather than a bare 502 whenever any frame arrived, because
+        # preserving a cut generation is what this adapter is FOR -- discarding it here would repeat,
+        # one layer down, the loss `core/llm.py`'s stream salvage was written to stop.
+        if collect_for_client and not answered:
+            try:
+                if collected:
+                    partial = self._reassemble(collected)
+                    for _ch in (partial.get("choices") or []):
+                        _ch["finish_reason"] = STREAM_TRUNCATED_FINISH_REASON
+                    self._send(200, json.dumps(partial).encode(),
+                               {"Content-Type": "application/json"})
+                else:
+                    self._send(502, json.dumps({"error": {
+                        "message": row.get("error") or "upstream stream failed before any frame",
+                        "type": "meter_stream_failed"}}).encode(),
+                        {"Content-Type": "application/json"})
+            except Exception:  # noqa: BLE001 - the socket may already be gone; the row still lands
+                pass
 
         latency_ms = round((time.time() - t0) * 1000, 1)
         row.update({"status": resp.status, "latency_ms": latency_ms, "prompt_tokens": pin,

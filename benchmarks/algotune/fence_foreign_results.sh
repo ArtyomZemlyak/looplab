@@ -32,6 +32,10 @@
 # restores from the HOLDING DIRECTORY rather than from `$STATE`, so losing the record never means
 # losing the data.
 set -u
+# The ours-vs-foreign predicate is SOURCED, not spelled here: this file used to carry it twice,
+# so `check` verified the fence with its own second copy of the fence's rule.
+# shellcheck source=benchmarks/algotune/ours.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ours.sh"
 AT=${FENCE_ALGOTUNE_ROOT:-/var/tmp/looplab-bench/AlgoTune}
 STATE=${FENCE_STATE:-/var/tmp/looplab-bench/.foreign_results_moved}
 HOLD=${FENCE_HOLD:-/var/tmp/looplab-bench/.foreign_results_held}
@@ -60,7 +64,7 @@ case "${1:-}" in
     for D in "$AT/results"/*/; do
       [ -d "$D" ] || continue
       B="$(basename "$D")"
-      case "$B" in LoopLab*|diag*|recheck*|REC-*|RuleCheck-*|CTL*) continue ;; esac
+      result_dir_is_ours "$B" && continue
       printf '%s\n' "$B" >> "$STATE"
       mkdir -p "$HOLD"
       mv "$D" "$HOLD/$B"; n=$((n+1))
@@ -83,11 +87,23 @@ case "${1:-}" in
     rm -f "$STATE"
     ;;
   check)
+    # A TREE THAT IS NOT THERE IS NOT A CLEAN ONE. Without this, a wrong or misspelled
+    # `FENCE_ALGOTUNE_ROOT` -- the default points at one box's absolute path -- printed "all foreign
+    # result directories are closed" and exited 0 while 2,831 other models' finished solutions sat
+    # unfenced wherever the checkout really is. A verifier that passes about a directory it never
+    # found is worse than no verifier: it is the one command an operator runs to be told it is safe
+    # to start. Same class as `check_leaks.sh`'s own recorded defect ("answers clean about
+    # directories it never looked at").
+    if [ ! -d "$AT/results" ]; then
+      echo "CANNOT CHECK: no results directory at $AT/results" >&2
+      echo "  (set FENCE_ALGOTUNE_ROOT to the AlgoTune checkout both arms are pointed at)" >&2
+      exit 2
+    fi
     bad=0
     for D in "$AT/results"/*/; do
       [ -d "$D" ] || continue          # unmatched glob is a literal `*`, not a foreign directory
       B="$(basename "$D")"
-      case "$B" in LoopLab*|diag*|recheck*|REC-*|RuleCheck-*|CTL*) continue ;; esac
+      result_dir_is_ours "$B" && continue
       echo "  STILL PRESENT: $B"; bad=1
     done
     # "STILL PRESENT", not "READABLE": the shipped design MOVES the directories aside, so what a
