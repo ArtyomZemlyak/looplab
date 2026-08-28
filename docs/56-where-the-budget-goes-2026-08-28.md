@@ -856,3 +856,24 @@ and kcenters — where every run of eight reaches its ceiling with numba and non
 
 Both probes are unfinished and these are train numbers on single nodes. What is settled is the
 mechanism on a second task; the size is not.
+
+**28.1 — replicated on the second task: n=2, both from a working extension on node 0.**
+
+| integer_factorization | AlgoTuner (arm A) | LoopLab campaign (arm B) | dsIF node 0 | dsIF2 node 0 |
+|---|---|---|---|---|
+| test / train | 9.763 | 9.147 | **97.6644** | **180.1625** |
+| shipped | — | — | `factor.pyx` (10 imports) | `rho64.pyx` (6 imports) |
+| build verified here | — | — | compiles | compiles |
+
+Both extensions were compiled by hand on a lane before either number was written down, so neither
+is a dsFix3-style dead file. Ten to twenty times what either arm reached in the campaign, on the
+FIRST node of a $1 run, twice independently.
+
+Together with dsFix4's 177.8392 on edge_expansion — also node 0, also a compiling `edge_cut.pyx`
+— the pattern across the two extension-rewarding tasks is now four first-nodes in a row above
+anything the old stack produced on them.
+
+Limits unchanged and repeated because they matter: these are train numbers on single nodes of
+unfinished runs, and §25 still bounds the claim to tasks where a compiled extension is the winning
+technique. The task set with data on disk is twenty, and `integer_factorization` was the only
+untried member of that class — further evidence has to come from replicates, not from new tasks.
