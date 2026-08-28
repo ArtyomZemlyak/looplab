@@ -759,3 +759,24 @@ One thing the third run does support: **no source inlining**. dsFix3 wrote a rea
 where dsN3 embedded ~90 lines of Cython in a `_KERNEL_SRC` string to hedge against companions not
 being submitted. That is the behaviour `c52bcb00`'s card clause was added for, at n=1 and with the
 run unfinished.
+
+**22.2 — the contamination was still biasing measurements, including mine, and the venv is now
+clean.** Comparing two compiled kernels on the same task — dsFix1's node 1 at 106.9037 against
+dsFix3's node 0 at 27.9939 — I timed both with `looplab_check.py` and got 0.0003 s against 0.39 s,
+a factor of 1,300. That number is **not reportable**: `solver_ext`, dsFix1's module, was installed
+in the shared venv (10:46, before `d439c966`), so its import resolved to a compiled binary, while
+`solver_cy` was not there. I compared a compiled import against something else. The arithmetic gave
+it away before the cause did — at 0.39 s per solve a candidate would be SLOWER than the ~43.9 ms
+reference and score below 1.0, not 27.99.
+
+The live risk was worse than the spoiled comparison. Of 27 module names imported by probe solvers,
+**four collided with the installed set** — `_fast_cut`, `edge_cut`, `edgecut`, `solver_ext` — and
+`dsN3b`, running at the time, imports `_fast_cut` and `edgecut`. A rebuild with a changed signature
+would have hit exactly the ds3 failure on a live run.
+
+All five candidate modules (`_fast_cut`, `edge_cut`, `edgecut`, `solver_ext`, `edge_flatten`) are
+quarantined out of `site-packages`, which now holds only genuine third-party extensions. Future
+evaluations install into their per-invocation `PIP_TARGET`, so nothing replaces them. All four
+probes survived; no `node_failed` and no `pause` appeared. One correction to my own procedure: I
+labelled the check "no evaluation in flight" when the grep had in fact matched one 18 seconds old.
+It survived, and the label was still wrong.
