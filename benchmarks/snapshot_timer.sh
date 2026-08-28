@@ -53,8 +53,19 @@ case "${1:-status}" in
       cur="$(fingerprint)"
       if [ "$cur" != "$last" ]; then
         echo "[$(date +%H:%M:%S)] change detected, snapshotting"
+        # `${PIPESTATUS[0]}`, because the `sed` that indents the output is what `$?` would report.
+        # And `last` advances ONLY on success: `snapshot.sh` exits 1 for a snapshot that is short of
+        # a source, and remembering the fingerprint of a run it could not archive means the timer
+        # sits quiet until something ELSE changes -- so the one measurement that failed to be
+        # archived is the one nobody retries.
         "$HERE/snapshot.sh" 2>&1 | sed 's/^/    /'
-        last="$cur"
+        snap_rc=${PIPESTATUS[0]}
+        if [ "$snap_rc" = "0" ]; then
+          last="$cur"
+        else
+          echo "    (snapshot exited $snap_rc -- NOT recording this fingerprint, so the next tick"
+          echo "     tries again rather than treating an incomplete archive as done)"
+        fi
       else
         echo "[$(date +%H:%M:%S)] nothing new since the last snapshot; skipping"
       fi

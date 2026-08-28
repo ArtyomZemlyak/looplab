@@ -1926,12 +1926,11 @@ class OpenAICompatibleClient:
         stamp, bounded by `tracing._TRACE_TEXT_CAP` (64,000 chars) like every other traced text.
         """
         thinking, answer = _clean_thinking(msg.get("content") or "", _reasoning_of(msg))
-        # OPEN[llm-stamp-lost-line-continuation] one ~150-col line where a ` \` continuation was
-        # meant. proof:line:_assistant_text&&.usage(usage)@looplab/core/llm.py
-        # REVIEW 2026-08-25 (style): the run of spaces mid-chain is a dropped backslash-newline --
-        # the sibling stamp in `chat`'s success path splits this exact chain over two lines. Valid
-        # Python, but it overflows the ~100-col house style and reads as a merge artifact; re-split.
-        gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking)            .usage(usage).cost(_usage_cost(usage)).error(reason)
+        # Split over two lines like the sibling stamp in `chat`'s success path: the run of spaces
+        # mid-chain that used to sit here was a dropped ` \` continuation, valid Python that read as
+        # a merge artifact at ~150 columns.
+        gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking) \
+           .usage(usage).cost(_usage_cost(usage)).error(reason)
 
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:
         tool = {"type": "function",

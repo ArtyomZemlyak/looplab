@@ -159,24 +159,15 @@ nav:
       - Claim surfaces root cause (2026-08-20): 45-claim-surfaces-2026-08-20.md
       - Early-stop blind classes (2026-08-20): 48-early-stop-blind-classes-2026-08-20.md
       - Day report (2026-08-21): 49-day-report-2026-08-21.md
-      # OPEN[mkdocs-nav-stale-rows-and-unquoted-colons] this file does not PARSE, so the CI docs
-      # deploy fails outright. proof:present:43-benchmark-landscape@mkdocs.yml
-      # REVIEW 2026-08-25 (correctness): two independent defects in the five rows below, verified
-      # 2026-08-25 with `yaml.safe_load` (ScannerError: "mapping values are not allowed here",
-      # line 163 col 53). (1) The two "AlgoTune arm" / "Bench box" titles carry a SECOND colon
-      # inside an unquoted key, which YAML refuses -- quote those titles. (2) The first two of the
-      # five rows are stale pre-renumber leftovers pointing at doc numbers 43/44, whose real files
-      # on this branch are the operator-list audit and the text-may-nominate doc -- the correct
-      # 50/51/52 rows sit right below them, so even after quoting, `mkdocs build --strict` (CI per
-      # CLAUDE.md: broken doc links fail the deploy) refuses the two dead nav targets. Delete the
-      # two stale rows, quote the two colon-bearing titles. Nothing in the suite guards mkdocs.yml
-      # (test_documentation_contracts checks 00-INDEX.md only); a one-line YAML-parse +
-      # nav-targets-exist test would have made both defects a red test instead of a broken deploy.
-      - Benchmark landscape + local plan (2026-08-19): 43-benchmark-landscape-and-local-plan-2026-08-19.md
-      - AlgoTune arm: operational notes (2026-08-20): 44-algotune-arm-operational-notes-2026-08-20.md
+      # A title carrying a SECOND colon must be QUOTED: unquoted, YAML reads the first `: ` as the
+      # mapping separator and the rest as another one, which is a ScannerError and takes the whole
+      # CI docs deploy with it. The 43/44 rows that used to sit above these were pre-renumber
+      # leftovers naming files this branch does not have (the real 43/44 are the operator-list audit
+      # and the text-may-nominate doc), so `mkdocs build --strict` refused them as dead nav targets
+      # even once the file parsed.
       - Benchmark landscape + local plan (2026-08-19): 50-benchmark-landscape-and-local-plan-2026-08-19.md
-      - AlgoTune arm: operational notes (2026-08-20): 51-algotune-arm-operational-notes-2026-08-20.md
-      - Bench box: JupyterHub + L40S (2026-08-20): 52-bench-box-jhub-l40s-2026-08-20.md
+      - "AlgoTune arm: operational notes (2026-08-20)": 51-algotune-arm-operational-notes-2026-08-20.md
+      - "Bench box: JupyterHub + L40S (2026-08-20)": 52-bench-box-jhub-l40s-2026-08-20.md
       - External-works synergy (2026-08-14): 41-external-works-synergy-2026-08-14.md
       - Pre-chewed evidence survey (2026-08-14): 42-pre-chewed-evidence-survey-2026-08-14.md
       - Mega-review of the 4-day window (2026-08-13): 40-mega-review-2026-08-13.md

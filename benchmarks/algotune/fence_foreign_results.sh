@@ -17,21 +17,20 @@
 # inside a candidate. No agent has done it and nothing suggests either would — but a benchmark that
 # relies on nobody thinking of something is not measuring what it claims to.
 #
-# So: mode 000 for the duration, restored afterwards. Not moved, because the fork tracks all 2,831
-# files and a moved tree would no longer be the commit the campaign names. `CapEff` is 0 in this
-# container, so the owner bits are enforced against us too — checked, not assumed.
+# So: MOVED ASIDE into `$HOLD` for the duration, and moved back afterwards.
 #
-# OPEN[fence-header-describes-abandoned-design] the paragraph above is the ABANDONED design: the
-# code below MOVES the directories.
-# proof:`present:So: mode 000 for the duration@benchmarks/algotune/fence_foreign_results.sh`
-# REVIEW 2026-08-25 (correctness): the chmod design was replaced because mode 000 killed the
-# evaluator's own results/ walk (commit "the fence must hide foreign work without blinding the
-# ruler"), and `close` now does `mv` into $HOLD -- so the header asserts the exact opposite of the
-# behaviour, INCLUDING the rationale ("Not moved, because ...") for the provenance property the
-# current code deliberately gives up (a closed fence leaves the fork's `git status` showing 2,831
-# deletions -- worth stating, since the header currently promises it away). `check`'s "SOME ARE
-# READABLE" wording is chmod-era too. Rewrite the header to the move design; the commit message's
-# text is accurate and can be lifted.
+# `chmod 000` was the first design and it took a live campaign down within half an hour: the arena's
+# own `scripts/evaluate_results.py` discovers work by iterating EVERY directory under `results/`, so
+# the first unreadable one raises `PermissionError` and the evaluator dies before it writes
+# `evaluate_summary.json` — two task-arms scored 0.0 in 0.1 s and it read as a solver fault. A fence
+# has to hide the foreign work WITHOUT blinding the ruler, and only the move does both
+# (`tests/test_algotune_fence_keeps_results_walkable.py` asserts each obligation separately).
+#
+# WHAT THE MOVE COSTS, stated rather than promised away: while the fence is closed the fork's
+# `git status` shows all 2,831 tracked files as deletions, so a `git` operation taken mid-campaign
+# sees a tree that is not the commit the campaign names. `open` restores them exactly, and it
+# restores from the HOLDING DIRECTORY rather than from `$STATE`, so losing the record never means
+# losing the data.
 set -u
 AT=${FENCE_ALGOTUNE_ROOT:-/var/tmp/looplab-bench/AlgoTune}
 STATE=${FENCE_STATE:-/var/tmp/looplab-bench/.foreign_results_moved}
@@ -53,19 +52,13 @@ case "${1:-}" in
     done
     held=$(wc -l < "$STATE")
     n=0
-    # OPEN[fence-close-unmatched-glob-fabricates-a-close] with results/ holding no directories, the
-    # unmatched glob is processed as a literal `*` entry.
-    # proof:`absent:-d "$D"@benchmarks/algotune/fence_foreign_results.sh`
-    # REVIEW 2026-08-25 (correctness): `set -u` does not set nullglob, so an empty results/ leaves
-    # `$D` as the literal pattern; `basename` yields `*`, which no skip pattern matches, so the
-    # loop records a `*` row in $STATE, `mv` errors on stderr, and it prints "closed 1 foreign
-    # result directories" about nothing. Driven 2026-08-25 against an empty results/. The realistic
-    # trigger is the exact double-close the idempotence comment above documents the driver doing
-    # (everything already held, no LoopLab* dirs yet); `check` has the same unguarded glob and then
-    # reports "STILL PRESENT: *" and exits 1 on a fresh checkout. Fix: guard both loops with a
-    # directory-exists test on `$D` (the held-restore loop above already does exactly that for its
-    # own glob), and the fabricated close and false alarm both disappear.
+    # `[ -d "$D" ] || continue` FIRST, exactly as the held-restore loop above does: `set -u` does
+    # not set nullglob, so an empty `results/` leaves `$D` as the literal pattern, `basename` yields
+    # `*`, no skip pattern matches it, and the loop recorded a `*` row in $STATE, errored on `mv`
+    # and then printed "closed 1 foreign result directories" about nothing. The realistic trigger is
+    # the double-close the idempotence note above documents the driver doing.
     for D in "$AT/results"/*/; do
+      [ -d "$D" ] || continue
       B="$(basename "$D")"
       case "$B" in LoopLab*|diag*|recheck*|REC-*|RuleCheck-*|CTL*) continue ;; esac
       printf '%s\n' "$B" >> "$STATE"
@@ -92,11 +85,14 @@ case "${1:-}" in
   check)
     bad=0
     for D in "$AT/results"/*/; do
+      [ -d "$D" ] || continue          # unmatched glob is a literal `*`, not a foreign directory
       B="$(basename "$D")"
       case "$B" in LoopLab*|diag*|recheck*|REC-*|RuleCheck-*|CTL*) continue ;; esac
       echo "  STILL PRESENT: $B"; bad=1
     done
-    [ "$bad" = "0" ] && echo "all foreign result directories are closed" || echo "SOME ARE READABLE"
+    # "STILL PRESENT", not "READABLE": the shipped design MOVES the directories aside, so what a
+    # failure means here is that they are still in `results/` — not that their mode bits are open.
+    [ "$bad" = "0" ] && echo "all foreign result directories are closed" || echo "SOME ARE STILL PRESENT"
     exit $bad
     ;;
   *) echo "usage: $0 close|open|check"; exit 2 ;;

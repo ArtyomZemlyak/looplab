@@ -696,7 +696,11 @@ def main() -> int:
             shutil.copy2(extra, dest_dir / extra.name)
             _submitted.append(extra.name)
     build_note = ""
-    if any(n.endswith((".pyx", ".pyi")) for n in _submitted) or "setup.py" in _submitted \
+    # `.pxd`, not `.pyi`. A `.pyi` is a TYPE STUB — `setup.py build_ext` has nothing to do with one
+    # — while `.pxd` is Cython's own header and is exactly what a `.pyx` submission brings with it.
+    # The typo made the trigger fire on a stub (spawning a build with no `setup.py`, whose rc=2 was
+    # then recorded as a "failed" build) and miss a `.pxd`-only submission.
+    if any(n.endswith((".pyx", ".pxd")) for n in _submitted) or "setup.py" in _submitted \
             or "pyproject.toml" in _submitted:
         cmd = [sys.executable, "setup.py", "build_ext", "--inplace"]
         try:
@@ -751,48 +755,42 @@ def main() -> int:
     # or changes during the run means the reference was measured here, which means the number below
     # is not about the candidate. `_emit` is told to refuse it rather than print it.
     #
-    # OPEN[baseline-guard-blind-in-serial-regime] the refusal this branch was built around cannot
-    # fire in the campaign's own mandated configuration.
-    # proof:present:glob(f"{args.task}__{subset}__*.json")@benchmarks/algotune/looplab_eval.py
-    # REVIEW 2026-08-25 (correctness): three defects in this one fingerprint, worst first.
-    # (1) THE GLOB NEVER MATCHES A SERIAL-REGIME CACHE FILE. `patch_baseline_cache.py` writes the
-    # per-instance timings as `<task>__<subset>.json` when workers <= 1 (its `_ll_regime` is the
-    # EMPTY string then, and the regime suffix only appears at w>1), while this glob demands a
-    # literal `__` plus a third segment after the subset. Driven 2026-08-25: a dir holding
-    # `discrete_log__test.json` and `discrete_log__test__w22x1.json` matches ONLY the second.
-    # docs/51 SS10 mandates serial ("leave ALGOTUNE_EVAL_WORKERS unset ... every campaign so far is
-    # serial") and campaign.sh sets nothing -- so on every mandated campaign both fingerprints are
-    # {} and compare equal, node 0's cold train baseline sails through unguarded, and the champion's
-    # one TEST scoring (always the first test-subset eval, therefore always cold) records exactly
-    # the plausible ~1.0 reference-vs-itself artifact the HEAD commit says "cost eight of this
-    # campaign's twenty final numbers". The guard's own test never sees this: its fixture
-    # hand-writes three-segment names (`t__test__w22x1r3.json`), i.e. the live box's divergent
-    # naming, not what the repo's own patch produces.
-    # (2) THE WATCHED DIRECTORY IS THE WRONG CLONE in the documented two-clone workflow:
-    # `patch_baseline_cache.py` bakes its cache dir at PATCH time (default: beside the patch script
-    # that ran, docs/52 SS6 runs it from the working clone) while `DEFAULT_TIMES_DIR` here resolves
-    # beside THIS file at run time (docs/51 SS7 runs the campaign from the pinned `looplab-armb`
-    # clone) -- two different `.baseline_times`, nothing passes `--baseline-times-dir`, nothing
-    # checks the pairing, so even at w>1 the guard can fingerprint a directory the arena never
-    # writes.
-    # (3) THE CLOSURE READS A VARIABLE THAT IS REASSIGNED BETWEEN ITS TWO CALLS: `subset` can be
-    # rewritten by `subset_from_stderr` after the run (the `subset_mismatch` case), so the
-    # before-glob and after-glob then cover DIFFERENT splits and the refusal fires with a fabricated
-    # explanation -- `timings_written` lists files that existed all along (or claims "(existing file
-    # changed)" about nothing) beside a `subset_evidence` that already states the real problem.
-    # Refusing on a mismatch is the right direction; lying about why is not.
-    # Fix direction: derive ONE `times_key = f"{task}__{subset}"` before the run and glob
-    # `<that>*.json` (matches both the bare serial spelling and every regime suffix) in both
-    # fingerprints; read the cache dir out of the patched `baseline_manager.py` (or refuse when the
-    # watched dir does not match the patch's embedded one); and give campaign.sh a re-score path for
-    # a refused champion pass, since `record_done` writes the marker regardless and
-    # `already_measured` will never re-run it. The refusal branch itself is also the one part of
-    # this mechanism no test executes -- see the annotation in
-    # tests/test_algotune_refuses_baseline_measured_in_pass.py.
+    # OPEN[baseline-guard-watches-the-wrong-clone] in the documented two-clone workflow this
+    # fingerprints a `.baseline_times` the arena never writes.
+    # proof:absent:--baseline-times-dir@benchmarks/algotune/campaign.sh
+    # REVIEW 2026-08-25 (correctness): `patch_baseline_cache.py` bakes its cache dir at PATCH time
+    # (default: beside the patch script that ran, docs/52 SS6 runs it from the working clone) while
+    # `DEFAULT_TIMES_DIR` here resolves beside THIS file at RUN time (docs/51 SS7 runs the campaign
+    # from the pinned `looplab-armb` clone). Nothing passes `--baseline-times-dir` and nothing checks
+    # the pairing, so the guard can fingerprint a directory nothing writes and stay silent. The glob
+    # and the reassigned-`subset` closure were fixed 2026-08-25; this half needs the cache dir read
+    # out of the patched `baseline_manager.py` (or a refusal when the watched dir does not match the
+    # patch's embedded one). Its companion: `campaign.sh` has no re-score path for a refused
+    # champion pass -- `record_done` writes the marker regardless and `already_measured` never
+    # re-runs it -- and the refusal BRANCH itself is executed by no test (see the annotation in
+    # tests/test_algotune_refuses_baseline_measured_in_pass.py).
+    # ONE KEY, FIXED BEFORE THE RUN, and a glob that matches what the patch really writes.
+    #
+    # `patch_baseline_cache.py` names a per-instance cache `<task>__<subset>[__<regime>].json`, and
+    # its regime segment is the EMPTY string whenever workers <= 1 — which docs/51 SS10 mandates and
+    # `campaign.sh` never overrides, so on every campaign run to date the file is the bare
+    # `<task>__<subset>.json`. The old pattern demanded a literal `__` plus a third segment, so it
+    # matched NOTHING in the serial regime: both fingerprints were `{}`, compared equal, and the
+    # reference-timed-in-pass refusal — the whole point of this block — could not fire on the one
+    # configuration the campaign actually runs. `*` after the subset matches both spellings.
+    #
+    # And `_times_key` is bound HERE rather than read out of `subset` at call time: `subset` is
+    # REASSIGNED after the run by `subset_from_stderr` (the `subset_mismatch` case), so a closure
+    # over it made the before-glob and the after-glob cover DIFFERENT splits and produced a refusal
+    # whose `timings_written` listed files that had existed all along. Refusing on a mismatch is
+    # right; explaining it with a fabricated cause is not, and `subset_evidence` already states the
+    # real one.
+    _times_key = f"{args.task}__{subset}"
+
     def _baseline_fingerprint() -> dict:
         try:
             return {f.name: (f.stat().st_mtime_ns, f.stat().st_size)
-                    for f in args.baseline_times_dir.glob(f"{args.task}__{subset}__*.json")}
+                    for f in args.baseline_times_dir.glob(f"{_times_key}*.json")}
         except OSError:
             return {}
 
@@ -837,6 +835,21 @@ def main() -> int:
 
     out: dict[str, Any] = {"speedup": 0.0, "eval_seconds": elapsed, "subset": subset,
                            "subset_evidence": subset_evidence}
+    # WHAT WAS SUBMITTED AND WHETHER IT BUILT, on the record rather than only on stderr.
+    #
+    # `build_note` used to be printed and then dropped, so a `setup.py build_ext` that FAILED was
+    # invisible in the JSON and the run continued to the arena, where the solver's `import fast`
+    # died and the verdict came back `solver_unloadable` — a reason `compare_arms.py` classifies as
+    # SOLVERS_FAULT and averages into arm B's mean as a real 0.0. The build is OUR step (this bridge
+    # invokes it), so a reader has to be able to tell "the candidate's extension would not compile"
+    # from "the candidate's python would not import", and one of those is upstream of the other.
+    # Nested for `json_line_extras`' reason: a top-level numeric key here would be swept into the
+    # node's `extra_metrics` as an undeclared `auto` measurement.
+    # Only when there is something to say: a one-file submission that needed no build adds no key,
+    # so the single-solver path keeps the exact shape `test_a_real_speedup_is_untouched` pins.
+    if _submitted or build_note:
+        out["submission"] = {"files": _submitted, "build_ran": bool(build_note),
+                             "build": build_note or "not needed (no .pyx/.pxd/setup.py submitted)"}
 
     if not summary.exists():
         out["error"] = "evaluate_summary.json not produced"

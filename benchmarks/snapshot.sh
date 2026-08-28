@@ -49,27 +49,27 @@ fi
 # so a snapshot that copied nothing at all still printed PROVENANCE.txt and exited 0, and
 # `campaign.sh`'s `|| echo "(snapshot failed...)"` could never fire. An archive that is silently
 # empty is worse than no archive: it is one somebody will restore from.
-MISSING=0
-# OPEN[snapshot-copy-failure-reads-as-success] a cp that dies mid-archive still exits 0 and claims
-# a complete snapshot.
-# proof:`present:cp -r "$1" "$OUT/" 2>/dev/null && echo@benchmarks/snapshot.sh`
-# REVIEW 2026-08-25 (correctness): only a MISSING SOURCE counts into the partial-snapshot tally; a
-# failed copy (its stderr discarded) is silently ignored -- the `&& echo` prints nothing, the
-# counter stays 0, the completeness check passes and the script exits 0, so campaign.sh's
-# "(snapshot failed...)" arm can never fire for it and snapshot_timer records the fingerprint as
-# archived. The destination is the geesefs S3 FUSE mount, where a transient error or ENOSPC
-# mid-`cp` is the ordinary failure -- producing exactly the artifact the comment above calls the
-# worst outcome ("an archive that is silently empty is worse than no archive: it is one somebody
-# will restore from"); the 2026-08-23 fix closed only the missing-source half. Secondary: the
-# prune below runs BEFORE the completeness check, so an incomplete snapshot still deletes the
-# oldest complete one. Fix: on cp failure print a COPY FAILED line, bump the same counter, and
-# keep cp's stderr; prune only after the check passes.
+# A FAILED COPY COUNTS THE SAME AS A MISSING SOURCE, and until 2026-08-25 only the second did. The
+# `cp` discarded its stderr and its status: the `&& echo` printed nothing, the counter stayed 0, the
+# completeness check below passed and the script exited 0 -- so `campaign.sh`'s
+# `|| echo "(snapshot failed...)"` arm could never fire for it and `snapshot_timer.sh` recorded the
+# fingerprint as archived. The destination is the geesefs S3 FUSE mount, where a transient error or
+# an ENOSPC part-way through a recursive copy is the ORDINARY failure, not an exotic one -- and it
+# produces exactly the artifact this header calls the worst outcome. `cp`'s own stderr is kept for
+# the same reason: "COPY FAILED" without the errno sends the operator back to the mount to guess.
+SHORT=0
 copy() {  # $1 = path under $SRC (or absolute), $2 = label
   if [ ! -e "$1" ]; then
     echo "  MISSING              $2 -- $1 does not exist, so it is NOT in this snapshot"
-    MISSING=$((MISSING + 1)); return 0
+    SHORT=$((SHORT + 1)); return 0
   fi
-  cp -r "$1" "$OUT/" 2>/dev/null && echo "  $2 $(du -sh "$OUT/$(basename "$1")" | cut -f1)"
+  if cp -r "$1" "$OUT/"; then
+    echo "  $2 $(du -sh "$OUT/$(basename "$1")" | cut -f1)"
+  else
+    echo "  COPY FAILED          $2 -- cp exited non-zero (see its error above); this snapshot is"
+    echo "                       SHORT of $1 and whatever it managed to write is PARTIAL"
+    SHORT=$((SHORT + 1))
+  fi
 }
 copy "$SRC/AlgoTune/reports"                     "reports              "
 copy "$SRC/looplab/benchmarks/algotune/.baseline_times" "baseline_times       "
@@ -93,7 +93,7 @@ for D in "$SRC"/campaign*; do
 done
 if [ "$FOUND_CAMPAIGN" = 0 ]; then
   echo "  MISSING              no $SRC/campaign* directory -- NO campaign markers or scores archived"
-  MISSING=$((MISSING + 1))
+  SHORT=$((SHORT + 1))
 fi
 
 # 3. Which commit of OUR repo produced them, and what the box looked like.
@@ -105,17 +105,24 @@ fi
 } > "$OUT/PROVENANCE.txt"
 cat "$OUT/PROVENANCE.txt"
 
+# The EXIT CODE is the claim. Anything this snapshot could not copy -- absent, or attempted and
+# failed -- makes it a partial one, and the caller (`campaign.sh`, `snapshot_timer.sh`) is the only
+# place left that can say so out loud.
+#
+# ASKED BEFORE THE PRUNE, deliberately. The prune deletes the OLDEST snapshot to make room for this
+# one, and doing that first traded a complete archive for an incomplete one -- on a mount where the
+# failure that produces an incomplete one (ENOSPC) is also the failure that makes the prune look
+# like the fix.
+if [ "$SHORT" -gt 0 ]; then
+  echo "  INCOMPLETE SNAPSHOT: $SHORT source(s) missing or unwritable (listed above). Do not restore"
+  echo "  from this one without checking what it is short of, and NOTHING has been pruned to make"
+  echo "  room for it -- the older, complete snapshots are still there."
+  exit 1
+fi
+
 # Keep the last N snapshots; the measurements accumulate and the mount is shared.
 KEEP="${SNAPSHOT_KEEP:-8}"
 ls -1d "$DEST"/2* 2>/dev/null | head -n -"$KEEP" | while read -r old; do
   echo "  pruning $old"; rm -rf "$old"
 done
-
-# The EXIT CODE is the claim. Anything this snapshot could not copy makes it a partial one, and the
-# caller (`campaign.sh`, `snapshot_timer.sh`) is the only place left that can say so out loud.
-if [ "$MISSING" -gt 0 ]; then
-  echo "  INCOMPLETE SNAPSHOT: $MISSING source(s) missing (listed above). Do not restore from this"
-  echo "  one without checking what it is short of."
-  exit 1
-fi
 exit 0

@@ -103,16 +103,10 @@ if old not in s:
     raise SystemExit("   FAILED: upstream shape changed; narrow the filter by hand "
                      "(see README, 'Known upstream bug')")
 s = s.replace(old, new, 1)
-# OPEN[setup-algotune-noop-self-replace] the line below replaces a string with ITSELF.
-# proof:`present:'\n                ):', 1)@benchmarks/algotune/setup_algotune.sh`
-# REVIEW 2026-08-25 (correctness): both arguments are identical, so this is a no-op wearing a
-# comment that claims it "close[s] the `if (` that the replacement opened". Harmless today -- the
-# replacement above is already balanced and the ast.parse gate below would catch a break -- but a
-# comment describing work that is not happening is exactly the recorded-fact drift CLAUDE.md's
-# claim-pin rule exists for, and the next person to edit `old`/`new` will trust it. Delete the
-# line and its comment, or make it do the closing it describes.
-# close the `if (` that the replacement opened: the original line ended with `):` two lines down
-s = s.replace(new + '\n                ):', new + '\n                ):', 1)
+# NOTHING CLOSES THE `if (` HERE, because `new` above already balances it. A line claiming to do
+# that used to sit at this point and replaced a string with ITSELF -- a no-op wearing a comment
+# describing work it was not doing, which is the recorded-fact drift the claim-pin rule exists for.
+# The `ast.parse` gate below is what actually proves the rewrite is syntactically whole.
 p.write_text(s, encoding="utf-8")
 if '"site-packages" not in module_file' not in p.read_text(encoding="utf-8"):
     raise SystemExit("   FAILED: narrowing did not take")

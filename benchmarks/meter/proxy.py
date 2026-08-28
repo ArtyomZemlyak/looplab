@@ -639,10 +639,28 @@ class Handler(BaseHTTPRequestHandler):
         # run's own accounting was short four calls on one task and never said so. A budget that
         # silently under-counts is worse than one that stops early: the arm looks cheap.
         deltas = 0
+        # `[DONE]` IS HELD BACK, NOT FORWARDED IN PLACE. A spec-compliant SSE client stops at the
+        # terminator -- openai-python's `Stream.__stream__` BREAKS on it and LoopLab's
+        # `defer_inband_error` keeps that rule -- so an estimate emitted after it reaches nobody,
+        # which is exactly where the synthesized usage frame used to go whenever a stream ended
+        # tidily WITHOUT a usage frame. It is also the flag the row below needs: a stream that
+        # reached `[DONE]` ended, whatever else it did or did not carry.
+        done_seen = False
+        swallow_blank = False
         try:
             for line in resp:
                 out = line
-                if line.startswith(b"data: ") and not line.startswith(b"data: [DONE]"):
+                if line.startswith(b"data: [DONE]"):
+                    done_seen = True
+                    swallow_blank = True         # ...and the blank line that terminates IT
+                    continue                     # re-emitted at the very end, after the estimate
+                if swallow_blank:
+                    # The `\n` that closed the held `[DONE]` event goes with it; anything else on
+                    # this line is an ordinary frame and is forwarded normally.
+                    swallow_blank = False
+                    if not line.strip():
+                        continue
+                if line.startswith(b"data: "):
                     try:
                         frame = json.loads(line[6:])
                     except ValueError:
@@ -670,29 +688,6 @@ class Handler(BaseHTTPRequestHandler):
                         usage["cost_source"] = self.server.pricing.fetched_at
                         out = b"data: " + json.dumps(frame).encode() + b"\n"
                 emit(out)
-            # OPEN[meter-estimate-lands-after-done] on the STREAMING route the synthesized usage
-            # frame is emitted after the `[DONE]` line, where no spec-compliant SSE client will
-            # ever read it -- and every tidy no-usage stream is then logged as aborted.
-            # proof:`present:if basis == "estimated_from_deltas":@benchmarks/meter/proxy.py`
-            # REVIEW 2026-08-25 (correctness): the loop above forwards `data: [DONE]` like any
-            # other line (the startswith guard only skips PARSING it), so when a stream ends WITH
-            # `[DONE]` but WITHOUT a usage frame, the estimate built below goes out behind the
-            # terminator -- openai-python's `Stream.__stream__` BREAKS on `[DONE]`, LoopLab's
-            # `defer_inband_error` keeps that rule, so the one client this injection exists for
-            # ("the arm's accountant reads the stream, not this file") cannot see it. The ledger
-            # then records the call as metered at the delta floor while the run's own accountant
-            # saw no usage at all: the arm looks free to itself while the meter says it paid.
-            # Reachable whenever a client streams without usage accounting -- LoopLab requests
-            # `stream_options.include_usage` but DEGRADES it away on an endpoint that rejects the
-            # parameter -- and untested as shipped: the fake upstream in
-            # tests/test_meter_proxy_stream_rows.py never sends `[DONE]`, so the cut-stream case
-            # (no terminator) is the only ordering any test exercises. Second half, one screen
-            # down: `stream_aborted` is keyed on the estimate basis, so a stream that ended
-            # cleanly with `[DONE]` and merely carried no usage frame is stamped aborted -- the
-            # guard test even asserts that for a stream its own docstring calls "tidy". Fix
-            # direction: hold the `[DONE]` line back one step and emit the estimate BEFORE
-            # forwarding it, and gate the aborted flag on "no `[DONE]` seen" rather than on which
-            # basis priced the row.
             if usage_frame_seen:
                 pass                            # the gateway priced it; nothing to estimate
             elif not basis and deltas:
@@ -733,10 +728,18 @@ class Handler(BaseHTTPRequestHandler):
                 # clean 200 with nothing for that arm's accountant to read. That is the very leak the
                 # estimate exists to close, one layer up, and it was untested because the fake
                 # upstream in the guard test always sent a usage frame.
+                # `finish_reason` ONLY WHEN THE STREAM DID NOT SUPPLY ONE. On the adapted
+                # (non-streaming) route `_reassemble` takes the LAST non-empty finish_reason it
+                # sees, so an unconditional `truncated` here overwrote a perfectly good `stop` and
+                # handed the client a completed answer labelled as cut -- which LoopLab's
+                # `_envelope_is_truncated` then refuses to cache while warning that the provider cut
+                # it. The mark belongs to a stream that really was cut: no `[DONE]`, no usage frame.
+                _choice = {"index": 0, "delta": {}}
+                if not done_seen:
+                    _choice["finish_reason"] = STREAM_TRUNCATED_FINISH_REASON
                 estimate = {
                     "id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
-                    "choices": [{"index": 0, "delta": {},
-                                 "finish_reason": STREAM_TRUNCATED_FINISH_REASON}],
+                    "choices": [_choice],
                     "usage": {
                         "prompt_tokens": 0, "completion_tokens": deltas, "total_tokens": deltas,
                         "cost": cost, "cost_basis": basis,
@@ -748,6 +751,8 @@ class Handler(BaseHTTPRequestHandler):
                     collected.append(estimate)
                 else:
                     emit(b"data: " + json.dumps(estimate).encode() + b"\n\n")
+            if done_seen:
+                emit(b"data: [DONE]\n\n")     # the terminator, now BEHIND the estimate
             emit(b"")           # terminating zero-length chunk
             if collect_for_client:
                 # ONE body, built from the frames, with the usage frame this proxy already priced
@@ -770,7 +775,12 @@ class Handler(BaseHTTPRequestHandler):
         if basis == "estimated_from_deltas":
             row["note"] = ("upstream ended the stream with no usage frame after "
                            f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas (a FLOOR)")
-            row["stream_aborted"] = True
+            # ABORTED means the stream never reached its terminator, NOT "we had to estimate it".
+            # Keyed on the basis, a stream that ended cleanly with `[DONE]` and merely carried no
+            # usage frame was stamped aborted -- a claim about the transport drawn from a fact about
+            # the pricing, and the two are independent.
+            if not done_seen:
+                row["stream_aborted"] = True
         elif not basis and row.get("error"):
             # THE ROW MUST NOT CONTRADICT ITSELF. The synthesis above lives inside the `try`, so any
             # exception while forwarding -- a client that hung up is the one that happens; five
