@@ -704,3 +704,37 @@ ran under. Removing the block silently breaks every such resume, so the change h
 opt-in setting defaulting to today's text. I attempted the mechanical hoist, broke the module's
 syntax on the first try, and reverted rather than push a shared prompt edit through at the end of a
 long pass. Queued with its measurement attached.
+
+---
+
+## 25 — The prediction I recorded for kcenters is falsified, and the reason was already in §18
+
+Before launching `dsFixKc` — the first clean run on kcenters with the whole repaired stack — I wrote
+down the expectation: *"if the mechanism is the same as on edge_expansion, the champion should ship
+a `.pyx` and go above 186."*
+
+It did not, and the family says why:
+
+| probe | nodes | `.pyx` written | technique | test |
+|---|---|---|---|---|
+| **dsFixKc** (fresh, full stack) | 117.1 … | **0** | `@njit` (6 mentions) | running |
+| dsChk49 | 186.3 → 163.2 | 0 | `@njit` ×16 | 171.7835 |
+| dsChkKc | 185.7 → 140.4 | 0 | `@njit` ×11 | 171.1507 |
+| dsFBKc | 174.4 → 124.3 | 0 | `@njit` ×9 | 162.1315 |
+| dsKcCtl | 90.8 → 0.0 | 0 | numba | 84.6247 |
+| dsKcRep | 10.6 → 47.2 | 0 | — | 45.0809 |
+| fxKcenters | 40.1 → 5.0 → 22.2 | 0 | — | 37.8161 |
+| dsFBKc2 | 33.9 | 0 | — | 30.6845 |
+
+**Not one kcenters run in the corpus has ever written a `.pyx`**, and the three best are numba. So
+the pip defect — decisive on edge_expansion, where a C extension is the only thing that breaks 50 —
+is irrelevant here, because the winning technique on this task was never blocked.
+
+That is exactly what §18 measured and I failed to carry forward: `@njit` is worth **3.6x** over
+plain numpy on kcenters and **nothing** on edge_expansion, and there is no `.pyx` in the kcenters
+corpus at all. I generalised a mechanism across tasks after having already recorded that it does
+not generalise.
+
+Consequence for the campaign-level claim: the pip repair raises the ceiling on tasks where a
+compiled C extension is the winning technique. It is not a uniform uplift, and any re-measurement
+should be read per task rather than pooled.
