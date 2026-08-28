@@ -23,6 +23,8 @@ exporting them, and this module needs nothing from `repo_task` at import time (n
 """
 from __future__ import annotations
 
+import math as _math
+
 from typing import Optional
 
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX
@@ -383,6 +385,18 @@ _REPO_DEV_PARENT_BLOCK = (
 # chars, p90 2,541, max 2,614 -- so 6,000 clips nothing that has actually been produced and bounds a
 # command whose stderr runs away. `DevCommandTools` already caps the raw streams at 64 KB.
 _STEP_FEEDBACK_CAP = 6000
+# What the reference agent tells its model before EVERY message and we told ours never: how much of
+# the run's money is left. `AlgoTuner/utils/message_writer.py:1442` renders "You have sent N messages
+# and have used up $X. You have $Y remaining." and `format_message_with_budget` puts it FIRST, and the
+# effect is visible in the arm-A logs -- 112 messages landing on $0.9952 of $1.0000. Ours flew blind:
+# 0 of 317 `plan_step` prompts in dsFB3 carried any spend figure, and the ceiling arrives as a node
+# CRASH ("LLM spend ceiling reached: $1.0024 of the $1.0000") that throws that node's work away.
+# Overshoot measured across finished probes: $1.002 to $1.091.
+_REPO_DEV_BUDGET_LINE = (
+    "BUDGET: ${spent:.4f} of ${limit:.4f} spent, ${remaining:.4f} left ({pct:.0f} % gone). Every "
+    "message you send spends it, and NOTHING you write after it runs out is measured -- the step is "
+    "lost, not saved. Spend what is left on the edit most likely to move the number; if little "
+    "remains, make this step small and finish it.\n\n")
 _REPO_DEV_STEP_FEEDBACK_BLOCK = (
     "\n\n=== MEASUREMENT OF THE WORK SO FAR (run for you, automatically) ===\n"
     "The operator's `{name}` command was run on your working set as it stands after the previous "
@@ -996,6 +1010,27 @@ class LLMRepoDeveloper:
         text = str(getattr(result, "content", "") or "")
         return text[:_STEP_FEEDBACK_CAP]
 
+    def _budget_note(self) -> str:
+        """The run's remaining LLM spend, worded for the session that is spending it, or "".
+
+        Returns "" for every reason a caller might want one -- no client, no accountant, no limit,
+        a non-finite or unparseable figure -- because this is an EXTRA rung and a build must never
+        fail over it. A run with no `llm_budget_usd` gets a byte-identical prompt to before.
+        """
+        acct = getattr(getattr(self, "client", None), "accountant", None)
+        if acct is None:
+            return ""
+        try:
+            limit = float(getattr(acct, "limit", None) or 0.0)
+            spent = float(getattr(acct, "spent", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return ""
+        if limit <= 0 or not _math.isfinite(limit) or not _math.isfinite(spent) or spent < 0:
+            return ""
+        return _REPO_DEV_BUDGET_LINE.format(
+            spent=spent, limit=limit, remaining=max(0.0, limit - spent),
+            pct=min(100.0, 100.0 * spent / limit))
+
     def _step_feedback_command_name(self) -> str:
         """The pinned command this developer may auto-run between steps, or "" when there is none.
 
@@ -1022,6 +1057,7 @@ class LLMRepoDeveloper:
         from looplab.tools.env_inspect import EnvInspectTools
         done_so_far = ", ".join(write.files) or "(none yet)"
         step_user = (
+            f"{self._budget_note()}"
             f"You are implementing a multi-step plan — STEP {idx} of {total}.\n"
             f"Overall experiment: {idea.rationale}\n{stage_note}\n"
             f"THIS STEP — {step['title']}:\n{step.get('detail') or step['title']}\n\n"
