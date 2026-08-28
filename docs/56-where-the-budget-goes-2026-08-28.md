@@ -877,3 +877,26 @@ Limits unchanged and repeated because they matter: these are train numbers on si
 unfinished runs, and §25 still bounds the claim to tasks where a compiled extension is the winning
 technique. The task set with data on disk is twenty, and `integer_factorization` was the only
 untried member of that class — further evidence has to come from replicates, not from new tasks.
+
+## 29 — dsFix4 closes the edge_expansion baseline at n=3 working extensions
+
+| clean run | nodes | champion | test | shipped |
+|---|---|---|---|---|
+| dsFix1 | 23.4 → 106.9 → 0.0 | node 1 | 106.4716 | `solver_ext.pyx` |
+| dsFix2 | 25.0 → 27.2 → 136.2 | node 2 | 132.7 | `cutext.pyx` |
+| **dsFix4** | **177.8 → 149.6 → 206.1** | node 2 | **202.7654** | `edge_cut.pyx` |
+| dsFix3 | 28.0 → 8.6 → 27.8 | node 0 | 27.7907 | a `.pyx` that never compiled |
+
+Three runs with a working extension: **106.47, 132.70, 202.77** on test, against the pre-repair
+$1 ceiling of 27.19–48.83 across eleven runs. The one that failed to compile landed at 27.79,
+inside the old band — which is the cleanest statement of the mechanism this campaign has: the
+number tracks whether a compiled kernel loads, not whether the model tried.
+
+dsFix4 is also the first run to start high — its node 0 is 177.8, where dsFix1 and dsFix2 opened
+at 23.4 and 25.0 and needed a second or third node to get there. It finished in **108 minutes**
+against 155 and 205, at the same $1.01 and the same 3 nodes, spending 51 % on code. Nothing about
+the loop changed between them; the first draft happened to reach for the extension immediately.
+
+Against the benchmark's published champion for the task: Gemini 3.1 ships 12 lines of `solver.py`
+over a 33-line `.pyx`; ours is 39 over 45. Same technique, more Python around it — unchanged from
+what §20a recorded for dsPyx.
