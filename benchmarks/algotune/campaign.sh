@@ -400,11 +400,13 @@ PYEOF
   #
   # `run_one` gives both arms the same per-task meter URL, arm B through LOOPLAB_LLM_BASE_URL and
   # arm A through OPENAI_BASE_URL. That second half only works for an entry litellm treats as a
-  # generic OpenAI endpoint. AlgoTuner picks the litellm model name at `AlgoTuner/main.py:270`,
+  # generic OpenAI endpoint. AlgoTuner picks the litellm model name in `AlgoTuner/main.py`,
   # `llm_model_name = model_info.get("model_name", desired_model_name)` -- so an entry with NO
   # `model_name` is named by its own config KEY. For an `openrouter/...` key litellm resolves the
   # base as `api_base or litellm.api_base or OPENROUTER_API_BASE or "https://openrouter.ai/api/v1"`
-  # (`litellm/main.py:3250`) and OPENAI_BASE_URL appears nowhere in that chain.
+  # (`litellm/main.py`, in `completion`'s base resolution) and OPENAI_BASE_URL appears nowhere in
+  # that chain. Cited by SYMBOL and by the quoted expression, never by line: these are
+  # third-party files whose numbering moves on every upgrade.
   #
   # The default `ALGOTUNE_MODEL_KEY` at the top of this file is exactly such a key, and the
   # `openrouter/deepseek/deepseek-v4-flash-0731` entry shipped in this checkout carries no
@@ -422,7 +424,8 @@ PYEOF
 import sys, yaml
 cfg = yaml.safe_load(open(f"{sys.argv[1]}/AlgoTuner/config/config.yaml")) or {}
 entry = (cfg.get("models") or {}).get(sys.argv[2]) or {}
-# AlgoTuner/main.py:270 -- the same resolution, re-derived rather than assumed.
+# `AlgoTuner/main.py`, the `llm_model_name = model_info.get(...)` line -- the same resolution,
+# re-derived rather than assumed.
 print(entry.get("model_name", sys.argv[2]))
 PYMETER
 )"
