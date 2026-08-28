@@ -676,3 +676,31 @@ cost 36.1 s of evaluation and one slot of three.
 
 Still n=2 against a ruler whose repeat spread is 2–8.5 %, so the SIZE of the gap is not settled;
 its direction and its mechanism are.
+
+---
+
+## 24 — `declare_stages` is never called, and its 5,001 characters cost 5 % of every run
+
+Measured across six probes on the current stack: **`declare_stages` was called 0 times**, while
+the guidance block that teaches it sits in every `plan` / `plan_step` / `card_build` system prompt.
+
+| probe | generations carrying the block | cost of the block | share of the run |
+|---|---|---|---|
+| dsFix1 | 167 | $0.0570 of $1.013 | 5.6 % |
+| dsFix2 | 143 | $0.0488 of $1.009 | 4.8 % |
+| dsPyx | 176 | $0.0601 of $1.009 | 6.0 % |
+| dsN3b | 233 | $0.0796 of $1.548 | 5.1 % |
+
+(9,763 rendered characters ≈ 2,440 prompt tokens per generation at the calibrated $0.14/Mtok.)
+
+The block is 5,001 source characters about GPU training, checkpoints, shards, `train.py` and
+`inline_repair_retrain_cap`, addressed to a role that on these tasks has one stage — `score` — and
+nothing to declare. Roughly a sixth of a node at the measured $0.35/node.
+
+**NOT CHANGED TODAY, and the reason is a contract rather than caution.** `_system_body`'s own
+docstring pins that `developer_probe=False` must reproduce the historical prompt BYTE FOR BYTE via
+`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, so a resumed pre-2026-08-13 run keeps the prompt its first half
+ran under. Removing the block silently breaks every such resume, so the change has to arrive as an
+opt-in setting defaulting to today's text. I attempted the mechanical hoist, broke the module's
+syntax on the first try, and reverted rather than push a shared prompt edit through at the end of a
+long pass. Queued with its measurement attached.
