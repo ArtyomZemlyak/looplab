@@ -406,3 +406,31 @@ by the two runs that worked around it. Section 18's njit-vs-pyx table in particu
 technique that mostly worked against one that mostly could not be submitted. And the four probes
 live at the moment of the repair — dsChk49, dsN3, dsN3b, dsPyx — straddle it: a `setup.py` written
 before 09:0x was doomed and one written after will build. Their numbers are not clean either way.
+
+---
+
+## 20 — The pip repair is probe-verified, and the prediction was recorded before the number
+
+Written down before the result, at 08:57: *"if the mechanism is what was measured, the probe should
+go past 150 rather than stay at 30–50."*
+
+| probe | before the repair | after | what it shipped | pip errors / deletes |
+|---|---|---|---|---|
+| **dsPyx** | node 0 = 21.6461 | node 1 = **242.855** | `edge_cut.pyx` + `setup.py` + `solver.py` | 2 errors, last 08:40:05 (pre-repair), 5 deletes |
+| **dsN3b** | — | node 0 = **131.8093** | `edgecut.pyx` + `setup.py` | **0 errors, 1 delete** |
+| dsN3 (started 06:09, mostly pre-repair) | node 1 = 165.3182 | — | — | 7 errors, last 08:00:59, 6 deletes |
+| dsChk49 (kcenters) | 186.3288 | — | numba, no `.pyx` | 0 errors, 0 deletes |
+
+dsPyx is the same run, the same model and the same card on both sides of the repair: before it, its
+`.pyx` was refused and it sat at 21.65; after it, the extension survived and the node scored
+**242.86** — an 11.2x move on one run, against a ruler whose noise is ~10 %. dsN3b never saw the
+error at all and its FIRST node ships an extension.
+
+Against the $1 ceiling this campaign has been reporting for edge_expansion — champions of 27.19 to
+48.83 across eleven runs — this is the ceiling itself moving, not a run getting lucky inside it.
+
+Two honest limits. Neither probe is finished, so these are node metrics on train and not a final
+test number. And dsPyx straddles the repair, which makes it excellent evidence for the MECHANISM
+(the same agent, refused then allowed) and poor evidence for a clean before/after average. `dsFix1`
+was launched at 09:16 on the fully repaired stack from scratch — pip present, the njit-vs-pyx
+clause in the card, `check --size 4408` — as the clean baseline.
