@@ -839,6 +839,24 @@ workdir matches three files and is refused `ambiguous`, falling back to `committ
 ceiling on guessing the resolver applies everywhere, and why
 `docs/reference/goal-dense-retrieval.md` names an exact path.
 
+**ANCHOR THE PATTERN; a recursive `**` is what makes it ambiguous, not the wildcard itself.**
+Measured 2026-08-28 by running the shipped `_resolved_carrier` over all **56 real node workdirs** on
+this box:
+
+| declared pattern | bound | ambiguous | missing |
+|---|---|---|---|
+| `vectorsearch/experiments/*/final/config.yaml` (anchored) | **52** | 3 | 1 |
+| `**/final/config.yaml` (recursive) | 17 | 39 | 0 |
+
+Same artifact, same corpus, a three-fold difference in how often the tier can answer. A single `*`
+does not cross a `/`, so the anchored form selects one experiment directory and skips the
+`…/<name>/tests/final/config.yaml` sibling that a real node also carries; `**` reaches both and every
+checkpoint directory besides, which is why 39 of 56 workdirs refuse it. The corpus figure quoted
+elsewhere — "28 of 52 nodes hold more than one `**/final/config.yaml` and on 8 the matches disagree"
+— is about the RECURSIVE shape and must not be read as a reason to leave the key undeclared.
+
+`runs/e5small-dr-unified-v10` is the first task to declare one, and it declares the anchored form.
+
 **It surfaces and never refuses.** A node that cut its epochs to fit a real time budget did the right
 thing — the champion's own config says so in a comment beside the line — and must still run, still
 record its metric and still be allowed to win. What must not survive is a record attributing that
