@@ -79,7 +79,13 @@ def test_neither_module_is_a_god_module_again():
     # line here by design, and the ratchet is what makes the NEXT one argue for its line instead of
     # spending slack somebody else left. What this guard is actually against is `make_roles`-
     # adjacent LOGIC coming back, not the wiring the split left here.
-    for rel, cap in (("adapters/tasks.py", 400), ("agents/factory.py", 521)):
+    #
+    # 521 -> 522 on 2026-08-28, again by exactly one line: `stage_guidance=` (commit 3dabc64d), the
+    # operator's opt-out from the stage-pipeline block. Same argument as the line above it, and the
+    # same minimum raise. Recorded here rather than fixed quietly because the commit that added the
+    # line left this guard RED and did not notice -- for the second time that day, by running a
+    # narrow `-k` selection instead of the suite.
+    for rel, cap in (("adapters/tasks.py", 400), ("agents/factory.py", 522)):
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 

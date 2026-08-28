@@ -346,6 +346,22 @@ class RunTools:
             if theme and projection.status != "complete":
                 return (f"({self._projection_note(projection)}; no retained current experiments "
                         f"match theme={theme}; this is NOT a complete zero)")
+            # `best`/`worst` rank by metric, so `top_nodes` drops every node that has not been
+            # evaluated yet. Saying "no matching experiments" to a caller whose whole ledger is
+            # still drafts tells it NOTHING HAS BEEN TRIED, which is the one thing it must not
+            # believe: `hyp_prioritize` and `foresight_rank` exist to avoid re-proposing work that
+            # is already in flight. MEASURED over the probe corpus on 2026-08-28: 48 calls in eight
+            # runs got this empty answer while a `sort=recent` call moments away in the same run
+            # listed the drafts -- and `sort="best"` is the DEFAULT, so it is the answer a caller
+            # that passes no `sort` receives.
+            # Only when the METRIC filter is what emptied the list. A `theme=` that matches nothing
+            # is a different, honest zero, and a scored node hidden by it must keep saying so.
+            if sort != "recent" and not theme:
+                pending = [node for node in st.nodes.values() if node.id in active_nodes]
+                if pending and not any(digest.node_metric(node) is not None for node in pending):
+                    return (f"(no SCORED experiments yet; {len(pending)} current experiment(s) "
+                            f"exist but none has a metric — use sort=recent to see them, and do "
+                            f"not read this as an empty ledger)")
             return "(no matching experiments)"
         total = len(nodes)
         selected = nodes[:limit]
