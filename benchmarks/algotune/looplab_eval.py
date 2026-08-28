@@ -603,6 +603,43 @@ def _rules_violation(root: Path, solver: Path) -> str:
 
 
 
+_DIAGNOSTIC_RE = re.compile(r"^[^\s:]+\.(?:pyx|pxd|c|cpp|h|py):\d+(?::\d+)?:.*$", re.M)
+
+
+def _build_error_digest(stderr: str, limit: int = 400) -> str:
+    """The compiler's own diagnostic first, then the tail -- not the tail alone.
+
+    WHY. Cython prints the line that names the mistake FIRST and the Python traceback of its own
+    internals after it, so a `[-400:]` tail keeps the useless half:
+
+        solver_cy.pyx:18:13: cdef statement not allowed here     <- dropped
+        Compiling solver_cy.pyx because it changed.
+        [1/1] Cythonizing solver_cy.pyx
+        Traceback (most recent call last):                        <- kept
+          File ".../Cython/Build/Dependencies.py", line 1153 ...
+
+    MEASURED on dsFix3, 2026-08-28: the bridge reported `build_ext failed rc=1` 27 times in tool
+    output, and the string `cdef statement not allowed` reached **0** prompts. The model was told
+    its build failed and shown Cython's internals instead of its own broken line; it abandoned the
+    `.pyx` -- which its solver never imported anyway -- and finished on numba at 27.99, against
+    106.90 and 136.18 from the two runs whose extensions worked.
+
+    Diagnostics are recognised by the universal `<file>:<line>[:<col>]: <text>` shape rather than
+    by compiler name, so gcc and Cython are both caught. When none match, head and tail are
+    returned together so the useful half can never be the one that is dropped.
+    """
+    text = (stderr or "").strip()
+    if not text:
+        return "(no stderr)"
+    diagnostics = _DIAGNOSTIC_RE.findall(text)
+    if diagnostics:
+        head = " | ".join(dict.fromkeys(d.strip() for d in diagnostics))[:limit]
+        return f"{head} || tail: {text[-limit // 2:]}"
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit // 2]} ... {text[-limit // 2:]}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--algotune-root", required=True, type=Path,
@@ -722,7 +759,7 @@ def main() -> int:
             built = subprocess.run(cmd, cwd=str(dest_dir), capture_output=True, text=True,
                                    timeout=1800)
             build_note = ("ok" if built.returncode == 0
-                          else f"failed rc={built.returncode}: {(built.stderr or '')[-400:]}")
+                          else f"failed rc={built.returncode}: {_build_error_digest(built.stderr)}")
         except subprocess.TimeoutExpired:
             build_note = "timeout after 1800s"
         except OSError as exc:                      # no setup.py, no compiler, no python
