@@ -61,3 +61,33 @@ export NO_PROXY="${NO_PROXY:-},127.0.0.1,localhost"
 export no_proxy="${no_proxy:-},127.0.0.1,localhost"
 
 echo "box: jhub-l40s | bench root $BENCH_ROOT | model $LOOPLAB_LLM_MODEL via ${METER_BASE}"
+
+# PIP В VENV АРЕНЫ — БЕЗ НЕГО КОМПИЛЯЦИЯ НЕ ЗАСЧИТЫВАЕТСЯ.
+#
+# `AlgoTune/scripts/evaluate_results.py:266` запускает `python -m pip install . --no-deps
+# --force-reinstall --no-cache-dir` над каталогом кандидата, как только там появился `setup.py`.
+# Venv арены создан `uv`, а `uv venv` pip НЕ кладёт — и вся ветка отвечает
+# `Setup install failed: ... No module named pip`, что оценщик превращает в
+# `no_speedup{reason: compilation_failed}` и `speedup: 0.0`.
+#
+# ЦЕНА, ИЗМЕРЕННАЯ 2026-08-28 по корпусу из 19 прогонов: восемь независимых прогонов написали
+# `.pyx` + `setup.py`, получили эту ошибку и УДАЛИЛИ своё расширение через 0.2-2.4 минуты. 35 из
+# 35 вызовов `delete_file` во всём корпусе — это `.pyx` и `setup.py`. Кто пробился (dsFB, sol10)
+# получил 204-261 на train и 207/259 на тесте; кто удалил — 27.2-48.8. Разрыв 5-9x при шуме 10%.
+# Опубликованный чемпион бенчмарка (Gemini 3.1) поставляется именно как `.pyx` + `setup.py`, то
+# есть сломана НАША среда, а не замысел арены.
+#
+# Ставится ТОЛЬКО pip, из встроенного в ensurepip колеса. `python -m ensurepip` притащил бы ещё
+# setuptools 65.5.0 поверх стоящего 84.0.0 — откат посреди живых оценок, чего делать нельзя.
+_algotune_ensure_pip() {
+  local py="${1:-$ROOT/AlgoTune/.venv/bin/python}"
+  [ -x "$py" ] || return 0
+  "$py" -m pip --version >/dev/null 2>&1 && return 0
+  local whl
+  whl=$("$py" -c "import ensurepip,os,glob;d=os.path.join(os.path.dirname(ensurepip.__file__),'_bundled');print((glob.glob(os.path.join(d,'pip-*.whl'))+[''])[0])" 2>/dev/null)
+  [ -n "$whl" ] || { echo "[box] НЕТ pip и нет встроенного колеса — компиляция будет засчитываться как 0.0" >&2; return 1; }
+  "$py" "$whl/pip" install --no-index --no-deps "$whl" >/dev/null 2>&1 \
+    && echo "[box] pip доставлен в venv арены (без setuptools)" \
+    || echo "[box] НЕ УДАЛОСЬ поставить pip — компиляция будет засчитываться как 0.0" >&2
+}
+_algotune_ensure_pip
