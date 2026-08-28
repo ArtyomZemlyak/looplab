@@ -1074,3 +1074,55 @@ god-module ratchet) and one field to `Settings` (217 → 218, moving the calibra
 Both guards were red on HEAD from 19:10 and were found on the next sweep, not at commit time —
 because I ran a narrow `-k` selection instead of the suite, for the second time that day. Re-pinned
 in `7c5795af` and `5d22360f`, each with the reason and the lateness recorded beside the pin.
+
+## 35. The stage-guidance switch at n=2, and a test that wrote into the ruler
+
+### 35.1 Removing the stage block costs nothing measurable — and does not obviously buy anything
+
+`edge_expansion`, deepseek-v4-flash, $1, same card, same lane width, `developer_stage_guidance`
+confirmed in each run's own `config.snapshot.json`:
+
+| stage block | n | runs | median | range |
+|---|---|---|---|---|
+| ON | 3 | dsFix1 106.47, dsFix2 132.70, dsFix4 202.77 | 132.70 | 106.47–202.77 |
+| OFF | 2 | dsNoStg **237.12**, dsNoStg2 **153.40** | 195.26 | 153.40–237.12 |
+
+The OFF range sits inside the ON range's own spread. **This does not decide anything**, and the
+tempting read — "removing 5,001 characters made it better" — is not supported at n=2 against a
+control band that already spans a factor of 1.9. What it does support is the weaker claim the switch
+was built to test: nothing was lost with the block. dsNoStg3 is running for a third point.
+
+Both OFF runs reached their number the same way as the controls: a `.pyx` plus `setup.py` that
+compiled. dsNoStg went 27.26 → 237.31 across two nodes; dsNoStg2 went 152.94 → 153.40.
+
+### 35.2 The test that proved the arena can build was building INTO the arena
+
+`test_a_setup_py_candidate_actually_installs` ran `evaluate_results.py`'s own argv with no
+`PIP_TARGET`, so at **21:20:01 today** it installed `_kern.cpython-311-x86_64-linux-gnu.so` and
+`kern-0.0.0.dist-info` into the arena's shared `site-packages` — **while two probe evaluations were
+running against that venv**. This is the contamination channel `d439c966` closed in the bridge, left
+open in the test that verifies the bridge's premise.
+
+Nothing was mismeasured. No probe imports the module name `_kern`, checked by module form across the
+corpus. My first check used a substring and matched `edge_expansion_kernel` and `_kernel_solve` in
+dsBud2 and dsFB2; I nearly reported a collision that does not exist. The defect is the write into a
+live ruler, which stands either way. Fixed in `53e69d26` with the same `PIP_TARGET` isolation the
+bridge uses plus an assertion that site-packages is unchanged.
+
+The deeper miss is that **nothing was watching**. `check_leaks.sh` had six sections and none looked
+at the venv, so this was found by an ad-hoc sweep. Section 7 added in `cfabb1ad`, anchored on the
+CAMPAIGN START rather than on `bin/python` — the first anchor reported 173 false positives because
+the binary predates the packages the venv was built with. Proven by canary.
+
+### 35.3 Three of my own commits left guards red
+
+| commit | guard | found |
+|---|---|---|
+| 3dabc64d | `factory.py` god-module ratchet 521 → 522 | one sweep late |
+| 3dabc64d | calibration profile digest + field count 217 → 218 | one sweep late |
+| 156b991e | `core/models.py:943` line citation in three files | two sweeps late |
+| 156b991e | `test_empty_build_is_stuck_not_a_crash.py` re-derived the package walk | two sweeps late |
+
+Every one of them was invisible to the narrow `-k` selections I kept running and visible immediately
+to the full suite. The lesson is not "run more tests"; it is that a `-k` filter chosen from the names
+of the files I edited cannot see a guard that watches the WHOLE package for a property I just broke.
