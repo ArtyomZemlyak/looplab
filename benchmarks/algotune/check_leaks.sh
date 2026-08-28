@@ -44,6 +44,36 @@ echo "== 6. ЖУРНАЛ МЕТРА (суммы по кампании смеша
 L=$(wc -l < "$ROOT/meter/meter.jsonl" 2>/dev/null || echo 0)
 [ "$L" != "0" ] && { say "meter.jsonl" "$L строк — ротируй"; BAD=1; } || say "meter.jsonl" "пуст"
 
+echo "== 7. ОБЩИЙ VENV АРЕНЫ (чужое расширение видно КАЖДОЙ идущей оценке)"
+# `evaluate_results.py:266` runs `pip install .` over any candidate carrying a `setup.py`, so
+# anything that lands in the arena's site-packages is importable by every concurrent evaluation.
+# The bridge redirects its installs with PIP_TARGET (d439c966), but nothing was WATCHING the venv:
+# on 2026-08-28 at 21:20 our own test suite dropped `_kern.cpython-311-*.so` and `kern-0.0.0.dist-info`
+# there while two probe evaluations were running, and it was found by an ad-hoc sweep, not by this
+# script. The baseline is the venv as built on 2026-08-20; anything NEWER than the arena's own
+# `python` binary was put there after the fact.
+SITE="$ROOT/AlgoTune/.venv/lib/python3.11/site-packages"
+if [ -d "$SITE" ]; then
+  SINCE="2026-08-24 10:12"
+  # `pip-*.dist-info` is the DELIBERATE repair of 2026-08-28 08:49: the uv-created venv shipped no
+  # pip, so `evaluate_results.py:266` answered "No module named pip" on every candidate carrying a
+  # setup.py, 363 times. Installing pip is what MAKES the arena able to score a compiled candidate,
+  # so it is the one post-campaign write that belongs here. Nothing else is allowlisted.
+  NEWER=$(find "$SITE" -maxdepth 1 -newermt "$SINCE" \
+          \( -name '*.so' -o -name '*.dist-info' -o -name '*.egg-link' \) \
+          -not -name 'pip-*.dist-info' 2>/dev/null | wc -l)
+  if [ "${NEWER:-0}" -gt 0 ]; then
+    say "site-packages" "$NEWER записей новее старта кампании — ЧУЖОЕ РАСШИРЕНИЕ В ЛИНЕЙКЕ:"
+    find "$SITE" -maxdepth 1 -newermt "$SINCE" \
+         \( -name '*.so' -o -name '*.dist-info' -o -name '*.egg-link' \) \
+         -not -name 'pip-*.dist-info' \
+         -printf '      %TY-%Tm-%Td %TH:%TM  %f\n' 2>/dev/null | head -20
+    BAD=1
+  else
+    say "site-packages" "чисто (кроме умышленного ремонта pip)"
+  fi
+fi
+
 echo
 [ "$BAD" = "0" ] && echo "ЧИСТО: перезапуск ничего не унаследует." || echo "ЕСТЬ ЧТО УНАСЛЕДОВАТЬ — см. выше."
 exit $BAD
