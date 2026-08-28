@@ -269,3 +269,31 @@ NOT evidence: node 0 on this task ranges 10.58 to 185.67 across six runs, so a s
 proves nothing about the metric. The verified claim is narrow and mechanical — the command exists,
 the model prefers it, and it catches real invalidity early. Whether that converts into score needs
 the run to finish and needs replicates.
+
+---
+
+## 17 — dsChkKc finished: the best kcenters number in the corpus, and still node 0
+
+| probe | card | $ | nodes | node scores | test |
+|---|---|---|---|---|---|
+| **dsChkKc** | **with `check`** | 1.004 | 2 | 185.67 → 140.40 | **171.1507** |
+| dsFBKc | without | 1.004 | 2 | 174.36 → 124.32 | 162.1315 |
+| dsKcCtl | without | 1.017 | 2 | 90.83 → **0.0** | 84.6247 |
+| dsKcRep | without | 1.005 | 2 | 10.58 → 47.23 | 45.0809 |
+| fxKcenters | without | 1.003 | 3 | 40.09 → 5.01 → 22.23 | 37.8161 |
+| dsFBKc2 | without | 1.002 | 1 | 33.92 | 30.6845 |
+
+171.15 is the highest kcenters test figure recorded, and it is NOT offered as evidence for the
+`check` command: node 0 on this task spans 10.58 to 186.33 across seven runs, so one high draw
+proves nothing. Two things in the table are worth more than the headline.
+
+**The champion is node 0 again** — the fifth kcenters run of six where the search does not beat its
+own first attempt, consistent with section 8's 10-of-18 across all tasks.
+
+**The child is valid.** dsChkKc's node 1 scored 140.40, a worse but LEGAL solver, where dsKcCtl's
+node 1 is the 0.0 that started this whole thread — the child that traded exactness for speed,
+self-checked 55 times without ever calling `is_solution`, and was refused by the engine after
+117.9 s. One run is not a pattern, but it is the outcome the command was built to produce, and
+`dsChk49` (same command at the graded n=49) is the replicate.
+
+Run shape: 157 min wall, 137 LLM, 6 evaluation, 46 % of the budget in `plan_step`.
