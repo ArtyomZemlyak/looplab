@@ -18,6 +18,7 @@ hard stop.
 """
 from __future__ import annotations
 
+import math as _math
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -38,6 +39,11 @@ from looplab.core.prompts import PromptStore, render
 from looplab.core.redact import redact_persisted_text
 from looplab.core.source_identity import canonical_source_ref
 
+
+_RESEARCH_BUDGET_LINE = (
+    "BUDGET: ${spent:.4f} of ${limit:.4f} spent, ${remaining:.4f} left ({pct:.0f} % gone). "
+    "Research that leaves no money for experiments buys nothing — size this memo to what is left.\n\n"
+)
 
 _MAX_SOURCES = MAX_RESEARCH_SOURCES
 _STATE_BRIEF_MAX_NODES = 80
@@ -455,6 +461,35 @@ class DeepResearcher:
             "name": "emit", "description": "Emit the final research memo.",
             "parameters": _MemoOut.model_json_schema()}}
 
+    def _budget_note(self) -> str:
+        """The run's remaining LLM spend, or "" — this stage is the one that could not see it.
+
+        MEASURED over the probe corpus on 2026-08-28: `deep_research` carried a budget line in 2 of
+        2,549 generations (0 %), against 84 % for `plan_step`, 85 % for `propose`, 91 % for `plan`
+        and 100 % for `strategist_consult`. It is also the ONLY stage with no turn cap and no money
+        cap of its own (`agent_max_turns` / `agent_time_budget_s` both default to 0 = unlimited), so
+        the one stage that cannot see the budget is the one that can spend all of it. `opus5` did
+        exactly that: ten generations, $1.0204 of a $1.00 run, ZERO nodes, ending in
+        `finalize_step: abandoned / error_terminal`. Corpus median share for this stage is 12.9 %.
+
+        Returns "" for every reason a caller might want one -- no client, no accountant, no limit, a
+        non-finite or unparseable figure -- so a run with no `llm_budget_usd` gets a byte-identical
+        prompt to before. This is an EXTRA rung; research must never fail over it.
+        """
+        acct = getattr(getattr(self, "client", None), "accountant", None)
+        if acct is None:
+            return ""
+        try:
+            limit = float(getattr(acct, "limit", None) or 0.0)
+            spent = float(getattr(acct, "spent", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return ""
+        if limit <= 0 or not _math.isfinite(limit) or not _math.isfinite(spent) or spent < 0:
+            return ""
+        return _RESEARCH_BUDGET_LINE.format(
+            spent=spent, limit=limit, remaining=max(0.0, limit - spent),
+            pct=min(100.0, 100.0 * spent / limit))
+
     def research(self, state: RunState, trigger: str = "") -> ResearchMemo:
         memo = ResearchMemo(at_node=len(state.nodes), trigger=trigger)
         if self.tools is not None and hasattr(self.tools, "bind_state"):
@@ -466,7 +501,7 @@ class DeepResearcher:
             # The tool-surface join goes in the USER turn, beside the snapshot it describes, and
             # is built from the BOUND provider rather than re-derived here — see
             # `agents/answered_by_context.py` for why this is data and not another prompt rule.
-            {"role": "user", "content": state_brief(state) +
+            {"role": "user", "content": self._budget_note() + state_brief(state) +
                 answered_by_context(self.tools) +
                 "\nReview the run. Consult sources if useful, then emit your memo."},
         ]
