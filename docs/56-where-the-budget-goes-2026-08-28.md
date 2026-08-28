@@ -179,6 +179,13 @@ Four probes, one ruler, `extract_champion` for the champion in each:
 | fxKcenters | off | 1.003 | 3 | 40.09 → 5.01 → 22.23 | node 0 |
 
 Every child is worse than its parent, four runs out of four, and one child is invalid outright.
+
+**Corrected 2026-08-28 06:2x — it is now four of FIVE.** `dsKcRep`, launched to reproduce this,
+went the other way: node 0 = 10.5804, node 1 = **47.2271**, a 4.5x improvement. So "every child is
+worse" was a four-run coincidence rather than a law, and the honest statement is the one section 8
+already makes — the search usually fails to improve, and on kcenters it had also happened to
+degrade. What survives unchanged is the spread of node 0 itself, which this probe widens rather
+than narrows: 10.58, 33.92, 40.09, 90.83, 174.36, 185.67 — a factor of eighteen.
 The step-feedback switch changes nothing here: on and off both land on node 0.
 
 Note also the spread of node 0 itself — 33.92, 40.09, 90.83, 174.36, a factor of five for the same
@@ -238,3 +245,27 @@ The alarm was half wrong and that half matters: `final.json` already carried 259
 post-fix re-score, so the published figure was never 0.0 — only the on-disk artefact and the tail
 of `probe.log` were stale. Both are now regenerated (`champion_solver.py` + `_edge_expansion.pyx` +
 `setup.py`), with the stale file kept as `champion_solver.stale.py`.
+
+---
+
+## 16 — The `check` command is probe-verified, by mechanism rather than by metric
+
+`dsChkKc` is the first run on a card carrying `check` (9fa706df). `dsKcRep` is the same model, same
+task, same week, on the card without it.
+
+| probe | card | `check` | `eval_train` | `profile` |
+|---|---|---|---|---|
+| dsChkKc | with | **7** | 3 | 2 |
+| dsKcRep | without | — | 11 | 5 |
+
+The agent reaches for the cheap check MORE than the expensive one, which is the behaviour change
+the command was built for. Three of the seven calls caught an invalid state before the engine ever
+ran, verbatim: `Solution is not optimal. Found value: 132.996, Optimal value: 31.543` /
+`130.754 vs 27.746` / `85.702 vs 33.999`. Against the old card's ratio — 55 free-form probes, one
+of which called `is_solution` (section 12's table) — that is the hole closing.
+
+WHAT IS NOT CLAIMED. dsChkKc's node 0 is 185.6706, the highest in the kcenters family, and that is
+NOT evidence: node 0 on this task ranges 10.58 to 185.67 across six runs, so a single high draw
+proves nothing about the metric. The verified claim is narrow and mechanical — the command exists,
+the model prefers it, and it catches real invalidity early. Whether that converts into score needs
+the run to finish and needs replicates.
