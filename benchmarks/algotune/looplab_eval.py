@@ -118,6 +118,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -749,6 +750,30 @@ def main() -> int:
     # What was ASKED for, deliberately -- a patched checkout honours it and an unpatched one ignores
     # it, and `subset_evidence` above has already recorded which of those this checkout is.
     env = dict(os.environ, ALGOTUNE_EVAL_SUBSET=args.subset)
+    # THE CANDIDATE'S EXTENSION MUST NOT BE INSTALLED INTO THE SHARED VENV.
+    #
+    # `AlgoTune/scripts/evaluate_results.py:266` runs `pip install . --no-deps --force-reinstall
+    # --no-cache-dir` over the candidate directory whenever a `setup.py` is present. With no pip in
+    # the venv that branch simply failed (the defect repaired in `box-jhub-l40s.sh` on 2026-08-28);
+    # with pip present it SUCCEEDS, and every compiled candidate lands in
+    # `AlgoTune/.venv/lib/python3.11/site-packages` and outlives its run.
+    #
+    # MEASURED the same day, hours after that repair: six candidate modules were installed there --
+    # `cutcounter`, `edge_cut`, `edge_flatten`, `edgecut`, `_fast_cut`, `solver_ext` -- five of them
+    # within ninety minutes. And it is not cosmetic. ds3's champion scored 156.4328 on train and
+    # 0.0 on test with `evaluator_error`; the cause is a `cutcounter` installed on 2026-08-27 19:56
+    # SHADOWING the champion's own build, so the import resolved to a stale binary whose
+    # `count_cut` takes three arguments where the caller passes two. Remove that one file and the
+    # same champion validates on every instance. Two earlier diagnoses of mine for that 0.0 -- an
+    # unseen data shape, then the missing pip -- were both wrong.
+    #
+    # `PIP_TARGET` redirects the install without patching the arena: verified 2026-08-28, a build
+    # under it left site-packages at 358 entries unchanged and the module imported from the target
+    # via PYTHONPATH. Per-invocation directory, so two concurrent evaluations cannot shadow each
+    # other either.
+    _pip_target = tempfile.mkdtemp(prefix="looplab-piptarget-")
+    env["PIP_TARGET"] = _pip_target
+    env["PYTHONPATH"] = os.pathsep.join([_pip_target] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
 
     # THE REFERENCE TIMINGS MUST ALREADY EXIST, and this snapshot is how we know they did.
     #
