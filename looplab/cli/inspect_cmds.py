@@ -197,7 +197,8 @@ def tokens(run_dir: Path = typer.Argument(...),
     import json as _json
 
     from looplab.events.eventstore import read_jsonl_lenient_with_health
-    from looplab.events.token_spend import token_spend_by_phase
+    from looplab.events.token_spend import (CARD_UNATTRIBUTED, token_spend_by_card,
+                                            token_spend_by_phase)
 
     ev_path = run_dir / "events.jsonl"
     sp_path = run_dir / "spans.jsonl"
@@ -208,6 +209,7 @@ def tokens(run_dir: Path = typer.Argument(...),
     # The DENOMINATOR: the durable ledger's own sum. Read first so a run with tracing off still
     # learns what it spent, even though it can never learn where.
     ledger_total = None
+    state = None
     if ev_path.exists():
         store = EventStore(ev_path)
         _echo_log_integrity(store, run_dir)
@@ -219,7 +221,8 @@ def tokens(run_dir: Path = typer.Argument(...),
         # pre-ledger run reports `ledger: 0` and a residual that is entirely negative. Over-counting
         # here does not merely misprint the denominator: `residual` is the whole point of the
         # command, and this is its subtrahend.
-        ledger_total = int((fold(store.read_all()).llm_cost or {}).get("total_tokens") or 0)
+        state = fold(store.read_all())
+        ledger_total = int((state.llm_cost or {}).get("total_tokens") or 0)
 
     if not sp_path.exists():
         typer.echo(f"ledger total: {ledger_total or 0:,} tokens")
@@ -273,6 +276,46 @@ def tokens(run_dir: Path = typer.Argument(...),
         # so a negative residual is a real state the operator should see rather than a rounding hide.
         typer.echo(f"residual   : {out['residual']:>14,} tokens "
                    f"({'spans over-attribute' if out['residual'] < 0 else 'unattributed by any span'})")
+
+    # THE PER-CARD HALF. Phase answers "which KIND of work spent it"; this answers "which EXPERIMENT
+    # spent it, and was that experiment ever evaluated" — the question a run cannot otherwise ask,
+    # because the durable ledger carries no card and no node. Printed by DEFAULT rather than behind a
+    # flag: the defect this closes is that nobody could see it, and an opt-in view is not seen.
+    # Suppressed when no card resolves at all, which is every serial-path run — a lone `(no card)`
+    # row states nothing and would push the phase table off a terminal for no reader's benefit.
+    card_nodes = {}
+    if state is not None:
+        from looplab.core.models import is_unevaluated_speculative_discard
+        for node in (state.nodes or {}).values():
+            card = getattr(getattr(node, "idea", None), "card_id", None)
+            if not isinstance(card, str) or not card.strip():
+                continue
+            owned = card_nodes.setdefault(card, {"nodes": [], "discarded": []})
+            owned["nodes"].append(node.id)
+            # The run's SINGLE answer to "did this node spend budget", not a second spelling of it.
+            if is_unevaluated_speculative_discard(state, node):
+                owned["discarded"].append(node.id)
+    by_card = token_spend_by_card(rows, card_nodes=card_nodes, ledger_total=ledger_total)
+    real = [r for r in by_card["rows"] if r["card"] != CARD_UNATTRIBUTED]
+    if real:
+        typer.echo("")
+        typer.echo(f"{'tokens':>14}  {'share':>6}  {'calls':>6}  nodes                 card")
+        for row in by_card["rows"]:
+            nodes = ",".join(str(n) for n in row["nodes"]) or "-"
+            if row["wholly_discarded"]:
+                nodes += " DISCARDED"
+            typer.echo(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
+                       f"{nodes:<21} {row['card']}")
+        lost = [r for r in by_card["rows"] if r["wholly_discarded"]]
+        if lost:
+            spent = sum(r["tokens"] for r in lost)
+            share = 100 * sum(r["share"] for r in lost)
+            # Stated as what it IS — a build that was paid for and never evaluated — and NOT as
+            # waste: the freshness gate discards a prefetch whose selection no longer holds, which
+            # is the machinery working. What the number buys the operator is the ability to weigh
+            # that trade, which until now had no visible price at all.
+            typer.echo(f"{spent:>14,}  {share:>5.1f}%  {'':>6}  "
+                       f"built and never evaluated ({len(lost)} card(s) discarded before dispatch)")
     # `read_jsonl_lenient_with_health` returns a plain DICT, and its damage key is `invalid_lines`.
     # `getattr(health, "damaged", 0)` was therefore always 0 by two independent routes — a dict has
     # no such attribute and there is no such key — so an unreadable `spans.jsonl` (the routine shape

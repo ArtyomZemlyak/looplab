@@ -25,6 +25,9 @@ looplab timings runs/demo         # wall-clock: per node + run-level (from spans
 looplab tokens runs/demo          # TOKENS by phase (from spans.jsonl), reconciled against the DURABLE
                                   # llm_usage ledger; residual SIGNED and printed. The build
                                   # (plan+stages+card_build) measured 61-63% of two real runs.
+                                  # Also a per-CARD roll-up on card-driven runs, flagging cards
+                                  # whose every node was discarded before dispatch: 21.0% of
+                                  # e5small-dr-unified-v9 bought builds never evaluated.
 looplab ui                        # FastAPI server + React UI (see looplab/serve/)
 ```
 

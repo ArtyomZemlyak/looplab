@@ -91,6 +91,122 @@ def _tokens_of(usage) -> tuple[int, int, int]:
     return total, prompt, completion
 
 
+# The bucket for a generation whose ancestry names no card — the per-card twin of
+# `PHASE_UNATTRIBUTED`, and it exists for the same reason: an unattributable call is a fact about the
+# record. Every `propose` generation lands here by construction on a card-driven run, because a
+# proposal is made BEFORE the card it may become exists.
+CARD_UNATTRIBUTED = "(no card)"
+
+# How far up a parent chain to look for a `card_id` before giving up. A build's generations sit two
+# or three hops under `card_build` (`generation <- stages <- card_build`), so this is slack, not a
+# limit anyone reaches; it is a TERMINATION bound, because a torn sidecar can present a parent chain
+# that cycles and this fold must not hang on a file it is only reporting about.
+_CARD_ANCESTRY_HOPS = 60
+
+
+def token_spend_by_card(spans, card_nodes=None, ledger_total=None) -> dict:
+    """Fold parsed span rows into a per-CARD token breakdown — what each experiment's BUILD cost.
+
+    MEASURED, and the reason this exists beside the per-phase fold: on `e5small-dr-unified-v9` at
+    17.6 h, cards 3 and 4 cost 35.3M + 33.6M = 68.9M tokens — 21.0 % of the run's 327.6M — and every
+    node either card ever owned was thrown away by the Card freshness gate before dispatch
+    (`node_failed reason=superseded`, `never_evaluated: True`, `eval_seconds: 0.0`). Those four nodes
+    are TWO cards each built TWICE, and the rebuilds cost MORE than the originals (40.9M of the
+    68.9M). No shipped reader could say any of it: `token_spend_by_phase` stops at the phase, and the
+    durable ledger carries no phase, no role and no node — so "what did this experiment cost, and was
+    it ever evaluated" had no answer at all.
+
+    **THE IDENTITY IS ALREADY IN THE RECORD; only the roll-up was missing.** A generation span does
+    not carry `card_id` itself — the `card_build` span above it does — so this walks each
+    generation's PARENT CHAIN to the nearest ancestor that names one. Measured on that run: 4,478 of
+    4,511 build generations resolve, 97 % of all generation tokens.
+
+    `spans` is any iterable of parsed span dicts. Unlike the per-phase fold this one MATERIALIZES it:
+    a parent chain can only be walked once every span's id is known, and a generator cannot be read
+    twice. `card_nodes` is `{card_id: {"nodes": [...], "discarded": [...]}}` supplied by the caller,
+    which is the only side that can fold the event log; `discarded` is the subset of `nodes` that
+    `core/models.py::is_unevaluated_speculative_discard` PROVED never reached a sandbox.
+
+    Returns ``{rows, attributed, calls, ledger_total, residual, damaged, torn_attributes}`` with
+    `rows` a list of ``{card, tokens, calls, prompt, completion, share, nodes, discarded,
+    wholly_discarded}`` sorted by tokens DESC then card ASC, exactly as the per-phase fold sorts, so
+    two reads of one file cannot disagree about the order.
+
+    **`wholly_discarded` is the load-bearing field and its rule is narrow on purpose**: a card is
+    wholly discarded only when it owns at least one node and EVERY node it owns was proven an
+    unevaluated discard. A card with no nodes is not "wholly discarded" — it is a card whose build is
+    still in flight or was refused before minting one, and calling that a loss would report the
+    engine's normal forward motion as waste. A card with one discarded node and one that ran is not
+    either: the idea WAS evaluated, and the discarded sibling is the prefetch machinery working.
+    """
+    rows_in = [s for s in spans]
+    parents: dict = {}
+    card_of: dict = {}
+    for span in rows_in:
+        if not isinstance(span, dict):
+            continue
+        span_id = span.get("span_id")
+        if span_id is None:
+            continue
+        parents[span_id] = span.get("parent_id")
+        attributes = span.get("attributes")
+        if isinstance(attributes, dict):
+            card = attributes.get("card_id")
+            if isinstance(card, str) and card.strip():
+                card_of[span_id] = card
+
+    def _owning_card(span_id):
+        seen = 0
+        while span_id is not None and seen < _CARD_ANCESTRY_HOPS:
+            if span_id in card_of:
+                return card_of[span_id]
+            span_id = parents.get(span_id)
+            seen += 1
+        return None
+
+    per: dict[str, dict] = {}
+    damaged = 0
+    torn_attributes = 0
+    for span in rows_in:
+        if not isinstance(span, dict):
+            damaged += 1
+            continue
+        if span.get("kind") != _GENERATION:
+            continue
+        attributes = span.get("attributes")
+        if not isinstance(attributes, dict):
+            torn_attributes += 1                      # a billed call whose attribution is lost
+            attributes = {}
+        card = _owning_card(span.get("span_id")) or CARD_UNATTRIBUTED
+        total, prompt, completion = _tokens_of(attributes.get("usage"))
+        row = per.setdefault(card, {"card": card, "tokens": 0, "calls": 0,
+                                    "prompt": 0, "completion": 0})
+        row["tokens"] += total
+        row["prompt"] += prompt
+        row["completion"] += completion
+        row["calls"] += 1
+    attributed = sum(r["tokens"] for r in per.values())
+    lineage = card_nodes if isinstance(card_nodes, dict) else {}
+    rows = sorted(per.values(), key=lambda r: (-r["tokens"], r["card"]))
+    for row in rows:
+        row["share"] = (row["tokens"] / attributed) if attributed else 0.0
+        owned = lineage.get(row["card"]) if isinstance(lineage.get(row["card"]), dict) else {}
+        nodes = [n for n in (owned.get("nodes") or [])]
+        discarded = [n for n in (owned.get("discarded") or [])]
+        row["nodes"] = nodes
+        row["discarded"] = discarded
+        row["wholly_discarded"] = bool(nodes) and set(discarded) >= set(nodes)
+    return {
+        "rows": rows,
+        "attributed": attributed,
+        "calls": sum(r["calls"] for r in per.values()),
+        "ledger_total": ledger_total,
+        "residual": None if ledger_total is None else ledger_total - attributed,
+        "damaged": damaged,
+        "torn_attributes": torn_attributes,
+    }
+
+
 def token_spend_by_phase(spans, ledger_total=None) -> dict:
     """Fold parsed span rows into a per-phase token breakdown, reconciled against the ledger.
 

@@ -2398,9 +2398,18 @@ def is_unevaluated_speculative_discard(state: "RunState", node: Node) -> bool:
     """Prove the Layer-5 budget refund for a speculative build that NEVER RAN, from folded receipts.
 
     A speculative build that turns out not to match the next selection is thrown away before it is
-    ever dispatched: it costs exactly one Developer call and touches no sandbox/GPU.  Charging it a
+    ever dispatched: it costs one Developer BUILD and touches no sandbox/GPU.  Charging it a
     node-budget slot is budget THEFT from the experiments the run still has to execute, so the slot
-    is refunded.  A speculative node that DID consume an evaluation is a real experiment and keeps
+    is refunded.
+
+    THAT SENTENCE READ "exactly one Developer call" UNTIL 2026-08-28, AND A BUILD IS NOT ONE CALL.
+    Measured on `e5small-dr-unified-v9`: card-3's first build was 274 generations and 12.7M tokens,
+    its rebuild 458 and 22.6M; cards 3 and 4 together — every node either ever owned discarded here —
+    cost 68.9M, 21.0 % of the run at 17.6 h.  The refund argument is unaffected, because it is about
+    the NODE BUDGET (GPU slots) and nothing else, and none of those tokens bought sandbox time.  But
+    the old wording made the discard read as free, and it is the most expensive thing the engine does
+    that produces no experiment.  `looplab tokens` now prices it per card (`events/token_spend.py::
+    token_spend_by_card`) so the trade can be weighed rather than assumed.  A speculative node that DID consume an evaluation is a real experiment and keeps
     its slot, whatever its outcome.
 
     "Never ran" is proven, never inferred.  Four independent durable facts must agree:

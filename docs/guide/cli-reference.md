@@ -747,6 +747,43 @@ provider call opens two spans against one billed row, and it is reported rather 
 A generation with no phase is bucketed under `(no phase)`, never dropped — `timings` learned that
 the expensive way, having once hidden 143 of one run's 174 spans by dropping the node-less ones.
 
+**A SECOND table answers "which EXPERIMENT spent it, and was that experiment ever evaluated".**
+Phase says which *kind* of work the tokens bought; it cannot say that a particular build was thrown
+away. On a card-driven run the command now prints a per-card roll-up under the phase table:
+
+```
+        tokens   share   calls  nodes                 card
+    97,610,634   28.0%   1,220  2                     card-2
+    75,578,374   21.7%     748  0                     card-0
+    35,324,049   10.1%     732  3,6 DISCARDED         card-3
+    33,557,920    9.6%     593  4,7 DISCARDED         card-4
+    10,003,845    2.9%     496  -                     (no card)
+    68,881,969   19.8%          built and never evaluated (2 card(s) discarded before dispatch)
+```
+
+That last line is the number nothing could report before. On `e5small-dr-unified-v9`, **68.9M tokens
+— 21.0 % of the run at 17.6 h — bought builds that were discarded by the Card freshness gate before
+dispatch**, and those four nodes are TWO cards each built TWICE, the rebuilds costing more than the
+originals (40.9M of the 68.9M).
+
+**It is not a waste report.** A discarded prefetch is the freshness gate doing its job: the build was
+paid for, the selection it predicted no longer held, and the node-budget slot was refunded
+(`core/models.py::is_unevaluated_speculative_discard`). What the operator gains is the price of that
+trade, which had none — and `models.py` described a discard as costing "exactly one Developer call"
+until this measurement, where one build is 274-458 generations.
+
+**`DISCARDED` is narrow on purpose.** A card is flagged only when it owns at least one node and
+EVERY node it owns was proven an unevaluated discard. A card with no nodes yet is a build in flight,
+not a loss; a card with one discarded node and one that ran was evaluated, and the discarded sibling
+is the prefetch machinery working.
+
+**How a card is attributed.** A generation span carries no `card_id` — the `card_build` span above it
+does — so each generation is charged to the nearest ancestor that names one (4,478 of that run's
+4,511 build generations, 97 % of its generation tokens). Everything else lands in `(no card)`, which
+is where every `propose` generation belongs by construction: a proposal is made before the card it
+may become exists. The section is suppressed entirely on a run where no card resolves, i.e. every
+serial-path run.
+
 **Why the phase is not simply stamped on `llm_usage` instead.** That was the obvious fix and it is
 the wrong one: `engine/costs.py` appends the row from an outbox drain and a reconcile retry loop as
 well as inline, so the phase in context at append time is the phase that *drained* the row, not the
