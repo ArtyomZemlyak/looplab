@@ -545,6 +545,9 @@ class DeepResearcher:
                 # Ran out of turns without an emit — force a structured memo from the accumulated context.
                 fallback=lambda msgs: self._forced(msgs, memo, sources),
                 on_tool_result=_record,
+                # Live, not the session-start snapshot the user turn carries: this stage has no turn
+                # cap and no money cap, so it must hear the figure MOVE. See `tool_loop.py`.
+                budget_note=self._budget_note,
                 nudge_prompt="Now call `emit` with your memo.",
                 stuck_prompt="Stop: you appear to be stuck ({reason}). Call `emit` with your memo now.",
                 **self.loop_opts)

@@ -65,3 +65,40 @@ def test_the_user_turn_leads_with_the_budget():
     assert "self._budget_note() + state_brief(state)" in src, (
         "the note must LEAD the user turn; appended after the brief it competes with the board "
         "rows the brief already fills to its character budget")
+
+
+# ---------------------------------------------------------------- the note must MOVE inside a session
+
+def test_the_loop_is_handed_a_live_callable_not_a_rendered_string():
+    """Measured on dsBN, 2026-08-28: the user-turn note read "$0.0000 of $1.0000 spent" for all
+    SEVEN generations of the first research session and "$0.3210" for all four of the second,
+    because a prompt built at session start is replayed every turn. `plan_step` behaves the same
+    ($0.0935 eight times running). opus5 spent its entire $1.0204 inside ONE session, so a
+    session-start figure would have read $0.0000 for all ten of its generations.
+
+    The refuter: pass `self._budget_note()` (a string, rendered once) instead of
+    `self._budget_note` (the callable) and this fails.
+    """
+    import inspect
+    src = inspect.getsource(DeepResearcher.research)
+    assert "budget_note=self._budget_note," in src
+    assert "budget_note=self._budget_note()" not in src, (
+        "a rendered string freezes at session start, which is the defect this fixes")
+
+
+def test_the_shared_loop_injects_only_when_the_figure_changes():
+    from looplab.agents import tool_loop
+    import inspect
+    src = inspect.getsource(tool_loop.drive_tool_loop)
+    assert '_note != _last_budget_note[0]' in src, (
+        "re-injecting an unchanged note every turn is noise the model pays for")
+    assert '"role": "user", "content": "Reminder — " + _note.strip()' in src, (
+        "system authority belongs to instructions, not to a spend reminder")
+
+
+def test_a_caller_that_passes_no_callable_is_untouched():
+    from looplab.agents import tool_loop
+    import inspect
+    sig = inspect.signature(tool_loop.drive_tool_loop)
+    assert sig.parameters["budget_note"].default is None, (
+        "every existing caller must keep a byte-identical message list")

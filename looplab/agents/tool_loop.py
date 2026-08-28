@@ -581,7 +581,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     self_plan: bool = False, plan_reinject_every: int = 5,
                     auto_summary: bool = False, summary_client=None, on_step=None, on_text=None,
                     cancel_check=None, on_tool_result=None,
-                    nudge_prompt: str = "", stuck_prompt: str = "",
+                    nudge_prompt: str = "", stuck_prompt: str = "", budget_note=None,
                     validate=None, emit_retries: int = 2, emit_after: int = 0, emit_force: int = 0):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
@@ -645,6 +645,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             on_step(ev)
         except Exception:               # noqa: BLE001 - transparency must not change behaviour
             pass
+    _last_budget_note = [""]        # last note actually injected; see the budget block below
+
     def _text(content):                 # interstitial assistant prose (a message written BEFORE a tool
         if on_text is None:             # round) — surfaced live so the chat reads like Claude Desktop
             return                      # (what the agent is thinking out loud between tool calls).
@@ -744,6 +746,27 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             messages.append({"role": "user",
                              "content": "Reminder — your current plan/TODO (update it via update_plan "
                                         "as you make progress):\n" + current_plan})
+        # THE BUDGET MOVES INSIDE A SESSION; A PROMPT BUILT AT SESSION START DOES NOT. Measured on
+        # dsBN 2026-08-28: `deep_research`'s budget line read "$0.0000 of $1.0000 spent" for all
+        # SEVEN generations of its first session and "$0.3210" for all four of its second, because
+        # the line is baked into `messages` once and replayed every turn. `plan_step` behaves the
+        # same ($0.0935 eight times running). For a stage with no turn cap and no money cap that is
+        # exactly the wrong shape: `opus5` spent $1.0204 inside ONE research session, so a
+        # session-start figure would have said $0.0000 for all ten of its generations and warned
+        # nobody.
+        #
+        # `user`-role for the same reason the plan reminder above is: this is a reminder, not an
+        # instruction carrying system authority. Injected only when the rendered note CHANGES, so a
+        # turn that spent nothing adds nothing, and never when the caller supplies no callable --
+        # every existing caller keeps a byte-identical message list.
+        if budget_note is not None:
+            try:
+                _note = budget_note() or ""
+            except Exception:               # noqa: BLE001 - an extra rung must not end a session
+                _note = ""
+            if _note and _note != _last_budget_note[0]:
+                _last_budget_note[0] = _note
+                messages.append({"role": "user", "content": "Reminder — " + _note.strip()})
         # NB: a transport failure (LLMError after the client's retries) PROPAGATES out of the loop by
         # design — the caller decides how to degrade. The assistant's `run_turn` surfaces it as an
         # error dict; the engine's agentic callers (ToolUsingResearcher.propose /
