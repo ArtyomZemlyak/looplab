@@ -100,7 +100,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               `check_false_positive` was added to it. The digest below is measured over BOTH,
 #               so it matches neither side's value and re-deriving it is the merge, not a
 #               rubber stamp. Old receipts should stop verifying, for the same reason as above.
-_EXPECTED_DIGEST = "sha256:d1a4daa186318e67cf0f54fa9a6d245b986f272e51ba863cef3aa0a9248979f7"
+_EXPECTED_DIGEST = "sha256:d716d0fd24522b5e2388d959b9c86f0a845978e5e921282410a03f4250945cb3"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -397,6 +397,16 @@ _EXPECTED_DIGEST = "sha256:d1a4daa186318e67cf0f54fa9a6d245b986f272e51ba863cef3aa
 #               ships ON and FAILS CLOSED, so a replicate calibrated where the kernel offers
 #               Landlock and one calibrated where it does not can spend a different number of
 #               Developer turns on the same node.
+#   2026-08-28  + developer_stage_guidance (217 -> 218). Same branch as the entry below, verified
+#               the same prescribed way -- an AST diff of `Settings`' annotated assignments against
+#               `3dabc64d^` reports exactly ['developer_stage_guidance'] added and [] removed, so
+#               no +2/-1 is hiding behind the new integer. The knob turns OFF ~5,001 characters of
+#               stage-pipeline guidance that `declare_stages` never used; it ships ON so a resumed
+#               pre-2026-08-13 run keeps the prompt its first half ran under. Old receipts SHOULD
+#               stop verifying: a replicate calibrated with the block and one without do not send
+#               the same system prompt, so they can spend a different number of Developer turns.
+#               RE-PINNED LATE: 3dabc64d added the field and left this guard red on HEAD, found on
+#               the next sweep rather than at commit time.
 #   2026-08-27  + developer_step_feedback_command (216 -> 217). The "field set changed too" branch,
 #               and verified by DIFFING THE FIELD SET rather than reading the count, as the
 #               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated assignments
@@ -415,7 +425,7 @@ _EXPECTED_DIGEST = "sha256:d1a4daa186318e67cf0f54fa9a6d245b986f272e51ba863cef3aa
 #               calibrated with it set and one without are genuinely different. Old receipts SHOULD
 #               stop verifying; `speculation_implementation_digest` hashes every shipped `.py` and
 #               this change moves it regardless.
-_EXPECTED_FIELD_COUNT = 217
+_EXPECTED_FIELD_COUNT = 218
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
