@@ -151,6 +151,13 @@ _LOG = logging.getLogger(__name__)
 # tracked data/generated file, where buffering the whole patch would spike run-start memory (a latent
 # OOM) and a truncated "did-it-change" signal is enough. Module-level so an operator/test can retune.
 _DIFF_DIGEST_CAP = 8 * 1024 * 1024
+# The wall the dirty-input enumeration gives `git status --porcelain`. NAMED, and named HERE, because
+# the harness has to bound its environment probe by the SAME number: a probe more patient than the
+# code it certifies passes on a loaded box while the product's call times out, and the test then
+# reports an environment fact as a product defect (measured 2026-08-28 — the probe allowed 120 s
+# against this 10, and the guard went red anyway). One spelling, imported by
+# `tests/test_setup_completion.py::_fixture_git_reports_dirty`, so the two cannot drift apart again.
+_DIRTY_STATUS_TIMEOUT_S = 10
 
 # Back-compatible export: the source-owned definition lives beside the shared runtime-scope digest.
 SPECULATION_CALIBRATION_VARIANT_FIELDS = SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS
@@ -6293,7 +6300,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 p = Path(src)
                 root = str(p if p.is_dir() else p.parent)
                 r = subprocess.run(["git", "-C", root, "status", "--porcelain"],
-                                   capture_output=True, text=True, timeout=10, env=git_env)
+                                   capture_output=True, text=True,
+                                   timeout=_DIRTY_STATUS_TIMEOUT_S, env=git_env)
                 dirty = [ln[:200] for ln in r.stdout.splitlines() if ln.strip()][:500]
                 if r.returncode == 0 and dirty:
                     entry = {"source": src, "dirty": dirty}

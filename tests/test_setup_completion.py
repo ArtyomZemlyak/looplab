@@ -172,17 +172,70 @@ def _fixture_git_reports_dirty(repo) -> bool:
     edge case. Measured 2026-08-28: both dirty-input tests failed `assert 0 == 1` in a full run and
     passed 15/15 in isolation on the same commit with a clean tree.
 
-    So the environment is probed FIRST, with a generous timeout of its own, and a git that cannot
-    answer here produces a SKIP naming the reason instead of a red that reads like a product defect.
-    The product assertions below are untouched: a broken digest still fails.
+    So the environment is probed FIRST, and a git that cannot answer here produces a SKIP naming the
+    reason instead of a red that reads like a product defect. The product assertions below are
+    untouched: a broken digest still fails.
+
+    **THE PROBE IS BOUNDED BY THE PRODUCT'S OWN NUMBER, AND THAT WAS THE BUG IN THE FIRST VERSION.**
+    Shipped 2026-08-28 with `timeout=120` against the product's 10, it was twelve times more patient
+    than the code it certifies — so on a loaded box git answered the probe in thirty seconds, the
+    probe declined to skip, the product's call timed out, `_dirty_inputs` returned `[]` and the test
+    failed `assert 0 == 1` pointing at the product. That is exactly the red this function exists to
+    prevent, and it happened in the full-suite pass that gated b745e538. The bound now has ONE
+    spelling, `orchestrator._DIRTY_STATUS_TIMEOUT_S`, imported here; the env is the product's
+    `git_subprocess_env()` for the same reason, since a probe run under a different environment is
+    not running the product's command.
+
+    **IT IS A FAITHFUL PROXY, NEVER A CERTIFICATE, AND MUST NOT BECOME ONE.** Probe and product are
+    two calls at two moments under load that moves between them, so a passing probe means "git could
+    answer within the product's own bound a moment ago", not "the product's call will". The circular
+    form that WOULD be exact — call `_dirty_inputs` and skip when it returns `[]` — is refused: it
+    skips on a real defect, which is the failure `test_the_environment_probe_tells_a_dirty_repo_from_a_non_repo`
+    exists to catch.
     """
     import subprocess
+
+    from looplab.engine.orchestrator import _DIRTY_STATUS_TIMEOUT_S
+    from looplab.runtime.sandbox import git_subprocess_env
+
     try:
         probe = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True,
+                               timeout=_DIRTY_STATUS_TIMEOUT_S, env=git_subprocess_env())
     except Exception:  # noqa: BLE001 — git missing or wedged is an environment fact, not a verdict
         return False
     return probe.returncode == 0 and bool(probe.stdout.strip())
+
+
+def test_the_probe_is_bounded_exactly_like_the_code_it_certifies(tmp_path, monkeypatch):
+    """A probe more generous than the product cannot certify it — the defect this file shipped once.
+
+    Driven by capturing the kwargs rather than by timing anything, because an assertion over a
+    duration is the very family of flake the guard exists to end.
+    """
+    import subprocess
+
+    from looplab.engine.orchestrator import _DIRTY_STATUS_TIMEOUT_S
+    from looplab.runtime.sandbox import git_subprocess_env
+
+    seen = {}
+    real_run = subprocess.run
+
+    def _spy(cmd, **kw):
+        if "status" in cmd:
+            seen.update(kw)
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(subprocess, "run", _spy)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _fixture_git_reports_dirty(repo)
+
+    assert seen.get("timeout") == _DIRTY_STATUS_TIMEOUT_S, (
+        "the probe must allow git exactly what the product allows it, or a passing probe says "
+        "nothing about whether the product's call could answer")
+    assert seen.get("env") == git_subprocess_env(), (
+        "the probe must run the product's command in the product's environment")
 
 
 def test_the_environment_probe_tells_a_dirty_repo_from_a_non_repo(tmp_path):
