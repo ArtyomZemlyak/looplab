@@ -65,6 +65,15 @@ import datetime
 from dataclasses import dataclass
 from typing import Optional
 
+# Invariant 7: an event type is a REGISTERED constant, never a literal. This module is the
+# reason the rule exists in its purest form — a `phase_progress` beacon has no reader that
+# fails loudly, so a literal that stopped matching would not raise: `_open_phase` would
+# return None for every run and `looplab inspect` would print the FALSE sentence "no phase
+# beacon was left open — the run was between phases" about a run that died mid-`propose`,
+# forever, with nothing red. `stop_account` lives in `events/`, so naming its own package's
+# registry costs no layering.
+from looplab.events.types import EV_PHASE_PROGRESS, PROGRESS_STARTED
+
 # The four dispositions, each PROVABLE from the durable record and jointly exhaustive:
 #   finished     — a `run_finished` is folded. The run ended on its own terms.
 #   paused       — a `pause` is in effect. Resumable, not over; the reason is quoted.
@@ -236,11 +245,11 @@ def _open_phase(rows):
     """
     open_by_key: dict = {}
     for e in rows:
-        if getattr(e, "type", None) != "phase_progress":
+        if getattr(e, "type", None) != EV_PHASE_PROGRESS:
             continue
         d = getattr(e, "data", None) or {}
         key = (d.get("node_id"), d.get("stage"), d.get("phase"))
-        if str(d.get("status") or "") == "started":
+        if str(d.get("status") or "") == PROGRESS_STARTED:
             label = " ".join(str(part) for part in (
                 f"node {d['node_id']}" if d.get("node_id") is not None else None,
                 d.get("operator"), d.get("stage"), d.get("phase")) if part)
