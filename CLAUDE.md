@@ -228,6 +228,19 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   `TRIAGE_ACTIONS`, which the guard asserts in both directions: `node_repaired` now carries a
   `triage_action` AND a `verified`, and one is a model's judgement while the other is the engine's
   byte comparison);
+  card-build skip reasons `engine/speculation.py::CARD_BUILD_SKIP_REASONS` (WHY a paid build was
+  closed without minting a node, written to `card_build_done.skipped_reason`. The coarse `skipped`
+  vocabulary is unchanged — `producer_failed` | `stale` — and this is the ADDITIVE half beside it,
+  because `_claim_requested_card_build` had NINE distinct `return "stale"` sites, one of them a
+  compound of three conditions, all writing one word. Measured on `e5small-dr-unified-v9`: 3 of 12
+  builds closed `stale` having spent 41.4M tokens, 11.8 % of the run, and nothing could say which
+  fired — `not_selected_now` (the board moved, the build is INTACT) and `card_action_changed` (the
+  build no longer matches what it was built for) are different facts with different remedies. Same
+  illness as `inert` in `node_repaired`. A typo'd slug does not fail: it lands on a durable row and
+  reads as a refusal nobody can look up, so `tests/test_card_build_skip_reasons.py` re-derives the
+  set from the claim path's own `ast.Return` constants in BOTH directions — and it EXCLUDES the
+  registry's own definition from the reachability scan, without which a registered-but-never-emitted
+  word was found inside the tuple itself and counted as its own evidence);
   metric-reader path slots `runtime/command_eval.py::READER_PATH_KEYS` (which spec keys each reader
   turns into a filesystem path — deliberately NOT the same table as `READERS_REQUIRING_PATH`, since
   "needs a path" and "names a path" are different facts: `_read_adapter` DEFAULTS its path and still
