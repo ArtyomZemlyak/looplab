@@ -921,3 +921,28 @@ What is NOT claimed: that $3 is worth 3x. dsN3 spent $3.002 for 190.00 and dsFix
 202.77 — more budget did not beat the best dollar run on this task. The honest statement is that
 budget buys node count, node count is where the search pays on the repaired stack, and the two are
 not the same thing as a better number.
+
+---
+
+## 31 — Two ruler worries, both measured and both empty
+
+Neither of these was a report of a defect; both are the kind of thing that quietly invalidates a
+campaign if nobody checks, so they are recorded with their numbers rather than left as assumptions.
+
+**The agent's own probes do not run during a scored evaluation.** `run_probe` launches
+`probe_launcher.py` as a direct child of the run, inheriting the LANE's core affinity — so a probe
+running while a node is being timed would steal cores from the measurement that scores it. Checked
+by overlapping span windows across six runs: **0 of 32 node evaluations overlapped any `run_probe`
+or `run_dev_command` call**. The loop serialises them; the writing session ends before the
+evaluation starts.
+
+**Concurrent lanes do not perturb each other.** Four probes share one box on disjoint 22-core
+lanes, but not disjoint memory bandwidth. Over 99 `edge_expansion` evaluations, `eval_seconds` has
+a median of **40.5 s when isolated** and **40.1 s with two or more evaluations nearby** — no
+measurable coupling. (Density is approximated by `score.log` mtimes within a ±15-minute window,
+which is a proxy for concurrency rather than a record of it; the point is the absence of a gap, and
+a real effect large enough to matter would not hide behind that approximation.)
+
+Taken with §21.10 — the 300 s cold-baseline node-0 evaluations that were an artefact of a cold
+cache and are gone on the warm one — the timing side of the ruler has now been checked from three
+directions and has held each time.
