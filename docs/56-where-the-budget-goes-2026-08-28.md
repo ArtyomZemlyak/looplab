@@ -946,3 +946,25 @@ a real effect large enough to matter would not hide behind that approximation.)
 Taken with §21.10 — the 300 s cold-baseline node-0 evaluations that were an artefact of a cold
 cache and are gone on the warm one — the timing side of the ruler has now been checked from three
 directions and has held each time.
+
+## 32 — integer_factorization closed at n=2, and a display trap of my own
+
+| | AlgoTuner | LoopLab campaign | dsIF | dsIF2 |
+|---|---|---|---|---|
+| test | 9.763 | 9.147 | **96.2102** | **178.7585** |
+| champion | — | — | node 0 | node 0 |
+| shipped | — | — | `factor.pyx` (198 lines) | `rho64.pyx` |
+| $ / nodes / wall | — | — | 1.009 / 2 / 215 min | 1.012 / 3 / 149 min |
+
+Ten to nineteen times either campaign arm, both from a compiled kernel on the first node, both
+builds verified by hand before the numbers were written down.
+
+Our kernel is the largest of the four on this task: 198 lines against **91** (Gemini 3.1 Pro),
+**146** (Gemini 3 Pro) and **84** (GPT-5.4) in `.foreign_results_held`. Same technique, twice the
+code — the same shape §20a found on edge_expansion.
+
+**A trap in my own reporting, not in the ruler.** Rounding node metrics to one decimal printed
+dsIF node 1 as `0.0` and dsIF2 node 2 as `1.0`, which read as a zero and a no-op. They are
+**0.0137** and **0.9702**: valid solvers with no refusal reason, just slow. dsIF's node 1 took
+238 s to evaluate and is ~70x SLOWER than the reference and ~7,000x worse than its own parent —
+a real regression inside a run, and worth noticing precisely because it is not a zero.
