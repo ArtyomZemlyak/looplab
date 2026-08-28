@@ -521,3 +521,26 @@ inlined source, dsBud2's subprocess build).
 **21.7 — a third genuine test-0.0, missing from §4's list.** `B/max_common_subgraph`: train
 champion 101.81, test **0.0** at `eval_seconds` 119.2 with `invalid_results` 98/100. Larger than
 ds3's gap and not previously recorded.
+
+**21.8 — my diagnosis of ds3's test 0.0 is withdrawn, and not replaced with a guess.**
+I published, and repeated, that ds3's train 156.4328 → test 0.0 "reproduces deterministically and
+is NOT the .pyx: the solver crashes on a data shape absent from train." The evidence does not
+support that. `final.json`'s `stderr_tail` reads `Compilation needed: 1 tasks` / `Failed
+evaluations: 1` / `Critical execution error encountered`, i.e. the failure is on the compilation
+path, not in a solver branch.
+
+What is now established about the artefact, measured rather than assumed: the node wrote
+`cutcounter.pyx` and `solver.py` and **no `setup.py`**; the champion calls `pyximport.install()`
+and imports `cutcounter`; `extract_champion` carried both files, so the artefact is complete
+relative to what the agent produced. And `AlgoTune/scripts/evaluate_results.py` has branches for
+`setup.py`/`pyproject.toml` (pip), Pythran and DaCe — and **no branch for a bare `.pyx`**. So ds3
+was compiling with `pyximport` INSIDE the timed evaluation, which is environment-dependent and
+evidently succeeded on train and not on test.
+
+That is a mechanism, not a proof. The decisive test is a re-score of the champion now that pip
+exists, and it must run on a 22-core lane: attempted on the free 8-core set it was correctly
+refused with `baseline_regime_mismatch` — the bridge's own guard, working. Queued for the first
+free lane rather than settled by argument.
+
+Until then ds3's 0.0 is an OPEN question, and every place this document leans on it as "a genuine
+solver failure on unseen data" (§4, §15) should be read as unsupported.
