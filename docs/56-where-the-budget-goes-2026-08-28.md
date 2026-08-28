@@ -434,3 +434,31 @@ test number. And dsPyx straddles the repair, which makes it excellent evidence f
 (the same agent, refused then allowed) and poor evidence for a clean before/after average. `dsFix1`
 was launched at 09:16 on the fully repaired stack from scratch — pip present, the njit-vs-pyx
 clause in the card, `check --size 4408` — as the clean baseline.
+
+### 20a — dsPyx finished: 228.61 on test, the first $1 run to ship an extension
+
+| | dsPyx | dsBud (previous $1 best) | dsNew |
+|---|---|---|---|
+| champion | node 1, **242.855** train / **228.6103 test** | node 1, 48.83 / 48.47 | node 0, 28.34 / 27.80 |
+| shipped | `champion_solver.py` + **`edge_cut.pyx` + `setup.py`** | pure numpy, 34 lines | pure numpy |
+| $ | 1.009 | 1.006 | 1.005 |
+| nodes | 2 | 2 | 3 |
+| wall / LLM / evaluation | 145 / 129 / 3 min | 98 / 83 / 3 | 144 / 133 / 4 |
+| code share | 68 % | 79 % | 54 % |
+
+**4.7x over the previous best at the same budget**, and the shape of the run is otherwise ordinary
+— same money, same node count, same three minutes of evaluation. Nothing about the search changed;
+what changed is that the extension it wrote was allowed to be scored.
+
+`extract_champion` carried both companions (`+2 more: edge_cut.pyx, setup.py`), so the published
+artefact is the whole thing rather than an orphaned import — the defect fixed in 136442be would
+have silently turned this run into a 0.0.
+
+Against the benchmark's own published champion for this task: Gemini 3.1 ships 12 lines of
+`solver.py` over a 33-line `.pyx`; ours is 95 lines over a 25-line `.pyx`. Same technique, more
+Python around it.
+
+The honest caveat repeated: dsPyx STRADDLES the pip repair — its node 0 (21.6461) was refused an
+extension and its node 1 was not. It is mechanism evidence. `dsFix1` (09:16) and `dsFix2` (09:32)
+are the clean runs from scratch on the repaired stack, and they are what the new $1 baseline should
+be read from.
