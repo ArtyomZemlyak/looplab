@@ -1266,3 +1266,42 @@ The medians differ by 1.75× and the ranges overlap almost completely — `dsFB`
 zero profiling, `dsFB2` reached 31.87 with one. At n=15 against n=6 with that spread this is **not
 a signal**, and a named profiler is a prompt-surface change that every run would pay for. Not built
 today; recorded so the option keeps its evidence.
+
+## 39. The probe convicted my own fix, and it was the right probe to run
+
+`a78d295f` gave `deep_research` a budget line and shipped marked NOT YET VERIFIED BY PROBE. dsBN was
+launched to verify it. The line lands — **7 of 7** `deep_research` generations carry it, against 2 of
+2,549 across the old corpus. Then reading the actual numbers:
+
+| generation | what the model was told |
+|---|---|
+| 1–7 | `$0.0000 of $1.0000 spent, $1.0000 left (0 % gone)` |
+| 8–11 | `$0.3210 of $1.0000 spent` |
+
+The figure is **constant within a session** and moves only between sessions, because the note was
+built into `messages` once and replayed every turn. `plan_step` in the same run shows `$0.0935`
+eight times running, so this is not a `deep_research` quirk — it is how every stage's budget line has
+always worked.
+
+That makes the shipped fix miss the case it was built for. `opus5` spent its entire **$1.0204 inside
+ONE research session** (`research_attempted: 1`, ten generations), so a session-start figure would
+have read `$0.0000` ten times and warned nobody. The fix closed the visibility gap and not the
+failure.
+
+Repaired in `453c83d9`: `drive_tool_loop` takes an optional `budget_note` CALLABLE, rendered fresh
+each turn at the same site the plan reminder already uses, injected as a `user` reminder only when
+the rendered text CHANGES. `deep_research` is the only opt-in — it is the only stage with neither a
+turn cap nor a money cap. Default `None` keeps every other caller's message list byte-identical.
+
+**The lesson is about the rule, not the bug.** "Verify a card or loop fix BY PROBE, not by
+reasoning" is what caught this. The fix was well-argued, tested, mutation-checked three ways, and
+wrong about the thing that mattered; no amount of further reasoning about it would have shown the
+seven identical `$0.0000` lines.
+
+### 39.1 My "zero failures" reports were sound, and the missing summary was mine
+
+`pyproject.toml` already sets `addopts = "-q"`, and I was passing `-q` again — `-qq` suppresses the
+`N passed` line entirely, which is why four sweeps of suite results carried no count. Checked with a
+deliberately failing canary rather than assuming: under `-qq` pytest still prints the `FAILED` line
+and still exits 1. So the green claims rested on a signal that works; only the positive count was
+missing. Dropping my own `-q` restores it.
