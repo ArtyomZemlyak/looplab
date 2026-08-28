@@ -629,3 +629,19 @@ contamination channel within the same morning. And the tool that finally named t
 four modules belonging to probes that were live at the time were left in place — removing a module
 a running evaluation might import is a risk with no matching reward, and the redirect stops any
 NEW ones. They should be cleared before the next campaign.
+
+**22.1 — a second paired re-measurement, and why it is not the clean one §21.5 asked for.**
+The isolation check re-evaluated dsPyx's champion on a 22-core lane and returned **248.0918**
+against the **228.6103** in its own `final.json` — same solver, same test subset, same lane width,
+**+8.52 %**. Beside the only other persisted pair (`fxSpectral` 2.1766 → 2.2244, **+2.20 %**), that
+is the shape I claimed and then had to soften in §21.5: noise grows with the magnitude being
+measured.
+
+It is still not proof, and the confound is in the record rather than in a footnote: the original
+evaluation took **43.7 s** and the re-run **178.8 s**, four times longer, because it rebuilt the
+extension and ran while three probes were live on the other lanes. A speedup is a ratio of times,
+so a differently-loaded box is not a repetition. A clean noise figure needs a quiet machine and a
+warm build, and neither of the two pairs on record has both.
+
+So the working band stays what it was: ~2 % measured at low speedup, ~8.5 % suggested at high
+speedup under load, and any single-probe difference inside those should be treated as provisional.
