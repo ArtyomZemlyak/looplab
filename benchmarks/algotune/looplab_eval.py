@@ -606,6 +606,27 @@ def _rules_violation(root: Path, solver: Path) -> str:
 _DIAGNOSTIC_RE = re.compile(r"^[^\s:]+\.(?:pyx|pxd|c|cpp|h|py):\d+(?::\d+)?:.*$", re.M)
 
 
+def build_decision(submitted):
+    """Decide whether to run `setup.py build_ext` over the submitted files.
+
+    Returns `(run_build, skip_note)`. Exactly one is meaningful: a non-empty `skip_note` means the
+    build was NOT attempted and says why in terms of what the model did.
+
+    A `.pyx` with NO build recipe can never be compiled, and running the build anyway spends a
+    subprocess to earn `rc=2: can't open file '.../setup.py'` -- a message about a missing file the
+    model never wrote, not about the mistake it actually made. MEASURED over the probe corpus on
+    2026-08-28: three of the thirty-nine `.pyx` nodes (ds3 node_0, ds3 node_6, dsFB node_2) took
+    exactly this path, shipped a Cython source nothing ever built, and were graded on the
+    pure-Python fallback without ever being told the kernel was dead weight.
+    """
+    has_recipe = "setup.py" in submitted or "pyproject.toml" in submitted
+    sources = sorted(n for n in submitted if n.endswith((".pyx", ".pyi")))
+    if sources and not has_recipe:
+        return False, ("not run: " + ", ".join(sources) + " submitted with no setup.py or "
+                       "pyproject.toml, so nothing was compiled and the pure-Python path was graded")
+    return bool(sources or has_recipe), ""
+
+
 def _build_error_digest(stderr: str, limit: int = 400) -> str:
     """The compiler's own diagnostic first, then the tail -- not the tail alone.
 
@@ -752,8 +773,11 @@ def main() -> int:
             shutil.copy2(extra, dest_dir / extra.name)
             _submitted.append(extra.name)
     build_note = ""
-    if any(n.endswith((".pyx", ".pyi")) for n in _submitted) or "setup.py" in _submitted \
-            or "pyproject.toml" in _submitted:
+    _run_build, _skip_note = build_decision(_submitted)
+    if _skip_note:
+        build_note = _skip_note
+        print(f"looplab_eval: build_ext {build_note}", file=sys.stderr)
+    elif _run_build:
         cmd = [sys.executable, "setup.py", "build_ext", "--inplace"]
         try:
             built = subprocess.run(cmd, cwd=str(dest_dir), capture_output=True, text=True,
