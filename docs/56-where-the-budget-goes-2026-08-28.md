@@ -462,3 +462,62 @@ The honest caveat repeated: dsPyx STRADDLES the pip repair — its node 0 (21.64
 extension and its node 1 was not. It is mechanism evidence. `dsFix1` (09:16) and `dsFix2` (09:32)
 are the clean runs from scratch on the repaired stack, and they are what the new $1 baseline should
 be read from.
+
+---
+
+## 21 — Corrections after an independent review, each re-verified here
+
+A second sub-agent re-derived the corpus with its own code. It found defects in this document and
+in the plot report. Everything below was re-measured by me before being written down.
+
+**21.1 — §8's headline is an OLD-EPOCH statement and does not hold on the repaired stack.**
+Re-measured, splitting the probes by epoch:
+
+| slice | n | median gain over node 0 | champion IS node 0 |
+|---|---|---|---|
+| old card / broken scorer | 16 | **1.00x** | 10/16 |
+| fresh (fixed card, most fixes) | 10 | **1.25x** | **3/10** |
+
+So "the search does not beat its own first attempt" is true of the corpus §8 was written from and
+false of the current one. §8 stands as history, not as a property of the loop.
+
+**21.2 — the "ceiling effect" is an artifact of dividing by the number it is compared to.**
+I reported ρ(LoopLab/AlgoTuner, AlgoTuner) = −0.75 as a clear finding and told the operator it
+explains the wins. Permutation null with the two arms shuffled — no relation by construction —
+gives mean **−0.526**, 5–95 % **−0.84…−0.14**, and the observed −0.745 sits at the **17th
+percentile, p ≈ 0.17**. A ratio with `a` in the denominator correlates negatively with `a` for
+random data. The hypothesis verdict (4 wins / 3 ties / 3 losses, |ρ| ≤ 0.24 against every
+difficulty proxy) survives; only my EXPLANATION of it is withdrawn.
+
+**21.3 — the span stream loses money, but only on the campaign runs.** Re-measured `events.jsonl`
+`llm_usage` against `spans.jsonl` `generation.cost`:
+
+* `runs-B/*` (campaign): 5.5 % to **19.4 %** missing (edge_expansion 379 usage events vs 320 spans).
+* `model-probes/*` (every probe): **0.0 % to 0.3 %**.
+
+Every phase table in this document was computed on PROBES, so §1, §9, §13 and §17 stand. What does
+not stand is the campaign figure I passed on to the operator — "LoopLab came in under its cap at
+$0.90" is really **$1.003**, exactly at the cap. The arm-A side of that comparison ($1.19) holds.
+
+**21.4 — §16's ratio does not survive its own replicates.** Final counters, `check` vs `eval_train`:
+dsChkKc 14/11, dsChk49 12/13, dsN3 18/18, dsPyx 20/21, dsN3b 4/6 — pooled **68 vs 66**, a tie, and
+`check` exceeds `eval_train` in exactly one run of five, the one §16 measured mid-flight. `eval_train`
+did not drop either: 6–13 without the command, 11–21 with it. **§17a survives** — the gate sequence
+(`check` INVALID → edits → `check` OK → `eval_train`) is a mechanism claim and is unaffected.
+
+**21.5 — the ~10 % noise band is weakly supported and the 2 % figure is the measured one.**
+My 285.5765 re-score of sol10 was a live run whose artefact was never saved; the only persisted
+paired re-measurement of ONE solver on ONE subset in the corpus is fxSpectral, 2.1766 → 2.2244,
+**+2.20 %**. The other apparent pairs (ctlEdge 26.45→27.74, fxKcenters 20.81→37.82) are DIFFERENT
+solvers — last node, then champion — and reading them as ruler noise would be an 81 % error.
+Every "below the 10 % noise" dismissal above should be read as provisional.
+
+**21.6 — dsFB's 207.48 was also obtained around the broken scorer.** Its champion imports
+`pyximport` (3 mentions) and compiles at import instead of through `setup.py install`. §19 gave
+sol10 that caveat and not dsFB; both need it. The review counts eleven runs hitting
+`No module named pip` and four distinct workarounds (sol10's argv patch, dsFB's pyximport, dsN3's
+inlined source, dsBud2's subprocess build).
+
+**21.7 — a third genuine test-0.0, missing from §4's list.** `B/max_common_subgraph`: train
+champion 101.81, test **0.0** at `eval_seconds` 119.2 with `invalid_results` 98/100. Larger than
+ds3's gap and not previously recorded.
