@@ -95,6 +95,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
 # measurement behind the line, and for why the diagnostician IS the triage call rather than a second
 # agent (8.7 provider calls per failure, already paid).
 from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagnosis_summary,
+                                              diagnosis_repair_lead,
                                               coerce_evidence, coerce_findings,
                                               diagnosed_failure_reason, diagnosis_tools,
                                               engine_observed_facts, evidence_citation_resolves,
@@ -2769,7 +2770,19 @@ class EvaluateMixin:
                 # A REFUSED rollback rides in FRONT of the eval error, not instead of it: the model
                 # still has to fix something, and the refusal only tells it which door is shut and
                 # why. Cleared on read so one refusal is carried exactly one attempt forward.
-                _err_in = f"{rollback_refusal}\n\n{err}" if rollback_refusal else err
+                # THE DIAGNOSTICIAN'S ACCOUNT LEADS THE TEXT IT DIAGNOSED, for a reason the
+                # diagnostician itself chose. `check_false_positive`'s directive has said "Read its
+                # rationale above before you touch anything" since it shipped, and nothing put the
+                # rationale above it — that kind exists to say "the declared check is wrong, here is
+                # WHY", and the Developer was handed only the refusal being disputed. The rule is
+                # `failure_diagnosis.diagnosis_repair_lead` rather than an inline `if` so its truth
+                # table is drivable: this call site is three hundred lines inside `_evaluate`.
+                # `_summary` is already redacted and capped (`coerce_diagnosis_summary`).
+                _diag_lead = diagnosis_repair_lead(_summary, _reason_source, err)
+                # A refused rollback still rides in FRONT of everything: it tells the model which
+                # door is shut, which it needs before it reads why the run was judged at all.
+                _err_in = (f"{rollback_refusal}\n\n{_diag_lead}{err}" if rollback_refusal
+                           else f"{_diag_lead}{err}")
                 rollback_refusal = ""
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     try:

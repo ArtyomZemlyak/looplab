@@ -757,22 +757,19 @@ class CrashRepairMixin:
             # numbers it has just been told are correct — and the cheapest way to satisfy a wrong
             # check is to break the thing it was checking.
             #
-            # OPEN[cfp-rationale-not-in-repair-prompt] "Read its rationale above" points at text the
-            # prompt does not carry.
-            # proof:`present:reason == "check_false_positive"@looplab/engine/crash_repair.py`
-            # REVIEW 2026-08-25 (correctness): `error` here is `_evaluate`'s `_err_in` — the eval's
-            # own failure text (for this kind, the CHECKER's refusal sentence), optionally prefixed
-            # by a rollback refusal — and nothing on the repair path splices the diagnostician's
-            # verdict into it: `triage["rationale"]`/`summary` reach the durable rows and the
-            # critic, never `Developer.repair`. So the one kind whose whole directive is "the
-            # diagnostician believes the check is wrong — read WHY" hands the Developer only the
-            # refusal being disputed, and the refuting numbers (n1's "val recall@100=0.8114") exist
-            # nowhere in its context. Contrast the `not_learning` path, where `_evaluate` prepends
-            # `watchdog_err` to `err` before this ladder runs — the sentence "its sentence is
-            # already at the head of `error`" is true there and false here. Fix direction: for a
-            # TRIAGE-sourced reason, prepend the (already redacted+capped) rationale or
-            # `reason_summary` to `_err_in` beside the watchdog prefix, then delete this marker and
-            # the "above" claim becomes true.
+            # "Read its rationale above" IS TRUE SINCE 2026-08-28, and it was not before. `error`
+            # here is `_evaluate`'s `_err_in`, and nothing on the repair path spliced the
+            # diagnostician's verdict into it — `triage["rationale"]`/`summary` reached the durable
+            # rows and the critic, never `Developer.repair`. So the one kind whose whole directive is
+            # "the diagnostician believes the check is wrong — read WHY" handed the Developer only
+            # the refusal being disputed, with the refuting numbers (n1's "val recall@100=0.8114")
+            # nowhere in its context. `failure_diagnosis.diagnosis_repair_lead` now prepends the
+            # already-redacted, already-capped `reason_summary` for any TRIAGE-sourced reason, in
+            # the same position `_evaluate` has always prepended `watchdog_err` on the
+            # `not_learning` path — which is why the identical sentence was true there and false
+            # here. The lead is suppressed for an ENGINE-final reason (a fact the engine measured is
+            # not a model's account) and when the summary is already in the text (the watchdog
+            # prepends upstream, and one finding said twice reads as two agreeing).
             return ("[failure kind: check_false_positive]\n" + error + "\n"
                     "THE STAGE'S DECLARED CHECK REFUSED THIS RUN, AND THE FAILURE DIAGNOSTICIAN — "
                     "reading the same log afterwards, with more of it — BELIEVES THE CHECK WAS "

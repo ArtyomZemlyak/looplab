@@ -740,6 +740,21 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   absent from `NEVER_SALVAGED_REASONS`, so they can neither suppress one nor grant one. The engine's own structural answer stays on the row beside it
   (`engine_reason`) and `reason_source` says who chose the word.
 
+  **A diagnosed reason now LEADS the text the Developer repairs from** (2026-08-28). It did not
+  until then, and `check_false_positive` is where that cost the most: its directive says *"Read its
+  rationale above before you touch anything"* and nothing spliced the diagnostician's verdict into
+  the error, so the one kind whose whole point is *"the declared check is wrong — read WHY"* handed
+  the Developer only the refusal being disputed. On `rubertlite-dense-retrieval` node 1 the
+  diagnosis reads "the run actually reached val recall@100=0.8114 (matching the known-good baseline
+  0.81), yet the verifier flagged" it — and that number was nowhere in the repair context. Asking a
+  Developer to fix a run whose numbers it has just been told are correct is how a working experiment
+  gets broken to satisfy a wrong check. `failure_diagnosis.py::diagnosis_repair_lead` prepends the
+  already-redacted, already-capped `reason_summary` for any TRIAGE-sourced reason, in the same
+  position the `not_learning` path has always prepended the watchdog's own sentence. It is
+  suppressed for an ENGINE-final reason — a fact the engine measured is not a model's account — and
+  when the summary is already in the error text, because one finding said twice reads as two
+  independent findings agreeing.
+
   The engine still HANDS OVER what it saw. `engine_observed_facts` states the exit status and
   whether the process wrote anything at all — a fact `_eval_failure_text` surfaced only when stderr
   was blank, so a pod cgroup OOM-kill leaving a `Killed` line used to reach the judge as that one
