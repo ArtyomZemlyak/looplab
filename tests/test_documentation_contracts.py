@@ -84,12 +84,14 @@ def test_index_mentions_every_numbered_document():
     #   52 -> 53 (2026-08-26): doc 53, the AlgoTune campaign read as evidence about our own
     #   loop. No collision this time — 53 was free, and the row went into the index in the
     #   same change that moved this number, which is the whole point of the literal.
+    #   54 -> 55 (2026-08-28): doc 56, where arm B's budget goes. Row and count moved in ONE
+    #   change, which is the lesson 55 paid for.
     #   53 -> 54 (2026-08-27): doc 55, the eleven probe results on one ruler. No collision — 54 was
     #   never allocated and 55 was free, and the row went into the index in the same change that
     #   moves this number, which is the whole point of the literal. It did NOT go in together the
     #   first time: `af0c99c0` added the document alone and left both guards red for half an hour,
     #   which is exactly the drift this count exists to catch, caught by it.
-    assert len(numbered) == 54, "the derived numbered-document inventory changed"
+    assert len(numbered) == 55, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
