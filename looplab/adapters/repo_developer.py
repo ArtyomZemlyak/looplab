@@ -27,7 +27,7 @@ import math as _math
 
 from typing import Optional
 
-from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX
+from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
 
@@ -556,7 +556,14 @@ def empty_build_refusal(*, error, base, base_deleted, files, deleted) -> str:
     authored = [name for name in (files or {}) if name != STAGES_MANIFEST]
     if not authored and not deleted:
         only_manifest = bool(files)
-        return (f"{DEVELOPER_ERROR_PREFIX} the implement session ended having written "
+        # SPELLED AS "STUCK", NOT AS A CRASH, since 2026-08-28. The docstring above already says
+        # why: the cause is "a missing forcing function rather than a confused model" and the
+        # session ended on its own wall budget with a live provider. `DEVELOPER_ERROR_PREFIX` routes
+        # to the provider circuit breaker and PAUSES the run (`core/models.py:943`), which ended
+        # dsNew2 at 2 evaluated nodes of 3 and qwen38f at its first — 2 of 106 nodes on the corpus,
+        # both of them run-ending, on a gateway that answered every call. The node still dies; the
+        # run no longer does. `engine/orchestrator.py` gained the matching branch in the same change.
+        return (f"{DEVELOPER_STUCK_PREFIX} the implement session ended having written "
                 + ("only the stage manifest" if only_manifest else "nothing at all")
                 + ", so there is no candidate to evaluate -- "
                 + ("declaring how to run an experiment is not writing one; " if only_manifest else "")

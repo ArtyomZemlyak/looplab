@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from looplab.adapters.repo_developer import empty_build_refusal
-from looplab.core.models import is_developer_error
+from looplab.core.models import is_developer_error, is_developer_stuck
 
 
 class _Write:
@@ -36,8 +36,18 @@ def _tail(error, base, base_deleted, write):
 
 
 def test_a_fresh_build_that_wrote_nothing_is_a_developer_error():
+    """Named for the property that matters: an empty set must not pass as a built node.
+
+    The SPELLING changed on 2026-08-28 and the name is kept so the history stays greppable. It was
+    `(developer error: ...)`, which `engine/orchestrator.py` routes to the provider circuit breaker
+    and which therefore paused the whole run -- measured twice on the probe corpus (dsNew2 node 2,
+    qwen38f node 0), both times on a gateway answering every call, dsNew2 losing a third of its
+    nodes. It is now `(developer stuck: ...)`: the node still dies, the run does not.
+    `tests/test_empty_build_is_stuck_not_a_crash.py` holds that contract.
+    """
     out = _tail(error=None, base=None, base_deleted=None, write=_Write())
-    assert is_developer_error(out), "an empty working set must not pass as a built node"
+    assert out, "an empty working set must not pass as a built node"
+    assert is_developer_stuck(out) and not is_developer_error(out), out
     assert "no candidate to evaluate" in out
 
 
@@ -67,7 +77,7 @@ def test_the_stage_manifest_ALONE_is_not_a_candidate():
 
     out = _tail(error=None, base=None, base_deleted=None,
                 write=_Write(files={STAGES_MANIFEST: '{"stages": []}'}))
-    assert is_developer_error(out)
+    assert is_developer_stuck(out) and not is_developer_error(out), out
     assert "only the stage manifest" in out, out
     # The two cases must READ differently: "wrote nothing" and "declared a pipeline and no code"
     # send an operator to different places.

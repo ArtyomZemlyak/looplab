@@ -106,7 +106,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS,  # noqa: F401
                                    _rule_triage, _shallow_fingerprint)
 from looplab.core.models import (
     Idea, Node, NodeStatus, RunState, durable_idea_payload, effective_card_footprint,
-    is_developer_error)
+    is_developer_error, is_developer_stuck)
 from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefusal
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
@@ -5800,6 +5800,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # pending, and the eval runs the PARENT's carried-over entrypoint and inherits the PARENT's
             # metric — a false success that pollutes the search (the 401-window nodes 50-54 each faked
             # the parent's 0.81 this way). node_created → node_failed keeps the one-terminal invariant.
+            # THE MODEL RAN OUT OF MOVES, WHICH IS NOT THE PROVIDER DYING. `empty_build_refusal`
+            # convicts a fresh build that wrote no candidate, and until 2026-08-28 it spelled that
+            # with the CRASH sentinel — so a session that probed 24 times and never called
+            # `write_file` paused the whole run through the provider circuit breaker.
+            # `core/models.py:943` already states the rule this violates: "(developer error: …)
+            # routes to the provider circuit breaker and pauses the RUN, which is exactly the wrong
+            # answer for a healthy model that has simply run out of ideas about one node."
+            #
+            # Measured on the probe corpus: 2 of 106 nodes ended this way (dsNew2 node 2, qwen38f
+            # node 0) and BOTH ended their run. dsNew2 stopped at 2 evaluated nodes of 3 on a
+            # gateway that answered every call, which at 2-4 nodes per $1 run is a third of it.
+            #
+            # This branch must come FIRST and must not fall through: `is_developer_error` does not
+            # match the stuck spelling, and the fresh-build path knew only that one, so a bare
+            # respelling in the refusal would drop the sentinel into "this is solution code" — the
+            # false-success path the comment below was written for.
+            elif is_developer_stuck(code):
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": 0,
+                    "error": code,
+                    # NOT `developer_crash`: that reason is what the circuit breaker reads. This node
+                    # is finished and the run is not — the next proposal is free to try something else.
+                    "reason": "developer_stuck", "eval_seconds": 0.0,
+                })
             elif is_developer_error(code):
                 # Terminal only — see `_request_create_pause` below for why the pause is queued.
                 crash_terminal, _crash_pause = developer_crash_records(
