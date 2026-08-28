@@ -968,3 +968,47 @@ dsIF node 1 as `0.0` and dsIF2 node 2 as `1.0`, which read as a zero and a no-op
 **0.0137** and **0.9702**: valid solvers with no refusal reason, just slow. dsIF's node 1 took
 238 s to evaluate and is ~70x SLOWER than the reference and ~7,000x worse than its own parent —
 a real regression inside a run, and worth noticing precisely because it is not a zero.
+
+## 33. The number tracks whether the kernel LOADS — and two ways it fails to
+
+Thirty-nine nodes across the probe corpus shipped a `.pyx`. Splitting them by what the bridge's
+build actually did:
+
+| what happened to the kernel | n | median speedup | values |
+|---|---|---|---|
+| `build_ext ok` | 34 | **192.32** | 261.11 … 16.60 |
+| compile failed (`rc=1`, Cython diagnostics) | 2 | **25.41** | 27.99, 22.82 |
+| `.pyx` shipped with **no** `setup.py` | 3 | **34.65** | 156.43, 34.65, 24.91 |
+
+The middle row is the sharpest statement this corpus supports about the pip repair: a kernel that
+compiles is worth roughly **7.6×** the median of one that does not. It is not that Cython is magic —
+it is that a `.pyx` which fails to load leaves the run graded on whatever pure-Python path remained,
+which is where the old 22–48 band lived. dsFix3's 27.79 was never a bad idea badly executed; it was
+a good idea that did not link.
+
+The third row is a distinct failure the loop had no words for, and it was **ours, not the model's**.
+The bridge's predicate fired on the presence of a `.pyx` alone, so a submission with a Cython source
+and no recipe ran `python setup.py build_ext --inplace` in a directory containing no such file and
+reported
+
+    build_ext failed rc=2: .../python: can't open file '.../setup.py': [Errno 2] No such file
+
+— a complaint about a file the model never wrote. Three runs (ds3 node_0 and node_6, dsFB node_2)
+carried a dead Cython source through grading and were never told. Fixed in `3be289eb`:
+`build_decision()` now names the source, names the missing recipe, and states the consequence.
+ds3 node_0's 156.43 shows the failure is survivable when `solver.py` never imported the extension —
+which is exactly why it went unnoticed for eleven runs.
+
+### 33.1 The syntax gate the reference agent has, and why we do not need it
+
+`AlgoTuner/editor/editor_functions.py` validates every edit with `ast.parse` plus pylint and reverts
+the write when it fails, so a broken file never reaches disk. The obvious move is to port it. It was
+measured first, over all 188 `.py` files written across the probe corpus:
+
+**zero** fail to parse.
+
+The gate would fire on nothing. Its cost is not zero either — the reference agent's version also runs
+pylint and refuses on *lint* errors, which turns a style opinion into a blocked edit. This is
+recorded as a **negative** result so the idea is not re-derived: the reference agent needs the gate
+because its edits are line-range splices into an existing file, where an off-by-one truncates a
+block; ours are whole-file writes, which are wrong or right but rarely unparseable.
