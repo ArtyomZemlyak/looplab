@@ -83,3 +83,55 @@ for name, path in (("8801 шлюз (код от 24.08)", "meter/meter.jsonl"),
     if len(naive) != len(bad):
         print("      (фильтр по коду ответа показал бы %d — на %d меньше)" % (len(naive), len(bad) - len(naive)))
 PY
+
+# ВОЗРАСТ ПРОЦЕССА ПРОТИВ ВОЗРАСТА ЕГО КОДА.
+#
+# Это прожило четыре дня незамеченным. Прокси 8801 стартовал 2026-08-24 10:11:59, а
+# `benchmarks/meter/proxy.py` менялся пять раз после этого — включая правку, после которой
+# оборванный поток перестал считаться ошибкой, и правку счётчика повторов. Все эти дни монитор
+# бодро печатал суммы и неудачи, посчитанные кодом, которого в дереве уже нет. docs/53 §9 записал
+# это 26.08 и оно осталось верным, потому что НИКТО НЕ СВЕРЯЛ. Теперь сверяет.
+#
+# По /proc, а не через pkill: шаблон pkill матчит собственную командную строку.
+python3 - "$ROOT" <<'PY'
+import os, sys, time
+root = sys.argv[1]
+src = os.environ.get("PROXY_SRC_OVERRIDE") or os.path.join(root, "looplab", "benchmarks", "meter", "proxy.py")
+if not os.path.exists(src):
+    src = os.path.join(root, "benchmarks", "meter", "proxy.py")
+if os.path.exists(src):
+    mtime = os.path.getmtime(src)
+    boot = time.time() - float(open("/proc/uptime").read().split()[0])
+    hz = os.sysconf("SC_CLK_TCK")
+    stale = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            parts = [a for a in open(f"/proc/{pid}/cmdline", "rb").read().decode(
+                "utf8", "replace").split("\0") if a]
+            started = boot + int(open(f"/proc/{pid}/stat").read().rsplit(") ", 1)[1].split()[19]) / hz
+        except (OSError, IndexError):
+            continue
+        # BY ARGV ELEMENTS, NOT BY SUBSTRING. A substring search over the whole command line matches
+        # THIS monitor's own shell, whose `bash -c` argument contains the heredoc that mentions
+        # proxy.py -- it reported five stale proxies where three exist. The same self-match that
+        # `pkill -f` is banned for. So: the interpreter must be python and some argument must BE
+        # proxy.py, as a path element rather than as text.
+        if not parts or not os.path.basename(parts[0]).startswith("python"):
+            continue
+        if not any(os.path.basename(a) == "proxy.py" for a in parts):
+            continue
+        port = "?"
+        if "--port" in parts:
+            i = parts.index("--port")
+            if i + 1 < len(parts):
+                port = parts[i + 1]
+        if started < mtime:
+            stale.append((pid, port, (mtime - started) / 3600))
+    for pid, port, hours in sorted(stale, key=lambda r: -r[2]):
+        print(f"  УСТАРЕВШИЙ ПРОКСИ: pid={pid} порт={port} стартовал на {hours:.1f} ч РАНЬШЕ "
+              f"последней правки proxy.py — его числа считает код, которого в дереве нет")
+    if not stale:
+        print("  прокси: все процессы новее своего кода")
+PY
