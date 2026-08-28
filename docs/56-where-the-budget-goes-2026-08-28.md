@@ -568,3 +568,23 @@ the same claim as "the reference was timed in this pass".
 Consequence for the statistics: any "gain over node 0" computed on the CAMPAIGN slice is inflated,
 because a fake ~1.0 node 0 is trivially beaten. §8 and §21.1 were computed on probes only and are
 unaffected; the plot report pooled both and its 1.05x should be read with this in mind.
+
+**21.11 — the retry counter is probe-verified, and the rate limiter is not a bottleneck.**
+At 10:38 three probes on the 8803 proxy took a `BrokenPipeError` within 31 seconds of each other —
+`status=200` on all three, so the upstream had begun answering and the stream was cut mid-flight.
+The proxy retried and **no work was lost**: zero `node_failed` and zero `pause` across dsFix1,
+dsFix2 and dsN3b.
+
+That incident verified a fix inherited from `10a79c3e` that had never been exercised. The new proxy
+recorded `attempts=2, queued_s=60.0` (dsN3b, dsFix1) and `attempts=3, queued_s=120.0` (dsFix2)
+against latencies of 66.5 s, 61.8 s and 121.1 s. Before that commit a call retried five times wrote
+`attempts: 1, queued_s: 0.0`. The old 8801 ledger still carries 279 rows with `attempts: null`, the
+pre-fix shape.
+
+Two things I got wrong on the way and correct here. `queued_s` is NOT the retry backoff — it
+accumulates `limiter.acquire()`, the RPM queue — so reading 60.0 as a backoff sum that should have
+been `min(2**n, 30)` was my error. And the guess that followed it, "three probes on one 45-rpm
+proxy are rate-limit bound", is refuted by measurement: over three hours, **240 s of queueing
+against 18,427 s of calls on 8803 (1 %)** and 60 s against 18,717 s on 8801 (0 %), with a median
+and p90 of 0.0 s and exactly 3 of 605 calls ever queueing — the same three. Adding proxies or
+raising `--rpm` would buy nothing at this concurrency.
