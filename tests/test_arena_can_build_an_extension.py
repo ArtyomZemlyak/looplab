@@ -20,6 +20,7 @@ installs pip ALONE from the ensurepip wheel -- `python -m ensurepip` would also 
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -49,19 +50,41 @@ def test_setuptools_was_not_downgraded_by_the_repair():
     assert major >= 84, f"setuptools was rolled back to {out} -- the ensurepip default did this"
 
 
+_SITE = _ARENA / ".venv" / "lib" / "python3.11" / "site-packages"
+
+
 def test_a_setup_py_candidate_actually_installs(tmp_path):
-    """The end-to-end path, run with the scorer's own argv rather than a proxy for it."""
+    """The end-to-end path, run with the scorer's own argv rather than a proxy for it.
+
+    ISOLATED THE SAME WAY THE BRIDGE ISOLATES IT (`looplab_eval.py`, `PIP_TARGET`). The first
+    version of this test ran the scorer's argv bare, so it installed `_kern` into the arena's SHARED
+    site-packages -- the exact contamination channel `d439c966` closed in the bridge, left open in
+    the test that verifies the bridge's premise. Caught on 2026-08-28 at 21:20, when the suite
+    dropped `_kern.cpython-311-x86_64-linux-gnu.so` and `kern-0.0.0.dist-info` into the venv WHILE
+    TWO PROBE EVALUATIONS WERE RUNNING against it. No probe imports the name `_kern` (checked
+    against the whole corpus, not by substring -- `edge_expansion_kernel` matches `_kern` and is
+    not it), so nothing was mismeasured; the write into a live ruler is the defect.
+    """
     (tmp_path / "_kern.pyx").write_text("def add(int a, int b):\n    return a + b\n", encoding="utf-8")
     (tmp_path / "setup.py").write_text(
         "from setuptools import setup\nfrom Cython.Build import cythonize\n"
         "setup(name='kern', ext_modules=cythonize('_kern.pyx', language_level=3))\n", encoding="utf-8")
+    target = tmp_path / "piptarget"
+    target.mkdir()
+    before = {p.name for p in _SITE.glob("*kern*")}
+    env = dict(os.environ, PIP_TARGET=str(target),
+               PYTHONPATH=os.pathsep.join([str(target), os.environ.get("PYTHONPATH", "")]).rstrip(os.pathsep))
     proc = subprocess.run(
         [str(_PY), "-m", "pip", "install", ".", "--no-deps", "--force-reinstall", "--no-cache-dir"],
-        cwd=tmp_path, capture_output=True, text=True, timeout=600)
+        cwd=tmp_path, capture_output=True, text=True, timeout=600, env=env)
     assert proc.returncode == 0, f"the scorer's own install command failed: {proc.stderr[-600:]}"
     check = subprocess.run([str(_PY), "-c", "import _kern;print(_kern.add(1, 2))"],
-                           cwd=tmp_path, capture_output=True, text=True)
+                           cwd=tmp_path, capture_output=True, text=True, env=env)
     assert check.stdout.strip() == "3", check.stderr[-400:]
+    # The refuter. Drop PIP_TARGET from `env` above and this is what fails.
+    assert {p.name for p in _SITE.glob("*kern*")} == before, (
+        "this test installed into the arena's SHARED site-packages, which every concurrent "
+        "evaluation imports from -- a test must never write into the ruler it is measuring with")
 
 
 def test_the_repair_is_pinned_in_the_box_script_and_installs_pip_alone():
