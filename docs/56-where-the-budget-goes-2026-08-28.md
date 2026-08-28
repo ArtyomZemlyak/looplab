@@ -780,3 +780,38 @@ evaluations install into their per-invocation `PIP_TARGET`, so nothing replaces 
 probes survived; no `node_failed` and no `pause` appeared. One correction to my own procedure: I
 labelled the check "no evaluation in flight" when the grep had in fact matched one 18 seconds old.
 It survived, and the label was still wrong.
+
+---
+
+## 26 — Three probes closed, and §23.1 is corrected: dsFix3 never had a working extension
+
+| probe | task | $ | nodes | champion | test | shipped |
+|---|---|---|---|---|---|---|
+| dsFix3 | edge_expansion | 1.004 | 3 | node 0 | **27.7907** | a `.pyx` that does not compile and is never imported |
+| dsFixKc | kcenters | 1.004 | 2 | node 1 | **159.5116** | numba, no `.pyx` |
+| dsN3 | edge_expansion ($3) | 3.002 | 6 | node 4 | **190.0012** | no `.pyx` on disk (Cython source inlined in a string) |
+
+**§23.1 was wrong and is withdrawn.** I recorded dsFix3 as a clean run that "shipped an extension
+and scored 27.99", which made the extension look necessary-but-not-sufficient. It is worse and
+simpler than that: `solver_cy.pyx` fails to cythonize (`18:13: cdef statement not allowed here`)
+and the node's 56-line `solver.py` **never imports it** — the 27.79 is a numba score, and the
+`.pyx` is a dead file. So the working-extension sample on the repaired stack is **two**, dsFix1
+106.4716 and dsFix2 132.7, not three, and the old $1 ceiling of 27.19–48.83 still stands unbroken
+by any run that did not get a compiled kernel to load.
+
+`dsFixKc` closes the kcenters question at 159.5116 with no `.pyx` in two nodes, confirming §25 on
+finished numbers: the technique there is numba and the pip repair is irrelevant to it.
+
+`dsN3` at $3 reached six nodes and 190.0012, its champion being node 4 — the search DOES pay at
+that node count, which is §21.1's fresh-epoch reading holding on a longer run.
+
+## 27 — Only twenty tasks have data, and a probe on a twenty-first cost $0.0042
+
+I picked `count_connected_components` as a second extension-rewarding task because it has five
+published `.pyx` champions, launched it, and killed it a minute later: the arena keeps exactly the
+twenty campaign tasks on disk and `make_task.py` will build a card for any name. Nothing refused
+it — lane free, fence closed, directory clean.
+
+Of the tasks that DO have data, `integer_factorization` is the one with published `.pyx`
+champions (three), and it carries both arms' numbers (AlgoTuner 9.763, LoopLab 9.147). Two probes
+are on it now. `run_probe.sh` gained a dataset guard in `cab2692c`.
