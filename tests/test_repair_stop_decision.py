@@ -1117,11 +1117,56 @@ def test_install_candidates_are_jointly_evidenced():
     assert deps.triage_install_candidates("my_local_helper_zzz", _R2, _T2) == ["transformers"]
 
 
+def _bare_interpreter_spawn_seconds() -> float:
+    """How long a bare `python -c pass` costs on this box, right now.
+
+    `deps.is_present` spawns an interpreter under `timeout=30.0` and FAILS CLOSED — a
+    `TimeoutExpired` is a `SubprocessError`, so a slow spawn answers "present". That is the correct
+    product shape (never install over something that may be there), and it makes exactly ONE of the
+    assertions below environment-dependent: the NEGATIVE one. The positives want "present" and get
+    it either way.
+
+    Measured 2026-08-28: this test failed `assert not True` in a full-suite run alongside the live
+    engine and passed in isolation on the same commit. On this box the interpreter lives on a
+    network-backed conda and site initialization scans `.pth` files, so a loaded spawn is slow.
+    """
+    import subprocess
+    import sys
+    import time
+    t0 = time.monotonic()
+    try:
+        subprocess.run([sys.executable, "-c", "pass"], capture_output=True, timeout=120)
+    except Exception:  # noqa: BLE001 — an interpreter that will not spawn is an environment fact
+        return float("inf")
+    return time.monotonic() - t0
+
+
+def test_the_spawn_probe_reports_a_real_positive_duration():
+    """The guard's own contract, driven — because in a FAST environment the guard is invisible.
+
+    A mutant that makes `_bare_interpreter_spawn_seconds` return 0.0 cannot be caught by the test
+    that uses it (the box is fast here, so it passes either way), and a mutant returning a huge
+    constant would turn the test into a permanent skip nobody notices. Both are killed here: the
+    probe must report a POSITIVE, FINITE duration that actually reflects a spawn.
+    """
+    import math
+
+    seconds = _bare_interpreter_spawn_seconds()
+    assert math.isfinite(seconds), "a box that cannot spawn an interpreter is a real environment fact"
+    assert seconds > 0.0, "a zero duration means the probe never timed a spawn"
+    assert seconds < 120.0, "the probe's own timeout is 120s; a value at or past it is not a measurement"
+
+
 def test_is_present_probes_the_interpreter_and_fails_closed():
     """The last condition, and the one no agent can influence: only what is provably ABSENT is
     installed. Any doubt answers 'present', so the failure mode is a missed install, never a
     surprise one."""
     assert deps.is_present("sys") and deps.is_present("json")
+    spawn = _bare_interpreter_spawn_seconds()
+    if spawn > 10.0:
+        pytest.skip("a bare interpreter spawn costs %.1fs here; `is_present` allows 30s for "
+                    "spawn+find_spec and fails closed to 'present' past it, so the NEGATIVE "
+                    "assertion cannot be trusted on this box right now" % spawn)
     assert not deps.is_present("definitely_not_a_real_module_zzz")
     assert deps.is_present("")                       # not a name -> no install
     assert deps.is_present("not an identifier!")
