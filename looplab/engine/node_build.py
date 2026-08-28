@@ -16,7 +16,8 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.core.llm_broker import in_llm_lane
-from looplab.core.models import Idea, RunState, normalize_researcher_footprint, is_developer_error
+from looplab.core.models import (Idea, RunState, normalize_researcher_footprint,
+                                 is_developer_error, is_developer_stuck)
 from looplab.events.types import EV_AGENT_DECISION, EV_NODE_CREATED, EV_NODE_FAILED, EV_PAUSE
 from looplab.search.operators import merge_idea
 
@@ -205,7 +206,12 @@ class NodeBuildMixin:
         unspecified proposal stays unspecified so legacy scheduling remains byte-for-byte compatible.
         """
         proposed = normalize_researcher_footprint(getattr(idea, "footprint", None))
-        if proposed is None or is_developer_error(code):
+        # BOTH SENTINELS. A footprint finalized from a build that produced no code is a claim about
+        # resources nothing will use. `empty_build_refusal` moved to the `stuck` spelling on
+        # 2026-08-28 and this reader kept testing only the crash one -- found by the cross-module
+        # invariant in `tests/test_empty_build_is_stuck_not_a_crash.py`, not by hand, after the same
+        # omission in `engine/speculation.py` had already cost dsFix1 a node.
+        if proposed is None or is_developer_error(code) or is_developer_stuck(code):
             return idea, False
         finalized = normalize_researcher_footprint(
             getattr(developer, "last_footprint", None)) or proposed

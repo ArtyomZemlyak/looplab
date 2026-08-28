@@ -22,7 +22,7 @@ from looplab.core.models import (
     NodeStatus,
     RunState,
     card_ownership_receipt,
-    durable_idea_payload, is_developer_error)
+    durable_idea_payload, is_developer_error, is_developer_stuck)
 from looplab.core.llm_broker import in_llm_lane
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.replay import fold
@@ -691,10 +691,18 @@ class SpeculationMixin:
 
     @staticmethod
     def _developer_sentinel(node) -> bool:
+        # BOTH SPELLINGS. `empty_build_refusal` moved from `(developer error:` to
+        # `(developer stuck:` on 2026-08-28 (c11251a1) and only `engine/orchestrator.py` was taught
+        # the new one, so this predicate stopped recognising a build that wrote nothing. Measured
+        # the same morning on dsFix1 node 2: the refusal fired, this returned False, the sentinel
+        # fell through as if it were solution code, and the engine committed a node with
+        # `files: {}` and spent 36.1 s evaluating the untouched `raise NotImplementedError`
+        # template for a 0.0 -- one node slot of three. A sentinel is only as safe as its LEAST
+        # aware reader.
         return bool(
             node is not None
             and isinstance(getattr(node, "code", None), str)
-            and is_developer_error(node.code)
+            and (is_developer_error(node.code) or is_developer_stuck(node.code))
         )
 
     @staticmethod
@@ -1260,6 +1268,17 @@ class SpeculationMixin:
                     reason="superseded",
                     never_evaluated=True,
                 )
+                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+                return
+            if is_developer_stuck(result.code):
+                # The model ran out of moves on THIS card; the run is not in trouble. Terminalize
+                # the build and let the next speculative action proceed -- no crash record, no
+                # circuit breaker, which is the distinction `core/models.py:943` draws and which
+                # the crash branch below would erase.
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": generation,
+                    "error": result.code, "reason": "developer_stuck", "eval_seconds": 0.0,
+                })
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
             if is_developer_error(result.code):

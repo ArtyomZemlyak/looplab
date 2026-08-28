@@ -6088,6 +6088,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     drop_card=replacement_card)
                 self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
+            if is_developer_stuck(code):
+                # SAME DISTINCTION AS THE FRESH-BUILD PATH ABOVE. The model ran out of moves on this
+                # node; the provider is fine. Terminalize the node and let the run continue -- the
+                # crash branch below would route it to the circuit breaker and pause everything.
+                # Found by the cross-module invariant in
+                # `tests/test_empty_build_is_stuck_not_a_crash.py`, which counted three readers of
+                # the crash sentinel here against one of the stuck one -- my own c11251a1 taught
+                # only the first of the three.
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node.id, "generation": generation,
+                    "error": code, "reason": "developer_stuck", "eval_seconds": 0.0,
+                })
+                self._discard_node_build_telemetry()
+                return
             if is_developer_error(code):
                 for crash_type, crash_data in developer_crash_records(
                         node.id, generation, code,
@@ -6322,6 +6336,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # two sibling create paths already fix). FAIL it now (node_created → node_failed keeps the
             # one-terminal invariant) and trip the SAME developer-crash circuit-breaker, so an operator
             # inject during an LLM outage can't silently slip a garbage-code node past it.
+            if is_developer_stuck(code):
+                # SAME DISTINCTION AS THE FRESH-BUILD PATH ABOVE. The model ran out of moves on this
+                # node; the provider is fine. Terminalize the node and let the run continue -- the
+                # crash branch below would route it to the circuit breaker and pause everything.
+                # Found by the cross-module invariant in
+                # `tests/test_empty_build_is_stuck_not_a_crash.py`, which counted three readers of
+                # the crash sentinel here against one of the stuck one -- my own c11251a1 taught
+                # only the first of the three.
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": 0,
+                    "error": code, "reason": "developer_stuck", "eval_seconds": 0.0,
+                })
+                self._discard_node_build_telemetry()
+                return
             if is_developer_error(code):
                 for crash_type, crash_data in developer_crash_records(
                         node_id, 0, code,

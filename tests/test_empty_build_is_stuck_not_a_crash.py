@@ -85,3 +85,62 @@ def test_the_refusal_still_says_what_happened_in_words():
     refusal = _refusal()
     assert "no candidate to evaluate" in refusal and "untouched template" in refusal
     assert re.match(r"^\(developer stuck: ", refusal), refusal
+
+
+# ------------------------------------- the second consumer, added 2026-08-28 after dsFix1 node 2
+_SPEC = Path(__file__).resolve().parents[1] / "looplab" / "engine" / "speculation.py"
+
+
+def test_the_speculative_path_knows_the_stuck_spelling_too():
+    """A sentinel is only as safe as its LEAST aware reader.
+
+    c11251a1 respelled `empty_build_refusal` and taught only `engine/orchestrator.py`. Measured the
+    same morning on dsFix1 node 2, built speculatively: the refusal fired, `speculation.py`'s
+    `is_developer_error` returned False, the sentinel fell through as if it were solution code, and
+    the engine committed a node with `files: {}` and spent 36.1 s evaluating the untouched
+    `raise NotImplementedError` template for a 0.0 -- one node slot of three.
+    """
+    body = _SPEC.read_text(encoding="utf-8")
+    # BY CALL SITE, NOT BY PRESENCE. The first version of this case asserted the string appeared in
+    # the file, and the import line alone satisfied that -- so reverting the predicate to the crash
+    # spelling left it GREEN. A test that does not redden under the regression it was written for
+    # is decoration.
+    predicate = body[body.index("def _developer_sentinel"):]
+    predicate = predicate[:predicate.index("@staticmethod")]
+    assert "is_developer_stuck(node.code)" in predicate, \
+        "the node predicate reads only the crash spelling; a stuck build passes it as real code"
+    assert "is_developer_error(node.code)" in predicate, "the crash spelling must still be read"
+
+
+def test_the_speculative_stuck_branch_precedes_the_crash_branch_and_asks_for_no_pause():
+    body = _SPEC.read_text(encoding="utf-8")
+    stuck = body.find("if is_developer_stuck(result.code):")
+    crash = body.find("if is_developer_error(result.code):")
+    assert stuck != -1 and crash != -1
+    assert stuck < crash, "stuck must be tested BEFORE the crash sentinel or it is unreachable"
+    block = body[stuck:crash]
+    code = "\n".join(ln for ln in block.splitlines() if ln.strip() and not ln.strip().startswith("#"))
+    assert "EV_NODE_FAILED" in code and '"developer_stuck"' in code
+    assert "pause" not in code.lower(), "one card running dry must not stop the run"
+
+
+def test_every_module_that_reads_one_spelling_reads_both():
+    """The invariant this whole episode exists to install, checked across the engine."""
+    root = Path(__file__).resolve().parents[1] / "looplab"
+    # COUNTED CALL SITES, not presence: an import of `is_developer_stuck` that nothing calls is
+    # exactly the state that let dsFix1's node through, and `node_build.py` was found this way
+    # after `speculation.py` had already been fixed by hand.
+    offenders = []
+    for path in root.rglob("*.py"):
+        body = path.read_text(encoding="utf-8", errors="replace")
+        calls_error = body.count("is_developer_error(")
+        calls_stuck = body.count("is_developer_stuck(")
+        # the definitions themselves live in core/models.py and are not consumers
+        if path.as_posix().endswith("core/models.py"):
+            continue
+        if calls_error and calls_stuck < calls_error:
+            offenders.append(f"{path.relative_to(root).as_posix()} "
+                             f"({calls_error} error / {calls_stuck} stuck)")
+    assert not offenders, (
+        "these modules act on the crash sentinel but cannot see the stuck one, so a build that "
+        f"wrote nothing falls through them as solution code: {offenders}")
