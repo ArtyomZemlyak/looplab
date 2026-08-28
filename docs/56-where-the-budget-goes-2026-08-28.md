@@ -1012,3 +1012,65 @@ pylint and refuses on *lint* errors, which turns a style opinion into a blocked 
 recorded as a **negative** result so the idea is not re-derived: the reference agent needs the gate
 because its edits are line-range splices into an existing file, where an off-by-one truncates a
 block; ours are whole-file writes, which are wrong or right but rarely unparseable.
+
+## 34. dsIF3 closes integer_factorization at n=3, and the ledger was lying to the two phases that rank
+
+**dsIF3** — `integer_factorization`, $1.004, three nodes, 174 min wall.
+
+| node | speedup (train) | eval s | submission |
+|---|---|---|---|
+| node_0 | 67.645 | 266.7 | `rho.pyx` + `setup.py` |
+| **node_1** | **153.297** | 29.6 | **`factor_cy.pyx`** + `setup.py` |
+| node_2 | 147.441 | 29.3 | `rho.pyx` + `setup.py` |
+
+Champion is node_1, confirmed against the extracted `factor_cy.pyx` rather than file times.
+**Test: 194.8199.** With dsIF (96.2102) and dsIF2 (178.7585) that is n=3 on the repaired stack
+against arm A's 9.763 and arm B's 9.147 — the task the plot report scored as a 0.94× *loss* is a
+**20× win** once the extension can compile. All three finals carry the same
+`baseline_source: in-harness`, and all three evaluated in 29–34 s with no ~210 s reference pass, so
+they are measured the same way as each other and as the campaign.
+
+Where the money and the time went, all three probes:
+
+| probe | wall | LLM | eval | top phases by time |
+|---|---|---|---|---|
+| dsIF | 216 min | 171 min (80 %, 264 calls) | 4.5 min | plan_step 81, deep_research 27, plan 27 |
+| dsIF2 | 150 min | 125 min (84 %, 290 calls) | 2.4 min | plan_step 56, deep_research 24, plan 17 |
+| dsIF3 | 174 min | 130 min (75 %, 282 calls) | 5.4 min | plan_step 48, propose 34, plan 21 |
+
+dsIF3's money splits `plan_step` $0.5516 (55 %), `propose` $0.1971, `plan` $0.1108,
+`deep_research` $0.0894, everything else under 3 % each. Local evaluation is **2–4 %** of wall clock
+on this task. Whatever is expensive here, it is not the ruler.
+
+### 34.1 The defect this probe exposed: `sort="best"` reports an unscored ledger as an empty one
+
+Reading dsIF3's phase spans, `hyp_prioritize` and `foresight_rank` were answered
+`(no matching experiments)` while `novelty`, in the same run, was shown `1 of 1 experiment(s)`.
+`list_experiments` empty-answer rate across the whole probe corpus, by the sort the caller passed:
+
+| phase | calls | empty | |
+|---|---|---|---|
+| `foresight_rank` (`sort=best`) | 126 | 47 | **37 %** |
+| `hyp_prioritize` (`sort=best`) | 155 | 43 | **28 %** |
+| `propose` | 22 | 3 | 14 % |
+| `novelty` (`sort=recent`) | 63 | 2 | 3 % |
+| `deep_research` (`sort=recent`) | 182 | 2 | 1 % |
+
+`best`/`worst` rank by metric, so `digest.top_nodes` keeps only nodes that are feasible **and
+already evaluated**. A run whose experiments are all still drafts therefore hears that its ledger is
+empty. **48 of those answers**, across eight runs, sit within five calls of a `sort=recent` answer in
+the same run that listed the drafts — same ledger, same moment, opposite story. And `best` is the
+DEFAULT, so it is what a caller that passes no `sort` receives.
+
+The two phases this misinforms are exactly the two whose job is not to re-proposing work already in
+flight, which is the likeliest mechanism behind the duplicate-proposal question left open in §4.
+Fixed in `7c5795af`: the answer now names the count and the way to see them, and only when the
+metric filter is what emptied the list — a `theme=` matching nothing keeps its own honest zero.
+
+### 34.2 Two guards were left red by my own commit
+
+`3dabc64d` (the stage-guidance switch) added one line to `agents/factory.py` (521 → 522, over the
+god-module ratchet) and one field to `Settings` (217 → 218, moving the calibration profile digest).
+Both guards were red on HEAD from 19:10 and were found on the next sweep, not at commit time —
+because I ran a narrow `-k` selection instead of the suite, for the second time that day. Re-pinned
+in `7c5795af` and `5d22360f`, each with the reason and the lateness recorded beside the pin.
