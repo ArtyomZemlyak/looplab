@@ -815,3 +815,15 @@ it — lane free, fence closed, directory clean.
 Of the tasks that DO have data, `integer_factorization` is the one with published `.pyx`
 champions (three), and it carries both arms' numbers (AlgoTuner 9.763, LoopLab 9.147). Two probes
 are on it now. `run_probe.sh` gained a dataset guard in `cab2692c`.
+
+**21.12 — the stale meter is finally retired.** The 8801 proxy had run since 2026-08-24 10:11:59,
+five commits behind its own file, and could not be restarted while probes were mid-flight through
+it (`3e848107`). At 16:27 its last call was 47 minutes old — dsN3, finished — and every live probe
+was on 8803, so it was stopped by PID and restarted on the current code. Smoke-tested at HTTP 200;
+all four running probes unaffected. The staleness guard added in `2372d63a`, which had printed a
+warning on every sweep since morning, now reports **"all processes newer than their code"**.
+
+Two consequences worth stating. Every number metered from here on is computed by the code in the
+tree — the retry counter, the aborted-stream classification and the synthetic usage frame all
+match what the repository says they do. And the failure counts I reported all day from 8801 remain
+upper bounds, because that process still classified an aborted stream as an error.
