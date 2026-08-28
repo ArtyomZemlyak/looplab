@@ -645,3 +645,34 @@ warm build, and neither of the two pairs on record has both.
 
 So the working band stays what it was: ~2 % measured at low speedup, ~8.5 % suggested at high
 speedup under load, and any single-probe difference inside those should be treated as provisional.
+
+---
+
+## 23 — The new $1 baseline, n=2: both clean runs ship an extension and land at 106 and 133
+
+`dsFix1` (09:16) and `dsFix2` (09:32) are the first probes started from scratch on the fully
+repaired stack — pip present, install redirected, the njit-vs-pyx clause and the
+companions-are-submitted clause in the card, `check` at the graded size.
+
+| | dsFix1 | dsFix2 | old $1 ceiling (11 runs) |
+|---|---|---|---|
+| champion | node 1 | node 2 | — |
+| train | 106.9037 | 136.1786 | 21.33 – 48.83 |
+| **test** | **106.4716** | **132.7** | **27.19 – 48.83** |
+| shipped | `solver_ext.pyx` + `setup.py` | `cutext.pyx` + `setup.py` | pure Python or numba |
+| $ | 1.014 | 1.009 | ~1.01 |
+| nodes | 3 | 3 | 2 – 4 |
+
+Both landed **above the entire previous range**, at the same budget and the same node count. The
+lowest of the two is 2.2x the best of the eleven. This is the ceiling moving, and unlike dsPyx and
+dsN3b — which straddled the repair — these two were clean from the first node.
+
+What did NOT change: node count (3 and 3, inside the old 2–4), spend, and the shape of the run.
+The search still spends its money the same way; it is the technique it can now submit that differs.
+
+dsFix1's third node is worth its own line: it scored **0.0** having written nothing at all, and
+that turned out to be a regression I introduced this morning — see the commit `156b991e`. The node
+cost 36.1 s of evaluation and one slot of three.
+
+Still n=2 against a ruler whose repeat spread is 2–8.5 %, so the SIZE of the gap is not settled;
+its direction and its mechanism are.
