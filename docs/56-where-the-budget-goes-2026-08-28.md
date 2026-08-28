@@ -1126,3 +1126,40 @@ the binary predates the packages the venv was built with. Proven by canary.
 Every one of them was invisible to the narrow `-k` selections I kept running and visible immediately
 to the full suite. The lesson is not "run more tests"; it is that a `-k` filter chosen from the names
 of the files I edited cannot see a guard that watches the WHOLE package for a property I just broke.
+
+## 36. Three reference-agent advantages measured, none worth porting today
+
+The sweep's item-8 answer, with the numbers that make it an answer rather than a shrug.
+
+**The validator's line-level failure context.** `AlgoTuner/utils/evaluator/failure_analyzer.py`
+traces `is_solution` with `sys.settrace` to find the exact line that returned False, and arm A's
+agent is shown up to three of them (`message_writer.py:726-750`). That is genuinely richer than
+anything we hand back. It is also unreachable through the script we call — `main.py:1160` attaches
+`invalid_solution_analysis` only when a `baseline_manager` is passed and `evaluate_results.py` does
+not pass one — which was established earlier and is recorded in the bridge's own header. What is new
+here is the size of the prize: across **151 score records in the probe corpus, zero** have
+`validity_pct < 100`. The feature would have fired **no times**. Not worth a re-plumbing of the
+evaluator call today.
+
+**The `0.0` that is not a measurement.** Eleven records carry `speedup: 0.0` with a live
+`eval_seconds`, which reads as a defect and is not one: `_emit` enforces that a non-positive speedup
+never ships without a `no_speedup.reason`, deliberately, because `null` would leave the node without
+a metric and `metric_salvage` DISCARDS those. The four reasons observed are `no_valid_speedups` (5),
+`evaluator_error` (4), `compilation_failed` (1), `solver_unloadable` (1). Checked that the reason
+actually REACHES the model by resolving each run's span-input chain: **11 of 11**. The twelfth
+apparent case was my own substring match catching `0.0614`.
+
+**"Avoid Cython" in the model's own reasoning.** 18 instances of "avoid cython" and 15 of "skip
+cython" across the corpus looked like the loop talking itself out of the move that wins here — the
+kernel-vs-no-kernel medians are 192.32 against 25.41 (§33). Measured at the OUTCOME instead of the
+sentence: of the 14 probes where the phrase appears, **11 shipped a `.pyx` anyway**, median best node
+**180.16**; the 3 that did not sit at median 47.23. The self-talk is deliberation the loop overrules,
+not a decision it makes. One `repropose` transcript does show our own "FULLY DIFFERENT … not a
+rewording" instruction being read as forbidding a Cython re-implementation of the same algorithm —
+worth watching, but it did not change what that run shipped.
+
+**What was fixed instead**, found while checking the fence: the TRACKED `check_leaks.sh` had no
+fence check at all. Two scripts of that name had diverged — the tracked one covered more campaign
+directories, the operator's ad-hoc copy held the foreign-champion check — and each sweep got
+whichever half it invoked. `09ef7171` gives the checkout both, and makes a readable champion set
+`BAD=1` rather than a note.
