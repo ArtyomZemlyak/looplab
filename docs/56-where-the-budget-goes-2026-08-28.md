@@ -185,3 +185,56 @@ Note also the spread of node 0 itself — 33.92, 40.09, 90.83, 174.36, a factor 
 model on the same task at the same budget. The first node is a lottery ticket and the search never
 improves the ticket it drew. dsKcCtl's own shape was 67 % code / 33 % scaffolding over 113
 `plan_step` generations, so this is not a run that was starved of writing time.
+
+---
+
+## 13 — dsNoDR: turning the exploration off freed a quarter of the budget and bought nothing
+
+Section 3 predicted that if dsNoDR landed inside the control band, the scaffolding is dead weight
+that can be moved to code-writing. It landed just below it, and the reason is more interesting than
+the number.
+
+| probe | deep_research | $ | nodes | code / scaffolding | test |
+|---|---|---|---|---|---|
+| dsNew | 13.0 %, 38 gens | 1.005 | 3 | 54 / 46 | 27.797 |
+| dsNew2 | 12.9 %, 41 gens | 1.005 | 3 | 59 / 41 | 28.1491 |
+| ctlEdge | 17.5 %, 54 gens | 1.006 | 4 | 27 / 73 | 27.7371 |
+| **dsNoDR** | **$0.000, 0 gens** | 1.014 | **3** | **66 / 34** | **27.192** |
+
+The knob worked — zero deep-research generations, confirmed in the run's own config snapshot. Code
+share rose from ~54 % to 66 %. **Node count did not move (3, the same as two of three controls) and
+the test number did not improve.** The freed money went into LONGER `plan_step` work inside the same
+three nodes (51 % of the run), not into more nodes.
+
+So the hypothesis in section 3 is REFUTED as stated. Node count at $1 is not limited by what
+exploration takes; a node simply expands to consume whatever is available. There is no per-node
+budget in `Settings` — `max_nodes` and the run-level `llm_budget_usd` are the only dials — so
+freeing money anywhere just makes the current node more expensive.
+
+Section 8 remains the live thread, and sol10 is its clearest evidence in the other direction:
+$10 bought 14 nodes, the champion was node 10, and it is worth **285.58 on test**.
+
+## 14 — Ruler noise is 10 % at high speedups, not the ~2 % this campaign has been quoting
+
+sol10's champion, re-extracted and re-scored on the same test subset on 2026-08-28: **285.5765**,
+against the **259.677** recorded in its `final.json`. Same solver, same subset, same lane width —
+a 10 % spread. The ~2 % figure quoted since doc 55 came from a pair at low speedup (2.1766 vs
+2.2244) and does not generalise upward.
+
+Consequence for every comparison in this document: a single-probe difference under ~10 % at these
+magnitudes is not a result. The control band on edge_expansion (27.737 / 27.797 / 28.149) is tight
+only because those numbers are small.
+
+## 15 — One published artefact was stale; the published NUMBER was not
+
+`model-probes/sol10/champion_solver.py` on disk was written 2026-08-27 15:58 by the pre-fix
+extractor, single-file, and its `import _edge_expansion` had no companion beside it. Re-scoring it
+gives `speedup: 0.0, eval_seconds: 3.5` with `reason: solver_unloadable` — and 3.5 s against a
+normal 40-150 s is the ruler-refusal signature, not a solver failure. Swept every probe for the
+combination "0.0 test with eval_seconds < 10": **sol10 is the only one**. ds3's 0.0 sits at 35.5 s
+and is a genuine failure on a data shape absent from train.
+
+The alarm was half wrong and that half matters: `final.json` already carried 259.677 from the
+post-fix re-score, so the published figure was never 0.0 — only the on-disk artefact and the tail
+of `probe.log` were stale. Both are now regenerated (`champion_solver.py` + `_edge_expansion.pyx` +
+`setup.py`), with the stale file kept as `champion_solver.stale.py`.
