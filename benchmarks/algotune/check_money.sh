@@ -16,7 +16,17 @@ python3 - "$ROOT" "$HOURS" <<'PY'
 import json, re, sys, time, collections, os
 root, hours = sys.argv[1], float(sys.argv[2])
 T = time.time() - hours * 3600
-for name, path in (("8801 шлюз", "meter/meter.jsonl"), ("8802 openrouter", "meter/meter-gemini.jsonl")):
+# THREE LEDGERS, NOT TWO, since 2026-08-28 08:04. The 8801 process has been alive since 2026-08-24
+# 10:11 and is FIVE commits behind the file it was started from -- 2afb287c (the synthetic usage
+# frame in the shape a client actually reads), 5f253594 (an aborted stream is not an error),
+# 0bdc1866, 10a79c3e (a call retried five times recorded attempts=1, queued_s=0.0) and 903759be.
+# Restarting it under four live probes would drop their in-flight calls into the provider circuit
+# breaker, so instead a proxy on the CURRENT code runs beside it on 8803 with its own ledger and
+# new probes are pointed there. A ledger this monitor cannot see is money it cannot reconcile,
+# which is the whole reason this list is not hard-coded to the old pair.
+for name, path in (("8801 шлюз (код от 24.08)", "meter/meter.jsonl"),
+                   ("8803 шлюз (текущий код)", "meter/meter-8803.jsonl"),
+                   ("8802 openrouter", "meter/meter-gemini.jsonl")):
     p = os.path.join(root, path)
     if not os.path.exists(p):
         continue
