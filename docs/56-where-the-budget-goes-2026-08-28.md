@@ -738,3 +738,24 @@ not generalise.
 Consequence for the campaign-level claim: the pip repair raises the ceiling on tasks where a
 compiled C extension is the winning technique. It is not a uniform uplift, and any re-measurement
 should be read per task rather than pooled.
+
+**23.1 — n=3 qualifies §23: the extension is necessary, not sufficient.**
+`dsFix3`, the third clean run, **did** ship `solver_cy.pyx` + `setup.py` — on its FIRST node — and
+scored **27.9939**, inside the old pure-Python band. Its node 1 dropped the extension and fell to
+8.593.
+
+| clean run | node that shipped a `.pyx` | its score |
+|---|---|---|
+| dsFix1 | node 1 | 106.9037 |
+| dsFix2 | node 2 | 136.1786 |
+| **dsFix3** | **node 0** | **27.9939** |
+
+So §23's "both clean runs ship an extension and land at 106 and 133" describes two of three. The
+repair removes the wall; what the model builds behind it still decides the number, and a compiled
+kernel can be as slow as good numpy. Any claim of a new $1 baseline should be read as 28–136 at
+n=3, not as a level.
+
+One thing the third run does support: **no source inlining**. dsFix3 wrote a real `.pyx` file,
+where dsN3 embedded ~90 lines of Cython in a `_KERNEL_SRC` string to hedge against companions not
+being submitted. That is the behaviour `c52bcb00`'s card clause was added for, at n=1 and with the
+run unfinished.
