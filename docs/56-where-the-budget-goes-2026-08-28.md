@@ -66,10 +66,13 @@ Reference=14.2341` — proposed is exactly half, the undirected-edge double coun
 ## 5. Two diagnoses of mine, refuted by measurement
 
 * **"The failure reason never reaches later prompts."** False. Resolving the
-  `input_carry`/`input_from` chain, **155 prompts across ten phases** carry
+  `input_carry`/`input_from` chain, **402 of 868 generations** carry
   `Edge expansion mismatch` with the Proposed/Reference numbers, and
   `hyp_prioritize` renders it as a `metric_account` line on experiment #0.
   gpt56luna repeated the bug at nodes 6 and 10 with that text in front of it.
+  (Corrected 2026-08-28 04:3x: this was first reported as 155, undercounted by the resolver
+  defect in section 11. The conclusion — the reason DOES reach later prompts — is unchanged and
+  is now stronger.)
 * **"The loop branches from invalid parents, which AlgoTuner's snapshot prevents."** False.
   Of 40 nodes with a parent, **0** had a parent whose metric was 0.0.
 
@@ -138,3 +141,26 @@ there was no memory pressure and the ruler was not dirtied. They were removed by
 excluding this shell's own ancestry and the live `looplab.cli run` PIDs — never `pkill -f`. No
 orphan newer than six hours exists, so today's probes leak nothing; this was campaign residue, and
 `rerun_arm_a.sh::leg` already clears the forkserver half of it at launch.
+
+---
+
+## 11 — The instrument that produced sections 5 and 8 was itself wrong
+
+`core/tracing.py:634` writes a chained turn as `input=cur[np:]`, `input_carry=np`, `input_from=<parent>`
+— so `input_carry` is an **integer prefix length**, not a list, and `input` is only the SUFFIX. My
+ad-hoc resolver returned as soon as it saw `input`, so for the 67 of 81 chained generations in dsBud
+it read the delta and called it the prompt. Measured cost of that:
+
+| claim | reported | true |
+|---|---|---|
+| dsBud step prompts carrying the budget line | 3 / 32 | **38 / 38** |
+| dsFB step prompts carrying the feedback block | 49 / 125 | **90 / 125** |
+| gpt56luna generations carrying the failure reason | 155 / 868 | **402 / 868** |
+
+Every conclusion drawn from those counts was directionally right and numerically wrong. One claim
+was re-checked rather than assumed: "0 of 317 dsFB3 generations carried a spend figure", which
+justified the budget fix, **survives** the corrected resolver — the 16 hits for "remaining" are all
+the model's own prose about optimisation headroom, none about money.
+
+The resolver now lives in `benchmarks/algotune/span_input.py` with
+`tests/test_span_input_resolution.py` beside it, so this is measured once and correctly.
