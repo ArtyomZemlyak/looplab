@@ -240,7 +240,10 @@ def main() -> int:
         # never produces made that rescue dead code.
         state = CA.marker_state(args.out, args.arm, task, runs_root)
         wall = _wall_minutes(args.out, args.arm, task)
-        if state == "wall_cut":
+        if state in CA.HARNESS_CUT_STATES:
+            # Delegated, not re-tested: `compare_arms.HARNESS_CUT_STATES` is the one place that says
+            # which states mean "this harness stopped the run". A membership test spelled here would
+            # be the fourth copy of that rule, and the copies are what come apart.
             wall_cut.append(task)
         elif state in ("unfinished", "refused"):
             owed.append(task)
@@ -265,7 +268,7 @@ def main() -> int:
         # THE MEANS EXCLUDE WHAT THEY MUST, on the same rule `compare_arms.py` applies: a wall-cut
         # task-arm was stopped by a clock rather than by the budget every other row is compared at,
         # so it is shown and not averaged.
-        comparable = [(t, v, w) for t, v, w, st in scored if st not in ("wall_cut",)]
+        comparable = [(t, v, w) for t, v, w, st in scored if st not in CA.HARNESS_CUT_STATES]
         if comparable:
             values = sorted(v for _, v, _ in comparable)
             walls = [w for _, _, w in comparable if w is not None]
@@ -277,7 +280,7 @@ def main() -> int:
         print(f"\n{len(blank)} task-arm(s) produced no number. That is NOT a zero and NOT a low "
               f"score -- see this file's docstring.")
     if wall_cut:
-        print(f"{len(wall_cut)} task-arm(s) were CUT AT THE WALL CLOCK (rc=124/state=wall_cut) "
+        print(f"{len(wall_cut)} task-arm(s) were STOPPED BY THE HARNESS (a wall cut or a stall cut) "
               f"rather than by the budget, so they are shown and not averaged: "
               + ", ".join(sorted(wall_cut)))
     if owed:

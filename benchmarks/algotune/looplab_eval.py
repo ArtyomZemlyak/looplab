@@ -551,7 +551,37 @@ def _emit(out: dict[str, Any]) -> None:
     _sweep_artefacts()
 
 
-def _rules_violation(root: Path, solver: Path) -> str:
+# The operator's PLANTED files, which are not part of any candidate's submission. Declared by
+# `make_task.py::main` as the task's `protect` list (`[f"reference_{task}.py", "description.txt"]`)
+# and repeated here as a DEFAULT only -- `--protect` lets the caller pass the declaration itself, so
+# renaming the planted reference does not silently start copying the grader's own source into the
+# scored directory beside the candidate.
+DEFAULT_PROTECT = ("description.txt",)
+DEFAULT_PROTECT_PREFIXES = ("reference_",)
+
+
+def submission_files(solver: Path, protect: tuple = DEFAULT_PROTECT,
+                     protect_prefixes: tuple = DEFAULT_PROTECT_PREFIXES) -> list:
+    """Every file this candidate SUBMITS beside its solver, in a stable order.
+
+    ONE enumeration, because two callers ask the same question for opposite reasons and a
+    disagreement between them is a hole: the copy loop decides what gets SCORED, and the rules check
+    decides what gets VALIDATED. While the rules check read only `solver.py`, a candidate could put
+    a banned primitive in a helper module -- `edit_surface` grants `*.py`, `*.pyx`, `*.pxd`,
+    `setup.py` and `pyproject.toml` -- and submit it unvalidated. Arm A cannot do that: AlgoTune
+    validates at EDIT time, on every file its editor writes.
+    """
+    out = []
+    for extra in sorted(solver.parent.iterdir()):
+        if extra.name == solver.name or extra.is_dir():
+            continue
+        if extra.name in protect or extra.name.startswith(tuple(protect_prefixes)):
+            continue
+        out.append(extra)
+    return out
+
+
+def _rules_violation(root: Path, solver: Path, extras: list = ()) -> str:
     """AlgoTune's own verdict on this candidate, or "" when it is clean.
 
     Their validator, imported from their checkout — not a reimplementation and not a copied list.
@@ -573,8 +603,20 @@ def _rules_violation(root: Path, solver: Path) -> str:
     finally:
         if sys.path and sys.path[0] == str(root):
             sys.path.pop(0)
+    # EVERY submitted Python source, not just `solver.py`. The rule is a FAIRNESS guarantee and it
+    # is only as wide as the submission: validating one file while copying five means a speedup can
+    # be obtained with a primitive the other arm was forbidden, which is precisely the incomparable
+    # number this flag exists to refuse. `.pyx`/`.pxd` are deliberately NOT fed to the validator --
+    # it parses Python with `ast` and Cython is not Python, so it would raise SyntaxError on every
+    # legitimate Cython submission and the arm below would report the evaluator's failure instead.
+    # That residual is real and is stated rather than papered over.
+    checked = [solver] + [e for e in extras if e.suffix == ".py"]
     try:
-        return str(check_code_for_tampering(solver.read_text(encoding="utf-8")) or "")
+        for path in checked:
+            verdict = str(check_code_for_tampering(path.read_text(encoding="utf-8")) or "")
+            if verdict:
+                return verdict if path is solver else f"{path.name}: {verdict}"
+        return ""
     except SyntaxError as exc:
         # Their validator re-raises a syntax error rather than reporting it, and a solver that does
         # not parse is the EVALUATOR's failure to report, not a rules violation.
@@ -608,6 +650,14 @@ def main() -> int:
                          "the emitted `subset` is what the evaluator will ACTUALLY score, with the "
                          "evidence for it under `subset_evidence` (see subset_actually_scored).")
     ap.add_argument("--timeout", type=int, default=7200, help="Seconds to allow the evaluator.")
+    ap.add_argument("--protect", default="",
+                    help="Comma-separated files the OPERATOR planted, which are not part of any "
+                         "candidate's submission and must never be copied into the scored "
+                         "directory. This is the task's own `protect` declaration "
+                         "(make_task.py writes it into the task JSON); passing it keeps ONE "
+                         "declaration instead of two spellings that drift. A name ending in `*` is "
+                         "a prefix. Empty = the historical default "
+                         "(`description.txt` and `reference_*`).")
     ap.add_argument("--solver-file-only", action="store_true",
                     help="Submit ONLY --solver, the way this bridge behaved before 2026-08-24. "
                          "Default is to submit every file the node wrote beside it and to run the "
@@ -640,8 +690,16 @@ def main() -> int:
                "no_speedup": _no_speedup("no_solver")})
         return 0
 
+    # The declaration wins where it is given; the literals below are only a fallback for a caller
+    # that has no task JSON to read (a hand invocation, an older campaign).
+    _protect, _protect_prefixes = DEFAULT_PROTECT, DEFAULT_PROTECT_PREFIXES
+    if args.protect.strip():
+        _declared = [x.strip() for x in args.protect.split(",") if x.strip()]
+        _protect = tuple(x for x in _declared if not x.endswith("*"))
+        _protect_prefixes = tuple(x[:-1] for x in _declared if x.endswith("*")) or ("\0",)
+
     if args.enforce_rules:
-        violation = _rules_violation(root, src)
+        violation = _rules_violation(root, src, submission_files(src, _protect, _protect_prefixes))
         if violation:
             # NOT a score of zero, and not a crash to repair: this candidate was never eligible.
             # Arm A cannot produce such a solver at all — AlgoTune validates at EDIT time and simply
@@ -686,13 +744,8 @@ def main() -> int:
     # `--inplace`, same 1800 s ceiling the editor uses.
     _submitted = []
     if not args.solver_file_only:
-        for extra in sorted(src.parent.iterdir()):
-            if extra.name == src.name or extra.is_dir():
-                continue
-            # The two files the operator PLANTED are not the candidate's submission, and copying
-            # them would put the grader's own source inside the scored directory.
-            if extra.name == "description.txt" or extra.name.startswith("reference_"):
-                continue
+        # Same enumeration the rules check above ran on, so what is SCORED is what was VALIDATED.
+        for extra in submission_files(src, _protect, _protect_prefixes):
             shutil.copy2(extra, dest_dir / extra.name)
             _submitted.append(extra.name)
     build_note = ""

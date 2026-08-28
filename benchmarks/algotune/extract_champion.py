@@ -15,6 +15,7 @@ TRAIN split, and the champion is scored on TEST once, at the end.
 from __future__ import annotations
 
 import argparse
+import pathlib
 import sys
 from pathlib import Path
 
@@ -26,6 +27,12 @@ def main() -> int:
     ap.add_argument("--out", required=True, type=Path, help="Where to write the champion solver.")
     ap.add_argument("--filename", default="solver.py",
                     help="The file to extract from the champion's committed working set.")
+    ap.add_argument("--all-files", action="store_true",
+                    help="Write the champion's ENTIRE committed working set into --out's directory "
+                         "(--out then names the solver inside it). Without this only --filename is "
+                         "written, so a champion that legitimately spans solver.py + a helper + "
+                         "setup.py -- the editing surface the task now grants -- cannot import and "
+                         "is scored 0.0 as if the SOLVER were at fault.")
     args = ap.parse_args()
 
     log = args.run_dir / "events.jsonl"
@@ -72,7 +79,42 @@ def main() -> int:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(content, encoding="utf-8")
-    print(f"champion node {best.id} (metric={best.metric}) -> {args.out}")
+
+    extra = 0
+    if args.all_files:
+        # THE WHOLE WORKING SET, because a champion is no longer one file. `make_task.py` grants an
+        # `edit_surface` of `solver.py, *.py, *.pyx, *.pxd, setup.py, pyproject.toml`, and a node
+        # commits everything it wrote -- so extracting only the solver hands the scorer a file whose
+        # `import fast` cannot resolve. That surfaces as `solver_unloadable`, which `compare_arms`
+        # classifies as the SOLVER's fault, so a real winning champion is averaged into arm B's mean
+        # as a 0.0, silently, in the direction that loses arm B the comparison.
+        #
+        # Written FLAT beside the solver, keyed on each path's basename, because that is the layout
+        # the scored directory has: `looplab_eval.py` copies `src.parent`'s files next to the solver
+        # and the arena imports them from one directory. A path that would escape that directory is
+        # refused rather than resolved -- `files` is model-authored, and a `..` in a key must not
+        # become a write outside `--out`'s parent.
+        target_name = pathlib.PurePosixPath(str(args.filename).replace("\\", "/")).name
+        for key, body in sorted(files.items()):
+            posix = str(key).replace("\\", "/")
+            # REFUSED, not resolved. Flattening `../../escape.py` to `escape.py` would keep the
+            # write inside the directory and still put a file the champion never named into the
+            # scored submission. A nested REPO-RELATIVE key (`pkg/solver.py`) is legitimate and is
+            # flattened; anything absolute or containing `..` is not a layout, it is a key nobody
+            # should have written, and it is skipped with a line on stderr.
+            if posix.startswith("/") or ".." in posix.split("/"):
+                print(f"refusing champion file with an escaping key: {key!r}", file=sys.stderr)
+                continue
+            name = pathlib.PurePosixPath(posix).name
+            if not name or name == target_name or name != pathlib.Path(name).name:
+                continue
+            if not isinstance(body, str):
+                continue
+            (args.out.parent / name).write_text(body, encoding="utf-8")
+            extra += 1
+
+    print(f"champion node {best.id} (metric={best.metric}) -> {args.out}"
+          + (f" (+{extra} sibling file(s))" if args.all_files else ""))
     return 0
 
 

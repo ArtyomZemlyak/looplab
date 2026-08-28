@@ -67,6 +67,13 @@ ALGOTUNE_MODEL_KEY="${ALGOTUNE_MODEL_KEY:-openrouter/${LOOPLAB_LLM_MODEL:-deepse
 # metered.
 # e.g. METER_BASE=http://127.0.0.1:8801  ->  http://127.0.0.1:8801/m/B/svm/a1/v1
 METER_BASE="${METER_BASE:-}"
+# DEFAULTED HERE because the rc=0 guard below is only as good as its ability to FIND the log.
+# `start_meter.sh` (the writer) and `box-jhub-l40s.sh` both default this; campaign.sh (the reader)
+# did not, so an operator following the documented invocation without sourcing the box profile
+# left `successful_calls` answering "" -- unknowable -- for every task, and the guard that exists
+# to catch a total endpoint outage failed OPEN on exactly the launch it was written for. Same
+# expression as the writer: one path, not two.
+METER_LOG="${METER_LOG:-${BENCH_ROOT:-/var/tmp/looplab-bench}/meter/meter.jsonl}"
 # THE WALL IS OFF BY DEFAULT, and a STALL bound replaces it. Measured 2026-08-24 on a full campaign:
 # the 4 h wall cut 13 of arm A's 19 task-arms and 3 of arm B's, and three of those cuts had not spent
 # the budget they were being compared at — one reached $0.14 of $1.00. So the clock, not the money,
@@ -87,6 +94,9 @@ METER_BASE="${METER_BASE:-}"
 # as an opt-in backstop for anyone who wants a hard ceiling anyway.
 HARD_TIMEOUT="${HARD_TIMEOUT:-0}"
 STALL_TIMEOUT="${STALL_TIMEOUT:-2400}"        # 40 min of total silence = hung, not slow
+# The graded champion pass is bounded by a WALL of its own (see its call site): it is a
+# known-shape workload with no agent in it, and it is legitimately quiet while it scores.
+CHAMPION_TIMEOUT="${CHAMPION_TIMEOUT:-14400}"
 
 # `timeout 0` means "no timeout" to GNU coreutils, so one spelling serves both settings and there is
 # no second code path to keep in step.
@@ -110,20 +120,39 @@ STALL_TIMEOUT="${STALL_TIMEOUT:-2400}"        # 40 min of total silence = hung, 
 # record from Ctrl-C.
 run_bounded() {   # run_bounded <events-file-or-empty> <cmd…>
   local watch="$1"; shift
+  # STALL_FLAG is the breadcrumb that tells `record_done` WE killed this lane rather than a human.
+  # A SIGTERM from the guard below arrives as rc=143, which is byte-identical to the operator's own
+  # Ctrl-C, and `record_done`'s `*)` arm reads 143 as "interrupted -- still owed, no marker". So a
+  # STRUCTURALLY stalled task was re-run from scratch on every resume, for ever, each time spending
+  # a fresh full LLM budget to stall at the same place. The flag is a file because the guard runs in
+  # a subshell and a variable set there is lost.
+  [ -n "${STALL_FLAG:-}" ] && rm -f "$STALL_FLAG"
   if [ -z "$watch" ] || [ "${STALL_TIMEOUT:-0}" = "0" ]; then
     timeout "$HARD_TIMEOUT" "$@"
     return $?
   fi
+  local t0; t0=$(date +%s)
   timeout "$HARD_TIMEOUT" "$@" &
   local job=$!
   ( while kill -0 "$job" 2>/dev/null; do
       sleep 60
       # The stall clock reads the RUN's own log, not the wall clock: a run that is writing is alive.
+      #
+      # A WATCH FILE THAT DOES NOT EXIST YET IS SILENCE, NOT LIFE. This was
+      # `stat … || echo "$now"`, so an absent file made `now-last` zero and the guard could never
+      # fire. For arm B the watch is `events.jsonl`, which does not exist until `Engine.__init__`
+      # writes `run_started` -- AFTER `preflight_role_endpoints` and `make_roles`. So a hang in
+      # preflight (a gateway that completes TLS and never answers), in a wedged repo/data mount, or
+      # in an import left the lane with NO bound at all once the wall went to 0, which is the exact
+      # "endpoint down, lane hung for ever" case the stall guard was added for. Falling back to the
+      # START of the run measures the silence that has actually elapsed. Arm A only escaped this by
+      # pre-creating its log with `: >`.
       local now last
       now=$(date +%s)
-      last=$(stat -c %Y "$watch" 2>/dev/null || echo "$now")
+      last=$(stat -c %Y "$watch" 2>/dev/null || echo "$t0")
       if [ $((now - last)) -gt "$STALL_TIMEOUT" ]; then
         echo "STALL: $watch has not grown in $((now - last))s — killing this lane" >&2
+        [ -n "${STALL_FLAG:-}" ] && : > "$STALL_FLAG"
         kill -TERM "$job" 2>/dev/null; sleep 5; kill -KILL "$job" 2>/dev/null
         return 0
       fi
@@ -183,21 +212,61 @@ _LANE_PLAN="$(python3 - "$LANE_COUNT" "$CORES_PER_LANE" "$CORE_OFFSET" <<'PYEOF'
 import sys
 
 lanes, per_lane, offset = (int(x) for x in sys.argv[1:4])
-phys_per_lane = max(1, per_lane // 2)          # a lane owns whole cores; 22 logical = 11 physical
+
+
+def _cpulist(text):
+    """Parse the kernel's cpulist format: `0,4` AND `0-1` AND `0-3,8-11`.
+
+    `thread_siblings_list` emits a RANGE whenever siblings are numbered adjacently, which is the
+    standard layout on KVM/cloud guests and on any host configured `sibling = core*2, core*2+1`.
+    Splitting on commas alone then hands `int()` the string `"0-1"`, and the resulting ValueError
+    is NOT an OSError, so it escaped the guard below, killed the heredoc, and left the shell with
+    zero ranges -- `lane plan produced 0 ranges`, exit 2, the whole arm refusing to start on a
+    machine where nothing was wrong.
+    """
+    out = []
+    for part in text.strip().split(","):
+        if not part:
+            continue
+        if "-" in part:
+            lo_s, hi_s = part.split("-", 1)
+            out.extend(range(int(lo_s), int(hi_s) + 1))
+        else:
+            out.append(int(part))
+    return tuple(sorted(out))
+
+
 pairs = []
 seen = set()
 for cpu in range(4096):
     try:
         with open(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list") as fh:
-            sibs = tuple(sorted(int(x) for x in fh.read().strip().split(",")))
+            sibs = _cpulist(fh.read())
     except OSError:
         break
-    if sibs not in seen:
+    if sibs and sibs not in seen:
         seen.add(sibs)
         pairs.append(sibs)
+
+# SMT WIDTH IS MEASURED, NOT ASSUMED. This was `per_lane // 2`, which is only the right divisor on
+# an SMT-2 box. With SMT OFF -- most cloud VMs and containers, and this very box, where cpu0's
+# sibling list is just `0` -- each lane got `CORES_PER_LANE // 2` logical cpus, i.e. HALF what the
+# operator asked for and, at the shipped default of 2, a SINGLE cpu against the measured 1.3-core
+# appetite. Lanes then throttle each other while `$REGIME` still records `cores_per_lane=2`, so the
+# marker asserts a regime that never ran. Round UP: a lane owns whole physical cores, and giving it
+# one more core than it asked for is honest where giving it fewer is the defect the header names.
+smt = max(1, min(len(p) for p in pairs)) if pairs else 1
+phys_per_lane = max(1, -(-per_lane // smt))    # ceil(per_lane / smt)
 need = offset + lanes * phys_per_lane
-if need > len(pairs):                          # not enough physical cores: fall back and SAY SO
-    print("FALLBACK", file=sys.stderr)
+if need > len(pairs):
+    # NOT ENOUGH PHYSICAL CORES. The contiguous `LO-HI` layout below is the exact allocation this
+    # whole block exists to abolish -- it is what measured 1.0103 where a quiet machine measured
+    # 57.36 -- so falling into it silently is the worst outcome available. It used to print the
+    # bare word FALLBACK on STDERR, which `$( )` does not capture and nothing therefore read.
+    # It now leads STDOUT, so the shell sees it, tells the operator, and stamps the regime: a
+    # number taken under this layout is still recorded, and can never again be mistaken for one
+    # taken under whole cores.
+    print("FALLBACK")
     for lane in range(lanes):
         lo = offset + lane * per_lane
         print(f"{lo}-{lo + per_lane - 1}")
@@ -207,13 +276,29 @@ for lane in range(lanes):
     print(",".join(str(c) for pair in chunk for c in sorted(pair)))
 PYEOF
 )"
+# `layout=` rides in $REGIME beside lanes/cores_per_lane because it is the regime property that
+# INVALIDATES a number rather than merely describing it. `whole_cores` = no lane shares silicon
+# with another; `contiguous_fallback` = they may, and the 57.36-vs-1.0103 measurement applies.
+LANE_LAYOUT="whole_cores"
 _L=0
 while IFS= read -r _line; do
   [ -n "$_line" ] || continue
+  if [ "$_line" = "FALLBACK" ]; then LANE_LAYOUT="contiguous_fallback"; continue; fi
   LANE_CPUS[$_L]="$_line"
   _L=$((_L + 1))
 done <<< "$_LANE_PLAN"
 [ "$_L" = "$LANE_COUNT" ] || { echo "lane plan produced $_L ranges for $LANE_COUNT lanes"; exit 2; }
+if [ "$LANE_LAYOUT" = "contiguous_fallback" ]; then
+  echo "############################################################################"
+  echo "# LANE PLAN FELL BACK TO CONTIGUOUS CPU RANGES."
+  echo "# There are not enough physical cores for $LANE_COUNT lanes x $CORES_PER_LANE cpus"
+  echo "# at CORE_OFFSET=$CORE_OFFSET. Lanes may now SHARE PHYSICAL CORES, which is the"
+  echo "# allocation that measured a speedup of 1.0103 for a solver a quiet machine"
+  echo "# measured at 57.36. Every marker from this campaign records"
+  echo "# layout=contiguous_fallback so the numbers are not mistaken for clean ones."
+  echo "# Reduce LANES or CORES_PER_LANE to get whole-core lanes back."
+  echo "############################################################################"
+fi
 
 cd "$AT"
 # shellcheck disable=SC1091
@@ -429,9 +514,29 @@ PYEOF
 }
 
 run_started_evidence() {   # $1 = run dir ("" = no LoopLab run dir, i.e. arm A). echoes metered calls
+  # PARSED, not grepped. `grep -c '"type":"llm_usage"'` counts LINES and is coupled to the
+  # serializer twice over: it assumes compact orjson (no space after the colon) and it assumes one
+  # event per line, which `eventstore.py::_EVENT_BATCH_TYPE` breaks by design -- a batched envelope
+  # carries many events on one line and would be counted once. It also disagreed with the other
+  # reader of this same fact (`compare_arms.py` matched `"llm_usage"` without the `"type":` prefix),
+  # which is two spellings of one question.
   [ -n "${1:-}" ] && [ -s "$1/events.jsonl" ] || return 1
-  N="$(grep -c '"type":"llm_usage"' "$1/events.jsonl" 2>/dev/null)"
-  echo "${N:-0}"
+  python3 - "$1/events.jsonl" <<'PYEOF'
+import json, sys
+n = 0
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        # a batch envelope carries its rows under `data.events`; a plain row IS the event
+        inner = (row.get("data") or {}).get("events") if isinstance(row, dict) else None
+        for ev in (inner if isinstance(inner, list) else [row]):
+            if isinstance(ev, dict) and ev.get("type") == "llm_usage":
+                n += 1
+print(n)
+PYEOF
 }
 
 # THE IDENTITY OF ONE ATTEMPT, ALLOCATED HERE AND NOWHERE ELSE.
@@ -485,19 +590,30 @@ next_attempt() {   # $1 = arm, $2 = task. Echoes this attempt's id AND records t
 # marker plus the attempt's own metered spend -- and the alternative to a flag is deleting `.done`
 # files by hand, which is how a marker over a real measurement gets destroyed. `PENDING_FIXES.md`
 # item 4 (raise the wall once the transport fixes land) is exactly this operation.
+# THE ONE SHELL SPELLING of "this harness stopped the run", mirroring
+# `compare_arms.py::HARNESS_CUT_STATES`. It was written out twice (here and in `final_banner`) and a
+# third state would have meant a third pair of edits; the copies coming apart is what makes a resume
+# skip a task the banner reports as owed. `rc=124` alone is kept because markers written before the
+# `state=` field existed carry only the integer.
+marker_is_harness_cut() {   # $1 = marker text
+  case "$1" in
+    *state=wall_cut*|*state=stall_cut*|*rc=124*) return 0 ;;
+  esac
+  return 1
+}
+
 already_measured() {   # $1 = marker path. Success = do NOT run this task-arm again.
   [ -s "$1" ] || return 1
-  case "$(cat "$1")" in
-    *state=wall_cut*|*rc=124*)      # `rc=124` alone: markers written before `state=` existed
-      [ "${RETRY_WALL_CUT:-0}" = "1" ] && return 1 ;;
-  esac
+  if marker_is_harness_cut "$(cat "$1")"; then
+    [ "${RETRY_WALL_CUT:-0}" = "1" ] && return 1
+  fi
   return 0
 }
 
 record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpus, $5 = run dir
   RC=$2
   WALL=$(( $(date +%s) - $3 ))
-  REGIME="cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE"
+  REGIME="cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE layout=$LANE_LAYOUT"
   # A `.done` marker means "this task-arm reached a TERMINAL state and must not be re-run". It must
   # NOT be written for a run that was interrupted: an interrupted task has no verdict, and a marker
   # makes a later resume SKIP it silently. Measured 2026-08-20: stopping a campaign wrote six
@@ -575,7 +691,20 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
         refuse_to_start "$1" "$WALL" "$4" "${5:-}"
       fi ;;
     *)
-      echo "  [$(date +%H:%M:%S)][$4] interrupted (rc=$RC) -- no marker written, task still owed" ;;
+      # A STALL KILL IS NOT AN INTERRUPTION. Both arrive as rc=143 and used to be filed together as
+      # "still owed", so a task that hangs structurally was re-run from scratch on every resume for
+      # ever, spending a fresh full budget each time to stall at the same place. The breadcrumb
+      # `run_bounded` drops is the only thing that can tell them apart -- an exit code cannot, by
+      # construction. It is TERMINAL (a `.done`, so a resume stops re-running it) but it is NOT a
+      # finish: `state=stall_cut` is read exactly like `wall_cut` downstream -- printed, never
+      # averaged -- because the run was stopped by the harness rather than on its own terms.
+      if [ -n "${STALL_FLAG:-}" ] && [ -f "${STALL_FLAG:-/nonexistent}" ]; then
+        rm -f "$STALL_FLAG"
+        echo "wall=$WALL rc=$RC state=stall_cut $REGIME attempt=${ATTEMPT:-none}" > "$1"
+        echo "  [$(date +%H:%M:%S)][$4] STALL-CUT after ${WALL}s of silence -- recorded, not averaged"
+      else
+        echo "  [$(date +%H:%M:%S)][$4] interrupted (rc=$RC) -- no marker written, task still owed"
+      fi ;;
   esac
 }
 
@@ -631,12 +760,10 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
   WALL_CUT=""
   for M in "$1/$2"-*.done; do
     [ -s "$M" ] || continue
-    case "$(cat "$M")" in
-      *state=wall_cut*|*rc=124*) WALL_CUT="$WALL_CUT $(basename "${M%.done}")" ;;
-    esac
+    marker_is_harness_cut "$(cat "$M")" && WALL_CUT="$WALL_CUT $(basename "${M%.done}")"
   done
   if [ -n "$WALL_CUT" ]; then
-    echo "[$(date +%H:%M:%S)] WALL-CUT (rc=124, state=wall_cut) --$WALL_CUT"
+    echo "[$(date +%H:%M:%S)] STOPPED BY THE HARNESS (wall cut or stall cut) --$WALL_CUT"
     echo "  These reached a TERMINAL state and hold a .done marker, so a resume will not retry them."
     echo "  They were stopped by HARD_TIMEOUT=${HARD_TIMEOUT:-?} s, NOT by the budget every other row is"
     echo "  compared at, so they are not measurements at that ceiling. compare_arms.py prints them"
@@ -677,6 +804,9 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
 run_one() {                       # $1 = task, $2 = cpu list
   T=$1; CPUS=$2
   MARKER="$OUT/$ARM-$T.done"
+  # Per task-arm, so two lanes cannot read each other's breadcrumb. `run_bounded` clears it on
+  # entry and writes it only when the stall guard itself does the killing.
+  STALL_FLAG="$OUT/.$ARM-$T.stalled"
   # THE RESUME CHECK IS ASKED FIRST, and once. It used to sit inside each arm branch, BELOW the
   # meter block -- so a skipped task-arm still ran the export. That was harmless while the path held
   # no per-attempt state; it is not harmless now, because `next_attempt` allocates an id and a
@@ -757,10 +887,34 @@ run_one() {                       # $1 = task, $2 = cpu list
     # and point the bridge at its solver.py -- extract_champion.py already reads `best.files`, so
     # this is an `--all-files` mode plus one line here.
     elif python "$REPO/benchmarks/algotune/extract_champion.py" --run-dir "$TASK_ROOT/run" \
-           --out "$TASK_ROOT/champion_solver.py" >> "$OUT/B-$T.log" 2>&1; then
-      (cd "$TASK_ROOT" && timeout "$HARD_TIMEOUT" taskset -c "$CPUS" \
+           --all-files --out "$TASK_ROOT/champion/solver.py" >> "$OUT/B-$T.log" 2>&1; then
+      # ITS OWN WALL, not $HARD_TIMEOUT. That default became 0 ("no timeout" to GNU
+      # coreutils) when the wall was replaced by the stall guard, and this call was never
+      # migrated to `run_bounded` -- so the graded TEST pass had no bound of any kind. A
+      # wedge outside `looplab_eval`'s own inner `subprocess.run(timeout=…)` (the build_ext
+      # child holding a lock, a geesefs stat, an evaluator child that ignores SIGTERM) held
+      # the lane for ever and the driver's final `wait` never returned. It does NOT go
+      # through `run_bounded`: a scoring pass is legitimately silent for long stretches
+      # (the README measures a single-candidate evaluation at 87 minutes), so a stall guard
+      # would kill healthy work. A generous wall is the right instrument here.
+      # `--protect` carries the TASK's own declaration rather than a second copy of it, and the
+      # champion is scored out of its OWN directory so its sibling files are the submission (see
+      # `extract_champion.py --all-files`). Scoring it from $TASK_ROOT made `src.parent` a directory
+      # whose other entries are directories, so a multi-file champion submitted nothing, built
+      # nothing, and failed to import -- recorded as the solver's own 0.0.
+      CHAMPION_PROTECT="$(python3 - "$WS/algotune_$T.json" <<'PROTEOF'
+import json, sys
+try:
+    spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
+except Exception:
+    raise SystemExit(0)
+print(",".join(str(x) for x in (spec.get("protect") or []) if x))
+PROTEOF
+)"
+      (cd "$TASK_ROOT/champion" && timeout "$CHAMPION_TIMEOUT" taskset -c "$CPUS" \
           python "$REPO/benchmarks/algotune/looplab_eval.py" --algotune-root "$AT" --task "$T" \
-          --model LoopLabFinal --solver champion_solver.py --subset test) \
+          --model LoopLabFinal --solver solver.py --subset test \
+          ${CHAMPION_PROTECT:+--protect "$CHAMPION_PROTECT"}) \
           > "$OUT/B-$T.final.json" 2>>"$OUT/B-$T.log"
     else
       echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"

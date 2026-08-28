@@ -305,6 +305,37 @@ def arm_a_failure(algotune_root: Path, task: str, model_fragment: str = "") -> t
     return (False, reason, stamp)
 
 
+# A HARNESS CUT: the run was stopped by this harness rather than on its own terms. Both members are
+# TERMINAL (a `.done`, so a resume does not re-run them) and both are REPORTED-BUT-NEVER-AVERAGED,
+# because the mean may only hold task-arms that ran to the ceiling they are compared at.
+#
+# One tuple rather than a second copy of the rule: the wall-cut test was already spelled three times
+# in two languages (here, `already_measured` and `final_banner` in campaign.sh) and adding a state by
+# editing every copy is how the copies come apart -- a resume then skips a task the banner reports as
+# owed, or averages a clock-killed run the report excludes.
+#   wall_cut  - `timeout` fired (rc=124). The clock, not the budget.
+#   stall_cut - the stall guard fired: the run's own log stopped growing for STALL_TIMEOUT. Added
+#               2026-08-25; before it, a stall kill arrived as rc=143, indistinguishable from an
+#               operator's Ctrl-C, so it got NO marker and the task was re-run from scratch for
+#               ever, spending a fresh full budget each time to stall in the same place.
+HARNESS_CUT_STATES: tuple[str, ...] = ("wall_cut", "stall_cut")
+# (row phrase, footer phrase) — one row is about ONE arm and the footer counts many, so they cannot
+# be one string without the grammar going wrong in whichever place it was not written for.
+_CUT_PHRASES = {
+    "wall_cut": ("cut at the wall clock (rc=124)", "were cut at the WALL CLOCK (rc=124)"),
+    "stall_cut": ("stall-cut (its own log stopped growing)",
+                  "were STALL-CUT (the run's own log stopped growing)"),
+}
+
+
+def _cut_phrase(state: str, *, footer: bool = False) -> str:
+    """What to call a harness cut in a sentence."""
+    pair = _CUT_PHRASES.get(state)
+    if pair is None:
+        return f"were stopped by the harness ({state})" if footer else f"stopped by the harness ({state})"
+    return pair[1] if footer else pair[0]
+
+
 def marker_state(final_dir: Path | None, arm: str, task: str, runs_root: Path | None = None) -> str:
     """What `campaign.sh` says about this task-arm: `"done"`, `"refused"` or `"unfinished"`.
 
@@ -340,6 +371,8 @@ def marker_state(final_dir: Path | None, arm: str, task: str, runs_root: Path | 
             return "done"
         if "state=wall_cut" in text or "rc=124" in text:
             return "wall_cut"
+        if "state=stall_cut" in text:
+            return "stall_cut"
         return "done"
     if (final_dir / f"{arm}-{task}.refused").exists():
         return "refused"
@@ -459,17 +492,17 @@ def main() -> int:
             # that are is the mixed-population failure this whole module is written against.
             why = why or f"arm B {state} (campaign.sh wrote no .done marker)"
             vb = None
-        elif vb is not None and state == "wall_cut":
-            # A WALL CUT IS NOT A BUDGET. The number is real — the champion was scored — but the run
-            # it came from was stopped by a clock rather than by the ceiling every other row is
-            # compared at, so it is REPORTED and not AVERAGED. Kept visible rather than dropped
-            # because the operator needs to see that the wall is binding at all: three of the five
+        elif vb is not None and state in HARNESS_CUT_STATES:
+            # A HARNESS CUT IS NOT A BUDGET. The number is real — the champion was scored — but the
+            # run it came from was stopped by this harness rather than by the ceiling every other row
+            # is compared at, so it is REPORTED and not AVERAGED. Kept visible rather than dropped
+            # because the operator needs to see that the bound is binding at all: three of the five
             # cuts measured on 2026-08-23 had not reached the budget, one of them at $0.14 of $1.00.
-            why = why or "arm B cut at the wall clock (rc=124), not by the budget"
-        if va is not None and state_a == "wall_cut":
-            why = why or "arm A cut at the wall clock (rc=124), not by the budget"
-        cut = "wall_cut" in (state, state_a)
-        rows.append((task, va, vb, why, "wall_cut" if cut else state, why_is_a_bare_reason))
+            why = why or f"arm B {_cut_phrase(state)}, not by the budget"
+        if va is not None and state_a in HARNESS_CUT_STATES:
+            why = why or f"arm A {_cut_phrase(state_a)}, not by the budget"
+        cut = next((st for st in (state, state_a) if st in HARNESS_CUT_STATES), None)
+        rows.append((task, va, vb, why, cut or state, why_is_a_bare_reason))
         # A wall-cut row on EITHER side is PRINTED (above) and not PAIRED: the mean is the one number
         # a reader takes away, and it may only contain task-arms that ran to the ceiling they are
         # compared at. Which arm hit the clock does not change that.
@@ -515,10 +548,11 @@ def main() -> int:
     if unmeasured:
         print(f"of those, {len(unmeasured)} arm-B row(s) are the ARENA producing no measurement "
               f"(not a wrong solver): " + ", ".join(unmeasured))
-    wall_cut = sorted(t for t, _, _, _, st, _ in rows if st == "wall_cut")
-    if wall_cut:
-        print(f"{len(wall_cut)} task-arm(s) were cut at the WALL CLOCK (rc=124) rather than by the "
-              f"budget, so their scores are shown but left out of the mean: " + ", ".join(wall_cut))
+    for _st in HARNESS_CUT_STATES:
+        _cut = sorted(t for t, _, _, _, st, _ in rows if st == _st)
+        if _cut:
+            print(f"{len(_cut)} task-arm(s) {_cut_phrase(_st, footer=True)} rather than by the budget, so their "
+                  f"scores are shown but left out of the mean: " + ", ".join(_cut))
     unfinished = sorted(t for t, _, _, _, st, _ in rows if st in ("unfinished", "refused"))
     if unfinished:
         print(f"{len(unfinished)} task-arm(s) have no .done marker from campaign.sh and are still "
