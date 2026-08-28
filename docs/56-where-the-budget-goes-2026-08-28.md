@@ -900,3 +900,24 @@ the loop changed between them; the first draft happened to reach for the extensi
 Against the benchmark's published champion for the task: Gemini 3.1 ships 12 lines of `solver.py`
 over a 33-line `.pyx`; ours is 39 over 45. Same technique, more Python around it — unchanged from
 what §20a recorded for dsPyx.
+
+## 30 — dsN3b at $3: 247.65 on test, and the budget buys nodes that the extension then uses
+
+| run | budget | nodes | champion | test | shipped |
+|---|---|---|---|---|---|
+| dsFix1/2/4 | $1 | 3 each | node 1–2 | 106.47 / 132.70 / 202.77 | working `.pyx` |
+| dsN3 | $3 | 6 | node 4 | 190.0012 | Cython inlined in a string |
+| **dsN3b** | **$3** | **5** | **node 1** | **247.6525** | `_fast_cut.pyx` + `setup.py` |
+
+dsN3b is the highest test figure this campaign has produced on edge_expansion. It is not a
+different mechanism from the $1 runs — the same compiled kernel, shipped as real files — but it
+reached it on node 1 of five rather than being cut off at three.
+
+Read against §21.1, which found the search beats its own node 0 on the fresh stack (median 1.25x,
+champion is node 0 in only 3 of 10) where the old corpus did not (1.00x, 10 of 16): the two $3 runs
+put their champions at nodes 1 and 4, so the extra nodes are used rather than merely counted.
+
+What is NOT claimed: that $3 is worth 3x. dsN3 spent $3.002 for 190.00 and dsFix4 spent $1.008 for
+202.77 — more budget did not beat the best dollar run on this task. The honest statement is that
+budget buys node count, node count is where the search pays on the repaired stack, and the two are
+not the same thing as a better number.
