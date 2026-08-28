@@ -150,3 +150,20 @@ def test_the_size_that_was_checked_is_reported(tmp_path):
     """A verdict without the size it was taken at cannot be compared to the graded one."""
     ref, sol = _files(tmp_path, _GOOD)
     assert check(ref, sol, n=1, size=7, seed=1)["size"] == 7
+
+
+def test_a_dying_candidate_does_not_drop_a_core_file_in_the_workspace(tmp_path, monkeypatch):
+    """The CWD of a `check` call is the agent's workspace, and a core is 88 MB-1.4 GB of it.
+
+    MEASURED 2026-08-28: the deliberate segfault above left an 88 MB `core` in the directory pytest
+    ran from, and an earlier accidental one left 1.4 GB in the repo root. The signal is reported in
+    the row; the dump is pure disk pressure inside a candidate tree.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    ref, sol = _files(tmp_path, _ABORTS)
+    monkeypatch.chdir(workspace)
+    out = check(ref, sol, n=1, size=6, seed=1)
+    assert out["invalid"] == 1 and "KILLED its process" in out["rows"][0].get("raised", "")
+    leftovers = [p.name for p in workspace.iterdir() if p.name.startswith("core")]
+    assert not leftovers, f"a core dump was written into the workspace: {leftovers}"

@@ -949,7 +949,27 @@ def toolchain_clause(root: Path, interpreter: str) -> str:
             "`setup.py`, the harness runs `setup.py build_ext --inplace` over your whole submission "
             "before scoring it and tells you whether that build succeeded. Reach for it when the "
             "cost is a Python-level loop over the instance; do not reach for it when the work is "
-            "already inside a library call.")
+            "already inside a library call. "
+            # THE TWO ARE NOT INTERCHANGEABLE, and the card used to imply they were by naming them
+            # in one breath. Measured over this campaign's own champions, scored on test:
+            #   edge_expansion  .pyx median 207.48 (n=3)  @njit 27.97 (n=6)  plain numpy 27.80 (n=5)
+            #   kcenters                     — (n=0)      @njit 123.38 (n=2) plain numpy 34.25 (n=2)
+            #   convex_hull                  — (n=0)      @njit 11.08 (n=3)  plain numpy 2.03 (n=1)
+            # So on some tasks `@njit` is the whole win and on others it is worth nothing at all:
+            # six edge_expansion champions stopped at njit and landed within noise of solvers that
+            # compiled NOTHING, while the two that shipped a `.pyx` scored 207 and 286. A model that
+            # reads "njit or Cython" as one option stops at the cheaper one and never learns which
+            # case it is in. The clause does not TELL it which to use -- that would be a guess about
+            # the task -- it tells it the test that distinguishes them, which it can run for free.
+            "THE TWO ARE NOT EQUIVALENT, and which one wins is a property of the task rather than "
+            "of the technique. Measured across this campaign's own champions: on one task the "
+            "`@njit` runs landed within noise of solvers that compiled nothing (27.97 against "
+            "27.80) while the two that shipped a real `.pyx` scored 207 and 286; on two other "
+            "tasks `@njit` alone was worth 3.6x and 5.5x over plain numpy. So treat `@njit` as a "
+            "MEASUREMENT, not a destination: apply it, measure, and if the number did not move, "
+            "the next step is an ahead-of-time `.pyx` extension rather than more decorator "
+            "tuning -- njit that fails to help usually means the loop was never the bottleneck "
+            "Python was paying for, and only a real extension removes the rest.")
 
 
 def solution_space_clause(ref: Path, task: str) -> str:

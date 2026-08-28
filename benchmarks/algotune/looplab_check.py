@@ -145,6 +145,17 @@ def _run_isolated(reference: Path, solver: Path, size: int, seed: int, timeout: 
     read_fd, write_fd = os.pipe()
     pid = os.fork()
     if pid == 0:                                        # child
+        # NO CORE DUMPS. A candidate that dies by SIGSEGV/SIGABRT writes a core into the CWD, and the
+        # CWD here is the agent's workspace. Measured 2026-08-28: one deliberate segfault produced a
+        # 1.4 GB core in the repo root, and this checker's own test left 88 MB behind on EVERY run.
+        # The signal is what this function reports; the dump is pure disk pressure inside a candidate
+        # tree, so the child refuses to write one. Best-effort: a platform without RLIMIT_CORE just
+        # keeps the old behaviour rather than failing the check.
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        except Exception:                               # noqa: BLE001
+            pass
         payload = {"valid": False, "raised": "child produced no verdict"}
         try:
             payload = _one_instance(reference, solver, size, seed)
