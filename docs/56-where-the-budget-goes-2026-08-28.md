@@ -1220,3 +1220,49 @@ gets a repeat under the changed prompt.
 The other 0 % rows are not the same defect: `novelty`, `foresight_rank` and `hyp_prioritize` are
 bounded single-shot rankers, not open-ended tool loops, and their corpus cost is 0.4 %, 2.1 % and
 2.6 % of a run.
+
+## 38. The stage-guidance switch at n=3 vs n=3: p = 0.10, median ×1.79
+
+dsNoStg3 finished at $1.005 with three nodes — node_0 22.35 (plain Python), node_1 155.94
+(`edge_cut.pyx` + `setup.py`), node_2 **271.4507**, the highest single node on `edge_expansion` in
+the whole corpus. **Test: 268.0908.** Champion is node_2, matching the extracted file.
+
+| stage block | n | finals | median |
+|---|---|---|---|
+| ON | 3 | 106.47, 132.70, 202.77 | 132.70 |
+| OFF | 3 | 153.40, 237.12, **268.09** | **237.12** |
+
+Sorted, the six interleave as ON, ON, OFF, ON, OFF, OFF. The OFF rank sum is 14 of a possible 15,
+and an exact one-sided rank test over all C(6,3) = 20 assignments gives **p = 2/20 = 0.100**. The
+median moves by a factor of **1.79**.
+
+That is the strongest evidence this switch has, and it is still not significance at any conventional
+threshold. What it is: three runs without the block, and all three beat the median of three runs
+with it. Two more runs — one per arm — would settle it, and the honest statement until then is
+"suggestive at p = 0.10", not "removing the block helps".
+
+Worth noting against my own §35.1: at n=2 I wrote that the ranges overlapped and decided nothing.
+They still overlap (202.77 beats 153.40). The third point did not remove the overlap; it moved the
+rank sum.
+
+### 38.1 The profiler the reference agent has, and why it is not being built today
+
+`AlgoTuner/interfaces/commands/types.py` exposes ten commands, of which `profile` and `profile_lines`
+have no named counterpart on our side. Our surface is far larger — **54 distinct tools** appear in
+the corpus, led by `repo_read` (3363), `read_file` (3232), `read_experiment` (2815), `run_probe`
+(2157) — and `run_probe` is the escape hatch through which the model profiles by hand: **189
+`time.perf_counter` uses across 28 probes**, plus 14 `timeit` and 2 `cProfile`. So the capability is
+there and the convenience is not.
+
+Before building it, the question was measured: does hand-rolled profiling correlate with a better
+result? Restricted to $1 `edge_expansion` runs so the comparison is like-for-like:
+
+| | n | median best node | range |
+|---|---|---|---|
+| profiled at least once | 15 | 48.83 | 27.6–271.5 |
+| never profiled | 6 | 27.83 | 19.0–204.5 |
+
+The medians differ by 1.75× and the ranges overlap almost completely — `dsFB` reached 204.47 with
+zero profiling, `dsFB2` reached 31.87 with one. At n=15 against n=6 with that spread this is **not
+a signal**, and a named profiler is a prompt-surface change that every run would pay for. Not built
+today; recorded so the option keeps its evidence.
