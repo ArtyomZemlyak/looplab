@@ -116,3 +116,37 @@ def test_it_runs_as_a_command_and_prints_json(tmp_path):
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     assert payload["invalid"] == 2 and not payload["ok"]
+
+
+# ------------------------------------------------------------------ isolation, added 2026-08-28
+_ABORTS = (
+    "import ctypes\n"
+    "class Solver:\n"
+    "    def solve(self, problem):\n"
+    "        ctypes.string_at(0)          # segfault: no Python `try` can catch it\n"
+)
+_HANGS = "import time\nclass Solver:\n    def solve(self, problem):\n        time.sleep(30)\n"
+
+
+def test_a_solver_that_kills_its_process_is_one_failed_row_not_an_empty_report(tmp_path):
+    """MEASURED: dsKcCtl node 1 at the graded size dies with `Fatal glibc error: malloc.c:4376
+    assertion failed` -- SIGABRT from native code under numpy/numba. The first version of this
+    checker ran in-process and was killed with it, printing NOTHING: the agent asked whether its
+    solver was valid and got an empty answer at exactly the size that matters."""
+    ref, sol = _files(tmp_path, _ABORTS)
+    out = check(ref, sol, n=2, size=6, seed=1)
+    assert out["instances"] == 2 and out["invalid"] == 2, out
+    assert all("KILLED its process" in r.get("raised", "") for r in out["rows"]), out["rows"]
+
+
+def test_one_hanging_instance_does_not_eat_the_whole_report(tmp_path):
+    ref, sol = _files(tmp_path, _HANGS)
+    out = check(ref, sol, n=2, size=6, seed=1, timeout=1.0)
+    assert out["instances"] == 2 and out["invalid"] == 2
+    assert all("TIMEOUT" in r.get("raised", "") for r in out["rows"]), out["rows"]
+
+
+def test_the_size_that_was_checked_is_reported(tmp_path):
+    """A verdict without the size it was taken at cannot be compared to the graded one."""
+    ref, sol = _files(tmp_path, _GOOD)
+    assert check(ref, sol, n=1, size=7, seed=1)["size"] == 7

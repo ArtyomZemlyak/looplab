@@ -31,6 +31,10 @@ import importlib.util
 import io
 import json
 import logging
+import os
+import re
+import select
+import signal
 import sys
 import time
 from pathlib import Path
@@ -69,57 +73,121 @@ def find_task(mod) -> Any:
     return best[1]
 
 
-def check(reference: Path, solver: Path, n: int, size: int, seed: int) -> dict:
+def _one_instance(reference: Path, solver: Path, size: int, seed: int) -> dict:
+    """Validate ONE instance. Runs in a forked child -- see `check` for why."""
     task_cls = find_task(_load_module(reference, "_looplab_reference"))
     try:
         task = task_cls()
     except TypeError:
         task = task_cls(n=size)
-
     solver_mod = _load_module(solver, "_looplab_candidate")
     solver_cls = getattr(solver_mod, "Solver", None)
     if solver_cls is None:
-        return {"ok": False, "error": f"{solver.name} defines no `Solver` class"}
-    instance = solver_cls()
+        return {"valid": False, "raised": f"{solver.name} defines no `Solver` class"}
+    problem = task.generate_problem(size, random_seed=seed)
+    # `is_solution` states its rejection through `logging.error`; capture it so the agent is told
+    # WHY and not merely that something was wrong.
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setLevel(logging.ERROR)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    prev = root.level
+    root.setLevel(logging.ERROR)
+    t0 = time.perf_counter()
+    try:
+        answer = solver_cls().solve(problem)
+        elapsed = time.perf_counter() - t0
+        row = {"valid": bool(task.is_solution(problem, answer)), "seconds": round(elapsed, 4)}
+    except Exception as exc:  # noqa: BLE001 — a candidate that raises is a FAILED instance
+        row = {"valid": False, "seconds": round(time.perf_counter() - t0, 4),
+               "raised": f"{type(exc).__name__}: {exc}"[:300]}
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(prev)
+    why = " ".join(buf.getvalue().split())[:300]
+    if why and not row["valid"]:
+        row["reason"] = why
+    return row
 
+
+def check(reference: Path, solver: Path, n: int, size: int, seed: int, timeout: float = 30.0) -> dict:
+    """Validate `n` instances, EACH IN ITS OWN CHILD PROCESS.
+
+    WHY A CHILD AND NOT A `try`. Measured 2026-08-28 on dsKcCtl node 1 at the graded size: the
+    candidate dies with `Fatal glibc error: malloc.c:4376 (_int_malloc): assertion failed` -- SIGABRT
+    from native code under numpy/numba. `except Exception` cannot see that, so the first version of
+    this checker was killed with it and printed NOTHING: the agent asked whether its solver was
+    valid and got an empty answer at exactly the size that matters. A child turns a process-killing
+    candidate into one failed instance with a named signal, and a hanging one into a timeout, and
+    the other instances still get answered.
+    """
+    # A MISSING `Solver` IS A FILE-LEVEL FACT, reported ONCE. Asked per-instance it would come back
+    # as n identical rows, which reads like n failures. Checked in the parent, before any fork.
+    if not re.search(r"^\s*class\s+Solver\b", solver.read_text(encoding="utf-8", errors="replace"), re.M):
+        return {"ok": False, "error": f"{solver.name} defines no `Solver` class"}
     rows = []
     for i in range(n):
-        problem = task.generate_problem(size, random_seed=seed + i)
-        # `is_solution` states its rejection through `logging.error`; capture it so the agent is told
-        # WHY and not merely that something was wrong.
-        buf = io.StringIO()
-        handler = logging.StreamHandler(buf)
-        handler.setLevel(logging.ERROR)
-        root = logging.getLogger()
-        root.addHandler(handler)
-        prev = root.level
-        root.setLevel(logging.ERROR)
-        t0 = time.perf_counter()
-        try:
-            answer = instance.solve(problem)
-            elapsed = time.perf_counter() - t0
-            valid = bool(task.is_solution(problem, answer))
-            row = {"instance": i, "seed": seed + i, "valid": valid, "seconds": round(elapsed, 4)}
-        except Exception as exc:  # noqa: BLE001 — a candidate that raises is a FAILED instance, not a crashed check
-            row = {"instance": i, "seed": seed + i, "valid": False,
-                   "seconds": round(time.perf_counter() - t0, 4),
-                   "raised": f"{type(exc).__name__}: {exc}"[:300]}
-        finally:
-            root.removeHandler(handler)
-            root.setLevel(prev)
-        why = " ".join(buf.getvalue().split())[:300]
-        if why and not row["valid"]:
-            row["reason"] = why
-        rows.append(row)
-
-    n_valid = sum(1 for r in rows if r["valid"])
+        rows.append(_run_isolated(reference, solver, size, seed + i, timeout, i))
+    n_valid = sum(1 for r in rows if r.get("valid"))
     return {"ok": n_valid == len(rows), "instances": len(rows), "valid": n_valid,
-            "invalid": len(rows) - n_valid, "rows": rows,
+            "invalid": len(rows) - n_valid, "size": size, "rows": rows,
             "note": ("ALL VALID on these instances. This is a correctness check on freshly generated "
-                     "instances, NOT the score -- the run's number still comes from the engine's "
-                     "evaluation." if n_valid == len(rows) else
+                     "instances at the GRADED size, NOT the score -- the run's number still comes "
+                     "from the engine's evaluation." if n_valid == len(rows) else
                      "INVALID INSTANCES PRESENT. The score is 0 unless every instance validates, so "
                      "fix this before optimising further.")}
+
+
+def _run_isolated(reference: Path, solver: Path, size: int, seed: int, timeout: float, index: int) -> dict:
+    """`_one_instance` in a forked child, so a SIGABRT or a hang is a ROW rather than the end."""
+    base = {"instance": index, "seed": seed, "size": size}
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:                                        # child
+        payload = {"valid": False, "raised": "child produced no verdict"}
+        try:
+            payload = _one_instance(reference, solver, size, seed)
+        except BaseException as exc:                    # noqa: BLE001 — the child reports, never propagates
+            payload = {"valid": False, "raised": f"{type(exc).__name__}: {exc}"[:300]}
+        finally:
+            try:
+                os.write(write_fd, json.dumps(payload).encode("utf-8"))
+                os.close(write_fd)
+            except Exception:                           # noqa: BLE001
+                pass
+            os._exit(0)
+    os.close(write_fd)
+    deadline = time.time() + timeout
+    chunks = []
+    try:
+        while True:
+            ready, _, _ = select.select([read_fd], [], [], max(0.0, deadline - time.time()))
+            if not ready:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                return {**base, "valid": False, "seconds": round(timeout, 4),
+                        "raised": f"TIMEOUT after {timeout:.0f}s -- the solver did not finish one "
+                                  f"instance at the graded size"}
+            block = os.read(read_fd, 65536)
+            if not block:
+                break
+            chunks.append(block)
+    finally:
+        os.close(read_fd)
+    _, status = os.waitpid(pid, 0)
+    if chunks:
+        try:
+            return {**base, **json.loads(b"".join(chunks).decode("utf-8"))}
+        except ValueError:
+            pass
+    if os.WIFSIGNALED(status):
+        sig = os.WTERMSIG(status)
+        name = signal.Signals(sig).name if sig in {s.value for s in signal.Signals} else str(sig)
+        return {**base, "valid": False,
+                "raised": f"the solver KILLED its process with {name} -- a native-code fault "
+                          f"(malloc/segfault) that no Python `try` can catch"}
+    return {**base, "valid": False, "raised": "the child exited without a verdict"}
 
 
 def main(argv=None) -> int:
@@ -127,7 +195,14 @@ def main(argv=None) -> int:
     ap.add_argument("--reference", required=True, type=Path)
     ap.add_argument("--solver", default=Path("solver.py"), type=Path)
     ap.add_argument("--n", type=int, default=3)
-    ap.add_argument("--size", type=int, default=20)
+    ap.add_argument("--size", type=int, default=20,
+                    help="instance size; make_task pins the GRADED n from the arena dataset name")
+    # 30 s PER INSTANCE, and the arithmetic is the reason. The card pins this command at a 120 s
+    # ceiling, so three instances at 60 s could be killed by their own runtime before printing
+    # anything -- the exact failure this checker was just repaired for. 3 x 30 + ~10 s of setup
+    # fits under 120 with room. Measured cost of a healthy call is far below it: 3.6 s for
+    # edge_expansion at its graded n=4408, 9.1 s for kcenters at n=49.
+    ap.add_argument("--timeout", type=float, default=30.0)
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args(argv)
     if not args.reference.exists():
@@ -136,7 +211,8 @@ def main(argv=None) -> int:
     if not args.solver.exists():
         print(json.dumps({"ok": False, "error": f"solver not found: {args.solver}"}))
         return 1
-    print(json.dumps(check(args.reference, args.solver, args.n, args.size, args.seed), indent=2))
+    print(json.dumps(check(args.reference, args.solver, args.n, args.size, args.seed,
+                       args.timeout), indent=2))
     return 0
 
 

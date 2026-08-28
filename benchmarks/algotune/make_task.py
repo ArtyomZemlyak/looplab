@@ -276,6 +276,31 @@ BASELINE_TIMES_DIR = Path(
 )
 
 
+
+def graded_instance_size(root: Path, task: str) -> int | None:
+    """The `n` the arena actually grades this task at, or None when it cannot be read.
+
+    The datasets are named `<task>_T<target>ms_n<N>_size<M>_<split>.jsonl` -- `N` is the instance
+    parameter and `M` is how many instances. Measured 2026-08-28: kcenters is n=49 and
+    edge_expansion is n=4408, against `looplab_check.py`'s default of 20. Checking a solver at 20
+    when it is graded at 49 is not a check: dsKcCtl node 1 passes 1 of 3 at size 20 and 0 of 3 at
+    size 49, where two of the failures are a native SIGABRT that never appears at the small size.
+
+    Returns None rather than a guess when the layout is not what this expects, and the caller then
+    omits `--size` instead of pinning a fabricated one.
+    """
+    import re as _re
+    base = root / ".hf_datasets" / "oripress__AlgoTune" / "data" / task
+    if not base.is_dir():
+        return None
+    sizes = set()
+    for entry in base.glob(f"{task}_T*ms_n*_size*_train.jsonl"):
+        m = _re.search(r"_n(\d+)_size\d+_train\.jsonl$", entry.name)
+        if m:
+            sizes.add(int(m.group(1)))
+    # More than one is ambiguous, and an ambiguous ruler is worse than no pin.
+    return sizes.pop() if len(sizes) == 1 else None
+
 def measured_reference_ms(task: str, subset: str = "train",
                           times_dir: Path | None = None) -> tuple[float, float] | None:
     """The reference's MEASURED per-instance milliseconds on this box, as (low, high) medians.
@@ -1015,6 +1040,9 @@ def main() -> int:
         solver.write_text(SOLVER_STUB.format(task=args.task), encoding="utf-8")
 
     interpreter = args.python or str(root / ".venv" / "bin" / "python")
+    # Read once, here, so the failure to read it is visible at build time rather than as a
+    # silently-too-small check inside a run.
+    _graded_n = graded_instance_size(root, args.task)
     train_path = train_dataset(root, args.task) if args.full_context else None
     if args.full_context and train_path is None:
         # REFUSE when it was ASKED FOR, WARN when it is merely the default. A flag that degrades
@@ -1091,6 +1119,7 @@ def main() -> int:
         # `results/<model>-<pid>/` and `reports/evaluate_summary.<pid>.json` on the way out, and
         # takes the shared baseline cache by default, so an invocation neither litters the
         # third-party checkout nor re-times the reference against itself.
+        # THE SIZE THE ARENA GRADES AT, read from its own dataset filename rather than assumed.
         **({"developer_commands": [{
             "name": "eval_train",
             "command": [
@@ -1186,7 +1215,7 @@ def main() -> int:
                 "--reference", f"reference_{args.task}.py",
                 "--solver", "solver.py",
                 "--n", "3",
-            ],
+            ] + (["--size", str(_graded_n)] if _graded_n else []),
             "description": ("Run your staged solver on 3 FRESH instances and ask the reference's "
                             "own is_solution() whether each answer is acceptable -- printing the "
                             "rejection reason verbatim when it is not. Seconds, not minutes. It "
