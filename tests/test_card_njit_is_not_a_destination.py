@@ -72,3 +72,25 @@ def test_the_permission_it_qualifies_is_still_there():
     text = _clause()
     assert "nothing here forbids it" in text
     assert "build_ext --inplace" in text
+
+
+# ------------------------------------------------- companion files, added 2026-08-28 after dsN3
+def test_the_card_says_plainly_that_every_written_file_is_submitted():
+    """The omission cost real work, so the claim is pinned rather than left to inference.
+
+    MEASURED on dsN3 node 1: `solver.py` embeds ~90 lines of Cython source in a string and compiles
+    it at run time, and its own comment gives the reason -- "embedded so the build works even if the
+    evaluation copies only solver.py into the run directory". That is false: `looplab_eval.py`
+    submits every file the node wrote and `--solver-file-only` is the opt-OUT, off by default. The
+    model hedged against a limitation that does not exist and paid with a compile inside the timed
+    call -- the same fragility that took ds3 from 156.43 train to 0.0 test.
+    """
+    text = _clause()
+    assert "EVERY FILE YOU WRITE IS SUBMITTED" in text
+    assert "`setup.py`" in text and "`.pyx`" in text
+    assert "compile anything at run time" in text, "the wrong move must be named, not only the right one"
+
+
+def test_it_gives_the_reason_and_not_only_the_instruction():
+    text = _clause()
+    assert "inside the timed call" in text and "fail scoring" in text

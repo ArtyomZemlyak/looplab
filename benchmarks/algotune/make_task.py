@@ -947,7 +947,21 @@ def toolchain_clause(root: Path, interpreter: str) -> str:
             "champions of this benchmark from everything else, and nothing here forbids it: "
             "`@numba.njit` is an ordinary decorator, and if you write a `.pyx` together with a "
             "`setup.py`, the harness runs `setup.py build_ext --inplace` over your whole submission "
-            "before scoring it and tells you whether that build succeeded. Reach for it when the "
+            "before scoring it and tells you whether that build succeeded. "
+            # SAID PLAINLY, because the omission cost real work. The bridge's default is to submit
+            # EVERY file the node wrote (`looplab_eval.py --solver-file-only` is the opt-OUT and is
+            # off), but the card only ever said "over your whole submission" and left the model to
+            # infer it. Measured 2026-08-28 on dsN3 node 1: its solver.py embeds ~90 lines of Cython
+            # source in a string and compiles it at run time, with the reason in its own comment --
+            # "embedded so the build works even if the evaluation copies only solver.py into the run
+            # directory". It hedged against a limitation that does not exist, and paid for the hedge
+            # with a compile INSIDE the timed evaluation, which is the same fragility that took ds3
+            # from 156.43 on train to 0.0 on test.
+            "EVERY FILE YOU WRITE IS SUBMITTED, not just `solver.py`: a `.pyx`, a `setup.py`, a "
+            "`.pxd`, a helper module -- they are all copied beside your solver and the build runs "
+            "over the set. You do not need to embed sources in strings or compile anything at run "
+            "time to smuggle them in, and you should not: a build inside the timed call is both "
+            "slower and a way to fail scoring that an ahead-of-time one cannot. Reach for it when the "
             "cost is a Python-level loop over the instance; do not reach for it when the work is "
             "already inside a library call. "
             # THE TWO ARE NOT INTERCHANGEABLE, and the card used to imply they were by naming them
