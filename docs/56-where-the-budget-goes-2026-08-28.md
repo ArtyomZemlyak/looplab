@@ -358,3 +358,51 @@ a task span EVERY attempt while the log is one attempt: edge_expansion is 447 me
 and reports the deepseek direction as inverted (self-report ~$0.99 against a metered median $1.04,
 max $2.41 on pde_heat1d) — that figure is its measurement, not one I have reproduced, and it is
 recorded as such.
+
+---
+
+## 19 — The largest lever in the campaign was a missing pip, and eight runs deleted their own answer
+
+`AlgoTune/scripts/evaluate_results.py:266` runs `python -m pip install . --no-deps
+--force-reinstall --no-cache-dir` over the candidate directory as soon as a `setup.py` is present.
+The arena venv is a `uv venv` — uv installs no pip — so that branch answered `Setup install failed:
+... No module named pip`, which the evaluator renders as `no_speedup{reason: compilation_failed}`
+and `speedup: 0.0`.
+
+363 occurrences of that error in the spans. **Eight independent runs wrote `.pyx` + `setup.py`,
+saw it, and deleted their own extension 0.2–2.4 minutes later.** All 35 `delete_file` calls in the
+entire corpus are `.pyx` or `setup.py` — nothing else was ever deleted.
+
+| run | error at | deleted at | lag | champion |
+|---|---|---|---|---|
+| dsBud3 | 19.9 m | 20.1 m | 0.2 m | 30.70 |
+| dsNew | 21.7 m | 22.0 m | 0.3 m | 28.34 |
+| dsBud | 34.6 m | 34.9 m | 0.3 m | 48.83 |
+| dsFB2 | 16.5 m | 17.9 m | 1.4 m | 31.87 |
+| dsKcRep | 39.1 m | 40.1 m | 1.0 m | 47.23 |
+| dsNoDR | 25.1 m | 26.4 m | 1.3 m | 27.59 |
+| ds3 | six times | six times | 0.7–3.9 m | 156.43 |
+| **sol10** | 43.5 m | **did not delete — patched `setup.py` instead** | | **261.11** |
+
+sol10 substituted `build_ext --inplace` for `install` in `sys.argv` and copied the `.so` under a
+`.py` name so the arena would carry it. Three and a half minutes later its node 4 scored **253.289**
+against a previous best of 23.72. Every one of its nine later nodes rides that extension. That is
+an exploitation of the harness defect rather than an honest optimisation, and 259.68/285.58 should
+be remembered as such.
+
+The reading in the model's own words, `dsNew`, `plan_step`, span `c47a5640b9e85ae6`: *"The Cython
+build failed … No module named pip. … I must remove setup.py and the .pyx … Simplest: delete both
+files, keep pure-Python solver."* The observation is correct and the conclusion is wrong — another
+model found the way around in four minutes.
+
+Repaired 2026-08-28 09:0x by installing pip ALONE from the ensurepip wheel (`python -m ensurepip`
+would have dropped setuptools 65.5.0 over the 84.0.0 in place, underneath four live evaluations).
+Pinned in `benchmarks/box-jhub-l40s.sh::_algotune_ensure_pip` with
+`tests/test_arena_can_build_an_extension.py` beside it.
+
+**The discontinuity, stated rather than buried.** Every number in docs 55 and 56 above this section
+was measured while this branch of the scorer was broken — so `.pyx` was, in practice, only scorable
+by the two runs that worked around it. Section 18's njit-vs-pyx table in particular compares a
+technique that mostly worked against one that mostly could not be submitted. And the four probes
+live at the moment of the repair — dsChk49, dsN3, dsN3b, dsPyx — straddle it: a `setup.py` written
+before 09:0x was doomed and one written after will build. Their numbers are not clean either way.
