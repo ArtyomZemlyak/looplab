@@ -164,3 +164,24 @@ the model's own prose about optimisation headroom, none about money.
 
 The resolver now lives in `benchmarks/algotune/span_input.py` with
 `tests/test_span_input_resolution.py` beside it, so this is measured once and correctly.
+
+---
+
+## 12 — On kcenters the search does not merely fail to help, it degrades
+
+Four probes, one ruler, `extract_champion` for the champion in each:
+
+| probe | switch | $ | nodes | node scores | champion |
+|---|---|---|---|---|---|
+| dsFBKc | on | 1.006 | 2 | 174.36 → 124.32 | node 0 |
+| dsFBKc2 | on | 1.002 | 1 | 33.92 | node 0 |
+| dsKcCtl | off | 1.017 | 2 | 90.83 → **0.0** | node 0 |
+| fxKcenters | off | 1.003 | 3 | 40.09 → 5.01 → 22.23 | node 0 |
+
+Every child is worse than its parent, four runs out of four, and one child is invalid outright.
+The step-feedback switch changes nothing here: on and off both land on node 0.
+
+Note also the spread of node 0 itself — 33.92, 40.09, 90.83, 174.36, a factor of five for the same
+model on the same task at the same budget. The first node is a lottery ticket and the search never
+improves the ticket it drew. dsKcCtl's own shape was 67 % code / 33 % scaffolding over 113
+`plan_step` generations, so this is not a run that was starved of writing time.
