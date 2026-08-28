@@ -93,3 +93,48 @@ before the numbers were taken: spans carry `duration_s` and `start`, not `durati
 `start_time` (the first pass reported every phase as 0.0 minutes), and `extract_champion.py`
 needs LoopLab's interpreter, not AlgoTune's venv (`ModuleNotFoundError: No module named
 'looplab'`). The cost column was never affected — it reads `attributes.cost`.
+
+---
+
+## 8 — Added 2026-08-28 04:0x: at $1 the search does not beat its own first attempt
+
+Champion node against node 0, every probe with at least two evaluated nodes (18 of them):
+
+| nodes | probes | champion is node 0 |
+|---|---|---|
+| 2–4 | 13 | **10** |
+| ≥7 | 5 | 1 |
+
+**Median improvement of the whole search over its own first node: 0.0 %.** Where it does pay it
+pays enormously — sol10 20.3637 → 261.1071 over 14 nodes (+1182 %), solHull 0.9449 → 28.0845 over
+11 (+2872 %), plus glm53f (10 nodes) and gpt56luna (11) — and every one of those had ten or more
+nodes. A $1 ceiling buys 2–4, and at 2–4 the scaffolding is paid for and never used.
+
+This reframes section 1. The scaffolding is not obviously waste; it is waste **at this node count**,
+because it consumes the money that would have bought the nodes it needs to pay off. It also explains
+the reference agent's shape directly: its iteration is one message inside one session, not a node
+with propose / plan / deep_research / foresight around it, so $0.51 bought it 35 evaluations.
+
+## 9 — And the 32/68 split is a corpus average, not a law
+
+The two probes that finished on 2026-08-28 03:5x sit at the opposite ends of it:
+
+| probe | task | $ | nodes | code / scaffolding | champion |
+|---|---|---|---|---|---|
+| dsFB4 | edge_expansion | 1.001 | 3 | **25 % / 75 %** | node 0, 28.0579 |
+| dsFBKc2 | kcenters | 1.002 | 1 | **73 % / 27 %** | node 0, 33.9209 |
+
+dsFB4 spent 75 % on search and never beat its first node in three tries. dsFBKc2 spent 69 % of the
+whole run on ONE node's `plan_step` sessions and never reached a second node. Both land on node 0.
+The corpus figure of 32/68 in section 1 stands as an aggregate; it is not a per-run constant, and a
+fix aimed at it has to be judged on node count and final metric, not on the ratio.
+
+## 10 — 23 orphaned workers, and what they did NOT do
+
+Lane 2 held 23 `multiprocessing.spawn` workers with `ppid=1`, started 2026-08-25 14:01 — two and a
+half days old, 0.0 % CPU, `futex_wait`, 5.1 GB RSS between them. Tempting to blame dsFB4's numbers,
+which ran on that lane: measured instead, 5.1 GB against 755 GB total with 714 GB available, so
+there was no memory pressure and the ruler was not dirtied. They were removed by explicit PID after
+excluding this shell's own ancestry and the live `looplab.cli run` PIDs — never `pkill -f`. No
+orphan newer than six hours exists, so today's probes leak nothing; this was campaign residue, and
+`rerun_arm_a.sh::leg` already clears the forkserver half of it at launch.
