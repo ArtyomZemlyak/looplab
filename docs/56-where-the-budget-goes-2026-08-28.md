@@ -297,3 +297,31 @@ self-checked 55 times without ever calling `is_solution`, and was refused by the
 `dsChk49` (same command at the graded n=49) is the replicate.
 
 Run shape: 157 min wall, 137 LLM, 6 evaluation, 46 % of the budget in `plan_step`.
+
+### 17a — and the tool-call sequence shows WHY, which the counts could not
+
+Ordered `run_dev_command` / `write_file` / `edit_file` spans from dsChkKc's node-0 session:
+
+```
++0m   write_file
++0m   check: INVALID   Solution is not optimal. Found value: 132.996, Optimal value: 31.5
++1m   edit_file x2
++1m   check: INVALID   Found value: 44.272
++5m   edit_file x4
++7m   check: INVALID   Found value: 44.272
++9m   edit_file x2
++9m   check: OK
++9m   eval_train                      <- the expensive one, only now
+```
+
+and node 1 at +92m repeats the shape: `write_file → check: INVALID → edit_file → check: OK →
+eval_train`. The model is using the cheap check as a GATE in front of the graded measurement, which
+is what the command was for and what the raw counts in section 16 could not show. Fourteen `check`
+calls in the run, four of them catching an invalid state before any evaluation was spent on it.
+
+Compare dsKcCtl, the same task without the command: 55 free-form probes, one of which called
+`is_solution`, and the first thing to notice the suboptimality was the engine — 117.9 s of
+evaluation to learn it, node scored 0.0, work discarded.
+
+This is mechanism evidence, not metric evidence. dsChkKc's 171.15 remains a single draw from a
+distribution that spans 10.58 to 186.33.
