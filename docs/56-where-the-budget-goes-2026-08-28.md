@@ -1163,3 +1163,60 @@ fence check at all. Two scripts of that name had diverged — the tracked one co
 directories, the operator's ad-hoc copy held the foreign-champion check — and each sweep got
 whichever half it invoked. `09ef7171` gives the checkout both, and makes a readable champion set
 `BAD=1` rather than a note.
+
+## 37. A third of the budget is spent before the first node, and one run spent all of it
+
+Cost of the run up to the moment the FIRST node is created, across all 48 probes:
+
+| | $ before node 1 | note |
+|---|---|---|
+| median | **~$0.30** | on a $1.00 budget — about a third |
+| worst that still produced nodes | dsFBKc2 $0.833 (2 nodes), fxSpectral $0.703 (3), ds3Hull $0.644 (6) | |
+| `convex_hull` band | ds3Hull 0.644, solHull 0.464, dsFBHull 0.405, dsHull 0.385 | the live dsCH at $0.62 with no node yet is INSIDE this band, not stalled |
+| best | glm53f $0.028 (21 nodes), gpt56luna $0.048 (22), ctlEdge $0.124 (8) | |
+| **produced nothing at all** | **opus5 $1.057** | |
+
+### 37.1 opus5: ten generations, one dollar, zero nodes
+
+Every cent went to a single stage. Phase table for the whole run:
+
+| phase | $ | calls |
+|---|---|---|
+| `deep_research` | **$1.0204** | 10 |
+| everything else | $0 | 0 |
+
+Events: `setup_started`, 2 × `setup_step`, `setup_finished`, `research_attempted`, 11 × `llm_usage`,
+`report_generated`, 6 × `finalize_step`, `run_finished`. The last one reads
+`{'step': 'abandoned', 'outcome': 'error_terminal'}`. No node was ever created, so there is no
+champion to compare with arm A, arm B or the held foreign champions — the comparison this section
+would normally make does not exist, and that is the finding.
+
+The per-generation price is what a turn cap cannot see: **$0.102 here against ~$0.003 for
+deepseek-v4-flash**, a factor of 34. Ten calls is a modest research budget for one model and the
+entire run for another.
+
+### 37.2 The stage that can spend everything is the stage that cannot see the budget
+
+Resolving each run's span-input chain and asking which generations carry a `BUDGET:` line:
+
+| stage | with budget | without | share |
+|---|---|---|---|
+| `strategist_consult` | 84 | 0 | 100 % |
+| `plan` | 1561 | 152 | 91 % |
+| `propose` | 2996 | 517 | 85 % |
+| `plan_step` | 5112 | 957 | 84 % |
+| `repropose` | 985 | 222 | 82 % |
+| `card_build` | 180 | 67 | 73 % |
+| **`deep_research`** | **2** | **2547** | **0 %** |
+| `novelty`, `foresight_rank`, `hyp_prioritize`, `report`, … | 0 | 2233 | 0 % |
+
+`deep_research` is also the only stage with neither a turn cap nor a money cap of its own —
+`agent_max_turns` and `agent_time_budget_s` both default to `0`, unlimited. The intersection of
+"can spend everything" and "is told nothing about the budget" is exactly one stage, and exactly one
+run died in it. Fixed in `a78d295f`; the note leads the user turn and states the consequence rather
+than only the number. **Not yet verified by probe** — all four lanes are busy; the next free one
+gets a repeat under the changed prompt.
+
+The other 0 % rows are not the same defect: `novelty`, `foresight_rank` and `hyp_prioritize` are
+bounded single-shot rankers, not open-ended tool loops, and their corpus cost is 0.4 %, 2.1 % and
+2.6 % of a run.
