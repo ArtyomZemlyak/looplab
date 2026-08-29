@@ -1305,3 +1305,57 @@ seven identical `$0.0000` lines.
 deliberately failing canary rather than assuming: under `-qq` pytest still prints the `FAILED` line
 and still exits 1. So the green claims rested on a signal that works; only the positive count was
 missing. Dropping my own `-q` restores it.
+
+## 40. dsCH: our worst loss narrows from 0.25× to 0.60×, and stops at one node
+
+`convex_hull`, $1.004, **one node**, test **2.5955** (node_0 2.6757, `solver.py` only — no kernel).
+
+| | speedup | vs dsCH |
+|---|---|---|
+| arm A (AlgoTuner) | 4.321 | we are at 0.60× |
+| arm B (campaign) | 1.089 | we are at 2.38× |
+| **dsCH** | **2.5955** | |
+
+So the repaired stack more than doubles the campaign's number on our worst-losing task and still
+does not close the gap. The mechanism is visible in one line of the phase table: `plan_step` $0.5619
+over 117 calls, `propose` $0.2394, `deep_research` $0.0994 — and **$0.62 was gone before the first
+node existed** (§37's table puts the `convex_hull` band at $0.385–0.644, so this is normal for the
+task, not a stall). At 72.8 s per evaluation and 267,021 instances, a $1 budget buys exactly one
+node here.
+
+What the winners do differently — the seventeen held foreign champions for this task:
+
+| import | champions using it |
+|---|---|
+| `numba` | **9 of 17** (Opus 4.5, Opus 4.6, GLM-4.5, GPT-5.2, GPT-5.4, Gemini 2.5 Pro, Gemini 3.1 Pro, R1, …) |
+| `scipy.spatial` only | 8 of 17 |
+
+Lengths run from 6 lines (Opus 4) to 263 (Opus 4.6). Ours is 110 lines of `numpy` + `scipy.spatial`
+— the reference approach with tweaks, which is what a FIRST node looks like. We never reached the
+node where the JIT goes in.
+
+**dsCH3 launched on the freed lane**: same task, same model, **$3.00**. It tests exactly the reading
+above — that $1 on `convex_hull` buys one node and the loss is a budget-shape problem rather than a
+capability one. It compares against dsCH 2.5955, arm A 4.321, arm B 1.089, and against the two other
+$3 runs in the corpus that reached 6 and 13 nodes on cheaper tasks.
+
+### 40.1 Two broken pipes, and the money still reconciles
+
+`check_money.sh` flagged `BrokenPipeError` on dsBN 23:42:05 and dsDL 23:42:36. Both carry
+**`status=200`**: the upstream call SUCCEEDED and the pipe broke while the response was written
+back, i.e. the client went away — the same shape as the 15:59 one, which was my own kill of dsCCC.
+Both runs continued normally 30–120 s later and no other arm appears in the window, so the test suite
+running at the time never touched the proxy.
+
+The question that mattered is whether we were billed for a response nobody received. Reconciling the
+proxy ledger against each run's own `llm_usage` events:
+
+| probe | ledger $ | run $ | difference |
+|---|---|---|---|
+| dsBN | 0.6059 | 0.6059 | **+0.0000** |
+| dsDL | 0.4741 | 0.4741 | **+0.0000** |
+| dsIF3x | 2.0808 | 2.0808 | **+0.0000** |
+| dsCH | 1.0041 | 1.0041 | **+0.0000** |
+
+Exact to the cent on all four. The ledger holds 1–3 more ENTRIES than the run counts calls, and
+those entries carry zero cost.
