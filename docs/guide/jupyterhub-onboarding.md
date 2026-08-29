@@ -4,9 +4,9 @@ Everything here runs inside your own single-user server. You never need admin on
 
 Two halves:
 
-* **[Part A — set it up once](#part-a--set-it-up-once)**, seven steps. Steps A5 and A6 are the two
+* **[Part A — set it up once](#part-a-set-it-up-once)**, seven steps. Steps A5 and A6 are the two
   that cost people an afternoon, so they say what goes wrong as well as what to type.
-* **[Part B — start a run by asking the assistant](#part-b--start-a-run-by-asking-the-assistant)**,
+* **[Part B — start a run by asking the assistant](#part-b-start-a-run-by-asking-the-assistant)**,
   which is how you will actually use it. A hand-written task file is the fallback, not the path.
 
 Symptom → cause table at the [end](#when-something-is-wrong). Nothing in Part A repeats it.
