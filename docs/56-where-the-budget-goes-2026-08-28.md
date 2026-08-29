@@ -1611,3 +1611,54 @@ retried. And it is the exact inverse of arm A's failure: theirs holds the socket
 4.59 M completion tokens and discards them; ours gives up at 45 s having paid nothing. The
 asymmetry in §43 is a client-configuration difference, and this is the configuration that produced
 it.
+
+## 45. Three dollars bought less than one, on the task where one dollar wins by 20×
+
+dsIF3x — `integer_factorization`, **$3.007**, six nodes, 456 min wall (75 % LLM, 4.8 min evaluation).
+Champion node_4 at 156.2249 (`rho.pyx`); **test 155.0593**.
+
+| budget | runs | finals | median |
+|---|---|---|---|
+| $1 | 3 | dsIF 96.21, dsIF2 178.76, dsIF3 194.82 | **178.76** |
+| $3 | 1 | dsIF3x **155.06** | 155.06 |
+
+Three times the money landed **below two of the three $1 runs**. The nodes show where it went:
+
+| node | speedup | kernel |
+|---|---|---|
+| node_0 | 134.7222 | `rho.pyx` |
+| node_1 | 33.5578 | `squfof.pyx` |
+| node_2 | 0.0 | — |
+| node_3 | 109.1567 | `fastrho.pyx` |
+| node_4 | **156.2249** | `rho.pyx` |
+| node_5 | 113.5379 | — |
+
+The run reached 134.72 on its FIRST node and spent the remaining ~$2.5 producing one node 16 % better
+and four worse — including a total loss and two detours into different factoring algorithms
+(`squfof`, `fastrho`) that both underperformed the Pollard rho it started with. `plan_step` took
+$1.579 over 344 calls, more than a whole $1 run's entire budget.
+
+This is one run against three, so it is not a law. But it is the first direct evidence on the
+spend-vs-quality question and it points the unwelcome way: on a task where the first node already
+lands near the ceiling, extra budget buys exploration that mostly moves sideways. **dsIF4 launched on
+the freed lane** — a fourth $1 run on the same task, to put the $1 arm at n = 4 before anything is
+concluded from a single $3 point.
+
+### 45.1 dsRBF's zero is a DIFFERENT failure from dsDL's, and they printed the same word
+
+Both nodes scored 0.0 with `reason: evaluator_error` and the same "Unexpected results format"
+verdict. The payloads are opposite:
+
+| probe | eval s | `error_type` | `num_errors` | `num_timeouts` | what the model should do |
+|---|---|---|---|---|---|
+| dsDL node_0 | 504.0 | timeout | 0 | >0 | make it **faster** |
+| dsRBF node_0 | 35.6 | `execution_error` | 3 | 0 | make it **correct** |
+
+dsRBF's solver raised its own `LinAlgError("Singular matrix in RBF solve.")` three times out of
+three runs and the evaluation stopped on "Critical execution error". Nothing was slow.
+
+Fixed in `2a9dd4f6`: `failure_shape()` lifts `error_type` / `runs` / `num_errors` / `num_timeouts`
+out of the harness payload into the `no_speedup` block. The reason VOCABULARY is untouched on
+purpose — it is registry-guarded and inventing a word is a bigger change than surfacing evidence
+that already exists. Absent evidence yields `{}`, never a block of zeros, so "no data" cannot read
+as "zero timeouts". Three mutations redden.
