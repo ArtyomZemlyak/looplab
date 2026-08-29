@@ -97,6 +97,43 @@ def _decoded_json_list(value: object) -> object:
     return decoded if isinstance(decoded, list) else value
 
 
+
+def _healed_node_id(item):
+    """One node citation, coerced exactly as far as pydantic would and no further.
+
+    `list[int]` on a plain `BaseModel` accepts `"3"` and `4.0` and refuses `"x"`, `"3.5"` and
+    `3.5`; this pre-heal runs `mode="before"`, so anything it drops never reaches that validation.
+    Dropping a value validation would have taken is silent evidence loss — measured: a claim citing
+    `["3", "5"]` arrived at `trust/memo_verify.py` with NO evidence and was durably stamped
+    `unsupported`.
+
+    **`True` IS REFUSED AND THAT IS THE POINT.** `isinstance(True, int)` is True, so a bool passes
+    every `isinstance` test and would cite node 1 on a claim that named nothing — the same trap
+    `runtime/applied_params.py::declared_numeric_params` records ("`True` is `isinstance(int)` and
+    would report an agreement nobody wrote"). `type(x) is int` is False for a bool, which is why
+    that spelling is kept.
+
+    Returns the int, or `None` for anything that is not one.
+    """
+    if type(item) is int:                      # bools excluded: `type(True) is bool`
+        return item
+    if type(item) is float and item.is_integer():
+        return int(item)                       # `4.0` is what pydantic makes of a JSON `4.0`
+    if isinstance(item, str):
+        # `int()` IS THE RULE, with no digit/sign pre-check in front of it. The first cut guarded
+        # with `body.isdigit()` after stripping one sign character, and both guards were DEAD:
+        # `int("x")`, `int("3.5")`, `int("")` and `int("--3")` all raise `ValueError`, which this
+        # already catches, so mutating either guard away changed no answer and both mutants
+        # SURVIVED. That is the same defect `_decoded_json_list` records eighty lines up — a
+        # `startswith("[")` fast path that made the real `list` check unreachable — and the lesson
+        # there is the lesson here: a heuristic that hides the rule is worse than the cost it saves.
+        try:
+            return int(item.strip())
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _healed_list_elements(annotation: object, value: object) -> object:
     """One BAD ELEMENT must not cost the whole field, mirroring `core/models.py`'s rules exactly.
 
@@ -163,23 +200,24 @@ def _healed_list_elements(annotation: object, value: object) -> object:
     elif annotation == list[int]:
         # `isinstance(True, int)` is True and a bool is not a node id; `type(...) is int` is the
         # same test `sanitize_research_memo_payload` makes of these very values.
-        # OPEN[claim-node-ids-healer-drops-numeric-strings] this pre-heal silently discards node
-        # citations pydantic's own lax validation accepted until 7326e259 made `_ClaimOut` heal.
-        # proof:`present:type(item) is int]@looplab/agents/deep_research.py`
-        # REVIEW 2026-08-29 (P1 correctness): numbers-as-strings is ordinary LLM JSON (30f6aee6 in
-        # this same window measured a whole list arriving as a string), and a bare `BaseModel`
-        # coerces `["3", "5"]` to `[3, 5]` — the shipped behaviour this healer sits in front of.
-        # Running `mode="before"`, the exact-int test drops every stringified id, so a TRUE,
-        # correctly-cited claim reaches `trust/memo_verify.py` with no evidence and is durably
-        # stamped `unsupported` / "no evidence cited" — poisoning the `memo_verdict_cue` tally
-        # spliced into every proposal prompt and refusing the claim as cross-run evidence at
-        # finalization. Driven live: `_ClaimOut.model_validate({"node_ids": ["3", "5"]})` yields
-        # `[]` where the pre-window model yields `[3, 5]`. The comment above is right about junk
-        # (`"x"`, True) and overshoots on values validation itself would accept;
-        # `tests/test_memo_stringified_list_arg.py` pins only the junk case. Fix direction: keep,
-        # besides exact ints, digit-strings and integral floats (still dropping bools/junk), or
-        # skip the pre-heal for elements pydantic can coerce and let validation decide.
-        healed = [item for item in value if type(item) is int]
+        # IT ALSO DROPPED EVERY VALUE PYDANTIC ITSELF WOULD HAVE ACCEPTED, until 2026-08-29.
+        # Numbers-as-strings are ordinary LLM JSON — `30f6aee6` measured a whole list arriving as
+        # one string — and a bare `BaseModel` coerces `["3", "5"]` to `[3, 5]`, which is the
+        # behaviour this healer sits in FRONT of. Running `mode="before"`, an exact-int test threw
+        # those away: driven live, `_ClaimOut.model_validate({"node_ids": ["3", "5"]})` returned
+        # `[]`. The cost is not cosmetic — a TRUE, correctly-cited claim then reaches
+        # `trust/memo_verify.py` with no evidence and is durably stamped `unsupported` / "no
+        # evidence cited", which poisons the `memo_verdict_cue` tally spliced into every proposal
+        # prompt and refuses the claim as cross-run evidence at finalization.
+        #
+        # So the rule is now COERCE WHAT VALIDATION WOULD, DROP WHAT IT WOULD NOT: exact ints,
+        # digit-strings and integral floats survive; bools, junk strings and non-integral floats do
+        # not. `True` stays out for the reason the original comment gives and it is the load-bearing
+        # half — `isinstance(True, int)` is True, so a bool would sail through any `isinstance`
+        # test and cite node 1 on a claim that named nothing. `type(...) is int` is False for a
+        # bool, which is why that spelling is kept rather than widened.
+        healed = [coerced for coerced in (_healed_node_id(item) for item in value)
+                  if coerced is not None]
     else:
         return value
     return value if healed == value else healed
