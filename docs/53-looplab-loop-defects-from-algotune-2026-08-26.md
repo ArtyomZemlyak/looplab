@@ -287,10 +287,56 @@ payload on that same event is the `_fp.siegelz` port that scored **6.0212**. On 
 Anything that reads the cards rather than the code draws the wrong conclusion — and the cards are
 what the next phase, the research memo and the final report all read.
 
-**Fix.** After a build, reconcile: diff the plan's stated approach against the committed files and
-either rewrite the plan or record `plan_superseded` with both. Cheap version: stamp the card with
-the sha of the files that were actually written, and make any consumer that quotes a card also
-quote that sha.
+**Re-measured 2026-08-26 over all 20 runs-B task-arms, and the item was too narrow as written.**
+There are TWO plans, not one, and the durable record holds the wrong one.
+
+* The **card** (`card_added.rationale` / `node_created.idea.rationale`) is written by the Researcher
+  *before the repo is read*. It is durable and nothing ever rewrites it.
+* The **Developer plan** (`repo_developer.py::_propose_plan`) is written *after* the plan phase has
+  read the source and run probes — it is the plan that actually drove the code. **63 of the 70 node
+  builds produced one, and `propose_plan` appears ZERO times across all twenty `events.jsonl`.** It
+  survives only as an unkeyed tool-call payload inside a generation span.
+
+So `discrete_log` node 1 is not the loop being sloppy — it is the loop *working*. The plan phase
+probed rho against BSGS at 2^37…2^46, found rho slower at every size, and its step 1 is titled
+*"Implement solver.py with a BSGS-everywhere discrete_log (raise rho threshold to 2^46)"*, detail:
+*"the winning move is the OPPOSITE of the hypothesis."* The shipped `RHO_THRESHOLD = 2 ** 46` is
+that decision. Only the record is wrong: card-1 still says rho, so 1.018 reads as a verdict on
+Pollard rho when it is a verdict on BSGS.
+
+Below the card, the plan does not describe the artefact either. Of the **46** builds whose plan had
+≥2 steps and therefore drove `_run_step` (**113 steps**): **46 steps (41 %) wrote nothing at all**
+— only 7 of them explained by the existing `plan_steps_failed` span, the other 39 silent successes
+— and **22 files were finished by a LATER step than the one whose title claims to produce them**
+(18 builds). **46 of 46 builds carry at least one of the two.**
+
+`count_riemann_zeta_zeros` node 0 is the shape: step 1 *"Implement exact nzeros port in solver.py"*,
+step 2 *"Accelerate block-analysis siegelz calls with numpy"* → wrote nothing, step 3 *"Final
+correctness sweep and cleanup"* → the bytes that shipped and then failed `SECURITY_VIOLATION`. So
+the step whose title owns solver.py is not the step whose bytes failed, and nothing said so.
+
+`discrete_log` node 0 — the run's CHAMPION at 1.186 — is the other shape. Its step 2 is *"Add three
+subgroup solvers with dispatch"*: a numpy Montgomery BSGS, a dict BSGS, and a `sympy.discrete_log`
+fallback "for correctness on p >= 2^64". It wrote nothing. The shipped `solver.py` has one plain
+`_bsgs` and no fallback at all, and steps 3 and 4 (both verification) wrote nothing either. The
+node scored, won, and its whole correctness tier exists only in a tool-call payload.
+
+**Fix (shipped).** RECORD the divergence rather than prevent it — the plan is a proposal, the
+artefact is the truth, and a Developer that overrides its plan on measured evidence is the loop
+working. Each step now runs inside its own `plan_step` span (which the phase list in `_run` had
+claimed since it was written and `run_phase`, which opens no operation span, never delivered), the
+working set is diffed by CONTENT around each step, and one `plan_steps` span carries the
+reconciliation: per step what it actually wrote/deleted, whether it superseded an earlier step, and
+whether it was a silent no-op — plus `authors` (shipped file → the step that last wrote it) and
+`unattributed` (shipped files no step touched, i.e. inherited from the base preload). That is what
+lets a later reader attribute an eval failure to the step that caused it.
+
+**Still open**, and why the item stays OPEN: the repair path. `node_repaired` carries the triage
+`rationale`/`reason_summary` — authored by `unified_agent.py::triage_crash` BEFORE the repair
+session runs — on the SAME event as the `files` it does not describe, and a repair skips the stages
+AND plan phases entirely (`is_fresh_repo` is false), so nothing above reaches it. Note also that no
+build in this corpus ran a stages phase at all: the operator declared `eval.stages`, so
+`_operator_stage_list` short-circuits it (0 `stages` spans in 20 runs).
 
 ---
 
