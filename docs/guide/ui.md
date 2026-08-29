@@ -407,7 +407,20 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   and who stopped the work and why is history the reopened Card still owes its reader — only whether
   the drop is *applied* changes. The affordance appears **only on a stopped Card** and deliberately
   **not** behind the danger disclosure the drop lives in: ending a line of work and resuming one
-  should not be presented with the same weight. A reopen carrying no event index leaves the drop
+  should not be presented with the same weight. **That sentence was a PRESCRIPTION the code
+  contradicted, and reading it as a description is what let the defect survive.** The form was
+  written inside the same `{onControl && !terminal && <details>}` disclosure it says it is not
+  behind, while requiring `status === 'dropped'` — and `terminal` *is*
+  `status === 'dropped' || merged_into`, so the two conditions are mutually exclusive and the button
+  could render for no Card at all. That was the THIRD time this affordance was unreachable from the
+  browser, and the first two were found and fixed while this one survived them, because every guard
+  tested the projection and the dispatch text and none rendered a dropped Card and looked for the
+  button. It is now a SIBLING of that disclosure, gated on the dropped + reopenable pair; the other
+  four controls stay inside it, deliberately, because edit / priority / resources / drop are about
+  work in flight and a stopped Card has one action left. `ui/test/cardReopenButtonRenders.test.js`
+  is what makes that checkable — it SSR-renders the real board and asserts the control exists on a
+  dropped reopenable Card, is absent on a live one and on a non-reopenable one, and that the other
+  four controls did not come back with it. A reopen carrying no event index leaves the drop
   standing, which is the fail-closed direction — the fold stamps an index on every receipt it writes,
   so a missing one means a hand-written or pre-upgrade row.
   **Only an OPERATOR's drop can be reopened, and only the board can say so.** The fold has always

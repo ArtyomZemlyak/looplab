@@ -581,19 +581,6 @@ function _CardKanbanCard({
       {evidence.length === 0 && <span className="muted">
         {evidenceKnown ? 'No evidence nodes' : 'Evidence unavailable'}</span>}
     </div>
-    {/* OPEN[reopen-form-gated-behind-terminal-exclusion] the reopen form can render for no card:
-        it requires status 'dropped' while this enclosing disclosure requires !terminal, and
-        `terminal` is true for every dropped card.
-        proof:`absent:onControl && _cardStatus(card) === 'dropped'@ui/src/CardBoard.jsx`
-        REVIEW 2026-08-29 (P1 delivery): the two gates are mutually exclusive, so the whole reopen
-        stack (event type + five control-validation rows + fold handler + CONTROL.reopenCard + the
-        reopenable authority gate) is unreachable from the browser — the THIRD unreachability in
-        this feature; the first two were fixed while this one persisted because every guard tests
-        the model/dispatch text and nothing renders a dropped card and looks for the button
-        (SSR-driven: a dropped reopenable card renders no controls block at all). Fix direction:
-        move the reopen form out of this disclosure into a sibling block gated on the dropped +
-        reopenable pair (the other controls SHOULD stay hidden on terminal cards), and add an SSR
-        test that renders a dropped reopenable card and asserts the button exists. */}
     {onControl && !terminal && <details className="card-kanban-controls">
       <summary aria-label={`Operator controls for ${card.id}`}>Operator controls</summary>
       <form className="card-control-form" onSubmit={event => { event.preventDefault(); saveStatement() }}>
@@ -635,20 +622,6 @@ function _CardKanbanCard({
           Abandon this Card
         </button>
       </div>
-      {/* SHOWN ONLY ON A STOPPED CARD, and not behind a danger disclosure: dropping ends a line of
-          work and reopening resumes one, so presenting them with the same weight would be wrong in
-          both directions. Until this shipped a drop was TERMINAL — the card stayed visible in the
-          `dropped` lane, unactionable, with no event in the vocabulary that could return it. */}
-      {_cardStatus(card) === 'dropped' && _cardReopenable(card) && <form className="card-control-form"
-        onSubmit={event => { event.preventDefault(); reopen() }}>
-        <label><span>Reopen reason (optional)</span><input className="text" value={reopenReason}
-          maxLength={400} aria-label={`Reopen reason for ${card.id}`} disabled={busy}
-          onChange={event => setReopenReason(event.target.value)} /></label>
-        <button type="submit" className="btn xs" disabled={busy}
-          title="Put this stopped Card back on the board; the drop receipt stays in the log">
-          Reopen this Card
-        </button>
-      </form>}
       <details className="card-control-danger">
         <summary>Drop Card…</summary>
         <form className="card-control-form" onSubmit={event => { event.preventDefault(); drop() }}>
@@ -661,6 +634,35 @@ function _CardKanbanCard({
       {controlsLocked && !ownPending && <div className="card-control-feedback" role="status">
         Another Card command is still being submitted for this run.</div>}
     </details>}
+    {/* A SIBLING OF THE CONTROLS DISCLOSURE, NOT A CHILD, and that placement is the whole fix.
+        This form lived inside `{onControl && !terminal && <details>}` while requiring
+        `status === 'dropped'` — and `terminal` is `status === 'dropped' || merged_into`, so the two
+        gates were mutually exclusive and the button could render for NO card. That made the entire
+        reopen stack — the event type, five control-validation rows, the fold handler,
+        `CONTROL.reopenCard` and the `reopenable` authority gate — unreachable from the browser, the
+        THIRD unreachability in this one feature. The first two were caught and fixed while this one
+        survived because every guard tests the MODEL and the dispatch text, and nothing rendered a
+        dropped card and looked for the button.
+
+        The other controls deliberately STAY hidden on a terminal card: edit / priority / resources /
+        drop are all about work in flight. Reopening is the one action a stopped card still has, so
+        it is the one control that must outlive `!terminal`.
+
+        SHOWN ON A STOPPED CARD AND NOT BEHIND A DANGER DISCLOSURE: dropping ends a line of work and
+        reopening resumes one, so presenting them with the same weight would be wrong in both
+        directions. Until `dccad06f` a drop was TERMINAL — the card sat visible in the `dropped`
+        lane, unactionable, with no event in the vocabulary that could return it. */}
+    {onControl && _cardStatus(card) === 'dropped' && _cardReopenable(card)
+      && <form className="card-control-form card-control-reopen"
+        onSubmit={event => { event.preventDefault(); reopen() }}>
+        <label><span>Reopen reason (optional)</span><input className="text" value={reopenReason}
+          maxLength={400} aria-label={`Reopen reason for ${card.id}`} disabled={busy}
+          onChange={event => setReopenReason(event.target.value)} /></label>
+        <button type="submit" className="btn xs" disabled={busy}
+          title="Put this stopped Card back on the board; the drop receipt stays in the log">
+          Reopen this Card
+        </button>
+      </form>}
     {isRecord(controlState?.notice) && <div
       className={'card-control-feedback ' + (controlState.notice.tone || '')}
       role={controlState.notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
