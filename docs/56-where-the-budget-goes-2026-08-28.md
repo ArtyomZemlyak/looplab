@@ -1359,3 +1359,21 @@ proxy ledger against each run's own `llm_usage` events:
 
 Exact to the cent on all four. The ledger holds 1–3 more ENTRIES than the run counts calls, and
 those entries carry zero cost.
+
+### 40.2 dsDL node 0 = 0.0: one timeout, then an early exit that fails the rest
+
+A zero with a live `eval_seconds` of **504.0** — seven times the usual 30–40 s. The reason block is
+`evaluator_error`, and the harness's own words are the diagnosis:
+
+    [isolated_benchmark] Run 1/3 timed out after 120.0s
+    [isolated_benchmark] Early exit enabled - treating all runs as timeout
+    Aborting evaluation after 5 consecutive failures
+
+So ONE real timeout at the campaign's `ALGOTUNE_MIN_TIMEOUT_S=120` ceiling cascades: AlgoTune's
+early-exit treats every remaining run as a timeout without running it, five consecutive failures
+abort the evaluation, and the node scores 0.0. `build_ext ok` is in the same log, so the extension
+did compile — the timeout is the solver's, not the build's.
+
+This is the same shape as the 56 unexplained aborts left open in docs/53 §9, on a task not in that
+list (`discrete_log`, graded n=25). Recorded here with the harness lines that name the mechanism,
+which §9 did not have.
