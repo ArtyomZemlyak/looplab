@@ -595,7 +595,15 @@ def main() -> int:
         if va is not None and state_a in HARNESS_CUT_STATES:
             why = why or f"arm A {_cut_phrase(state_a)}, not by the budget"
         cut = next((st for st in (state, state_a) if st in HARNESS_CUT_STATES), None)
-        rows.append((task, va, vb, why, cut or state, why_is_a_bare_reason))
+        # THE ROW'S STATE HAS TO SPEAK FOR BOTH ARMS. It carries arm B's marker, with arm A's
+        # consulted only for the cut flag above -- so an arm-A `operator_skip` reached the table as
+        # arm B's `done` and the "skipped" line never printed. A harness cut still outranks it (a
+        # clock beats bookkeeping); a skip on EITHER side is named when neither arm was cut. Lost
+        # and restored at the 2026-08-29 merge, where `HARNESS_CUT_STATES` replaced the single
+        # `wall_cut` this precedence was originally written around.
+        skipped = "skipped" in (state, state_a)
+        rows.append((task, va, vb, why,
+                     cut or ("skipped" if skipped else state), why_is_a_bare_reason))
         # A wall-cut row on EITHER side is PRINTED (above) and not PAIRED: the mean is the one number
         # a reader takes away, and it may only contain task-arms that ran to the ceiling they are
         # compared at. Which arm hit the clock does not change that.
