@@ -934,6 +934,29 @@ class RunTools:
         summary = str(m.get("summary") or "").strip()
         findings = [str(f).strip() for f in (m.get("findings") or []) if str(f).strip()]
         dirs = [str(d).strip() for d in (m.get("recommended_directions") or []) if str(d).strip()]
+        # THE COMPATIBILITY FIELD IS OPTIONAL AND A MEMO MAY LEGITIMATELY LEAVE IT EMPTY, in which
+        # case this page rendered NOTHING for a memo that had plenty to say. The prompt asks the
+        # model to SPLIT what it would try next into `open_questions` (a family of experiments) and
+        # `next_experiments` (one concrete change each), and then to "also fill
+        # `recommended_directions` with the union of both, unchanged, so existing readers keep
+        # working" — a courtesy the model owes readers like this one, not a contract it can be held
+        # to. Measured over the 20 durable memos on this box (v9 preserved + v10 live): 12 carry
+        # `next_experiments`, 78 concrete experiments in total, 71 of them (91 %) DO appear in the
+        # union — and ONE memo filled 7 concrete experiments with an EMPTY `recommended_directions`,
+        # so every one of its 7 was unreadable here. Those 7 are the whole of the 9 % that go
+        # missing.
+        #
+        # So the fallback is the READER's, not a new demand on the model: union the two split lists
+        # when the compat field is empty, in the memo's own order, questions first. `dirs` is
+        # UNCHANGED whenever the model did fill the union, which is 19 of 20 memos, so every
+        # preserved log renders byte-identically — the same shape as `research_cadence.py`'s
+        # `questions = open_questions or directions`, which is this rule's mirror image on the other
+        # channel. Deliberately NOT a merge of all three: re-uniting lists the model already united
+        # would duplicate every entry on the 19 memos that complied.
+        if not dirs:
+            dirs = [str(d).strip()
+                    for d in list(m.get("open_questions") or []) + list(m.get("next_experiments") or [])
+                    if str(d).strip()]
         # THE VIEW'S OWN population rule, spelled the same way — see `_memo_claim_rows`.
         claims = [c for c in (m.get("claims") or [])[:MAX_RESEARCH_CLAIMS]
                   if isinstance(c, dict) and str(c.get("statement") or "").strip()]
