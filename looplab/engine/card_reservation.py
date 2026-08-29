@@ -59,7 +59,8 @@ from looplab.core.models import (CARD_IDEA_CONCEPT_FIELDS, CARD_STATEMENT_MAX_CH
                                  normalize_researcher_footprint)
 from looplab.engine.proposal_cues import normalize_steering_context
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
-from looplab.events.types import (EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED,
+from looplab.events.card_ledger import _drop_author
+from looplab.events.types import (EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED, EV_CARD_REOPENED,
                                   EV_CARD_MERGED, EV_HYPOTHESIS_MERGED, EV_NODE_BUILDING,
                                   PROGRESS_STAGE_BUILD,
                                   EV_NODE_CREATED, EV_NOVELTY_REJECTED)
@@ -1881,26 +1882,39 @@ class CardReservationMixin:
         # unsafe. Use the EventStore's atomic tail CAS instead: concurrent callers either observe the
         # first drop or lose the CAS and retry against its prefix.
         def _plan(events, tail) -> None:
-            # OPEN[reopened-card-immune-to-engine-drop] idempotence is keyed on "any drop receipt
-            # ever", so an operator reopen makes the card permanently un-retirable by the engine.
-            # proof:absent:EV_CARD_REOPENED@looplab/engine/card_reservation.py
-            # REVIEW 2026-08-29 (P1 correctness): the fold resolves drop/reopen LAST-RECEIPT-WINS
-            # (`events/card_ledger.py` pops an operator drop superseded by a later reopen), but this
-            # scan still treats any historical drop as standing and returns without appending — and
-            # no engine module reads `card_reopened` receipts at all. So after drop -> reopen, every
-            # later engine retirement (`_retire_unclaimable_cards`, the failed-reservation cleanup,
-            # the node-reset re-propose that drops the superseded card) silently no-ops while its
-            # caller believes the card retired: the retire loop resets its counters and re-enters
-            # the same refuse/retire cycle, and the re-propose path leaves the superseded twin live
-            # beside its replacement — the leak `_exhausted` below exists to refuse, now silent.
-            # The ledger's own comment names this state ("permanently un-droppable by its owner")
-            # but blocks only the laundering path; the legitimate operator reopen reaches it too.
-            # Fix direction: disregard drop receipts superseded by a later reopen of the same
-            # canonical id (the fold's own index rule), or key idempotence on folded card status.
-            if any(
-                    event.type in {EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED}
-                    and self._canonical_card_id(event.data.get("id")) == card_id
-                    for event in events):
+            # IDEMPOTENCE IS "IS A DROP STANDING", NOT "WAS ONE EVER APPENDED", and keying it on the
+            # latter made an operator reopen permanently un-retirable by the engine. The fold has
+            # resolved drop/reopen LAST-RECEIPT-WINS since `dccad06f` (`events/card_ledger.py`), so
+            # after drop -> reopen the board shows the card LIVE while this scan still saw the
+            # historical drop and returned without appending. Every later engine retirement then
+            # silently no-opped while its caller believed the card retired: `_retire_unclaimable_
+            # cards` resets its counters and re-enters the same refuse/retire cycle, and the
+            # node-reset re-propose leaves the superseded twin live beside its replacement — the
+            # leak `_exhausted` below exists to refuse, made silent. The ledger's own comment names
+            # the state ("permanently un-droppable by its owner") and blocks only the laundering
+            # path; the legitimate operator reopen reached it too.
+            #
+            # THE RULE IS THE FOLD'S, REPLAYED OVER RAW EVENTS RATHER THAN RE-INVENTED, and the
+            # author test is why `_drop_author` is IMPORTED: its own docstring says "ONE spelling,
+            # because three readers ask it and they must not drift", and this is now a fourth. A
+            # reopen may only undo an OPERATOR's drop — an engine `card_auto_dropped` stands whatever
+            # follows it, which is what stops a reopen from laundering a rejected proposal back onto
+            # the selectable board (`_record_node_less_card` mints and auto-drops in one
+            # `append_many` precisely so the audit row is never live).
+            #
+            # Order is the log's own, so no `_event_index` is needed here: the CAS hands this plan
+            # the prefix in append order, and "later" is simply "further along `events`".
+            standing = False
+            standing_author = "engine"
+            for event in events:
+                if self._canonical_card_id(event.data.get("id")) != card_id:
+                    continue
+                if event.type in {EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED}:
+                    standing = True
+                    standing_author = _drop_author(event.data or {})
+                elif event.type == EV_CARD_REOPENED and standing and standing_author == "operator":
+                    standing = False
+            if standing:
                 return None
             self.store.append(EV_CARD_AUTO_DROPPED, {
                 "id": card_id,
