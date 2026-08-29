@@ -181,8 +181,10 @@ CHAMPION_CAVEAT_SALVAGED = "salvaged"
 CHAMPION_CAVEAT_TRUST_FLAGGED = "trust_flagged"
 CHAMPION_CAVEAT_PARAMS_OVERRIDDEN = "params_overridden"
 CHAMPION_CAVEAT_MIXED_COMPARABILITY = "mixed_comparability"
+CHAMPION_CAVEAT_MERGED_COORDINATES = "merged_coordinates"
 CHAMPION_CAVEATS = (CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED,
-                    CHAMPION_CAVEAT_PARAMS_OVERRIDDEN, CHAMPION_CAVEAT_MIXED_COMPARABILITY)
+                    CHAMPION_CAVEAT_PARAMS_OVERRIDDEN, CHAMPION_CAVEAT_MIXED_COMPARABILITY,
+                    CHAMPION_CAVEAT_MERGED_COORDINATES)
 
 
 def champion_metric_caveats(state) -> list[str]:
@@ -238,9 +240,42 @@ def champion_metric_caveats(state) -> list[str]:
     # configuration", and a declaration the node's own code contradicts fails that question whoever
     # wrote the line. (`node_repaired.param_overrides` carries the attribution, for the reader who
     # is asking about the attempt rather than about the number.)
-    if (declared_param_overrides(getattr(getattr(best, "idea", None), "params", None) or {},
-                                 getattr(best, "files", None) or {},
-                                 code=getattr(best, "code", "") or "")
+    # A MERGED CHAMPION DECLARES NOTHING, so `params_overridden`'s premise is absent and its
+    # evidence is spurious — the FIFTH member exists to say the true thing instead (2026-08-29).
+    #
+    # `search/operators.py::merge_idea` returns `Idea(operator="merge", params=<the ARITHMETIC MEAN
+    # of the parents' params>)`. Nobody declared those numbers, and the node trains nothing of its
+    # own: it averages two parents' weights and scores the average. So "the champion's own committed
+    # code assigns a DIFFERENT value to a parameter its `Idea` DECLARES" is false in both halves,
+    # while the underlying worry is TRUE and sharper than the slug can put it — a mean-merge is
+    # published at coordinates NO configuration ever occupied, which is a fact about merging and not
+    # about any file disagreeing with any other.
+    #
+    # MEASURED (2026-08-29) by replaying this function over every `runs/**/events.jsonl` on the box:
+    # 9 logs, 0 unreadable, 7 with a champion, 4 caveated. `e5small-dr-unified-v4` node 13 —
+    # 0.793411, the SECOND-BEST number here — is the only merge-operator champion, and it carried
+    # `params_overridden` cited to `vectorsearch/configs/config.yaml:265`'s 2048 against a declared
+    # 4096 on a node whose whole pipeline is `merge` + `score`: zero epochs at no batch size and no
+    # learning rate. Its two sibling merges (v4 nodes 7 and 11) carry the same spurious rows, and
+    # `runtime/applied_params.py::stages` records the pipeline that makes them readable as such.
+    #
+    # THE SWAP CANNOT CLEAN ANYTHING, and that property is why it is safe to ship. Over the same
+    # corpus it re-labels exactly ONE champion and newly caveats ZERO: the only merge champion was
+    # already flagged, so no number goes from caveated to clean, and none goes from clean to
+    # caveated. The other two `params_overridden` champions (`e5small-dr-unified-v2` node 1 and
+    # `rubertlite-dr-unified-v8` node 3) are `draft` ideas that really trained and are untouched.
+    # Simply SUPPRESSING the caveat was refused for the reason this whole family exists: it would
+    # make the box's second-best number read clean when it is the least well-located result in the
+    # corpus — the vacuous green one layer up.
+    #
+    # 8 of the 43 evaluated nodes with a metric on this box are merges, so this is a standing
+    # population and not a one-off; the caveat is keyed on `idea.operator`, the structured marker
+    # `merge_idea` writes, never on the `mean-merge of nodes …` rationale TEXT beside it.
+    if getattr(getattr(best, "idea", None), "operator", None) == "merge":
+        out.append(CHAMPION_CAVEAT_MERGED_COORDINATES)
+    elif (declared_param_overrides(getattr(getattr(best, "idea", None), "params", None) or {},
+                                   getattr(best, "files", None) or {},
+                                   code=getattr(best, "code", "") or "")
             or applied_params_diverged(provenance)):
         out.append(CHAMPION_CAVEAT_PARAMS_OVERRIDDEN)
 

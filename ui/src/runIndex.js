@@ -91,6 +91,13 @@ export const CHAMPION_CAVEAT_SALVAGED = 'salvaged'
 export const CHAMPION_CAVEAT_TRUST_FLAGGED = 'trust_flagged'
 export const CHAMPION_CAVEAT_PARAMS_OVERRIDDEN = 'params_overridden'
 export const CHAMPION_CAVEAT_MIXED_COMPARABILITY = 'mixed_comparability'
+// A merged champion declares nothing: `merge_idea` returns `Idea(operator='merge')` with the
+// ARITHMETIC MEAN of its parents' params, and the node trains nothing of its own — it averages
+// two parents' weights and scores the average. So it is published at coordinates NO
+// configuration ever occupied, which is a sharper claim than `params_overridden` (whose premise,
+// a DECLARATION its own code contradicts, is simply absent) and is why the engine emits this
+// instead of that one rather than as well as it.
+export const CHAMPION_CAVEAT_MERGED_COORDINATES = 'merged_coordinates'
 
 // ABSENT is `[]`, deliberately, and for the same reason `sourceIncomplete` defaults to false: a
 // legacy server that does not send the field must not paint every run with a caveat. And an EMPTY
@@ -112,6 +119,7 @@ const CAVEAT_LABEL = {
   [CHAMPION_CAVEAT_TRUST_FLAGGED]: 'trust-flagged',
   [CHAMPION_CAVEAT_PARAMS_OVERRIDDEN]: 'params overridden',
   [CHAMPION_CAVEAT_MIXED_COMPARABILITY]: 'mixed comparability',
+  [CHAMPION_CAVEAT_MERGED_COORDINATES]: 'merged coordinates',
 }
 export const bestMetricCaveatLabel = slug => CAVEAT_LABEL[slug] || String(slug || '')
 
@@ -140,7 +148,13 @@ export function bestMetricCaveatNotice(run = {}) {
               + 'recorded comparability keys provably differ — so this number won a mixed field. '
               + 'The values are each true of their own measurement; the ordering between them is '
               + 'not.'
-            : `The server reports a caveat this view has no sentence for: “${slug}”.`))
+            : slug === CHAMPION_CAVEAT_MERGED_COORDINATES
+              ? 'This number comes from a MEAN-MERGE node: its parameters are the arithmetic '
+                + 'average of its two parents’ declarations, and it trained nothing of its own — it '
+                + 'averaged their weights and scored the average. Nobody chose the configuration '
+                + 'this result is filed under, so it sits at coordinates no run ever occupied. The '
+                + 'metric itself was measured normally, and the run selected on it.'
+              : `The server reports a caveat this view has no sentence for: “${slug}”.`))
   return sentences.join(' ')
 }
 

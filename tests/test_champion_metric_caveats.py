@@ -214,7 +214,20 @@ def test_every_caveat_rides_together_in_vocabulary_order(tmp_path):
     assert row["best_metric_caveats"] == [CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED,
                                           CHAMPION_CAVEAT_PARAMS_OVERRIDDEN,
                                           CHAMPION_CAVEAT_MIXED_COMPARABILITY]
-    assert list(CHAMPION_CAVEATS) == row["best_metric_caveats"], "the registry IS the order"
+    # THE REGISTRY IS THE ORDER, AND SINCE 2026-08-29 THAT IS A SUBSEQUENCE AND NOT AN EQUALITY.
+    # This line read `list(CHAMPION_CAVEATS) == row[...]`, i.e. "every member fires at once", which
+    # was true while all four were independent facts about one number. `merged_coordinates` is the
+    # first member that CANNOT co-occur with another: it REPLACES `params_overridden` for a
+    # merge-operator champion, because that slug's premise — a declaration the node's own code
+    # contradicts — is absent when `merge_idea` derived the params and the node trained nothing.
+    # Weakening the equality to a subsequence keeps both properties the test was written for (the
+    # order is the vocabulary's, so an unchanged run cannot look changed to a client diffing the row
+    # between two polls; and no caveat hides another), and the exclusivity it can no longer express
+    # is driven directly by `tests/test_merged_champion_coordinates.py`.
+    emitted = row["best_metric_caveats"]
+    registry = list(CHAMPION_CAVEATS)
+    assert [c for c in registry if c in emitted] == emitted, "the registry IS the order"
+    assert set(emitted) < set(registry), "and every emitted slug is a registered one"
 
 
 def test_the_champion_is_never_in_unreliable_metric_ids(tmp_path):
