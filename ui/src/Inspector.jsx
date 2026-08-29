@@ -2755,25 +2755,36 @@ export function Metrics({ n, detail, state, runId }) {
   // row reading `salvaged | 0.74 | 0.81` must not leave the second number looking like the measured
   // one by contrast.
   const champObjective = champ ? objectiveMetricSource(champ) : null
-  // OPEN[extras-channel-union-mislabel] a provenance caveat is rendered beside an empty cell.
-  // proof:present:(correctness):@ui/src/Inspector.jsx
-  // REVIEW 2026-08-18 (correctness): `extraKeys` is the UNION over ALL nodes, but each extras row's
-  // `channel` is read from THIS node only — a key this node never reported still gets
-  // `extraMetricChannel(n, k)` = 'unknown', rendering a warn "provenance unknown" label beside an
-  // empty cell (a caveat about a value that does not exist, the invented-caveat shape
-  // `objectiveMetricSource` forbids). And the champion's extras value in the `best #N` column
-  // carries no channel read of its own — only the ★ row reads `champObjective` — so a self-reported
-  // champ value sits unlabeled beside this node's labeled one, the exact by-contrast misread the ★
-  // cell's comment above warns about. Fix direction: label only cells that hold a value, each from
-  // its own node's record (`extraMetricChannel(champ, k)` for the best column).
+  // A CHANNEL IS READ FROM THE NODE THAT HOLDS THE VALUE, and only where a value exists (fixed
+  // 2026-08-29). `extraKeys` is the UNION over every node in the run, so this node legitimately has
+  // no value for most of it — and `extraMetricChannel(n, k)` answers `unknown` for a key `n` never
+  // reported exactly as it does for one recorded before the channel was written down. The row then
+  // printed a warn "provenance unknown" beside an EMPTY cell: a caveat about a value that does not
+  // exist, which is the invented-caveat shape `objectiveMetricSource` forbids two lines up, and it
+  // also fed `anyUnverified`, so a phantom row could summon the whole self-reported footnote.
+  //
+  // `channel` is therefore `null` when this node holds no value, and the source cell renders
+  // nothing at all rather than a word about nothing. `bestChannel` is the same read against the
+  // CHAMPION's own record: the `best #N` column is a different node's number, and until now only
+  // the ★ row consulted `champObjective`, so a self-reported champion extra sat unlabelled beside
+  // this node's labelled one — the by-contrast misread the ★ cell's own comment warns about.
   const rows = [
     { k: 'objective', mine: n.confirmed_mean ?? n.metric, best: champ ? (champ.confirmed_mean ?? champ.metric) : null, star: true },
-    ...extraKeys.map(k => ({
-      k, mine: n.extra_metrics?.[k], best: champ?.extra_metrics?.[k],
-      channel: extraMetricChannel(n, k),
-    })),
+    ...extraKeys.map(k => {
+      const mine = n.extra_metrics?.[k]
+      const best = champ?.extra_metrics?.[k]
+      return {
+        k, mine, best,
+        channel: mine == null ? null : extraMetricChannel(n, k),
+        bestChannel: (champ && best != null) ? extraMetricChannel(champ, k) : null,
+      }
+    }),
   ]
-  const anyUnverified = rows.some(r => r.channel && r.channel !== 'declared')
+  // A row with no value on EITHER side can no longer summon this footnote: `channel` and
+  // `bestChannel` are both null there, so the sentence is printed only when some cell it describes
+  // is actually on screen.
+  const anyUnverified = rows.some(r => (r.channel && r.channel !== 'declared')
+    || (r.bestChannel && r.bestChannel !== 'declared'))
   return <>
     <div className="section-h">Reported metrics{champ ? ` · best = #${champ.id}` : ''}</div>
     <DataTable caption="Node metric comparison" card={false}><table className="tbl"><thead><tr><th>metric</th><th>source</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
@@ -2782,13 +2793,18 @@ export function Metrics({ n, detail, state, runId }) {
         <td className="muted">{r.star
           ? <span className={objectiveCaveated ? 'warn' : ''}
             title={objectiveSourceHelp(objective)}>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>
-          : <span className={r.channel === 'declared' ? '' : 'warn'}
-            title={EXTRA_METRIC_CHANNEL_HELP[r.channel]}>{EXTRA_METRIC_CHANNEL_LABEL[r.channel]}</span>}</td>
+          : r.channel
+            ? <span className={r.channel === 'declared' ? '' : 'warn'}
+              title={EXTRA_METRIC_CHANNEL_HELP[r.channel]}>{EXTRA_METRIC_CHANNEL_LABEL[r.channel]}</span>
+            : null}</td>
         <td>{fmt(r.mine)}</td>
         {showChamp && <td>{r.star && objectiveSourceCaveated(champObjective)
           ? <span className="warn" title={objectiveSourceHelp(champObjective)}>
             {fmt(r.best)} · {OBJECTIVE_SOURCE_LABEL[champObjective.channel]}</span>
-          : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
+          : r.bestChannel && r.bestChannel !== 'declared'
+            ? <span className="warn" title={EXTRA_METRIC_CHANNEL_HELP[r.bestChannel]}>
+              {fmt(r.best)} · {EXTRA_METRIC_CHANNEL_LABEL[r.bestChannel]}</span>
+            : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
     {/* The extras' footnote below exists because a tooltip is not discoverable — an operator
         scanning a table does not hover every cell. That argument is STRONGER for the ★ row, which
         is the number that drives selection, so the caveat is printed rather than only hovered. It
