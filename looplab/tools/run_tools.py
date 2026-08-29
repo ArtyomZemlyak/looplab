@@ -51,6 +51,58 @@ _MEMO_DEFAULT_SECTION = "overview"
 _MEMO_FINDING_ROWS = 12
 _MEMO_CLAIM_ROWS = 12
 _MEMO_DIRECTION_ROWS = 8
+# WHICH OF THE MEMO'S OWN TWO LISTS A RENDERED DIRECTION CAME FROM — recovered by MEMBERSHIP,
+# because the flat list cannot say and the union is what destroyed the distinction.
+#
+# The prompt asks the model to split what it would try next into `open_questions` (a family of
+# experiments) and `next_experiments` (ONE concrete change each), and then to "also fill
+# `recommended_directions` with the union of both, UNCHANGED". Measured on the first memo of
+# `e5small-dr-unified-v11` (2026-08-29): `recommended_directions == next_experiments +
+# open_questions` exactly, in order, with 6/6 and 4/4 members appearing verbatim. The model complied
+# — and complying is what makes the rendered list unreadable, because a row that is a concrete
+# one-change experiment is presented identically to a row that is an open family.
+#
+# THAT COST A REAL MISREADING, and it was mine. v11's card-0 matched `next_experiments[1]`, which
+# looked like the first live evidence that the concrete half of the split reaches a proposal — and
+# it matched `recommended_directions[1]` byte-for-byte, because d1 IS n1. No observation of the
+# card could name the carrier.
+#
+# Membership recovers it precisely BECAUSE the union is verbatim: an entry that appears in exactly
+# one of the two split lists belongs to that list, whichever field the render happened to read. An
+# entry in BOTH (the model repeated itself) or in NEITHER (a legacy compat-only memo, or a model
+# that edited the text on the way into the union) is left UNLABELLED — a refusal that records
+# itself, never a guess, on the rule `metric_subject` states one package over: a tie is `ambiguous`
+# and `ambiguous` is a refusal.
+#
+# It RENDERS and decides nothing: no event, no fold, no card, no selection. What it buys is that
+# the agent reading the memo can tell a family from a single change — which is the whole reason the
+# two lists exist — and that a proposal citing a labelled row is traceable to the list it came from.
+_MEMO_DIRECTION_KINDS = {"experiment": "[experiment]", "question": "[question]"}
+
+
+def memo_direction_kind(entry, questions, experiments):
+    """`"question"` | `"experiment"` | `None` for one rendered direction.
+
+    `None` is the honest answer for an entry in both lists or in neither, and it is why the caller
+    renders no marker at all rather than a default one.
+    """
+    text = str(entry or "").strip()
+    if not text:
+        return None
+    in_q = any(text == str(q or "").strip() for q in (questions or ()))
+    in_x = any(text == str(x or "").strip() for x in (experiments or ()))
+    if in_q and not in_x:
+        return "question"
+    if in_x and not in_q:
+        return "experiment"
+    return None
+
+
+def memo_direction_row(entry, questions, experiments):
+    """One rendered `  - ...` direction row, marked with the list it provably came from."""
+    kind = memo_direction_kind(entry, questions, experiments)
+    marker = _MEMO_DIRECTION_KINDS.get(kind)
+    return f"  - {marker} {entry}" if marker else f"  - {entry}"
 #: What the OVERVIEW spends on the summary. Measured: the summary is a median 1,395 chars (p90
 #: 1,620), the whole overview shares 4,000 with a verifier block of up to 1,827 and a directions
 #: section of up to 3,116, and the summary is the memo's LEAST load-bearing field on both counts
@@ -953,10 +1005,13 @@ class RunTools:
         # `questions = open_questions or directions`, which is this rule's mirror image on the other
         # channel. Deliberately NOT a merge of all three: re-uniting lists the model already united
         # would duplicate every entry on the 19 memos that complied.
+        # The memo's OWN two lists, bound once and read by the row renderer below. They are the
+        # authority for what a rendered direction IS, whether `dirs` came from the compat field or
+        # from the fallback — see `memo_direction_kind`.
+        split_questions = [str(q).strip() for q in (m.get("open_questions") or []) if str(q).strip()]
+        split_experiments = [str(x).strip() for x in (m.get("next_experiments") or []) if str(x).strip()]
         if not dirs:
-            dirs = [str(d).strip()
-                    for d in list(m.get("open_questions") or []) + list(m.get("next_experiments") or [])
-                    if str(d).strip()]
+            dirs = split_questions + split_experiments
         # THE VIEW'S OWN population rule, spelled the same way — see `_memo_claim_rows`.
         claims = [c for c in (m.get("claims") or [])[:MAX_RESEARCH_CLAIMS]
                   if isinstance(c, dict) and str(c.get("statement") or "").strip()]
@@ -978,7 +1033,8 @@ class RunTools:
                             or ["  (this memo records no findings)"], cap=RESULT_CAP)
         if want == "directions":
             return fit_rows([head, lead, "Recommended directions:"],
-                            [f"  - {d}" for d in dirs[:_MEMO_DIRECTION_ROWS]]
+                            [memo_direction_row(d, split_questions, split_experiments)
+                             for d in dirs[:_MEMO_DIRECTION_ROWS]]
                             or ["  (this memo recommends no directions)"], cap=RESULT_CAP)
         if want == "summary":
             return fit_rows([head, lead, "Summary:"],
@@ -1000,7 +1056,8 @@ class RunTools:
         # every provider to deriving its bounds from `RESULT_CAP` rather than from a free-standing
         # ~4000, and a derivation buried in a call argument is the shape that guard cannot see.
         overview_budget = RESULT_CAP - reserve
-        rows = [f"  - {d}" for d in dirs[:_MEMO_DIRECTION_ROWS]]
+        rows = [memo_direction_row(d, split_questions, split_experiments)
+                for d in dirs[:_MEMO_DIRECTION_ROWS]]
         body = fit_rows([head, lead] + (["Recommended directions:"] if rows else []), rows,
                         cap=max(0, overview_budget), omitted=_MEMO_DIRECTIONS_OMITTED)
         # What the directions did not spend goes to the summary, never the other way round: it is the
