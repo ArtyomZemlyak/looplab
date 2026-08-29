@@ -42,7 +42,8 @@ from __future__ import annotations
 
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
-    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
+    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
+    EV_CARD_RESOURCE_PINNED,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
@@ -78,6 +79,10 @@ CONTROL_EVENTS = frozenset({
     # drop may cancel its running eval. New engine lifecycle drops use `card_auto_dropped`; only legacy
     # logs can still carry an engine-authored `card_dropped` compatibility row.
     EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_DROPPED,
+    # The drop's counterpart: an operator putting a stopped card back on the board. Command-only
+    # and server-stamped like every other card control, and folded LAST-RECEIPT-WINS against the
+    # drop by event index, so drop/reopen/drop is expressible and replays identically.
+    EV_CARD_REOPENED,
 })
 
 # Versioned collaboration is command-only: unlike the compatibility /control route, the durable
@@ -86,6 +91,7 @@ COLLABORATION_EVENTS = frozenset({
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONCEPT_TAG_EDITED,
     EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_DROPPED,
+    EV_CARD_REOPENED,
     # PART V (D): a base-concept edit is command-only too — force it through the generation-fenced command
     # endpoint (not the legacy /control route) so a write formed against an old generation can't land on a
     # post-reset replacement run, exactly like its per-node sibling EV_CONCEPT_TAG_EDITED.

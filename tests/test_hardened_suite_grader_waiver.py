@@ -192,9 +192,24 @@ def test_a_sanctioned_grader_import_keeps_the_node_selectable(tmp_path):
     run_dir, state = _run(tmp_path, code=_HONEST_SOLUTION,
                           assets={"grader.py": _GRADER_ASSET},
                           suite_rules=[_SEED_IMPORT_RULE, _DERIVED_IMPORT_RULE])
-    assert _signals(run_dir) == [], "the hardened suite re-flagged the sanctioned grader import"
+    # THE PROPERTY IS THE SUITE'S, so filter to the suite's own signals rather than demanding the
+    # event stream be empty. Since 2026-08-23 `critic_check` ships ON, and `_ScriptedDeveloper`
+    # returns the SAME code whatever params were proposed — so `critic:params_ignored` is structural
+    # to this harness, true of the fixture, and says nothing about the grader waiver. It is also
+    # BROAD, i.e. advisory even under this run's `trust_gate="block"` (only
+    # `critic:hardcoded_metric` gates), which the feasibility assertions below re-derive.
+    suite_signals = [s for s in _signals(run_dir) if not s["signal"].startswith("critic:")]
+    assert suite_signals == [], "the hardened suite re-flagged the sanctioned grader import"
+    # …and pin the critic note itself, so this test cannot silently absorb a NEW signal later.
+    assert [s["signal"] for s in _signals(run_dir)] == ["critic:params_ignored"]
     folded = fold(EventStore(run_dir / "events.jsonl").read_all())
-    assert not folded.reward_hacks
+    # The same filter one layer up: a folded row EXISTS, and it exists only because of the advisory
+    # critic note above. What must be absent is a SUITE finding — that is the thing
+    # `trust_gate="block"` acts on, and the feasibility assertions below are this test's own proof
+    # that the broad critic note did not.
+    assert not [row for row in folded.reward_hacks
+                if any(not sig["signal"].startswith("critic:")
+                       for sig in (row.get("signals") or []))]
     # The eval really ran the import: 0.5 is what the ASSET's `score` returns and nothing else in
     # this run produces it, so the grader.py the engine materialized was imported for real.
     assert [n.metric for n in folded.evaluated_nodes()] == [0.5]

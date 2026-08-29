@@ -10,12 +10,14 @@ the real loop (draft -> run -> evaluate -> improve -> select) deterministically.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import random
 from typing import Optional, Protocol
 
 from looplab.core.advisory_payloads import memo_snapshot_cue, memo_verdict_cue
 from looplab.core.models import (Idea, IdeaEmission, Node, RunState,
+                                 card_drift_brief, card_is_direction,
                                  developer_artifact_footprint, hypothesis_statement_digest,
                                  normalize_researcher_footprint)
 from looplab.core.parse import LLMClient, ParseError, extract_code, parse_structured
@@ -329,7 +331,16 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     # every attempt of every node — the feature silently ceasing to exist, with nothing red anywhere,
     # and the only visible symptom a repair loop that keeps failing at `train` for reasons it already
     # correctly diagnosed.
-    "last_rollback_stage")
+    "last_rollback_stage",
+    # WHICH BOUND ENDED THE SESSION ("time" / "turns"), "" when it finished on its own terms. Same
+    # registry argument as `last_rollback_stage` above and the same falsy default, so a one-sided
+    # rename would read as "no session was ever cut short" on every node — which is exactly the
+    # reading this attribute exists to stop being the only one available. `tool_loop.py` has
+    # announced this through `on_budget` since it was written and nothing subscribed; measured over
+    # `runs/`, 12 of the 12 `inert` repairs in the corpus ran past their wall clock and 0 of the 65
+    # that finished inside it are inert, so `inert` alone cannot tell "decided not to edit" from
+    # "ran out of clock mid-investigation".
+    "last_budget_exhausted")
 RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
 
 # Duck-typed attributes that answer "does building one node make provider calls at all?" — the seam
@@ -877,22 +888,54 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
         # predicted-value order, so the search tests the most promising one first and the [:5] cap now
         # drops the LOWEST-payoff cards, not arbitrary insertion-order ones. No ranking -> insertion
         # order (unchanged). Replay-safe: only the resulting node's `idea.hypothesis` is recorded.
-        lines.append("Untested hypotheses on the board (registered by the operator or deep research"
-                     + (", ordered by predicted payoff — best first" if hyp_order else "")
-                     + " — none has evidence yet):")
-        for card in open_hyps:
-            lines.append(
-                f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
-                f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
-        if for_proposal:
-            # A CLAIM CONTRACT, and only a caller whose answer is an `Idea` can honour it. This brief
-            # also feeds the crash-triage judge (`engine/crash_repair.py`) and the macro-action
-            # chooser (`engine/node_build.py`), whose replies are a verdict string and an index —
-            # neither has a `card_id` field to return one in, so for them this sentence is an
-            # instruction that cannot be followed, competing with the one that can.
-            lines.append("If your next experiment tests one of these, return its CARD_ID in "
-                         "`card_id`. The engine restores the complete immutable seed; do not use "
-                         "display edits as semantic identity.")
+        # TWO KINDS OF ROW, TWO DIFFERENT CONTRACTS, and until 2026-08-24 they were one list.
+        # `open_research_beliefs()` returns every open untested card, and a card is either an
+        # EXPERIMENT (it owns an executable action, so it can be claimed and built) or a
+        # DIRECTION (it owns none — a deep-research `recommended_direction`, an operator's broad
+        # question — so it can NEVER be built, no matter what the model returns). Rendering them
+        # together offered a claim contract that is false for half the rows: measured on
+        # `runs/e5small-dr-unified-v5`, 5 of 5 rows the proposer saw were directions, and a
+        # `card_id` naming any of them resolves to a card that owns no action.
+        #
+        # The split gives the direction the contract it CAN honour: not "claim this", but "propose a
+        # minimal-change experiment that ANSWERS this, and file it under the direction". That is
+        # what turns a direction from a row that clogs the board into the source of the next
+        # experiment — and it is the only way the `Card.parent_card_id` edge is ever authored,
+        # since nothing can infer from a proposal's text which question it was written to answer.
+        directions = [card for card in open_hyps if card_is_direction(card)]
+        work_items = [card for card in open_hyps if not card_is_direction(card)]
+        if directions:
+            lines.append("OPEN RESEARCH DIRECTIONS (broad questions with no experiment yet"
+                         + (", ordered by predicted payoff — best first" if hyp_order else "")
+                         + " — these are NOT experiments and cannot be run as they stand):")
+            for card in directions:
+                lines.append(
+                    f"- DIRECTION_ID={card.id} "
+                    f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
+            if for_proposal:
+                lines.append(
+                    "To pursue one, propose ONE concrete minimal-change experiment that would move "
+                    "it forward and return its DIRECTION_ID in `parent_card_id`. Do NOT put a "
+                    "DIRECTION_ID in `card_id` — a direction owns no action and cannot be claimed. "
+                    "Several experiments may be filed under the same direction over time; that is "
+                    "what it is for.")
+        if work_items:
+            lines.append("Untested hypotheses on the board (registered by the operator or deep research"
+                         + (", ordered by predicted payoff — best first" if hyp_order else "")
+                         + " — none has evidence yet):")
+            for card in work_items:
+                lines.append(
+                    f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
+                    f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
+            if for_proposal:
+                # A CLAIM CONTRACT, and only a caller whose answer is an `Idea` can honour it. This brief
+                # also feeds the crash-triage judge (`engine/crash_repair.py`) and the macro-action
+                # chooser (`engine/node_build.py`), whose replies are a verdict string and an index —
+                # neither has a `card_id` field to return one in, so for them this sentence is an
+                # instruction that cannot be followed, competing with the one that can.
+                lines.append("If your next experiment tests one of these, return its CARD_ID in "
+                             "`card_id`. The engine restores the complete immutable seed; do not use "
+                             "display edits as semantic identity.")
     # …and the OTHER half of the board, which nothing showed until now: the questions that already
     # have an experiment against them. See `attempted_board_prompt_cards` for what it cost that a
     # card disappeared from this prompt the instant it got a node — including a node still RUNNING,
@@ -904,11 +947,23 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
         lines.append("Research questions ALREADY on the board (each already has an experiment — "
                      "do NOT propose one of these again as if it were new):")
         for card in attempted:
+            # …AND WHETHER THE EXPERIMENT THAT RAN IS STILL THE ONE THIS CARD PROPOSED. The arbiter
+            # existed and nothing consumed it, which made this block quietly dangerous: a card's
+            # `params` is the receipt-bound PROPOSAL, and under `params_style: "none"` the Developer
+            # realises the idea by editing the repo, so a repair that fits a training into memory
+            # moves the numbers while the card keeps the old ones. A proposer reading "already
+            # tried" and sizing its next idea one knob off THAT is sizing it off a recipe nothing
+            # ever ran. Measured on `runs/e5small-dr-unified-v4`: six of the nine cards with an
+            # applied record disagree with their own proposal, the run's CHAMPION among them —
+            # card-132 says batch 4096 / lr 0.001 / 3 epochs and node 13 ran 2048 / 0.0005 / ONE
+            # epoch. Silent when the two agree, so the loud case stays loud.
+            drift = card_drift_brief(card)
             lines.append(
                 f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
                 f"STATUS={card.status} VERDICT={card.verdict} "
                 f"NODES={sorted(card.evidence)} "
-                f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
+                + (f"{drift} " if drift else "")
+                + f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
         if for_proposal:
             # THE PROMISE THAT WAS MADE HERE AND NEVER EXISTED, removed rather than implemented, and
             # the choice is deliberate. It read: "If one of these genuinely needs another attempt,
@@ -937,19 +992,65 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
 
 
 def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
-    """Resolve a model claim to a visible Card and restore its immutable semantic seed."""
+    """Resolve a model claim to a visible Card and restore its immutable semantic seed.
+
+    TWO independent edges, resolved against the SAME visible set. `card_id` is a CLAIM on a work
+    item — the model says "this experiment IS that board row" — and it is nulled when it names
+    nothing visible. `parent_card_id` is a FILING: "this experiment answers that research
+    direction". They are resolved separately because they can be right or wrong independently, and
+    because a direction is exactly the row a `card_id` claim must NOT resolve to (it owns no action,
+    so claiming it would hand the engine an unbuildable work item — the failure the two prompt
+    blocks were split to prevent).
+
+    A direction named in `card_id` is NULLED, not re-routed into `parent_card_id`. Re-routing would
+    read better on the case where the model plainly meant to file — but it infers intent from a
+    field the prompt explicitly told it not to use, and it would mint a link no one authored while
+    looking like one the model chose. Nulling is what this function already does with any `card_id`
+    it cannot honour: the proposal keeps its OWN hypothesis (a claim overwrites it with the card's
+    seed statement) and the experiment stands as a root.
+    """
     by_id = {card.id: card for card in cards}
+    # RESOLVE THE CLAIM FIRST — the self-edge test must compare against the card this proposal will
+    # actually be bound to, not the id it happened to type. A proposal that names no `card_id` and
+    # is matched to a card by its SEED STATEMENT can name that same card as its parent, and against
+    # the raw `idea.card_id` (None) the guard sees no self edge and emits `card_id ==
+    # parent_card_id` into the durable payload for the fold to drop silently.
     chosen = by_id.get(idea.card_id) if idea.card_id else None
     if chosen is None and idea.hypothesis:
         matches = [card for card in cards if card.seed_statement == idea.hypothesis]
         chosen = matches[0] if len(matches) == 1 else None
+    # A DIRECTION IS NEVER A CLAIM — said in the docstring above, said in the prompt block that
+    # renders directions, and until 2026-08-26 enforced NOWHERE: visibility was the only test, so
+    # both resolution paths above could hand back a row that owns no action. Placed AFTER both of
+    # them because they are two ways of reaching the same wrong row, and BEFORE the self-edge test
+    # below because that ordering is the entire fix.
+    #
+    # THE SEED FALLBACK IS THE DANGEROUS PATH, and it fires on a COMPLIANT proposal. The direction
+    # block instructs the model to "propose ONE concrete minimal-change experiment that would move
+    # it forward and return its DIRECTION_ID in `parent_card_id`"; a model that does exactly that
+    # and echoes the direction's wording as its `hypothesis` matched the direction HERE, and the
+    # self-edge guard then saw `parent.id == chosen.id` and nulled the parent. Driven at 7d406cc2:
+    # `parent_card_id="card-7"` in, `card_id='card-7' parent_card_id=None` out. The filing became a
+    # claim on the question and the direction->experiment edge (#66, live on v7) was destroyed on
+    # the one path the prompt actively invites. Nulling `chosen` first is what lets the parent live.
+    if chosen is not None and card_is_direction(chosen):
+        chosen = None
+    parent = by_id.get(idea.parent_card_id) if idea.parent_card_id else None
+    # A card names its parent, never itself. The fold refuses a self edge anyway, but nulling it
+    # here keeps the durable payload from carrying a link the board will silently drop.
+    if parent is not None and chosen is not None and parent.id == chosen.id:
+        parent = None
+    parent_update = ({} if (parent.id if parent else None) == idea.parent_card_id
+                     else {"parent_card_id": parent.id if parent else None})
     if chosen is not None:
         return idea.model_copy(update={
             "card_id": chosen.id,
             "hypothesis": chosen.seed_statement,
+            **parent_update,
         })
-    if idea.card_id is not None:
-        return idea.model_copy(update={"card_id": None})
+    if idea.card_id is not None or parent_update:
+        return idea.model_copy(update={
+            **({"card_id": None} if idea.card_id is not None else {}), **parent_update})
     return idea
 
 
@@ -963,11 +1064,22 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     from looplab.events.digest import unscored_metric_clause
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
+    # THE COORDINATES THAT RAN, not the ones that were asked for. `Idea.params` is a PROPOSAL, and
+    # under `params_style: "none"` the Developer realises it by editing the repo — so a repair that
+    # fits a run into memory moves the numbers while the proposal stays frozen. These two lines fed
+    # the proposal to every proposal cycle: on `runs/e5small-dr-unified-v4` the Researcher was told
+    # its champion ran `batch_size 8192 / accum 2 / n_epochs 15` for four days, when node 3 had
+    # applied `4096 / 4 / 3`. Every idea sized "one knob off the champion" was sized off a recipe
+    # that never existed. `node_params_brief` puts the applied value first and the proposal in
+    # brackets beside the ones that moved.
+    from looplab.core.param_carriers import node_params_brief
     if best is not None:
-        lines.append(f"Best so far: node {best.id} metric={best.metric} params={best.idea.params}"
+        lines.append(f"Best so far: node {best.id} metric={best.metric} "
+                     f"params={node_params_brief(best)}"
                      + unscored_metric_clause(best))
     if parent is not None:
-        lines.append(f"Refine from node {parent.id}: params={parent.idea.params} metric={parent.metric}"
+        lines.append(f"Refine from node {parent.id}: params={node_params_brief(parent)} "
+                     f"metric={parent.metric}"
                      + unscored_metric_clause(parent))
     # PART V (B): a delta author cannot subtract from an invisible reference. Surface the run base and
     # effective primary-parent membership, bounded so a malformed taxonomy cannot consume the role context.
@@ -1309,6 +1421,45 @@ class WrapsResearcher:
         return getattr(self._delegate, "space_hint", "")
 
 
+def bind_state_on(target, state, parent=None) -> None:
+    """Call `target.bind_state` with whichever arity it declares; a no-op when it has none.
+
+    `tools/_base.py`'s contract is `bind_state(state, parent=None)`, but a developer is not a
+    ToolProvider and nothing obliges it to take the second argument, so a one-argument
+    implementation must not become a TypeError that kills the build. Decided from the SIGNATURE
+    rather than by catching TypeError around the call: a `TypeError` raised from INSIDE the callee's
+    own body is indistinguishable from an arity mismatch at the boundary, and retrying on it would
+    run a state binding twice.
+
+    A FREE FUNCTION because two callers need it and they bind different objects — the forwarder
+    below binds whatever it wraps, and `UnifiedAgent` binds every per-stage backend it holds. A
+    second spelling of the arity rule is how one of them comes to call a developer wrong.
+
+    The signature is asked to BIND the call, never merely COUNTED. A count answers `>= 2` for
+    `bind_state(self, state, **kw)` and for `bind_state(self, state, *, parent=None)` — the natural
+    way to write "accepted and ignored" — and then makes the positional two-argument call that
+    raises the exact `TypeError` this function exists to avoid, out of an unguarded forwarder and
+    into `node_build._implement`, killing the build. It answers `1` for `bind_state(self, *args)`
+    and silently drops `parent` on a callee that wanted it. `Signature.bind` decides by KIND, which
+    is the property actually in question, and the three attempts are ordered widest-first so a
+    callee that can take `parent` either way still gets it."""
+    fn = getattr(target, "bind_state", None)
+    if not callable(fn):
+        return
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):     # a builtin/C callable exposes no signature
+        fn(state)
+        return
+    for args, kwargs in (((state, parent), {}), ((state,), {"parent": parent}), ((state,), {})):
+        try:
+            sig.bind(*args, **kwargs)
+        except TypeError:
+            continue
+        fn(*args, **kwargs)
+        return
+
+
 class WrapsDeveloper:
     """Forwarding half of the Developer-WRAPPER contract (`ValidatingDeveloper`,
     `BestOfNDeveloper`, `UnifiedAgent`). A wrapper composes an inner Developer and must stay
@@ -1394,11 +1545,46 @@ class WrapsDeveloper:
         fn = getattr(self._wrapped, "audit_extra", None)
         return fn() if callable(fn) else {}
 
+    def bind_state(self, state, parent=None) -> None:
+        """Forward the run-state binding to the wrapped developer.
+
+        `engine/node_build.py` binds with `getattr(developer, "bind_state", None)` on the FACADE,
+        and under the shipped default (`Settings.unified_agent`) the facade is a `UnifiedAgent` —
+        a wrapper, which had no `bind_state`. So the `getattr` answered None, nothing was called,
+        and `LLMRepoDeveloper._memory_state` stayed None for the whole run: the Developer's
+        `QuestionBoardTools` answered "no run state bound" on every call and its `CrossRunTools`
+        (`audience="run"`) answered nothing, both shipped INERT under the default config. The
+        provider-side comment beside that wiring warns about binding a name that does not exist;
+        this is the same failure one layer up, where the NAME was right and the object reading it
+        was the wrapper.
+
+        A no-op when the wrapped developer has none, which is most of them (draft, offline,
+        template), so this only ever forwards a binding somebody asked for.
+        """
+        bind_state_on(self._wrapped, state, parent)
+
     def _sync_audit(self) -> None:
-        """Mirror the wrapped developer's per-call files and resource estimate onto this wrapper."""
+        """Mirror the wrapped developer's per-call outputs onto this wrapper.
+
+        EVERY member of `DEVELOPER_OUTPUT_ATTRS` the engine reads off `self.developer` has to be
+        here, and two were not. `last_rollback_stage` and `last_budget_exhausted` are set on the
+        INNER developer by `adapters/repo_developer.py`, while `engine/evaluate.py` reads them off
+        the FACADE — and under the shipped default (`Settings.unified_agent`) the engine's developer
+        is a `UnifiedAgent`, i.e. a wrapper. Both have a FALSY default at their reader, so the
+        omission did not fail: every `node_repaired` row recorded "no rollback was requested" and
+        "the session finished on its own terms", which is precisely the reading each attribute was
+        added to stop being the only one available. `tests/test_developer_output_forwarding.py`
+        derives the required set from the engine's own `getattr` sites.
+
+        `last_seed` / `last_run` / `last_patch` are deliberately NOT mirrored: `ValidatingDeveloper`
+        reads them off `self.inner` directly, so a wrapper copy would be a second spelling with no
+        reader. `last_report` is a read-through property above for the same reason.
+        """
         self.last_files = getattr(self._wrapped, "last_files", {}) or {}
         self.last_deleted = getattr(self._wrapped, "last_deleted", []) or []
         self.last_footprint = getattr(self._wrapped, "last_footprint", None)
+        self.last_rollback_stage = getattr(self._wrapped, "last_rollback_stage", "") or ""
+        self.last_budget_exhausted = getattr(self._wrapped, "last_budget_exhausted", "") or ""
 
 
 # --------------------------------------------------------------------------- #

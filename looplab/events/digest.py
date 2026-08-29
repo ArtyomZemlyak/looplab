@@ -513,12 +513,67 @@ def _node_line(n, state=None) -> str:
     # next proposal then reacts to "the idea is unsound because X", not a bare taxonomy label.
     triage = getattr(n, "triage_rationale", "") if n.status is NodeStatus.failed else ""
     triage = f" — triage: {' '.join(triage.split())[:100]}" if triage else ""
-    # The SCORED node's counterpart of that clause. `metric=0.0` alone is the line the arm-B corpus
-    # was steered by; when the eval said WHY, the why rides the line with it (bounded to the same
-    # ~100 chars, and empty on every node whose eval said nothing).
+    # THE COORDINATES THAT RAN, and HOW MANY OF THEM this node actually moved.
+    #
+    # `fmt_params(n.idea.params)` printed the PROPOSAL. Under `params_style: "none"` a repair moves
+    # the numbers and the proposal stays frozen, so this line told the Researcher that node 3 ran
+    # `batch 8192 / 15 epochs` when it ran `4096 / 3`.
+    #
+    # The knob count is the arbiter of "one hypothesis, minimal change": node 8 reads Δ1 and its card
+    # claims one knob; node 4 reads Δ3 and its card claims one, which is exactly the confound that
+    # made its 0.789365 unable to answer the question it was proposed to answer. Δ0 with a different
+    # metric is its own signal — the difference was in CODE, not coordinates.
+    from looplab.core.param_carriers import node_knob_comparison, node_params_brief
+    params = node_params_brief(n, cap=6)
+    delta = ""
+    parents = list(getattr(n, "parent_ids", None) or [])
+    if parents and state is not None:
+        by_id = getattr(state, "nodes", None) or {}
+        # EVERY parent, not just the first. A merge descends from two, and reporting only
+        # `parents[0]` hides half of what it combined — on the live run node 13 read "Δ0 vs #11"
+        # while also descending from #10. (`resolved_params` still resolves through parents[0]
+        # alone, because that is the workspace this node inherited; different question.)
+        shown = []
+        moved_any = False
+        compared_any = False
+        for pid in parents[:3]:
+            parent = by_id.get(pid)
+            # "NOTHING MOVED" AND "THERE WAS NOTHING TO COMPARE" ARE DIFFERENT FACTS, and only the
+            # first supports the claim below. A bare delta list is `[]` for both — for a parent
+            # absent from the fold, and for two nodes that each declare no coordinates at all —
+            # so a single `all_zero` flag read an empty comparison as a measured agreement and
+            # emitted a positive claim about where the difference lay into the Researcher's prompt.
+            # That is not an edge case on the task family this line was built for: `params_style:
+            # "none"` repo runs declare no `Idea.params`, so BOTH sides are empty on every node and
+            # every line asserted it.
+            #
+            # ASKED OF THE HELPER THAT ALREADY KNOWS, not re-derived here: `node_knob_comparison`
+            # resolves both sides once and answers both questions from them. Re-deriving `theirs`
+            # at this call site walked the ancestor chain a THIRD time per parent for a fact the
+            # helper was already holding, and left the distinction one caller wide — the next
+            # reader of the delta repeats the conflation.
+            moved, comparable = node_knob_comparison(n, parent, by_id)
+            compared_any = compared_any or comparable
+            moved_any = moved_any or bool(moved)
+            if not comparable:
+                # Say the absence rather than rendering it as a measured Δ0.
+                shown.append(f"vs #{pid}: no coordinates recorded")
+                continue
+            names = ", ".join(k.rsplit(".", 1)[-1] for k in moved[:4])
+            more = f" +{len(moved) - 4}" if len(moved) > 4 else ""
+            shown.append(f"Δ{len(moved)} vs #{pid}" + (f": {names}{more}" if moved else ""))
+        note = (" — the difference is in CODE, not params"
+                if compared_any and not moved_any else "")
+        delta = f" [{'; '.join(shown)}{note}]"
+    # Δ BEFORE the coordinates, deliberately: it is the most compressed decision-relevant fact on
+    # the line ("did this node test one thing or five?"), and the coordinate list is long enough to
+    # push anything after it out of a reader's first glance and out of the char budget.
+    # The SCORED node's counterpart of the unscored clause. `metric=0.0` alone is the line the
+    # arm-B corpus was steered by; when the eval said WHY, the why rides the line with it
+    # (bounded to the same ~100 chars, and empty on every node whose eval said nothing).
     why = "" if n.status is NodeStatus.failed else metric_account(n, brief=True)
     why = f" — why: {why}" if why else ""
-    return f"  #{n.id} {n.operator} {outcome} {fmt_params(n.idea.params)}{swept}{theme}{triage}{why}"
+    return f"  #{n.id} {n.operator} {outcome}{delta} {params}{swept}{theme}{triage}{why}"
 
 
 def trust_reflection(state: RunState, max_shown: int = 2) -> str:

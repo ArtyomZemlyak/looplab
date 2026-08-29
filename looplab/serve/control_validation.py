@@ -58,7 +58,8 @@ from looplab.events.comment_projection import (
     normalize_comment_text)
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
-    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
+    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
+    EV_CARD_RESOURCE_PINNED,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
@@ -1282,6 +1283,19 @@ def _normalize_card_dropped(ctx: _ControlIntake) -> dict:
     return {"id": card_id, "reason": reason, "dropped_by": "operator"}
 
 
+def _normalize_card_reopened(ctx: _ControlIntake) -> dict:
+    """The drop's counterpart, and the SAME shape on purpose.
+
+    `replay.py::_on_card_reopened` reuses `_bounded_card_drop_receipt`, so the two receipts must be
+    one shape — a second, subtly different bound is how two halves of one lifecycle switch come to
+    disagree about which ids are admissible. `by` rather than `dropped_by` because the receipt reads
+    either and "dropped_by" on a reopen row would be a lie to whoever reads the log.
+    """
+    card_id, _card_value = ctx.card()
+    reason = ctx.text("reason", required=False, limit=400) or "operator reopened"
+    return {"id": card_id, "reason": reason, "by": "operator"}
+
+
 # ------------------------------------------------------------------ append-time preconditions
 #
 # Every one of these runs against a FRESH fold, immediately before the strict-lock append, inside
@@ -1314,6 +1328,30 @@ def _precondition_card(state, event_type: str, data: dict, envelope) -> Optional
             f"the Card target {card_id!r} is already dropped or merged and cannot be modified",
             "refresh the Card board; a terminal Card no longer accepts edits, priority or "
             "resource pins",
+        )
+    # A REOPEN THE FOLD WILL DECLINE MUST BE REFUSED HERE, not accepted and then quietly ignored.
+    # Only an operator's own drop is undoable — an engine `card_auto_dropped` retires a rejected
+    # proposal and reopening one put it back on the selectable board permanently, since
+    # `_drop_card_once` is idempotent by history and could never retire it again. `_apply_card_drops`
+    # has always refused that; nothing here did, so the POST returned 2xx, `card_reopened` was
+    # appended, a success toast fired, and the browser's optimistic `proposed` was never reconciled
+    # away because it waits on a status change the fold never makes. A refusal rolls it back.
+    #
+    # `card.reopenable` is the FOLD'S OWN ANSWER and is deliberately not re-derived here: it is not
+    # `dropped_by == "operator"`, which reads only the HEAD receipt and so passes for an operator
+    # drop written over an engine one. Two spellings of this rule is how the server comes to accept
+    # exactly what replay throws away, which is the defect being closed.
+    #
+    # Scoped to a card that IS dropped: a reopen of a live card has nothing to undo, the fold treats
+    # it as a no-op, and turning that into a 4xx would be a contract change nothing asked for.
+    if (event_type == EV_CARD_REOPENED and getattr(card, "status", None) == "dropped"
+            and not getattr(card, "reopenable", False)):
+        return _error(
+            "card_reopen_not_permitted",
+            f"the Card target {card_id!r} was stopped by the engine, and only an operator's own "
+            "drop can be reopened",
+            "refresh the Card board; an engine retirement is part of the run's own lifecycle and "
+            "is not an operator control",
         )
     if event_type == EV_CARD_RESOURCE_PINNED:
         gpus = data.get("gpus")
@@ -1556,6 +1594,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_CARD_EDITED: frozenset({"id", "statement"}),
     EV_CARD_RESOURCE_PINNED: frozenset({"id", "gpus", "gpu_mem_mib"}),
     EV_CARD_DROPPED: frozenset({"id", "reason"}),
+    EV_CARD_REOPENED: frozenset({"id", "reason"}),
 }
 assert set(CONTROL_DATA_FIELDS) == set(CONTROL_EVENTS), "every control event needs a data allowlist"
 assert _INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE], (
@@ -1595,6 +1634,7 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_CARD_EDITED: _normalize_card_edited,
     EV_CARD_RESOURCE_PINNED: _normalize_card_resource_pinned,
     EV_CARD_DROPPED: _normalize_card_dropped,
+    EV_CARD_REOPENED: _normalize_card_reopened,
 }
 assert set(_CONTROL_NORMALIZERS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit intake normalizer (None = allow-list only)")
@@ -1634,6 +1674,7 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_CARD_EDITED: _precondition_card,
     EV_CARD_RESOURCE_PINNED: _precondition_card,
     EV_CARD_DROPPED: _precondition_card,
+    EV_CARD_REOPENED: _precondition_card,
 }
 assert set(_CONTROL_PRECONDITIONS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit append-time precondition (None = not applicable)")
@@ -1674,6 +1715,7 @@ _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
     EV_CARD_EDITED: None,
     EV_CARD_RESOURCE_PINNED: None,
     EV_CARD_DROPPED: None,
+    EV_CARD_REOPENED: None,
 }
 assert set(_CONTROL_DECISIONS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit engine decision (None = the shared policy tail)")
@@ -1731,6 +1773,7 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     EV_CARD_EDITED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_CARD_RESOURCE_PINNED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_CARD_DROPPED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_REOPENED: (EnginePolicy.NO_SPAWN, "folded_intent"),
 }
 
 

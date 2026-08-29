@@ -517,22 +517,42 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
             _tool_obs.set("capability_manifest_sha256", manifest_hash)
         for key, value in typed_result.trace_attributes().items():
             _tool_obs.set(f"result_{key}", value)
-    # Cap once, up front — appending an explicit truncation marker when the cap actually
-    # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
-    # will carry (a single expression, not two kept-in-sync copies).
-    result = _cap_tool_result(str(result))
-    # Tag the 3rd+ IDENTICAL-RESULT repeat of this (tool, canonical-args) call (see
-    # _REPEAT_NOTE: the round-robin gap the StuckDetector's 1-/2-cycle window can't
-    # cover; a changed result — a cursor poll's new chunk, a post-write re-read —
-    # resets the streak and never gets the note). The note rides OUTSIDE the cap so it
-    # can never be truncated away.
-    repeat_note = ""
-    sig = f"{name}({_canonical(args)})"
-    prev, streak = repeat_state.get(sig, (None, 0))
-    streak = streak + 1 if result == prev else 1
-    repeat_state[sig] = (result, streak)
-    if streak >= 3:
-        repeat_note = _REPEAT_NOTE.format(k=streak)
+        # Cap once, up front — appending an explicit truncation marker when the cap actually
+        # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
+        # will carry (a single expression, not two kept-in-sync copies).
+        result = _cap_tool_result(str(result))
+        # Tag the 3rd+ IDENTICAL-RESULT repeat of this (tool, canonical-args) call (see
+        # _REPEAT_NOTE: the round-robin gap the StuckDetector's 1-/2-cycle window can't
+        # cover; a changed result — a cursor poll's new chunk, a post-write re-read —
+        # resets the streak and never gets the note). The note rides OUTSIDE the cap so it
+        # can never be truncated away.
+        repeat_note = ""
+        sig = f"{name}({_canonical(args)})"
+        prev, streak = repeat_state.get(sig, (None, 0))
+        streak = streak + 1 if result == prev else 1
+        repeat_state[sig] = (result, streak)
+        if streak >= 3:
+            repeat_note = _REPEAT_NOTE.format(k=streak)
+        # THIS BLOCK MOVED INSIDE THE TOOL SPAN so the streak can be STAMPED, and that is the
+        # whole change: the note was appended to the model's message and to nothing else, so no
+        # span, event or export ever carried it. Measured on `e5small-dr-unified-v10`'s first
+        # propose phase — 370 tool calls, 71 repeated (tool, args) pairs, 101 repeats whose
+        # output was byte-identical — and the durable record could not say whether the nudge had
+        # fired once. Nobody could count its firings on any run, and nobody could answer the only
+        # question it exists for: does a nudged model stop repeating? `streak >= 3` was therefore
+        # an unvalidated constant. Reading the spans it looks like the note NEVER fires; that is
+        # an artifact of where it was appended, and this stamp is what makes the two
+        # distinguishable.
+        #
+        # ADDITIVE trace attributes only (invariant #5): no event type, no fold change, no
+        # behaviour change — the message the model receives is byte-identical, which is what
+        # `tests/test_tool_repeat_streak_is_traced.py` pins. `repeat_streak` rides on EVERY tool
+        # call, because "this call has run once" is the denominator the firings are a rate over;
+        # `repeat_note_sent` rides only when the note really went, since a flag on a call that
+        # was not nudged would be a claim nobody made.
+        _tool_obs.set("repeat_streak", streak)
+        if repeat_note:
+            _tool_obs.set("repeat_note_sent", True)
     if on_tool_result is not None:      # provenance hook: exceptions propagate
         on_tool_result(name, args, result + repeat_note)
     return result, repeat_note
@@ -700,30 +720,56 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     emit_nudged = False
     exhausted = False                    # ran out of turns/time (vs stalled/stuck/cancelled)
 
-    def _accept_forced(forced):
+    def _accept_forced(forced, *, may_retry: bool):
         """Validate a FORCED emit the same way an in-loop emit is validated, then finalize it. Returns
-        (True, result) when acceptable, else (False, None) so the caller can fall through to a nudge /
-        fallback instead of accepting an empty/malformed emit — the very no-op node the `validate`
-        bounce exists to prevent, which the forced-emit paths otherwise re-created."""
+        (accepted, result, refusal) — `refusal` is the validator's own message, for a caller that
+        still has a turn to spend delivering it.
+
+        `may_retry` is the whole rule, and it is why the refusal is not applied uniformly. A `validate`
+        bounce exists to buy ONE MORE TURN in which the model fixes what it only described; that trade
+        is only available where a turn remains. On the three exits that have none (`emit_force`
+        ceiling, `stuck`, budget exhaustion) a rejection cannot produce the edit — it only drops the
+        emit, and the caller then falls to `fallback`, which for a repair is `lambda m: ""`. That
+        discards the summary AND `rollback_stage` and leaves `repair_verdict` empty, so
+        `is_developer_stuck` can never fire: strictly worse than accepting an unverified summary,
+        which the durable `inert`/`unmet` verdicts already grade on BYTES downstream.
+
+        So a terminal salvage is ACCEPTED and a retryable one is bounced WITH its reason attached —
+        previously every path bounced and every path threw the reason away, so the one chance the
+        rung promised was never actually delivered to the model."""
         if forced is None:
-            return False, None
-        if validate is not None:
+            return False, None, ""
+        # OPEN[terminal-forced-emit-skips-hard-validators] every validator is bypassed when a
+        # forced emit lands on an exit with no retry turn.
+        # proof:`line:validate is not None&&may_retry@looplab/agents/tool_loop.py`
+        # REVIEW 2026-08-27 (P1 correctness): `drive_tool_loop` is generic, but this terminal policy
+        # is repair-specific. The stages caller also uses `validate` to enforce the operator's wall
+        # budget, missing inputs and manifest collisions; a terminal forced emit skips all three and
+        # `_finalize` persists anything that is merely shape-valid. The Researcher likewise turns an
+        # empty rejected emit into an ordinary draft instead of its circuit-breaker fallback. Keep
+        # repair-summary salvage as a caller policy, rather than disabling every hard validator here.
+        if validate is not None and may_retry:
             try:
-                if validate(forced):      # non-None err string == rejected
-                    return False, None
+                refusal = validate(forced)    # non-None err string == rejected
+                if refusal:
+                    return False, None, str(refusal)
             except Exception:  # noqa: BLE001 — a broken validator must not crash the loop
                 pass
-        return True, finalize(forced)
+        return True, finalize(forced), ""
 
-    def _salvage_emit():
+    def _salvage_emit(*, may_retry: bool = False):
         """The forced-emit salvage all FOUR exits share (prose reply / `emit_force` ceiling / stuck /
         budget exhaustion): make ONE forced tool call from everything gathered and validate it like
-        an in-loop emit. Returns `(accepted, result)` — deliberately a pair rather than a `None`
-        sentinel, because `finalize` may legitimately return None (ToolUsingStrategist's degrades to
-        the rule baseline, which is `Optional[Strategy]`), so "nothing to accept" and "the result is
-        None" have to stay distinguishable. The `_cancelled()` guard stays at each call site: what a
-        cancelled loop does next differs per exit, and only three of the four skip the paid call."""
-        return _accept_forced(_force_emit(client, messages, emit_spec))
+        an in-loop emit. Returns `(accepted, result, refusal)` — deliberately a tuple rather than a
+        `None` sentinel, because `finalize` may legitimately return None (ToolUsingStrategist's
+        degrades to the rule baseline, which is `Optional[Strategy]`), so "nothing to accept" and
+        "the result is None" have to stay distinguishable. The `_cancelled()` guard stays at each
+        call site: what a cancelled loop does next differs per exit, and only three of the four skip
+        the paid call.
+
+        `may_retry` defaults to FALSE — the safe direction. Only the prose-reply exit loops back for
+        another turn, so only it can honour a bounce; see `_accept_forced`."""
+        return _accept_forced(_force_emit(client, messages, emit_spec), may_retry=may_retry)
 
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
@@ -784,7 +830,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # exhaustion path at the bottom of this loop already guards its forced emit this way.
             if _cancelled():
                 break
-            ok, result = _salvage_emit()
+            # THE ONE EXIT THAT LOOPS BACK, so the only one where a `validate` bounce can buy the
+            # extra turn it exists for.
+            ok, result, refusal = _salvage_emit(may_retry=True)
             if ok:
                 return result
             stalls += 1
@@ -796,8 +844,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                              seconds=time.monotonic() - started,
                              detail="the model answered in prose and could not be forced to emit")
                 break
+            # DELIVER THE REFUSAL. A validator that rejected this emit said WHY, and the generic
+            # nudge threw that away — so the repair rung that bounces "you described an edit you
+            # never made" spent its one shot on a turn that only ever heard "call emit again".
             messages.append({"role": "user",
-                             "content": nudge_prompt or f"Now call `{emit_name}` with your final answer."})
+                             "content": refusal or nudge_prompt
+                             or f"Now call `{emit_name}` with your final answer."})
             continue
         stalls = 0
         # Surface interstitial prose live — but NOT on the final turn where the model pairs prose with
@@ -908,7 +960,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                              detail=f"the soft-convergence ceiling ({emit_force} tool turns) was hit")
                 if _cancelled():        # paid call — see the prose-reply force above
                     break
-                ok, result = _salvage_emit()
+                ok, result, _ = _salvage_emit()
                 if ok:
                     return result
                 break   # force unsupported/rejected: fall to fallback, don't re-attempt every turn
@@ -933,7 +985,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                                               f"Call `{emit_name}` now with your best answer.")})
             if _cancelled():            # paid call — see the prose-reply force above
                 break
-            ok, result = _salvage_emit()
+            ok, result, _ = _salvage_emit()
             if ok:
                 return result
             break
@@ -948,7 +1000,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         messages.append({"role": "user",
                          "content": f"Out of turn/time budget. Call `{emit_name}` NOW with your "
                                     "best answer from everything you have gathered."})
-        ok, result = _salvage_emit()
+        ok, result, _ = _salvage_emit()
         if ok:
             return result
     return fallback(messages)

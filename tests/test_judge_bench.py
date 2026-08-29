@@ -505,8 +505,8 @@ def test_the_incumbent_baseline_is_what_a_candidate_is_read_against(dataset):
 # ones are `test_every_label_rederives` (every label recomputed from the row's own facts through the
 # production rule) and `test_the_committed_corpus_is_internally_derived` below (every field the
 # label rule does NOT read, re-derived from the extractor's own construction rules).
-_CORPUS_SHA256 = "6a283e9814a55670fcd89e308f57b34308b56f718443f765add8268b9938294f"
-_CORPUS_BYTES = 3_969_540
+_CORPUS_SHA256 = "7ec0d709337ca5d9fa2b835881710dd0962268295e7d17b78b0d3b4fbbabd5d5"
+_CORPUS_BYTES = 3_976_740
 
 
 def test_the_committed_corpus_is_internally_derived(dataset):

@@ -657,7 +657,16 @@ class Settings(BaseSettings):
     # operator's reader over the protected `score` stage is untouched) and it cannot buy a second
     # grace. Still, it is money, so the operator opts in rather than discovering it on a bill.
     # `runtime/sandbox.py::_granted_grace` is where the clamp is enforced.
-    eval_deadline_grace_s: float = Field(default=0.0, ge=0)
+    # ON BY DEFAULT SINCE 2026-08-23, as AUTO (`-1`), on the operator's decision. It shipped opt-in
+    # on the argument one line up — it is money — and a year of the corpus answered that argument:
+    # NINE `stage_finished.status == "timeout"` rows across `runs/` discarded 57.6 GPU-hours, every
+    # one of them landing within seconds of its own declared wall. Opt-in put the whole of that loss
+    # behind a switch nobody had turned, which is the wrong default for a bounded, one-shot,
+    # fail-closed rescue. `-1` rather than a number because the right ceiling is a FRACTION of the
+    # stage being rescued, not a constant — see `resolve_deadline_grace` for why 1800 means three
+    # different things on this repo's own stages. A resumed pre-2026-08-23 run keeps `0.0` through
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`; the ge bound admits the sentinel and nothing below it.
+    eval_deadline_grace_s: float = Field(default=-1.0, ge=-1)
     # RUN-LEVEL DECLARED ENVIRONMENT: variables set for every eval of every node — the per-node
     # `setup`, the single `command`, and every stage on BOTH sandbox tiers, and the solution.py
     # sandbox path for a non-repo task (the composition sits above that branch, not inside it). The run-wide half of the
@@ -1112,7 +1121,11 @@ class Settings(BaseSettings):
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
     # audit event in the Trust panel. Off by default. Whether a flag CHANGES selection is governed by
     # `trust_gate` below (default: audit-only, never changes selection).
-    reward_hack_detect: bool = False
+    # ON by default since 2026-08-23 (operator). Audit-only by construction: whether a flag changes
+    # selection is `trust_gate`'s decision, and that still defaults to audit, so this buys VISIBILITY
+    # and nothing else. A suspiciously-perfect metric on a run whose whole purpose is to maximise one
+    # number is precisely the failure an autonomous engine cannot notice about itself.
+    reward_hack_detect: bool = True
     # Trust enforcement (T2): what a reward-hack / data-leakage flag actually DOES to selection.
     #   "audit" (default) = surface it in the Trust panel, never change selection (today's behavior);
     #   "gate"  = a flagged node can no longer be selected as BEST **and isn't bred/confirmed from**
@@ -1126,7 +1139,10 @@ class Settings(BaseSettings):
     trust_gate: str = "audit"
     # I3 data-centric: static code-leakage scan of each evaluated solution (fit-before-split,
     # fit-on-test) surfaced into the Trust panel alongside reward-hack flags. Off by default.
-    code_leakage_detect: bool = False
+    # ON by default since 2026-08-23 (operator). Static, execution-free, audit-only under the default
+    # `trust_gate` — the same argument as the two flags above. fit-before-split and fit-on-test are
+    # silent wins: they raise the metric and leave the log looking healthy.
+    code_leakage_detect: bool = True
     # 4.4 sandbox instrumentation (needs reward_hack_detect): after each eval, flag a RUNTIME write
     # to a protected/frozen file (an answer key or grader tampered mid-run) — behavioral evidence a
     # static code scan misses. ON by default; only fires when the reward-hack detector is on.
@@ -1166,7 +1182,13 @@ class Settings(BaseSettings):
     # params-ignored; on host-graded tasks the metric checks become a submission-output check)
     # surfaced in the Trust panel. Broad findings are advisory; `critic:hardcoded_metric` can gate under
     # trust_gate=gate/block. Off by default.
-    critic_check: bool = False
+    # ON by default since 2026-08-23 (operator). It is EXECUTION-FREE and, under the default
+    # `trust_gate=audit`, changes no selection — it only makes the finding visible. The reason it
+    # stops being opt-in is `params-ignored`, which is not hypothetical here: `params_style: none`
+    # means the Developer realises a proposal by editing the repo, 41 of 457 corpus comparisons
+    # diverged, and the e5 champion is RECORDED as batch 8192/accum 2/15 epochs while it RAN
+    # 512/32/3 — the exact class of fact this critic exists to surface and nobody had turned on.
+    critic_check: bool = True
     # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
     # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:
     # every choice the Strategist makes is also a direct knob. Defaults to "agent" so the agent adapts
@@ -1947,6 +1969,59 @@ class Settings(BaseSettings):
     # model that never emits `done` fails cleanly with the code it wrote so far, instead of looping.
     developer_session_max_turns: int = 500
     developer_session_time_budget_s: float = 1200.0  # 20 min wall-clock per developer session
+    # THE SAME FINITE CEILING FOR THE CRASH/TIMEOUT TRIAGE JUDGE, and it exists because the
+    # "read-only agents are safe unbounded" assumption above was measured FALSE on a live run.
+    # `runs/e5small-dr-unified-v8` node 2 died at 09:07:19 and the engine did not return to work
+    # until 11:07:32 — 2h00m with both H200s at 0%. The split: triage 88.3 min / 206 provider calls
+    # / 19,156,560 tokens, then the (already bounded) repair 31.9 min / 46 calls. What the triage
+    # spent it on was ONE 663-line file — `training/loss.py`, swept top-to-bottom SIX times, the
+    # identical 12-window sequence repeating verbatim, 664 of its 667 lines re-served >= 5 times —
+    # while the transcript grew 14.5k -> 160.7k prompt tokens and every one of the 206 calls re-sent
+    # all of it.
+    #
+    # FOUR EXISTING BOUNDS, EACH MEASURABLY OUT OF REACH, which is why this is a new one and not a
+    # retune of an old one:
+    #   * `StuckDetector` catches 1-cycles and 2-cycles; its docstring says so out loud. The longest
+    #     CONSECUTIVE identical (action, observation) run in that session was 2, against a threshold
+    #     of 4. It could not fire.
+    #   * Exact adjacent p-cycle detection would not have helped either: other tools interleave, so
+    #     the first exact repeat at ANY period 1..20 lands at tool call 248 of 278.
+    #   * The round-robin gap was already known and answered with a NUDGE — `tool_loop._REPEAT_NOTE`,
+    #     "we only TELL the model it is repeating itself so it can stop on its own". It fired 57
+    #     times inside this one triage and the model did not stop. That is the escalation this
+    #     ceiling is: from informing to bounding, on evidence that informing was tried first.
+    #   * `agent_emit_after`/`agent_emit_force` (300/500) are TURN counts sized for the pilot's
+    #     self-driving loop. 206 turns fits comfortably inside both, so 88 minutes of dark GPU sat
+    #     entirely within a "healthy" turn budget. Wall clock is the quantity that hurts here and
+    #     nothing was measuring it.
+    #
+    # NOT A ONE-OFF. The SAME node's second triage, measured while this fix was being written, ran
+    # 48.2 min (then 38.4 min of repair) before the node was abandoned — 4.2x the worst prior
+    # decision in the whole corpus, on an independent draw. Two decisions, 136.5 min of triage; this
+    # ceiling would have made it 40.
+    #
+    # WHY 1200, and why it is not a guess: across the 124 triage decisions in the eight runs that
+    # carry `spans.jsonl`, the worst prior triage wall is 11.6 min and the worst prior call count is
+    # 91. A 20-minute ceiling therefore fires on NONE of them, and would have cut this one at 20 min
+    # instead of 88 — ~68 minutes of GPU returned. It is deliberately the same number as
+    # `developer_session_time_budget_s` above: triage and the repair it hands off to sit on the same
+    # eval-blocking thread, one after the other, and two different walls on one blocked thread would
+    # be a number nobody could explain.
+    #
+    # 0 = unlimited, and an operator who sets a finite `agent_time_budget_s` keeps THEIR number: the
+    # ceiling applies only when the loop is otherwise unwalled (see `unified_agent._pilot_emit`,
+    # which refuses to convert an operator's "no cap" into a cap for the same reason).
+    #
+    # Hitting it is not a lost verdict. `drive_tool_loop`'s time exit calls `_note_budget(..., "time")`
+    # so the operator is TOLD the investigation was cut short, then `_salvage_emit()` forces the emit
+    # from everything gathered — the triage still answers, it just stops browsing.
+    #
+    # NO `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` ROW, deliberately, on `memo_verdict_cue`'s ground: that
+    # map exists so a resume cannot SILENTLY ADD paid calls or mount a treatment an old run never
+    # consented to. A wall can only ever remove calls, never add one, and it mounts no intervention,
+    # changes no concurrency and no selection policy. A resumed run gains nothing it did not consent
+    # to; it only stops paying for a sweep it was already paying for.
+    triage_time_budget_s: float = 1200.0
     # Keep the Developer's stage-pipeline guidance in its system prompt. TRUE reproduces the
     # historical text byte for byte, which `_system_body`'s contract requires for a resumed run.
     # Turn it OFF for tasks whose eval declares a single stage: measured 2026-08-28 on AlgoTune,
@@ -2075,11 +2150,20 @@ class Settings(BaseSettings):
     # E3 literature-grounded ideation (network-OPTIONAL): give the agentic Researcher an arXiv search
     # tool to ground ideas in real techniques. Off by default (egress is unreliable on some boxes);
     # fails gracefully if the network is blocked.
-    literature_search: bool = False
+    # ON by default since 2026-08-23 (operator), and the old reason for keeping it off — 'egress is
+    # unreliable on some boxes' — was MEASURED on this one and is false here: `export.arxiv.org`
+    # answers 200 in ~0.8 s through the ambient proxy, and `LiteratureTools.execute('arxiv_search')`
+    # returns real hits. It still fails gracefully where the network is blocked, which is what makes
+    # ON the right default rather than a per-box question.
+    literature_search: bool = True
     # Deep-Research stage (network-OPTIONAL): give the DeepResearcher a general web search/fetch
     # tool (DuckDuckGo) on top of arXiv to read across results + the web before steering the next
     # batch. Off by default (egress is unreliable on some boxes); fails gracefully when blocked.
-    web_search: bool = False
+    # ON by default since 2026-08-23 (operator). Same measurement, same graceful failure: DuckDuckGo
+    # answers through the proxy and `WebTools.execute('web_search')` returns real results here. The
+    # SSRF guard, the download bound and the redirect handler are unchanged — this flips WHETHER the
+    # DeepResearcher may look, not what it is allowed to reach.
+    web_search: bool = True
     # Cadence for the Deep-Research stage: run it automatically every N created nodes.
     # **`0` MEANS START IMMEDIATELY, NOT "off"** — this is the one interval knob in `Settings` whose
     # zero is not the off switch, and the rule is stated once in `engine/cadence.py`
@@ -2579,6 +2663,28 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # terminal, `require` remains reachable on a resume, and re-pinning a LEGACY default would change
     # how an already-recorded run replays, which is the one thing this table exists to prevent.
     "metric_subject": "off",
+    # THE DEADLINE GRACE, whose DEFAULT changed (0.0 -> -1 AUTO) on 2026-08-23. Like
+    # `inline_repair_attempts` and `repair_reasons` this is a pre-existing field, so (a) cannot
+    # apply and (b)+(c) carry it. (b) is paid work in both currencies at once: a resumed run would
+    # start making a judge call at EVERY stage deadline the original made none at, and would hand
+    # out up to 10% more wall clock per stage — on a nine-hour training, GPU-hours nobody chose,
+    # in the same event log whose first half killed on the wall. (c) is `0.0`, pointable at every
+    # commit between the field landing (2026-08-13) and this one, and it is exactly what that
+    # field's own comment still means by "the unconditional tree-kill, byte for byte".
+    "eval_deadline_grace_s": 0.0,
+    # THE FIVE DEFAULTS FLIPPED ON 2026-08-23 with `eval_deadline_grace_s`. All five are CHANGED
+    # defaults on pre-existing fields, so (a) cannot apply and (b)+(c) carry them, and (b) is paid
+    # work in every case: the three trust scans add a per-node pass (two of them a MODEL call) that
+    # the resumed run's first half never made, and the two search tools add network round trips and
+    # extra agentic turns to ideation. (c) is False for all five, pointable at every commit before
+    # this one. Note the trust three are audit-only under the default `trust_gate` — that makes them
+    # cheap to turn ON for a NEW run and does NOT make them free for an OLD one, which is the whole
+    # distinction this table draws.
+    "critic_check": False,
+    "reward_hack_detect": False,
+    "code_leakage_detect": False,
+    "literature_search": False,
+    "web_search": False,
     # THE RUN-LEVEL "nothing has ever worked" STOP, added 2026-08-11 defaulting to 3. It satisfies
     # (a)+(b)+(c): (b) is the strongest form on this table — it does not add work, it TERMINATES the
     # run, so a resumed pre-versioning snapshot stops itself after three failed nodes under a policy

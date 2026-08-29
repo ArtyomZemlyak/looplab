@@ -129,7 +129,13 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
     if getattr(settings, "researcher_tools", True):
         from looplab.tools.node_diff import NodeDiffTools   # what differs between two nodes
         from looplab.tools.run_tools import DataTools, RunTools
-        providers += [RunTools(), DataTools(task), NodeDiffTools()]   # experiments / data / diffs
+        from looplab.tools.question_board import QuestionBoardTools
+        providers += [RunTools(), DataTools(task), NodeDiffTools(),
+                      # The QUESTION board as a pull, beside the experiments. The Researcher already
+                      # receives the open directions by push (`roles.py::_state_brief`), so what this
+                      # adds for THIS role is the children and their deltas — "has anything already
+                      # been tried against this question, and what did it measure".
+                      QuestionBoardTools()]   # experiments / data / diffs / questions
     if run_dir is not None and getattr(settings, "cross_run_tools", True):
         from looplab.tools.run_tools import SiblingRunTools
         providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))   # other runs
@@ -291,6 +297,8 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
                         stage_clients=extra_clients, prompts=getattr(researcher, "prompts", None),
                         agent_max_turns=getattr(settings, "agent_max_turns", 0),
                         agent_time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
+                        # The triage judge's own wall, latent unless the shared one above is 0.
+                        triage_time_budget_s=getattr(settings, "triage_time_budget_s", 1200.0),
                         loop_opts=loop_opts_from_settings(settings))   # B1 stuck + C1 plan + C2 summary
 
 

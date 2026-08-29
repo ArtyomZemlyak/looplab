@@ -196,6 +196,29 @@ def _format_repair_log(repair_log) -> str:
                      + ". The declared value is what this node is ranked against its siblings by, "
                        "so if the change was deliberate say so in your rationale; if it was not, "
                        "putting it back is a fix.")
+        # A THIRD independent sentence, and the one `inert` most needs beside it: `changed: nothing`
+        # is the same column whether the Developer LOOKED and decided not to edit or was cut off
+        # mid-investigation, and those want opposite next moves. Measured over `runs/`, 12 of the 12
+        # inert repairs in the corpus ran past `session_time_budget_s` and 0 of the 65 that finished
+        # inside it are inert — so on this box the column is very nearly the explanation for `inert`,
+        # and until now it reached the judge on neither the live row nor the resumed one.
+        #
+        # PER KIND, because `_note_session_budget` stores any member of
+        # `tool_loop.py::LOOP_CUTOFF_KINDS` and only two of the five are budget bounds. Calling
+        # `stuck` or `emit_force` "ran out of clock" would be a confident wrong sentence in the one
+        # place this rung exists to stop being wrong. Appended, never substituted, so a row without
+        # the column renders byte-identically to what this prompt has always been.
+        _cutoff = str(r.get("budget_exhausted") or "").strip()
+        if _cutoff:
+            note += "\n    " + {
+                "time": "THE SESSION RAN OUT OF WALL CLOCK — it did not finish on its own terms, so "
+                        "an empty or thin change set here is where it got to, not what it decided.",
+                "turns": "THE SESSION RAN OUT OF TURNS — it did not finish on its own terms, so an "
+                         "empty or thin change set here is where it got to, not what it decided.",
+            }.get(_cutoff,
+                  f"THE LOOP ENDED THIS SESSION ITSELF ({_cutoff}) rather than the Developer "
+                  "finishing: it stopped without a model-chosen emit, so what this attempt changed "
+                  "is what had been written by then.")
         out.append(
             f"attempt {r.get('attempt')}: failed with — {' '.join(str(r.get('error', '')).split())}\n"
             f"    the fix claimed: {str(r.get('fix', '')).strip() or '(no rationale)'}\n"
@@ -733,6 +756,20 @@ class CrashRepairMixin:
             # error, fix your code" context, which asks a Developer to rewrite a training run whose
             # numbers it has just been told are correct — and the cheapest way to satisfy a wrong
             # check is to break the thing it was checking.
+            #
+            # "Read its rationale above" IS TRUE SINCE 2026-08-28, and it was not before. `error`
+            # here is `_evaluate`'s `_err_in`, and nothing on the repair path spliced the
+            # diagnostician's verdict into it — `triage["rationale"]`/`summary` reached the durable
+            # rows and the critic, never `Developer.repair`. So the one kind whose whole directive is
+            # "the diagnostician believes the check is wrong — read WHY" handed the Developer only
+            # the refusal being disputed, with the refuting numbers (n1's "val recall@100=0.8114")
+            # nowhere in its context. `failure_diagnosis.diagnosis_repair_lead` now prepends the
+            # already-redacted, already-capped `reason_summary` for any TRIAGE-sourced reason, in
+            # the same position `_evaluate` has always prepended `watchdog_err` on the
+            # `not_learning` path — which is why the identical sentence was true there and false
+            # here. The lead is suppressed for an ENGINE-final reason (a fact the engine measured is
+            # not a model's account) and when the summary is already in the text (the watchdog
+            # prepends upstream, and one finding said twice reads as two agreeing).
             return ("[failure kind: check_false_positive]\n" + error + "\n"
                     "THE STAGE'S DECLARED CHECK REFUSED THIS RUN, AND THE FAILURE DIAGNOSTICIAN — "
                     "reading the same log afterwards, with more of it — BELIEVES THE CHECK WAS "

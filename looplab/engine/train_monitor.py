@@ -398,6 +398,24 @@ class LossTrajectory:
     progress_done: Optional[int] = None
     progress_total: Optional[int] = None
     span_s: Optional[float] = None
+    # HOW LONG THIS STAGE STILL HAS, in seconds — the run's own step rate extrapolated to its own
+    # declared total. `None` whenever the log has not said enough to answer (see `_eta_of`).
+    #
+    # WHY IT IS WORTH RECORDING AT ALL. Nothing in this engine knew how long anything would take:
+    # `_resource_envelope` carries a GPU count and memory and no time at all, and a search for
+    # `eta` / `predicted_duration` / `estimated_seconds` across `engine/` and `search/` finds
+    # nothing. Every scheduling question an operator asks — "can a second experiment fit beside this
+    # one?" — needs this number and could not be asked.
+    #
+    # MEASURED on the two e5 nodes that finished under this monitor: the step-rate figure settles
+    # almost immediately (node 3 predicted 6.90 h at step 20 and 6.94 h at step 936; node 4 gave
+    # 8.74 h and 8.76 h at the same points) and UNDER-states the truth by 4-5 % (actuals 7.28 h and
+    # 9.13 h), because it counts training steps and not the tail — the in-process test, the
+    # checkpoint write, the score stage. That bias is one-directional and therefore correctable, but
+    # NOT from two samples: this field records the RAW extrapolation, `node_evaluated.eval_seconds`
+    # already records the truth, and the pair accumulates until the correction can be measured
+    # instead of guessed.
+    eta_s: Optional[float] = None
 
     @property
     def anomalous(self) -> bool:
@@ -488,6 +506,63 @@ def _anomaly_of(rows, numeric) -> str:
     return ""
 
 
+def _eta_of(rows) -> Optional[float]:
+    """Seconds of stage remaining, from the run's OWN observed step rate. `None` when unanswerable.
+
+    Derived from the two windows the tracker already keeps rather than from a new parse:
+    `progress_done` / `progress_total` / `at` are collected on every tick for the progress line, so
+    this costs nothing and cannot drift from what the trajectory reports.
+
+    Refuses rather than guesses, in FOUR ways, because a wrong ETA is worse than none for anything
+    that would schedule on it: a missing progress pair, a non-positive total, no forward motion
+    between the ends (a stalled or restarted counter), or a non-positive span. `done >= total`
+    answers 0.0 rather than a negative — a bar at or past its own total is finishing, not overdue.
+
+    THERE IS NO SEPARATE "FEWER THAN TWO WINDOWS" CHECK, and its absence is deliberate. One was
+    written here first, to mirror the rule `summarize_trajectory` applies to `direction`. Mutation
+    testing showed it could not fail: with a single window `first` and `last` are the same object,
+    so `advanced == 0` and the forward-motion guard below already answers None. A guard that cannot
+    fail is the vacuous shape this repo keeps finding, so it is gone rather than propped up by a
+    test that could not discriminate it either.
+    """
+    if not rows:
+        return None
+    first, last = rows[0], rows[-1]
+    # OPEN[eta-pairs-progress-across-lanes] the two ends of this rate can come from DIFFERENT
+    # progress bars, and nothing checks that they share one.
+    # proof:line:first.progress_done,&&last.progress_total@looplab/engine/train_monitor.py
+    # REVIEW 2026-08-25 (correctness): each window's `progress_done`/`progress_total` is
+    # `_latest_progress` over that tick's tail — the LAST counter in the window, whichever lane
+    # rendered it — and this pairs `first`'s done with `last`'s done/total with no same-lane check.
+    # That is the exact defect `schedule_reading` below refuses by its ONE-RECORD rule, quoting the
+    # same measurement (109 of the 109 stage logs above 200 KB carry more than one bar lane), so on
+    # the corpus this runs over the mixed pairing is the ROUTINE case, not the corner: a tick that
+    # lands during an in-epoch validation ends with the val bar (total ~361) while its neighbours
+    # end with the train bar (total ~10,590), and `advanced` is then a difference between two
+    # unrelated counters. Most mixes only DEFLATE the ETA (the conservative direction
+    # `projected_overrun_s` leans on), but the claim there — "it will under-report an overrun and
+    # never invent one" — is not safe against the mix that INFLATES it: a first window ending on a
+    # near-complete eval-on-start/sanity-val bar (HF `eval_on_start`, Lightning's sanity check) and
+    # a last window on the young train bar gives a small positive `advanced` over a real span, so
+    # the per-step time is overstated and `projected_overrun_s`/`stage_wall_s` can be stamped on the
+    # durable alert for a stage that fits. Fix direction: key the pair by lane the way the clock
+    # derivation already does ("tqdm elapsed tracked PER BAR TOTAL") — take `done_a` from the latest
+    # window whose total equals the last window's total, and answer None when no earlier
+    # window shares that lane. Delete this marker with the fix.
+    done_a, done_b, total = first.progress_done, last.progress_done, last.progress_total
+    if not (type(done_a) is int and type(done_b) is int and type(total) is int and total > 0):
+        return None
+    if first.at is None or last.at is None:
+        return None
+    span, advanced = last.at - first.at, done_b - done_a
+    if span <= 0 or advanced <= 0:
+        return None
+    remaining = total - done_b
+    if remaining <= 0:
+        return 0.0
+    return remaining * (span / advanced)
+
+
 def summarize_trajectory(windows) -> LossTrajectory:
     """Reduce the observed windows to the run-scale trajectory. Pure/deterministic — the whole
     "is it still descending" decision is this one function plus `_anomaly_of`, so it has a truth
@@ -507,6 +582,7 @@ def summarize_trajectory(windows) -> LossTrajectory:
         progress_done=last_seen.progress_done, progress_total=last_seen.progress_total,
         span_s=((last_seen.at - rows[0].at)
                 if last_seen.at is not None and rows[0].at is not None else None),
+        eta_s=_eta_of(rows),
     )
     if not numeric:
         return LossTrajectory(direction="unknown", **common)
@@ -971,6 +1047,95 @@ def trajectory_vetoes_kill(trajectory: Optional[LossTrajectory]) -> bool:
             and not trajectory.anomalous)
 
 
+def projected_overrun_s(span_s, eta_s, wall_s) -> Optional[float]:
+    """Seconds by which a stage is projected to MISS its own wall, or None when unanswerable.
+
+    `span_s + eta_s` is where this stage is heading; `wall_s` is where it will be killed. The whole
+    point is WHEN the comparison can be made: at the wall, `eval_deadline_grace_s` asks a judge for
+    a one-shot rescue and that judge is right to refuse a run two hours short — 30 minutes cannot
+    close a 2.2-hour gap, which is exactly what it correctly refused for node 6. Seven hours EARLIER
+    the same overrun was already computable, while it was still cheap to act on.
+
+    Total and fail-CLOSED: any missing, non-finite or non-positive input answers None, and a stage
+    that fits answers None as well — the row exists only when there is something to say.
+
+    NOTE THE BIAS, and note its direction. `LossTrajectory.eta_s` counts training steps and not the
+    tail (the in-process test, the checkpoint write), so on the two e5 nodes measured it UNDER-stated
+    the truth by 4-5%. That makes this figure CONSERVATIVE: it will under-report an overrun and never
+    invent one. A caller may treat a positive answer as real; it may not treat None as "fits"."""
+    try:
+        span, eta, wall = float(span_s), float(eta_s), float(wall_s)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (span, eta, wall)):
+        return None
+    if span < 0 or eta < 0 or wall <= 0:
+        return None
+    overrun = (span + eta) - wall
+    return overrun if overrun > 0 else None
+
+
+def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan,
+                            *, grace_cap=None) -> None:
+    """Put the projection beside the verdict on the durable alert row, when there is one to put.
+
+    A separate function for the same reason `trajectory_row` is one: the alert is assembled inside a
+    long async loop, and a fact that can only be tested by driving that loop is a fact nobody tests.
+    Mutates `alert` in place and returns nothing — it is a stamp, not a decision.
+
+    Silent unless ALL of it is knowable: a measured span, an answerable ETA, a resolved stage, and a
+    wall that stage's own manifest declared. Every one of those absences means "the engine cannot
+    say", and none of them means "it fits"."""
+    wall = None
+    if resolved is not None and getattr(resolved, "stage", None) and log_plan is not None:
+        wall = (getattr(log_plan, "timeouts", None) or {}).get(str(resolved.stage))
+    over = projected_overrun_s(getattr(trajectory, "span_s", None),
+                               getattr(trajectory, "eta_s", None), wall)
+    if over is None:
+        return
+    alert["projected_overrun_s"] = round(over, 1)
+    alert["stage_wall_s"] = round(float(wall), 1)
+    # …AND WHETHER ANYONE SHOULD BE WOKEN, decided HERE because this is the only place that holds
+    # both facts. `projected_overrun_s` is deliberately unfiltered — it is the engine's record that
+    # it knew — but a 40-second overrun on a ten-hour stage is not a thing to interrupt an operator
+    # about, and "is it big enough" has exactly one principled answer already in the tree: the
+    # deadline GRACE that will actually be granted when the wall arrives. An overrun the grace
+    # absorbs needs no human; one that exceeds it will end the node no matter who is watching.
+    #
+    # Reusing `runtime/sandbox.resolve_deadline_grace` rather than re-deriving is what keeps the two
+    # from drifting: under the AUTO sentinel it is 10% of the wall capped at 30 minutes, and a second
+    # copy of that arithmetic here would decide to wake an operator on a bar the rescue no longer
+    # uses.
+    #
+    # KNOW WHAT THIS BAR IS, because the sentence here used to get it backwards. It read "it can only
+    # surface a real projection, never suppress one", which is true only of the `except` below — an
+    # unreadable cap resolving to no grace. The BAR ITSELF suppresses, and it suppresses against a
+    # CEILING rather than a grant: `resolve_deadline_grace` answers the most a stage could ever be
+    # given, while the seconds actually granted are `sandbox._granted_grace`, an LLM deadline judge's
+    # one-shot answer clamped by that ceiling — 0.0 for every way of not answering, and asked only
+    # once, AT the wall. So on a ten-hour stage under the shipped AUTO default there is a 30-minute
+    # band in which a real projected overrun opens no attention item, and if the judge then declines
+    # the node dies on its wall with nothing to show and the operator was never told, in the window
+    # where acting was still cheap.
+    #
+    # OPEN[overrun-grace-bar] the alert bar subtracts a grace CEILING that may never be granted, so a
+    # projected overrun inside it is silently suppressed. The noise it exists to stop is real (a
+    # 40-second overrun on a ten-hour stage is not worth an interrupt), so the fix is a bar keyed on
+    # the PROJECTION's own precision rather than on a discretionary rescue — and nobody has measured
+    # that precision, so the number is not inventable here. `projected_overrun_s` is stamped
+    # unfiltered above either way, so the durable record already holds what the engine knew.
+    # proof:`present:beyond = over - max(0.0, grace)@looplab/engine/train_monitor.py`
+    try:
+        from looplab.runtime.sandbox import resolve_deadline_grace
+        grace = float(resolve_deadline_grace(grace_cap, wall))
+    except Exception:  # noqa: BLE001 — an unreadable cap means "no grace", never "it fits"
+        grace = 0.0
+    beyond = over - max(0.0, grace)
+    if beyond > 0:
+        alert["overrun_beyond_grace_s"] = round(beyond, 1)
+        alert["stage_grace_s"] = round(max(0.0, grace), 1)
+
+
 def trajectory_row(trajectory: Optional[LossTrajectory]) -> Optional[dict]:
     """The compact, JSON-safe form stamped on `EV_TRAIN_MONITOR_ALERT`, or None.
 
@@ -982,6 +1147,11 @@ def trajectory_row(trajectory: Optional[LossTrajectory]) -> Optional[dict]:
         return None
     row = {"direction": trajectory.direction, "windows": trajectory.windows,
            "points": trajectory.points}
+    # The ETA rides the row the trajectory already stamps, so it reaches the durable log, the judge's
+    # context and the UI through ONE seam instead of three. Absent when unanswerable — a reader must
+    # treat a missing `eta_s` as "the engine cannot say", never as "soon".
+    if isinstance(trajectory.eta_s, float) and math.isfinite(trajectory.eta_s):
+        row["eta_s"] = round(trajectory.eta_s, 1)
     for key in ("first", "last", "minimum", "noise", "net"):
         value = getattr(trajectory, key)
         if isinstance(value, float) and math.isfinite(value):
@@ -1430,6 +1600,12 @@ class EvalLogPlan:
     # because every existing construction is keyword-only and it must stay that way for a
     # positional one too.
     declarations: dict = field(default_factory=dict)
+    # stage name -> the WALL that stage was declared with. Carried so a watchdog can compare its own
+    # projection against the deadline the stage will actually be held to. Without it the engine can
+    # measure that a run needs ten hours and be unable to notice that it has seven — which is what
+    # happened: `runs/e5small-dr-unified-v4` node 6 was recorded at 15:45 as "6% of a ~10h run"
+    # against a 28000 s wall, and was killed on that wall 7 hours later having burned 7.78 GPU-hours.
+    timeouts: dict = field(default_factory=dict)
 
 
 def eval_log_plan(stages) -> EvalLogPlan:
@@ -1526,9 +1702,13 @@ def eval_log_plan(stages) -> EvalLogPlan:
     # are already going to hold that stage to, and withholding it from a stage that promised
     # something would hide a check the engine is certainly going to run.
     declarations: dict = {}
+    timeouts: dict = {}
     for stage in raw:
         if not isinstance(stage, dict) or stage.get("name") is None:
             continue
+        _wall = stage.get("timeout")
+        if type(_wall) in (int, float) and math.isfinite(float(_wall)) and float(_wall) > 0:
+            timeouts[str(stage.get("name"))] = float(_wall)
         expect = stage.get("expect") or {}
         files = expect.get("files") if isinstance(expect, dict) else None
         promised = tuple(str(f) for f in (files or []) if isinstance(f, str))
@@ -1581,7 +1761,7 @@ def eval_log_plan(stages) -> EvalLogPlan:
         if roles.get(_log_name_key(f"{name}.log"), (None, None))[1] == LOG_ROLE_TRAINING:
             artifacts = promised
     return EvalLogPlan(roles=roles, stage_names=names, training_artifacts=artifacts,
-                       declarations=declarations)
+                       declarations=declarations, timeouts=timeouts)
 
 
 def training_authority_spent(workdir, plan: Optional[EvalLogPlan]) -> bool:
@@ -2460,8 +2640,14 @@ class TrainingMonitorMixin:
         except Exception:  # noqa: BLE001 - advisory history lookup; the live monitor still proceeds
             pass
         llm_calls = 0
-        # Phase 3 arming state. `broken_streak` counts CONSECUTIVE confident-broken verdicts about the
-        # same stage log; `armed_key` is the log they were about, so a stage change (train.log ->
+        # Phase 3 arming state. `broken_streak` counts CONSECUTIVE `broken` verdicts about the
+        # same stage log — ANY of them, at ANY confidence: the increment below is
+        # `if verdict.status == "broken"` and never reads the number. This comment said
+        # "confident-broken" until 2026-08-27 and that was wrong in a way that matters, because
+        # it makes the two kill conjuncts look like one. They are independent: repetition is
+        # satisfied by sub-bar verdicts, and the confidence bar is what actually holds the gun.
+        # On `runs/e5small-dr-unified-v8` node 2 the streak reached 3 across verdicts of 0.70,
+        # 0.65 and 0.70 while nothing was armed to fire; `armed_key` is the log they were about, so a stage change (train.log ->
         # score.log) can never let two different subjects confirm each other. `armed_at` is set only
         # when the KILL GATE actually arms (a broken verdict about a kill-eligible log) and is what
         # licenses the changed-digest bypass; with `arm_looks` it bounds how long and how expensively
@@ -2695,6 +2881,38 @@ class TrainingMonitorMixin:
                         # the wrong direction to fail in, and it matters much more now that
                         # `train_monitor_kill` defaults to True. Mirrors the identical rule in
                         # `asha_monitor.py`; a non-numeric knob falls back to the schema default.
+                        # REPETITION IS ALREADY REQUIRED, AND IT IS NOT THE THING HOLDING THE GUN.
+                        # `should_monitor_kill` needs `broken_streak >= confirm_ticks` AND this
+                        # confidence bar, and the streak counts ANY `broken` verdict at any
+                        # confidence (see its increment). So the tempting fix — "kill once the
+                        # verdict has repeated K times" — is already shipped, and what would
+                        # actually change behaviour is DROPPING or LOWERING the confidence conjunct
+                        # so repetition alone can fire. That is the thing measured and refused here.
+                        #
+                        # `runs/e5small-dr-unified-v8` node 2 drew three `broken` verdicts
+                        # under the bar — 0.70 at 08:31:58, 0.65 at 08:44:38, 0.70 at 08:56:39 —
+                        # before the 0.90 kill at 09:07:14, so 36 minutes of GPU ran under a
+                        # watchdog that already believed the node broken three times. The obvious
+                        # answer is "kill on K consecutive sub-bar broken verdicts". It was measured
+                        # against every alert this box has recorded and it is REFUSED:
+                        #
+                        #   rubertlite-dr-unified-v6 node 1   0.62, 0.62, 0.75  ->  recorded 0.715142
+                        #   e5small-dr-unified-v4    node 3   0.75, 0.70, 0.75  ->  recorded 0.790898
+                        #   e5small-dr-unified-v8    node 2   0.70, 0.65, 0.70  ->  failed not_learning
+                        #   e5small-dr-unified-v4    node 12  0.62, 0.70        ->  idea_rejected,
+                        #                                                          never trained
+                        #
+                        # Two good nodes destroyed per node saved, and one of the two carries the
+                        # strongest number in its neighbourhood. The 36 minutes are real and are the
+                        # PRICE of that ratio, not an argument against it. What would change the
+                        # answer is a signal that separates those rows — the trajectory veto already
+                        # tried, and it is consulted on every one of them.
+                        #
+                        # DECLINED[broken-verdict-ladder] killing by accumulation of sub-bar `broken`
+                        # verdicts. measured: 4 node-generations in `runs/` reach 2+ consecutive
+                        # sub-0.8 `broken` verdicts across all 259 alerts; a K=3 ladder fires on 3 of
+                        # them and TWO recorded real metrics (0.715142, 0.790898) against ONE true
+                        # positive — docs/guide/llm-and-agents.md
                         _kc = getattr(self, "_train_monitor_kill_confidence", 0.8)
                         threshold = (float(_kc) if isinstance(_kc, (int, float))
                                      and not isinstance(_kc, bool) else 0.8)
@@ -2836,6 +3054,16 @@ class TrainingMonitorMixin:
                             measured = trajectory_row(trajectory)
                             if measured is not None:
                                 alert["trajectory"] = measured
+                                # THE PROJECTION AGAINST THE WALL, while it is still cheap to act
+                                # on. The engine has measured a stage's remaining time since the ETA
+                                # shipped and compared it against nothing: node 6 was recorded at
+                                # "6% of a ~10h run" seven hours before a 28000 s wall killed it and
+                                # discarded 7.78 GPU-hours. The deadline judge is the LAST line and
+                                # is right to refuse a run two hours short; this is the first one.
+                                # Additive and fold-ignored — it records that the engine knew.
+                                stamp_projected_overrun(
+                                    alert, trajectory, resolved, log_plan,
+                                    grace_cap=getattr(self, "eval_deadline_grace_s", None))
                             if trajectory_veto:
                                 alert["trajectory_veto"] = True
                             if role_withheld:

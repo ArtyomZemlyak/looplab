@@ -183,6 +183,186 @@ def _echo_section(title: str, cats: dict, note: str = "") -> None:
 
 
 @app.command()
+def tokens(run_dir: Path = typer.Argument(...),
+           top: int = typer.Option(0, help="only the N largest phases (0 = all)")):
+    """Where the TOKENS went, by phase — the token twin of `timings`' wall-clock breakdown.
+
+    The TOTAL and the SPLIT come from different files on purpose. `llm_usage` in `events.jsonl` is
+    the durable, replayable ledger and knows the true total but carries no phase; the `generation`
+    spans in `spans.jsonl` carry `phase` but live in a sidecar replay never rebuilds. So the ledger
+    is the denominator, the spans supply the attribution, and the gap between them is PRINTED.
+
+    A generation with no phase is bucketed, never dropped. Needs `spans.jsonl` for the breakdown;
+    without it the ledger total is still reported, then exit 2.
+    """
+    import json as _json
+
+    from looplab.events.eventstore import read_jsonl_lenient_with_health
+    from looplab.events.token_spend import (CARD_UNATTRIBUTED, token_spend_by_build,
+                                            token_spend_by_card, token_spend_by_phase)
+
+    ev_path = run_dir / "events.jsonl"
+    sp_path = run_dir / "spans.jsonl"
+    if not ev_path.exists() and not sp_path.exists():
+        typer.echo(f"no run found at {run_dir} (no events.jsonl or spans.jsonl). {_RUN_DIR_HINT}")
+        raise typer.Exit(2)
+
+    # The DENOMINATOR: the durable ledger's own sum. Read first so a run with tracing off still
+    # learns what it spent, even though it can never learn where.
+    ledger_total = None
+    state = None
+    if ev_path.exists():
+        store = EventStore(ev_path)
+        _echo_log_integrity(store, run_dir)
+        # THROUGH THE FOLD, not a hand sum over `llm_usage` rows. `replay._on_llm_usage` carries two
+        # rules a `sum(...)` does not, and both change the number this command reconciles against:
+        # it DE-DUPLICATES by `usage_id` — `engine/costs.py` appends from an outbox drain and a
+        # reconcile retry, so duplicate rows are expected by design and the fold's dedup is the proof
+        # — and it starts from the legacy `EV_LLM_COST` compatibility base, without which a
+        # pre-ledger run reports `ledger: 0` and a residual that is entirely negative. Over-counting
+        # here does not merely misprint the denominator: `residual` is the whole point of the
+        # command, and this is its subtrahend.
+        state = fold(store.read_all())
+        ledger_total = int((state.llm_cost or {}).get("total_tokens") or 0)
+
+    if not sp_path.exists():
+        typer.echo(f"ledger total: {ledger_total or 0:,} tokens")
+        typer.echo("no spans.jsonl — the ledger records totals only, so the split is unavailable.")
+        raise typer.Exit(2)
+
+    # THE SAME READER SETTINGS `timings` USES on the same file, and the `errors` one is not
+    # cosmetic: `jsonlio.read_jsonl_lenient`'s own docstring names it ("the spans reader uses
+    # 'replace' — a mid-file mojibake byte must cost one span, not the whole timings report").
+    # Under the default "strict" a single invalid UTF-8 byte raises `UnicodeDecodeError`, which the
+    # reader quarantines — so a generation span `timings` reads and charges, `tokens` dropped, and
+    # its tokens came back out as `residual … unattributed by any span`, i.e. reported as a fact
+    # about the ledger rather than about this command's own reader.
+    rows, health = read_jsonl_lenient_with_health(sp_path, loads=_json.loads, errors="replace")
+    out = token_spend_by_phase(rows, ledger_total=ledger_total)
+    unreadable = int(health.get("invalid_lines") or 0)
+    if not out["rows"]:
+        # SAY WHAT WAS LOST BEFORE GIVING UP. A torn `spans.jsonl` — the routine shape after a
+        # killed engine process — parses to zero rows, and exiting here printed neither the ledger
+        # total nor the damage count, so the one message the operator got ("no generation spans
+        # found") named the record rather than the reader and read identically to a run that simply
+        # never traced. Both facts are already in hand at this point.
+        typer.echo(f"ledger total: {ledger_total or 0:,} tokens")
+        if unreadable or out["damaged"]:
+            typer.echo(f"no generation spans could be read; {unreadable + out['damaged']} damaged "
+                       f"span row(s) stepped over — the split is unavailable because spans.jsonl is "
+                       f"unreadable, not because the run made no calls.")
+        else:
+            typer.echo("no generation spans found; nothing to attribute.")
+        raise typer.Exit(2)
+
+    shown = out["rows"][:top] if top and top > 0 else out["rows"]
+    typer.echo(f"{'tokens':>14}  {'share':>6}  {'calls':>6}  {'prompt':>13}  {'completion':>11}  phase")
+    for row in shown:
+        typer.echo(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
+                   f"{row['prompt']:>13,}  {row['completion']:>11,}  {row['phase']}")
+    if len(shown) < len(out["rows"]):
+        rest = out["rows"][len(shown):]
+        typer.echo(f"{sum(r['tokens'] for r in rest):>14,}  "
+                   f"{100 * sum(r['share'] for r in rest):>5.1f}%  "
+                   f"{sum(r['calls'] for r in rest):>6,}  "
+                   f"{'':>13}  {'':>11}  ({len(rest)} more phase(s), --top {len(shown)})")
+
+    typer.echo("")
+    typer.echo(f"attributed : {out['attributed']:>14,} tokens over {out['calls']:,} generation spans")
+    if out["ledger_total"] is None:
+        typer.echo("ledger     :            n/a  (no readable events.jsonl — no denominator)")
+    else:
+        typer.echo(f"ledger     : {out['ledger_total']:>14,} tokens (llm_usage, the durable record)")
+        # SIGNED and never clamped: a retried provider call opens two spans against one billed row,
+        # so a negative residual is a real state the operator should see rather than a rounding hide.
+        typer.echo(f"residual   : {out['residual']:>14,} tokens "
+                   f"({'spans over-attribute' if out['residual'] < 0 else 'unattributed by any span'})")
+
+    # THE PER-CARD HALF. Phase answers "which KIND of work spent it"; this answers "which EXPERIMENT
+    # spent it, and was that experiment ever evaluated" — the question a run cannot otherwise ask,
+    # because the durable ledger carries no card and no node. Printed by DEFAULT rather than behind a
+    # flag: the defect this closes is that nobody could see it, and an opt-in view is not seen.
+    # Suppressed when no card resolves at all, which is every serial-path run — a lone `(no card)`
+    # row states nothing and would push the phase table off a terminal for no reader's benefit.
+    card_nodes = {}
+    if state is not None:
+        from looplab.core.models import is_unevaluated_speculative_discard
+        for node in (state.nodes or {}).values():
+            card = getattr(getattr(node, "idea", None), "card_id", None)
+            if not isinstance(card, str) or not card.strip():
+                continue
+            owned = card_nodes.setdefault(card, {"nodes": [], "discarded": []})
+            owned["nodes"].append(node.id)
+            # The run's SINGLE answer to "did this node spend budget", not a second spelling of it.
+            if is_unevaluated_speculative_discard(state, node):
+                owned["discarded"].append(node.id)
+    by_card = token_spend_by_card(rows, card_nodes=card_nodes, ledger_total=ledger_total)
+    real = [r for r in by_card["rows"] if r["card"] != CARD_UNATTRIBUTED]
+    if real:
+        typer.echo("")
+        typer.echo(f"{'tokens':>14}  {'share':>6}  {'calls':>6}  nodes                 card")
+        for row in by_card["rows"]:
+            nodes = ",".join(str(n) for n in row["nodes"]) or "-"
+            if row["wholly_discarded"]:
+                nodes += " DISCARDED"
+            typer.echo(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
+                       f"{nodes:<21} {row['card']}")
+        # A build that minted NO node is invisible to the rule above, which needs the card to OWN
+        # one — measured on v9, that hid 40.1M tokens (card-2's first build and card-5's only one,
+        # both `skipped: stale`), while card-2's row read as a healthy 97.6M. Priced from the
+        # durable log's own `card_build_requested` -> `card_build_done` windows rather than by
+        # widening `wholly_discarded`, which answers a different question and answers it correctly.
+        builds = []
+        if state is not None:
+            open_req = {}
+            for ev in EventStore(ev_path).read_all():
+                kind = getattr(ev, "type", None) or (ev.get("type") if isinstance(ev, dict) else None)
+                data = getattr(ev, "data", None) or (ev.get("data") if isinstance(ev, dict) else None) or {}
+                ts = getattr(ev, "ts", None) or (ev.get("ts") if isinstance(ev, dict) else None)
+                cid = data.get("card_id")
+                if kind == "card_build_requested":
+                    open_req[cid] = ts
+                elif kind == "card_build_done":
+                    builds.append({"card": cid, "start": open_req.pop(cid, None), "end": ts,
+                                   "skipped": data.get("skipped"), "node_id": data.get("node_id")})
+        by_build = token_spend_by_build(rows, builds)
+        if by_build["skipped_builds"]:
+            share = (100 * by_build["skipped_tokens"] / by_card["attributed"]) if by_card["attributed"] else 0.0
+            typer.echo(f"{by_build['skipped_tokens']:>14,}  {share:>5.1f}%  {'':>6}  "
+                       f"built and SKIPPED as stale, minting no node "
+                       f"({by_build['skipped_builds']} of {by_build['builds']} builds)")
+        lost = [r for r in by_card["rows"] if r["wholly_discarded"]]
+        if lost:
+            spent = sum(r["tokens"] for r in lost)
+            share = 100 * sum(r["share"] for r in lost)
+            # Stated as what it IS — a build that was paid for and never evaluated — and NOT as
+            # waste: the freshness gate discards a prefetch whose selection no longer holds, which
+            # is the machinery working. What the number buys the operator is the ability to weigh
+            # that trade, which until now had no visible price at all.
+            typer.echo(f"{spent:>14,}  {share:>5.1f}%  {'':>6}  "
+                       f"built and never evaluated ({len(lost)} card(s) discarded before dispatch)")
+    # `read_jsonl_lenient_with_health` returns a plain DICT, and its damage key is `invalid_lines`.
+    # `getattr(health, "damaged", 0)` was therefore always 0 by two independent routes — a dict has
+    # no such attribute and there is no such key — so an unreadable `spans.jsonl` (the routine shape
+    # after a killed engine process leaves a torn tail) printed no damage line at all and its lost
+    # tokens were reported as `residual … unattributed by any span`, i.e. as a fact about the ledger
+    # rather than about the reader. `token_spend_by_phase` counts only the rows it was HANDED, so it
+    # cannot see a line that never parsed; this is the half that can. (`unreadable` is resolved up
+    # beside the read itself, because the zero-rows exit owes the operator the same disclosure and
+    # used to return before ever reaching this line.)
+    # TWO POPULATIONS, and summing them printed a false sentence about one of them. A line that
+    # never parsed and a row that was not a span at all really were stepped over and contribute
+    # nothing; a generation span with a torn `attributes` map is COUNTED in `calls` above and only
+    # its phase and usage are lost. Reporting the sum as "stepped over" claimed the third kind had
+    # been skipped while the `attributed … over N generation spans` line was already counting it.
+    if out["damaged"] or unreadable:
+        typer.echo(f"damaged span rows stepped over: {out['damaged'] + unreadable}")
+    if out.get("torn_attributes"):
+        typer.echo(f"generation spans with unreadable attributes: {out['torn_attributes']} "
+                   f"(counted as calls above, attributed to no phase)")
+
+
+@app.command()
 def timings(run_dir: Path = typer.Argument(...),
             node: Optional[int] = typer.Option(None, help="only this node id")):
     """Where the wall-clock went: per node, then RUN-LEVEL, reconciled against the run's real duration.
@@ -708,6 +888,55 @@ def _output_fingerprint(outputs) -> Optional[str]:
             return None                       # an unbound output names nothing anybody may compare
         parts.append(f"{row.get('path')}={row.get('digest_mode')}:{row.get('digest')}")
     return "|".join(sorted(parts))
+
+
+@app.command(name="repair-candidates")
+def repair_candidates(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
+                      show_nodes: bool = typer.Option(
+                          False, "--nodes", help="List the node ids behind each row.")):
+    """Which files this run's nodes had to fix, ranked by how many DISTINCT nodes fixed them.
+
+    THE LEDGER EXISTED AND NOTHING SHOWED IT. `RunState.repair_candidates()` has been derived on
+    every fold since the repair ledger landed and had no CLI, no route and no panel — so the one
+    question it answers ("what belongs in the source repo rather than in one node?") could only be
+    asked by opening a Python REPL over the event log.
+
+    Why DISTINCT NODES and not repair count, in the model's own words: one node repairing the same
+    file four times is one discovery, and four nodes repairing it once each is a property of the
+    repo. Measured by running this command on `runs/e5small-dr-unified-v4`: SIX nodes repaired
+    `looplab_stages.json` and FIVE repaired `vectorsearch/configs/config.yaml`, four of those for
+    `oom`, across 19 repair rows. A node inherits its PARENT's files
+    and can never inherit a fix a SIBLING found, because a node becomes a parent only by winning on
+    metric, so the same fix is paid for again on every branch.
+
+    It RANKS and decides nothing, exactly as the model says. Promoting a fix into the source repo
+    moves the substrate every later node is measured on: that is the operator's call, and it has to
+    be recorded as an event or the comparability key cannot tell nodes on either side of it apart.
+    """
+    store = _require_run_dir(run_dir)
+    _echo_log_integrity(store, run_dir)
+    state = fold(store.read_all())
+    rows = state.repair_candidates()
+    if not rows:
+        # Two very different facts, and an operator acting on this must not confuse them: a run
+        # whose nodes never needed a repair, and a log written before the ledger existed.
+        typer.echo("no repaired files recorded in this run"
+                   + ("." if state.repair_ledger else
+                      " (and the repair ledger is empty — a pre-ledger log records none)."))
+        return
+    typer.echo(f"repaired files: {len(rows)}  repair rows: {len(state.repair_ledger)}")
+    for row in rows:
+        reasons = ", ".join(f"{k}x{v}" for k, v in row["reasons"].items())
+        typer.echo(f"  {row['node_count']:>2} node(s)  {row['path']}"
+                   + (f"  [{reasons}]" if reasons else ""))
+        if show_nodes and row["nodes"]:
+            typer.echo("       nodes: " + ", ".join(str(n) for n in row["nodes"]))
+    top = rows[0]
+    if top["node_count"] >= 2:
+        typer.echo("")
+        typer.echo(f"{top['node_count']} separate experiments fixed {top['path']}. A fix rediscovered "
+                   "per branch is one the repo owes them; promoting it is an operator decision and "
+                   "must be recorded so later comparisons know which side of it a node ran on.")
 
 
 @app.command(name="stage-dups")

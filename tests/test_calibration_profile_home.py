@@ -93,14 +93,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
-#   2026-08-22  A DEFAULT MOVED AGAIN, on the branch side this time, and the two changes MEET
-#               here: `inline_repair_reasons` now excludes `rules_violation` (an arena's own
-#               submission validator refused the candidate before scoring, so there is nothing a
-#               repair could fix that would not be a way AROUND the rule) while master's
-#               `check_false_positive` was added to it. The digest below is measured over BOTH,
-#               so it matches neither side's value and re-deriving it is the merge, not a
-#               rubber stamp. Old receipts should stop verifying, for the same reason as above.
-_EXPECTED_DIGEST = "sha256:d716d0fd24522b5e2388d959b9c86f0a845978e5e921282410a03f4250945cb3"
+_EXPECTED_DIGEST = "sha256:e4d60d6c712b4e9a7fae7d501f922e927f90735b49789a53fd527616ebc8f143"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -389,43 +382,35 @@ _EXPECTED_DIGEST = "sha256:d716d0fd24522b5e2388d959b9c86f0a845978e5e921282410a03
 #               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated
 #               assignments against master reports exactly [train_monitor_contract] added
 #               and [] removed, so no +1/-1 pair is hiding behind the new integer.
-#   2026-08-21  REBASE onto master, and BOTH pins re-measured over the rebased tree rather than
-#               carried from either side. The branch adds three fields to master's set
-#               (`llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`) — 213 -> 216 —
-#               and the digest hashes every shipped `.py`, so 45 commits of master move it whatever
-#               the field set does. Old receipts SHOULD stop verifying: `developer_probe_confine`
-#               ships ON and FAILS CLOSED, so a replicate calibrated where the kernel offers
-#               Landlock and one calibrated where it does not can spend a different number of
-#               Developer turns on the same node.
-#   2026-08-28  + developer_stage_guidance (217 -> 218). Same branch as the entry below, verified
-#               the same prescribed way -- an AST diff of `Settings`' annotated assignments against
-#               `3dabc64d^` reports exactly ['developer_stage_guidance'] added and [] removed, so
-#               no +2/-1 is hiding behind the new integer. The knob turns OFF ~5,001 characters of
-#               stage-pipeline guidance that `declare_stages` never used; it ships ON so a resumed
-#               pre-2026-08-13 run keeps the prompt its first half ran under. Old receipts SHOULD
-#               stop verifying: a replicate calibrated with the block and one without do not send
-#               the same system prompt, so they can spend a different number of Developer turns.
-#               RE-PINNED LATE: 3dabc64d added the field and left this guard red on HEAD, found on
-#               the next sweep rather than at commit time.
-#   2026-08-27  + developer_step_feedback_command (216 -> 217). The "field set changed too" branch,
-#               and verified by DIFFING THE FIELD SET rather than reading the count, as the
+#   2026-08-23  CHANGED DEFAULT: eval_deadline_grace_s 0.0 -> -1 (AUTO). The 'field set is
+#               UNCHANGED / a default moved on purpose' branch — 213 fields before and after, so
+#               this is case (2) and old receipts SHOULD stop verifying. It is the SAME field the
+#               2026-08-13 entry above admitted while calling it "INERT AT ITS DEFAULT", and that
+#               sentence is what expires here: the default is no longer the historical kill, so a
+#               replicate that reaches its wall now gets a judge call and, if that judge says
+#               FINISHING, up to 10% more wall clock (30 min ceiling). A receipt issued before this
+#               was measured on replicates that could not be rescued, which is precisely a
+#               different envelope. The knob that "does not get to be invisible just because its
+#               default is off" is now not off. Digest re-pinned; field count unchanged at 213,
+#               which is itself the evidence that no field was added or removed alongside it.
+#   2026-08-27  + triage_time_budget_s (213 -> 214). The "field set changed too" branch, and
+#               verified by DIFFING THE FIELD SET rather than reading the count, as the
 #               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated assignments
-#               against HEAD reports exactly ['developer_step_feedback_command'] added and []
-#               removed, so no +2/-1 is hiding behind the new integer. The knob names an
-#               operator-pinned developer command the plan loop runs BETWEEN steps, handing its
-#               output to the next step (doc 53 item 10a). INERT for a calibration replicate twice
-#               over: the profile's toy workload is the `solution.py` path, which declares no
-#               `developer_commands` at all, so `_step_feedback_command_name` resolves to "" before
-#               anything is executed; and the replicate's roles come from
-#               `cli/__init__.py::_make_calibration_roles`, which builds no `LLMRepoDeveloper`. The
-#               guard is deliberately not clever enough to exempt an inert knob, and re-pinning is
-#               right rather than merely necessary for the reason `repair_log_tools` above records:
-#               this field decides what a paid role is TOLD, and it also decides whether a node
-#               build spends an extra ~40 s of wall clock per editing step — so a replicate
-#               calibrated with it set and one without are genuinely different. Old receipts SHOULD
-#               stop verifying; `speculation_implementation_digest` hashes every shipped `.py` and
-#               this change moves it regardless.
-_EXPECTED_FIELD_COUNT = 218
+#               against master reports exactly [triage_time_budget_s] added and [] removed, so no
+#               +1/-1 pair is hiding behind the new integer. Old receipts SHOULD stop verifying:
+#               the knob puts a 20-minute wall-clock ceiling on a crash-triage call that had none,
+#               and a speculation receipt measured while one failure could hold the eval thread for
+#               88 minutes was measured in a different envelope.
+#   2026-08-29  MERGE with master (214 -> 219 profile rows, 220 -> 225 Settings). Both sides grew
+#               the schema independently and the merge keeps both, so BOTH pins are RECOMPUTED from
+#               the merged module rather than taken from either side -- neither side's digest
+#               describes it. Verified the prescribed way, by DIFFING the field set rather than
+#               adding the integers: an AST scan of `Settings` against both parents reports nothing
+#               lost from either, nothing invented, and exactly five fields carried in from this
+#               branch (`llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`,
+#               `developer_step_feedback_command`, `developer_stage_guidance`), so 220 + 5 = 225.
+#               Old receipts SHOULD stop verifying: the merged envelope is neither parent's.
+_EXPECTED_FIELD_COUNT = 219
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

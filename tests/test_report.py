@@ -3753,6 +3753,54 @@ def test_scope_report_action_cross_process_lease_fences_live_worker(
     assert generation_calls == 1
 
 
+def _bare_spawn_seconds() -> float:
+    """How long a fresh interpreter costs on this box, right now.
+
+    A `multiprocessing` "spawn" context starts a NEW Python and re-imports the target's module, so
+    the readiness wait below is really a bet on interpreter start-up. On this box the interpreter
+    lives on a network-backed conda and the engine runs during every full-suite pass; measured
+    2026-08-28, this test failed "spawned lease holder did not become ready" in a full run and
+    passed in isolation on the same commit.
+    """
+    import subprocess
+    import sys
+    import time
+    t0 = time.monotonic()
+    try:
+        subprocess.run([sys.executable, "-c", "pass"], capture_output=True, timeout=120)
+    except Exception:  # noqa: BLE001 — a box that cannot spawn is an environment fact
+        return float("inf")
+    return time.monotonic() - t0
+
+
+def _await_spawned_ready(process, ready) -> None:
+    """Wait for the child to signal readiness, sized from THIS box and failing fast if it died.
+
+    Two things the flat `ready.wait(30)` could not do. (1) The budget is derived: 30 s is kept as a
+    floor and scaled by the measured interpreter start-up, so a loaded box gets room instead of a
+    red — but the scale is bounded, because a wait that grows without limit stops being a test.
+    (2) A child that EXITED is distinguished from a child that is slow. Before this, a crashing
+    child produced "did not become ready" after the full wait, which names the wrong defect: the
+    lease holder did not fail to become ready, it failed to exist.
+    """
+    import time
+
+    spawn = _bare_spawn_seconds()
+    deadline = min(300.0, max(30.0, 20.0 * spawn))
+    end = time.monotonic() + deadline
+    while time.monotonic() < end:
+        if ready.wait(0.5):
+            return
+        if not process.is_alive():
+            raise AssertionError(
+                "the spawned lease holder EXITED before signalling ready (exitcode %r) — that is a "
+                "dead child, not a slow one" % (process.exitcode,))
+    raise AssertionError(
+        "spawned lease holder did not become ready within %.1fs (bare interpreter spawn measured "
+        "%.2fs here); the child is still alive, so this is start-up latency rather than a crash"
+        % (deadline, spawn))
+
+
 def test_scope_report_action_and_scope_leases_are_live_across_spawned_process(
         tmp_path):
     import multiprocessing
@@ -3773,7 +3821,7 @@ def test_scope_report_action_and_scope_leases_are_live_across_spawned_process(
     )
     process.start()
     try:
-        assert ready.wait(30), "spawned lease holder did not become ready"
+        _await_spawned_ready(process, ready)
         with reports._scope_store_lock(reports_dir):
             assert reports._scope_action_lease_is_live(reports_dir, action_id) is True
             assert reports._scope_action_scope_lease_is_live(

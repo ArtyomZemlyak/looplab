@@ -676,6 +676,45 @@ def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
     return RepairVerification(REPAIR_UNMET, claims, convicting)
 
 
+# --- The PRE-EMIT rung: a repair that DESCRIBES an edit it never made ----------------------------
+# MEASURED on `runs/e5small-dr-unified-v8` node 1: two repair sessions, 51 minutes, 108 tool calls
+# (`read_file` 50, `run_probe` 26, `grep` 21) and ZERO `edit_file`/`write_file`/`declare_stages`,
+# ending in an emit that read "FIX: changed mine_stage.py so the pass/fail decision asserts on the
+# ARTIFACT ... Updated looplab_stages.json expect.assert to match." `changed` was `[]`. The
+# diagnosis was CORRECT and matched the engine's own `check_false_positive`; only the application
+# was missing. Two such repairs abandoned a node holding valid mined negatives and a sound plan.
+#
+# WHY THIS IS NOT THE `inert` VERDICT'S JOB, and must never become it. `inert` is decided on BYTES
+# with the rationale unread, precisely so that no wording can steer the one verdict the loop acts on
+# (see `verify_repair` and `INERT_REPAIR_LIMIT` above). A text-derived signal that could move it
+# would let a model write its way out of the only bound on a repair chain. This rung is the
+# opposite direction: it reads the text INSIDE the session, where steering is the entire point, and
+# it can never touch a durable verdict. Same shape as `_declare_stages_phase`'s `_validate`, which
+# bounces a malformed manifest back while the model can still re-declare.
+#
+# It fires ONLY when both halves are true — nothing was written this session AND the summary named
+# something concrete a diff could have contained. A session that honestly reports "no change is
+# needed" names nothing concrete and is left alone, which matters: refusing to edit can be the right
+# answer, and this rung must not push a model into a cosmetic edit to get past it.
+def repair_claimed_without_writing(summary, *, wrote: bool) -> str:
+    """The bounce text for a repair emit that claims an edit while nothing was written, else "".
+
+    Pure and total: any input answers, never raises, because it runs inside the emit path of a
+    session that has already cost minutes. `wrote` is the CALLER's byte fact (did this session add,
+    change or delete anything), never anything the model said about itself.
+    """
+    if wrote:
+        return ""
+    claims = claimed_tokens(summary)
+    if not claims:
+        return ""
+    named = ", ".join(claims[:6])
+    return ("Your summary describes changes (" + named + ") but this session called NO write tool: "
+            "`edit_file`, `write_file` and `declare_stages` were all available and none was used, "
+            "so the workspace is byte-identical to the one that failed and the next evaluation would "
+            "re-run the same inputs. Either MAKE the edits now with `edit_file`/`write_file` and then "
+            "emit, or emit a summary that states plainly that no code change is needed and why.")
+
 # --- Repair ATTRIBUTION: the triage's prose is a proposal, the artefact is the truth -------------
 # Doc 53 §3, the REPAIR half of `stored-plan-diverges-from-shipped-artefact`. `_triage_crash` runs
 # BEFORE the repair session opens — `engine/evaluate.py` line ~2584 against the `_repair` call at

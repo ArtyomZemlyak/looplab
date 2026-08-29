@@ -839,17 +839,29 @@ def test_the_memo_prompt_shows_the_board_its_own_directions_filled():
     DeepResearcher(client).research(state, trigger="cadence")
     user_turn = client.turns[0][1]["content"]
 
-    # The untested belief — claimable by the PROPOSER, context here.
-    assert "Untested hypotheses on the board" in user_turn
+    # The untested belief — context here, and since 2026-08-25 it is rendered under the DIRECTION
+    # heading rather than "Untested hypotheses". It arrived as `hypothesis_added`, so it owns no
+    # executable action and `card_kind_of` calls it a direction; the board block was split so the
+    # claim contract ("return its CARD_ID") stops being offered for rows that can never be claimed.
+    # The property this test holds is unchanged — BOTH halves reach the memo, in the proposal
+    # brief's exact vocabulary — only the half's name moved.
+    assert "OPEN RESEARCH DIRECTIONS" in user_turn
     assert untested in user_turn
     # …and the question that already has an experiment, with its live work item named.
     assert "ALREADY on the board" in user_turn
     assert running in user_turn and "STATUS=running" in user_turn and "NODES=[0]" in user_turn
     # One vocabulary with the proposal brief: same row spelling, resolved from that brief.
+    #
+    # BOTH row spellings, and the count is asserted, because the `CARD_ID`-only loop this replaced
+    # became VACUOUS the moment the untested belief moved to the direction block: it iterated over
+    # an empty match set and passed while proving nothing. A guard that cannot fail is the defect
+    # this repo has now measured ten times.
     from looplab.agents.roles import _state_brief
-    for row in _state_brief(state, None).splitlines():
-        if row.startswith("- CARD_ID="):
-            assert row in user_turn
+    board_rows = [row for row in _state_brief(state, None).splitlines()
+                  if row.startswith(("- CARD_ID=", "- DIRECTION_ID="))]
+    assert len(board_rows) >= 2, f"the brief must carry both halves, got {board_rows}"
+    for row in board_rows:
+        assert row in user_turn
     # No claim contract: a memo has no `card_id` field to return one in.
     assert "return its CARD_ID in `card_id`" not in user_turn
     assert "registered as OPEN BELIEFS" in user_turn

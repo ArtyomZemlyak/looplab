@@ -60,6 +60,35 @@ from looplab.search.card_selection import (
 _LOG = logging.getLogger(__name__)
 
 
+# WHY a paid build was closed without minting a node — the CLOSED vocabulary of
+# `card_build_done.skipped_reason`. A registry rather than nine loose literals because this repo has
+# paid for the alternative twice: `node_repaired.verified` (`inert` was an undiagnosed proxy for
+# which bound ended a repair session, #82) and `TRIAGE_ACTIONS`, where a typo'd literal turns a stop
+# into "keep repairing". Here a typo'd slug does not fail — it lands on a durable row and reads as a
+# refusal nobody can look up. `tests/test_card_build_skip_reasons.py` re-derives this set from the
+# claim path's own `ast.Return` constants, in BOTH directions.
+#
+# MEASURED, and the reason it exists at all: on `e5small-dr-unified-v9`, 3 of 12 builds closed
+# `skipped: "stale"` having spent 41.4M tokens — 11.8 % of the run — and the record could not say
+# which of these fired. `not_selected_now` (the board moved and the engine wants something else) and
+# `card_action_changed` (the build no longer matches what it was built for) are different facts with
+# different remedies, and one word covered both.
+CARD_BUILD_SKIP_REASONS = (
+    "search_epoch_rotated",      # the search epoch moved under the request
+    "run_is_stopping",           # a terminal intent is pending
+    "eval_budget_exhausted",     # total_eval_seconds crossed the run ceiling
+    "commit_not_allowed",        # the outer gate refused the commit
+    "selection_limit_reached",   # card_budget_used hit the selection limit
+    "not_selected_now",          # selection no longer picks this card — the build is INTACT
+    "card_gone",                 # the card left the board
+    "card_action_changed",       # the card's action is not the one this was built for
+    "reservation_refused",       # the node reservation would not form
+    "idea_changed",              # the reserved idea differs from the built one
+    "commit_failed",             # the node commit raised
+    "commit_not_ours",           # the committed node is not this build's
+)
+
+
 @dataclass(frozen=True)
 class SpecBuildResult:
     """One isolated producer result.  It is never serialized or treated as queue authority."""
@@ -1323,6 +1352,7 @@ class SpeculationMixin:
         *,
         node_id: Optional[int] = None,
         skipped: Optional[str] = None,
+        skipped_reason: Optional[str] = None,
     ) -> bool:
         """Close only the exact folded head, retrying a moving tail without skipping requests."""
 
@@ -1335,6 +1365,10 @@ class SpeculationMixin:
         payload: dict[str, Any] = {"card_id": card_id, "generation": generation}
         if skipped is not None:
             payload["skipped"] = skipped
+            # ADDITIVE and fold-ignored (invariant #5): which of the nine refusals fired. The coarse
+            # word stays exactly what it was, so every existing reader is byte-identical on it.
+            if isinstance(skipped_reason, str) and skipped_reason.strip():
+                payload["skipped_reason"] = skipped_reason.strip()[:64]
         else:
             payload.update({"node_id": node_id, "speculative": True})
         def _plan(events, tail) -> bool:
@@ -1517,15 +1551,17 @@ class SpeculationMixin:
         state = fold(events)
         if self._request_key(self._head_request(state)) != key:
             return "closed", None
-        if (
-            generation != state.search_epoch
-            or self._terminal_intent(state)
-            or (
-                max_eval_seconds is not None
-                and state.total_eval_seconds >= max_eval_seconds
-            )
-        ):
-            return "stale", None
+        # SPLIT INTO THREE NAMED REFUSALS, not because the branch was wrong but because the RECORD
+        # was: all three wrote the one word `stale`, and on `e5small-dr-unified-v9` three builds
+        # worth 41.4M tokens (11.8 % of the run) were discarded with nothing to say which of the
+        # nine `stale` exits below fired. Same illness `node_repaired.verified` had one package over
+        # (`inert` was an undiagnosed proxy for which bound ended the session), same remedy.
+        if generation != state.search_epoch:
+            return "stale:search_epoch_rotated", None
+        if self._terminal_intent(state):
+            return "stale:run_is_stopping", None
+        if max_eval_seconds is not None and state.total_eval_seconds >= max_eval_seconds:
+            return "stale:eval_budget_exhausted", None
         self._refresh_speculation_budget(state)
         # The exact request head already owns one durable future slot. Convert that ownership into
         # node_building without double-charging it, but never cross a ceiling that was already full
@@ -1536,7 +1572,7 @@ class SpeculationMixin:
             return "budget", None
         selection_limit = self._speculative_selection_node_limit(state)
         if card_budget_used(state) >= selection_limit:
-            return "stale", None
+            return "stale:selection_limit_reached", None
 
         excluded = self._election_excluded_card_ids(state)
         # ...but never exclude the exact card being claimed now: its head result is committing, so it
@@ -1561,15 +1597,17 @@ class SpeculationMixin:
             ),
             None,
         )
+        # The board MOVED and this card is no longer what selection would choose. Distinct from
+        # every other exit here: the build is intact and the engine simply wants something else.
         if selected_action is None:
-            return "stale", None
+            return "stale:not_selected_now", None
         card = state.cards.get(card_id)
         if card is None:
-            return "stale", None
+            return "stale:card_gone", None
         from looplab.search.card_selection import card_action
         current_action = card_action(card)
         if current_action is None or current_action != result.action:
-            return "stale", None
+            return "stale:card_action_changed", None
         commit_action = {
             **current_action,
             **{
@@ -1582,7 +1620,7 @@ class SpeculationMixin:
             events, state, commit_action, card, node_id,
         )
         if reservation is None or reservation.idea is None:
-            return "stale", None
+            return "stale:reservation_refused", None
         if (
             reservation.idea.card_id != result.idea.card_id
             or reservation.idea.operator != result.idea.operator
@@ -1591,7 +1629,7 @@ class SpeculationMixin:
             or reservation.idea.eval_profile != result.idea.eval_profile
             or reservation.idea.eval_timeout != result.idea.eval_timeout
         ):
-            return "stale", None
+            return "stale:idea_changed", None
 
         tail = events[-1].seq if events else -1
         try:
@@ -1644,7 +1682,7 @@ class SpeculationMixin:
                     error=producer_error_text(exc, "speculative node commit failed: "),
                     reason="build_interrupted",
                 )
-            return "stale", None
+            return "stale:commit_failed", None
         committed = fold(self.store.read_all()).nodes.get(reservation.node_id)
         if (
             committed is None
@@ -1652,7 +1690,7 @@ class SpeculationMixin:
             or committed.speculative is not True
             or committed.card_build_generation != generation
         ):
-            return "stale", None
+            return "stale:commit_not_ours", None
         return "created", committed.id
 
     def _serve_card_builds(
@@ -1684,7 +1722,11 @@ class SpeculationMixin:
             or not allow_commit
         ):
             self._discard_spec_result(self._spec_builds.pop(key, None))
-            return self._append_card_build_done(request, skipped="stale")
+            return self._append_card_build_done(
+                request, skipped="stale",
+                skipped_reason=("search_epoch_rotated" if key[1] != state.search_epoch else
+                                "run_is_stopping" if self._terminal_intent(state) else
+                                "eval_budget_exhausted" if budget_exhausted else "commit_not_allowed"))
         result = self._spec_builds.get(key)
         if result is None:
             # Quarantine before recovery even asks whether the Card is still alive: this head carries a
@@ -1744,6 +1786,9 @@ class SpeculationMixin:
         outcome, node_id = self._claim_requested_card_build(
             request, result, max_eval_seconds,
         )
+        # The refusal SLUG rides beside the coarse word. `_append_card_build_done` validates the
+        # coarse one against its closed vocabulary exactly as before; the slug is additive record.
+        outcome, _, stale_reason = outcome.partition(":")
         if outcome == "retry":
             return False
         if outcome == "closed":
@@ -1763,7 +1808,8 @@ class SpeculationMixin:
         if outcome == "created" and node_id is not None:
             closed = self._append_card_build_done(request, node_id=node_id)
         else:
-            closed = self._append_card_build_done(request, skipped="stale")
+            closed = self._append_card_build_done(
+                request, skipped="stale", skipped_reason=stale_reason or None)
         if closed:
             self._discard_spec_result(self._spec_builds.pop(key, None))
         return closed

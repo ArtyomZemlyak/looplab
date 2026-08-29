@@ -417,6 +417,10 @@ export const NARR = {
     validate: d => typeof d?.id === 'string' && d.id.length > 0,
     render: (d) => `Card ${d.id.slice(0, 80)} automatically dropped${note(d.reason, 70)}`,
   },
+  card_reopened: {
+    validate: d => typeof d?.id === 'string' && d.id.length > 0,
+    render: (d) => `Card ${d.id.slice(0, 80)} reopened${note(d.reason, 70)}`,
+  },
   hypothesis_updated: {
     validate: d => ownValue(d, 'statement'),
     render: (d) => `hypothesis updated — ${String(d.statement || '').slice(0, 80)}`,
@@ -487,7 +491,7 @@ export const GROUPS = [
   ['research', 'research', 'research_completed research_attempted deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
   ['report', 'report', 'report_generated reflection_note report_refresh_failed'],
   ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank asha_verdict'],
-  ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
+  ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped card_reopened inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
   ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired card_auto_dropped phase_progress'],
 ]
 export const TYPE2GROUP = Object.fromEntries(GROUPS.flatMap(([group, , types]) =>

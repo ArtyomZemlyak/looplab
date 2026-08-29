@@ -76,7 +76,7 @@ from looplab.events.types import (
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
     EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_BUILD_ATTEMPTED, EV_CARD_BUILD_DONE,
     EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED,
-    EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED,
+    EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED, EV_CARD_REOPENED,
     EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
     EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
@@ -1087,6 +1087,46 @@ def _on_node_eval_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
 _SALVAGE_CAUSE_TRIAGE_ACTION = "salvage_cause_fix"
 
 
+_REPAIR_LEDGER_MAX = 200
+_REPAIR_LEDGER_RATIONALE_CAP = 400
+
+
+def _record_repair_ledger(st: RunState, d: dict) -> None:
+    """Append one row to the cross-node repair ledger — see `RunState.repair_ledger` for why it
+    exists and what it deliberately does NOT do.
+
+    Recorded OUTSIDE the pending/generation guard below on purpose: that guard protects the node's
+    own CODE from a duplicate or post-terminal row, and this records a fact about the run rather
+    than mutating a node. Idempotence is provided instead by the (node, attempt, generation) key, so
+    a double-fold collapses to the same single row and replay stays a pure function of the log."""
+    node_id = d.get("node_id")
+    attempt = d.get("attempt")
+    generation = d.get("generation")
+    if type(node_id) is not int:
+        return
+    key = (node_id, attempt, generation)
+    for row in st.repair_ledger:
+        if (row.get("node_id"), row.get("attempt"), row.get("generation")) == key:
+            return
+    if len(st.repair_ledger) >= _REPAIR_LEDGER_MAX:
+        return
+    # `changed` is the path list the repair itself declared; fall back to the keys of `files` so a
+    # row written before that column existed still names what it touched.
+    paths = d.get("changed")
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        paths = sorted((d.get("files") or {}).keys()) if isinstance(d.get("files"), dict) else []
+    rationale = d.get("rationale")
+    st.repair_ledger.append({
+        "node_id": node_id,
+        "attempt": attempt,
+        "generation": generation,
+        "reason": d.get("reason") if isinstance(d.get("reason"), str) else None,
+        "paths": [p for p in paths][:40],
+        "rationale": (rationale[:_REPAIR_LEDGER_RATIONALE_CAP]
+                      if isinstance(rationale, str) else None),
+    })
+
+
 def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
     # node's code with the LLM-repaired version BEFORE the eval that follows it. Idempotent
@@ -1095,6 +1135,7 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # or post-terminal node_repaired (corrupt/double-fold) is a no-op — mirrors the
     # `first_terminal` guard above. The LLM/subprocess are never re-invoked; the final code
     # and metric/status are reconstructed purely from this event + the terminal event.
+    _record_repair_ledger(st, d)
     n = _node_for_event(st, d)
     if (n is not None and n.id not in st.aborted_nodes and not n.tombstoned
             and _generation_matches(n, d)
@@ -1319,6 +1360,23 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     if not isinstance(found, dict) or not found:
         return
     node.extra_metrics = normalize_extra_metrics(found)
+    # OPEN[score-backfill-fold-drops-backfilled-marker] the docstring's "backfilled marker beside
+    # it" never reaches folded state, and neither does `precision_decimals`.
+    # proof:line:EXTRA_METRIC_DECLARED&&node.extra_metrics})@looplab/events/replay.py
+    # REVIEW 2026-08-25 (correctness): the sibling handler below stamps `backfilled: true` into the
+    # record it folds, so a reconstruction is legible as one on every surface; THIS handler folds
+    # only values + a bare `declared` channel, and the marker plus the per-key decimals the writer
+    # argues a reader "must not have to guess" (`maintenance/backfill_score_metrics.py`) live only
+    # on the raw event row — which no surface reads. So a recovered 2-decimal nDCG@100 renders on
+    # the extras table, the exports and `read_experiment` exactly like a live operator-declared
+    # measurement (`extraMetricIsDeclared` answers true for it), and v4's nodes 0 and 1 — equal on
+    # every recovered row only because the print statement cannot separate them — read as MEASURED
+    # ties. That is the reconstruction-presented-as-measurement inversion both backfill docstrings
+    # exist to refuse, committed by the one handler of the pair that promises otherwise. Fix
+    # direction: carry the marker + decimals somewhere the fold keeps (the sibling stamps its
+    # record inside `metric_provenance`, which is a plain dict) and teach the extras readers the
+    # absent-means-live default; or stop the docstring claiming a marker exists. Delete this
+    # marker with either.
     node.extra_metrics_provenance = normalize_extra_metric_channels(
         {k: EXTRA_METRIC_DECLARED for k in node.extra_metrics})
     # ...and NOT `extra_metrics_direction`. See the docstring: the axis stays unorientable because
@@ -2888,6 +2946,23 @@ def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
         at_node = d.get("at_node")
         if type(at_node) is int and 0 <= at_node <= (1 << 31) - 1:
             receipt["at_node"] = at_node
+        # THE CONCEPTS THE QUESTION IS ABOUT, and until now this handler dropped them on the floor.
+        # A question registered here becomes a board row that owns no action, and it carried NO
+        # concept membership at all — measured on `runs/e5small-dr-unified-v5`, all five questions
+        # had `concept_tags=[]` while the run's one experiment carried four. So the concept
+        # hierarchy and the question board were disjoint taxonomies over the same run: an operator
+        # grouping by concept saw the experiments and none of the questions they answer.
+        #
+        # Bounded by the SAME rule every other concept membership goes through
+        # (`bounded_raw_concept_values`), so a question cannot introduce a slug shape a node could
+        # not. Absent/malformed leaves the receipt without the key entirely, which is what keeps
+        # every log on disk folding byte-identically — an empty list would be an authored claim of
+        # "no concepts", and that is a different statement from "this writer said nothing".
+        raw_concepts = d.get("concepts", d.get("concept_tags"))
+        if isinstance(raw_concepts, list):
+            values, _overflow, _invalid = bounded_raw_concept_values(raw_concepts)
+            if values:
+                receipt["concepts"] = values
         st.hypotheses_added.append(receipt)
         # Re-adding an abandoned statement reopens it (last write wins).
         try:
@@ -2952,6 +3027,24 @@ def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # arbitrary objects from becoming enormous strings later in `_derive_cards`.
         receipt["_event_index"] = ctx.event_index
         st.cards_dropped.append(receipt)
+
+
+def _on_card_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """An operator putting a stopped card back on the board.
+
+    MIRRORS `_on_card_dropped` deliberately, down to reusing its bounded receipt: the two are one
+    lifecycle switch and a second, subtly different bound is how they come to disagree about which
+    ids are admissible. `_event_index` is what resolves them — last receipt wins — so drop, reopen
+    and drop again is expressible and replays identically.
+
+    The drop receipt is NOT removed. The log is append-only and who stopped the work and why is
+    history the reopened card still owes its reader; `_apply_card_drops` simply stops APPLYING a drop
+    that a later reopen supersedes.
+    """
+    receipt = _bounded_card_drop_receipt(d)
+    if receipt is not None:
+        receipt["_event_index"] = ctx.event_index
+        st.cards_reopened.append(receipt)
 
 
 def _on_card_reprioritized(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -4118,6 +4211,7 @@ _HANDLERS = {
     EV_CARD_DROPPED: _on_card_dropped,
     EV_CARD_REPRIORITIZED: _on_card_reprioritized,
     EV_CARD_EDITED: _on_card_edited,
+    EV_CARD_REOPENED: _on_card_reopened,
     EV_CARD_RESOURCE_PINNED: _on_card_resource_pinned,
     EV_CARD_ENRICHED: _on_card_enriched,
     EV_CARD_RANKED: _on_card_ranked,

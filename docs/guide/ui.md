@@ -319,7 +319,43 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   `trust_gate` to `gate`/`block` (or pick the `thorough` profile) to make a **high-precision** flag
   ineligible to win or seed breeding/confirmation. Broad critic/perfect-score warnings remain advisory;
   `critic:hardcoded_metric` is the narrow high-precision critic exception.
-- **Cards board** — the run's bounded work-item projection, grouped into the replay-derived lifecycle
+- **Cards board** — two views over one card population, chosen by the **Group the board by** bar,
+  and they answer two different questions. **Lanes** is the kanban below. **Research** is
+  the question LADDER: rows are the run's questions, nested by *concept-set inclusion* — a question
+  about `{distill, llm}` sits under both `{distill}` and `{llm}`, indented one rung under each.
+  Four rules an operator should know it follows, none of them cosmetic. A question with two broader
+  questions is **listed under both**, subtree and all, and says "also listed above" where it appears:
+  electing one canonical parent would hide half the structure and the choice would depend on
+  iteration order. A rung shows only the concepts it **adds** to its parent, so each row states what
+  it narrows instead of repeating the chain. The number on a row is the **best** improvement measured
+  anywhere in its subtree *including its own experiments* — never a sum, since two experiments testing
+  one sharpening would add their gains into a total nobody measured — with `own` shown separately
+  when the row's own experiments did worse than a sharper child. And a row whose evidence nodes
+  recorded **provably different comparability keys** says `mixed comparability` beside the number
+  rather than hiding it, exactly as a champion that won a mixed field does: blanking it would leave
+  the questions that got the most work showing nothing. Absent keys are silence, not disagreement.
+  A question with no experiment yet keeps its row and says so — it is the most actionable row on the
+  view. Below the ladder, **Not filed under any question** holds the experiments no question claims:
+  they have no position in a concept lattice, so they are a section beside it rather than a row
+  inside it, and the section is rendered only when occupied. Between the ladder and that section
+  every card the wire carried is drawn somewhere — the property on which the **Directions** tab was
+  retired (2026-08-26) without losing a row, since its own "Not filed under any direction" group had
+  been the only other surface holding them. Directions grouped experiments under the direction that
+  owns them, one flat parent→child level; the ladder reads the *same* `parent_card_id` edge and adds
+  the concept-set nesting, so it was a strict superset rather than a substitute — which is why the
+  tab could go rather than being kept beside it. The grouping choice is not persisted, so no operator
+  is left holding a selection that no longer exists. A question the run **closed** (status `dropped`, or verdict `abandoned`) is **dimmed in
+  place, never removed**: it is part of the chain that explains its neighbours, and there is no
+  "hide closed" control for that reason. Beside it the view says whether the closure rests on
+  anything — at least one sharper question below it, or at least one experiment of its own that
+  produced evidence — and a closure resting on neither is marked `nothing narrower`. That is the
+  operator's own rule made checkable: a direction should not be discarded when no more precise
+  experiment was ever run. The view only REPORTS it; nothing here reopens a card, and reopening is
+  not yet a control the engine has. A question carrying no concepts is neither dropped nor seated among the real roots; it has no
+  position in the lattice and gets its own bucket, last. Before the opening memo is written the view
+  says no question has been registered, which is a healthy run's first minutes and not an empty board.
+  The lanes:
+  the run's bounded work-item projection, grouped into the replay-derived lifecycle
   lanes (proposed / building / **coded** / running / evaluated / **failed** / gated / dropped) —
   *except while a build is in
   flight*, where the derived, never-folded `state.card_authoring` overlay replaces the folded status
@@ -350,8 +386,9 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   reads Failed and retires, which is what stops a returned idea from looping. Unknown future
   statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
-  edit display text, pin the 1-based visible priority, pin a configured GPU request, or deliberately
-  drop a Card. All four actions use the same generation-fenced command lifecycle as the rest of the
+  edit display text, pin the 1-based visible priority, pin a configured GPU request, deliberately
+  drop a Card, or — since 2026-08-26 — **reopen** one. All five actions use the same
+  generation-fenced command lifecycle as the rest of the
   workspace; accepted/executing actions remain visibly pending across SSE lag, while a definite
   failure rolls back only that optimistic field. Browser state is scoped to run + event-log generation,
   so a late response from a replaced run cannot mutate the new board. Resource display keeps the
@@ -361,7 +398,36 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   GPU-owning Run may wait behind the conservative pool-wide host lease. The UI shows the configured
   request, not a live allocation or queue position. Dropping a Card is
   the explicit stop-now affordance for its matching in-flight eval; engine/freshness drops still burn
-  to a valid terminal result. The Card board stores work items; `belief_id` groups retries or other cards
+  to a valid terminal result. **A drop is no longer terminal.** `st.cards_dropped` was an
+  accumulating list nothing ever removed, so a stopped Card sat visible-but-unactionable in the
+  `dropped` lane with no event in the vocabulary that could return it — the operator asked for the
+  control by name. `card_reopened` is its counterpart, resolved **last receipt wins** by event index,
+  so drop / reopen / drop is expressible and replays identically, and a stale reopen can never revive
+  a Card the operator has since stopped again. The **drop receipt survives**: the log is append-only
+  and who stopped the work and why is history the reopened Card still owes its reader — only whether
+  the drop is *applied* changes. The affordance appears **only on a stopped Card** and deliberately
+  **not** behind the danger disclosure the drop lives in: ending a line of work and resuming one
+  should not be presented with the same weight. A reopen carrying no event index leaves the drop
+  standing, which is the fail-closed direction — the fold stamps an index on every receipt it writes,
+  so a missing one means a hand-written or pre-upgrade row.
+  **Only an OPERATOR's drop can be reopened, and only the board can say so.** The fold has always
+  refused a reopen over an engine `card_auto_dropped` receipt — an engine retirement is a decision
+  the run made about its own supply, not a control the operator holds — but the board offered the
+  affordance on *any* stopped Card, where the request returns 2xx, the event is appended and a
+  success toast fires while the fold declines it; because the optimistic patch waits for a status
+  change that never arrives, the retired Card then rendered as live until a reload. The control is
+  now shown exactly where the gesture can succeed, and the append-time guard refuses the rest with
+  `card_reopen_not_permitted` rather than accepting an event replay discards — a direct API caller
+  and a stale client get a real refusal, which the browser rolls its optimistic field back on.
+  The gate reads the card's **whole drop history and not just the head receipt**: an operator
+  `card_dropped` landing on top of an engine one would otherwise make the pair reopenable and remove
+  the engine's retirement with it, which is unrecoverable — re-retiring is idempotent by history. If
+  any engine-authored drop precedes the reopen, the drop stands, whoever wrote the most recent row.
+  All three surfaces read **one** derivation: the fold stamps `Card.reopenable` and publishes it
+  beside `dropped_by`, because `dropped_by` names only the head receipt's author and so reads
+  `operator` for exactly the laundered pair above. A reopen of a card that is not dropped keeps its
+  tolerant no-op contract — there is nothing to undo, which is not a refusal.
+  The Card board stores work items; `belief_id` groups retries or other cards
   that test the same hypothesis, while the distinct-belief projection avoids duplicate prompt/ranking rows. The
   operator **+ Add** / **abandon** affordances write `hypothesis_added` / `hypothesis_updated` control
   events that seed and update cards.
@@ -943,7 +1009,10 @@ because nothing you can do in the browser makes it stop being true.
 
 **A `salvaged`, `trust-flagged` or `params overridden` pill beside a run's best metric.** The run
 selected on a number its own record carries a caveat about, and the caveat travels with the number so the
-portfolio cannot read it as a plain measurement. There are exactly three, they come from the server
+portfolio cannot read it as a plain measurement. There are FOUR in
+`engine/champion_caveats.py::CHAMPION_CAVEATS` — this page said "exactly three" and omitted
+`mixed_comparability`, which says the run's own evaluated nodes were not all measured against the same
+data, so the champion won a mixed field. They come from the server
 (`best_metric_caveats` on each `/api/runs` row, `engine/champion_caveats.py`), and each names a rung the
 operator set or a fact the engine derived — none of them a bug report. The first two qualify **how** the
 number was measured; the third qualifies **what it is a number for**:
@@ -958,18 +1027,40 @@ number was measured; the third qualifies **what it is a number for**:
 - **`params overridden`** — the champion's own committed `.py` code assigns a **different** value to a
   parameter its experiment record declares, so the declared configuration is not the one the result was
   produced under. The metric itself was measured normally; what is in question is the recipe beside it.
-  This is the one pill that is non-empty on this box today: `rubertlite-dr-unified-v8` node 3 is that
-  run's champion at 0.762048 with `train.training.batch_size` declared 8192 and `train.py:31` assigning
-  4096 (and `gradient_accumulation_steps` 2 → 4). The engine derives it from the declaration and the
-  bytes it committed and never from anything a model wrote about them; a repair that introduces one also
-  stamps `param_overrides` on its `node_repaired` row, which is what the node's repair history shows.
+  RE-DERIVED 2026-08-26 over all 45 event logs it is the only non-empty pill on this box, and it is no
+  longer one run — **3 of the 42 champions carry it**, including both leading numbers here:
+  `e5small-dr-unified-v2` node 1 (0.793426), `e5small-dr-unified-v4` node 13 (0.793411, declaring
+  batch_size 4096 / learning_rate 0.001 / n_epochs 3 against 2048 / 0.0005 / 1) and
+  `rubertlite-dr-unified-v8` node 3 (0.762048, batch_size 8192 declared / 4096 in `train.py:31`). This
+  page named only the last of the three until that scan; re-derive rather than quoting it.
+  **It has TWO sources and this page used to describe only one**: `declared_param_overrides` reads the
+  committed `.py` by AST, and `applied_params_diverged` reads the APPLIED-configuration record
+  (`runtime/applied_params.py`), whose carriers include YAML/JSON configuration documents. Both v2's and
+  v4's rows cite `vectorsearch/configs/config.yaml`, so a config-file divergence is exactly what fires
+  it. The engine derives it from the declaration and the bytes it committed and never from anything a
+  model wrote about them; a repair that introduces one also stamps `param_overrides` on its
+  `node_repaired` row, which is what the node's repair history shows.
+
+  **The pill is a slug; the DETAIL is on the node's Metrics tab.** The run row can only say the word,
+  which answers "may I reuse this configuration" with "no" and withholds the part that would let the
+  operator act. Under *Reported metrics* the node now prints every diverged coordinate it recorded —
+  the knob, the declared value, the value that ran, and the carrier file and line it was read from —
+  from `runIndex.js::appliedParamsDivergences` over the folded
+  `metric_provenance.applied_params`. It RENDERS and never re-derives: that record was decided at the
+  metric read against carriers the engine staged, and a second opinion formed in the browser would be a
+  different claim wearing the same name. `checked` rides beside the count so "everything else agreed" and
+  "nothing else was looked at" stay distinguishable, and `unresolved`/`conflicts` are counted apart from
+  `diverged` — a coordinate no carrier states, and one two carriers disagree about, are neither
+  divergences nor agreements.
 
 No pill is a claim that anything is wrong with the run: it is the claim that the number in the `best`
 column is not the same kind of evidence as the one beside it, and none of them moves a rank, a champion
 or a selection. **An absent pill is not a certificate either** — `reward_hack_detect` is off by default,
 so the second caveat is silent on most runs; the third is silent on every task whose space declares its
-parameters by bare name (the toy and benchmark spaces), and on a divergence expressed in a config file
-rather than in code. Only what a run RECORDED can be reported. Open the run and read the node's Trust
+parameters by bare name (the toy and benchmark spaces), and on a divergence no carrier the engine can
+read states at all. It is NOT silent on a config-file divergence — this page claimed that until
+2026-08-26 and the corpus refutes it, since the two e5small champions above diverge in
+`config.yaml` and are caveated for it. Only what a run RECORDED can be reported. Open the run and read the node's Trust
 and Metrics tabs before reusing its configuration.
 
 **`EACCES` executing a file under `node_modules` (e.g. esbuild), or `vite: not found`.** Vite's

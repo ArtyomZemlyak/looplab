@@ -16,6 +16,7 @@ looplab replay          Pure fold of the event log → state (read-only)
 looplab readmodel       Rebuild/check readmodel.sqlite — works on a live or crashed run (--check exits 1 if stale)
 looplab speculation-gate Validate paired Card-speculation evidence and publish the rollout receipt
 looplab timings         Wall-clock breakdown per node + run-level, reconciled against the run's duration
+looplab tokens          TOKEN breakdown by phase, reconciled against the durable llm_usage ledger
 looplab stage-dups      Duplicated stage work, and what a cross-node reuse key would have done
 looplab parser-stats    How the structured-output parser actually behaved on this box, per role
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
@@ -39,6 +40,7 @@ looplab claims          Lean statement/reference claim projection (PART IV cross
 looplab claim-decide    Lean operator decision overlay (PART V §22.4)
 looplab claim-steward   AGENTIC claim curator: proposal-only ratify/reject/pin review (PART IV §22.4)
 looplab atlas           Capped Atlas summary: explored / thin / contradictory (PART IV Step 6)
+looplab repair-candidates Which files this run's nodes had to fix, ranked by DISTINCT nodes
 looplab backfill-applied-params Repair the record where a node's PROPOSED params are not what RAN (offline, append-only)
 looplab backfill-score-metrics Recover the objectives a score stage measured and the record kept one of (offline, append-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)
@@ -694,6 +696,119 @@ reconciliation vs 27.9 min wall clock:
   stopped run waits for someone to finalize it. It is reported rather than hidden: a residual you
   can see is a residual you can go and instrument.
 
+### tokens
+
+Where the **tokens** went, by phase — the token twin of [`timings`](#timings)' wall-clock breakdown.
+
+```bash
+looplab tokens RUN_DIR [--top N]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (reads its `events.jsonl` and `spans.jsonl`) |
+| `--top N` | all phases | Show only the N largest phases; the remainder is collapsed into one stated row, never dropped |
+
+```
+        tokens   share   calls         prompt   completion  phase
+    28,027,840   25.8%     522     27,143,339      884,501  plan
+    27,436,262   25.3%     766     26,556,986      879,276  propose
+    19,533,608   18.0%     383     18,640,158      893,450  stages
+    18,636,924   17.2%     558     18,358,746      278,178  card_build
+    12,263,891   11.3%     259     11,729,850      534,041  inline_repair
+       308,166    0.3%      18        288,838       19,328  deep_research
+    …
+
+attributed :    108,534,235 tokens over 2,815 generation spans
+ledger     :    116,504,162 tokens (llm_usage, the durable record)
+residual   :      7,969,927 tokens (unattributed by any span)
+```
+
+**The total and the split come from different files, and that is the design.** `llm_usage` in
+`events.jsonl` is the durable, replayable ledger: it knows the true total and carries **no** phase,
+role or node. The `generation` spans in `spans.jsonl` carry `phase` but live in a sidecar that
+replay never rebuilds and that clearing a trace can destroy. So the ledger is the **denominator**,
+the spans supply the **attribution**, and the gap is printed — exactly as `timings` reconciles span
+durations against the event log's own wall clock.
+
+**Where the residual COMES FROM, and how to find the callers.** The tracer is bound inside
+`Tracer.span`, so `tracing.generation` no-ops when no operation span is open — the call is billed and
+traced nowhere. Since 2026-08-27 the engine names those sites itself: the first time each distinct
+caller reaches that branch it logs one WARNING, `untraced LLM generation: no operation span open at
+<file>:<line> in <function>`. So `grep 'untraced LLM generation' RUN_DIR.console.log` lists every
+producer whose calls are missing from this table, once each. It is a diagnostic only — no event, no
+run state, no decision moves on it.
+
+**Read `residual` before reading the shares.** On the run above it is 6.8 % of the real spend, so
+every `share` is a share of what the spans could attribute and not of what the run actually cost. It
+is **signed**: a negative residual means the spans over-attribute, which happens when a retried
+provider call opens two spans against one billed row, and it is reported rather than clamped.
+
+A generation with no phase is bucketed under `(no phase)`, never dropped — `timings` learned that
+the expensive way, having once hidden 143 of one run's 174 spans by dropping the node-less ones.
+
+**A SECOND table answers "which EXPERIMENT spent it, and was that experiment ever evaluated".**
+Phase says which *kind* of work the tokens bought; it cannot say that a particular build was thrown
+away. On a card-driven run the command now prints a per-card roll-up under the phase table:
+
+```
+        tokens   share   calls  nodes                 card
+    97,610,634   28.0%   1,220  2                     card-2
+    75,578,374   21.7%     748  0                     card-0
+    35,324,049   10.1%     732  3,6 DISCARDED         card-3
+    33,557,920    9.6%     593  4,7 DISCARDED         card-4
+    10,003,845    2.9%     496  -                     (no card)
+    41,389,065   11.8%          built and SKIPPED as stale, minting no node (3 of 12 builds)
+    68,881,969   19.8%          built and never evaluated (2 card(s) discarded before dispatch)
+```
+
+That last line is the number nothing could report before. On `e5small-dr-unified-v9`, **68.9M tokens
+— 21.0 % of the run at 17.6 h — bought builds that were discarded by the Card freshness gate before
+dispatch**, and those four nodes are TWO cards each built TWICE, the rebuilds costing more than the
+originals (40.9M of the 68.9M).
+
+**It is not a waste report.** A discarded prefetch is the freshness gate doing its job: the build was
+paid for, the selection it predicted no longer held, and the node-budget slot was refunded
+(`core/models.py::is_unevaluated_speculative_discard`). What the operator gains is the price of that
+trade, which had none — and `models.py` described a discard as costing "exactly one Developer call"
+until this measurement, where one build is 274-458 generations.
+
+**`DISCARDED` is narrow on purpose.** A card is flagged only when it owns at least one node and
+EVERY node it owns was proven an unevaluated discard. A card with no nodes yet is a build in flight,
+not a loss; a card with one discarded node and one that ran was evaluated, and the discarded sibling
+is the prefetch machinery working.
+
+**The two summary lines are DIFFERENT losses and must not be added up carelessly.** `never
+evaluated` is a build that minted a node which the freshness gate then discarded at dispatch.
+`SKIPPED as stale` is a build that finished with `card_build_done.skipped == "stale"` and no
+`node_id` — it never minted a node at all, so the gate never saw it. On `e5small-dr-unified-v9` only
+card-3's 1.2M is in both; net of that overlap, builds that produced no evaluation are **109.0M, 31 %
+of the run**.
+
+The stale line exists because the per-card rule is blind to it in both directions, which is exactly
+how it was found: card-5's only build was skipped, so it owns no node and carries no flag, and
+card-2 reads as a healthy 97.6M row while a third of that spend bought a build the engine threw
+away. Rather than widen `DISCARDED` — which answers a different question and answers it correctly —
+the skipped builds are priced from the durable log's own `card_build_requested` →
+`card_build_done` windows (`events/token_spend.py::token_spend_by_build`), charging a generation to
+a window only when its card matches *and* its start lies inside it.
+
+**How a card is attributed.** A generation span carries no `card_id` — the `card_build` span above it
+does — so each generation is charged to the nearest ancestor that names one (4,478 of that run's
+4,511 build generations, 97 % of its generation tokens). Everything else lands in `(no card)`, which
+is where every `propose` generation belongs by construction: a proposal is made before the card it
+may become exists. The section is suppressed entirely on a run where no card resolves, i.e. every
+serial-path run.
+
+**Why the phase is not simply stamped on `llm_usage` instead.** That was the obvious fix and it is
+the wrong one: `engine/costs.py` appends the row from an outbox drain and a reconcile retry loop as
+well as inline, so the phase in context at append time is the phase that *drained* the row, not the
+one that spent the tokens. A confidently wrong attribution on a durable row is worse than an honest
+one derived from the span that actually made the call.
+
+Note this box's provider is unpriced (`cost` 0.0, `priced_calls` 0), so **tokens are the meaningful
+unit here** and the command reports tokens rather than currency.
+
 When a run also carries a `budget` receipt, its `elapsed_s` is printed alongside the computed wall
 clock, flagged when the two differ by more than a second. On a run finalized before LoopLab
 2026-08-05 they can differ by orders of magnitude — see below. On a current run they differ only by
@@ -1106,6 +1221,38 @@ looplab backfill-score-metrics runs/ --apply             # actually append
   scored node".
 * **It refuses a live run**, by contending for `engine.lock`: a `score.log` still being written
   describes nothing yet.
+
+## `repair-candidates`
+
+**Which files this run's nodes had to fix, ranked by how many DISTINCT nodes fixed them.**
+
+`RunState.repair_candidates()` has been derived on every fold since the repair ledger landed and had
+no CLI, no route and no panel — the one question it answers, *what belongs in the source repo rather
+than in one node?*, could only be asked from a Python REPL over the event log.
+
+**DISTINCT NODES, not repair count**, and the distinction is the whole ranking: one node repairing
+the same file four times is one discovery, while four nodes repairing it once each is a property of
+the repo. A node inherits its PARENT's files and can never inherit a fix a SIBLING found — a node
+becomes a parent only by winning on metric — so the same fix is paid for again on every branch.
+Measured on `runs/e5small-dr-unified-v4`: **six** nodes repaired `looplab_stages.json` and **five**
+repaired `vectorsearch/configs/config.yaml`, four of those for `oom`, across 19 repair rows.
+
+It RANKS and decides nothing. Promoting a fix into the source repo moves the substrate every later
+node is measured on: that is the operator's call, and it has to be recorded as an event or the
+comparability key cannot tell nodes on either side of it apart (see `promote-repo-fix`).
+
+An empty answer distinguishes two facts an operator must not confuse — a run whose nodes never
+needed a repair, and a log written before the ledger existed.
+
+```bash
+looplab repair-candidates runs/my-run            # the ranked files
+looplab repair-candidates runs/my-run --nodes    # with the node ids behind each row
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `RUN_DIR` | *(required)* | The run directory to read |
+| `--nodes` | off | List the node ids behind each row |
 
 ## `backfill-applied-params`
 

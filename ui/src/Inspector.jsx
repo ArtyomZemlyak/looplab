@@ -17,6 +17,8 @@ import { nodeFeasibilityStatus, isSalvagedMetricViolation,
 import { EXTRA_METRIC_CHANNEL_HELP, EXTRA_METRIC_CHANNEL_LABEL,
   extraMetricChannel } from './extraMetrics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
+import { nodeAppliedParams, appliedParamsDivergences, appliedParamsChecked,
+  appliedParamsNotice } from './runIndex.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
   NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, attemptReadRequired, conversationWindow,
@@ -1261,7 +1263,11 @@ function SpanRow({ row, t0, total, runId, expectedGeneration, open, io,
     const request = traceDeadlineGet(
       runApiPath(runId, `/spans/${encodeURIComponent(s.span_id)}`), expectedGeneration)
     request.promise.then(d => {
-      if (!traceGenerationMatches(d, expectedGeneration)) throw 0
+      // The route echoes the observation id as well as the run generation. Both are part of the
+      // evidence identity: a proxy/schema regression that returns another span must never paint that
+      // span's prompt or tool output under the row the operator expanded.
+      if (String(d?.span_id) !== String(s.span_id)
+          || !traceGenerationMatches(d, expectedGeneration)) throw 0
       if (alive()) onIo(traceDetailState(d))
     }).catch(() => { if (alive()) onIo(unavailableTraceDetail()) })
     return request
@@ -1807,9 +1813,14 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
       const payload = matchingTracePayload(
         { status: observation ? 'fulfilled' : 'rejected', value: candidate },
         subject, expectedGeneration)
+      // A 200 envelope can still be an explicit failed observation (`_trace_unavailable`). Treat it
+      // like the rejected/deadline branch so a failed WIDER read keeps the last confirmed window
+      // instead of replacing it with an unavailable receipt.
+      const readablePayload = payload && !traceUnavailable(payload.projection) ? payload : null
       // A 200's cursor and ETag must agree before either is sent back. A 304 already matched the
       // exact validator this scope supplied. A proxy/header anomaly costs only the optimization.
-      const etag = payload && (observation.unchanged || payload.cursor === observation.etag)
+      const etag = readablePayload
+        && (observation.unchanged || readablePayload.cursor === observation.etag)
         ? observation.etag : null
       // Transport success is not enough: a delayed response for the previous lifecycle must never
       // settle this attempt's window. The server echoes both identity fields and independently rejects
@@ -1818,14 +1829,14 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
       // the server answered, about a node/attempt/generation that is no longer on screen. Retrying
       // this scope will keep answering about the new one; only reloading the run helps. The two were
       // indistinguishable, and both printed "Trace unavailable".
-      commit(!!payload, payload, etag,
+      commit(!!readablePayload, readablePayload, etag,
         observation && !payload ? TRACE_FAILURE_SUPERSEDED : TRACE_FAILURE_UNREADABLE)
       const logPayload = logs
         ? matchingNodePayload(logs, subject.nodeId, subjectAttempt, expectedGeneration)
         : null
       // The stage bands and their log text are one evidence snapshot. Never combine a retained
       // attempt-A conversation with logs returned while A was rejected/resetting.
-      if (payload && logPayload) setLogs(logPayload)
+      if (readablePayload && logPayload) setLogs(logPayload)
     // `allSettled` never rejects, so this branch is the DEADLINE — which is exactly the failure a
     // widened read hits. Routing it through the same `commit` is what stops a timed-out widen from
     // silently keeping the old payload with nothing said about it.
@@ -1913,19 +1924,38 @@ function RunSetupLog({ text }) {
 // until then), then that node's `/trace` projection at the requested limit; for one operation's
 // trace it is the only source there is, so it reads immediately. Polls on the same cadence as the
 // conversation while the subject is being worked, so paging a LIVE node does not freeze its trace at
-// the moment it was paged; `nonce` re-reads after a trace clear. A failed read stays null and falls
-// back to the detail payload rather than blanking a trace the operator can still see — asking for
-// more must never cost them what they had.
+// the moment it was paged; `nonce` re-reads after a trace clear. A failed read retains the last
+// confirmed page (or falls back to an eligible detail payload) while bounded retry runs — asking
+// for more must never cost the operator what they already had.
 function usePagedTrace({
   subject, runId, expectedGeneration, limit, nonce, working, enabled,
 }) {
   const [settled, setSettled] = useState(null)
+  // Unlike the lifecycle nonce above, a retry is the same evidence question. Keeping it separate is
+  // what lets a failed refresh retain the page already on screen while a bounded automatic retry runs.
+  const [retryNonce, setRetryNonce] = useState(0)
   const subjectKey = traceSubjectKey(subject)
   const scope = `${expectedGeneration || runId}:${subjectKey}:${nonce}`
+  const current = enabled && settled?.scope === scope ? settled : null
+  const autoRetryMs = working ? null : traceRetryMs(current?.failures, current?.failure)
+  useTraceRetry(autoRetryMs, current?.failures || 0, setRetryNonce)
   // Identity changes (and an explicit post-clear nonce) discard evidence. A larger window does not:
   // the narrower successful page remains the last confirmed truth until its replacement settles.
   useEffect(() => { setSettled(null) }, [enabled, scope])
   usePoll((alive) => {
+    const fail = failure => {
+      if (!alive()) return
+      setSettled(previous => {
+        const prior = previous?.scope === scope ? previous : null
+        return {
+          scope,
+          payload: prior?.payload || null,
+          stale: true,
+          failures: (prior?.failures || 0) + 1,
+          failure,
+        }
+      })
+    }
     const request = traceDeadlineGet(
       runApiPath(runId, traceRequestPath(subject, TRACE_VIEW_SPANS)),
       expectedGeneration, traceSubjectAttempt(subject), limit, traceReadDeadlineMs(limit),
@@ -1934,19 +1964,36 @@ function usePagedTrace({
       // Same fence the Dock applies: a response for another node/attempt — or another trace — is a
       // stale in-flight read from the previous scope, never this subject's trace.
       if (!traceSubjectMatches(subject, d)
-          || !traceGenerationMatches(d, expectedGeneration)) throw 0
-      if (alive()) setSettled({ scope, payload: d })
+          || !traceGenerationMatches(d, expectedGeneration)) {
+        fail(TRACE_FAILURE_SUPERSEDED)
+        return
+      }
+      // `_node_trace` deliberately returns an unavailable projection rather than leaking an internal
+      // error. It is still a failed observation, not a successful page that may replace last-good rows.
+      if (traceUnavailable(d?.projection)) {
+        fail(TRACE_FAILURE_UNREADABLE)
+        return
+      }
+      if (alive()) setSettled({ scope, payload: d, failures: 0 })
     })
-      .catch(() => {
-        if (alive()) setSettled(previous => previous?.scope === scope
-          ? { ...previous, stale: true }
-          : { scope, payload: null, stale: true })
-      })
+      .catch(() => fail(TRACE_FAILURE_UNREADABLE))
     return request
   },
     working ? 4000 : null,
-    [runId, subjectKey, expectedGeneration, limit, nonce, working, enabled], { enabled })
-  return enabled && settled?.scope === scope ? settled : null
+    [runId, subjectKey, expectedGeneration, limit, nonce, retryNonce, working, enabled], { enabled })
+  if (!current) return null
+  return {
+    ...current,
+    retrying: autoRetryMs != null,
+    // A manual retry refills the automatic budget, then takes the exact same read path. It does not
+    // change `scope`, so any confirmed payload remains visible until the replacement settles.
+    retry: () => {
+      setSettled(previous => previous?.scope === scope
+        ? { ...previous, failures: 0 }
+        : previous)
+      setRetryNonce(value => value + 1)
+    },
+  }
 }
 
 // THE TRACE SURFACE — the one way this UI reads a trace, wherever a trace is read.
@@ -2000,6 +2047,7 @@ export function TraceSurface({
   const subjectAttempt = traceSubjectAttempt(subject)
   const subjectAnchored = traceSubjectBefore(subject) != null
   const detailAttempt = detail ? detail.attempt : null
+  const canUseDetail = !!detail && !subjectAnchored && subjectAttempt === detailAttempt
   // `view` is part of the gate, not just the window: the conversation branch returns below without
   // ever reading `paged`, and both views raise the SAME shared window BY DESIGN — so an operator who
   // reached for earlier steps in the conversation had a second 4 s poll running against this node for
@@ -2007,15 +2055,16 @@ export function TraceSurface({
   // at the x8 ceiling). With no detail payload there is nothing to fall back to, so the read is not
   // optional at all.
   const readNonce = `${nonce}:${retryNonce}`
+  const pagedEnabled = traceSubjectValid(subject) && !!runId
+    && view !== TRACE_VIEW_CONVERSATION && (!detail || attemptReadRequired({
+      selected: subjectAttempt, current: detailAttempt, anchored: subjectAnchored,
+      canPageFurther: spanLimit > NODE_TRACE_SPAN_WINDOW,
+    }))
   const pagedRead = usePagedTrace({
     subject, runId, expectedGeneration, limit: spanLimit, nonce: readNonce, working,
     // The validity gate belongs HERE as well as at the early return below: hooks run during render,
     // so an unguarded read would already be in flight by the time the refusal renders.
-    enabled: traceSubjectValid(subject) && !!runId
-      && view !== TRACE_VIEW_CONVERSATION && (!detail || attemptReadRequired({
-        selected: subjectAttempt, current: detailAttempt, anchored: subjectAnchored,
-        canPageFurther: spanLimit > NODE_TRACE_SPAN_WINDOW,
-      })),
+    enabled: pagedEnabled,
   })
   const paged = pagedRead?.payload
   const trace = detail
@@ -2034,14 +2083,28 @@ export function TraceSurface({
   // empty claim ("No observations were recorded…") about a read that merely timed out, under a
   // header notice saying "showing confirmed spans" with zero spans ever confirmed. A failed
   // observation is never evidence that the subject recorded nothing.
-  const unavailable = detailUnavailable
-    || (!detail && (traceUnavailable(trace?.projection)
-                    || (pagedRead?.stale && !pagedRead?.payload)))
+  const usingDetail = !paged && canUseDetail
+  const pagedFailure = pagedRead?.stale && !paged
+  const unavailable = traceUnavailable(trace?.projection)
+    || (usingDetail && detailUnavailable)
+    || (pagedFailure && !canUseDetail)
+  const failedReadLabel = pagedFailure
+    ? traceFailureLabel(pagedRead?.failure, { retrying: pagedRead?.retrying === true })
+    : undefined
+  const failedReadRetry = pagedFailure
+    ? (pagedRead?.failure !== TRACE_FAILURE_SUPERSEDED ? pagedRead.retry : null)
+    : onRetry
+  const retainedSpanEvidence = !!pagedRead?.payload || (canUseDetail && !!detail?.payload)
   const inline = chrome === 'inline'
   const head = <div className={'trace-head' + (inline ? ' trace-head-inline' : '')}>
     {status}
-    {view !== TRACE_VIEW_CONVERSATION && pagedRead?.stale && <TraceUnavailable
-      label="Span-tree refresh failed; showing confirmed spans." />}
+    {view !== TRACE_VIEW_CONVERSATION && pagedRead?.stale && retainedSpanEvidence
+      && <TraceUnavailable
+        label={pagedRead.failure === TRACE_FAILURE_SUPERSEDED
+          ? traceFailureLabel(pagedRead.failure)
+          : `Span-tree refresh failed; showing confirmed spans${pagedRead.retrying
+            ? ' while retrying automatically' : ''}.`}
+        onRetry={pagedRead.failure !== TRACE_FAILURE_SUPERSEDED ? pagedRead.retry : undefined} />}
     <div className="conv-toggle">
       {TRACE_SURFACE_VIEWS.map(v => <button key={v} type="button" aria-pressed={view === v}
         className={'seg' + (view === v ? ' on' : '')}
@@ -2067,6 +2130,10 @@ export function TraceSurface({
       reloadNonce={readNonce} onRetry={retryRead}
       spanLimit={spanLimit} onLoadMore={loadMore} />)
   }
+  // A historical/anchored node and an operation trace have no eligible detail fallback. Until their
+  // first page settles, the only honest state is loading — never the positive "no spans" claim.
+  if (pagedEnabled && pagedRead === null && !canUseDetail)
+    return shell(<div className="muted trace-small" role="status">loading…</div>)
   // The span tree's window rule, over whichever payload is rendering (paged read or detail default).
   // Same `canPage` as the conversation, because both raise the SAME window.
   const spanWindow = traceWindow(trace?.projection, { canPage })
@@ -2079,10 +2146,12 @@ export function TraceSurface({
     onReach={loadMore} notice={traceWindowNotice(spanWindow)} />
   // Unavailable takes precedence over every empty/partial shape: a failed observation is never
   // evidence that the subject recorded nothing.
-  // (`unavailable` above already folds in the detail-less subject's failed sole read, which used
-  // to fall through to the positive empty claim.)
+  // (`unavailable` above already folds in a subject with no eligible detail fallback whose sole
+  // paged read failed, which used to fall through to the positive empty claim.)
   if (unavailable)
-    return shell(<TraceUnavailable onRetry={onRetry || retryRead} pending={retryPending} />)
+    return shell(<TraceUnavailable label={failedReadLabel}
+      onRetry={pagedFailure ? failedReadRetry : (failedReadRetry || retryRead)}
+      pending={pagedFailure ? false : retryPending} />)
   if (!spans.length) {
     if (spanWindow.kind !== 'complete')
       return shell(<><div className="notice compact" role="status">
@@ -2280,8 +2349,10 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
       title="Return the window to this experiment's most recent steps">latest ›</button>}
     {open && <span className="trace-episodes-body">
       {map === null && <span className="muted" role="status">loading steps…</span>}
-      {map?.status === 'unavailable' && <span className="muted" role="status">
-        {EPISODE_MAP_UNAVAILABLE}</span>}
+      {map?.status === 'unavailable' && <>
+        <span className="muted" role="alert">{EPISODE_MAP_UNAVAILABLE}</span>
+        <button type="button" className="btn xs ghost" onClick={reloadEpisodes}>retry steps</button>
+      </>}
       {map?.status === 'empty' && <span className="muted" role="status">{EPISODE_MAP_EMPTY}</span>}
       {/* READ FINE, AND NOT EMPTY. This node has earlier steps and the map can point at none of
           them — a bounded server map, or rows with no anchor. It used to fall into `empty` above
@@ -2473,6 +2544,11 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   const researchRows = research
     ? (cardTraceSections(research).find(section => section.kind === 'research')?.rows || [])
     : []
+  const researchUnavailable = traceUnavailable(research?.projection)
+  const researchSuperseded = research?.projection?.superseded === true
+  const researchNotice = researchSuperseded
+    ? traceFailureLabel(TRACE_FAILURE_SUPERSEDED)
+    : cardTraceNotice(research)
   const researchStrip = cardId && <div className={'trace-research' + (researchOpen ? ' open' : '')}>
     <div className="trace-research-bar">
       <button type="button" className="btn xs ghost trace-research-toggle" aria-expanded={researchOpen}
@@ -2492,9 +2568,12 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
           sentence here made the two screens disagree about the same fact. "No research is linked to
           card-3" is a positive claim about the Researcher's proposal; a read that never landed
           cannot support it, and the disclosure is not re-fetched on collapse, so it stuck. */}
-      {research !== null && !researchRows.length && <div className="muted" role="status">
-        {cardTraceNotice(research)
+      {research !== null && !researchRows.length && <div className="muted"
+        role={researchUnavailable ? 'alert' : 'status'}>
+        {researchNotice
           || `No research is linked to ${cardId} — it is never inferred from timing.`}</div>}
+      {researchUnavailable && !researchSuperseded && <button type="button" className="btn xs ghost"
+        onClick={() => setResearch(null)}>retry research trace</button>}
       <ResearchTraces rows={researchRows} runId={runId} expectedGeneration={expectedGeneration} />
     </div>}
   </div>
@@ -2719,6 +2798,30 @@ export function Metrics({ n, detail, state, runId }) {
     {objectiveCaveated && <div className="muted">
       The ★ objective is marked <b>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</b>.{' '}
       {objectiveSourceHelp(objective)}
+    </div>}
+    {/* WHAT THE NUMBER IS FOR, beside the two footnotes about how it was MEASURED. The run row can
+        only say the slug `params_overridden` (`runIndex.js::bestMetricCaveats`), and until this
+        shipped that was the whole answer an operator got: their champion's coordinates are wrong,
+        and not which knob. The rows have been on `metric_provenance.applied_params` all along.
+        Printed rather than hovered for the same reason as the ★ footnote above — an operator
+        scanning a table does not hover every cell — and the sentence comes from the same call the
+        model owns, so the wording cannot drift from the count. It SURFACES and does not accuse: the
+        Developer deviating from a proposal is legitimate and documented; what would be the defect is
+        the record claiming the declared value. */}
+    {appliedParamsDivergences(nodeAppliedParams(n)).length > 0 && <div className="muted">
+      <b>Declared coordinates that did not run.</b> {appliedParamsNotice(nodeAppliedParams(n))}
+      <ul className="applied-param-divergences">
+        {appliedParamsDivergences(nodeAppliedParams(n)).map(d => <li key={d.param}>
+          <code>{d.param}</code>: declared <b>{fmt(d.declared)}</b> · ran{' '}
+          <b className="warn">{fmt(d.applied)}</b>
+          {d.file ? <span className="muted"> · {d.file}{d.line == null ? '' : `:${d.line}`}
+            {d.match === 'suffix' ? ' (matched by dotted suffix)' : ''}</span> : null}
+        </li>)}
+      </ul>
+      {appliedParamsChecked(nodeAppliedParams(n)) == null && <span className="muted">
+        This record does not say how many coordinates were checked, so it cannot tell you that the
+        rest agreed — only that these did not.
+      </span>}
     </div>}
     {anyUnverified && <div className="muted">
       Rows marked <b>self-reported</b> were taken from the experiment's own stdout with nothing

@@ -36,7 +36,16 @@ def test_support_is_sticky_when_a_record_setter_is_overtaken():
     assert st.best_node_id == 3                                       # #3 is now best
     assert b["H2 record"].verdict == "supported"                      # ... yet #2's verdict STANDS
     assert b["H3 winner"].verdict == "supported"                      # the current record too
-    assert b["H1 baseline"].verdict == "supported"                    # the first node ESTABLISHED the SOTA
+    # #1 ESTABLISHED the SOTA, which is not the same as advancing it: there was nothing to advance
+    # over. This line asserted `supported` and is INVERTED — see
+    # `tests/test_verdict_needs_a_comparison.py` for what that verdict cost on
+    # `runs/e5small-dr-unified-v5`, where a Researcher read it, disbelieved it in its own trace and
+    # spent a whole Developer build re-implementing the card.
+    #
+    # The three parentless drafts above are also why the discriminator is the ESTABLISHER and not a
+    # parent: keyed on "has a feasible parent", #2 and #3 — genuine record-beaters, one of them the
+    # run's champion — read `tested` too, which is the same board lie pointed the other way.
+    assert b["H1 baseline"].verdict == "tested"
 
 
 def test_hypothesis_delete_removes_it_from_the_board():

@@ -926,6 +926,36 @@ class LLMRepoDeveloper:
         # persona override silently dropping THAT is a safety hole. This is a hint about latency.
         return self._drop_stage_guidance(render(self.prompts, "repo_developer_system_body", default))
 
+    def _note_session_budget(self, payload) -> None:
+        """Remember WHICH bound ended a session, for the durable row to carry.
+
+        Passed as an EXPLICIT keyword and never folded into `_session_opts`'s bundle:
+        `loop_options.py` requires `LOOP_OPTION_FIELDS` and `EXPLICIT_ONLY_LOOP_ARGS` to PARTITION
+        the loop's keyword-only parameters, and a name reachable BOTH ways raises a duplicate-keyword
+        `TypeError` that the loop's own containment `except` swallows — silently degrading an agentic
+        phase to a non-agentic one, which is the defect that partition exists to prevent.
+
+        Best-effort exactly like `_note_budget`'s own contract: this fires on the way to a salvage
+        emit, so a raise here would turn a rescued answer into a crash.
+
+        `kind` IS THE WHOLE OF `tool_loop.py::LOOP_CUTOFF_KINDS`, not the two this docstring used to
+        name. `_note_budget` fires the same `on_budget` observer for all five — `time`, `turns`,
+        `stuck`, `stalled`, `emit_force` — and this stores whatever arrives, so three of them landed
+        on a durable column two comments described as "which BUDGET ended the session". Only the
+        first two are budget bounds; the other three are the loop ending a session that was not
+        going anywhere, which is a different fact with a different remedy, and
+        `crash_repair.py::_format_repair_log` now says which it was rather than implying a clock.
+        CLAIM[budget-exhausted-vocabulary] the durable `budget_exhausted` column carries any of the
+        five loop cutoff kinds, not only the two budget bounds.
+        decided:`line:LOOP_CUTOFF_KINDS&&emit_force@looplab/agents/tool_loop.py`
+        """
+        try:
+            kind = str((payload or {}).get("kind") or "").strip()
+        except Exception:  # noqa: BLE001 — an observer may not break the salvage path
+            return
+        if kind:
+            self.last_budget_exhausted = kind[:32]
+
     def _session_opts(self, *, max_turns=None, time_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
         a model that keeps writing/exploring without ever emitting `done` fails cleanly with the code
@@ -1124,7 +1154,8 @@ class LLMRepoDeveloper:
             run_phase(self.client, CompositeTools([write, EnvInspectTools(self._grader_packages())] + self._scout_tools(write)),
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
-                      fallback=lambda m: "", **self._session_opts())
+                      fallback=lambda m: "", on_budget=self._note_session_budget,
+                      **self._session_opts())
         except Exception as e:  # noqa: BLE001
             return f"(step {idx} error: {e})"
         return ""
@@ -1167,6 +1198,20 @@ class LLMRepoDeveloper:
             from looplab.tools.cross_run_tools import CrossRunTools
             tool = CrossRunTools(self._cross_run_memory_dir, role="developer", audience="run")
             state = getattr(self, "_memory_state", None)
+            # …AND the lessons ledger itself, role-scoped. Until 2026-08-23 the Developer could read
+            # what the prior renderer PUSHED at it and nothing more: `search_lessons` lives in
+            # `MemoryTools`, `MemoryTools` is composed in `agents/factory._shared_providers`, and the
+            # Developer assembles its own toolset here. Measured on `runs/e5small-dr-unified-v4`:
+            # across 10,455 tool calls `search_lessons` fired 10 times — 9 in `propose`, 1 in
+            # `deep_research`, ZERO in `card_build`/`plan`/`stages`/`inline_repair`. So the role that
+            # writes the code could not look up the lesson its current failure matches, and node 8
+            # repeated the stage failure node 6 had already diagnosed and fixed.
+            # `role="developer"` keeps meta-notes out — the same line the prior renderer draws.
+            from looplab.tools.memory_tools import MemoryTools
+            lessons_tool = MemoryTools(self._cross_run_memory_dir, role="developer")
+            if state is not None:
+                lessons_tool.bind_state(state)
+            extra.append(lessons_tool)
             if state is not None:
                 # Agent-facing providers are task-bound before use. Unbound reads remain an explicit
                 # human/CLI portfolio capability, never an accidental agent default — `audience="run"`
@@ -1174,6 +1219,29 @@ class LLMRepoDeveloper:
                 # than falling back to the whole portfolio.
                 tool.bind_state(state)
             extra.append(tool)
+        # THE QUESTION BOARD, for the role that writes the code an experiment runs. Measured
+        # 2026-08-26: this scout set had no reader for it at all — not `RunTools` (Researcher-only),
+        # and `read_run_experiment` here is a FOREIGN-run reader. So the Developer could not see the
+        # question its experiment answers, and the repair path could not see whether a sibling under
+        # the same question had already hit the same wall. A narrow provider rather than granting
+        # `RunTools` wholesale, which would also hand over `list_experiments`, `read_code` and the
+        # rest — a much larger change in what this role may do.
+        #
+        # ABOVE the `if not roots: return extra` below, and that placement is the point: a
+        # developer with no editable roots still repairs, still reasons about what to write, and
+        # still needs to know which question its work answers. Attaching the board after that
+        # early return coupled 'may I read the questions' to 'do I own source to edit', which are
+        # unrelated — and a behavioural test caught it where a source pin would not have.
+        from looplab.tools.question_board import QuestionBoardTools
+        board = QuestionBoardTools()
+        # `_memory_state`, NOT `_state` — the attribute this class actually holds, and the same one
+        # the lessons and cross-run tools are bound from twenty lines up. Binding a name that does
+        # not exist would leave the provider answering "no run state bound" on every call, i.e.
+        # shipped INERT, which is the failure this tree has paid for more than once.
+        state = getattr(self, "_memory_state", None)
+        if state is not None:
+            board.bind_state(state)
+        extra.append(board)
         roots = [e["path"] for e in (getattr(self, "_editables", None) or []) if e.get("path")]
         if not roots:
             return extra
@@ -1246,12 +1314,16 @@ class LLMRepoDeveloper:
                                            "assert": {"type": "string", "description":
                                                       "ONE line stating what this stage's success "
                                                       "MEANS, checkable against what the stage prints "
-                                                      "— e.g. 'hard negatives mined for at least 90% "
-                                                      "of the training queries' or 'all 30 epochs "
-                                                      "completed and a checkpoint saved'. State the "
-                                                      "WORK, never the result quality: 'the metric "
-                                                      "beats 0.85' is not a stage condition (the "
-                                                      "search ranks results, this does not)."}}}},
+                                                      "— e.g. 'negatives.parquet written with at "
+                                                      "least n_negatives negatives on every row' or "
+                                                      "'all 30 epochs completed and a checkpoint "
+                                                      "saved'. State the WORK, never the result "
+                                                      "quality: 'the metric beats 0.85' is not a "
+                                                      "stage condition (the search ranks results, "
+                                                      "this does not). Assert what the stage "
+                                                      "CONTROLS; a numeric bar you have not measured "
+                                                      "on this data is a guess that fails correct "
+                                                      "artifacts — print such a quantity instead."}}}},
                             "required": ["name", "command"]}}},
                         ["stages"])
 
@@ -1301,6 +1373,75 @@ class LLMRepoDeveloper:
             return eval_spec_time_budget(self._cmd_context()[0])
         except Exception:  # noqa: BLE001 — a bare/unit-test dev with no task states no budget
             return None
+
+    def _gpu_footprint_note(self, idea) -> str:
+        """How many GPUs THIS node will actually get, for the role that writes the launcher.
+
+        `_time_budget_note` one axis over, and the same defect: the RESEARCHER declares the footprint
+        and is told the budget (`engine/proposal_cues.py::_stamp_gpu_budget_hint` sets
+        `_gpu_budget_hint` on it, and `_gpu_footprint_cue` rides its prompts), while THIS role — the
+        one that writes `accelerate launch --num_processes N` into a stage command — was told
+        nothing about device count at all. Grep the Developer prompts before this landed: not one
+        mention of gpus, devices or CUDA.
+
+        MEASURED on `runs/e5small-dr-unified-v6` node 0, the run this note was written from. The
+        node declared `footprint {"gpus": 1}`; its own train stage was authored as
+        `accelerate launch --num_processes 2 --multi_gpu -m vectorsearch.train`;
+        `engine/resources.py::_acquire_gpus` fenced `CUDA_VISIBLE_DEVICES` to the one granted
+        device, and rank 1 died with `torch.AcceleratorError: CUDA error: invalid device ordinal`.
+        Cost: `mine` 356.5 s + `train` 171.6 s + a second identical `train` 172.0 s after an INERT
+        repair, and 62.7 minutes of wall clock from the first failure to a working manifest — to
+        discover a number that fits in one sentence.
+
+        SIX OF SEVEN nodes on this box get it right, so this is a rare miss and the note is a rung,
+        not a gate. It only ever ADDS a fact the role could not otherwise know; a static refusal
+        (`procs > footprint.gpus`) is a reasonable SECOND rung and is deliberately not here, because
+        refusing before informing tells the Developer "no" without telling it what to write — the
+        `runtime/deps.py` rule, where text may NOMINATE and only a probe DECIDES.
+
+        UNCONDITIONAL, with no `Settings` flag, following `_time_budget_note` rather than
+        `gpu_footprint_cue`: a note spliced into the DEVELOPER prompt makes no provider call, spends
+        nothing, kills nothing and moves no selection, so it has nothing a legacy-snapshot default
+        would need to hold back. Empty when the footprint states no integer count — a role told
+        "some GPUs" is worse off than one told nothing, and this must never guess.
+
+        IT READS THE DECLARATION AND NOT THE GRANT, and the sentence now says so. The granting
+        authority is `engine/resources.py::_resource_request_for_node`, which resolves an operator
+        `resource_pin` through `core/cards.py::effective_card_footprint` and then CLAMPS to the
+        detected pool — so a footprint of 4 on a two-GPU box is granted 2 while this read still says
+        4, reproducing the exact `invalid device ordinal` this note exists to prevent with the
+        engine's own prose as the cause. Neither input is reachable from an adapter: the pin is the
+        Card's and the pool is the Engine's `_gpu_ids`. Stating the declaration and naming what can
+        reduce it keeps every case the note was written for (all 132 recorded footprints on this box
+        are `{"gpus": 1}`, so the clamp bites on none of them) without asserting a number this side
+        cannot know. The exact fix is a stamp from the engine, the shape
+        `proposal_cues.py::_stamp_gpu_budget_hint` already uses for the Researcher.
+        CLAIM[developer-gpu-note-is-the-declaration] the device count in the Developer prompt is the
+        DECLARED footprint, not the grant — the grant clamps it to the detected pool and applies any
+        operator resource pin.
+        decided:`line:def _resource_request_for_node&&resource_pin@looplab/engine/resources.py`
+        """
+        gpus = None
+        try:
+            footprint = getattr(idea, "footprint", None)
+            if isinstance(footprint, dict):
+                raw = footprint.get("gpus")
+                # `isinstance(True, int)` is True, so a bool has to be refused explicitly — a
+                # footprint of `{"gpus": true}` would otherwise announce "1 GPU" about a
+                # declaration that states no count at all.
+                if type(raw) is int and raw > 0:
+                    gpus = raw
+        except Exception:  # noqa: BLE001 — a bare/unit-test dev carrying no idea states no footprint
+            return ""
+        if gpus is None:
+            return ""
+        return (f"\n\nTHIS NODE IS DECLARED {gpus} GPU{'' if gpus == 1 else 's'} AND WILL GET AT MOST "
+                f"THAT MANY. `CUDA_VISIBLE_DEVICES` is fenced to the granted "
+                f"{'device' if gpus == 1 else 'devices'} before your stages run, so a launcher that "
+                "starts more processes than that dies on the first one that asks for a device "
+                "outside the fence (`CUDA error: invalid device ordinal`), after the earlier stages "
+                f"have already been paid for. Size every `--num_processes` / `--nproc_per_node` / "
+                f"`--gpus` to {gpus} or fewer, and put the per-device batch size where it fits.")
 
     def _time_budget_note(self) -> str:
         """The operator's per-eval WALL-CLOCK budget, for the role that actually spends it (docs/29 F1h).
@@ -1547,7 +1688,11 @@ class LLMRepoDeveloper:
             "`%params%`). Give training a generous timeout."
             # docs/29 F1h: spliced AFTER the generous-timeout ask, never instead of it — "generous"
             # without a ceiling is what produced a 48-hour `train` stage on a 6-hour budget.
-            + self._time_budget_note() + "\n\n"
+            + self._time_budget_note()
+            # The device count, at the SAME splice position and for the same reason one axis over:
+            # this is the phase that authors the launcher command, so it is the phase that has to
+            # know how many devices exist.
+            + self._gpu_footprint_note(idea) + "\n\n"
             "GIVE EVERY STAGE ITS `needs` — the workdir-relative files it READS and cannot run without: "
             "what an earlier stage produces, plus whatever the seeded workdir must already contain. The "
             "engine checks them BEFORE the stage starts, so a pipeline whose stages disagree about where "
@@ -1574,11 +1719,36 @@ class LLMRepoDeveloper:
             "  • `files`: the workdir-relative paths this stage WRITES. The engine checks after the "
             "stage that each exists, is non-empty, and was written by THIS run of the stage.\n"
             "  • `assert`: ONE line stating what this stage's success MEANS, phrased so it can be "
-            "checked against what the stage PRINTS — 'hard negatives mined for at least 90% of the "
-            "training queries', 'all 30 epochs completed and a best-val checkpoint saved', 'embeddings "
-            "written for every document in the corpus'. State the WORK, not the result quality: 'recall "
-            "beats 0.85' is not a stage condition — the search ranks results, this only asks whether the "
-            "stage did its job.\n"
+            "checked against what the stage PRINTS — 'negatives.parquet written with at least "
+            "n_negatives negatives on every row', 'all 30 epochs completed and a best-val checkpoint "
+            "saved', 'embeddings written for every document in the corpus'. State the WORK, not the "
+            "result quality: 'recall beats 0.85' is not a stage condition — the search ranks results, "
+            "this only asks whether the stage did its job.\n"
+            # THE EXAMPLE HERE IS LOAD-BEARING AND THIS ONE WAS MEASURED WRONG. It used to read "hard
+            # negatives mined for at least 90% of the training queries", and that exact sentence is
+            # in 28 of the 33 numeric asserts this corpus has ever produced — the model was not
+            # inventing a bar, it was COPYING the one it was shown, which is why 6 different runs
+            # converged on the same number. On this data the true figure is 41.8 % (908,121 of
+            # 2,170,069): `add_negatives` inner-joins mined ids to product names and drops the rest
+            # BY DESIGN, and the champion (0.7934) was trained on exactly that. So the shipped
+            # example refused the recipe that produced this box's best result — verified on
+            # e5small-dr-unified-v8 node 1, which mined a valid 2,732,976-row parquet, failed its own
+            # gate, and was abandoned after two repairs with the engine's own diagnostician calling
+            # it `check_false_positive` and being right.
+            #
+            # THE REPLACEMENT IS NOT A SMALLER NUMBER, IT IS A DIFFERENT KIND OF CLAIM: every row
+            # carrying its n_negatives is a property the stage CONTROLS and can guarantee; the share
+            # of queries that survive a downstream join is an OUTCOME of the data it does not. A
+            # stage that mines 1 % still fails this loudly, which is the whole point of `expect` two
+            # paragraphs up. The sentence below says the rule outright, because an example alone is
+            # what got copied last time.
+            "A numeric bar you have NOT measured on THIS data is a guess, and a guess in an `assert` "
+            "fails stages whose artifact is correct. Assert the property the stage CONTROLS (every "
+            "row has its negatives; the checkpoint exists; the file covers the ids it claims) and "
+            "PRINT the quantity you do not control (coverage, survival rate, class balance) as "
+            "information. If you genuinely need a bar on an outcome, measure it first — read the "
+            "code that produces the number, or run the smallest probe that answers it — and say in "
+            "the assert what you measured it against.\n"
             "Write the `assert` against a number the stage will actually print; the implement phase then "
             "has to make the stage print it (and assert it in code). Declare `expect` for EVERY stage "
             "you can, and especially for any stage whose script you will NOT be able to edit later "
@@ -1676,7 +1846,7 @@ class LLMRepoDeveloper:
                 self.client, read_only, messages, self._stages_emit_spec(),
                 label="Developer·stages", next_label="the plan & implement phases",
                 finalize=_finalize, fallback=lambda m: [], validate=_validate,
-                **self._session_opts()) or []
+                on_budget=self._note_session_budget, **self._session_opts()) or []
         except Exception:  # noqa: BLE001 — a failed stages phase degrades to the operator cmd alone
             return []
 
@@ -1691,6 +1861,26 @@ class LLMRepoDeveloper:
         # nobody asked it to. Every early return below (including the `except` that mints the
         # developer-error sentinel) therefore leaves it "" rather than the previous call's answer.
         self.last_rollback_stage = ""
+        # WHICH BOUND ENDED THE SESSION, or "" for one that finished on its own terms. Cleared here
+        # for the same shared-instance reason as the line above — a sibling node's exhaustion must
+        # never be read as this node's.
+        #
+        # `tool_loop.py` has computed and announced this since it was written ("TELL SOMEONE …
+        # presenting a cut-short investigation as a finished one is how 'the assistant hangs around
+        # 40 tool uses and then something odd comes back' reads to an operator who was never told the
+        # turn ran out of wall clock") and NOTHING SUBSCRIBED: `on_budget` appeared outside
+        # `tool_loop.py` only in `loop_options.py`'s registry. Measured over `runs/`, pairing each
+        # `inline_repair` session with its own verdict: 12 of the 12 `inert` repairs in the whole
+        # corpus ran past `session_time_budget_s`, and 0 of the 65 that finished inside it are inert.
+        # So `inert` — "the change set was empty" — has been doing double duty as an undiagnosed
+        # proxy for "ran out of clock", and the two have opposite remedies.
+        #
+        # The same failure is already on the record one phase over: the `stages` session's own
+        # comment describes reading "for the whole budget, never reached declare_stages, and silently
+        # degraded to 'no stages declared' … observed live". That was fixed by widening the clamp;
+        # this records it instead, because the repair bound is not obviously wrong (median repair =
+        # 151 s, 13 % of it) and a bound nobody can see the effect of cannot be argued about.
+        self.last_budget_exhausted = ""
         # Resolved ONCE for the whole node: operator `cmd.stages` make declare_stages refuse (P12)
         # and drive the stage notes below; data-mount names make mount refusals honest.
         op_stages = self._operator_stage_list()
@@ -1728,7 +1918,10 @@ class LLMRepoDeveloper:
                 # docs/29 F1h: the STAGES phase declares the leash, but the CODE written here is where the
                 # schedule and the batch size are actually chosen — and a repair session (which skips the
                 # stages phase entirely) reaches this path and nothing else.
-                + self._time_budget_note())
+                + self._time_budget_note()
+                # A repair session skips the stages phase entirely and reaches ONLY this path, which
+                # is exactly where v6's launcher bug had to be fixed — so the count rides here too.
+                + self._gpu_footprint_note(idea))
         if base:
             cap_each, cap_total, used = 8000, 24000, 0
             parts = []
@@ -1891,7 +2084,8 @@ class LLMRepoDeveloper:
                     run_phase(self.client, tools, messages, self._emit_spec(),
                               label="Developer·implement", handoff=False,
                               finalize=lambda a: (a or {}).get("summary", ""),
-                              fallback=lambda m: "", **self._session_opts())
+                              fallback=lambda m: "", on_budget=self._note_session_budget,
+                      **self._session_opts())
             else:
                 # repair / toy single session — terminal, so no summary (and repair isn't in a scope
                 # anyway when it runs inline during eval; the debug-operator repair gets an empty ledger).
@@ -1902,12 +2096,55 @@ class LLMRepoDeveloper:
                     if error:
                         self.last_rollback_stage = str((a or {}).get("rollback_stage", "")).strip()[:64]
                     return (a or {}).get("summary", "")
+
+                # A REPAIR THAT DESCRIBES AN EDIT IT NEVER MADE gets ONE chance to actually make it.
+                # Measured on v8 node 1: 51 minutes, 108 tool calls, zero writes, and an emit naming
+                # two files it had "changed" — the diagnosis correct, the application absent, and the
+                # node abandoned after the second such attempt. The byte fact comes from the write
+                # tool's own ledger, never from the summary; the rule is in
+                # `engine/repair_verify.py::repair_claimed_without_writing` beside the claim
+                # vocabulary it reuses. This CANNOT reach the `inert` verdict, which stays decided on
+                # bytes with the rationale unread so that no wording can steer the one verdict the
+                # loop acts on.
+                _files_before = dict(write.files)
+                _deleted_before = list(write.deleted)
+                _bounced = []
+
+                def _validate_repair(args):
+                    # ONE-SHOT. A second bounce would spend the session arguing instead of editing,
+                    # and the model has already been told exactly what to do; `agent_emit_force`
+                    # bounds the loop but must not be what stops this.
+                    #
+                    # The shot is only spent where it can be SPENT: `drive_tool_loop` calls a
+                    # validator on a forced emit only when a turn remains to act on the refusal
+                    # (`_accept_forced(may_retry=…)`). On the terminal salvages the emit is accepted
+                    # unvalidated instead — rejecting there dropped the summary and `rollback_stage`
+                    # on the floor and left `repair_verdict` empty, which is how a rung meant to buy
+                    # one more edit came to cost the whole repair record.
+                    if not error or _bounced:
+                        return None
+                    # ONE place decides "did this session write anything", and it is the `wrote`
+                    # parameter the rule's own docstring says owns it. Testing it here and then
+                    # passing the literal `False` stated the byte fact twice and left the parameter
+                    # unreachable outside tests — so a second caller reading that docstring would
+                    # get a different answer from the one the repair loop gets.
+                    from looplab.engine.repair_verify import repair_claimed_without_writing
+                    refusal = repair_claimed_without_writing(
+                        (args or {}).get("summary", ""),
+                        wrote=(write.files != _files_before
+                               or write.deleted != _deleted_before))
+                    if not refusal:
+                        return None                     # claimed nothing concrete — a legitimate
+                    _bounced.append(True)               # "no change needed" answer is left alone
+                    return refusal
+
                 repair_verdict = run_phase(
                           self.client, tools, messages,
                           self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
-                          finalize=_finish,
-                          fallback=lambda m: "", **self._session_opts())
+                          finalize=_finish, validate=_validate_repair,
+                          fallback=lambda m: "", on_budget=self._note_session_budget,
+                      **self._session_opts())
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)
             self.last_deleted = list(write.deleted)

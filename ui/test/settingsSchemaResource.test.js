@@ -100,6 +100,15 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   paragraph prescribes rather than by bumping the number: the catalogue was 183 keys and
   //   removing exactly `train_monitor_contract` gave back 182, so this is one real addition
   //   with nothing renamed away underneath it.
+  //   183 -> 184 (2026-08-27): `triage_time_budget_s` — the wall-clock ceiling on ONE
+  //   crash/timeout triage call, the operator's only handle on a loop that BLOCKS the eval
+  //   thread with the GPU dark behind it. FOURTEENTH occurrence, and the Python guard caught
+  //   it first for the tenth consecutive time. Verified as the paragraph prescribes rather
+  //   than by bumping the number: the catalogue was 184 keys and removing exactly
+  //   `triage_time_budget_s` gave back 183, so this is one real addition with nothing renamed
+  //   away underneath it.
+  assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
+  assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   //   183 -> 186 (2026-08-21, REBASE): this branch's three rows meeting master's additions —
   //   `llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`.
   //   187 -> 188 (2026-08-28): `developer_stage_guidance` — the switch that drops ~5,000
@@ -112,7 +121,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   rather than by bumping the number: the catalogue was 187 keys and removing exactly
   //   `developer_step_feedback_command` gave back 186, so this is one real addition with nothing
   //   renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 188)
+  assert.equal(Object.keys(schema.fieldByKey).length, 189)
+  //   184 -> 189 (2026-08-29, MERGE with master): master's 184 rows meeting this branch's
+  //   five. Verified by intersection (183 common) rather than by bumping the number.
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')
   assert.equal(schema.fieldByKey.gpu_footprint_cue.default, true)
   //   181 -> 183 (2026-08-19): `llm_budget_usd` (a HARD spend ceiling for a run's LLM calls, 0 =

@@ -4269,6 +4269,198 @@ Same shape both times: the mechanism is intact end to end, the bound cuts the TA
 is at the tail. A bound that removes the answer is worse than no answer, because the caller cannot
 tell a short record from a truncated one.
 
+## The calibration corpus is already revoked, and ordinary `Settings` work is what revokes it
+
+Found 2026-08-24 while PRICING a different change, which is the only reason anyone looked: the
+empty-authority fix had to prove it did not move the paired-run receipt, so
+`analyze_speculation_run` was replayed over all six preserved calibration runs. All six REFUSE, and
+not for any reason to do with that change:
+
+    ValueError: config fields differ from the exact calibration snapshot
+    (missing=['asha_live_kill_confidence', 'assistant_time_budget_s', 'auto_extra_metrics',
+              'cadence_while_evaluating', 'concept_tidy', 'developer_probe',
+              'developer_probe_timeout_s', 'eval_deadline_grace_s', ...])
+
+`_validate_calibration_config` requires the snapshot's field SET to equal
+`SPECULATION_CALIBRATION_SNAPSHOT_FIELDS | SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS` exactly,
+and that expected set is a CURRENT constant. Every one of the missing names is an ordinary `Settings`
+field added after those runs were recorded — several of them mine, over the last two weeks. So the
+check demands that evidence written in the past carry fields that did not exist when it was written,
+and **no receipt can be minted on this box today at all**. Six GPU runs are sitting there as a dead
+asset and nothing said so; the gate reports it as a snapshot mismatch, which reads like a corrupt
+run rather than like a version skew.
+
+**This is not the same failure as a changed derivation, and the difference decides the fix.** A
+changed derivation SHOULD revoke receipts — that is the protocol working, and it is why a change
+there is proved by comparing `canonical_json(body)` over the same corpus. Adding an unrelated
+`Settings` field changes no derivation and no measurement; it changes only what a snapshot happens
+to contain. The equality is doing the job of a version check with the tool of an exactness check.
+
+OPEN[calibration-corpus-revoked-by-unrelated-settings] every preserved calibration run refuses because the expected field set is a CURRENT constant, so any new `Settings` field revokes evidence it cannot affect. proof:`present:if set(config) != expected_config_fields@looplab/search/speculation_quality.py`
+
+  The shape of the fix is a VERSION, not a loosening: the expected set has to be the one that was
+  current when the evidence was written (the snapshot already stamps `config_snapshot_schema`), so a
+  field added later is absent-and-fine while a field the calibration actually READS staying absent is
+  still fatal. Do NOT simply subtract the unknown names — that turns an exactness check into a
+  no-op and the next genuinely-lossy snapshot passes. It is a receipt-protocol revision and belongs
+  with that module's owner; what this entry adds is that the cost of NOT doing it is already paid.
+
+## Three cadences that looked like defects — measured 2026-08-25, and two of my own claims were wrong
+
+The post-v5 fix list carried three "unexplained cadence" items with the standing rule attached: they
+are MEASUREMENTS, and no gate may be touched before the number exists. All three were replayed over
+every event log and every span file on the box. One is a real and larger defect than described, one
+was misdescribed by me, and one is not a defect at all.
+
+### 1. The first propose phase is SYSTEMICALLY the longest, with both GPUs idle
+
+Not the v5 one-off it was filed as. Per-run `propose` operation spans, minutes:
+
+| run | n | first | median | max |
+|---|---|---|---|---|
+| `e5small-dr-unified-v2` | 18 | **19.9** | 8.8 | 19.9 |
+| `e5small-dr-unified-v3` | 12 | **138.0** | 21.4 | 138.0 |
+| `e5small-dr-unified-v4` | 137 | 8.8 | 5.2 | 31.7 |
+| `rubertlite-dr-unified-v6` | 10 | **10.9** | 5.6 | 10.9 |
+| `rubertlite-dr-unified-v7` | 13 | 9.9 | 6.7 | 12.5 |
+| `rubertlite-dr-unified-v8` | 25 | **21.7** | 6.3 | 21.7 |
+| `rubertlite-dr-unified-v9` | 13 | 6.7 | 8.4 | 23.2 |
+
+**In four of the seven the FIRST propose IS the run's maximum**, at 1.6-6.4x that run's median, and
+v9 is the only run whose first is below its own median. v5's 34 minutes fits the shape exactly.
+
+What makes it expensive is WHEN it happens: at `n == 0` no node exists, so every GPU on the box is
+idle for the whole phase — this is not one long turn among many, it is dead time at the front of
+every run. v3 spent **2 hours 18 minutes** there and then died with three nodes and no metric.
+
+OPEN[first-propose-runs-with-every-gpu-idle] the opening propose is the longest phase of most runs and the only one that cannot overlap an evaluation. proof:`present:def _ground_run_start@looplab/engine/research_cadence.py`
+
+  NOT a cadence fix and not a prompt fix. The lever is overlap: `_ground_run_start` and the first
+  propose both run before any node exists, serially, on the loop thread. Measure the split between
+  them before choosing — the numbers above are the SUM.
+
+### 2. Trust scans — the question is not "why not every node", it is "why only one run"
+
+I filed this as "trust scans ran 4 times for 10 nodes (unexplained)". That is wrong, and the real
+shape is more interesting: over the six unified runs plus v2/v3, `trust_scan` rows exist in
+**exactly one run** — `e5small-dr-unified-v4`, 11 rows against 15 nodes. v2, v3, v6, v7, v8 and v9
+have **ZERO**. A per-node ratio was never the question.
+
+DECLINED[trust-scan-ratio-is-not-the-defect] the 4-of-10 ratio I filed does not exist in any log. measured: 11 scans in 1 of 8 runs, 0 in the other 7 — docs/BACKLOG.md
+
+  Superseded by, not closed into, the real question: what turned the scanner on for v4 alone. Until
+  that is answered nothing about a ratio is worth arguing.
+
+### 3. The distillation cadence is honest; the PAIR ledger leaks on long runs only
+
+Filed as "lessons distillation ran twice in three days, the first with count: 0 (unexplained)". Both
+halves dissolve on measurement. The cadence is a clean every-4-nodes rule and the `count: 0` is
+simply the first firing having nothing comparable yet:
+
+* `e5small-dr-unified-v4` — firings at nodes 4, 8, 12, 15, sizes 0/3/3/3, **no pair repeated**;
+* `rubertlite-dr-unified-v8` — two firings AT NODE 16, 75 seconds apart, which looked like the
+  duplicate I suspected and is not: their pairs are `[(6,1),(15,3),(10,3)]` and
+  `[(13,3),(11,3),(14,3)]`, disjoint. The `at_node` value is not the gate; the PAIR LEDGER is, and
+  it did its job.
+
+What the sweep did find is a real leak on the one long run. `rubertlite-dense-retrieval` (81 nodes,
+22 firings) re-distilled **three pairs** — `(23,14)`, `(14,7)`, `(24,14)` — each paid for twice, and
+it also has a double firing at `at_node=24`.
+
+OPEN[distilled-pair-ledger-leaks-on-long-runs] three (child, parent) pairs were distilled and paid for twice on the only run long enough to show it. proof:`present:for p in (d.get("pairs") or [])@looplab/engine/lessons_reconcile.py`
+
+  Three pairs of ~60 on one run is small, and it is the SHAPE that matters: the ledger is the thing
+  standing between a cadence and unbounded re-spend, and it is the only run with enough firings to
+  test it at all. Find which of the 22 firings admitted a pair an earlier one had spent before
+  changing anything.
+
+## An EMPTY-authority card dies the moment the board stops being empty, and its prefetched node is killed before it ever runs
+
+Measured on `runs/e5small-dr-unified-v4`, 2026-08-24. `card-2` — "complete a teacher/self-mined
+hard-negative run", the idea this run's own Deep-Research still labels **"NEW (highest value)"** four
+days later — was created 08-20 05:53 with EMPTY authority (no incumbent existed yet), prefetched into
+node 2 at 06:46, and at 09:29 node 2 was terminalized:
+
+    node_failed  reason=superseded  error="superseded by Card freshness gate"
+
+It never entered a sandbox. The card has been `selection_blockers=['freshness_stale']` ever since —
+four days — and the hypothesis has never been tested.
+
+**The clause is one this repo already argued should go.** `core/cards.py::_card_action_freshness`
+shed the same champion-equality rule from its INCUMBENT branch on 2026-08-13, with the measured case
+of `rubertlite-dr-unified-v6` (a card whose only defect was that an unrelated node had outscored the
+champion it was proposed under; GPU 1 idle for the whole run). The EMPTY branch kept it, and its own
+docstring says it "should go too", deferring on the argument that **"the only window it can cost
+anything in is bootstrap"**. This run falsifies that: the window caught the most valuable seeded
+hypothesis on the board and held it for the whole run. An action formed with no incumbent anchors
+nothing, so nothing about it can die — the docstring's own words.
+
+**Why it was not simply removed here.** The deferral's OTHER reason is current, not stale prose, and
+it was re-checked against the tree rather than taken from the comment:
+`search/speculation_quality.py::_validate_calibration_card_owners` requires every node to carry a
+UNIQUE native `card_id` ("calibration nodes require unique native Card owners"). Un-staling an
+empty-authority card makes it selectable again, a second node claims the same card, and the paired-run
+calibration receipt is refused outright. That protocol's revision is priced in its own module at six
+GPU runs and assigned to that module's owner. Breaking it as a side effect of an idle-GPU fix is
+exactly the trade this entry exists to NOT make silently.
+
+**What is NOT the defect, checked and excluded.** The six action-less cards beside it
+(`source=deep_research`) are not a wiring gap: `open_research_beliefs()` returns all of them, so the
+Researcher has had "teacher re-mining, highest value" in its proposal feed every cycle and has
+proposed temperature sweeps and merges instead. That is a choice, not a broken channel.
+
+**[2026-08-24 — RE-MEASURED OVER THE WHOLE CORPUS, AND THE RECEIPT PRICE IS ZERO.]** Two of this
+entry's own claims were checked against every event log in `runs/` and the results move the item
+from "priced at six GPU runs" to "priced at three test decisions".
+
+*The blast radius is 9 of 10, not one card.* Replaying every `node_failed reason=superseded` on the
+box: TEN nodes ever died that way, and NINE were carrying a card with `scored_against_empty: true`
+and no anchor at all — `e5small-dr-unified-v2` #3, `-v4` #2, `rubertlite-dr-unified-v7` #3/#4/#5/#6/#7
+(five nodes of one run), `-v8` #2, `-v9` #2. Each was BUILT — a paid Developer call, code committed
+to the node — and discarded before dispatch. The tenth, v8 #7, names a real anchor (node 1,
+generation 0) and is a genuine staleness the rule is right to refuse, which is the discrimination
+that makes the change safe to state: removing `board_empty` does not weaken the anchored branch by
+a byte. "The only window it can cost anything in is bootstrap" is now falsified twice over.
+
+*The six-GPU-run price does not apply, and the proof is the one this repo demands for that module.*
+`canonical_json(analyze_speculation_run(run))` was compared over all six preserved calibration runs
+(`runs/specgate/`, `runs/specgate2/`) with and without the change: **byte-identical**. No issued
+receipt moves. **But the honest half of that result is that the corpus is ALREADY revoked for an
+unrelated reason** — all six refuse with `config fields differ from the exact calibration snapshot`,
+missing `asha_live_kill_confidence`, `auto_extra_metrics`, `cadence_while_evaluating`,
+`developer_probe`, `eval_deadline_grace_s` and more, i.e. ordinary `Settings` additions made over
+weeks, long before this change. So the comparison proves the change makes nothing worse; it cannot
+prove neutrality on a corpus that no longer validates. That second finding is its own open item.
+
+*What the change actually costs is three test decisions, and they are why it is still not shipped.*
+Driven on a working tree with `board_empty` removed: `tests/test_cards.py`'s freshness truth table
+goes green after flipping the one row that asserts the old rule (correct — a deliberate rule
+change), and three others fail. `test_card_selection_guard.py::test_explicit_empty_score_and_parent_
+fences_are_current_only_while_run_is_empty` asserts the old rule in its NAME and is the same flip.
+`test_speculation_quality_gate.py::test_stale_precommit_is_kept_in_the_request_denominator` builds a
+fixture whose own comment describes the race this change abolishes ("elected while node 0 was still
+in flight, then that evaluation moved the score/parent authority"), so it must manufacture staleness
+a way that is still real — a reset or aborted anchor — rather than by the board filling. And two
+`test_card_speculation_engine.py` cases now end with the prefetched node `evaluated` where they
+asserted `pending`: the built node is no longer left undispatched, which is plausibly the fix
+working and is a change to WHEN a session dispatches speculation, i.e. wider than "stop killing
+built nodes". That last one was not run to ground and is the reason this is a measurement rather
+than a merge.
+
+**SHIPPED 2026-08-25 in `31918a2c`.** The clause is gone, the anchored branch is untouched, three
+test expectations flipped and the calibration allow-list gained `card_auto_dropped` — the only
+remaining real way a pre-commit head closes stale once the board can no longer stale a card. The
+marker that stood here was deleted by its own guard going red, which is exactly what that guard
+is for: a red `test_open_item_index` means the item shipped, not that the product broke. Leaving
+it would have reproduced the five-day gap this index exists to close — in the same session that
+restored the entry for being invisible.
+
+  The fix is two words in `_card_action_freshness` and a decision that does not belong to it: either
+  the calibration receipt protocol admits a re-elected empty-authority card, or the empty branch
+  gains a build-ledger guard (one `card_build_requested` per card) so re-election cannot produce a
+  second request. The measured cost of leaving it is one untested top-ranked hypothesis per run that
+  seeds a card before its first metric lands.
+
 OPEN[tail-truncation-drops-the-payload] no rule stops the next bounded surface putting its answer past its own cut. proof:present:RESULT_CAP@looplab/tools/_base.py
 
   Both fixes are LOCAL: memos gained sections, the case record leads with its params. Neither
@@ -6434,3 +6626,68 @@ file exists to end. `tests/test_best_of_n.py` drives the broken selection AND th
   code they classify as `check_failed`, an authenticated fact, so the judge is never asked; the
   check-stage judge already names the cause in prose and the vocabulary flattens it. Whether
   `check_failed` should carry that judge's own attribution is the next question of this shape.]
+
+### §0.21 The claim LADDER is designed, mostly already shipped, and its last rule cannot fire yet (2026-08-26)
+
+Two settled design records (operator tasks #57/#58) were taken off the queue to be BUILT and were
+instead re-derived against the tree first. One is largely already in the code; the other's remaining
+rule has no data that could exercise it; the third finding is that a sibling design IS supported by
+the corpus. Nothing was built, deliberately, and the trigger for each is written down.
+
+**The design.** Layers are Concept (subject, hierarchical, cross-run, never a verdict) > Claim
+(falsifiable) > Card (one minimal change) > Node (one attempt). A claim chain is a LADDER of
+sharpenings on two axes at once — the intervention narrows AND the predicted effect strengthens.
+Four propagation rules, three of them prohibitions:
+
+1. support does NOT flow up (a child's success may be owed entirely to what the child added);
+2. refutation does NOT flow up — three failed experiments on specific teachers do not refute
+   "teachers help", because an experiment is always MORE SPECIFIC than a broad claim, so a broad
+   claim can never be tested at its own generality;
+3. refutation flows DOWN as UNDERCUT, never as refutation — a child may be true for a different
+   reason;
+4. therefore a broad claim has NO verdict of its own, only a TALLY of its children.
+
+**Rules 1, 2 and 4 are ALREADY IN THE TREE.** `events/card_ledger.py::_apply_card_verdicts` computes
+each card's verdict as `_evidence_verdict(c.evidence, …)` — the card's OWN evidence and nothing
+else — so neither support nor refutation can flow up any edge; the prohibitions hold by
+construction rather than by a rule anyone enforces. Rule 4 is `core/cards.py::card_child_rollup`,
+whose docstring already states the operator's objection in the operator's own terms: a parent gets
+`17 done · 2 running · 4 no-result` and never a borrowed lane, because "a broad direction would sit
+in **Running** for months because one of two hundred experiments under it happens to be training".
+The own-level/child split the design demands as a recorded FACT also exists: `Card.evidence` is the
+experiments testing THIS claim, `child_rollup.nodes` is the descendants' — two fields, never summed.
+
+**Rule 3 is unimplemented AND unfirable, which is why it was not built.** `undercut` appears nowhere
+in `looplab/` or `ui/src/`. Measured 2026-08-26 by folding every `runs/**/events.jsonl`: **691 cards,
+of which exactly ONE has a child** — ladder depth histogram `{0: 690, 1: 1}` — and **ZERO parents
+carry own-level evidence**. Rule 3 fires when a parent's own experiments refute it and its children
+must be marked undercut; on this corpus no card could ever reach that state. That single edge is
+`card-1 -> does-training-the-champion-recipe-to-completion--50d1e8` on `e5small-dr-unified-v7`,
+created 2026-08-26 21:54, the first parent/child card edge on this box. Building the derivation now
+would ship machinery with zero possible firings, which is the `_MemoOut` inert-field trap (§0.7's
+neighbour) approached from the other side: there a prompt named a field the schema lacked, here the
+code would name a state the board cannot enter.
+
+OPEN[claim-refutation-undercut] refutation does not flow DOWN as undercut — a parent whose own experiments failed leaves its children unmarked; do NOT build until a parent carries own-level evidence proof:absent:undercut@looplab/events/card_ledger.py
+
+**The trigger, stated so nobody has to re-derive it:** build rule 3 when a fold produces a card with
+BOTH `child_card_ids` and a non-empty `evidence`. Until then the ladder is one edge deep and the
+prohibitions that matter are already enforced.
+
+**The SIBLING design is the one the corpus supports.** #58 proposes belief identity =
+{concepts} + metric + direction, against today's `card_ledger.py::_apply_card_beliefs`, which sets
+`c.belief_id = hypothesis_statement_digest(seed)` — a digest of the seed TEXT. Measured over the same
+691 cards: 528 carry `concept_tags`, forming 84 (run, concept-set, direction) groups, and the text
+key splits **18 of the 84** into more than one `belief_id` (distinct ids per group: 66×1, 9×2, 2×3,
+3×4, 3×5, 1×7). So the two keys genuinely disagree on a fifth of the tagged board.
+
+**That is evidence the keys DISAGREE, not evidence the concept key is RIGHT, and the difference is
+the whole risk.** An identical concept SET does not establish an identical BELIEF: two cards tagged
+`loss/contrastive/temperature` may be "temperature 0.05" and "temperature 0.01", which are two
+positions on one axis and not one claim. Merging them is a CLAIM that they are the same belief, and
+a wrong merge pools the evidence of two different experiments under one verdict — strictly worse
+than today's fragmentation, which at least keeps them apart. What would settle it is reading the
+18 split groups and counting how many are genuine restatements versus genuine distinctions; that
+read has not been done and no key should change before it is.
+
+OPEN[belief-identity-text-keyed] belief identity is a digest of the seed TEXT, which splits 18 of 84 concept-equal groups; the semantic key is unbuilt and unvalidated proof:present:hypothesis_statement_digest(seed)@looplab/events/card_ledger.py

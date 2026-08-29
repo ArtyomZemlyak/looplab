@@ -129,6 +129,96 @@ class WorkspaceSeeder:
                 srcs[f"ref:{ref['name']}"] = _shallow_fingerprint(ref["path"])
         return srcs
 
+    def workspace_source_paths(self) -> list[str]:
+        """The real filesystem paths behind `workspace_fingerprint`'s LABEL keys.
+
+        The fingerprint keys on `editable:<name>` / `data:<name>` / `ref:<name>` because it is READ
+        BY LABEL. `orchestrator._dirty_inputs` keys on the PATH — it does `Path(src)` and runs
+        `git -C <root> status --porcelain` — so handing it the fingerprint MAP resolved every source
+        to `Path("editable:foo").parent`, i.e. `"."`, the engine's own CWD. Two records were wrong
+        for the one reason: `run_started.dirty_inputs` enumerated LoopLab's own checkout (or, off a
+        git tree, nothing at all) instead of the operator's repo, and `substrate_fingerprint` — whose
+        entire job is to notice a fix promoted into the editable tree mid-run — read CLEAN for every
+        such promotion and let `comparability` answer SAME across it.
+
+        ONE derivation of "which trees are this run's sources", so the label spelling and the path
+        spelling cannot drift apart again. Same sources, same order, as the fingerprint above.
+        """
+        if not self._e._repo_spec:
+            return []
+        paths: list[str] = []
+        for ed in self._e._repo_spec.get("editables", []):
+            paths.append(str(ed["path"]))
+        for _name, spec in self._e._repo_spec.get("data", {}).items():
+            paths.append(str(spec["path"] if isinstance(spec, dict) else spec))
+        for ref in self._e._repo_spec.get("references", []):
+            if ref.get("mount"):
+                paths.append(str(ref["path"]))
+        return paths
+
+    def substrate_fingerprint(self) -> dict:
+        """The editable source tree a NUMBER was produced on — HEAD *and* the uncommitted work.
+
+        `workspace_fingerprint` above is `git rev-parse HEAD` per source, and its own sibling
+        (`orchestrator._dirty_inputs`) says in its docstring that HEAD "is blind to uncommitted
+        work". That is fine for its job — detecting that the operator's repo MOVED between a run's
+        start and a resume — and it is not fine for this one.
+
+        The gesture this exists to catch is an operator promoting a fix into the editable repo
+        mid-run, which `looplab repair-candidates` explicitly urges them to do, and the ordinary way
+        to do that is to EDIT THE WORKING TREE. On a HEAD-only digest both sides of that edit read
+        identical and `comparability` would answer SAME while `_SUBSTRATE_NOTICE` asserted the
+        opposite — a record that is confidently wrong, which is worse than one that says nothing.
+
+        So the porcelain list and the bounded diff digest ride along. Best-effort exactly like the
+        fingerprint it extends: a source that cannot be read contributes nothing rather than raising,
+        because this record may never cost a node its terminal. Cheap enough only because it is
+        called off the event loop, once per node terminal — see the call site.
+        """
+        base = self.workspace_fingerprint()
+        if not base:
+            return {}
+        try:
+            # The PATHS, never `base`: `base` is keyed by LABEL and `_dirty_inputs` reads its keys as
+            # filesystem paths — see `workspace_source_paths` for what that cost.
+            dirty = self._e._dirty_inputs(self.workspace_source_paths())
+        except Exception:  # noqa: BLE001 — an unreadable tree contributes no dirty evidence
+            dirty = None
+        # "COULD NOT READ" IS NOT "NOTHING TO READ", and returning `base` for both said the second
+        # about the first. `base` IS the spelling of a clean tree — the argument is spelled out
+        # sixteen lines below for the sibling digest-failure branch — so a node whose
+        # `git status --porcelain` raised (an index.lock, a mid-rebase tree, an EIO on the geesefs
+        # mount this box measures 105-950 ms absent-file `lstat`s on) recorded itself as CLEAN and
+        # then read SAME against a genuinely clean one, which is exactly the confidently-wrong
+        # record this discriminator exists to refuse. Only a successfully read, EMPTY enumeration
+        # may return `base`.
+        #
+        # It shares the `"unknown"` marker with that branch rather than minting a second word,
+        # because the two mean the same thing to every reader: the engine cannot say what this tree
+        # held. Note the marker is a CONSTANT, so two unreadable trees still compare equal to each
+        # other — it makes them refusable against a CLEAN tree, which is the case that was wrong,
+        # and nothing here can distinguish two trees it failed to read.
+        if dirty is None:
+            return {**base, "dirty": "unknown"}
+        if not dirty:
+            return base
+        # A DIGEST of the enumeration, not the enumeration: the caller hashes this into one opaque
+        # token, and carrying a few hundred porcelain lines through `metric_provenance` on every
+        # node would bloat the durable record for bytes nobody reads back.
+        #
+        # Through the SHARED tail (`core/jsonutil.py::canonical_json_digest`, doc 25 CO-08) and not a
+        # local `sha256(canonical_json(...))`: the hand-rolled copy called `.encode()` on a value that
+        # `canonical_json` already returns as BYTES, so every dirty tree raised into the call site's
+        # `except Exception: _substrate = None` and recorded no substrate at all — silently absent on
+        # exactly the uncommitted-edit case this function's own docstring says it exists for.
+        from looplab.core.jsonutil import canonical_json_digest
+        digest = canonical_json_digest(dirty)
+        # That tail fails CLOSED (None) for a value with no canonical form. "Dirty, but undigestable"
+        # must not fall back to `base`, because `base` IS the spelling of a clean tree: such a node
+        # would then read SAME against a genuinely clean one, which is the confidently-wrong record
+        # this discriminator exists to refuse. An opaque marker keeps it refusable.
+        return {**base, "dirty": digest[:16] if digest else "unknown"}
+
     def seed_workspace(self, workdir) -> None:
         """RepoTask (ADR-7): materialize the editable repo tree(s) into the eval workdir, plus
         any runtime-mounted reference repos and data files. Phase 4: each editable repo is

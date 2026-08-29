@@ -68,14 +68,21 @@ different code path ignores, an environment variable that wins over the file —
 visible to any reader of bytes. The record says which file it read and what that file said, and a
 `resolved` record says the process wrote it. Absence is silence, never a certificate.
 
-OPEN[applied-config-glob-undeclared] no task on this box declares `applied_config_glob`, so the
-`resolved` tier — the ONLY reader that can see a value the eval process settled for itself — is inert
-and every record here is `committed` authority. It is the `metric_subject` literal-path shape one
-declaration over, and the cost is measurable: `rubertlite-dr-unified-v8` node 8 declares batch 8192 /
-15 epochs, its committed carrier AGREES with the declaration, and the config the process resolved says
-4096 / 8 — a node no reading of committed bytes can ever caveat. Closing it is one line in the repo
-task's `eval.metric`, plus a run that records `authority: "resolved"` on a real node.
-proof:absent:applied_config_glob@examples
+WHY THE `resolved` TIER EARNS ITS COST (shipped 2026-08-28, retiring the
+open item `applied-config-glob-undeclared` — spelled without brackets on purpose: the scanner that
+IS the index matches the bracket form anywhere, so a closed item quoted in prose reads as an open
+one, exactly as `claimpin` cannot tell a pin from a quoted example).
+For most of this repo's life no task declared `applied_config_glob`, so this tier was inert and every
+record bound at `committed`. The cost of that was measurable: `rubertlite-dr-unified-v8` node 8
+declares batch 8192 / 15 epochs, its committed carrier AGREES with the declaration, and the config the
+process resolved says 4096 / 8 — two documents that agree with each other and are both wrong about
+what executed, on a node that scored. `examples/repo_task.json` now declares the glob and
+`tests/test_applied_config_glob_example.py` drives the shipped example end to end, asserting the
+record reaches `authority: "resolved"`; that test is the tier's live proof, not this paragraph.
+The example nests deliberately — `config.json` is flat because that is the human edit surface, the
+trainer resolves it into `train.x`, and since a declared coordinate needs two dotted parts the
+committed carrier CANNOT answer a legal declaration while the resolved one can. That asymmetry is the
+tier, and real trainers reproduce it.
 
 DECLINED[cli-vs-carrier-contradiction] a rung reporting that a stage's `--dotted.path=<n>` argv token
 contradicts the committed carrier's value for the same path. The pair is real and it is exactly the
@@ -249,7 +256,15 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
          "declared": int,                      # declared coordinates that were comparable at all
          "applied": {key: float},              # what the carrier says each answered coordinate is
          "diverged": [{param, declared, applied, line, match}],
-         "unresolved": {key: "absent" | "ambiguous"},
+         "unresolved": {key: "absent" | "ambiguous" | "conflict"},
+                                               # `absent`/`ambiguous` are `param_carriers`' two words
+                                               # for one document's answer; `conflict` is THIS
+                                               # function's own third (UNRESOLVED_CONFLICT below) and
+                                               # means two carriers each answered once and disagreed.
+                                               # It was missing from this shape until 2026-08-28 while
+                                               # 12 rows carrying it sat in `rubertlite-dr-unified-v8`,
+                                               # so a reader keying on the documented pair dropped a
+                                               # state the record has been emitting for weeks.
          "resolved_refused": str}              # why the stronger tier did not bind, when it did not
 
     Never raises for anything a filesystem or a malformed document can do: a record may not cost a
@@ -339,6 +354,22 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
     #
     # So a conflicted coordinate is NOT in `applied`; it rides in `conflicts` with EVERY reading and
     # the file each came from, and `unresolved` names it `conflict`. Surfaced, never settled.
+    # OPEN[applied-ambiguous-popped-by-python-settle] a document's `ambiguous` refusal is silently
+    # popped here when a `.py` carrier answers the same key.
+    # proof:line:where[key]&&(rel,@looplab/runtime/applied_params.py
+    # REVIEW 2026-08-25 (correctness): the document branch above is careful that an `ambiguous`
+    # refusal "OUTRANKS a later `absent`" — it is a fact about the DECLARATION — but the Python
+    # branch offers its reading without touching `unresolved`, and this pop then erases the marker
+    # whenever the `.py` side settles to one value. The record that results says K = 4096, clean,
+    # about a node whose own config document defines K at two or more leaves (possibly two OTHER
+    # numbers): a three-way disagreement rendered as a single answered coordinate, which is the
+    # settling this block's own heading forbids — the ambiguous document's readings never reach
+    # `readings`, so the conflict rule cannot see them either. Reachable on this corpus: the
+    # measured bare-suffix shapes (a `batch_size`-family declaration matching sibling `train.*` and
+    # `test.*` leaves) plus the same key assigned once in `train.py`, i.e. the 51-of-54
+    # both-families population. Fix direction: only pop an `absent` marker here — keep `ambiguous`
+    # beside the applied value (or demote the coordinate to `conflicts` with the document named as
+    # unreadably plural), then delete this marker.
     for key, seen in readings.items():
         if len(seen) == 1:
             value = next(iter(seen))

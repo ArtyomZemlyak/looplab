@@ -36,6 +36,8 @@ from looplab.core.concepts import (
 )
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
+                     CARD_CHILD_LIMIT, CARD_CONCEPT_TAG_LIMIT, CARD_LINEAGE_MAX_DEPTH,
+                     card_child_rollup, card_kind_of,
                      CARD_IDEA_CONCEPT_FIELDS,
                      CARD_STATEMENT_MAX_CHARS,
                      INHERITABLE_CONCEPT_PROVENANCE as _INHERITABLE_CONCEPT_PROVENANCE,
@@ -312,6 +314,18 @@ def _bounded_card_added_receipt(d: dict) -> dict | None:
     parent_id = _card_replay_node_id(d.get("parent_id"))
     if parent_id is not None:
         rec["parent_id"] = parent_id
+    # THE RESEARCH-LINEAGE EDGE, and it has to be named HERE or it does not exist. This function
+    # rebuilds the replay row from an ALLOW-LIST — `RunState` is deep-copied on every incremental
+    # snapshot, so `_on_card_added` must never retain `Event.data` — and a key it does not name is
+    # gone before any reader sees it. `_card_added_snapshot` decoded `parent_card_id` faithfully
+    # from a dict that had already been stripped of it, so the decoder worked and the field was
+    # dead: measured on `runs/e5small-dr-unified-v5`, the durable row named a direction that WAS on
+    # the board and the folded child's parent was None with every direction childless.
+    # NOT a node id — this is a CARD id, so it takes the same string bound as a card's own id
+    # rather than `_card_replay_node_id` one line above it.
+    parent_card_id = _card_id(d.get("parent_card_id"))
+    if parent_card_id is not None:
+        rec["parent_card_id"] = parent_card_id
     scored_against = _card_replay_node_id(d.get("scored_against"))
     if scored_against is not None:
         rec["scored_against"] = scored_against
@@ -411,6 +425,25 @@ def _bounded_card_drop_receipt(d: dict) -> dict | None:
     return rec
 
 
+def _sota_eligible(n: Node) -> bool:
+    """May this node's metric take part in the run's SOTA at all?
+
+    ONE spelling, because `_record_setter_ids` and `_record_establisher_id` both answer "which node
+    is first" and the second one's own docstring says why that matters: "a second reading of 'which
+    node is first' is how the two come to disagree about it" — and then the predicate was written
+    out twice anyway. The moment a clause is added to one (this repo already maintains populations a
+    SOTA rule plausibly grows into — `metric_salvage.unreliable_metric_ids`, the trust gate's
+    `flagged_node_ids`), `record_establisher` names a node no longer in `record_setters`, NO member
+    is excluded by `_evidence_verdict`'s `n.id != record_establisher` test, and the "a record set
+    over nothing is not support" rung silently reverts to calling the opening hypothesis of every
+    run `supported` with `best_delta=None` — with nothing red.
+
+    §6.3: a deleted node must not set the board's SOTA.
+    """
+    return (n.status is NodeStatus.evaluated and n.feasible and n.metric is not None
+            and not n.tombstoned)
+
+
 def _record_setter_ids(nodes: dict[int, Node], direction: str) -> set[int]:
     """The run-global set of node ids that ADVANCED the run's SOTA — sticky evidence.
 
@@ -424,16 +457,40 @@ def _record_setter_ids(nodes: dict[int, Node], direction: str) -> set[int]:
     setters: set[int] = set()
     running: float | None = None
     for n in sorted(nodes.values(), key=lambda x: x.id):
-        if (n.status is NodeStatus.evaluated and n.feasible and n.metric is not None
-                and not n.tombstoned):              # §6.3: a deleted node must not set the board's SOTA
+        if _sota_eligible(n):
             if running is None or better(n.metric, running):
                 setters.add(n.id)                   # first node ESTABLISHES the SOTA, or a later node
                 running = n.metric                  # BEATS the standing record — either is a real advance
     return setters
 
 
+def _record_establisher_id(nodes: dict[int, Node]) -> int | None:
+    """The ONE node in `_record_setter_ids` that beat nothing — the run's first SOTA, or None.
+
+    `_record_setter_ids` folds two different events into one set: a node that ESTABLISHES the first
+    record (`running is None`) and a node that BEATS a standing one. Only the second is evidence
+    that anything improved, and this names the first so `_evidence_verdict` can tell them apart.
+
+    Derived HERE rather than proxied by "does the node have a feasible parent", which is what the
+    first cut of that distinction used. The two agree only on a run whose lineage is a chain: a ROOT
+    node that beats a standing sibling record has no parent and is a genuine advance, and under
+    card-driven selection most proposals ARE root drafts, so the proxy told the Researcher its best
+    experiment had improved on nothing. Same loop as `_record_setter_ids` and the SAME guard object
+    (`_sota_eligible`) rather than a retyped copy of it, because a second reading of "which node is
+    first" is how the two come to disagree about it — and a docstring saying so beside a duplicated
+    predicate is not what stops that. Takes no
+    `direction`: which node is FIRST is a fact about creation order, and the comparison that needs a
+    direction is the one this node is defined by not having made.
+    """
+    for n in sorted(nodes.values(), key=lambda x: x.id):
+        if _sota_eligible(n):
+            return n.id
+    return None
+
+
 def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direction: str,
                       record_setters: set[int], is_abandoned: bool,
+                      *, record_establisher: int | None,
                       ) -> tuple[float | None, str, bool]:
     """Compute (best_delta, status, supported) for one hypothesis/card from its evidence nodes.
 
@@ -460,8 +517,34 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
             best_delta = delta if best_delta is None else max(best_delta, delta)
             if better(n.metric, base):
                 supported = True
-        if n.id in record_setters:                 # a draft/node that advanced the run's SOTA (sticky —
-            supported = True                       # stays supported even after a later node overtakes it)
+        # A RECORD SET OVER NOTHING IS NOT SUPPORT, and the ESTABLISHER is the whole of that
+        # distinction. `record_setters` deliberately includes the node that establishes the first
+        # SOTA — which on every run is node 0, by being the only node — so this clause used to
+        # declare the OPENING hypothesis of every run `supported` with `best_delta=None`, i.e.
+        # borne out against nothing at all.
+        #
+        # It is not a cosmetic wrong word. `verdict` is what the proposal board shows the
+        # Researcher, and a model reading "supported" either believes it and stops testing the
+        # question, or distrusts the whole board. Measured live on `runs/e5small-dr-unified-v5`:
+        # card-0 read `supported` on node 0 (metric 0.693, no parents, one node in the run), the
+        # Researcher wrote "…but wait, the card says NODES=[0] and verdict=supported … that's odd"
+        # in its own trace, and spent the next proposal re-implementing what the board claimed was
+        # already done — card-1, a near-duplicate of card-0.
+        #
+        # The sticky clause keeps its real job: a node that BEAT a standing record stays supported
+        # after something overtakes it, which is the board bug its comment describes. What it no
+        # longer does is mint a verdict where no comparison exists. Such a card lands on `tested`
+        # ("evaluated without improvement"), which is exactly true of a first measurement.
+        #
+        # The test is `is not the establisher`, and it was `base is not None` — a PARENT — for one
+        # day. Those two agree only on a run whose lineage is a chain. A ROOT node that beats a
+        # standing sibling record has no parent and IS a genuine advance, and under card-driven
+        # selection most proposals are root drafts: with the parent proxy, a run whose best
+        # experiment was a fresh draft read `tested`, i.e. the board told the Researcher its best
+        # result had improved on nothing. That is the same class of board lie in the other
+        # direction, and this rung exists to remove it, not to swap it.
+        if n.id in record_setters and n.id != record_establisher:
+            supported = True
     pending = [n for n in ev if n.status is NodeStatus.pending]
     if is_abandoned:
         status = "abandoned"
@@ -516,13 +599,6 @@ def _bounded_card_enrichment(value, *, depth: int = 0, budget: list[int] | None 
                 out[key] = bounded
         return True, out
     return False, None
-
-
-def _bounded_card_ref(value) -> str | None:
-    if (not isinstance(value, str) or not value or value != value.strip()
-            or len(value) > 400 or not value.isprintable()):
-        return None
-    return value
 
 
 def _digest_ref(value: str, namespace: str) -> bool:
@@ -607,7 +683,7 @@ def _bounded_card_cross_run_enrichment(value) -> dict | None:
 
 
 def _proposal_card_concept_source(
-    kind: Literal["card_added", "card_enriched"], *, present: bool,
+    kind: Literal["card_added", "card_enriched", "hypothesis_added"], *, present: bool,
     overflow: bool = False, invalid: bool = False,
 ) -> CardConceptSource:
     reasons: set[ConceptMaterializationReason] = set()
@@ -622,6 +698,27 @@ def _proposal_card_concept_source(
         complete=present and receipt is None,
         materialization_receipt=receipt,
     )
+
+
+def _bounded_card_ref(value) -> str | None:
+    """One ENRICHMENT ref as a foreign key, or None — a memo/lesson/claim id, not a card id.
+
+    RESTORED to its original contract on 2026-08-27 after a card-lineage change narrowed it for a
+    new caller: the bound went 400 -> 256, and refusing a padded value (`value != value.strip()`)
+    became silently STRIPPING one. This helper folds `research_origin`, `lesson_refs` and
+    `claim_refs` on logs already on disk, so both edits changed replay OUTPUT for rows nobody was
+    editing — a legacy ref of 257-400 chars started folding to `None` and vanishing, and a
+    whitespace-padded ref that the rule deliberately REFUSED began resolving to a stripped id, which
+    is the treat-display-edits-as-identity failure the card-id rules elsewhere warn about. (Only
+    LEGACY rows: a `modern` row must additionally be a `sha256:` digest ref, far under either bound.)
+
+    The card-id shape it was narrowed for is `_card_id`, which already spells exactly that rule; the
+    `parent_card_id` edge calls it directly.
+    """
+    if (not isinstance(value, str) or not value or value != value.strip()
+            or len(value) > 400 or not value.isprintable()):
+        return None
+    return value
 
 
 def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
@@ -708,6 +805,16 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
         steering = normalize_steering_context(d.get("steering_context"))
         if steering is not None:
             snapshot["steering_context"] = steering
+    # The RESEARCH-LINEAGE edge, decoded at the top level exactly like `steering_context` above and
+    # for the same reason: it is not an executable member. It deliberately does NOT set `owns_action`
+    # — naming the direction you serve is not owning an action, and if it counted as one a pure
+    # research direction that happened to be filed under a broader one would become an "action owner"
+    # and its `action_owner_missing` blocker would silently turn into `action_receipt_incomplete`.
+    # The edge is validated for SHAPE here and for legality (self-edge, cycle, unknown target,
+    # merged-away target) in `_apply_card_lineage`, which is the only place that can see every card.
+    parent_card_id = _card_id(d.get("parent_card_id"))
+    if parent_card_id is not None:
+        snapshot["parent_card_id"] = parent_card_id
     return snapshot, owns_action
 
 
@@ -1054,7 +1161,6 @@ def _card_action_freshness(st: RunState, card: Card) -> str:
             and card.scored_against not in st.aborted_nodes
         ),
         anchor_attempt=None if scored_node is None else scored_node.attempt,
-        board_empty=st.best_node_id is None,
     )
 
     states = {parent_state, score_state}
@@ -1514,10 +1620,30 @@ def _seed_cards_from_receipts(
                     _record_action_owner(cid, "card_added", complete=action_complete)
             if cid in cards:
                 continue
+            # THE QUESTION'S OWN CONCEPTS, on the path where `snapshot` is empty by construction.
+            # `_card_added_snapshot` runs only for a NATIVE row, so a question registered through
+            # `hypothesis_added` reached this constructor with no membership at all — measured on
+            # `runs/e5small-dr-unified-v5`, all five questions carried `concept_tags=[]` while the
+            # run's one experiment carried four, leaving the concept hierarchy and the question
+            # board as disjoint taxonomies over one run.
+            #
+            # The receipt is `hypothesis_added` and deliberately not `card_added`: the tags ARE
+            # authored, but by a memo rather than by a card mint, and there is no ownership receipt
+            # or action digest behind them. Absent tags leave BOTH the list and the source alone, so
+            # every log on disk folds byte-identically and "nobody said" stays distinguishable from
+            # "said none".
+            question_concepts = d.get("concepts") if not native_row else None
+            question_source = (
+                {"concept_tags": list(question_concepts),
+                 "concept_source": _proposal_card_concept_source(
+                     "hypothesis_added", present=True)}
+                if isinstance(question_concepts, list) and question_concepts else {}
+            )
             cards[cid] = Card(
                 id=cid, statement=stmt, seed_statement=stmt,
                 source=str(d.get("source") or "human"),   # mirror _derive_hypotheses' default
                 rationale=str(d.get("rationale", ""))[:400], created_at_node=at_node,
+                **question_source,
                 **snapshot,
             )
             card_origins[cid] = "card_added_unbound" if native_row else "hypothesis_shadow"
@@ -1578,6 +1704,13 @@ def _link_cards_to_nodes(
                      provenance_tier=node_concept_source.provenance,
                      parent_id=(n.parent_ids[0] if n.parent_ids else None),
                      parent_ids=list(n.parent_ids or []),
+                     # THE DIRECTION EDGE THE RESEARCHER AUTHORED, on the path that has no
+                     # `card_added` receipt to decode it from. `Idea.parent_card_id` rides
+                     # `node_created` for free, and until this line the board dropped it on every
+                     # such path — `card_driven_selection=False` (which is the LEGACY snapshot
+                     # default, i.e. every resumed pre-flag run) and `inject_node`. The edge was
+                     # written durably and then silently lost by the only reader that renders it.
+                     parent_card_id=(n.idea.parent_card_id or None),
                      parent_generations=_node_parent_generations(st, n))
             cards[cid] = c
             card_origins[cid] = "node_card_id" if explicit_card_id else "node_statement_hash"
@@ -1594,6 +1727,10 @@ def _link_cards_to_nodes(
             c.eval_timeout = n.idea.eval_timeout
             c.parent_id = n.parent_ids[0] if n.parent_ids else None
             c.parent_ids = list(n.parent_ids or [])
+            # Part of the same atomic action block: a thin `card_added` that never carried the edge
+            # must still take the one its own first node stated, or the backfill leaves the card
+            # substance-complete and lineage-blind.
+            c.parent_card_id = c.parent_card_id or (n.idea.parent_card_id or None)
             c.parent_generations = _node_parent_generations(st, n)
             action_owned_cards.add(cid)
         if c.concept_source is None or c.concept_source.kind != "node":
@@ -1921,6 +2058,10 @@ def _apply_card_verdicts(
     # 3) record-setters (sticky SOTA advancers) — the SAME pure helper the hypotheses use, so a card's
     #    verdict is byte-identical to its hash-joined hypothesis.
     _record_setters = _record_setter_ids(st.nodes, st.direction)
+    # …and the ONE of them that beat nothing. Derived once per fold beside the set it partitions,
+    # never per card: the two must be read off the same `st.nodes` or they disagree about which
+    # node was first.
+    _record_establisher = _record_establisher_id(st.nodes)
 
     # 4) verdict per card via the SHARED helper (open/testing/supported/tested/abandoned). `is_abandoned`
     #    mirrors the hypothesis: a shadow card keyed by the hypothesis id inherits the abandoned override.
@@ -1928,7 +2069,20 @@ def _apply_card_verdicts(
         c.best_delta, c.verdict, _ = _evidence_verdict(
             c.evidence, st.nodes, st.direction, _record_setters,
             any(control_id in st.hypotheses_abandoned
-                for control_id in control_ids.get(c.id, {c.id})))
+                for control_id in control_ids.get(c.id, {c.id})),
+            record_establisher=_record_establisher)
+
+
+def _drop_author(receipt: dict) -> str:
+    """Who a drop receipt is attributed to, defaulting to the engine.
+
+    ONE spelling, because three readers ask it and they must not drift: the reopen gate's
+    "may this be undone", the engine-retirement history it is checked against, and the
+    `Card.dropped_by` the board publishes. `dropped_by` is the current key and `by` the legacy
+    one; an unattributed receipt reads as the engine's, which is the fail-closed direction for
+    every one of the three.
+    """
+    return str(receipt.get("dropped_by") or receipt.get("by") or "engine")
 
 
 def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) -> dict[str, dict]:
@@ -1938,6 +2092,15 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
     #    visible (like an abandoned hypothesis) — lifecycle `status` shows the 'dropped' lane. Historical
     #    engine-authored `card_dropped` rows are already normalized into the same bounded receipt list.
     dropped: dict[str, dict] = {}
+    # EVERY engine-authored drop this card has ever carried, by `_event_index`. `dropped` is
+    # LAST-RECEIPT-WINS over BOTH authorities, so it cannot answer "did the engine ever retire this
+    # card" — an operator `card_dropped` landing after a `card_auto_dropped` overwrites the entry
+    # and the engine's retirement becomes invisible to any reader of `dropped` alone. The reopen
+    # gate below is exactly such a reader, so it needs the history rather than the head.
+    # A receipt whose index is unusable is recorded as `None` and treated as blocking: an
+    # unordered engine retirement cannot be proven to precede or follow anything, and the
+    # conservative answer on this gate is the one the surrounding comments already take.
+    engine_drop_indices: dict[str, list] = {}
     for d in st.cards_dropped:
         raw_id = d.get("id")
         bounded_id = _card_id(raw_id)
@@ -1956,12 +2119,79 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
         cid = aliases.canon_at(bounded_id, drop_index)
         if cid:
             dropped[cid] = d
+            if _drop_author(d) != "operator":
+                engine_drop_indices.setdefault(cid, []).append(drop_index)
+    # A REOPEN SUPERSEDES AN EARLIER DROP, and only an earlier one. Resolution is LAST RECEIPT WINS
+    # by `_event_index`, so drop / reopen / drop is expressible and a replay of the same log gives
+    # the same board every time. Until this shipped, `cards_dropped` accumulated and nothing ever
+    # removed an entry: an operator stop was TERMINAL, the card sat visible-but-unactionable in the
+    # `dropped` lane, and no event in the vocabulary could put it back. The operator asked for the
+    # control by name.
+    #
+    # The DROP RECEIPT SURVIVES in `st.cards_dropped` — the log is append-only and who stopped the
+    # work and why is history the reopened card still owes its reader, which is the same reason
+    # `Card.discarded_nodes` keeps nodes that never ran instead of deleting them. What changes is
+    # only whether the drop is APPLIED.
+    #
+    # A reopen with no index cannot claim to be later than anything: `drop_index` is stamped on
+    # every receipt by the fold, so a missing one means a hand-written or pre-upgrade row, and the
+    # conservative answer is to leave the drop standing rather than let an unordered receipt revive
+    # a card the operator stopped.
+    for r in st.cards_reopened:
+        bounded_id = _card_id(r.get("id"))
+        raw_index = r.get("_event_index")
+        if bounded_id is None or type(raw_index) is not int or raw_index < 0:
+            continue
+        cid = aliases.canon_at(bounded_id, raw_index)
+        prior = dropped.get(cid) if cid else None
+        if prior is None:
+            continue
+        prior_index = prior.get("_event_index")
+        if not (type(prior_index) is int and prior_index < raw_index):
+            continue
+        # A REOPEN MAY ONLY UNDO AN OPERATOR'S OWN DROP. `st.cards_dropped` holds TWO authorities:
+        # the operator's `card_dropped` and the engine's `card_auto_dropped`, folded by one handler
+        # into one list — so an unqualified pop let an operator override the engine's own lifecycle
+        # retirement. `card_reservation._record_node_less_card` mints a Card and auto-drops it in a
+        # single `append_many` precisely so a REJECTED proposal is retained for audit and never
+        # live; reopening one put it back on the selectable board. Worse, `_drop_card_once` is
+        # idempotent by HISTORY — it refuses to re-plan a drop for a card any drop receipt already
+        # names — so the engine could never retire it again: permanently un-droppable by its owner.
+        #
+        # Fail-closed on an unattributed receipt, which is the same reading the card itself already
+        # publishes (`dropped_by` defaults to "engine" three lines below). "operator" is the
+        # established spelling of this authority — `engine/resources.py` and `engine/evaluate.py`
+        # both gate on exactly it — and `control_validation` stamps it server-side, so it cannot be
+        # forged by the payload.
+        if _drop_author(prior) != "operator":
+            continue
+        # …AND THE HEAD RECEIPT IS NOT THE WHOLE AUTHORITY QUESTION. `dropped` is last-wins across
+        # both authorities, and `control_validation._precondition_card` deliberately EXCLUDES
+        # `EV_CARD_DROPPED` from its terminal-lifecycle refusal so "an operator keeps authority over
+        # the DROP itself on a terminal Card". Those two facts compose into a laundering path: the
+        # engine appends `card_auto_dropped` for a rejected proposal, the operator appends their own
+        # `card_dropped` over it (server-stamped `dropped_by: "operator"`), and the head receipt now
+        # reads as theirs — so the check above passes and the `pop` below removes the ENGINE's
+        # retirement too. That is precisely the state the comment above calls unrecoverable, since
+        # `_drop_card_once` is idempotent by HISTORY and can never re-retire the card.
+        # So an engine drop is undone by NOTHING: if any engine-authored receipt precedes this
+        # reopen, the drop stands, whoever wrote the most recent row.
+        if any(i is None or i < raw_index for i in engine_drop_indices.get(cid, ())):
+            continue
+        dropped.pop(cid, None)
     for cid, d in dropped.items():
         c = cards.get(cid)
         if c is not None:
             reason = str(d.get("reason", "") or "")[:400]
             c.dropped_reason = reason or None
-            c.dropped_by = str(d.get("dropped_by") or d.get("by") or "engine")
+            c.dropped_by = _drop_author(d)
+            # PUBLISH THE GATE'S OWN ANSWER, so the server's refusal and the board's affordance read
+            # the fold rather than each re-deriving it — `Card.reopenable` says why that matters.
+            # A future reopen's `_event_index` is greater than every receipt already folded (the log
+            # is append-only), so "an engine drop exists for this card" and "an engine drop precedes
+            # the next reopen" are the same statement, and the loop above already holds it.
+            c.reopenable = (_drop_author(d) == "operator"
+                            and not engine_drop_indices.get(cid))
     return dropped
 
 
@@ -2205,6 +2435,50 @@ def _recompact_card_enrichment(
     st.cards_enriched = sorted(compacted, key=lambda row: (
         row.get("id", ""), _card_enrichment_field(row) or "", *_card_enrichment_order(row)))
     return {card_id for (card_id, _field), count in omitted.items() if count > 0}
+
+
+def _apply_card_applied_params(st: RunState, ledger: _CardLedger) -> None:
+    """Publish, beside every card's PROPOSED `params`, the coordinates its experiment actually ran at.
+
+    `Card.params` is receipt-bound and stays exactly as it was minted — the receipt records what was
+    proposed and correcting it would unmake the card's identity. What was missing is the other half.
+    Under `params_style: "none"` the engine applies nothing and the Developer realises the idea by
+    editing the repo, so a repair that fits a training into memory moves the numbers while the
+    proposal stays frozen: 457 comparisons across the corpus, 41 diverged, 18 on nodes that produced
+    a metric, and the e5 champion recorded at batch 8192 / accum 2 / 15 epochs ran 512 / 32 / 3.
+
+    THE LATEST EVALUATED EVIDENCE NODE WINS, and its id is published with the numbers. Two rules,
+    each refusing a tempting alternative:
+
+      * MERGING several evidence nodes' applied maps would mint a coordinate set no single run ever
+        occupied — the same fabrication as reading the proposal, one step subtler.
+      * Picking the BEST node would need the run direction and would make the row move when an
+        unrelated node scored. "What this card most recently ran at" is a fact about the card; "what
+        its best attempt ran at" is a fact about a ranking, and the two must not share a field.
+
+    `effective_params` is NOT used here, deliberately: it falls back to the DECLARATION when no
+    applied record exists, which is right for a reader asking "what were this node's numbers" and
+    wrong for a field whose entire purpose is to be distinguishable from the declaration. A card
+    whose nodes predate the applied record (or never bound a metric) publishes NOTHING and the empty
+    map means "not recorded", never "the same as proposed".
+    """
+    for card in ledger.cards.values():
+        card.applied_params = {}
+        card.applied_params_node = None
+        for node_id in sorted(card.evidence, reverse=True):
+            node = st.nodes.get(node_id)
+            if node is None or node.status is not NodeStatus.evaluated:
+                continue
+            provenance = getattr(node, "metric_provenance", None)
+            record = provenance.get("applied_params") if isinstance(provenance, dict) else None
+            applied = record.get("applied") if isinstance(record, dict) else None
+            if not isinstance(applied, dict) or not applied:
+                continue
+            bounded = normalize_extra_metrics(applied, max_items=64)
+            if bounded:
+                card.applied_params = bounded
+                card.applied_params_node = node_id
+            break
 
 
 def _apply_card_enrichment(
@@ -2683,6 +2957,136 @@ def _apply_card_selection_readiness(st: RunState, ledger: _CardLedger, aliases: 
         c.selection_ready = not blockers
 
 
+def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases) -> None:
+    """Publish the DIRECTION -> EXPERIMENT forest: `card_kind`, `parent_card_id`, `child_card_ids`,
+    `child_rollup`.
+
+    THE RELATION THIS ADDS, and why the board needed it. Two facts had no way to be said together:
+    a Card is one minimal-change hypothesis (that is the whole point of the card/node split), and
+    research is done in FAMILIES of them under one broad question. A direction like "distil from a
+    stronger teacher" is not a minimal change and can never be made into one, so it was written to
+    the board as a row that owns no action — `identity_not_native`, `action_owner_missing` — sitting
+    among the work items forever, unbuildable by construction. Measured on
+    `runs/e5small-dr-unified-v5`: 5 of 5 rows were directions, 0 were buildable, and the board
+    nevertheless read as full. The previous grouping key was `belief_id`, a hash of the seed
+    statement TEXT, which put 140 cards of one run into 31 groups with 19 singletons: paraphrase is
+    a new belief, so it grouped nothing an operator would call the same question.
+
+    ORDERING. This phase runs AFTER `_apply_card_selection_readiness` — the only hard ordering
+    constraint in the whole ledger besides step 9's — because `card_kind` is derived from
+    `selection_provenance.action_source`, which that step writes. It runs BEFORE
+    `_publish_visible_cards` so the fields are on the rows the wire actually carries. Nothing later
+    reads them.
+
+    THE EDGES ALWAYS FORM A FOREST, and that is enforced here rather than promised. Four refusals,
+    each of which a hostile, corrupt or merely old log can produce:
+
+      * an edge naming a card that does not exist (a target dropped from a truncated log);
+      * a SELF edge, including one that becomes a self edge only after canonicalization — a card
+        merged INTO its own declared parent resolves to itself, which is exactly the case a
+        "`raw != cid`" check at decode time would miss;
+      * an edge that lies ON a cycle — every edge of the cycle, because there is no principled
+        way to elect one of three mutually-referring cards as the mistake. A card hanging OFF a
+        cycle member keeps its edge: the cycle members become roots, so its chain terminates;
+      * a chain already `CARD_LINEAGE_MAX_DEPTH` deep, which becomes its own root rather than
+        deepening a tree no consumer is willing to walk.
+
+    A refused edge leaves `parent_card_id` None — the card is a root, which is what it was before
+    this phase existed. Refusal is never an exception: one malformed row must not brick the fold.
+
+    THE ROLLUP IS NOT A STATUS, and this is the operator-visible half. Giving a parent its children's
+    worst/latest lane would park a broad direction in **Running** for months because one of two
+    hundred experiments under it is training. `card_child_rollup` returns COUNTS instead, exact even
+    where `child_card_ids` clips at `CARD_CHILD_LIMIT`.
+    """
+    cards = ledger.cards
+    _canon = aliases.canon
+
+    # 1) Kind for every row, and a clean slate for the derived halves. Reset FIRST and
+    #    unconditionally: these are derived overlays, and a row that lost its edge this fold must not
+    #    keep the one it had last fold (the ledger object is rebuilt per fold today, so this is a
+    #    fence rather than a live case — but a stale inverse edge is invisible once written).
+    for cid, c in cards.items():
+        c.card_kind = card_kind_of(c)
+        c.child_card_ids = []
+        c.child_rollup = None
+
+    # 2) Resolve every declared edge to a canonical, existing, non-self target.
+    declared: dict[str, str] = {}
+    for cid, c in cards.items():
+        raw = c.parent_card_id
+        c.parent_card_id = None
+        if not isinstance(raw, str) or not raw:
+            continue
+        target = _canon(raw)
+        if target not in cards or target == _canon(cid):
+            continue
+        declared[cid] = target
+
+    # 3) Refuse every edge that lies ON a cycle — and ONLY those. The first draft walked up from each
+    #    edge's target and refused any edge whose walk came back around, which reads right and is
+    #    wrong twice: in a pure 3-cycle EVERY edge comes back around, so all three were refused and
+    #    the "keep the rest of the chain" promise was empty; and a perfectly legal card hanging off a
+    #    cycle member lost its edge as collateral, because its walk cannot terminate either. Peeling
+    #    is exact instead of approximate. In this functional graph (one parent each) the nodes with no
+    #    CHILD can never be on a cycle, so removing them repeatedly leaves precisely the cyclic cores.
+    #
+    #    A pure cycle loses all of its edges deliberately: there is no principled way to pick which
+    #    of three mutually-referring cards is "the" mistake, and picking one would make the published
+    #    board depend on dict iteration order. Corrupt input becomes roots, not an arbitrary tree.
+    child_count: dict[str, int] = {}
+    for target in declared.values():
+        child_count[target] = child_count.get(target, 0) + 1
+    peel = [cid for cid in declared if child_count.get(cid, 0) == 0]
+    while peel:
+        cid = peel.pop()
+        target = declared[cid]
+        child_count[target] = child_count.get(target, 1) - 1
+        if child_count[target] == 0 and target in declared:
+            peel.append(target)
+    on_cycle = {cid for cid in declared if child_count.get(cid, 0) > 0}
+
+    # 4) With the cycles gone every remaining chain terminates, so depth is measurable. A card whose
+    #    ancestor chain already reaches the bound becomes a ROOT: the top `CARD_LINEAGE_MAX_DEPTH`
+    #    levels stay a tree and anything past them is published as its own family rather than
+    #    silently deepening one no consumer is willing to walk.
+    for cid, target in declared.items():
+        if cid in on_cycle:
+            continue
+        walk: str | None = target
+        depth = 0
+        while walk is not None and walk not in on_cycle and depth < CARD_LINEAGE_MAX_DEPTH:
+            walk = declared.get(walk)
+            depth += 1
+        if depth < CARD_LINEAGE_MAX_DEPTH:
+            cards[cid].parent_card_id = target
+
+    # 5) The inverse edge and the parent's rollup. `sorted` so two folds of the same log publish the
+    #    same list; the rollup is computed over EVERY child while only the first
+    #    `CARD_CHILD_LIMIT` ids are published, so a clipped parent still states its true size.
+    children: dict[str, list[str]] = {}
+    for cid, c in cards.items():
+        if c.parent_card_id:
+            children.setdefault(c.parent_card_id, []).append(cid)
+    for parent_id, kids in children.items():
+        kids.sort()
+        parent = cards[parent_id]
+        parent.child_card_ids = kids[:CARD_CHILD_LIMIT]
+        parent.child_rollup = card_child_rollup([cards[k] for k in kids])
+        # The concept union over EVERY child, not only the published ids — same reason the rollup
+        # counts every child. Written to `child_concept_tags` and never to `concept_tags`, whose
+        # `concept_source` provenance says who AUTHORED a membership and may not be handed a
+        # derived union (see the field).
+        union: set[str] = set()
+        for k in kids:
+            union.update(t for t in (cards[k].concept_tags or []) if isinstance(t, str) and t)
+        # The bound is the WIRE's, shared as a constant rather than typed here: this clipped at 64
+        # while `serve/public_cards.py` publishes at 32, so a direction whose children named 33+
+        # distinct concepts published a truncated set AND reported its whole card projection
+        # incomplete — the board-wide "card projection incomplete" banner, on a healthy board.
+        parent.child_concept_tags = sorted(union)[:CARD_CONCEPT_TAG_LIMIT]
+
+
 def _publish_visible_cards(
         st: RunState, ledger: _CardLedger, control_ids: dict[str, set[str]]) -> None:
     cards = ledger.cards
@@ -2718,8 +3122,10 @@ def derive_cards(
     The numbered phases below are the SAME sequence this function ran inline until doc 25 EV-01 split
     them out, in the same order, and the order is load-bearing: ``_card_identity_map`` must see the
     whole log before any Card exists, the merge fold must run before verdicts (evidence is unioned),
-    the operator overlay must run after enrichment and ranking (docs/23 decision 27), and
-    ``actionable`` / ``selection_ready`` read the FINAL status. ``_apply_card_belief_lineage`` is the
+    the operator overlay must run after enrichment and ranking (docs/23 decision 27),
+    ``actionable`` / ``selection_ready`` read the FINAL status, and ``_apply_card_lineage`` must run
+    AFTER selection readiness because ``card_kind`` is derived from the ``selection_provenance``
+    that step writes. ``_apply_card_belief_lineage`` is the
     one phase with NO ordering constraint of its own — it writes only the two derived research-direction
     identities (``belief_id``/``retry_of``) and no later phase reads them — so it sits where the
     sequence stays readable as "derive every projected field, then gate on the final values".
@@ -2739,10 +3145,12 @@ def derive_cards(
     dropped = _apply_card_drops(st, ledger, aliases)
     building_card_nodes = _card_building_ids(st, ledger, aliases)
     _apply_card_status(st, ledger, dropped, building_card_nodes)
+    _apply_card_applied_params(st, ledger)
     _apply_card_enrichment(st, ledger, aliases, card_enrichment_omissions)
     _apply_card_ranking(st, identity, ledger, aliases)
     _apply_card_operator_overlays(st, ledger, aliases)
     _apply_card_belief_lineage(st, ledger, aliases)
     _apply_card_actionable(ledger)
     _apply_card_selection_readiness(st, ledger, aliases, building_card_nodes)
+    _apply_card_lineage(ledger, aliases)
     _publish_visible_cards(st, ledger, control_ids)

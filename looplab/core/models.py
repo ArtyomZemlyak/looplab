@@ -16,6 +16,12 @@ from looplab.core.cards import (
     CARD_STEERING_CONTEXT_FIELDS as _CARD_STEERING_CONTEXT_FIELDS,
     CARD_STATEMENT_MAX_CHARS as _CARD_STATEMENT_MAX_CHARS,
     CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_STATEMENT_MAX_UTF8_BYTES,
+    CARD_CHILD_LIMIT,
+    CARD_CONCEPT_TAG_LIMIT,
+    CARD_KINDS,
+    CARD_KIND_DIRECTION,
+    CARD_KIND_EXPERIMENT,
+    CARD_LINEAGE_MAX_DEPTH,
     Card,
     CardConceptSource as _CardConceptSource,
     CardIdentityProvenance as _CardIdentityProvenance,
@@ -25,6 +31,13 @@ from looplab.core.cards import (
     IDEA_PROPOSAL_DIGEST_V1_FIELDS as _IDEA_PROPOSAL_DIGEST_V1_FIELDS,
     _card_action_digest as __card_action_digest,
     card_action_digest as _card_action_digest_v2,
+    card_child_rollup,
+    card_drift_brief,
+    card_proposal_drift,
+    card_lineage_brief,
+    card_rollup_brief,
+    card_is_direction,
+    card_kind_of,
     card_ownership_receipt as _card_ownership_receipt,
     card_score_fence_state as _card_score_fence_state,
     developer_artifact_footprint as _developer_artifact_footprint,
@@ -564,6 +577,14 @@ class NodeStatus(str, Enum):
     failed = "failed"        # ran but produced no usable metric
 
 
+# DURABLE-PAYLOAD hygiene for `Idea.open_questions`, not a policy about the board. The board cap is
+# `engine/research_cadence.py::admit_research_beliefs`, which is derived from the prompt window every
+# reader can actually show; re-stating that number here is exactly how two caps come to disagree, so
+# these are deliberately LOOSER and answer only "how much may one proposal write into node_created".
+_REGISTERED_QUESTION_LIMIT = 8
+_REGISTERED_QUESTION_CHARS = 500
+
+
 class Idea(BaseModel):
     """A proposed experiment: which operator, what parameters, why."""
     operator: str
@@ -633,6 +654,91 @@ class Idea(BaseModel):
     # node_created -> Idea(**d["idea"]) for free and old logs fold identically. The engine stamps it from
     # its receipt-bound Card mint; legacy/external writers may still leave it absent.
     card_id: Optional[str] = None
+    # The research DIRECTION this experiment serves — the card-level edge `Card.parent_card_id`
+    # publishes (see `core/cards.py` for what the relation is and why it is not `belief_id`). The
+    # Researcher AUTHORS it: a direction is a board row that owns no action, so it can never be
+    # CLAIMED the way `card_id` above is claimed, and the only way an experiment gets filed under
+    # one is by naming it. Advisory and nullable exactly like `card_id`: the fold refuses a self
+    # edge, an unknown target and a cycle, so a wrong value costs a missing link and never a
+    # malformed board. Rides `durable_idea_payload` -> `card_added` -> `Card.parent_card_id` and
+    # `node_created` -> `Idea(**d["idea"])` for free; None => the card is a root, today's behaviour.
+    # NOT part of any digest — `IDEA_PROPOSAL_DIGEST_V1_FIELDS` and the card action digests are
+    # fixed tuples that do not name it, so two proposals differing only in the direction they serve
+    # are still the same executable action, which is what makes filing one free.
+    # The DESCRIPTION is the contract surface, not decoration: `IdeaEmission` inherits this field
+    # and `agents/agent.py` hands `model_json_schema()` to the model as the emit tool's parameters,
+    # so this sentence is what the Researcher actually reads about the edge.
+    parent_card_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional. The DIRECTION_ID of the open research direction this experiment is meant to "
+            "answer, exactly as shown in the OPEN RESEARCH DIRECTIONS block. A direction is a broad "
+            "question that owns no runnable action; filing an experiment under one is how a family "
+            "of minimal-change experiments is tracked to a shared verdict. Never put a DIRECTION_ID "
+            "in card_id, and never name this experiment's own card here."),
+    )
+    # QUESTIONS THIS PROPOSAL IS NOT PURSUING — the Researcher's own channel for "I noticed something
+    # worth investigating and it is not what I am proposing now". Until this shipped only deep
+    # research and the operator could put a question on the board: the Researcher could ANSWER a
+    # direction (`parent_card_id`) and, through `read_questions`, READ the board, and had no way to
+    # ASK. A noticed-but-unpursued question left in `rationale` prose is read by nothing.
+    #
+    # AN OUTPUT FIELD AND DELIBERATELY NOT A TOOL. Engine invariant #1: the engine is the sole writer
+    # of domain events, so a role returns a value and the ENGINE appends. A `register_question` tool
+    # would append `EV_HYPOTHESIS_ADDED` from inside a tool call on the role's own thread, and that
+    # event's membership in `BACKGROUND_APPENDABLE` does not license it — that membership exists for
+    # the concurrent RESEARCH TASK, whose safety argument is "appending FEWER rows moves no reader's
+    # position", not "any thread may append".
+    #
+    # Advisory, nullable and additive with reader-side defaults (invariant #5), exactly like
+    # `card_id`/`parent_card_id`: it rides `durable_idea_payload` -> `node_created` ->
+    # `Idea(**d["idea"])` for free, and an old log that carries neither key folds identically. NOT
+    # part of any digest — `IDEA_PROPOSAL_DIGEST_V1_FIELDS` and the card action digests are fixed
+    # tuples that do not name it, so two proposals differing only in the questions they file are the
+    # same executable action. That is what makes asking FREE, which is the whole point: a Researcher
+    # that had to spend its proposal to record a question would record none.
+    #
+    # OPEN[researcher-questions-not-appended] the CARRIER ships here and no engine path reads it yet,
+    # so a registered question rides `node_created` and becomes no board row.
+    # proof:absent:idea_registered_questions@looplab/engine/research_cadence.py
+    #
+    # WHY IT IS STAGED rather than inlined: `EV_HYPOTHESIS_ADDED` is FOLDED, so appending it from the
+    # main task inside a reservation's window moves `speculation._proposal_authority_seq`'s max-seq
+    # CAS and discards a proposal the run has already PAID for — the exact hazard invariant #1
+    # records for `train_monitor_alert`. The append must land outside that window, reuse
+    # `research_cadence.admit_research_beliefs` (so the two writers agree about a full board) and
+    # `question_concept_rows` (so both spell the positional join once). Shipping the carrier alone is
+    # the "stamped and nothing consumes it" shape this repo has paid for before, which is exactly why
+    # it wears a marker instead of a promise.
+    #
+    # The proof is over the FIX'S OWN SYMBOL (CLAUDE.md tier 1) and NOT over the string
+    # `open_questions`: that literal already occurs in `research_cadence.py`'s memo path and
+    # docstrings, so an `absent:` predicate on it is false the day it is written — the guard caught
+    # exactly that, along with the slug being declared in three files instead of one.
+    # `idea_registered_questions` exists nowhere yet; the commit that adds it turns this proof red,
+    # and a red guard here means the item SHIPPED, so delete the marker. The predicate is ONE
+    # whitespace-free token by construction — the guard splits on space, so `absent:def foo@path`
+    # parses as the predicate `absent:def`, which it rejected.
+    open_questions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional. Research questions you noticed but are NOT pursuing in this experiment — "
+            "each a broad question worth its own investigation later, not a restatement of what you "
+            "are proposing now. They become open research directions on the board that you or a "
+            "later experiment can file work under; nothing is run because you listed it here."),
+    )
+    # WHAT EACH QUESTION IS ABOUT, positionally aligned with `open_questions` — the same shape and
+    # the same join as `ResearchMemo.question_concepts`, resolved by the one shared
+    # `engine/research_cadence.py::question_concept_rows`. A question's concept SET is its position
+    # in the question lattice, so a question with no concepts is registered and lands ungrouped
+    # rather than being refused.
+    question_concepts: list[list[str]] = Field(
+        default_factory=list,
+        description=(
+            "Optional. Concept ids for each entry of open_questions, aligned by POSITION: "
+            "question_concepts[i] describes open_questions[i]. Same axis/slug vocabulary as "
+            "`concepts`. Omit rather than guess — a question with no concepts is still registered."),
+    )
     # Hypothesis-card Kanban (docs/23, Layer 1b): the Researcher-PROPOSED resource footprint for this
     # experiment — {gpus, gpu_mem_mib, ...}. Audit-only in Layer 1 (surfaced on the card as proposed_by=
     # 'researcher'); the Developer FINALIZES it and the bin-packing scheduler CONSUMES it only in Layer 4.
@@ -641,7 +747,7 @@ class Idea(BaseModel):
     # eval_timeout, clamped to a Settings ceiling (docs/23 owner decision 3).
     footprint: Optional[dict] = None
 
-    @field_validator("card_id", mode="before")
+    @field_validator("card_id", "parent_card_id", mode="before")
     @classmethod
     def _read_bounded_card_id(cls, value):
         # card linkage is advisory. A future/corrupt scalar must not reject node_created and
@@ -652,6 +758,108 @@ class Idea(BaseModel):
         if not card_id or len(card_id) > 256 or not card_id.isprintable():
             return None
         return card_id
+
+    @field_validator("question_concepts", mode="before")
+    @classmethod
+    def _read_question_concept_rows(cls, value):
+        """The ROW SHAPE has to be healed HERE, and driving it is what proved that.
+
+        A `mode="before"` validator that merely checks the OUTER type is not enough: pydantic then
+        validates each element against `list[str]` and raises on a flat `["loss/contrastive", ...]`
+        BEFORE any `mode="after"` hook runs. That is exactly the 7d406cc2 defect — the only
+        `list[list[str]]` in a schema, a model returning the natural flat shape, and the whole
+        payload lost — reproduced in the field added to prevent it, and it survived until the shape
+        was actually fed through the model rather than reasoned about.
+
+        A flat row becomes an EMPTY row rather than being dropped: POSITION IS THE JOIN, so removing
+        it would shift every later question onto its neighbour's concepts (c438f1c9, one layer down).
+
+        THE ELEMENTS INSIDE A ROW NEED THE SAME TREATMENT, and healing only the row shape left the
+        defect half-fixed: pydantic validates each row against `list[str]` and raises on
+        `[["distill/teacher", 2]]` — a well-formed row with one non-string id — before
+        `_bounded_question_concepts` (mode="after") can coerce anything. So the whole proposal was
+        still lost over an advisory decoration, which is the outcome the paragraph above says must
+        not happen. The dead giveaway that element healing was always intended and unreachable is
+        that the after-validator does `str(item or "")` on values pydantic has already guaranteed
+        are `str`.
+
+        A non-string ID is DROPPED rather than blanked, and that is the opposite of the row rule
+        because the join is different: a row's position joins it to a question, while the ids WITHIN
+        a row are an unordered set. Coercing `2` to `"2"` would register a concept named "2" on the
+        concept graph, which is worse than not registering one.
+        """
+        if not isinstance(value, list):
+            return []
+        return [[item for item in row if isinstance(item, str)] if isinstance(row, list) else []
+                for row in value[:_REGISTERED_QUESTION_LIMIT]]
+
+    @field_validator("open_questions", mode="before")
+    @classmethod
+    def _read_registered_questions(cls, value):
+        """HEAL, never raise — and `IdeaEmission` deliberately does NOT override this with a strict
+        twin, which is the one design decision in this field worth arguing.
+
+        The concept envelope beside it IS strict on the emission path, because a wrong membership
+        corrupts the concept graph and the model must be asked to try again. The opposite is true
+        here, and 7d406cc2 is the measurement: `_MemoOut.question_concepts` was the only
+        `list[list[str]]` in that schema, a model returned the natural FLAT shape, and the strict
+        finalizer discarded nine good fields with it — two complete deep-research passes, 203 tool
+        calls and 64 sources, thrown away over a decoration. Registering a question is strictly
+        less valuable than the experiment carrying it, so a malformed value costs the QUESTION and
+        never the proposal.
+
+        Bounded here rather than at the append site because this rides a DURABLE payload: a model
+        that returns two hundred questions must not write two hundred of them into `node_created`.
+        The bound is deliberately loose — `engine/research_cadence.py::admit_research_beliefs` owns
+        the real board cap, and duplicating that number here is how the two come to disagree.
+
+        "HEAL, never raise" needs the ELEMENTS too, and for one day it healed only the outer type:
+        pydantic then validated each entry against `str` and raised on `["ok", 3]`, and on the very
+        ordinary `[{"question": …, "why": …}]` a model returns when asked for research questions —
+        so the whole proposal was lost exactly as in 7d406cc2. A non-string becomes `""` and KEEPS
+        its slot, because position is the join with `question_concepts`; the blank is then dropped
+        from the board by `admit_research_beliefs`, which is the same treatment an unusable string
+        already gets one validator down. Deliberately NO key-guessing on a dict: picking `question`
+        or `statement` out of it would be this validator inventing content, and a question nobody
+        wrote is worse on the board than one that was never registered.
+        """
+        if not isinstance(value, list):
+            return []
+        return [item if isinstance(item, str) else ""
+                for item in value[:_REGISTERED_QUESTION_LIMIT]]
+
+    @field_validator("open_questions", mode="after")
+    @classmethod
+    def _bounded_question_statements(cls, value):
+        """Bound each statement WITHOUT changing the list's length — position is the join.
+
+        The first cut of this dropped unusable entries, and driving it caught the consequence
+        immediately: `["q1", "", "q3"]` became a 2-entry list while `question_concepts` still held
+        3 rows, so "q3" joined to row 1. That is c438f1c9's defect re-created inside the validator
+        written to carry its fix — the same trap, one layer up, and reasoning about it was not what
+        found it.
+
+        So an unusable entry becomes `""` and KEEPS its slot.
+        `engine/research_cadence.py::question_concept_rows` is the one place blanks are skipped, and
+        it skips them AFTER reading the index; `admit_research_beliefs` drops them from the board.
+        Neither ever sees a shifted list.
+        """
+        bounded = []
+        for item in value:
+            text = str(item or "").strip()
+            bounded.append(text[:_REGISTERED_QUESTION_CHARS] if text and text.isprintable() else "")
+        return bounded
+
+    @field_validator("question_concepts", mode="after")
+    @classmethod
+    def _bounded_question_concepts(cls, value):
+        # The row SHAPE is already healed in `_read_question_concept_rows`; this only bounds the ids
+        # inside each row. An emptied row is KEPT — `question_concept_rows` reads it as "no concepts
+        # for that question", exactly as it reads a missing one, and keeping it holds the position.
+        return [[text[:_REGISTERED_QUESTION_CHARS] for text in
+                 (str(item or "").strip() for item in row[:64])
+                 if text and text.isprintable()]
+                for row in value]
 
     @field_validator("footprint", mode="before")
     @classmethod
@@ -770,12 +978,16 @@ class IdeaEmission(Idea):
     def _strict_raw_concept_envelope(cls, value):
         if not isinstance(value, dict):
             raise ValueError("Idea emission must be an object")
-        raw_card_id = value.get("card_id")
-        if raw_card_id is not None:
-            if (not isinstance(raw_card_id, str) or raw_card_id != raw_card_id.strip()
-                    or not raw_card_id or len(raw_card_id) > 256
-                    or not raw_card_id.isprintable()):
-                raise ValueError("card_id must be a bounded printable string")
+        # BOTH card edges, and both strict for the same reason: base `Idea`'s validator HEALS a
+        # malformed id to None, which is right for a durable log and wrong for a live producer —
+        # the model would silently lose the link it authored and never be asked to try again.
+        for field in ("card_id", "parent_card_id"):
+            raw_card_id = value.get(field)
+            if raw_card_id is not None:
+                if (not isinstance(raw_card_id, str) or raw_card_id != raw_card_id.strip()
+                        or not raw_card_id or len(raw_card_id) > 256
+                        or not raw_card_id.isprintable()):
+                    raise ValueError(f"{field} must be a bounded printable string")
         raw_footprint = value.get("footprint")
         if raw_footprint is not None and not valid_researcher_footprint(raw_footprint):
             raise ValueError("footprint must contain only bounded integer gpus/gpu_mem_mib")
@@ -1326,6 +1538,38 @@ class ResearchMemo(BaseModel):
     claims_receipt: Optional[dict] = Field(default=None, exclude=True)
     sources: list[dict] = Field(default_factory=list)   # {title, url} consulted (web/arXiv)
     recommended_directions: list[str] = Field(default_factory=list)  # what to try next (steer hints)
+    # THE SPLIT, and it exists because the FIELD NAME contradicted its own description. The prompt
+    # asked for `recommended_directions` and defined them as "(specific next experiments to try)",
+    # so the model correctly returned EXPERIMENTS and the channel called them directions. Measured on
+    # `runs/e5small-dr-unified-v5`: of five, exactly ONE was a genuine direction (a family —
+    # "cross-encoder / strong-teacher distillation"); #2 was a single-knob experiment with an exact
+    # value ("test temperature 0.01"), #1 and #3 were two concrete actions each. A one-knob
+    # experiment arriving through a channel that carries no action is unbuildable forever, so the
+    # memo already decided an experiment the engine then could not run.
+    #
+    # Both are ADDITIVE and `recommended_directions` keeps its meaning byte-for-byte: every log on
+    # disk carries only it, every reader keeps working, and a memo that fills neither new field
+    # folds exactly as it always did. The registration path prefers `open_questions` when present —
+    # those are the rows that legitimately own no action — and leaves `next_experiments` to be
+    # proposed as real work.
+    open_questions: list[str] = Field(default_factory=list)    # families, no action, may not be built
+    # WHAT EACH OPEN QUESTION IS ABOUT, positionally aligned with `open_questions`.
+    #
+    # IT WAS MISSING AND `_assemble` ASSIGNED IT ANYWAY, which is a sharper defect than a dropped
+    # value: `agents/deep_research.py::_assemble` sets the memo's fields one by one and its line
+    # `memo.question_concepts = clean["question_concepts"]` raised on a model with no such field —
+    # so `memo.sources` on the NEXT line was never set and the call died half way. Because
+    # `_assemble` mutates the memo IN PLACE, everything assigned before that line survived in the
+    # object, and a memo could come back looking populated while being the product of a crashed
+    # assembly. Every deep-research memo on this box went through that path.
+    #
+    # The durable event never showed it because `core/advisory_payloads.py::sanitize_research_memo_payload`
+    # builds its own dict and defaults this key to `[]` when the source lacks it — so the row said
+    # "no concepts" about a memo whose carrier could not hold any. Two writers, one payload; the
+    # sanitizer was looking for a key the object was structurally unable to provide.
+    question_concepts: list[list[str]] = Field(default_factory=list)
+
+    next_experiments: list[str] = Field(default_factory=list)  # one concrete change each
     # Optional concrete proposals the engine may materialize as injected nodes (empty for v1; the
     # directions above already feed the Researcher as standing context).
     proposed_ideas: list[Idea] = Field(default_factory=list)
@@ -1952,6 +2196,10 @@ class RunState(BaseModel):
     cards_added: list[dict] = Field(default_factory=list)
     cards_merged: list[dict] = Field(default_factory=list)
     cards_dropped: list[dict] = Field(default_factory=list)
+    # The reopen receipts, resolved against `cards_dropped` by `_event_index` (last one wins). Kept
+    # as its OWN list rather than by removing the drop: the drop carries who/why, which a reopened
+    # card's history still owes the operator.
+    cards_reopened: list[dict] = Field(default_factory=list)
     # Layer 1b enrichment channel. `cards_enriched`: engine/operator card_enriched deltas (novelty verdict,
     # cross-run prior, footprint-finalize, steering cues), applied last-write-by-seq in `_derive_cards`.
     # `card_ranking`: the latest `card_ranked` event {order:[card ids], confidence, reason}; stamps each
@@ -1977,6 +2225,25 @@ class RunState(BaseModel):
     # `lessons_refreshed` records each mid-run re-read of the shared cross-run store (cadence gate).
     lessons_distilled: list[dict] = Field(default_factory=list)
     lessons_refreshed: list[dict] = Field(default_factory=list)
+    # THE CROSS-NODE REPAIR LEDGER — what OTHER nodes had to fix, and why.
+    #
+    # Lineage carries FILES from parent to child, and it carries them correctly (see
+    # `repo_developer.implement_from`). What it cannot carry is a fix discovered by a SIBLING,
+    # because a node only becomes a parent by WINNING ON METRIC. Measured on
+    # `runs/e5small-dr-unified-v4`: nodes 4,5,6,8,9 all improve from node 3 — a star, not a chain.
+    # Node 6 hit `stage 'mine' exited 0 without producing its artifact`, its repair wrote a `prep.py`
+    # that fixes it, and node 6 scored 0.781781 against node 3's 0.790898. So node 6 will never be a
+    # parent, its `prep.py` is unreachable, and node 8 inherited node 3's six files verbatim and hit
+    # the identical failure. Three nodes paid for the same discovery.
+    #
+    # The mechanism is right and is NOT changed: a mechanical fix and a scientific result are being
+    # selected by the SAME criterion, and only one of them should be. So this is a second channel
+    # carrying INFORMATION, never files — a later Developer is told what was repaired and why, and
+    # decides for itself. It cannot corrupt a lineage because nothing is inherited through it.
+    #
+    # Bounded on purpose (`_REPAIR_LEDGER_MAX`): a long run repairs many times, and a ledger that
+    # grows without limit becomes a prompt that crowds out the code it is meant to annotate.
+    repair_ledger: list[dict] = Field(default_factory=list)
 
     @field_serializer("run_setup_done")
     def _ser_run_setup_done(self, v: set) -> list:
@@ -2043,6 +2310,48 @@ class RunState(BaseModel):
                 continue
             seen.add(key)
             out.append(c)
+        return out
+
+    def repair_candidates(self) -> list[dict]:
+        """The repair ledger grouped by FILE PATH, most-repeated first — the operator's list of
+        changes that belong in the source repo rather than in one node.
+
+        A node inherits its parent's files, and correctly; what it cannot inherit is a fix a SIBLING
+        found, because a node becomes a parent only by winning on metric. Measured on
+        `runs/e5small-dr-unified-v4`: nodes 4, 5, 6, 8 and 9 all improve from node 3, so node 6's
+        repaired `prep.py` — which diagnosed the mine-stage artifact contract correctly — was
+        unreachable to node 8, and node 8 hit the same failure with node 3's six files verbatim.
+
+        Grouped by path and counted by DISTINCT NODES on purpose: one node repairing the same file
+        four times is one discovery, and four nodes repairing it once each is a property of the
+        repo. The second is what deserves a commit; the first is a node having a bad day.
+
+        This RANKS, it decides nothing. Promoting a fix into the source repo moves the substrate
+        every later node is measured on — that is an operator's call, and it has to be recorded as
+        an event or the comparability key cannot tell nodes on either side of it apart."""
+        by_path: dict[str, dict] = {}
+        for row in self.repair_ledger:
+            node_id = row.get("node_id")
+            for path in (row.get("paths") or []):
+                if not isinstance(path, str):
+                    continue
+                entry = by_path.setdefault(path, {"path": path, "nodes": set(), "reasons": {}})
+                # A row with no `node_id` (a hand-edited or pre-stamping log) is attributable to no
+                # DISTINCT node, so it may not swell the count: `None` in this set made `node_count`
+                # one higher than the `nodes` list it is rendered beside, and `node_count >= 2` is
+                # the exact conjunct that fires this command's headline "N separate experiments
+                # fixed <path>" recommendation.
+                if node_id is not None:
+                    entry["nodes"].add(node_id)
+                reason = row.get("reason")
+                if isinstance(reason, str):
+                    entry["reasons"][reason] = entry["reasons"].get(reason, 0) + 1
+        out = [{"path": e["path"],
+                "nodes": sorted(e["nodes"]),
+                "node_count": len(e["nodes"]),
+                "reasons": dict(sorted(e["reasons"].items(), key=lambda kv: (-kv[1], kv[0])))}
+               for e in by_path.values()]
+        out.sort(key=lambda e: (-e["node_count"], e["path"]))
         return out
 
     def evaluated_nodes(self) -> list[Node]:
@@ -2135,9 +2444,18 @@ def is_unevaluated_speculative_discard(state: "RunState", node: Node) -> bool:
     """Prove the Layer-5 budget refund for a speculative build that NEVER RAN, from folded receipts.
 
     A speculative build that turns out not to match the next selection is thrown away before it is
-    ever dispatched: it costs exactly one Developer call and touches no sandbox/GPU.  Charging it a
+    ever dispatched: it costs one Developer BUILD and touches no sandbox/GPU.  Charging it a
     node-budget slot is budget THEFT from the experiments the run still has to execute, so the slot
-    is refunded.  A speculative node that DID consume an evaluation is a real experiment and keeps
+    is refunded.
+
+    THAT SENTENCE READ "exactly one Developer call" UNTIL 2026-08-28, AND A BUILD IS NOT ONE CALL.
+    Measured on `e5small-dr-unified-v9`: card-3's first build was 274 generations and 12.7M tokens,
+    its rebuild 458 and 22.6M; cards 3 and 4 together — every node either ever owned discarded here —
+    cost 68.9M, 21.0 % of the run at 17.6 h.  The refund argument is unaffected, because it is about
+    the NODE BUDGET (GPU slots) and nothing else, and none of those tokens bought sandbox time.  But
+    the old wording made the discard read as free, and it is the most expensive thing the engine does
+    that produces no experiment.  `looplab tokens` now prices it per card (`events/token_spend.py::
+    token_spend_by_card`) so the trade can be weighed rather than assumed.  A speculative node that DID consume an evaluation is a real experiment and keeps
     its slot, whatever its outcome.
 
     "Never ran" is proven, never inferred.  Four independent durable facts must agree:

@@ -739,3 +739,95 @@ def test_a_bounded_or_rejected_value_is_never_certified_exact(name, raw):
     projected = _field_value({name: raw}, name)
     bounded = None if projected is _SKIP else projected
     assert _field_projection_lossless(name, raw, bounded) is False
+
+
+def _replay_journal_fields() -> list[str]:
+    """Every `RunState` field that is a LIST OF RECEIPTS the fold keeps for replay.
+
+    Derived from the model rather than listed, because a list is what let `cards_reopened` ship on
+    the wire: the existing coverage asserted `not (INTERNAL_CARD_STATE_FIELDS & state.keys())`,
+    which is self-referential — it proves the set excludes itself and says nothing about a journal
+    that was never added to it.
+    """
+    from looplab.core.models import RunState
+
+    names = []
+    for name, field in RunState.model_fields.items():
+        if not (name.startswith("card_") or name.startswith("cards_")):
+            continue
+        if repr(field.annotation).replace(" ", "") in ("list[dict]", "typing.List[dict]"):
+            names.append(name)
+    return names
+
+
+def test_no_card_replay_journal_reaches_the_public_state():
+    """DRIVEN, not pinned: populate every derived journal with a receipt carrying the fold's own
+    `_event_index` and prove none of it survives the public exclusion.
+
+    `cards_reopened` is the case. It is the same shape as `cards_dropped`, is stamped with the same
+    `_event_index` by `_on_card_reopened`, and was omitted from `INTERNAL_CARD_STATE_FIELDS` when it
+    landed — so an operator reopening cards grew an accumulating journal that rode every ~1s SSE
+    frame and landed in the reviewer read namespace. A journal added to one side of the drop/reopen
+    switch and not the other is exactly the producer-only field that set exists to keep off the wire.
+    """
+    from looplab.core.models import RunState
+
+    journals = _replay_journal_fields()
+    assert len(journals) >= 4, f"the journal derivation read too little: {journals}"
+
+    st = RunState()
+    for name in journals:
+        getattr(st, name).append({"id": "card-1", "reason": "r", "_event_index": 7})
+    state = st.model_dump(mode="json", exclude=INTERNAL_CARD_STATE_FIELDS | {"cards"})
+
+    leaked = sorted(name for name in journals if name in state)
+    assert leaked == [], (
+        f"{leaked} are replay journals still serialized into every owner-state frame, SSE tick and "
+        "review summary — add them to INTERNAL_CARD_STATE_FIELDS")
+
+    # The property behind the name list: no fold-internal key may reach the wire by ANY route, so a
+    # future journal that escapes the derivation above is still caught here.
+    def _underscored(value) -> bool:
+        if isinstance(value, dict):
+            return any(str(k).startswith("_") for k in value) or any(
+                _underscored(v) for v in value.values())
+        return isinstance(value, list) and any(_underscored(item) for item in value)
+
+    assert not _underscored(state), "a fold-internal `_`-prefixed key reached the public state"
+
+
+def test_the_fold_and_the_wire_agree_about_the_concept_tag_bound():
+    """Two caps on one field is how a healthy board reports itself broken.
+
+    The fold unioned a direction's child concepts at 64 while this projector publishes ref-lists at
+    `_MAX_ITEMS` (32), so a direction whose children named 33+ distinct concepts was published
+    truncated AND had `_field_projection_lossless` fail — which flips the CARD's receipt, which
+    flips the whole board's, which renders `_CardProjectionNotice` ("card projection incomplete")
+    over a run where nothing is wrong. That is exactly the collision `public_cards.py`'s own comment
+    says was avoided by keeping `child_card_ids` off the wire, arriving through its sibling.
+
+    `core` may not import `serve`, so the shared bound lives in `core/cards.py` and this is what
+    ties the two together. It is also the guard for the other direction: raising `_MAX_ITEMS` alone
+    would silently stop publishing concepts the fold no longer collects.
+    """
+    from looplab.core.cards import CARD_CONCEPT_TAG_LIMIT
+    from looplab.serve.public_cards import _MAX_ITEMS
+
+    assert CARD_CONCEPT_TAG_LIMIT == _MAX_ITEMS, (
+        "the fold's `child_concept_tags` union bound and the wire's ref-list bound must be one "
+        "number; when they differ, whichever is larger makes every board above the smaller one "
+        "report an omission it did not choose")
+
+
+def test_a_full_concept_union_still_projects_complete():
+    """Driven, because the constants agreeing is only half of it — the projector must actually
+    certify a field filled to that bound."""
+    from looplab.core.cards import CARD_CONCEPT_TAG_LIMIT
+    from looplab.core.models import Card
+
+    card = Card(id="dir-1", statement="s", card_kind="direction",
+                child_concept_tags=[f"axis/c{i}" for i in range(CARD_CONCEPT_TAG_LIMIT)])
+    projection = public_cards_projection({"dir-1": card}).cards_projection.model_dump()
+    assert projection["complete"] is True
+    assert projection["items"]["dir-1"]["complete"] is True
+    assert projection["items"]["dir-1"]["omissions"] == {}

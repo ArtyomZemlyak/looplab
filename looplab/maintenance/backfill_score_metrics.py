@@ -151,7 +151,20 @@ def plan_run(run_dir: Path) -> list[dict]:
 
 
 def apply_run(run_dir: Path, rows: list[dict]) -> int:
-    """Append the planned rows. Returns how many were written."""
+    """Append the planned rows. Returns how many were written.
+
+    OPEN[score-backfill-reapply-appends-noise-rows] a second `--apply` grows the log by one row per
+    considered node, every time.
+    proof:`present:row["unrecoverable"] = ALREADY_RECORDED@looplab/maintenance/backfill_score_metrics.py`
+    REVIEW 2026-08-25 (improvement): the module docstring promises "a second run of this command a
+    no-op", and that is true of the FOLD only. `plan_run` emits a row for every scored node — the
+    recovered ones come back as `ALREADY_RECORDED` on the next pass, and the unrecoverable ones are
+    re-planned verbatim because their event is fold-ignored — and this function appends all of
+    them, so each re-apply adds ~N rows of no new information to an append-only authoritative log.
+    The applied-params sibling already has the right shape (`continue` on an answered node, and its
+    unrecoverable rows FOLD, so they too answer "already" next time). Fix direction: make apply (or
+    a re-run's plan) skip rows whose only content is that a previous pass already ran; then delete
+    this marker."""
     from looplab.events.types import EV_SCORE_METRICS_BACKFILLED
     store = EventStore(str(run_dir / "events.jsonl"))
     for row in rows:

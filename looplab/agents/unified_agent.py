@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from looplab.agents.roles import WrapsDeveloper, forward_hints
+from looplab.agents.roles import WrapsDeveloper, bind_state_on, forward_hints
 # `BudgetExceeded` is no longer named here — the propagate-vs-degrade rule moved into
 # `tool_loop.resilient`, which owns it (doc 25 AG-06). Re-exported for any importer that
 # reached it through this module.
@@ -62,6 +62,7 @@ class UnifiedAgent(WrapsDeveloper):
     def __init__(self, *, researcher, developer, strategist=None,
                  pilot_client=None, pilot_tools=None, stage_clients=None, prompts=None,
                  agent_max_turns: int = 0, agent_time_budget_s: float = 0.0,
+                 triage_time_budget_s: float = 0.0,
                  loop_opts: Optional[dict] = None, repair_developer=None):
         # Internal per-stage backends. Named `researcher`/`developer`/`strategist` (not _-prefixed)
         # so the engine's cost roll-up walk (_emit_llm_cost) descends into them and finds every
@@ -81,6 +82,11 @@ class UnifiedAgent(WrapsDeveloper):
         # below, into which these two are folded once (doc 25 AG-01).
         self._agent_max_turns = agent_max_turns
         self._agent_time_budget_s = agent_time_budget_s
+        # The triage judge's OWN wall, spent only when the shared one above is unlimited. Kept beside
+        # the two it defers to rather than inside `triage_crash`, because "which budget wins" is a
+        # property of this object's configuration and reads wrong split across two files. Config-driven
+        # via `Settings.triage_time_budget_s`, whose comment carries the measurement.
+        self._triage_time_budget_s = float(triage_time_budget_s or 0.0)
         # B1 stuck + C1 self-plan + C2 summary (config-driven), folded ONCE into the typed bundle
         # together with the two limits above so `_pilot_emit` spreads it with no option keyword
         # beside it — the duplicate-keyword shape doc 25 AG-01 closes. `with_defaults`: a bundle
@@ -119,6 +125,30 @@ class UnifiedAgent(WrapsDeveloper):
         # researcher that actually reads them.
         forward_hints(self, self.researcher)
         return self.researcher.propose(state, parent)
+
+    def bind_state(self, state, parent=None) -> None:
+        """Bind the run state to EVERY per-stage Developer backend, not just the active one.
+
+        The inherited forwarder binds `self._wrapped`, which is `_active_developer` — the delegate
+        of the LAST code-producing call, since only `_for_stage` ever reassigns it. Every engine
+        caller binds BEFORE the call it is about (`engine/node_build.py` does `bind_state(state)`
+        and then `repair_from(...)` three lines later), so with `repair_developer` configured — an
+        operator giving implement and repair different stage models — the binding for a repair
+        landed on the IMPLEMENT developer, and the repair Developer's `QuestionBoardTools` went on
+        answering "no run state bound". After that repair the active delegate is the repair
+        developer, so the NEXT implement's bind landed there instead and the implement developer
+        kept a stale `RunState`: with a split model, each stage was bound to the other one.
+
+        Binding all of them is not a widening — a `RunState` is the RUN's, not a stage's, and the
+        backends are exactly the objects this facade may delegate a code stage to. It also makes
+        the binding independent of call ORDER, which is what the bug really was.
+        """
+        seen = []
+        for dev in (self.developer, self.repair_developer):
+            if dev is None or any(dev is s for s in seen):
+                continue                # `repair_developer=None` is the default: one backend, once
+            seen.append(dev)
+            bind_state_on(dev, state, parent)
 
     # ----------------------------------------------------------- Developer
     def _for_stage(self, stage: str):
@@ -178,7 +208,7 @@ class UnifiedAgent(WrapsDeveloper):
 
     def _pilot_emit(self, messages: list, emit_spec: dict, finalize, fallback, *,
                     state=None, bind_state: bool = True, transport_fallback=None,
-                    extra_tools=None, extra_turns: int = 0):
+                    extra_tools=None, extra_turns: int = 0, wall_when_unbounded: float = 0.0):
         """Drive the pilot tool loop for one emit, containing everything but a budget stop.
 
         `choose_action` and `triage_crash` differ only in prompt, schema and coercion; this owns what
@@ -217,6 +247,15 @@ class UnifiedAgent(WrapsDeveloper):
         `0 + n` would silently turn an operator's "no turn cap" into a cap of n — the loop is already
         bounded there by `agent_emit_after`/`agent_emit_force` and the stuck detector, which is what
         that configuration chose.
+
+        `wall_when_unbounded` is the OTHER half of that sentence, and it exists because the half above
+        was measured wrong for one caller. Those two backstops are TURN counts (300/500) sized for the
+        pilot's self-driving loop, and the stuck detector catches 1- and 2-cycles only; a triage judge
+        that swept one 663-line file six times spent 206 turns and 88 minutes inside all three of them
+        with the GPU dark behind it (`Settings.triage_time_budget_s` carries the numbers). So a caller
+        may name a wall to apply ONLY WHEN THE LOOP IS OTHERWISE UNWALLED. It is not a `min()` with the
+        configured budget on purpose: shortening an operator's explicit finite wall is the same sin as
+        `0 + n`, read from the other end. 0 (the default) leaves every existing caller byte-identical.
         """
         if bind_state and self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
             self._pilot_tools.bind_state(state, None)
@@ -235,6 +274,11 @@ class UnifiedAgent(WrapsDeveloper):
             _configured = int(getattr(loop_opts, "max_turns", 0) or 0)
             if _configured > 0 and extra_turns > 0:
                 loop_opts = loop_opts.replace(max_turns=_configured + int(extra_turns))
+        # The wall goes on OUTSIDE the `extra_tools` branch: it is about the thread this loop blocks,
+        # not about which tools this call was handed, and a caller that names one must get it whether
+        # or not it also brought a per-call provider.
+        if wall_when_unbounded and not float(getattr(loop_opts, "time_budget_s", 0.0) or 0.0):
+            loop_opts = loop_opts.replace(time_budget_s=float(wall_when_unbounded))
         # Resolve through `agent.py`'s module global at CALL time, not at import time: a
         # module-level `from ... import drive_tool_loop` early-binds the function object, so a
         # monkeypatch on the documented seam `looplab.agents.agent.drive_tool_loop` (CLAUDE.md;
@@ -886,7 +930,8 @@ class UnifiedAgent(WrapsDeveloper):
         return self._pilot_emit(messages, emit_spec, _finalize, _no_emit,
                                 state=state, bind_state=state is not None,
                                 transport_fallback=_transport_failed,
-                                extra_tools=tools, extra_turns=self._REPAIR_LOOK_TURNS)
+                                extra_tools=tools, extra_turns=self._REPAIR_LOOK_TURNS,
+                                wall_when_unbounded=self._triage_time_budget_s)
 
     # --------------------------------------------------- Repair critic (F8: the stop, not the fix)
     _REPAIR_CRITIC_SYSTEM = (

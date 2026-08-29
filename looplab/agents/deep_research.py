@@ -21,7 +21,10 @@ from __future__ import annotations
 import math as _math
 from typing import Optional
 
-from pydantic import BaseModel, Field
+import json
+import logging
+
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from looplab.agents.answered_by_context import answered_by_context
 from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
@@ -40,6 +43,7 @@ from looplab.core.redact import redact_persisted_text
 from looplab.core.source_identity import canonical_source_ref
 
 
+_LOG = logging.getLogger(__name__)
 _RESEARCH_BUDGET_LINE = (
     "BUDGET: ${spent:.4f} of ${limit:.4f} spent, ${remaining:.4f} left ({pct:.0f} % gone). "
     "Research that leaves no money for experiments buys nothing — size this memo to what is left.\n\n"
@@ -69,21 +73,251 @@ _STATE_BRIEF_FAILURE_CHARS = 300
 _STATE_BRIEF_RATIONALE_CHARS = 120
 
 
-class _ClaimOut(BaseModel):
+def _decoded_json_list(value: object) -> object:
+    """A list argument the model serialised as a JSON STRING, decoded back to the list it holds.
+
+    MEASURED on `runs/e5small-dr-unified-v7`, from the emit call's own arguments in `spans.jsonl`
+    (a `generation` span's `tool_calls[].arguments` — the emit is not traced as a `tool` span, so
+    this is the only record of what the model actually sent):
+
+        "open_questions": "[\\"Does training the e5-small backbone past the 1-3 applied epochs
+                            (toward the documented 15-60) actually lift recall@100 ...\\", ...]"
+
+    i.e. a `str` holding a JSON array of strings, where the schema declares `list[str]`. The memo
+    was otherwise sound — 10 findings, 11 claims and 64 sources all validated and were kept by the
+    drop-the-offender rung above — and the questions alone were refused and discarded.
+
+    THE MODEL'S OUTPUT WAS NOT WRONG, ITS ENCODING WAS. The questions are well-formed, on-topic and
+    exactly the shape the field wants once the outer quotes come off; nothing about them needed a
+    judgement call. That is what separates this from the shape this rung deliberately does NOT
+    heal: a model returning `[{"question": ..., "concepts": [...]}]` would need someone to decide
+    WHICH key is the question, and a guess like that admits a second spelling of one field into a
+    durable row. A JSON decode is not a guess — it either yields the declared type or it does not.
+
+    So the recovery is deliberately narrow and fails CLOSED at TWO points: the value must be a
+    `str`, and the decode must produce a `list`. Anything else is returned untouched and meets the
+    ordinary refusal, which is what keeps this from becoming a blanket "try to make it fit" —
+    `"not json"`, `'"a string"'` and `'{"a": 1}'` are all still refused, and the decoded elements
+    are handed to pydantic to validate normally.
+
+    THE TYPE CHECK IS THE RULE AND A TEXT CHECK CANNOT SUBSTITUTE FOR IT. The first cut of this
+    guarded with `text.startswith("[")` before decoding, as a fast path. That made the `list` check
+    DEAD: valid JSON opening with `[` is always an array, so nothing could reach the type test and
+    fail it — a mutation replacing the whole clause with a bare `return decoded` passed the entire
+    suite. A heuristic that hides the real rule is worse than the cost it saves, so the decode is
+    attempted on any string and the DECODED TYPE decides.
+
+    Healing happens BEFORE validation, so what reaches the durable row is always the declared
+    `list[...]` and never the string. There is no second spelling to read back.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        decoded = json.loads(value)
+    except (ValueError, TypeError):
+        return value
+    return decoded if isinstance(decoded, list) else value
+
+
+def _healed_list_elements(annotation: object, value: object) -> object:
+    """One BAD ELEMENT must not cost the whole field, mirroring `core/models.py`'s rules exactly.
+
+    THE FIELD-LEVEL DROP IS THE SAME DEFECT ONE LEVEL DOWN. `_finalize` says "ALL-OR-NOTHING WAS
+    THE DEFECT, not the field" and then keeps every field that validated — but pydantic refuses a
+    `list[str]` field ENTIRELY over a single `None` or `2` inside it, so a memo emitting
+    `["Does distillation help?", null, "Does temperature matter?"]` loses BOTH real questions and
+    the board stays empty. That is the run paying for a think-hard pass and getting nothing, which
+    is the outcome the drop-the-offender rung was written to end.
+
+    THE THREE RULES ARE NOT A PREFERENCE — each is already argued and measured in
+    `core/models.py`, and re-deciding them here is how the two surfaces come to disagree about one
+    model's output:
+      * `list[str]`: a non-string becomes `""` and KEEPS ITS SLOT. Position is the join —
+        `question_concepts[i]` describes `open_questions[i]` — so dropping would shift every later
+        question onto its neighbour's concepts (`_read_registered_questions`, c438f1c9). A blank
+        is filtered by every downstream reader (`sanitize_research_memo_payload` blanks it too,
+        and `admit_research_beliefs` skips it) so nothing empty reaches the board.
+      * `list[list[str]]`: a non-string ID inside a ROW THAT IS ALREADY A LIST is DROPPED — a row's
+        ids are an unordered SET, and coercing `2` to `"2"` would register a concept named "2" on
+        the graph, which is worse than not registering one (`_read_question_concept_rows`).
+      * `list[int]`: a non-int is DROPPED. `_ClaimOut.node_ids` is an unordered evidence set with
+        no positional join, blanking has no meaning in it, and coercing junk would FABRICATE a
+        node citation — the one thing `trust/memo_verify.py` exists to catch.
+
+    A ROW OF THE WRONG SHAPE IS DELIBERATELY NOT HEALED, and this is the one place the rule differs
+    from `core/models.py` — for a reason that is about the SURROUNDING MACHINERY, not the data.
+    There, blanking a flat row to `[]` is the only way to keep anything at all. HERE there is a
+    better rung already: `_finalize` refuses just the offending key, keeps the other nine fields and
+    LOGS what it dropped. The first cut of this healer mapped a flat row to `[]` and thereby traded
+    that VISIBLE refusal for a silent empty — `question_concepts: ["flat"]` became `[[], []]`, every
+    concept gone and nothing said — which is precisely what `_finalize`'s own docstring forbids
+    ("NOT SILENT … this defect survived two runs precisely because nothing said anything").
+    `tests/test_memo_keeps_what_validated.py` caught it. So the whole-shape case falls through to
+    the rung that reports it, and only losses that rung CANNOT see are healed here.
+
+    …and those are still said out loud. Healing keeps more than refusing does, but a memo that
+    arrives malformed is a fact about the model's output, so every heal logs the field and the count
+    at WARNING — the same reason `_finalize` and `_admissible_beliefs` log what they discard.
+
+    Every other annotation (`list[_ClaimOut]`) is returned untouched: what a healed element of a
+    nested model would be is a guess, and a guess admits a second spelling of one field into a
+    durable row — the boundary `_decoded_json_list` already draws.
+
+    Returns `value` ITSELF when nothing moved, so the caller can test identity and leave an
+    untouched payload byte-identical.
+
+    The annotations are matched with `==` and NEVER with `is`. `list[str] is list[str]` is FALSE —
+    each subscription builds a fresh `types.GenericAlias` — so an identity test makes every branch
+    below unreachable and the whole rung inert with nothing red, which is the shape of defect this
+    module keeps recording (`_decoded_json_list`'s own dead `startswith` fast path, one function
+    up). Driving a real `null` through `_MemoOut` is what caught it here.
+    """
+    if not isinstance(value, list):
+        return value
+    if annotation == list[str]:
+        healed = [item if isinstance(item, str) else "" for item in value]
+    elif annotation == list[list[str]]:
+        # A non-list row is left EXACTLY as it arrived, so pydantic still refuses the field and
+        # `_finalize` still names it in its WARNING. See the docstring: healing it here would make
+        # the loss invisible, which is strictly worse than the refusal it replaces.
+        healed = [[i for i in row if isinstance(i, str)] if isinstance(row, list) else row
+                  for row in value]
+    elif annotation == list[int]:
+        # `isinstance(True, int)` is True and a bool is not a node id; `type(...) is int` is the
+        # same test `sanitize_research_memo_payload` makes of these very values.
+        healed = [item for item in value if type(item) is int]
+    else:
+        return value
+    return value if healed == value else healed
+
+
+class _StringifiedListTolerant(BaseModel):
+    """Heals a JSON-string-encoded list — and its ELEMENTS — on any list field of the emit schema.
+
+    ON THE CLASS AND NOT ON THE FIELD, which is this module's own precedent: the sibling rung in
+    `_finalize` records that "ALL-OR-NOTHING WAS THE DEFECT, not the field", and `_MemoOut`'s
+    docstring says any field added later meets the same hazard. Nothing makes `open_questions`
+    special here either — the next memo can stringify `findings` just as easily — so the list of
+    covered fields is DERIVED from `model_fields` rather than written down, and a list field added
+    to either subclass inherits the tolerance without anyone remembering to.
+
+    TWO HEALINGS, IN THIS ORDER, because the second only becomes reachable once the first has run:
+    a field arriving as `"[\\"a\\", null]"` is a `str`, so there are no elements to inspect until
+    the decode has produced the list. `_decoded_json_list` heals the ENCODING (the value is not a
+    list at all) and `_healed_list_elements` heals what is INSIDE it.
+
+    A value that is already a list keeps its encoding untouched, and elements are never DECODED: a
+    question whose text happens to read `"[1, 2]"` is a question, not a nested array. Healing an
+    element is the opposite operation — it removes something unusable, it never interprets.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _heal_stringified_lists(cls, data: object) -> object:
+        from typing import get_origin
+
+        if not isinstance(data, dict):
+            return data
+        healed: Optional[dict] = None
+        repaired: list[str] = []
+        for name, field in cls.model_fields.items():
+            if name not in data or get_origin(field.annotation) is not list:
+                continue
+            original = data[name]
+            decoded = _decoded_json_list(original)
+            fixed = _healed_list_elements(field.annotation, decoded)
+            if fixed is original:
+                continue
+            if healed is None:
+                healed = dict(data)
+            healed[name] = fixed
+            # Only the ELEMENT repair is reported. A decode is a lossless re-reading of exactly what
+            # the model sent (`_decoded_json_list` fails closed unless the decode yields a list), so
+            # announcing it would be noise; dropping or blanking an element loses something, and
+            # anything the engine discards has to be visible — the rule `_finalize` states and that
+            # this healer's first cut broke by silently emptying a field the rung used to name.
+            if fixed is not decoded:
+                repaired.append(name)
+        if repaired:
+            _LOG.warning(
+                "deep research: %d malformed element(s) repaired in emitted field(s): %s — the "
+                "field is kept, the unusable entries are not", len(repaired), ", ".join(repaired))
+        return data if healed is None else healed
+
+
+class _ClaimOut(_StringifiedListTolerant):
     """D8: one claim with its provenance — which experiments (node ids) and/or sources back it."""
     statement: str = ""
     node_ids: list[int] = Field(default_factory=list)
     urls: list[str] = Field(default_factory=list)
 
 
-class _MemoOut(BaseModel):
+class _MemoOut(_StringifiedListTolerant):
     """Structured shape the LLM fills via `emit` (assembled into a ResearchMemo, validated again)."""
     summary: str = ""
     reasoning: str = ""
     findings: list[str] = Field(default_factory=list)
     claims: list[_ClaimOut] = Field(default_factory=list)
     recommended_directions: list[str] = Field(default_factory=list)
+    # THE TWO HALVES THE PROMPT ASKS FOR. They were added to `ResearchMemo` and to `_SYSTEM` and NOT
+    # here, and this class is the one the model actually fills — `_emit_spec` hands
+    # `_MemoOut.model_json_schema()` to the provider as the tool's parameters. So the prompt asked
+    # for fields the model had no slot to write into, and it did the only thing it could: put all
+    # eleven outputs in `recommended_directions` and leave both new fields empty. Verified live on
+    # the fresh `runs/e5small-dr-unified-v5`: `open_questions` 0, `next_experiments` 0, compat 11.
+    #
+    # A prompt that names a field and a schema that lacks it is a feature shipped INERT. The guard
+    # in `tests/test_memo_question_experiment_split.py` now re-derives the prompt's field names from
+    # the text and asserts each one exists here, so the two cannot move apart again.
+    open_questions: list[str] = Field(default_factory=list)
+    next_experiments: list[str] = Field(default_factory=list)
+    # WHAT EACH QUESTION IS ABOUT, as concept ids, positionally aligned with `open_questions`.
+    # A list-of-lists rather than objects because the emit schema is what a provider renders into a
+    # tool signature, and a nested object per question costs tokens on every memo for no gain — the
+    # alignment rule is one sentence in the prompt and is checked, not trusted, at the append site.
+    #
+    # This is the join that makes a question findable: without it the concept hierarchy and the
+    # question board are disjoint taxonomies over one run. Measured on `runs/e5small-dr-unified-v5`:
+    # every one of five questions carried no concepts while the run's one experiment carried four.
+    #
+    # IT IS THE ONLY FIELD IN THIS CLASS WITH A `description`, and the measurement is why. On
+    # `runs/e5small-dr-unified-v6` — the first run pinning the schema fix — the memo came back with
+    # `question_concepts: []` while the model had made TWENTY-FIVE concept calls in that same phase
+    # (`find_concept_slugs` 19, `concept_card` 4, `read_concept_tree` 1, `cross_run_concept_map` 1,
+    # out of 203 tool calls). So the instruction was READ and the work was DONE; what was missing at
+    # the moment the emit call was constructed — thousands of tokens and 203 tool calls after the
+    # system prompt — was any reminder AT THE FIELD. `_emit_spec` hands `model_json_schema()` to the
+    # provider as the tool's parameters, and a `description` rides in it, so this is the one channel
+    # that is in front of the model exactly when it fills the argument.
+    #
+    # NOT made required, which was the other candidate and is worse: a model obliged to supply a
+    # value for a field it has nothing to say about pads it, and a fabricated concept membership is
+    # a lie the fold will persist and the board will render. Absence is recoverable; a wrong
+    # membership is not. The default stays, and a memo that genuinely has nothing may still say so.
+    question_concepts: list[list[str]] = Field(
+        default_factory=list,
+        description=(
+            "What each open question is ABOUT, as concept ids. One inner list per entry of "
+            "open_questions, at the SAME position: question_concepts[0] describes "
+            "open_questions[0]. 2-3 ids each, in axis/slug form (e.g. loss/contrastive, "
+            "training/negative-mining). Reuse ids that already exist where they fit; MINT a new "
+            "axis/slug when nothing does — an empty list here means the question belongs to no "
+            "part of the tree and can be found by nobody, which is never the right answer for a "
+            "question worth asking."),
+    )
 
+
+# Backticked names in `_SYSTEM` that are NOT memo fields. The guard in
+# `tests/test_memo_question_experiment_split.py` demands a schema slot for every backticked name in
+# the emit instruction, because a field the prompt asks for and the schema lacks ships INERT — that
+# happened, and cost a whole run's memos. Tool CALLS and example ids look identical to a parser, so
+# they are declared here rather than pattern-matched: adding an example to the prompt then fails the
+# guard until it is listed, which is the cost of the guard staying able to fire on a real field.
+_PROMPT_NON_FIELD_NAMES = frozenset({
+    "emit", "update_plan",                       # tools the prompt tells the model to call
+    "read_concept_tree", "find_concept_slugs",   # …and the two it must use before inventing an id
+    "train", "training",                         # the near-duplicate EXAMPLE, not a field
+})
 
 _SYSTEM = (
     "You are a senior ML researcher doing a DEEP-RESEARCH review of an ongoing automated experiment "
@@ -103,8 +337,28 @@ _SYSTEM = (
     "as {statement, node_ids, urls} citing the experiment ids and/or source urls it rests on "
     "(a claim with no evidence will be flagged by the verifier). A claim URL MUST exactly equal a "
     "URL you actually fetched or otherwise consulted through a tool during this review; a search-result "
-    "URL must be fetched before you cite it — and `recommended_directions` "
-    "(specific next experiments to try). Put your detailed deliberation in `reasoning`. Be "
+    "URL must be fetched before you cite it. "
+    # THE SPLIT. This field used to be `recommended_directions`, described as "(specific next
+    # experiments to try)" — a name that contradicted its own description, so the model returned
+    # experiments and the board filed them as unbuildable directions. Measured on
+    # `runs/e5small-dr-unified-v5`: one of five outputs was a genuine family; the rest were concrete
+    # single- or two-change experiments the engine then could not run, because the channel they
+    # arrived through carries no action.
+    "Then SPLIT what you would try next into two lists, by what each one IS rather than by how "
+    "promising it is. `open_questions`: broad questions a FAMILY of experiments would answer, which "
+    "cannot be run as they stand ('does distilling from a stronger teacher help here'). "
+    "`next_experiments`: ONE concrete change each, specific enough that somebody could run it "
+    "tomorrow without deciding anything else ('set loss.temperature to 0.01 on the ported "
+    "DCL+R-Drop recipe'). If a line names an exact value or an exact edit, it belongs in "
+    "`next_experiments`, not in `open_questions`. Also fill `recommended_directions` with the union "
+    "of both, unchanged, so existing readers keep working. "
+    # The join. Without it a question is findable by nobody and belongs to no part of the tree.
+    "For EVERY entry of `open_questions`, put 2-3 concept ids in `question_concepts` at the SAME "
+    "position — `question_concepts[0]` describes `open_questions[0]`. Use ids that ALREADY EXIST: "
+    "call `read_concept_tree` or `find_concept_slugs` first and reuse what is there, because a "
+    "near-duplicate id (`train` beside `training`) splits the same knowledge in two. Propose a new "
+    "`axis/slug` only when nothing in the tree fits. "
+    "Put your detailed deliberation in `reasoning`. Be "
     "concrete and grounded in the actual results, not generic advice."
 )
 
@@ -570,17 +824,64 @@ class DeepResearcher:
         memo.claims = clean["claims"]                  # D8 evidence ledger
         memo.claims_receipt = clean["claims_receipt"]  # authoritative pre-cap denominator
         memo.recommended_directions = clean["recommended_directions"]
+        # The two halves the compat field was split into. A model that filled neither leaves both
+        # empty and the registration path falls back to `recommended_directions`, so a pre-split
+        # prompt and every log on disk behave exactly as before.
+        memo.open_questions = clean["open_questions"]
+        memo.next_experiments = clean["next_experiments"]
+        memo.question_concepts = clean["question_concepts"]
         memo.sources = clean["sources"]
         return memo
 
     def _finalize(self, args: dict, memo: ResearchMemo, sources: list[dict]) -> ResearchMemo:
+        """Assemble the emitted memo, keeping every field that validated.
+
+        ALL-OR-NOTHING WAS THE DEFECT, and it cost two whole runs of memos. This used to be one
+        `try` around `model_validate` whose `except` returned a memo carrying ONLY `summary` and
+        `sources` — so a single field of the wrong shape discarded the directions, the questions,
+        the experiments, the findings and the claims that had all validated beside it.
+
+        MEASURED on `runs/e5small-dr-unified-v7`: both of that run's deep-research memos came back
+        with a real summary, 64 sources and every list empty, against a corpus base rate of one
+        empty memo in 101. The model had emitted — its last generation reads "I have everything I
+        need. Let me emit the final research memo. [tool_calls: emit]" at ~136 turns, well short of
+        the 300-turn nudge. The trigger was `question_concepts`, the only `list[list[str]]` in
+        `_MemoOut`: a model returning the natural flat shape `["loss/contrastive", …]` instead of
+        `[["loss/contrastive"], …]` took nine good fields with it. Two full passes — 203 tool calls
+        and 64 sources on the first alone — were thrown away.
+
+        SO THE OFFENDING KEYS ARE DROPPED AND THE REST IS KEPT. `ValidationError.errors()` names the
+        field in `loc[0]`; every named key is removed and the memo is validated once more. ONE retry
+        and no loop: a second failure after the offenders are gone means the payload is junk
+        throughout, which is what the summary-only fallback is for and what it still does.
+
+        NOT SILENT. A dropped field is logged at WARNING, because a field the engine discards must
+        be visible — this defect survived two runs precisely because nothing said anything.
+        `engine/research_cadence.py::_admissible_beliefs` sets the same precedent one module over:
+        what it refuses to register, it still says out loud.
+        """
         try:
             return self._assemble(_MemoOut.model_validate(args), memo, sources)
+        except ValidationError as first:
+            refused = sorted({str(err["loc"][0]) for err in first.errors()
+                              if err.get("loc")})
+            if isinstance(args, dict) and refused:
+                kept = {key: value for key, value in args.items() if key not in refused}
+                try:
+                    assembled = self._assemble(_MemoOut.model_validate(kept), memo, sources)
+                except Exception:  # noqa: BLE001 — junk throughout; fall through to summary-only
+                    pass
+                else:
+                    _LOG.warning(
+                        "deep research: emitted memo kept, %d field(s) refused for shape: %s",
+                        len(refused), ", ".join(refused))
+                    return assembled
         except Exception:  # noqa: BLE001 — a junk emit must not crash the run
-            value = (args or {}).get("summary", "") if isinstance(args, dict) else ""
-            memo.summary = redact_persisted_text(value or "(empty memo)", max_chars=1_000)
-            memo.sources = sources
-            return memo
+            pass
+        value = (args or {}).get("summary", "") if isinstance(args, dict) else ""
+        memo.summary = redact_persisted_text(value or "(empty memo)", max_chars=1_000)
+        memo.sources = sources
+        return memo
 
     def _forced(self, messages: list[dict], memo: ResearchMemo, sources: list[dict]) -> ResearchMemo:
         from looplab.core.parse import forced_structured

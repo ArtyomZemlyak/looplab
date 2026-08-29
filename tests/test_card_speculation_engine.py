@@ -1223,14 +1223,29 @@ def test_depth_one_prefetches_next_card_then_returns_at_outer_cadence_boundary(
     anyio.run(_scenario)
 
     events = engine.store.read_all()
-    # Depth is a live backlog cap: one next Card is ready before the current eval ends. Once that
-    # admitted eval reaches terminal, the session deliberately leaves the prebuilt Node pending and
-    # returns so outer controls/Strategist/cadences run before another admission.
+    # Depth is a live backlog cap: one next Card is ready before the current eval ends.
+    #
+    # THE BOUNDARY THIS PINS IS THE PAID ONE, and until 2026-08-24 the assertion below claimed a
+    # different boundary that never existed. It read "the session deliberately leaves the prebuilt
+    # Node pending and returns so outer controls/Strategist/cadences run before another admission",
+    # and the prebuilt node really did stay pending — but not because any rule said so.
+    # `CardSession.open_for_production` closes PAID producer work on the first terminal (a
+    # provider call started after it would hold the session open for its whole duration), while
+    # `open_for_admission` closes only on `stopping`. What actually stopped the already-built node
+    # from being dispatched was `core/cards.py::card_score_fence_state`'s empty-authority clause
+    # marking its card stale the moment the first node scored — a phantom staleness that also
+    # killed NINE of the ten nodes ever terminalized `superseded` across `runs/`.
+    #
+    # With that clause gone the prefetch does what a prefetch is for: work already built and paid
+    # for gets dispatched instead of idling until the next outer turn. The boundary that matters is
+    # unchanged and the two assertions above are what say so — the producer was NOT called a third
+    # time and no third `card_build_done` was written, i.e. the session started no new paid work
+    # after the terminal. Only the fate of the node it had already built moved.
     assert producer.calls == 2
     assert len([event for event in events if event.type == EV_CARD_BUILD_DONE]) == 2
     assert sorted(node.status for node in fold(events).nodes.values()) == [
         NodeStatus.evaluated,
-        NodeStatus.pending,
+        NodeStatus.evaluated,
     ]
 
 
@@ -1307,7 +1322,11 @@ def test_session_stages_raw_policy_fallback_on_isolated_researcher_while_eval_ru
     state = fold(events)
     assert len(state.nodes) == 2
     assert state.nodes[0].status is NodeStatus.evaluated
-    assert state.nodes[1].status is NodeStatus.pending
+    # Node 1 was `pending` here until 2026-08-24 for the same reason it was in the prefetch test
+    # above — the empty-authority freshness clause, not a session rule. The three assertions this
+    # test really makes are the ones that did not move: ONE raw proposal, TWO producer calls, TWO
+    # build-done rows. No paid work crossed the boundary; a node already built simply ran.
+    assert state.nodes[1].status is NodeStatus.evaluated
 
 
 @pytest.mark.parametrize("raw_result", [None, "not-an-Idea"], ids=["none", "invalid"])

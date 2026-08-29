@@ -702,7 +702,13 @@ class CardConceptSource(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["card_added", "card_enriched", "node"]
+    # `hypothesis_added` joined on 2026-08-25 and is NOT a synonym for `card_added`. A QUESTION
+    # registered by a memo (or by an operator's "+ Add") carries concepts its writer authored, and
+    # that writer is not a card mint: there is no ownership receipt, no action digest, and the row
+    # owns no executable action. Filing those tags under `card_added` would mint a receipt nobody
+    # issued — the exact provenance lie this class exists to prevent — and leaving `concept_source`
+    # None would make an authored membership indistinguishable from one nobody claimed.
+    kind: Literal["card_added", "card_enriched", "node", "hypothesis_added"]
     node_id: Optional[int] = Field(default=None, ge=0)
     node_generation: Optional[int] = Field(default=None, ge=0)
     provenance: Optional[Literal[
@@ -763,6 +769,28 @@ class CardIdentityProvenance(BaseModel):
         return self
 
 
+# The two things a board row can BE. See `Card.card_kind` for why the distinction is first-class and
+# why it is derived from action ownership rather than declared by whoever wrote the row.
+CARD_KIND_DIRECTION = "direction"
+CARD_KIND_EXPERIMENT = "experiment"
+CARD_KINDS = frozenset({CARD_KIND_DIRECTION, CARD_KIND_EXPERIMENT})
+# How many child ids one parent PUBLISHES. The rollup counts stay exact past this bound.
+CARD_CHILD_LIMIT = 256
+# How many DERIVED concept ids one parent carries in `child_concept_tags`.
+#
+# It is the wire's own lossless bound (`serve/public_cards.py::_MAX_ITEMS`) and not a number of its
+# own, because the two must agree and they did not: the fold unioned up to 64 while the projector
+# clipped at 32, so a direction whose children named 33+ distinct concepts was published truncated
+# AND reported its whole card projection incomplete — surfacing the board-wide "card projection
+# incomplete" banner on a perfectly healthy board. That is the exact collision the comment beside
+# `child_card_ids` says was avoided by keeping THAT list off the wire, reintroduced through its
+# sibling. `tests/test_card_public_projection.py` pins the two to stay equal; `core` may not import
+# `serve`, so the constant lives here (the layer both can read) and the guard enforces the tie.
+CARD_CONCEPT_TAG_LIMIT = 32
+# How deep a lineage chain may be walked. Two levels is the shipped shape (direction -> experiment);
+# the bound exists so a corrupt or hostile log cannot make the fold walk forever.
+CARD_LINEAGE_MAX_DEPTH = 16
+
 CardSelectionBlocker = Literal[
     "identity_not_native", "action_owner_missing", "action_owner_ambiguous",
     "action_receipt_incomplete", "freshness_unknown", "freshness_stale",
@@ -791,6 +819,220 @@ class CardSelectionProvenance(BaseModel):
         if self.action_complete and self.action_owner_count != 1:
             raise ValueError("only one exact action owner can be complete")
         return self
+
+
+def card_kind_of(card) -> str:
+    """`direction` or `experiment` — WHICH OF THE TWO THINGS a board row is.
+
+    ONE predicate, and it is action OWNERSHIP, not readiness: a card owns an executable action iff
+    ``selection_provenance.action_source`` is not ``"none"`` (the model enforces the equivalence with
+    ``action_owner_count > 0``). Readiness is transient — a native work item is not-ready while it is
+    stale, incomplete, in flight or terminal — so a ``not selection_ready`` test would re-label a
+    perfectly ordinary experiment as a direction every time it was blocked, which is precisely the
+    confusion this function exists to end. ``engine/research_cadence.py::is_pure_belief`` applies the
+    SAME test at the append site. THEY ARE NOT ONE CALL and this docstring claimed they were:
+    that function is untouched, and the two already answer differently when
+    `selection_provenance` is None — it reads `action_source` off a missing object and gets
+    `"none"` (a direction), while this returns `experiment`, the conservative side. Unifying
+    them is worth doing; ASSERTING it had been done was worse than leaving them apart, because a
+    reader trusts the claim and stops checking.
+
+    Total by construction: an unknown/None card reads as an ``experiment``, the conservative answer,
+    because the only thing the ``direction`` label unlocks is being EXCLUDED from the work accounting
+    and given a rollup instead. Mislabelling work as a direction would hide it; the reverse merely
+    renders a question in the wrong column.
+    """
+    provenance = getattr(card, "selection_provenance", None)
+    source = getattr(provenance, "action_source", None)
+    if isinstance(source, str) and source and source != "none":
+        return CARD_KIND_EXPERIMENT
+    if provenance is None:
+        return CARD_KIND_EXPERIMENT
+    return CARD_KIND_DIRECTION
+
+
+def card_is_direction(card) -> bool:
+    """``card_kind_of(card) == CARD_KIND_DIRECTION``, spelled once for readers that want a predicate."""
+    return card_kind_of(card) == CARD_KIND_DIRECTION
+
+
+# The lifecycle lanes a child can be in, folded into the four buckets a PARENT is asked about. The
+# mapping is deliberately total over `Card.status`'s open vocabulary: an unrecognised future lane
+# counts into `children` and into no bucket, so the four never overstate what was actually seen and
+# `children` never disagrees with the number of rows.
+_ROLLUP_BUCKETS = {
+    "proposed": "open", "speculating": "open", "built-awaiting-commit": "open", "coded": "open",
+    "building": "running", "running": "running",
+    "evaluated": "evaluated",
+    "failed": "failed", "gated": "failed",
+    "dropped": "dropped",
+}
+
+
+def card_child_rollup(children) -> dict | None:
+    """A direction's own progress, summed from the children that answer it. ``None`` for no children.
+
+    WHY A ROLLUP AND NOT A DERIVED STATUS. The obvious design gives a parent the "worst" or "latest"
+    lane of its children, and the operator named the failure it produces before it was built: a broad
+    direction would then sit in **Running** for months because one of two hundred experiments under it
+    happens to be training. A lane is a statement about ONE piece of work. A direction is not one
+    piece of work, so it gets counts — which is also the only form that stays honest as the family
+    grows: ``17 done · 2 running · 4 no-result`` says more at 23 children than any single word could.
+
+    ``children`` is EXACT even when ``Card.child_card_ids`` clips at ``CARD_CHILD_LIMIT``: the count
+    is what an operator reasons about, the id list is only what the UI can draw.
+
+    ``best_delta`` is the best improvement-over-parent any child measured, with the child that owns
+    it — the direction's actual research answer, and the one number worth putting beside its title.
+    A child with no measurement contributes nothing rather than a zero.
+    """
+    rows = [c for c in (children or []) if c is not None]
+    if not rows:
+        return None
+    counts = {"open": 0, "running": 0, "evaluated": 0, "failed": 0, "dropped": 0}
+    nodes = 0
+    best_delta: float | None = None
+    best_card_id: str | None = None
+    for child in rows:
+        bucket = _ROLLUP_BUCKETS.get(str(getattr(child, "status", "") or ""))
+        if bucket is not None:
+            counts[bucket] += 1
+        evidence = getattr(child, "evidence", None)
+        if isinstance(evidence, list):
+            nodes += len(evidence)
+        delta = getattr(child, "best_delta", None)
+        # `isinstance(True, float)` is False, so a bool cannot pose as a delta here; NaN/inf are
+        # refused because a direction headlined "best +inf" is worse than one headlined nothing.
+        if isinstance(delta, float) and math.isfinite(delta):
+            if best_delta is None or delta > best_delta:
+                best_delta = delta
+                best_card_id = str(getattr(child, "id", "") or "") or None
+    return {
+        "children": len(rows),
+        **counts,
+        "nodes": nodes,
+        "best_delta": best_delta,
+        "best_card_id": best_card_id,
+    }
+
+
+def card_proposal_drift(card) -> dict | None:
+    """How far the experiment that RAN is from the one this card proposed, or None.
+
+    THE ARBITER, and this is the half that was measured and never consumed. `Card.params` is the
+    receipt-bound proposal and `Card.applied_params` is what the coordinates turned out to be; the
+    question nobody was answering is whether the two still describe ONE experiment. A card is meant
+    to be a single hypothesis with a minimal change — so a run that moved four of its knobs is not
+    that card's experiment any more, and a reader sizing the next idea "one knob off this one" is
+    sizing it off a recipe that never existed. That reading cost `runs/e5small-dr-unified-v4` four
+    days: its champion is recorded at batch 8192 / accum 2 / 15 epochs and ran 512 / 32 / 3.
+
+    Compared only on the coordinates BOTH sides name. A knob the card declared and the carrier never
+    answered is not evidence of a move — the applied record answers what it could read, and absence
+    is `unknown` exactly as it is everywhere else in this file. `moved` therefore never exceeds
+    `compared`, and `compared` is the honest denominator for "how much of this proposal was checked".
+
+    None when there is nothing to say: no applied record, or no shared coordinate. Never an empty
+    dict — a caller must be able to tell "they agree" from "nothing was comparable", which is the
+    same distinction `metric_provenance`'s `checked`-beside-`diverged` pair exists for one layer down.
+    """
+    proposed = getattr(card, "params", None)
+    applied = getattr(card, "applied_params", None)
+    if not isinstance(proposed, dict) or not isinstance(applied, dict) or not applied:
+        return None
+    shared = sorted(set(proposed) & set(applied))
+    if not shared:
+        return None
+    moved = [name for name in shared if proposed[name] != applied[name]]
+    return {
+        "compared": len(shared),
+        "moved": len(moved),
+        "params": moved[:12],
+        "node": getattr(card, "applied_params_node", None),
+    }
+
+
+def card_drift_brief(card) -> str:
+    """One clause for a prompt or a board row — "" when the card and its run still agree.
+
+    Deliberately silent on agreement: a line saying "0 of 6 knobs moved" on every card is noise that
+    trains a reader to skip the line, and the whole point is that the loud case be loud.
+    """
+    drift = card_proposal_drift(card)
+    if not drift or not drift["moved"]:
+        return ""
+    names = ", ".join(drift["params"])
+    more = drift["moved"] - len(drift["params"])
+    node = drift.get("node")
+    where = f" on node {node}" if isinstance(node, int) else ""
+    return (f"RAN AT DIFFERENT COORDINATES{where}: {drift['moved']} of {drift['compared']} "
+            f"declared knobs moved ({names}{f', +{more} more' if more > 0 else ''})")
+
+
+def card_rollup_brief(rollup) -> str:
+    """One line of a direction's progress, or "" — the shared spelling of the counts.
+
+    Written once because three surfaces state it (the agent's `read_experiment`, the operator's
+    board, the text digest) and three hand-rolled versions of "how is this direction doing" is how
+    they come to disagree about what `failed` counts. Zero buckets are OMITTED: a direction with
+    twelve evaluated children and no failures should not have to carry `0 no-result` forever.
+    """
+    if not isinstance(rollup, dict):
+        return ""
+    total = rollup.get("children")
+    if not isinstance(total, int) or total <= 0:
+        return ""
+    parts = [f"{total} experiment(s)"]
+    for key, label in (("open", "open"), ("running", "running"), ("evaluated", "evaluated"),
+                       ("failed", "no result"), ("dropped", "dropped")):
+        count = rollup.get(key)
+        if isinstance(count, int) and count > 0:
+            parts.append(f"{count} {label}")
+    best = rollup.get("best_delta")
+    if isinstance(best, float) and math.isfinite(best):
+        owner = rollup.get("best_card_id")
+        parts.append(f"best {best:+.6g}" + (f" by {owner}" if isinstance(owner, str) and owner else ""))
+    return ", ".join(parts)
+
+
+def card_lineage_brief(card, cards_by_id=None, *, statement_chars: int = 120) -> str:
+    """"card-9 <kind> … under DIRECTION dir-1 "…" (4 experiment(s), 1 running, best +0.004)", or "".
+
+    The join a reader needs and could not make: `read_experiment` rendered a node with no mention of
+    the card at all, so an agent could see WHAT ran and never which question it was answering or
+    which siblings had already answered part of it. `cards_by_id` is optional because two of the
+    three callers hold one card and not the board; without it the parent is named but not described,
+    which is still strictly more than the nothing that was there before.
+    """
+    cid = str(getattr(card, "id", "") or "")
+    if not cid:
+        return ""
+    kind = card_kind_of(card)
+    parts = [f"{cid} ({kind})"]
+    statement = str(getattr(card, "seed_statement", "") or getattr(card, "statement", "") or "")
+    if statement:
+        parts[0] += f" {_clip(statement, statement_chars)!r}"
+    parent_id = getattr(card, "parent_card_id", None)
+    if isinstance(parent_id, str) and parent_id:
+        parent = (cards_by_id or {}).get(parent_id)
+        line = f"under DIRECTION {parent_id}"
+        parent_statement = str(getattr(parent, "seed_statement", "")
+                               or getattr(parent, "statement", "") or "") if parent else ""
+        if parent_statement:
+            line += f" {_clip(parent_statement, statement_chars)!r}"
+        siblings = card_rollup_brief(getattr(parent, "child_rollup", None)) if parent else ""
+        if siblings:
+            line += f" [{siblings}]"
+        parts.append(line)
+    own = card_rollup_brief(getattr(card, "child_rollup", None))
+    if own:
+        parts.append(f"children: {own}")
+    return " — ".join(parts)
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
 def surviving_work_item_aliases(card) -> list[str]:
@@ -841,7 +1083,6 @@ def card_score_fence_state(
     *,
     anchor_live: bool,
     anchor_attempt: Optional[int],
-    board_empty: bool,
 ) -> str:
     """The score half of the Card freshness fence: ``current`` | ``stale`` | ``unknown``.
 
@@ -891,19 +1132,24 @@ def card_score_fence_state(
     consumer that wants it (``card.scored_against != state.best_node_id``) without a fold-level
     blocker that no path can clear.
 
-    **The EMPTY branch keeps its board check, and that is a scoped decision, not an oversight.**
-    ``board_empty`` is ``state.best_node_id is None``, so requiring it is literally the same
-    champion-equality clause for the case where the recorded champion was "none", and by the argument
-    above it should go too: an action formed with no incumbent anchors nothing, so nothing about it
-    can die. It stays for now because (a) the only window it can cost anything in is bootstrap —
-    a draft staged before the FIRST evaluation lands, which the forced seed prefix builds long before
-    that on any real cadence — and (b) removing it makes an empty-authority Card whose build head
-    closed ``skipped="stale"`` survive and be RE-ELECTED, and the paired-run calibration receipt
-    protocol cannot express that: ``search/speculation_quality.py::_validate_calibration_card_owners``
-    requires the build-request ledger to map one-to-one onto the ``card_added`` registrations, in
-    order, so a second request for the same card is refused outright. That is a change to a receipt
-    protocol whose revision costs six GPU runs, and it belongs to that module's owner rather than to
-    a fix for an idle second GPU.
+    **The EMPTY branch no longer consults the board.** This docstring used to explain why an extra
+    ``board_empty`` conjunct stayed on the empty branch, and it conceded in its own second sentence
+    that the argument above applies: ``board_empty`` was ``state.best_node_id is None``, i.e. the
+    same champion-equality clause for the case where the recorded champion was "none". What kept it
+    was a belief that the only window it could cost anything in was bootstrap, and a worry about the
+    paired-run calibration receipt. The branch body below records how both were settled — the first
+    by replaying every ``superseded`` death on the box (9 of 10 were this clause), the second by the
+    byte-comparison that module prescribes for a changed derivation.
+
+    **One thing the fix revealed and did not create.** With the phantom staleness gone, a prefetched
+    node is ADMITTED in the session that built it instead of idling until the next outer turn. That
+    was never a deliberate boundary: ``speculation.py::CardSession.open_for_production`` closes
+    PAID producer work on the first terminal (a provider call would hold the session open), while
+    ``open_for_admission`` only closes on ``stopping`` — so what actually stopped the dispatch of
+    already-built work was this clause. Dispatching costs no provider call and evals outlive their
+    session, so the boundary that matters still holds: the two engine tests that moved keep their
+    ``producer.calls`` and ``card_build_done`` counts unchanged and differ only in the prefetched
+    node's status.
 
     Pure and total, so the fold's tri-state and the selection-time recheck state the rule ONCE. The
     caller owns the state lookups because the two live on opposite sides of the layer boundary
@@ -915,11 +1161,26 @@ def card_score_fence_state(
             return "unknown"
         # Modern complete EMPTY authority: the action was formed with no incumbent at all. A receipt
         # that claims empty authority AND an anchor generation is malformed, never merely empty.
-        return (
-            "current"
-            if scored_against_generation is None and board_empty
-            else "stale"
-        )
+        #
+        # `board_empty` USED TO BE A CONJUNCT HERE and its removal is this branch's whole change.
+        # The argument was already written above and only two doubts held it back. An action formed
+        # with no incumbent anchors nothing, so nothing about it can go stale; keeping the clause
+        # meant a card went stale the instant the FIRST node scored — not because anything it
+        # depended on moved, but because the board stopped being empty — and the node already BUILT
+        # for it was discarded before it ever entered a sandbox.
+        #
+        # THE FIRST DOUBT ("the only window it can cost anything in is bootstrap") IS FALSIFIED.
+        # Replayed over every event log in `runs/` on 2026-08-24: TEN nodes died
+        # `node_failed reason=superseded`, and NINE were carrying a card with
+        # `scored_against_empty: true` and no anchor at all — v2 #3, v4 #2, v7 #3/#4/#5/#6/#7 (five
+        # nodes of one run), v8 #2, v9 #2. The tenth (v8 #7) names a real anchor — node 1,
+        # generation 0 — and is a genuine staleness the branch below still refuses, byte for byte.
+        # That discrimination is what makes this safe: the anchored branch is untouched.
+        #
+        # THE SECOND DOUBT WAS THE CALIBRATION RECEIPT, and the proof that module demands was run:
+        # `canonical_json(analyze_speculation_run(run))` over all six preserved calibration runs
+        # (`runs/specgate*`), with and without this change — byte-identical. No issued receipt moves.
+        return "current" if scored_against_generation is None else "stale"
     if not anchor_live:
         return "stale"
     if scored_against_generation is None:
@@ -1082,6 +1343,63 @@ class Card(BaseModel):
     # The immediate edge only, never a walked chain — node parents are always older than their children,
     # so the edges form a DAG, and publishing one hop keeps it that way for every consumer.
     retry_of: Optional[str] = None
+    # --- RESEARCH LINEAGE: the one card->card edge that is NOT a retry (DERIVED; `card_ledger.py`).
+    #
+    # `retry_of` above answers "is this the same question again?" and `belief_id` answers it by TEXT.
+    # Neither can say "this experiment serves that broad research direction", and that is the relation
+    # the board was missing: a direction like "cross-distillation from a stronger teacher" is not one
+    # minimal-change hypothesis and can never be one — it is the QUESTION a family of minimal-change
+    # hypotheses answers. Until this edge existed the two lived in one flat list, so a direction was
+    # rendered as an unbuildable work item (`identity_not_native`, `action_owner_missing`) and the
+    # board looked full of work nothing could execute. Measured on `runs/e5small-dr-unified-v5`:
+    # 5 of 5 board rows were directions and none of them was buildable.
+    #
+    # `parent_card_id` is DURABLE-derived — decoded from the `card_added` payload's own
+    # `parent_card_id` member, or — on a path with no receipt to decode — from the owning node's
+    # `Idea.parent_card_id`. THERE IS NO CORRECTION PATH YET: an earlier draft of this comment
+    # promised a `card_relinked` control event and no such event exists (`grep -rn card_relinked`
+    # returned only the promise), so a wrong edge today can only be changed by re-proposing. That
+    # is a real gap, stated rather than implied. It is deliberately
+    # NOT part of the action digest: a research-lineage annotation must never change the executable
+    # identity, exactly as `steering_context` does not. It is canonicalized through merges, may never
+    # be a self-edge, and may never close a cycle — `_apply_card_lineage` walks the chain and refuses
+    # the edge that would close one, so these edges always form a forest.
+    parent_card_id: Optional[str] = None
+    # The inverse edge, DERIVED and sorted. Bounded because a direction with a thousand children is a
+    # rendering problem, not a research one; the counts in `child_rollup` stay EXACT when this clips.
+    child_card_ids: list[str] = Field(default_factory=list, max_length=CARD_CHILD_LIMIT)
+    # A direction's own progress, rolled up from its children so a parent never has to borrow a
+    # child's lifecycle lane. That is the whole reason the rollup exists instead of a derived
+    # `status`: an operator must not see a months-long direction sitting in "Running" because one of
+    # its two hundred experiments is. None on a card with no children. See `card_child_rollup`.
+    child_rollup: Optional[dict] = None
+    # THE CONCEPTS THIS DIRECTION'S EXPERIMENTS TOUCH — the union over its children (DERIVED).
+    #
+    # A SEPARATE FIELD FROM `concept_tags`, and that is the whole care in it. Those are AUTHORED and
+    # carry `concept_source` provenance naming exactly who claimed them (`card_added` /
+    # `card_enriched` / `node`); writing a derived union into them would make the board attribute to
+    # a proposer a membership nobody proposed — the defect `CardConceptSource` exists to prevent.
+    #
+    # Why it is needed: concepts are a hierarchy and so is the direction forest, and until this
+    # field the two were disjoint taxonomies over one board. Measured on
+    # `runs/e5small-dr-unified-v5`: all five directions carried `concept_tags=[]` while card-0
+    # carried four, so an operator grouping the board by concept saw the experiments and none of the
+    # questions they answer. Corpus-wide only 28% of cards are tagged at all, which is why
+    # densifying at the DIRECTION level — a dozen questions rather than 236 experiments — is where
+    # the grouping becomes usable.
+    #
+    # EMPTY FOR A CHILDLESS DIRECTION, honestly rather than conveniently: a question nobody has run
+    # an experiment against has no MEASURED concept membership, and deriving one from its wording is
+    # a classifier's job, not this fold's. It fills the moment the first child is filed.
+    child_concept_tags: list[str] = Field(default_factory=list, max_length=CARD_CONCEPT_TAG_LIMIT)
+    # WHICH OF THE TWO THINGS THIS ROW IS (DERIVED, from `selection_provenance.action_source`):
+    # `direction` — owns no executable action, so it is a research question children answer;
+    # `experiment` — owns one action, the minimal-change hypothesis the engine can actually run.
+    # Identity, never readiness: a native work item that is merely stale/in-flight/terminal is still
+    # an `experiment`. This is the SAME predicate `engine/research_cadence.py::is_pure_belief` applies
+    # at the append site, published here so the board, the prompts, the tools and that gate read ONE
+    # spelling. Frozen vocabulary for the UI contract: kinds may be added, never re-spelled.
+    card_kind: str = CARD_KIND_EXPERIMENT
     # Identity / lineage.
     merged_into: Optional[str] = None                   # canonical id if this card was merged away
     aliases: list[str] = Field(default_factory=list)    # ids folded INTO this canonical card
@@ -1092,6 +1410,22 @@ class Card(BaseModel):
     belief_aliases: list[str] = Field(default_factory=list)
     dropped_reason: Optional[str] = None
     dropped_by: Optional[str] = None                    # operator | engine | freshness | novelty
+    # WOULD THE FOLD ACCEPT A REOPEN OF THIS CARD RIGHT NOW? DERIVED by `_apply_card_drops` on every
+    # fold and never carried by an event — it is the fold's own answer, stamped and then published
+    # so the two surfaces that must agree with it (the append-time guard and the board's affordance)
+    # read it instead of each re-deriving one.
+    #
+    # `dropped_by` cannot answer it and that is the whole reason this exists. It names the author of
+    # the HEAD receipt, and `st.cards_dropped` holds two authorities folded by one handler: an
+    # operator `card_dropped` landing on top of the engine's `card_auto_dropped` makes the head read
+    # "operator" while an engine retirement still stands underneath. `control_validation` used to
+    # have no clause here at all, so a reopen POST returned 2xx, appended the event and fired a
+    # success toast while the fold declined it — and because the browser's optimistic patch waits
+    # for a status change that never arrives, the retired Card rendered as live until a reload.
+    #
+    # False on a card that is not dropped: there is nothing to reopen, which is not the same as a
+    # refusal, so the server keeps treating that as the tolerant no-op it always was.
+    reopenable: bool = False
     # Prospective parent anchor — the Layer-5 freshness gate re-derives improve/merge legality for a
     # not-yet-built card against state.best()/rank_by_metric[:2]/breedable_nodes().
     parent_id: Optional[int] = None
@@ -1110,6 +1444,27 @@ class Card(BaseModel):
     space: dict[str, list[float]] = Field(default_factory=dict)
     eval_profile: Optional[str] = None
     eval_timeout: Optional[float] = Field(default=None, gt=0)
+    # WHAT ACTUALLY RAN, beside the PROPOSAL `params` above (DERIVED; `card_ledger.py`).
+    #
+    # `params` is receipt-bound — it is inside the action digest, so it cannot be corrected without
+    # unmaking the card's identity, and that is right: the receipt records what was PROPOSED. What
+    # was wrong is that nothing beside it recorded what the experiment then ran at. Under
+    # `params_style: "none"` the engine applies nothing and the Developer realises the idea by
+    # editing the repo, so a repair that fits a training into memory moves the numbers while the
+    # proposal stays frozen. Measured over every log on disk: 457 comparisons, 41 diverged, 18 of
+    # them on nodes that produced a metric — and the e5 champion at 0.793426 is recorded as
+    # batch 8192 / accum 2 / 15 epochs and RAN batch 512 / accum 32 / 3 epochs.
+    #
+    # The readers were fixed in August (`param_carriers.node_params_brief`, the digest's node line),
+    # but they read a NODE. A card is the row an operator and the Researcher both reason about, and
+    # it still published the proposal alone.
+    #
+    # `applied_params_node` is not decoration: this is a claim about coordinates, so it must name
+    # the experiment it is a claim ABOUT. When a card owns several evidence nodes the LATEST
+    # evaluated one wins and its id is published, rather than merging several nodes' numbers into a
+    # composite no single run ever occupied.
+    applied_params: dict[str, float] = Field(default_factory=dict)
+    applied_params_node: Optional[int] = None
     concept_tags: list[str] = Field(default_factory=list)
     # exact, additive ownership receipt for concept_tags.  Without it a merged card could
     # show the union/override from several evidence nodes beside one misleading scalar provenance tier.

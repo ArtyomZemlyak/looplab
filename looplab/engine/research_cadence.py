@@ -79,7 +79,8 @@ def normalized_belief_key(statement) -> str:
 
 
 def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[str], *,
-                           cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP) -> list[str]:
+                           cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP,
+                           counted: "Iterable[str] | None" = None) -> list[str]:
     """Which of a memo's directions may become OPEN BELIEFS, given the board already open.
 
     PURE and stateable on purpose (CLAUDE.md tier 2): the rule used to be "all five, every memo,
@@ -92,12 +93,41 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
       2. the open board is capped at `cap` DISTINCT beliefs; a memo may fill the remaining room and
          no more.
 
+    TWO POPULATIONS, because the two rules are about different things and sharing one list made the
+    second silently break the first. `open_statements` is the DEDUP universe — every open direction,
+    including ones already being worked on, because restating a question somebody answered is exactly
+    the duplicate rule 1 exists to refuse. `counted` is the subset that OCCUPIES a cap slot, and it
+    is narrower: a direction with children is no longer an unanswered question competing for room.
+    Passing one list for both meant the caller's (correct) narrowing of the cap also removed those
+    directions from `seen`, so a later memo restating one registered a second card for the same
+    question — and, because a direction never accrues evidence, the open population then grew
+    without bound and the five-row prompt window began rotating real questions out of view.
+    `counted=None` means "the same list", i.e. byte-for-byte the historical behaviour.
+
     Order is preserved and the memo's own repeats collapse against each other, so `admit(open, ds)`
-    is idempotent under re-running the same memo. Everything dropped is still recorded — the memo
-    body and the `hint` row carry the full `recommended_directions` list — so nothing is LOST here;
-    what is refused is the board row, which is the resource that was overflowing.
+    is idempotent under re-running the same memo. Everything dropped is still recorded — the MEMO
+    BODY carries every `recommended_direction`, and `read_research_memo` renders them in full — so
+    nothing is LOST here; what is refused is the board row, which is the resource that was
+    overflowing.
+
+    THAT SENTENCE USED TO SAY "the memo body and the `hint` row carry the full list", AND THE HINT
+    HALF WAS FALSE. The hint carries the first `DEEP_RESEARCH_HINT_DIRECTIONS` of them (see
+    `deep_research_hint_text`), so on `runs/e5small-dr-unified-v7`'s third memo — 8 directions, the
+    only one of that run's three with any content — directions 6-8 reached the hint not at all. It
+    is a bounded PUSH, not the record, and reading it as the record is how "nothing is lost" gets
+    believed by whoever next decides a drop is safe. The memo body genuinely is the record, which is
+    why the corrected sentence names it alone.
     """
-    seen = {normalized_belief_key(s) for s in open_statements if str(s or "").strip()}
+    # ONE spelling of "usable statements, keyed", used for both populations. Written out twice, the
+    # dedup universe and the cap-occupancy set are keyed by two expressions that a later change to
+    # what counts as a usable statement (a length bound inside `normalized_belief_key`, blank
+    # detection moving off `str(s or "").strip()`) can update independently — which is the two
+    # populations silently disagreeing again, the exact failure `counted` was added to fix.
+    def _keys(statements) -> set:
+        return {normalized_belief_key(s) for s in statements if str(s or "").strip()}
+
+    seen = _keys(open_statements)
+    occupied = set(seen) if counted is None else _keys(counted)
     admitted: list[str] = []
     for direction in directions:
         text = str(direction or "").strip()
@@ -106,11 +136,71 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
         key = normalized_belief_key(text)
         if key in seen:
             continue
-        if len(seen) >= max(0, int(cap)):
+        if len(occupied) >= max(0, int(cap)):
             break
-        seen.add(key)
+        seen.add(key)          # never registered twice, whether or not it holds a slot
+        occupied.add(key)      # …and a newly admitted direction is unanswered, so it holds one
         admitted.append(text)
     return admitted
+
+
+# HOW MANY DIRECTIONS THE PUSHED HINT CARRIES — a bound on a PROMPT, not on the record.
+# CLAIM[deep-research-hint-carries-five] the `hint` row carries the FIRST FIVE recommended
+# directions, never all of them; the memo body is what carries every one.
+# decided:line:DEEP_RESEARCH_HINT_DIRECTIONS&&5@looplab/engine/research_cadence.py
+#
+# Measured on `runs/e5small-dr-unified-v7`: its third memo (the only one of three with content)
+# returned 8 directions, so three of them reached the hint not at all. Deliberately NOT raised to
+# cover that memo — the hint is spliced into a prompt, `agents/hints.py` filters on its prefix, and
+# a push that grows with whatever the model happened to return is how a brief becomes a wall of
+# text. The remedy for a reader that wants them all is `read_research_memo`, which renders the
+# directions IN FULL, not a bigger push.
+DEEP_RESEARCH_HINT_DIRECTIONS = 5
+
+
+def deep_research_hint_text(directions: Iterable) -> str:
+    """The pushed hint's exact text — hoisted so the bound above is a rule and not a slice.
+
+    Byte-identical to the inline `DEEP_RESEARCH_HINT_PREFIX + "; ".join(directions[:5])` it replaces;
+    the prefix is load-bearing (`agents/hints.py` FILTERS on it, which is how a row whose `source`
+    stamp predates that field is still recognised), so it is never spelled separately.
+    """
+    return DEEP_RESEARCH_HINT_PREFIX + "; ".join(
+        list(directions)[:DEEP_RESEARCH_HINT_DIRECTIONS])
+
+
+def question_concept_rows(questions: Iterable, per_question: Iterable) -> dict[str, list]:
+    """Join each question to ITS OWN concept row: `question_concepts[i]` describes `questions[i]`.
+
+    PURE and shared on purpose (CLAUDE.md §0.8 measured the alternative: four implementations of one
+    claim/verdict join, and every drift was between the copies). Two callers — the deep-research memo
+    and, since #72, the Researcher's own registered questions — and a positional join that disagrees
+    with itself files a question under a concept set belonging to a different question.
+
+    THE ORDER IS THE WHOLE FUNCTION. Blanks are skipped AFTER the index is read, never before. The
+    in-place version filtered them out first and then enumerated the SHORTENED list, so every
+    question after a blank took its predecessor's row: driven with `["", "q2"]` and
+    `[["loss/contrastive"], ["training/negative-mining"]]`, q2 was filed under `loss/contrastive`.
+    That misplaces the row in the question lattice, which keys on the concept SET.
+
+    LATENT WHEN FIXED, and the zero is worth keeping: over every event log on the box — 173 memos
+    carrying an `open_questions` list — 0 contained a blank and 0 carried `question_concepts` at all,
+    because the field could not reach the durable row until `_assemble` stopped raising on it
+    (7d406cc2). Repairing that carrier is exactly what made this reachable.
+
+    Checked, not trusted: a short, missing or non-list row simply yields no concepts for that
+    question, and a question with none is registered exactly as it was before any of this shipped.
+    """
+    rows = list(per_question or [])
+    joined: dict[str, list] = {}
+    for index, question in enumerate(questions or []):
+        statement = str(question or "").strip()
+        if not statement:
+            continue
+        row = rows[index] if index < len(rows) else None
+        if isinstance(row, list) and row:
+            joined[statement] = row
+    return joined
 
 
 def is_pure_belief(card) -> bool:
@@ -142,6 +232,14 @@ def research_memo_sig(memo) -> str:
 
     summary = str(_get("summary") or "").strip()
     directions = [str(d).strip() for d in (_get("recommended_directions") or []) if str(d).strip()]
+    # OPEN[research-memo-signature-omits-split-output] the convergence key still covers only the
+    # legacy compatibility projection, not the two new memo outputs.
+    # proof:`line:blob = summary&&join(directions)@looplab/engine/research_cadence.py`
+    # REVIEW 2026-08-27 (P1 delivery): two valid memos with the same summary and an empty legacy
+    # union hash identically even when their open questions and concrete experiments differ. The
+    # repeated-research loop then treats the later paid answer as converged and never records it.
+    # Include both split lists in a canonical, field-delimited signature; the existing whitespace
+    # normalization can otherwise stay unchanged.
     blob = summary + "\n" + "\n".join(directions)
     return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()[:16]
 
@@ -571,23 +669,79 @@ class ResearchCadenceMixin:
         # It is explicitly model-generated advisory data, not operator authority; prompt rendering
         # filters this source while the research memo/open-hypothesis channels carry the signal.
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
+        # OPEN[next-experiments-never-reach-proposal] the concrete half of the new memo split has no
+        # production reader, so an experiments-only memo steers no later work.
+        # proof:absent:memo_d.get("next_experiments")@looplab/engine/research_cadence.py
+        # REVIEW 2026-08-27 (P1 delivery): the durable model says these entries are left to be
+        # proposed as real work, but this writer reads only the legacy union and open questions. A
+        # schema-valid memo that omits the optional compatibility field therefore appends its paid
+        # `research_completed` row yet emits no hint, card or executable proposal for its concrete
+        # list. Route that list through the real proposal intake (or a dedicated bounded hint).
+        # WHAT BECOMES A BOARD ROW is now what the memo itself called a QUESTION, not everything it
+        # would try next. `recommended_directions` was described to the model as "specific next
+        # experiments to try", so it correctly returned experiments and every one of them landed as
+        # a row owning no action — unbuildable by construction. Measured on
+        # `runs/e5small-dr-unified-v5`: one of five was a genuine family; the rest were concrete
+        # single-change experiments the engine could not run.
+        #
+        # `open_questions` when the memo filled it, the whole list otherwise. The fallback is what
+        # keeps every log already on disk and every memo from a pre-split prompt folding exactly as
+        # it did — absence means "this memo did not draw the distinction", never "it has no
+        # questions".
+        questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()] or directions
+        # TWO CHANNELS, TWO GATES, and they were one until 2026-08-27. The legacy hint projection
+        # is keyed on `recommended_directions` and the board registration on `questions`, but both
+        # sat under `if directions:` — so a schema-valid memo that filled `open_questions` and left
+        # the redundant compatibility field empty (it is optional, defaults to `[]`, and the prompt
+        # asks for it only as a union of the two new lists) suppressed EVERY `EV_HYPOTHESIS_ADDED`
+        # append. The run paid for a think-hard deep-research pass and the board stayed empty.
+        #
+        # The hint stays on `directions` alone rather than falling back to `questions`: it is the
+        # replay-compatibility projection, prompt rendering already filters its source, and the live
+        # signal travels on the memo/open-hypothesis channels. Widening it would put new text into
+        # old logs' channel for no reader. Where a memo drew no distinction `questions` falls back
+        # to `directions`, so every log already on disk folds byte-identically.
         if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
             # The prefix comes from `agents/hints.py`, which FILTERS on it — a deep-research row
             # whose `source` stamp is missing (a log older than the field) is recognised by this
             # text alone, so the two must not be spelled separately.
             self.store.append(EV_HINT, {
-                "text": DEEP_RESEARCH_HINT_PREFIX + "; ".join(directions[:5]),
+                "text": deep_research_hint_text(directions),
                 "source": "deep_research"})
-            # P1: also register each direction as an OPEN hypothesis so a deep-research idea is
-            # tracked to a verdict (was fire-and-forget) — it accrues evidence when a matching node
-            # runs, and shows on the board as an open question the search should resolve.
-            if self._track_hypotheses:
-                assert EV_HYPOTHESIS_ADDED in BACKGROUND_APPENDABLE   # see the method-level note
-                for direction in self._admissible_beliefs(directions[:5]):
-                    self.store.append(EV_HYPOTHESIS_ADDED, {
-                        "statement": direction, "source": "deep_research",
-                        "at_node": memo.at_node})
+        # P1: register each question as an OPEN hypothesis so a deep-research idea is tracked to a
+        # verdict (was fire-and-forget) — it accrues evidence when a matching node runs, and shows
+        # on the board as an open question the search should resolve.
+        if questions and self._track_hypotheses:
+            assert EV_HYPOTHESIS_ADDED in BACKGROUND_APPENDABLE   # see the method-level note
+            # THE JOIN, carried to the durable row. `question_concepts[i]` describes
+            # `open_questions[i]` — POSITIONAL alignment, which is why it is resolved against
+            # the memo's own question list rather than against `questions` (which falls back to
+            # `recommended_directions` for a memo that drew no distinction, where the positions
+            # mean nothing). Checked, not trusted: a mis-aligned or short list simply yields no
+            # concepts for that question, and a question with none is registered exactly as it
+            # was before this shipped.
+            # The order rule and its driven counter-example live in `question_concept_rows`,
+            # which is shared with the Researcher's own registered questions — a positional join
+            # spelled twice is a join that will disagree with itself.
+            by_statement = question_concept_rows(
+                memo_d.get("open_questions") or [], memo_d.get("question_concepts") or [])
+            # NO INTAKE TRUNCATION, and the bare `5` that used to be here was wrong twice over.
+            # `DEEP_RESEARCH_OPEN_BELIEF_CAP` is DERIVED from `BOARD_PROMPT_CARDS` precisely so
+            # raising the prompt window cannot leave a stale literal behind (see its comment), and
+            # this line reintroduced the literal it was written to abolish. Worse, truncating HERE
+            # happens BEFORE `admit_research_beliefs` dedups: a memo whose first five questions are
+            # all already open registered ZERO cards while question six was genuinely new and there
+            # was room for it — the same "the run paid for a think-hard pass and the board stayed
+            # empty" outcome this cadence's own cap fix was written for. `admit_research_beliefs`
+            # owns both the dedup universe and the cap, and it bounds its OUTPUT, so handing it the
+            # whole list is what lets the cap mean what it says.
+            for direction in self._admissible_beliefs(questions):
+                concepts = by_statement.get(str(direction).strip())
+                self.store.append(EV_HYPOTHESIS_ADDED, {
+                    "statement": direction, "source": "deep_research",
+                    "at_node": memo.at_node,
+                    **({"concepts": concepts} if concepts else {})})
 
     def _admissible_beliefs(self, directions: list) -> list[str]:
         """Read the open belief board and apply `admit_research_beliefs` to this memo's directions.
@@ -611,18 +765,45 @@ class ResearchCadenceMixin:
         """
         try:
             board = fold(self.store.read_all())
-            open_statements = [c.seed_statement for c in board.open_research_beliefs()
-                               if is_pure_belief(c)]
+            # A DIRECTION THAT HAS BEEN TAKEN UP NO LONGER OCCUPIES A SLOT, and without this clause
+            # the cap is permanent. `open_research_beliefs()` means "open and carrying no EVIDENCE",
+            # and a direction never carries any — since the `parent_card_id` edge shipped, the
+            # experiments answering it are CHILD cards with evidence of their own, so the direction
+            # stays evidence-free for the whole run by design.
+            #
+            # Measured live on `runs/e5small-dr-unified-v5`: FOUR research memos completed and only
+            # the FIRST one's directions were ever registered — five of them, seq 35-39. Memos 2, 3
+            # and 4 produced concrete directions (a `dcl_threshold` sweep among them, visible in
+            # their `hint` rows) and contributed ZERO to the board, because five childless beliefs
+            # met a cap of five and nothing ever frees it. The run paid for three think-hard reviews
+            # and could not act on any of them.
+            #
+            # Counting only CHILDLESS directions is the whole fix: the cap still bounds "unanswered
+            # questions on the board", which is the resource it was written to protect, and a
+            # question somebody is already working on stops competing for that room. The proposal
+            # FEED is untouched — a direction with one child and twelve experiments left to run must
+            # still be visible — so this narrows what the cap counts, never what the model sees.
+            # TWO POPULATIONS OUT OF ONE FOLD, and the narrowing belongs to exactly one of them.
+            # `open_statements` is every open direction — the DEDUP universe, because restating a
+            # question somebody is already answering is precisely the duplicate to refuse. `counted`
+            # drops the taken-up ones, because those no longer compete for board room. Handing one
+            # narrowed list to both (which this did for a day) let a later memo register a SECOND
+            # card for a question already under way, and since a direction never accrues evidence the
+            # open population then grew unbounded past the five-row prompt window.
+            taken_up = {c.parent_card_id for c in board.cards.values() if c.parent_card_id}
+            beliefs = [c for c in board.open_research_beliefs() if is_pure_belief(c)]
+            open_statements = [c.seed_statement for c in beliefs]
+            unanswered = [c.seed_statement for c in beliefs if c.id not in taken_up]
         except Exception:  # noqa: BLE001 — see the docstring: degrade to the pre-bound behaviour
-            open_statements = []
-        admitted = admit_research_beliefs(open_statements, directions)
+            open_statements = unanswered = []
+        admitted = admit_research_beliefs(open_statements, directions, counted=unanswered)
         dropped = len(directions) - len(admitted)
         if dropped:
             # Not silent: the operator reading the log sees a memo whose directions did not all
             # become cards, and the memo body + `hint` row still carry every one of them.
             _LOG.info("deep research: %d of %d recommended direction(s) not registered as beliefs "
                       "(%d already open, cap %d) — the memo and its hint still carry them",
-                      dropped, len(directions), len(open_statements),
+                      dropped, len(directions), len(unanswered),
                       DEEP_RESEARCH_OPEN_BELIEF_CAP)
         return admitted
 

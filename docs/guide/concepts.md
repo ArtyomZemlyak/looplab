@@ -740,6 +740,21 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   absent from `NEVER_SALVAGED_REASONS`, so they can neither suppress one nor grant one. The engine's own structural answer stays on the row beside it
   (`engine_reason`) and `reason_source` says who chose the word.
 
+  **A diagnosed reason now LEADS the text the Developer repairs from** (2026-08-28). It did not
+  until then, and `check_false_positive` is where that cost the most: its directive says *"Read its
+  rationale above before you touch anything"* and nothing spliced the diagnostician's verdict into
+  the error, so the one kind whose whole point is *"the declared check is wrong — read WHY"* handed
+  the Developer only the refusal being disputed. On `rubertlite-dense-retrieval` node 1 the
+  diagnosis reads "the run actually reached val recall@100=0.8114 (matching the known-good baseline
+  0.81), yet the verifier flagged" it — and that number was nowhere in the repair context. Asking a
+  Developer to fix a run whose numbers it has just been told are correct is how a working experiment
+  gets broken to satisfy a wrong check. `failure_diagnosis.py::diagnosis_repair_lead` prepends the
+  already-redacted, already-capped `reason_summary` for any TRIAGE-sourced reason, in the same
+  position the `not_learning` path has always prepended the watchdog's own sentence. It is
+  suppressed for an ENGINE-final reason — a fact the engine measured is not a model's account — and
+  when the summary is already in the error text, because one finding said twice reads as two
+  independent findings agreeing.
+
   The engine still HANDS OVER what it saw. `engine_observed_facts` states the exit status and
   whether the process wrote anything at all — a fact `_eval_failure_text` surfaced only when stderr
   was blank, so a pod cgroup OOM-kill leaving a `Killed` line used to reach the judge as that one
@@ -839,6 +854,21 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   that is usually wrong is a line the judge learns to discount. What is deliberately still `unmet`:
   a rationale that names the broken component and then edits a different file. That is a diagnosis
   rather than a promise, but "you said the bug was in X and did not touch X" is worth saying.
+  **And since 2026-08-26 the row also says whether the session was CUT SHORT.** `verified` reports
+  what the repair did to the tree; it cannot report why a diff was empty, and the two readings —
+  "the agent looked and decided no edit was warranted" and "the agent was still reading when the
+  clock stopped" — have opposite remedies. Measured over every run here, pairing each
+  `inline_repair` session with its own verdict: **12 of the 12 `inert` repairs in the corpus ran past
+  `session_time_budget_s` (1200 s), and 0 of the 65 that finished inside it are inert** — so `inert`
+  had become an undiagnosed proxy for "ran out of clock". Nothing needed deriving: `tool_loop.py`
+  has announced this through its `on_budget` observer since it was written, and no caller subscribed.
+  `node_repaired.budget_exhausted` now carries which bound ended it (`time` or `turns`, kept apart
+  because only one of them has ever fired here), omitted entirely for a session that finished on its
+  own terms — an absent key means "not cut short", not "nobody looked". Additive and fold-ignored;
+  `INERT_REPAIR_LIMIT` is untouched, so which nodes stop repairing does not change. The budget itself
+  was deliberately NOT raised: the median repair uses 151 s, 13 % of it, and a bound whose effect
+  nobody can see cannot be argued about — recording it is what makes "how many truncated repairs were
+  one edit away?" answerable from the record.
 - **ablation-driven refinement** — neutralize a parameter (or a whole code block with
   `ablate_code_blocks`) to find the highest-impact lever, then refine it (`ablate_every`).
 - **merge / ensemble** — recombine two parents: a param mean, or a code-recombination ensemble
@@ -1220,6 +1250,44 @@ therefore a second card whose statement was byte-identical to the first: the boa
 question twice. `Card.belief_id` / `Card.retry_of` still name that relationship for any card that does
 mint, and every pre-existing log folds unchanged.
 
+A **discarded proposal is receipted.** `_plan_native_card` answers with one of five dispositions —
+`mint`, `reuse`, `attach`, `duplicate`, `invalid` — and until 2026-08-27 only `invalid` left a row
+(`novelty_rejected{kind: "card_contract"}`). `duplicate`, which is what a BUSY BOARD produces when an
+existing card already owns the action, returned `None` two lines below it with nothing written; so did
+the third branch, which fires when an accepted disposition comes back with no `card_id` or no `idea`.
+All three unwind through `audit._discard_node_build_telemetry`, which despite its name appends no
+event — its body only nulls the per-role prediction attributes (`last_hyp_priority`, `last_foresight`,
+`last_foresight_pick`, `last_report`) so a later build cannot emit an abandoned build's ranking.
+
+The cost of that silence is measurable. On `runs/e5small-dr-unified-v8` a propose that ran **24.1
+minutes, 81 provider calls and 4,270,000 tokens** emitted a well-formed one-knob delta — raise
+`train.max_seq_length` 128 → 256 to match the eval's document truncation, citing four `file:line`
+locations — and left no `card_added`, no `card_enriched`, no `hypothesis_added`, and no
+`card_dropped` anywhere in the log. The next propose spent 148 calls and returned a *different*
+hypothesis, so the idea was not recovered; it was lost, and nothing in the record said so.
+
+The receipt lands in **exactly one place**, and which one is the load-bearing part.
+`_prepare_node_idea._link` runs immediately after the proposal call and nowhere else, so it is the
+only pass that can know a *paid* proposal was refused; it writes `novelty_rejected` with
+`kind: "card_duplicate"` or `kind: "card_unplannable"`, `pass: "planner"`, the `disposition` that
+produced it, and the proposal's `hypothesis` bounded to 400 chars — the same bound the fold applies
+to a `rationale`, so an audit row can never outgrow what is kept beside it.
+
+`_reserve_node_build` stays **silent**, deliberately. It is also the batch pre-reservation entry
+point, called with a ready-made Idea and no propose behind it, so calling it twice with the same idea
+is the idempotent retry of one action — and
+`test_card_writer_lifecycle::test_batch_prereservations_mint_on_main_thread_and_dedupe_exact_active_work`
+pins that such a re-reservation appends nothing at all. A row there would count a phantom loss on
+every exact twin. (A first version of this change did append there; that test caught it.)
+
+`novelty_rejected` rather than a new event type, because the fold appends it to `st.novelty_events`
+with no schema switch, so a new `kind` is additive under invariant #5 and every existing reader
+tolerates it.
+
+**Refusing the mint is unchanged and right** — a card whose owner is in flight must not be minted
+twice. What changed is that refusing in silence is no longer possible, so the cost is countable and
+the idea recoverable by a reader instead of re-derived by a later paid propose.
+
 Attaching is **opt-in at each build site**, and the ordinary build spine is the only one that opts in.
 An operator `inject_node` never attaches: an attach writes no `card_added`, so it would discard both the
 `source: "operator"` receipt and the `implementation_ref` that binds a human's ready-made code. Nor may
@@ -1239,6 +1307,71 @@ and an index; they see the board's content without either claim contract. Until 
 first list existed, so a card disappeared from the Researcher's view the moment it got a node,
 including a node still running.
 
+**The Researcher can now RECORD a question it is not pursuing** — `Idea.open_questions`, with
+`Idea.question_concepts` aligned by position, both carried on the emit schema the proposer reads.
+Until this field only deep research and the operator could put a question on the board: the
+Researcher could ANSWER a direction (`parent_card_id`) and, since `read_questions`, READ the board,
+and had no way to ASK. A question noticed mid-proposal and left in `rationale` prose is read by
+nothing. It is an **output field and deliberately not a tool**, because the engine is the sole writer
+of domain events (invariant #1) — and `EV_HYPOTHESIS_ADDED`'s membership in `BACKGROUND_APPENDABLE`
+does not license a tool-thread append, since that membership exists for the concurrent research task
+whose safety argument is "appending *fewer* rows moves no reader's position".
+
+Registering a question is **free**: the field is in no digest, so two proposals differing only in the
+questions they file are the same executable action — a Researcher that had to spend its proposal to
+record a question would record none. It is also *tolerant where the concept envelope is strict*: a
+malformed value heals to empty instead of raising, because a question is worth strictly less than
+the experiment carrying it, and the opposite choice is what discarded two complete deep-research
+passes over one flat list. A blank statement KEEPS its slot in the payload — position is the join —
+and is dropped only by `question_concept_rows` (after its index is read) and by
+`admit_research_beliefs` (from the board). **The engine-side append is not wired yet** — the open-item
+marker for it is declared once, on the field itself in `core/models.py`, and the reason it is staged
+rather than inlined is that `EV_HYPOTHESIS_ADDED` is FOLDED: appending it inside a reservation's
+authority CAS window moves `speculation._proposal_authority_seq`'s max-seq compare and discards a
+proposal the run has already paid for, which is the hazard invariant #1 records for
+`train_monitor_alert`.
+
+**A DIRECTION IS NEVER A CLAIM, and since 2026-08-26 that is enforced rather than only asked for.**
+`agents/roles.py::bind_idea_to_board_card` resolves two independent edges against the same visible
+board — `card_id` (a claim on a work item) and `parent_card_id` (a filing under a question) — and
+until then a direction could become either one. Both resolution paths reached it: a proposal naming a
+`DIRECTION_ID` in `card_id` bound to it (and had its own `hypothesis` overwritten by the direction's
+broad seed statement), and so did the SEED FALLBACK, which is the path that fires on a **compliant**
+proposal. The direction block asks the model to propose an experiment that moves the direction
+forward and file it with `parent_card_id`; a model that does exactly that and echoes the direction's
+wording as its own `hypothesis` matched the direction, and the self-edge guard below then saw
+`parent.id == chosen.id` and nulled the parent — turning a correct filing into a claim on the
+question and destroying the direction→experiment edge. `chosen` is now nulled for a direction after
+both resolution paths and BEFORE the self-edge test, which is what lets the parent survive. A
+direction named in `card_id` is nulled and deliberately NOT re-routed into `parent_card_id`: the
+prompt already says which field to use, and inferring the filing would mint a link nobody authored.
+
+**And since 2026-08-26 an agent can ASK for the board, not only be shown it.** `read_questions`
+(`tools/question_board.py`) returns each open research question with its concepts, the experiments
+filed under it, and what each of those measured. **It shipped BROKEN and the failure is worth
+knowing**: the provider defined `call` where `tools/_base.py::ToolProvider` requires `execute`, and
+that protocol is STRUCTURAL — its own docstring says "no provider inherits this" — so nothing checked
+it at import or at construction. The first run that loaded the provider lost its whole deep-research
+stage on the first dispatch, its memo reading `(deep research unavailable: 'QuestionBoardTools'
+object has no attribute 'execute')` with zero findings, zero directions and zero questions. Ten unit
+tests passed throughout, because every one of them called `.call(...)` — the name the object defined
+— so they confirmed the author's naming rather than the contract's. `tests/test_tool_provider_contract.py`
+is the guard that can see it: a class-wide scan where anything offering `specs` owes `execute`, plus
+a driven dispatch, since `hasattr` is satisfied by the wrong name being right — the same join the operator's Research ladder
+renders. Before it, a census of the whole tool surface found 83 tools and not one that read the
+questions: the concept tools read the TAXONOMY and `read_research_memo` reads the memo that PRODUCED
+a question. The only channel was the PUSH block below, which is bounded by whatever the brief chooses
+to include and reaches only the roles the engine pushes it to.
+
+The role that was blind is not the obvious one. `RunTools` — `list_experiments`, `read_experiment` —
+is built for the RESEARCHER only; the Developer's scout set had no reader for the board at all, and
+the `read_run_experiment` calls visible in its `stages`/`plan`/`card_build` phases are a FOREIGN-run
+reader. So the role writing an experiment's code could not see the question it answers, and the
+repair path could not see whether a sibling experiment under the same question had already hit the
+same wall. It is wired to both the Researcher's providers and the Developer's scouts as a NARROW
+provider rather than by granting `RunTools` wholesale, which would also hand over `read_code` and the
+rest. It records nothing: every field is already on the Card, and the fold is untouched.
+
 **So does the deep-research memo prompt**, which is the stage that fills the board: both halves render
 from one shared block (`agents/roles.py::board_prompt_lines`), in the same `CARD_ID`/`BELIEF_ID`/
 `SEED_STATEMENT_JSON` spelling, without the claim contract (a memo has no `card_id` field). Until
@@ -1248,10 +1381,99 @@ were written. The prompt half is paired with an engine-side bound at the append 
 (`engine/research_cadence.py::admit_research_beliefs`): a direction whose case- and
 whitespace-normalized statement already names an open belief is not registered, and the open belief
 board is capped at five distinct rows — the same window the prompts can show. Everything refused is
-still recorded in the memo body and in the standing `hint`; what is refused is only the board row.
+still recorded **in the memo body** — `read_research_memo` renders the directions in full — and what
+is refused is only the board row. The standing `hint` is a bounded PUSH and not the record: it
+carries the first `DEEP_RESEARCH_HINT_DIRECTIONS` (5) directions, so a memo that returns more leaves
+the rest out of it. That distinction was documented the other way round until 2026-08-26, when
+`runs/e5small-dr-unified-v7`'s third memo — 8 directions, the only one of that run's three with any
+content — put three of them in neither the hint nor the board. The bound is deliberately not raised:
+the hint is spliced into a prompt and `agents/hints.py` filters on its prefix, so a push that grows
+with whatever the model returned is how a brief becomes a wall of text.
 Near-duplicate *wording* is not caught here on purpose: over that run's statements a token-overlap
 rule scores its best pair across two genuinely different experiments, so paraphrase identity stays
 the agentic consolidation cadence's job.
+
+**A question is filed under ITS OWN concepts**, and the positional join that does it
+(`engine/research_cadence.py::question_concept_rows`) is one shared pure function rather than a rule
+each caller re-spells. `question_concepts[i]` describes `open_questions[i]`, so a blank statement is
+skipped **after** its index is read: filtering blanks first and enumerating the shortened list gave
+every question after a blank its predecessor's row — driven with `["", "q2"]` against
+`[["loss/contrastive"], ["training/negative-mining"]]`, `q2` was filed under `loss/contrastive`. That
+is not a mislabelling but a misplacement, because a question's concept SET is its position in the
+question lattice. It has never fired on this box, and the zero is evidence rather than comfort: of
+173 memos carrying an `open_questions` list, **0** contain a blank and **0** carry
+`question_concepts` at all — the field could not reach the durable row until `_assemble` stopped
+raising on it, so repairing that carrier is exactly what makes this reachable. A short, missing or
+non-list row still yields no concepts for that question, and a question with none is registered
+exactly as it was before any of this shipped.
+
+**The carrier had a SECOND blockage and it was the ENCODING**, found live on the run launched from
+the fix above. That run's first memo came back rich — 10 findings, 11 claims, 64 sources — and the
+console read `deep research: emitted memo kept, 1 field(s) refused for shape: open_questions`, so
+the model answered the question half of the prompt and the engine dropped exactly that answer. The
+emit call's own arguments survive on a `generation` span's `tool_calls[].arguments` (the emit is
+not traced as a `tool` span, which is why no `tool` row shows it), and the shape is
+`"open_questions": "[\"Does training the e5-small backbone past the 1-3 applied epochs …\", …]"` —
+a `str` holding a JSON array of strings where the schema declares `list[str]`. The structure was
+right and the quoting was not.
+
+`agents/deep_research.py::_decoded_json_list` decodes it, on any list-annotated field of the emit
+schema, derived from `model_fields` so a field added later inherits the tolerance. It fails CLOSED
+at two points — the value must be a `str` and the decode must produce a `list` — and healing runs
+BEFORE validation, so the durable row only ever holds the declared type and there is no second
+spelling to read back. That is what separates it from the shape deliberately NOT healed: an
+`[{"question": …, "concepts": […]}]` form would need someone to decide which key is the question,
+and a guess like that is how two spellings of one field enter a durable row. A decode is not a
+guess. Note the span record clips arguments at `core/tracing.py::_TRACE_TOOL_ARGUMENT_CAP` (16,000
+chars), so that memo's `recommended_directions` and `question_concepts` sit past the cut and
+nothing is claimed about them here.
+
+**The `assert` EXAMPLE the Developer is shown is load-bearing, and the shipped one was measured
+wrong.** Reading `looplab_stages.json` out of every `node_created` row, 33 agent-authored
+`expect.assert` strings carry a numeric threshold and **about 28 are the same sentence** — *"hard
+negatives mined for at least 90% of the training queries"* — across six independent runs. That is
+not invention converging: it was the worked example in BOTH channels, `_stages_user` and the
+`declare_stages` tool schema's `assert` description. The model copied what it was shown.
+
+On this data the bar is wrong by more than 2×. `add_negatives` inner-joins mined ids to product names
+and drops the rest **by design**, so the real figure is 41.8 % (908,121 of 2,170,069) and the champion
+(0.7934) was trained on exactly that — the shipped example refused the recipe that produced this box's
+best result. Verified on `e5small-dr-unified-v8` node 1: it mined a valid 2,732,976-row parquet,
+failed its own gate, and was abandoned after two repairs, with the engine's own diagnostician
+returning `check_false_positive` and being right.
+
+**The replacement is a different KIND of claim, not a smaller number.** "Every row has its
+`n_negatives`" is a property the stage CONTROLS; "90 % of queries survive a downstream join" is an
+OUTCOME of the data it does not. Both channels now carry the property-shaped example, and
+`_stages_user` states the rule outright — assert what you control, PRINT what you do not, and if you
+genuinely need a bar on an outcome, measure it first and say what you measured it against — because
+an example alone is what got copied last time. `validate_stages` is deliberately NOT changed to
+reject thresholds: the distinction is semantic, so a syntactic refusal would either miss the bad bars
+or kill the good ones, and a stage that mines 1 % must still fail loudly.
+
+**A repair that DESCRIBES an edit it never made is bounced once, inside the session.** Measured on
+`runs/e5small-dr-unified-v8` node 1: two inline-repair sessions spent 51 minutes and 108 tool calls
+(`read_file` 50, `run_probe` 26, `grep` 21) with **zero** `edit_file`/`write_file`/`declare_stages`,
+then emitted *"FIX: changed mine_stage.py … Updated looplab_stages.json expect.assert to match."*
+`node_repaired.changed` was `[]`. The diagnosis was right — it matched the engine's own
+`check_false_positive` — and only the application was missing; two such attempts hit
+`INERT_REPAIR_LIMIT` and abandoned a node holding valid mined negatives. The wiring was checked and
+is fine (the repair path composes the write tools), and the probe was ruled out (0 of 26 probes
+contain a write).
+
+`engine/repair_verify.py::repair_claimed_without_writing` is the rule and
+`adapters/repo_developer.py`'s repair session is its one caller, through the same `validate=` seam
+`_declare_stages_phase` uses to bounce a malformed manifest. It fires only when BOTH halves hold —
+the write tool's own ledger shows nothing added, changed or deleted this session, AND the summary
+names something concrete a diff could have contained — so an honest *"no code change is needed"*
+answer is left alone, which matters because refusing to edit is sometimes correct. It is **one-shot**:
+a second bounce would spend the session arguing instead of editing.
+
+**It can never reach the `inert` verdict, and that separation is the point.** `inert` stays decided
+on bytes with the rationale unread, because it is the only verdict the loop acts on and a
+text-derived signal that could move it would let a model write its way out of `INERT_REPAIR_LIMIT`.
+This rung reads the text *inside* the session, where steering is the entire purpose, and touches no
+durable record.
 
 Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the bounded
 `concept_consolidation` rename chain (at most 16 hops) on the base, inherited values, removals and additions

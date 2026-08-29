@@ -89,6 +89,28 @@ def _fold(events):
     return orchestrator.fold(events)
 
 
+# The hypothesis carried on a DISCARD receipt, bounded. A discarded proposal's whole value to a
+# reader is "what was the idea, so I can tell whether losing it mattered" — so the field is the
+# hypothesis and not the rationale, which is the long half and the one a reader can re-derive from
+# the card that won. 400 chars matches the bound `replay._on_hypothesis_added` already applies to a
+# `rationale`, so an audit row can never grow past what the fold is willing to keep beside it.
+#
+# Never raises: a receipt may not cost a build its refusal. Anything unreadable becomes "" and the
+# row still carries the disposition, which is the part that makes the discard countable.
+_DISCARDED_PROPOSAL_TEXT_MAX = 400
+
+
+def _discarded_proposal_text(idea) -> str:
+    try:
+        text = getattr(idea, "hypothesis", "") or ""
+        if not isinstance(text, str):
+            return ""
+        text = text.strip()
+    except Exception:  # noqa: BLE001 — a receipt must never raise into the reservation path
+        return ""
+    return text[:_DISCARDED_PROPOSAL_TEXT_MAX]
+
+
 class _BuildReservation(NamedTuple):
     """Durable node/card reservation handed from the main task to one build worker.
 
@@ -600,6 +622,14 @@ class CardReservationMixin:
             # Card action deliberately stays compact, but two repo rationales or implementation budgets must not
             # collapse merely because their params/profile happen to match.
             "proposal_ref": proposal_ref,
+            # The research DIRECTION this work item serves — the ONE card->card edge that is not a
+            # retry. Emitted only when the Researcher named one, so a run whose proposals name no
+            # direction writes byte-identical payloads to the ones already on disk (which is also
+            # what keeps `_card_event_matches` able to recognise a pre-upgrade crash-prefix mint).
+            # Deliberately OUTSIDE `action` and therefore outside every digest: filing an experiment
+            # under a direction must not change its executable identity, or two proposals that are
+            # the same experiment would stop deduping the moment one of them named its parent.
+            **({"parent_card_id": idea.parent_card_id} if idea.parent_card_id else {}),
             **({"implementation_ref": implementation_ref} if implementation_ref else {}),
             **({"cross_run_receipt": advisory_receipt} if advisory_receipt else {}),
         }
@@ -1096,6 +1126,18 @@ class CardReservationMixin:
                     })
                     return None
                 if plan.disposition == "duplicate":
+                    # SILENT HERE, DELIBERATELY, and the receipt lives one pass up instead.
+                    # This function is also the batch pre-reservation entry point, reached with a
+                    # ready-made Idea and NO paid propose behind it: `_reserve_node_build` called
+                    # twice with the same idea is the idempotent retry of one action, and
+                    # `test_card_writer_lifecycle::test_batch_prereservations_mint_on_main_thread_
+                    # and_dedupe_exact_active_work` pins that it appends NOTHING. A discard row here
+                    # would count a phantom loss on every exact twin.
+                    #
+                    # The loss that IS real — a fully paid propose refused because the board is busy
+                    # — lands in `orchestrator._prepare_node_idea._link`, which runs immediately
+                    # after the proposal call and nowhere else. That is where the receipt is
+                    # written; see it for the measurement.
                     return None
                 if plan.disposition not in {"mint", "reuse", "attach"} \
                         or plan.card_id is None or plan.idea is None:

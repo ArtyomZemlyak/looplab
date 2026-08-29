@@ -17,7 +17,9 @@ from typing import Optional
 from looplab.events import digest
 from looplab.core.advisory_payloads import (MAX_RESEARCH_CLAIMS, VERDICT_UNVERIFIED,
                                             memo_verification_view, verdict_tally)
-from looplab.core.models import NodeStatus, RunState, extra_metric_channel
+from looplab.core.models import (NodeStatus, RunState, card_lineage_brief,
+                                 extra_metric_channel)
+from looplab.core.param_carriers import node_params_brief
 from looplab.tools._base import RESULT_CAP, clip, fit_rows, fn_spec
 from looplab.tools._runcache import RunStateCache
 
@@ -387,9 +389,19 @@ class RunTools:
         n = st.nodes.get(nid)
         if n is None:
             return f"(no experiment #{nid})"
+        # THE COORDINATES THAT RAN, not the ones that were asked for. This line read
+        # `params={n.idea.params}` — the raw PROPOSAL under an unqualified label — while
+        # `events/digest.py` and `agents/roles.py::_state_brief` had both already moved to
+        # `node_params_brief`. It is the surface a Researcher calls to read ONE specific past
+        # experiment, which is precisely the "size the next idea one knob off this one" path, and
+        # under `params_style: "none"` the Developer realises an idea by editing the repo, so the
+        # proposal and the run legitimately differ. `node_params_brief` puts the applied value
+        # first and the proposal in brackets beside the ones that moved, and falls back to the
+        # declaration UNMARKED when no applied record exists — a pre-2026-08-20 node reads exactly
+        # as it did.
         out = [f"experiment #{n.id} — operator={n.operator} status={n.status.value}",
                f"parents={n.parent_ids or '[]'}",
-               f"params={n.idea.params}"]
+               f"params={node_params_brief(n)}"]
         if n.idea.space:
             out.append(f"sweep_space={n.idea.space}")
         out.append(f"metric={digest.fmt_num(n.metric)}")
@@ -424,6 +436,15 @@ class RunTools:
             out.append(f"failure={n.error_reason}: {(n.error or '')[:300]}")
         if n.trials:
             out.append(self._sweep_view(n, trials_arg, st.direction))
+        # THE RESEARCH QUESTION THIS EXPERIMENT ANSWERS, which this surface did not carry at all.
+        # A reader could see what ran and never which board row it belongs to, which direction that
+        # row serves, or what the other experiments under the same direction have already found —
+        # so the sibling evidence was one `list_experiments` + a human join away, every time.
+        # Absent card / absent link renders nothing, so a run whose proposals name no direction is
+        # byte-identical here.
+        lineage = card_lineage_brief(st.cards.get(n.idea.card_id or ""), st.cards)
+        if lineage:
+            out.append(f"research: {lineage}")
         if n.idea.rationale:
             out.append(f"rationale: {n.idea.rationale.strip()[:400]}")
         text = "\n".join(out)
@@ -1005,6 +1026,29 @@ class RunTools:
         summary = str(m.get("summary") or "").strip()
         findings = [str(f).strip() for f in (m.get("findings") or []) if str(f).strip()]
         dirs = [str(d).strip() for d in (m.get("recommended_directions") or []) if str(d).strip()]
+        # THE COMPATIBILITY FIELD IS OPTIONAL AND A MEMO MAY LEGITIMATELY LEAVE IT EMPTY, in which
+        # case this page rendered NOTHING for a memo that had plenty to say. The prompt asks the
+        # model to SPLIT what it would try next into `open_questions` (a family of experiments) and
+        # `next_experiments` (one concrete change each), and then to "also fill
+        # `recommended_directions` with the union of both, unchanged, so existing readers keep
+        # working" — a courtesy the model owes readers like this one, not a contract it can be held
+        # to. Measured over the 20 durable memos on this box (v9 preserved + v10 live): 12 carry
+        # `next_experiments`, 78 concrete experiments in total, 71 of them (91 %) DO appear in the
+        # union — and ONE memo filled 7 concrete experiments with an EMPTY `recommended_directions`,
+        # so every one of its 7 was unreadable here. Those 7 are the whole of the 9 % that go
+        # missing.
+        #
+        # So the fallback is the READER's, not a new demand on the model: union the two split lists
+        # when the compat field is empty, in the memo's own order, questions first. `dirs` is
+        # UNCHANGED whenever the model did fill the union, which is 19 of 20 memos, so every
+        # preserved log renders byte-identically — the same shape as `research_cadence.py`'s
+        # `questions = open_questions or directions`, which is this rule's mirror image on the other
+        # channel. Deliberately NOT a merge of all three: re-uniting lists the model already united
+        # would duplicate every entry on the 19 memos that complied.
+        if not dirs:
+            dirs = [str(d).strip()
+                    for d in list(m.get("open_questions") or []) + list(m.get("next_experiments") or [])
+                    if str(d).strip()]
         # THE VIEW'S OWN population rule, spelled the same way — see `_memo_claim_rows`.
         claims = [c for c in (m.get("claims") or [])[:MAX_RESEARCH_CLAIMS]
                   if isinstance(c, dict) and str(c.get("statement") or "").strip()]

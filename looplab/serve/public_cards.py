@@ -21,6 +21,12 @@ from looplab.core.models import (
 INTERNAL_CARD_STATE_FIELDS = frozenset({
     "cards_added", "cards_merged", "cards_dropped", "cards_enriched", "card_ranking",
     "card_priority_pins", "card_operator_edits", "card_resource_pins",
+    # The other half of the drop/reopen lifecycle switch. It is the same shape as `cards_dropped`,
+    # is stamped with the same fold-internal `_event_index`, and was omitted here when it landed —
+    # so an operator reopening cards grew an accumulating journal that rode every SSE frame and the
+    # reviewer summary. A journal added on one side of a switch and not the other is precisely the
+    # "future producer-only field" this set exists to keep off the wire.
+    "cards_reopened",
 })
 
 PUBLIC_CARD_MAX_COUNT = 256
@@ -35,16 +41,26 @@ _SKIP = object()
 # this is the explicit wire DTO. Adding a Card or event field does not publish it until this
 # boundary is reviewed; fixed order also makes byte output deterministic across event/mapping order.
 _FIELDS = (
-    "id", "belief_id", "retry_of", "status", "status_nodes", "verdict", "actionable", "identity",
+    "id", "belief_id", "retry_of", "card_kind", "parent_card_id", "child_rollup",
+    "child_concept_tags",
+    "status", "status_nodes", "verdict", "actionable", "identity",
     "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
     "seed_statement", "source",
     "created_at_node", "rationale", "evidence", "discarded_nodes", "best_delta", "merged_into",
     "aliases",
     "belief_aliases",
-    "dropped_reason", "dropped_by", "parent_id", "parent_ids", "parent_generations",
+    # `reopenable` rides BESIDE `dropped_by` and is not derivable from it, which is the whole reason
+    # it is on the wire: `dropped_by` names the author of the HEAD drop receipt, and an operator
+    # `card_dropped` written over an engine `card_auto_dropped` makes that read "operator" while the
+    # engine's retirement still stands. The browser gated its Reopen control on the head author and
+    # therefore offered a gesture the fold declines — 2xx, an appended event, a success toast, and an
+    # optimistic `proposed` that is never reconciled because it waits on a status change that never
+    # comes. This publishes the FOLD's own answer so the board cannot hold a second opinion.
+    "dropped_reason", "dropped_by", "reopenable", "parent_id", "parent_ids", "parent_generations",
     "scored_against", "scored_against_generation", "scored_against_empty", "operator",
-    "params", "space", "eval_profile", "eval_timeout", "concept_tags", "priority", "pinned",
+    "params", "applied_params", "applied_params_node",
+    "space", "eval_profile", "eval_timeout", "concept_tags", "priority", "pinned",
     "foresight_rank", "confidence",
     "footprint", "resource_pin", "novelty_verdict", "cross_run_prior", "research_origin", "lesson_refs",
     "claim_refs", "steering_context", "provenance_tier",
@@ -65,14 +81,20 @@ _TEXT_LIMITS = {
     "dropped_reason": 800,
 }
 _REF_FIELDS = {
-    "id", "belief_id", "retry_of", "source", "status", "verdict", "merged_into", "dropped_by", "operator",
+    "id", "belief_id", "retry_of", "card_kind", "parent_card_id",
+    "source", "status", "verdict", "merged_into", "dropped_by", "operator",
     "eval_profile", "research_origin", "provenance_tier",
 }
-_INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority", "foresight_rank"}
+_INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority",
+               "foresight_rank", "applied_params_node"}
 _NONNEG_INT_FIELDS = {"statement_edit_seq", "scored_against_generation"}
 _FLOAT_FIELDS = {"best_delta", "confidence"}
 _POSITIVE_FLOAT_FIELDS = {"eval_timeout"}
-_REF_LIST_FIELDS = {"aliases", "belief_aliases", "concept_tags", "lesson_refs", "claim_refs"}
+# `child_concept_tags` rides the SAME projector as `concept_tags` — the pair is only useful side
+# by side (authored vs derived-from-children), and two bounding rules would let one clip where the
+# other did not and make an inherited membership look narrower than it is.
+_REF_LIST_FIELDS = {"aliases", "belief_aliases", "concept_tags", "child_concept_tags",
+                    "lesson_refs", "claim_refs"}
 # `status_nodes` rides the same projector as `evidence`: the node ids the lifecycle lane was derived
 # from. It is published because the board's own claim has to be checkable — an operator reading
 # "Running" must be able to name the node that is running, and until it existed a `building` card
@@ -82,6 +104,19 @@ _REF_LIST_FIELDS = {"aliases", "belief_aliases", "concept_tags", "lesson_refs", 
 # it on the wire a returned card reads `proposed` with no evidence — i.e. indistinguishable from one
 # that was never built at all — and the operator loses the only record that the run paid for it.
 _INT_LIST_FIELDS = {"evidence", "parent_ids", "status_nodes", "discarded_nodes"}
+# The direction rollup's closed vocabulary (`core/cards.py::card_child_rollup`).
+#
+# `Card.child_card_ids` is deliberately NOT on this wire. Every edge it inverts is already published
+# — one `parent_card_id` per card — so a client rebuilds the child list itself from the same card
+# map it is already holding, exactly as it rebuilds the node->card join. Publishing it as well would
+# put up to `CARD_CHILD_LIMIT` ids on every parent to say something the response already contains,
+# and would collide with `_ref_list_kind`'s 32-item lossless bound: a healthy direction with forty
+# experiments under it would then report its whole card projection INCOMPLETE for a list nobody
+# needed. The COUNTS below stay exact regardless of how many ids any layer chose to carry.
+_ROLLUP_KEYS = frozenset({
+    "children", "open", "running", "evaluated", "failed", "dropped", "nodes",
+    "best_delta", "best_card_id",
+})
 _FOOTPRINT_KEYS = {"gpus", "gpu_mem_mib", "proposed_by", "finalized_by", "pinned_by"}
 _NOVELTY_KEYS = {"grade", "level", "near_node", "near_generation", "recommendation"}
 _PRIOR_RUN_KEYS = {
@@ -123,7 +158,8 @@ _CONCEPT_SOURCE_KEYS = {
 }
 # this is the CARD's exact node/proposal owner receipt.  It is intentionally separate from
 # `_CONCEPT_SOURCE_KEYS`, which describes cross-run capsule-store completeness inside cross_run_prior.
-_CARD_CONCEPT_SOURCE_KINDS = frozenset({"card_added", "card_enriched", "node"})
+_CARD_CONCEPT_SOURCE_KINDS = frozenset(
+    {"card_added", "card_enriched", "node", "hypothesis_added"})
 _CARD_CONCEPT_SOURCE_KEYS = frozenset({
     "kind", "node_id", "node_generation", "provenance", "membership_present",
     "complete", "receipt_valid", "materialization_receipt",
@@ -988,7 +1024,8 @@ _FIELD_KINDS: dict[str, _FieldKind] = {
     **{name: _ref_list_kind() for name in _REF_LIST_FIELDS},
     **{name: _int_list_kind() for name in _INT_LIST_FIELDS},
     **{name: _bool_kind()
-       for name in ("actionable", "selection_ready", "scored_against_empty", "pinned")},
+       for name in ("actionable", "selection_ready", "scored_against_empty", "pinned",
+                    "reopenable")},
     "statement": _statement_kind(),
     "seed_statement": _statement_kind(),
     "identity": _FieldKind(_card_identity, _card_identity_lossless),
@@ -996,11 +1033,16 @@ _FIELD_KINDS: dict[str, _FieldKind] = {
         _card_selection_provenance, _card_selection_provenance_lossless),
     "selection_blockers": _FieldKind(_card_selection_blockers, _card_selection_blockers_lossless),
     "params": _mapping_kind(_params),
+    # Same projector as `params` on purpose: the pair is only useful when a reader can put the
+    # two maps side by side, and two bounding rules would let one of them clip where the other
+    # did not and make an agreement look like a divergence.
+    "applied_params": _mapping_kind(_params),
     "space": _mapping_kind(_space),
     "parent_generations": _FieldKind(
         lambda value: None if value is None else _generations(value),
         lambda raw, bounded: (isinstance(raw, dict) and len(raw) <= _MAX_ITEMS
                               and _generations(raw) == raw == bounded)),
+    "child_rollup": _named_scalars_kind(_ROLLUP_KEYS),
     "footprint": _named_scalars_kind(_FOOTPRINT_KEYS),
     "resource_pin": _named_scalars_kind(_FOOTPRINT_KEYS),
     "novelty_verdict": _named_scalars_kind(_NOVELTY_KEYS, free_text=True),

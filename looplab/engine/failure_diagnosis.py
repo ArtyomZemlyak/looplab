@@ -465,6 +465,49 @@ def coerce_evidence(verdict, redact=None) -> dict:
     return {"source": src, "locator": loc, "quote": quote}
 
 
+def diagnosis_repair_lead(summary, reason_source, error_text) -> str:
+    """The diagnostician's own account, prefixed to the text the Developer repairs from.
+
+    THE DEFECT THIS CLOSES, and it was recorded against itself: the `check_false_positive` repair
+    directive says *"Read its rationale above before you touch anything"* and the prompt did not
+    carry the rationale. That kind's WHOLE point is "the diagnostician believes the declared check
+    is wrong — read WHY", and the Developer was handed only the refusal being disputed. Measured on
+    `runs/rubertlite-dense-retrieval`: node 1's diagnosis reads "the run actually reached val
+    recall@100=0.8114 (matching the known-good baseline 0.81), yet the verifier flagged" it, and
+    that number existed NOWHERE in the repair context. Asking a Developer to fix a run whose numbers
+    it has just been told are correct is how a working experiment gets broken to satisfy a wrong
+    check.
+
+    The `not_learning` path already had this and is the precedent copied here: `_evaluate` prepends
+    the watchdog's own sentence to `err` before the per-reason ladder runs, so "its sentence is at
+    the head of the error" was true there and false for every TRIAGE-sourced kind.
+
+    THREE CONJUNCTS, each with a reason to exist:
+
+    * a summary is required — with none there is nothing to lead with;
+    * the reason must NOT be engine-final. `REASON_SOURCE_ENGINE` means the ENGINE classified the
+      failure from something it did, ran or measured (its clock, its watchdogs, its own `stat`), so
+      a diagnostician's account is not what that reason rests on and leading with it would dress an
+      engine fact as a model's opinion;
+    * the summary must not already BE in the error text. The watchdog path prepends its own
+      sentence upstream, and on a `not_learning` kill the two texts can be the same words; saying
+      them twice reads as two independent findings agreeing.
+
+    Returns the lead INCLUDING its trailing blank line, or `""`. The caller concatenates; this
+    function decides. It is a pure string rule so its truth table is drivable — the property lives
+    at a call site three hundred lines inside `_evaluate` where no test can reach it otherwise.
+    """
+    if not isinstance(summary, str) or not summary.strip():
+        return ""
+    if reason_source == REASON_SOURCE_ENGINE:
+        return ""
+    text = error_text if isinstance(error_text, str) else ""
+    if summary.strip() in text:
+        return ""
+    return ("The failure diagnostician read this run's logs and concluded: "
+            f"{summary.strip()}\n\n")
+
+
 def coerce_diagnosis_summary(verdict, redact=None) -> str:
     """THE SELF-SUFFICIENT ACCOUNT of what failed and why — the one field on the durable row that has
     to work with nothing else in front of it. `""` when the diagnostician did not write one.

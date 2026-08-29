@@ -95,6 +95,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
 # measurement behind the line, and for why the diagnostician IS the triage call rather than a second
 # agent (8.7 provider calls per failure, already paid).
 from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagnosis_summary,
+                                              diagnosis_repair_lead,
                                               coerce_evidence, coerce_findings,
                                               diagnosed_failure_reason, diagnosis_tools,
                                               engine_observed_facts, evidence_citation_resolves,
@@ -578,6 +579,15 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
         if d.get("verified") in REPAIR_VERDICTS:
             row["verified"] = str(d.get("verified"))
             row["unmet"] = [str(u) for u in (d.get("unmet") or [])][:12]
+        # WHICH BOUND ENDED THE SESSION, read back under the same absent-means-absent rule as the two
+        # columns above. It was written to the durable row and to the in-process one and read back by
+        # NEITHER — `_format_repair_log` had no branch for it either — so the fact the whole
+        # `last_budget_exhausted` rung exists to deliver (12 of 12 `inert` repairs in the corpus ran
+        # past their wall clock; 0 of the 65 that finished inside it are inert) reached no reader at
+        # all, and a resumed row lost the key outright while both write sites' comments asserted the
+        # two render identically.
+        if d.get("budget_exhausted"):
+            row["budget_exhausted"] = str(d.get("budget_exhausted"))[:32]
         # The declared-coordinate column, read back under the SAME absent-means-absent rule: this
         # column is written only when non-empty, so a missing key is either an old row or a repair
         # that moved nothing, and `_format_repair_log` renders neither. Rows are re-shaped rather
@@ -2579,6 +2589,21 @@ class EvaluateMixin:
                 # DURING the attempt that just died — a snapshot taken before the node started
                 # contains, by construction, none of them. This is the one place in the node loop
                 # where that distinction is the whole point of the read.
+                # OPEN[monitor-verdicts-read-on-event-loop] this fresh read runs ON the event loop
+                # while the line above it already pays for a worker hop.
+                # proof:present:_durable_monitor_verdicts(self.store.read_all(),@looplab/engine/evaluate.py
+                # REVIEW 2026-08-25 (efficiency): `read_all()` is incrementally cached, but the
+                # increment here is exactly one multi-hour attempt's appends (stage rows, cost rows,
+                # up to `_MAX_MONITOR_LLM_CALLS` alert rows — parsed on this thread), and the
+                # `_durable_monitor_verdicts` walk after it is O(whole log) pure Python per failed
+                # attempt. Both run between two awaits, so every concurrent eval's terminal and the
+                # whole serve/read side stall behind them — the same event-loop-callback shape that
+                # moved `card_reservation._stage_card_creates` off-thread on 2026-08-22, ONE DAY
+                # after this line landed on the loop. The fix is already half-paid: fold this read
+                # into the `to_thread.run_sync` immediately above (`EventStore` serializes via its
+                # own locks, so a worker-thread read is sanctioned — invariant #1's own note), or
+                # thread the rows out of the same lambda that builds `diagnosis_tools`. Delete this
+                # marker with the fix.
                 _monitor_verdicts = _durable_monitor_verdicts(self.store.read_all(), node_id,
                                                               generation)
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
@@ -2864,7 +2889,19 @@ class EvaluateMixin:
                 # A REFUSED rollback rides in FRONT of the eval error, not instead of it: the model
                 # still has to fix something, and the refusal only tells it which door is shut and
                 # why. Cleared on read so one refusal is carried exactly one attempt forward.
-                _err_in = f"{rollback_refusal}\n\n{err}" if rollback_refusal else err
+                # THE DIAGNOSTICIAN'S ACCOUNT LEADS THE TEXT IT DIAGNOSED, for a reason the
+                # diagnostician itself chose. `check_false_positive`'s directive has said "Read its
+                # rationale above before you touch anything" since it shipped, and nothing put the
+                # rationale above it — that kind exists to say "the declared check is wrong, here is
+                # WHY", and the Developer was handed only the refusal being disputed. The rule is
+                # `failure_diagnosis.diagnosis_repair_lead` rather than an inline `if` so its truth
+                # table is drivable: this call site is three hundred lines inside `_evaluate`.
+                # `_summary` is already redacted and capped (`coerce_diagnosis_summary`).
+                _diag_lead = diagnosis_repair_lead(_summary, _reason_source, err)
+                # A refused rollback still rides in FRONT of everything: it tells the model which
+                # door is shut, which it needs before it reads why the run was judged at all.
+                _err_in = (f"{rollback_refusal}\n\n{_diag_lead}{err}" if rollback_refusal
+                           else f"{_diag_lead}{err}")
                 rollback_refusal = ""
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     try:
@@ -2912,6 +2949,13 @@ class EvaluateMixin:
                 # `await` would risk picking up a sibling node's answer and re-running an expensive
                 # stage on THIS node that nobody asked for.
                 _rollback_ask = str(getattr(self.developer, "last_rollback_stage", "") or "").strip()
+                # WHICH BOUND ENDED THE SESSION, snapshotted HERE for exactly the reason the line
+                # above is: the developer is shared across concurrent evals, so reading it after the
+                # next `await` could attribute a sibling node's exhaustion to this one. Bounded and
+                # coerced because it rides a durable row; empty for a session that finished on its
+                # own terms, which is the common case (median repair uses 13 % of its clock).
+                _budget_exhausted = str(
+                    getattr(self.developer, "last_budget_exhausted", "") or "").strip()[:32]
                 # THE DEVELOPER SAYING "I DO NOT KNOW HOW TO FIX THIS" (F8). The first of the two
                 # signals the operator asked for, and the one that already existed as a capability
                 # and had no way to be expressed: a Developer that knew it was beaten could only
@@ -3056,6 +3100,23 @@ class EvaluateMixin:
                         # because it is model-derived text riding in an event payload.
                         "verified": _verification.verdict,
                         "unmet": list(_verification.unmet[:12]),
+                        # WHY THE DIFF WAS EMPTY, when the answer is one the ENGINE holds. `verified`
+                        # says WHAT the repair did to the tree; this says whether the session that
+                        # produced it was CUT SHORT. Measured over `runs/` by pairing each
+                        # `inline_repair` session with its own verdict: 12 of the 12 `inert` repairs
+                        # in the corpus ran past `session_time_budget_s`, and 0 of the 65 that
+                        # finished inside it are inert — so `inert` alone has been an undiagnosed
+                        # proxy for "ran out of clock", and "the agent decided no edit was warranted"
+                        # and "the agent was still reading when the budget ended" have opposite
+                        # remedies. `tool_loop.py` computed and announced this all along
+                        # (`_note_budget`) and nothing subscribed.
+                        #
+                        # OMITTED WHEN EMPTY, exactly like `param_overrides` below and for the stated
+                        # reason: an absent key on an old row means "nobody looked", which is not the
+                        # same fact as "looked and the session was not cut short". Additive and
+                        # fold-ignored (invariant #5); no metric, champion, selectability or
+                        # violation moves on it, and `INERT_REPAIR_LIMIT` is untouched.
+                        **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
                         # A DECLARED COORDINATE THIS REPAIR MOVED, if any. Additive and fold-ignored
                         # (invariant #5), and OMITTED when empty rather than written as `[]`: an
                         # absent key on an old row means "nobody looked", which is not the same fact
@@ -3159,6 +3220,11 @@ class EvaluateMixin:
                     "changed": _changed_col,
                     "verified": _verification.verdict,
                     "unmet": list(_verification.unmet[:12]),
+                    # Same fact, same omit-when-empty rule, same reason as the durable row above:
+                    # `_format_repair_log` renders this row and the rebuilt one identically, so a
+                    # divergence here would show one node two different histories depending on
+                    # whether the process had resumed.
+                    **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
                     # Same omit-when-empty rule as the durable row above, and for the same reason:
                     # `_format_repair_log` renders this row and the rebuilt one identically, so a
                     # `[]` here and an absent key there would render two different histories for
@@ -3492,8 +3558,27 @@ class EvaluateMixin:
                     # "two runs that recorded nothing are the same evaluation" is the exact statement
                     # this mechanism exists to refuse.
                     _inputs_prov = getattr(res, "eval_inputs", None)
+                    # …and the SUBSTRATE this number was produced on, read LIVE rather than from
+                    # the folded pin: the pin is what `run_started` recorded and is blind to a fix
+                    # the operator promoted into the editable repo an hour ago, which is exactly the
+                    # move that has to split two nodes. Discriminator only — see
+                    # `comparability.py::comparability_record` — so a wrong or missing answer can
+                    # never CERTIFY a comparison, and a task with no editable repo records none.
+                    #
+                    # IN A THREAD, and that is not tidiness. `_substrate_fingerprint` spawns
+                    # `git rev-parse` / `git status` / `git diff` with real timeouts, or walks a tree
+                    # with `rglob`+`stat` for a non-git source. Until 2026-08-25 it ran on the event
+                    # loop at EVERY node terminal — where it had previously only ever run at setup
+                    # and resume — and a wedged FUSE mount would have frozen eval finalisation,
+                    # terminals and GPU dispatch for the whole of its timeout. This engine has
+                    # already paid that bill once, for a propose phase.
+                    try:
+                        _substrate = (await anyio.to_thread.run_sync(self._substrate_fingerprint)
+                                      if self._repo_spec else None)
+                    except Exception:  # noqa: BLE001 — an unreadable tree is `unknown`, never a failure
+                        _substrate = None
                     _cmp = comparability_record(task=self._task_snapshot_for_comparability(),
-                                                inputs_prov=_inputs_prov)
+                                                inputs_prov=_inputs_prov, substrate=_substrate)
                     if isinstance(_inputs_prov, dict) or _cmp is not None:
                         _merged = dict(_eval_payload.get("metric_provenance") or {})
                         if isinstance(_inputs_prov, dict):

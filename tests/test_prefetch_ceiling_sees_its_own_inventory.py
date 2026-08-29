@@ -12,15 +12,37 @@ pending, `card_next_actions` returns `forced_card_actions` (an `evaluate` naming
 and never reaches card selection, so a staged card could not become the Node the counter was
 waiting for. Minting stayed legal precisely because consuming was impossible.
 """
-from looplab.core.models import Card, Idea, Node, RunState
+from looplab.core.models import Card, CardSelectionProvenance, Idea, Node, RunState
 from looplab.engine.speculation import SpeculationMixin
 from looplab.search.card_selection import unconsumed_card_inventory
 
 
 def _card(cid: str, **over) -> Card:
+    """A staged WORK ITEM — a card that owns an executable action.
+
+    The action receipt is not decoration here, and omitting it is what left this whole file red for
+    three days: `Card.selection_provenance` defaults to a `CardSelectionProvenance()` whose
+    `action_source` is `"none"`, so a card built without one is a DIRECTION to `card_kind_of` — and
+    `unconsumed_card_inventory` now skips directions, on the measured ground that a research question
+    owns no action, can never become a Node, and filled the ceiling with unbuildable rows on every
+    run on the box. A real staged card comes out of `_stage_prepared_card` with an action, so a
+    fixture without one was never the thing these tests describe.
+    """
     base = dict(id=cid, statement="extend n_epochs 15->30 on node #3's recipe",
                 seed_statement="extend n_epochs 15->30 on node #3's recipe",
-                operator="improve", status="proposed", verdict="open")
+                operator="improve", status="proposed", verdict="open",
+                selection_provenance=CardSelectionProvenance(
+                    action_source="card_added", action_owner_count=1))
+    base.update(over)
+    return Card.model_validate(base)
+
+
+def _direction(cid: str, **over) -> Card:
+    """The other kind: a research question, owning no action. `CardSelectionProvenance()` IS the
+    direction shape — this is what the fixture above was accidentally building."""
+    base = dict(id=cid, statement="does a stronger teacher help", seed_statement="does a stronger "
+                "teacher help", status="proposed", verdict="open",
+                selection_provenance=CardSelectionProvenance())
     base.update(over)
     return Card.model_validate(base)
 
@@ -119,3 +141,30 @@ def test_the_gate_refuses_once_inventory_covers_the_ceiling():
     assert not (SpeculationMixin._prefetch_supply_used(st) < ceiling)
     # ...and an empty board still prefetches, which is the feature working as intended.
     assert SpeculationMixin._prefetch_supply_used(_state()) < ceiling
+
+
+def test_a_research_QUESTION_is_not_inventory_any_build_can_consume():
+    """The clause that made every fixture above matter, and which nothing here covered.
+
+    A direction owns no action, so it can never become a Node — but the four terminal checks admit
+    it, because "non-terminal" describes an open question perfectly and says nothing about
+    buildability. Measured on `runs/e5small-dr-unified-v6`: supply read SIX, all six of them
+    questions, against a ceiling of 1 — so `6 < 1` refused the only producer that can fill a second
+    evaluation lane, on every turn, for seven hours with GPU 1 idle. Every run on the box carries
+    3-7 questions, so every run began by filling its own ceiling with unbuildable rows.
+    """
+    st = _state([_card("work"), _direction("q1"), _direction("q2")])
+    assert unconsumed_card_inventory(st) == 1, (
+        "MUTATION: drop the `card_is_direction` skip and this is 3 — the ceiling fills with rows "
+        "no build can consume and the raw lane is refused for the rest of the run")
+    assert SpeculationMixin._prefetch_supply_used(st) == 1
+
+
+def test_the_skip_is_BY_KIND_and_not_by_readiness():
+    """The coarseness the counter's docstring insists on: a work item that merely fails a fence this
+    turn is still inventory the board holds. Reading readiness instead of ownership would re-label an
+    ordinary blocked experiment as a question and re-open the defect this file was written for."""
+    blocked = _card("blocked")
+    blocked.selection_ready = False
+    blocked.selection_blockers = ["freshness_unknown"]
+    assert unconsumed_card_inventory(_state([blocked])) == 1

@@ -591,6 +591,56 @@ class ProposalCuesMixin:
         # smallest is a declaration the first-fit reservation may satisfy either way.
         return f" (each holding ~{min(sizes) // 1024} GiB)"
 
+    def _observed_footprint_note(self) -> str:
+        """What THIS RUN's own nodes have actually asked for — the evidence the budget cue lacked.
+
+        The GPU BUDGET paragraph tells the Researcher the pool and the per-experiment ceiling. It
+        never told it what the run's existing nodes RAN on, and the gap is not academic: on
+        `runs/e5small-dr-unified-v4` the Researcher wrote 123 cards proposing to extend node #3's
+        recipe and declared `{"gpus": 2}` on every one of them, while node #3 itself was created
+        with `{"gpus": 1}` and ran on a single card. The widest of those declarations then settled
+        the run's width to 1 (`proposal_derived_width`), so one card carried the work and the other
+        idled for a nine-hour evaluation.
+
+        DELIBERATELY EVIDENCE AND NOT A CLAMP. A larger footprint can be the right call — one of
+        those cards said so in as many words, "using 2 GPUs to halve wall-clock", which is a real
+        reason for a 30-epoch run. Refusing the declaration would override a judgement the
+        Researcher is entitled to make; telling it what its own predecessors used lets it make that
+        judgement informed. The scheduler-side answer to an idle card is backfill, not a veto here.
+
+        Cheap by construction: a linear pass over the ALREADY-CACHED event list (`read_all` is
+        cache-served), no fold, and the same cost class as `watchdog_reflection` one method over.
+        Silent on a run with no evaluated node yet — there is no evidence to report, and inventing
+        a default would be the guess this note exists to replace.
+        """
+        try:
+            events = self.store.read_all()
+        except Exception:  # noqa: BLE001 — a prompt cue may never fail the build it decorates
+            return ""
+        seen: dict[int, int] = {}
+        for event in events:
+            if getattr(event, "type", None) != "node_created":
+                continue
+            data = getattr(event, "data", None) or {}
+            idea = data.get("idea") or {}
+            footprint = idea.get("footprint") or {}
+            gpus = footprint.get("gpus")
+            node_id = data.get("node_id")
+            if type(gpus) is int and gpus >= 0 and type(node_id) is int:
+                seen[node_id] = gpus
+        if not seen:
+            return ""
+        counts: dict[int, int] = {}
+        for gpus in seen.values():
+            counts[gpus] = counts.get(gpus, 0) + 1
+        parts = ", ".join(f"{n} node(s) on {g} GPU(s)"
+                          for g, n in sorted(counts.items(), reverse=True))
+        return ("\nWHAT THIS RUN'S OWN NODES ASKED FOR: " + parts +
+                ". A larger footprint than a node you are extending is a legitimate choice — say why "
+                "in the statement — but the widest declaration among OPEN proposals sets this run's "
+                "evaluation width, so declaring more than the experiment needs narrows the run for "
+                "everyone.")
+
     def _stamp_gpu_budget_hint(self, researcher=None) -> None:
         """Stamp `_gpu_budget_hint` (RESEARCHER_HINT_ATTRS) onto the active Researcher.
 
@@ -610,7 +660,8 @@ class ProposalCuesMixin:
         still the legacy clause, so this only ever moves a role the ENGINE is proposing with."""
         _r = researcher if researcher is not None else self.researcher
         try:
-            setattr(_r, "_gpu_budget_hint", self._gpu_budget_hint_text())
+            setattr(_r, "_gpu_budget_hint",
+                    self._gpu_budget_hint_text() + self._observed_footprint_note())
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -646,7 +697,7 @@ class ProposalCuesMixin:
           longer one that reports nothing, and that is not licence to propose something too small to
           answer the question.
 
-        `eval_deadline_grace_s` is named only when it is ON (default `0.0` says nothing), and named as a
+        `eval_deadline_grace_s` is named whenever it is ON — which since 2026-08-23 is by default — and as a
         RESCUE rather than as budget: a judge-granted extension does not change the number to plan
         against, and a ceiling that reads as "you have more than this" would re-open the defect from the
         other side.
@@ -718,18 +769,25 @@ class ProposalCuesMixin:
                 "that buys nothing.")
 
     def _deadline_grace_text(self) -> str:
-        """The `eval_deadline_grace_s` clause — present only when the operator turned it on.
+        """The `eval_deadline_grace_s` clause — present whenever the feature is ON (AUTO included).
 
         A judge-granted extension is a RESCUE for a stage that is demonstrably about to finish, clamped
         to the operator's own number in the runtime (`sandbox._granted_grace`). It does not change the
         number to plan against, and announcing it as though it did would hand back exactly the margin
-        this hint exists to state. Silent at the `0.0` default so the shipped prompt gains nothing."""
+        this hint exists to state. Silent only at an explicit `0.0`, which is now the OFF switch rather than the default."""
         try:
             grace = float(getattr(self, "eval_deadline_grace_s", 0.0) or 0.0)
         except (TypeError, ValueError, OverflowError):
             return ""
-        if not math.isfinite(grace) or grace <= 0:
+        if not math.isfinite(grace) or grace == 0:
             return ""
+        if grace < 0:
+            # AUTO. The cue CANNOT name seconds: the ceiling is a fraction of whichever stage reaches
+            # its wall, and this hint is written once per proposal, before any stage exists. Naming
+            # the RULE keeps the clause honest; naming a number here would invent one.
+            return (" (At the deadline a judge may grant a stage that is demonstrably about to finish "
+                    "up to 10% of that stage's own time limit, at most 30 minutes. That is a rescue, "
+                    "not budget — plan as if it does not exist.)")
         return (f" (At the deadline a judge may grant a stage that is demonstrably about to finish up to "
                 f"{grace:.0f}s more. That is a rescue, not budget — plan as if it does not exist.)")
 

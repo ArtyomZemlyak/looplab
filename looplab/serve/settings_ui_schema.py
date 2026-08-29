@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 188
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 189
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -125,6 +125,13 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # `coverage_snapshot` and ZERO classifier `node_concepts` between them, because none of them ever
 # reached a moment with no pending node. It buys no extra passes per node count and its output is
 # fenced out of the graded-novelty evidence channel, so nothing it enables can reach selection.)
+# (184 since `triage_time_budget_s`: the wall-clock ceiling on ONE crash/timeout triage call. A row
+# because it is the operator's only handle on a loop that BLOCKS the eval thread with the GPU idle
+# behind it, and because 0 (unlimited) is what the box ran until 2026-08-27 — `e5small-dr-unified-v8`
+# node 2 spent 88.3 min and 206 provider calls re-sweeping one 663-line file inside a perfectly
+# healthy TURN budget, which is the shape no turn count can see. It sits next to
+# `developer_session_time_budget_s` and carries the same 1200, because the two bound consecutive
+# phases of one blocked thread.)
 # 2026-08-27: +`developer_step_feedback_command` (row, default ""). The between-steps measurement
 # from doc 53 item 10 — an operator-pinned command the plan loop runs for the Developer so a
 # writing session sees a number without spending a whole step on one.
@@ -133,7 +140,10 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # `declare_stages` was called ZERO times while the block cost 4.8-6.0 % of each $1 run. Default TRUE
 # because `_system_body` must reproduce the historical prompt byte for byte for a resumed run; the
 # operator turns it off for tasks whose eval declares one stage.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "bbcd0a3d61d098f69cf017f1d35758fb8ceded84de858d85fb586a0771686513"
+# 2026-08-29: MERGED with master. Both histories above are real and both are kept; the
+# count is 184 + our five rows = 189 and the revision below is RECOMPUTED from the merged
+# catalogue rather than taken from either side, because neither side's hash describes it.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "0558f9ead1c268847d3035a581df6ebcb21cd31e1e11371dbff87f4b22e9ce03"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

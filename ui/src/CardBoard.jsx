@@ -22,11 +22,15 @@ import {
   cardAttemptSummary, cardInt as _cardInt, cardLanes as _cardLanes,
   cardNodes as _cardNodes, cardNumber as _cardNumber, cardOrder as _cardOrder,
   cardRows as _cardRows, cardStatus as _cardStatus, cardStatusLabel as _cardStatusLabel,
+  cardReopenable as _cardReopenable,
   cardText as _cardText, cardLessons as _cardLessons, cardOrigin as _cardOrigin,
   cardSelectionBlock,
   resolveSelectedCard,
 } from './cardBoardModel.js'
 import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
+import { CARD_KIND_DIRECTION, cardIsDirection, cardLineageViews,
+  cardProposalDrift, rollupChips, splitBoardByKind } from './cardLineageModel.js'
+import ResearchView from './ResearchView.jsx'
 import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
 import { nodeTraceSubject } from './traceSurfaceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
@@ -52,7 +56,7 @@ const _CARD_ICON = {
 const _cardRefs = value => Array.isArray(value)
   ? value.filter(item => typeof item === 'string' && item).slice(0, 32) : []
 
-const _CARD_CONTROL_KINDS = ['edit', 'priority', 'resources', 'drop', 'abandon']
+const _CARD_CONTROL_KINDS = ['edit', 'priority', 'resources', 'drop', 'reopen', 'abandon']
 
 function _cardResourceValues(value) {
   if (!isRecord(value)) return null
@@ -84,6 +88,11 @@ function cardControlReflected(card, kind, patch, baseline, expectedEventSeq) {
   if (kind === 'resources') return _sameCardResourceValues(card.resource_pin, patch.resource_pin)
   if (kind === 'drop') return card.status === 'dropped'
     && (!patch.dropped_reason || card.dropped_reason === patch.dropped_reason)
+  // The drop's mirror. Reflection is "the card left the dropped lane" and deliberately NOT "the
+  // reason matches": the server's reopen receipt carries its OWN reason, and the fold clears
+  // `dropped_reason` when the drop stops applying, so keying on it would leave every reopen
+  // optimistically pending until a poll timed it out.
+  if (kind === 'reopen') return card.status !== 'dropped'
   if (kind === 'abandon') return card.verdict === 'abandoned'
   return false
 }
@@ -136,7 +145,7 @@ function _CardProjectionNotice({ projection, cards }) {
 function _CardKanbanCard({
   card, receipt, onSelect, onClose, onControl, controlState, controlsLocked,
   presentation = 'full', selected = false, onOpen = null, attempts = null,
-  attemptCoverage = null, onRecover = null, state = null,
+  attemptCoverage = null, onRecover = null, state = null, lineage = null,
 }) {
   // Item 6's two derivations. `state` is optional on purpose: a lane card is a summary, and the
   // legacy pre-Card fallback board has no run state to pass — both then simply render nothing extra
@@ -154,6 +163,18 @@ function _CardKanbanCard({
   const params = isRecord(card.params) ? Object.entries(card.params)
     .filter(([, value]) => _cardNumber(value) != null).slice(0, 6) : []
   const spaceCount = isRecord(card.space) ? Object.keys(card.space).length : 0
+  // The coordinates that RAN, keyed by the knob that moved, so the Action row above can lead with
+  // the real value and keep the proposal in brackets — the same shape `param_carriers.
+  // node_params_brief` renders for the agents. `drift` is null when the two agree or when nothing
+  // was comparable, which is what keeps an unchanged card byte-identical to what it drew before.
+  const isDirection = cardIsDirection(card)
+  // The server's own exact count — see `card_child_rollup`; it stays true where `child_card_ids`
+  // clipped and where the 256-card wire cap kept a child off this page.
+  const childCount = Number.isSafeInteger(card.child_rollup?.children) ? card.child_rollup.children : 0
+  const drift = cardProposalDrift(card)
+  const moved = new Map((drift?.params || [])
+    .filter(name => isRecord(card.applied_params) && card.applied_params[name] != null)
+    .map(name => [name, card.applied_params[name]]))
   const footprintKnown = Object.hasOwn(card, 'footprint')
   const baseFootprint = isRecord(card.footprint) ? card.footprint : null
   const resourcePin = isRecord(card.resource_pin) ? card.resource_pin : null
@@ -212,6 +233,7 @@ function _CardKanbanCard({
   const [gpuDraft, setGpuDraft] = useState(formGpus == null ? '' : String(formGpus))
   const [memoryDraft, setMemoryDraft] = useState(formGpuMem == null ? '' : String(formGpuMem))
   const [dropReason, setDropReason] = useState('operator dropped')
+  const [reopenReason, setReopenReason] = useState('operator reopened')
   const [controlError, setControlError] = useState('')
   const ownPending = isRecord(controlState?.pending) ? controlState.pending : null
   const busy = !!ownPending || controlsLocked === true
@@ -272,6 +294,14 @@ function _CardKanbanCard({
   const drop = () => {
     const reason = dropReason.trim() || 'operator dropped'
     control('drop', { reason }, { status: 'dropped', dropped_reason: reason })
+  }
+  // The drop's counterpart. The optimistic patch clears `dropped_reason` alongside the lane
+  // because the fold does: once a later reopen supersedes the drop, the card is not carrying a
+  // drop reason any more, and showing one on a reopened row would state a stop that no longer
+  // applies. The drop RECEIPT survives in the log — this is the board, not the history.
+  const reopen = () => {
+    const reason = reopenReason.trim() || 'operator reopened'
+    control('reopen', { reason }, { status: 'proposed', dropped_reason: null })
   }
   // This is deliberately Card-scoped: the backend receives one Card id, so siblings that happen to
   // share a seed remain unchanged. The control changes the Card's research verdict, not its work lane.
@@ -381,8 +411,26 @@ function _CardKanbanCard({
       <span className="card-kanban-k">Action</span>
       <span>{operator || 'operator unspecified'}</span>
       {evalProfile && <span>profile {evalProfile}</span>}
-      {params.map(([key, value]) => <span key={key} className="card-param">{key}={fmt(value)}</span>)}
+      {params.map(([key, value]) => <span key={key} className={'card-param' + (moved.has(key) ? ' card-param-moved' : '')}>
+        {key}={fmt(moved.has(key) ? moved.get(key) : value)}
+        {moved.has(key) && <span className="muted"> (proposed {fmt(value)})</span>}
+      </span>)}
       {spaceCount > 0 && <span>{spaceCount} search variable{spaceCount === 1 ? '' : 's'}</span>}
+    </div>}
+    {/* WHAT ACTUALLY RAN, and until 2026-08-25 this pane showed the PROPOSAL alone. `card.params`
+        is receipt-bound and cannot be corrected; `applied_params` rides beside it on the wire and
+        was rendered nowhere — so the fix that taught the agent's prompt, the digest and the tools to
+        lead with the coordinates that ran left the one surface the OPERATOR looks at still saying
+        the old numbers. Measured on `runs/e5small-dr-unified-v4`: six of the nine cards with an
+        applied record disagree with their own proposal, the run's champion among them.
+        Silent when the two agree, so a card that ran as proposed renders exactly as it always did. */}
+    {drift && <div className="card-kanban-fact card-drift">
+      <span className="card-kanban-k">Ran at</span>
+      <span>
+        <span className="chip xs warn">{drift.moved} of {drift.compared} knobs moved</span>
+        {typeof card.applied_params_node === 'number'
+          ? <span className="muted">on experiment #{card.applied_params_node}</span> : null}
+      </span>
     </div>}
     <div className="card-kanban-fact">
       <span className="card-kanban-k">Declared</span>
@@ -398,19 +446,71 @@ function _CardKanbanCard({
       <span className="card-kanban-k">Provenance</span>
       <span>{provenanceBits.length ? provenanceBits.join(' · ') : 'unavailable'}</span>
     </div>
-    <div className="card-kanban-fact">
+    {/* THE GATE AND ITS BLOCKERS ANSWER "why will the Card queue not pick this up next" — a question
+        about a WORK ITEM. A direction is not one: it owns no executable action BY DESIGN, so
+        `identity_not_native` / `action_owner_missing` / `freshness_unknown` are not defects on it,
+        they are its definition restated as three alarms. Every direction on
+        `runs/e5small-dr-unified-v5` wore all three, which reads as breakage on a row that is
+        working exactly as intended. What a direction needs is an experiment filed under it, and
+        that is what this says instead. */}
+    {!isDirection && <div className="card-kanban-fact">
       <span className="card-kanban-k">Gate</span>
       <span>{selection && _cardText(selection.freshness) ? `freshness ${selection.freshness}` : 'freshness unknown'}
         {selection && _cardText(selection.owner_state) ? ` · owner ${selection.owner_state}` : ''}
         {selection && typeof selection.action_complete === 'boolean'
           ? ` · action ${selection.action_complete ? 'complete' : 'incomplete'}` : ''}</span>
-    </div>
-    {blockers.length > 0 && <div className="card-kanban-blockers" aria-label="Selection blockers">
+    </div>}
+    {!isDirection && blockers.length > 0 && <div className="card-kanban-blockers" aria-label="Selection blockers">
       {blockers.slice(0, 5).map(blocker => <span key={blocker} className="chip xs warn">
         {blocker.replaceAll('_', ' ')}</span>)}
       {blockers.length > 5 && <span className="muted">+{blockers.length - 5}</span>}
     </div>}
+    {isDirection && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Direction</span>
+      <span>
+        <span className="chip xs chip-direction">not runnable by design</span>
+        <span className="muted">{childCount > 0
+          ? `${childCount} experiment${childCount === 1 ? '' : 's'} filed under it`
+          : 'no experiment filed under it yet'}</span>
+      </span>
+    </div>}
     {!blockersKnown && <div className="muted card-kanban-unknown">Selection blockers unavailable</div>}
+    {/* WHICH RESEARCH QUESTION THIS ROW BELONGS TO — above the node Lineage below, because the two
+        are different relations and were easy to confuse while only one of them was rendered. This
+        one is card->card: the DIRECTION this experiment answers, or the experiments answering this
+        direction. The row below is node->node: which experiment this one was bred from.
+        A parent id we hold but cannot resolve says so; it must NOT read as "unfiled", which is a
+        different and false statement (see `cardLineageModel.js::cardLineageView`). */}
+    {lineage && (lineage.parentId || lineage.children.length > 0
+      || lineage.kind === CARD_KIND_DIRECTION) && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Research</span>
+      <span>
+        {lineage.kind === CARD_KIND_DIRECTION
+          ? <span className="chip xs chip-direction">direction</span> : null}
+        {lineage.parentId ? <>
+          {' answers '}
+          {lineage.parent && onOpen
+            ? <button type="button" className="btn xs ghost"
+                title={_cardText(lineage.parent.statement) || lineage.parentId}
+                onClick={e => onOpen(lineage.parentId, e.currentTarget)}>
+                {_cardText(lineage.parent.statement) || lineage.parentId}
+              </button>
+            : <span>{lineage.parentId}{lineage.parent ? '' : ' (not on this page)'}</span>}
+        </> : null}
+        {lineage.children.length > 0 ? <>
+          {lineage.parentId ? ' · ' : ' '}
+          {rollupChips(lineage.rollup).map(chip => (
+            <span key={chip.key} className="chip xs">{chip.label}</span>
+          ))}
+          {rollupChips(lineage.rollup).length === 0
+            ? `${lineage.children.length} experiment${lineage.children.length === 1 ? '' : 's'}`
+            : null}
+        </> : null}
+        {/* An unanswered direction says so rather than rendering an empty row. */}
+        {lineage.kind === CARD_KIND_DIRECTION && lineage.children.length === 0
+          ? ' — no experiment proposed against this yet' : null}
+      </span>
+    </div>}
     {(parents.length > 0 || scoredAgainst != null) && <div className="card-kanban-fact">
       <span className="card-kanban-k">Lineage</span>
       <span>{parents.length ? `parent ${parentLineage}` : ''}
@@ -522,6 +622,20 @@ function _CardKanbanCard({
           Abandon this Card
         </button>
       </div>
+      {/* SHOWN ONLY ON A STOPPED CARD, and not behind a danger disclosure: dropping ends a line of
+          work and reopening resumes one, so presenting them with the same weight would be wrong in
+          both directions. Until this shipped a drop was TERMINAL — the card stayed visible in the
+          `dropped` lane, unactionable, with no event in the vocabulary that could return it. */}
+      {_cardStatus(card) === 'dropped' && _cardReopenable(card) && <form className="card-control-form"
+        onSubmit={event => { event.preventDefault(); reopen() }}>
+        <label><span>Reopen reason (optional)</span><input className="text" value={reopenReason}
+          maxLength={400} aria-label={`Reopen reason for ${card.id}`} disabled={busy}
+          onChange={event => setReopenReason(event.target.value)} /></label>
+        <button type="submit" className="btn xs" disabled={busy}
+          title="Put this stopped Card back on the board; the drop receipt stays in the log">
+          Reopen this Card
+        </button>
+      </form>}
       <details className="card-control-danger">
         <summary>Drop Card…</summary>
         <form className="card-control-form" onSubmit={event => { event.preventDefault(); drop() }}>
@@ -737,6 +851,11 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
 function _CardDetailPane({
   card, receipt, attempts, selectedNodeId, onOpenNode, onSelect, onControl, controlState,
   controlsLocked, renderInspector, state, onRecover, runId = null, expectedGeneration = null,
+  // The lineage view for THIS card. It defaults to `null` on `_CardKanbanCard` and the Research
+  // block is gated on it, so omitting it here silently withheld "answers DIRECTION card-7" from the
+  // one surface built for reading a single card in full — while the lane tiles, which are summaries,
+  // showed it. That is the reverse of where a reader expects the detail.
+  lineage = null,
 }) {
   if (!card) {
     return <div className="card-detail card-detail-empty">
@@ -761,7 +880,7 @@ function _CardDetailPane({
       coverage={cardAttemptCoverage(attempts, receipt)} />
     <_CardKanbanCard card={card} receipt={receipt} presentation="full" state={state}
       controlState={controlState} controlsLocked={controlsLocked} onControl={onControl}
-      onRecover={onRecover} onSelect={onSelect} onClose={null} />
+      onRecover={onRecover} onSelect={onSelect} onClose={null} lineage={lineage} />
     {runId && <_CardTrace card={card} runId={runId} expectedGeneration={expectedGeneration}
       onOpenNode={onOpenNode} attempts={attempts} />}
   </div>
@@ -781,6 +900,15 @@ function _CardKanban({
 }) {
   const [optim, setOptim] = useState({})
   const [addDraft, setAddDraft] = useState('')
+  // HOW THE BOARD IS GROUPED, and why there is a choice at all rather than a replacement. The lanes
+  // answer "what is the machine doing right now"; they are the right default and nothing here
+  // changes them. They cannot answer "what are we trying to find out", because that question is one
+  // level up: a research DIRECTION owns no runnable action, so the fold gives it no meaningful lane
+  // and the Kanban drew it among the work items as a card that would never move. Measured on
+  // `runs/e5small-dr-unified-v5`, 5 of the 5 rows an operator saw were exactly that.
+  // Not persisted deliberately: this is a way of LOOKING at the current board, not a preference —
+  // an operator who opened the run to see what is running should find the lanes, every time.
+  const [grouping, setGrouping] = useState('lanes')
   const inFlight = useRef(new Set())
   const activeRef = useRef(true)
   useEffect(() => {
@@ -832,7 +960,16 @@ function _CardKanban({
       return changed ? next : current
     })
   }, [state.cards])
-  const visibleCards = cards.map(card => _cardWithOptimisticControls(card, optim[card.id]))
+  // MEMOIZED, and it is not a micro-optimisation. A fresh array every render changes the identity
+  // of the `cards` prop `ResearchView` receives, and that prop is the root dependency of its whole
+  // memo chain — `all` -> `questions` -> `rows` (`latticeRows`, whose own REVIEW note measures up to
+  // 109,600 placements on a legal 255-card payload) -> `rollups` (`latticeRollups`, a pairwise
+  // comparability split per row). Every one of those recomputed on every render: each 2.5 s run
+  // poll, each keystroke in the add-card draft, each optimistic-control change. The memos were
+  // written and were dead weight.
+  const visibleCards = useMemo(
+    () => cards.map(card => _cardWithOptimisticControls(card, optim[card.id])),
+    [cards, optim])
   // A 'confirmation-unknown' pending (a lost/uncertain submission) MAY never self-clear: if the intent
   // never actually landed, the fold never reflects it and the reconcile effect above never drops it (if
   // it DID land, that effect clears it normally). Because it can hang indefinitely, it must not count
@@ -850,7 +987,14 @@ function _CardKanban({
       resources: { saving: 'Pinning Card resources…', success: 'Card resources pinned', failure: 'Could not pin Card resources' },
       drop: { saving: 'Dropping Card…', success: 'Card dropped', failure: 'Could not drop Card' },
       abandon: { saving: 'Abandoning this Card…', success: 'Card abandoned', failure: 'Could not abandon Card' },
+      reopen: { saving: 'Reopening Card…', success: 'Card reopened', failure: 'Could not reopen Card' },
     }[kind]
+    // A kind with no row here is REFUSED by the guard below, and it refuses with the concurrency
+    // message — so a control that reaches the dispatch ladder but not this table reads to the operator
+    // as "another command is in flight" forever. That is how `reopen` shipped unreachable: the event
+    // type, the five control-validation rows, the fold handler and the form all landed, and one absent
+    // row here meant `CONTROL.reopenCard` was never called. `_CARD_CONTROL_KINDS` is the vocabulary
+    // both sides must cover; `ui/test/cardBoardGrouping.test.js` now derives this table from it.
     if (!labels || inFlight.current.size > 0) {
       const message = 'Another Card command is still being submitted for this run.'
       onToast?.(message)
@@ -882,7 +1026,9 @@ function _CardKanban({
             ? await CONTROL.pinCardResources(runId, card.id, data.gpus, data.gpu_mem_mib)
             : kind === 'abandon'
               ? await CONTROL.abandonHypothesis(runId, card.id)
-              : await CONTROL.dropCard(runId, card.id, data.reason)
+              : kind === 'reopen'
+                ? await CONTROL.reopenCard(runId, card.id, data.reason)
+                : await CONTROL.dropCard(runId, card.id, data.reason)
       if (!activeRef.current) return { kind: 'stale', message: 'Card board scope changed' }
       const feedback = commandFeedback(record, {
         success: labels.success, noop: `${labels.success} (already current)`,
@@ -1055,25 +1201,64 @@ function _CardKanban({
     <button className="btn sm primary" onClick={addCard}
       disabled={readOnly || !addDraft.trim()}>+ Add</button>
   </div>
+  // The DIRECTIONS view. One section per research direction, its experiments nested under it, and
+  // the experiments nobody filed in a bucket of their own that is never merged away — "unfiled" is
+  // a fact an operator acts on, and folding it into a total would claim a coverage the run does not
+  // have. The direction header wears COUNTS and never a lifecycle lane: giving a parent its
+  // children's worst status parks a months-long direction in "Running" because one of two hundred
+  // experiments under it is training, which is the failure the operator named before this existed.
+  // ONE walk of the edges for the whole board, mirroring why `attemptsByCard` is hoisted:
+  // the per-card `cardLineageView` rebuilds the index from the card list every call, so using it
+  // here would be O(cards^2) on a board the wire already lets reach 256 rows.
+  const lineageByCard = useMemo(() => cardLineageViews(visibleCards), [visibleCards])
+  const renderCard = card => <_CardKanbanCard key={card.id} card={card}
+    lineage={lineageByCard.get(card.id) || null}
+    receipt={isRecord(receipts[card.id]) ? receipts[card.id] : null}
+    controlState={optim[card.id]}
+    controlsLocked={readOnly || (globalPending && !optim[card.id]?.pending)}
+    onSelect={onSelect} onClose={onClose} onControl={control}
+    presentation={view ? 'lane' : 'full'} state={view ? null : state}
+    selected={view && selectedCardId === card.id} onOpen={openDetails}
+    attempts={attemptsByCard?.get(card.id) || null}
+    attemptCoverage={cardAttemptCoverage(
+      attemptsByCard?.get(card.id) || [], receipts[card.id])} />
+  // The question ladder. `visibleCards` and `renderCard` are the SAME inputs the other two views
+  // draw from, so a filter or a control applied on one board reaches this one too rather than the
+  // view growing its own quietly-different population.
+  const researchBoard = <ResearchView cards={visibleCards} state={state} renderCard={renderCard} />
+  // The lanes are a LIFECYCLE view and a question has no lifecycle of its own — see
+  // `splitBoardByKind`. The questions are not dropped: the count and the way to them ride above the
+  // lanes, because "five questions await an experiment" and "the board is empty" are different runs.
+  const { work: laneCards, questions: laneQuestions } = splitBoardByKind(visibleCards)
+  // Said where the lanes are, not where the questions went: an operator who sees fewer rows than the
+  // board's own total needs the reconciliation on the surface that shrank.
+  const questionNotice = laneQuestions.length > 0 && grouping === 'lanes'
+    ? <div className="muted card-question-notice" role="status">
+        {laneQuestions.length} research question{laneQuestions.length === 1 ? '' : 's'} not shown
+        here — a question owns no experiment, so it has no lane.{' '}
+        <button type="button" className="btn sm ghost" onClick={() => setGrouping('research')}>
+          open the Research ladder
+        </button>
+      </div>
+    : null
+  const groupingBar = <div className="toolbar card-grouping" role="group"
+    aria-label="Group the board by">
+    {[['lanes', 'Lanes', 'lifecycle status — what the machine is doing now'],
+      ['research', 'Research', 'the ladder of questions, each one narrowing the one above it'],
+    ].map(([key, label, hint]) => <button key={key} type="button" title={hint}
+      className={'btn sm' + (grouping === key ? ' primary' : '')}
+      aria-pressed={grouping === key} onClick={() => setGrouping(key)}>{label}</button>)}
+  </div>
   const board = <div className="card-board" role="region" aria-label="Card lifecycle kanban">
     {lanes.map(([key, label, hint]) => {
-      const rows = visibleCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
+      const rows = laneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
       const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
       const laneId = `card-lane-${encodeURIComponent(key)}`
       return <section key={key} className={'card-col' + tone} aria-labelledby={laneId}>
         <h3 id={laneId} className="card-col-h" title={hint}>
           {label} <span className="muted">{rows.length}</span>
         </h3>
-        {rows.map(card => <_CardKanbanCard key={card.id} card={card}
-          receipt={isRecord(receipts[card.id]) ? receipts[card.id] : null}
-          controlState={optim[card.id]}
-          controlsLocked={readOnly || (globalPending && !optim[card.id]?.pending)}
-          onSelect={onSelect} onClose={onClose} onControl={control}
-          presentation={view ? 'lane' : 'full'} state={view ? null : state}
-          selected={view && selectedCardId === card.id} onOpen={openDetails}
-          attempts={attemptsByCard?.get(card.id) || null}
-          attemptCoverage={cardAttemptCoverage(
-            attemptsByCard?.get(card.id) || [], receipts[card.id])} />)}
+        {rows.map(renderCard)}
         {rows.length === 0 && <div className="muted card-empty">—</div>}
       </section>
     })}
@@ -1090,9 +1275,11 @@ function _CardKanban({
         <div className="card-lanes-head">
           <span className="muted">{sub}</span>
           <_CardProjectionNotice projection={projection} cards={visibleCards} />
+          {groupingBar}
+          {questionNotice}
         </div>
         {addBar}
-        {board}
+        {grouping === 'research' ? researchBoard : board}
       </div>
       {detailOpen && pane?.compact && <button type="button" className="workspace-scrim"
         tabIndex={-1} onClick={closeDetails} aria-label="Close work item details" />}
@@ -1125,6 +1312,7 @@ function _CardKanban({
           controlState={selectedCard ? optim[selectedCard.id] : null}
           controlsLocked={readOnly || (globalPending && !(selectedCard && optim[selectedCard.id]?.pending))}
           onRecover={recoverCardControl}
+          lineage={selectedCard ? lineageByCard.get(selectedCard.id) || null : null}
           runId={runId} expectedGeneration={runGeneration || null} />
       </aside>}
     </div>
@@ -1136,8 +1324,10 @@ function _CardKanban({
   // narrower window gets a panel that fits rather than one clipped by the browser edge.
   return <Panel title="Cards" sub={sub} onClose={onClose} size="board">
     <_CardProjectionNotice projection={projection} cards={visibleCards} />
+    {groupingBar}
+    {questionNotice}
     {addBar}
-    {board}
+    {grouping === 'research' ? researchBoard : board}
   </Panel>
 }
 
@@ -1900,7 +2090,12 @@ export function CardWorkspace({
   readOnly = false,
 }) {
   const [, setRecoveryEpoch] = useState(0)
-  const cards = _cardRows(state)
+  // MEMOIZED, because `cardRows` returns a fresh array of freshly-spread objects every call.
+  // The `visibleCards` memo below (and, through it, the whole `all -> questions -> rows ->
+  // rollups` chain in ResearchView) deps on this array's IDENTITY, so an unmemoized call here
+  // busted it on every parent re-render — a card click, a pane change, a `readOnly` toggle —
+  // and not only when `state` actually moved. That is the entire lattice cost, per click.
+  const cards = useMemo(() => _cardRows(state), [state])
   const projection = isRecord(state?.cards_projection) ? state.cards_projection : null
   const hasAuthoritativeCards = cards.length > 0 || (_cardInt(projection?.total) ?? 0) > 0
     || projection?.source_valid === false
@@ -1926,7 +2121,12 @@ export function CardWorkspace({
 
 export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose, onToast }) {
   const [, setRecoveryEpoch] = useState(0)
-  const cards = _cardRows(state)
+  // MEMOIZED, because `cardRows` returns a fresh array of freshly-spread objects every call.
+  // The `visibleCards` memo below (and, through it, the whole `all -> questions -> rows ->
+  // rollups` chain in ResearchView) deps on this array's IDENTITY, so an unmemoized call here
+  // busted it on every parent re-render — a card click, a pane change, a `readOnly` toggle —
+  // and not only when `state` actually moved. That is the entire lattice cost, per click.
+  const cards = useMemo(() => _cardRows(state), [state])
   const projection = isRecord(state?.cards_projection) ? state.cards_projection : null
   // A non-empty/omitted/invalid Card projection is authoritative. With no Cards at all, preserve the
   // hypothesis add/abandon workflow for older logs and for a run before its first Card is minted.

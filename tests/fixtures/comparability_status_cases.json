@@ -1,0 +1,39 @@
+{
+  "_": [
+    "THE SHARED TRUTH TABLE for `comparability_status`. `looplab/engine/comparability.py` decides",
+    "whether two numbers may be ordered and `ui/src/runIndex.js::comparabilityStatus` mirrors it, and",
+    "the mirror's own comment says the two 'can never disagree'. Nothing checked that: the engine grew",
+    "the `substrate` discriminator and the browser did not follow for three days, so the run list,",
+    "RegistryPanel, ParetoPanel and crossRunRank went on ordering exactly the pairs the engine had just",
+    "refused. Both suites read THIS file, so a rule added on one side and not the other goes red."
+  ],
+  "cases": [
+    {"name": "same keys, same substrate",
+     "a": {"keys": {"measured": "K"}, "substrate": "a1"},
+     "b": {"keys": {"measured": "K"}, "substrate": "a1"}, "status": "same"},
+    {"name": "same keys, DIFFERENT substrate — the operator promoted a fix mid-run",
+     "a": {"keys": {"measured": "K"}, "substrate": "a1"},
+     "b": {"keys": {"measured": "K"}, "substrate": "b2"}, "status": "different"},
+    {"name": "a substrate on one side only is silence, never agreement",
+     "a": {"keys": {"measured": "K"}, "substrate": "a1"},
+     "b": {"keys": {"measured": "K"}}, "status": "same"},
+    {"name": "no substrate at all — every pre-2026-08-24 log",
+     "a": {"keys": {"measured": "K"}},
+     "b": {"keys": {"measured": "K"}}, "status": "same"},
+    {"name": "different keys at a certifying authority",
+     "a": {"keys": {"measured": "K"}},
+     "b": {"keys": {"measured": "J"}}, "status": "different"},
+    {"name": "an agreeing NON-certifying authority certifies nothing",
+     "a": {"keys": {"inferred": "K"}},
+     "b": {"keys": {"inferred": "K"}}, "status": "unknown"},
+    {"name": "a substrate mismatch outranks an agreeing measured key",
+     "a": {"keys": {"measured": "K"}, "substrate": "a1"},
+     "b": {"keys": {"measured": "K"}, "substrate": "b2"}, "status": "different"},
+    {"name": "an agreeing substrate does not rescue differing keys",
+     "a": {"keys": {"measured": "K"}, "substrate": "a1"},
+     "b": {"keys": {"measured": "J"}, "substrate": "a1"}, "status": "different"},
+    {"name": "an empty-string substrate is absent, not a value",
+     "a": {"keys": {"measured": "K"}, "substrate": ""},
+     "b": {"keys": {"measured": "K"}, "substrate": "b2"}, "status": "same"}
+  ]
+}

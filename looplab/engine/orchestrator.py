@@ -18,7 +18,7 @@ import os
 import secrets
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -56,7 +56,8 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_deriv
                                    settle_width, settled_width_refusal)
 from looplab.engine.audit import AuditMixin
 from looplab.engine.cadence import occupancy_due
-from looplab.engine.card_reservation import CardReservationMixin, _BuildReservation
+from looplab.engine.card_reservation import (CardReservationMixin, _BuildReservation,
+                                            _discarded_proposal_text)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
 from looplab.engine.costs import bind_cost_accountants
@@ -151,6 +152,13 @@ _LOG = logging.getLogger(__name__)
 # tracked data/generated file, where buffering the whole patch would spike run-start memory (a latent
 # OOM) and a truncated "did-it-change" signal is enough. Module-level so an operator/test can retune.
 _DIFF_DIGEST_CAP = 8 * 1024 * 1024
+# The wall the dirty-input enumeration gives `git status --porcelain`. NAMED, and named HERE, because
+# the harness has to bound its environment probe by the SAME number: a probe more patient than the
+# code it certifies passes on a loaded box while the product's call times out, and the test then
+# reports an environment fact as a product defect (measured 2026-08-28 — the probe allowed 120 s
+# against this 10, and the guard went red anyway). One spelling, imported by
+# `tests/test_setup_completion.py::_fixture_git_reports_dirty`, so the two cannot drift apart again.
+_DIRTY_STATUS_TIMEOUT_S = 10
 
 # Back-compatible export: the source-owned definition lives beside the shared runtime-scope digest.
 SPECULATION_CALIBRATION_VARIANT_FIELDS = SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS
@@ -3352,7 +3360,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # P0-5 dirty-input enumeration: which repo files were uncommitted at start
                             # (repo tasks only; a clean/non-repo run records []). Provenance on top of
                             # the workspace content hash in `wf`.
-                            "dirty_inputs": (self._dirty_inputs(wf) if self._repo_spec else []),
+                            # The source PATHS, not `wf` — `wf` is keyed by label and this reads its
+                            # keys as paths (see `workspace.workspace_source_paths`).
+                            "dirty_inputs": (self._dirty_inputs(self.workspace.workspace_source_paths())
+                                             if self._repo_spec else []),
                             # T2 trust enforcement: recorded here so the pure fold applies the same
                             # gate on replay/resume (config isn't available to `replay.fold`). Absent in
                             # old logs -> "audit" -> byte-identical legacy selection.
@@ -4529,6 +4540,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # research_completed/hint/hypothesis_added AFTER _dispatch_evals returns — possibly
                 # past finalize. Waiting for the append (bounded, far shorter than the compute path)
                 # is safer.
+                # OPEN[failed-initial-research-tick-receipted-again] the initial trigger is consumed
+                # only after the entire receipt -> compute -> multi-append record path succeeds.
+                # proof:absent:initial_trigger_consumed@looplab/engine/orchestrator.py
+                # REVIEW 2026-08-27 (P2 durability/cost): if `_record_deep_research` appends
+                # `research_completed` and a later hint/card append raises, this catch retries with
+                # the original cadence/strategist label. The next tick buys the same think again,
+                # writes a second durable receipt and can duplicate the completed memo because
+                # `last_sig` is still empty. Consume the one-shot trigger once its receipt/paid pass
+                # starts, while retaining an explicit status if a pre-receipt failure may retry it.
                 sig, recorded = await anyio.to_thread.run_sync(
                     functools.partial(self._research_attempt_step, snap, trig,
                                       manual=False, last_sig=last_sig),
@@ -4959,6 +4979,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         "_write_node_files": ("workspace", None),
         "_materialize": ("workspace", None),
         "_workspace_fingerprint": ("workspace", None),
+        "_substrate_fingerprint": ("workspace", None),
         "_seed_workspace": ("workspace", None),
         "_seed_repo_tree": ("workspace", None),
         "_link_input": ("workspace", None),
@@ -5474,6 +5495,41 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     "kind": "card_contract",
                     "reason": "proposal cannot form a bounded native Card action",
                     "action": "dropped",
+                })
+            elif plan.disposition not in {"mint", "reuse", "attach"}:
+                # THE ONLY PLACE A DISCARDED PROPOSAL IS RECEIPTED, and the placement is the
+                # decision. This branch runs immediately after the proposal call and nowhere else,
+                # so it is the one pass that can know a PAID proposal was refused. It returned None
+                # on a non-accepting disposition and the caller (`_create_node_scoped`) then unwound
+                # through `_discard_node_build_telemetry`, which despite its name appends nothing —
+                # its body only nulls the per-role prediction attributes so a later build cannot
+                # emit an abandoned build's ranking. Correct as far as it goes, and exactly why the
+                # loss was invisible. Measured on `runs/e5small-dr-unified-v8`: a propose of 24.1
+                # min / 81 provider calls / 4,270,000 tokens emitted a well-formed one-knob delta
+                # (train.max_seq_length 128 -> 256, citing four file:line locations) and left no
+                # `card_added`, no `card_enriched`, no `hypothesis_added` and no `card_dropped`.
+                #
+                # `card_reservation._reserve_node_build` is DELIBERATELY silent on the same
+                # dispositions: it is also the batch pre-reservation entry point, reached with a
+                # ready-made Idea and no propose behind it, so calling it twice with one idea is the
+                # idempotent retry of a single action and
+                # `test_card_writer_lifecycle::test_batch_prereservations_mint_on_main_thread_and_
+                # dedupe_exact_active_work` pins that it appends nothing. A row there would count a
+                # phantom loss on every exact twin.
+                #
+                # REFUSING THE MINT IS UNCHANGED — a card whose owner is in flight must not be
+                # minted twice. What is fixed is refusing in SILENCE.
+                self._append_proposal_event(EV_NOVELTY_REJECTED, {
+                    "node_id": prospective_node_id, "generation": 0,
+                    "kind": "card_duplicate" if plan.disposition == "duplicate"
+                            else "card_unplannable",
+                    "reason": ("an existing card already owns this action"
+                               if plan.disposition == "duplicate"
+                               else "the card plan named no bounded action"),
+                    "action": "dropped",
+                    "disposition": str(plan.disposition),
+                    "pass": "planner",
+                    "hypothesis": _discarded_proposal_text(linked),
                 })
             return plan.idea if plan.disposition in {"mint", "reuse", "attach"} else None
 
@@ -6380,6 +6436,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _workspace_fingerprint(self) -> dict:
         return self.workspace.workspace_fingerprint()
 
+    def _substrate_fingerprint(self) -> dict:
+        return self.workspace.substrate_fingerprint()
+
     def _setup_manifest(self, wf: "dict | None" = None) -> str:
         """P0-3 content-addressed setup: a stable digest of the MATERIAL the task+data preflight
         verified — the config hash, the workspace fingerprint, and the data-asset provenance. Binds
@@ -6409,7 +6468,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         from looplab.search.speculation_quality import speculation_environment_fingerprint
         return speculation_environment_fingerprint()
 
-    def _dirty_inputs(self, wf: "dict | None") -> list:
+    def _dirty_inputs(self, sources: "Iterable[str] | None") -> list:
         """P0-5 dirty-input enumeration: for each git-repo workspace source, the uncommitted-file LIST
         (`git status --porcelain`) plus a bounded DIGEST of the actual diff vs HEAD (`git diff HEAD`) —
         the EXPLICIT record of which inputs differ from a clean checkout AND a content fingerprint of
@@ -6430,7 +6489,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             path that is genuinely a run INPUT should be mounted as a `data:` source, where
             `_shallow_fingerprint` covers it outside git's ignore rules.
           * Multiple sources under one repo share a single diff (computed once per resolved root).
-        Bounded output: <=500 porcelain lines x 200 chars, and one capped digest per repo root."""
+        Bounded output: <=500 porcelain lines x 200 chars, and one capped digest per repo root.
+
+        `sources` is an iterable of FILESYSTEM PATHS — never the workspace fingerprint, whose keys are
+        the `editable:<name>` LABELS this function would resolve to `Path(".")`. A dict still works
+        (iterating one yields its keys) so the four tests that pass `{path: {}}` are unchanged, but
+        callers should hand it `workspace.workspace_source_paths()`."""
         import os
         import subprocess
         import time
@@ -6479,12 +6543,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         out: list = []
         digests: dict = {}                                          # resolved-root -> digest (once)
-        for src in sorted((wf or {}).keys()):
+        for src in sorted(sources or ()):
             try:
                 p = Path(src)
                 root = str(p if p.is_dir() else p.parent)
                 r = subprocess.run(["git", "-C", root, "status", "--porcelain"],
-                                   capture_output=True, text=True, timeout=10, env=git_env)
+                                   capture_output=True, text=True,
+                                   timeout=_DIRTY_STATUS_TIMEOUT_S, env=git_env)
                 dirty = [ln[:200] for ln in r.stdout.splitlines() if ln.strip()][:500]
                 if r.returncode == 0 and dirty:
                     entry = {"source": src, "dirty": dirty}

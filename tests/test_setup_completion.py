@@ -3,6 +3,8 @@ run_id. run_started is appended mid-setup (before the leakage hard-stop), so a c
 used to make every later resume skip the rest of preflight — leakage included — forever."""
 from __future__ import annotations
 
+import pytest
+
 from looplab.core.models import Idea, RunState
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -159,6 +161,110 @@ def _mk_engine(run_dir):
                   auto_install_deps=False)
 
 
+def _fixture_git_reports_dirty(repo) -> bool:
+    """Did GIT ITSELF manage to report this fixture as dirty, right now, on this box?
+
+    `Engine._dirty_inputs` is documented BEST-EFFORT — "a source never fails the run" — and it runs
+    `git status --porcelain` under `timeout=10` inside `except Exception: pass`. That is the correct
+    product shape: a slow git must degrade the enumeration, never fail an experiment. But it makes
+    every assertion of the form `len(out) == 1` a coin flip on a loaded box, and on THIS box the
+    engine is running during every full-suite pass, so loaded is the normal condition rather than an
+    edge case. Measured 2026-08-28: both dirty-input tests failed `assert 0 == 1` in a full run and
+    passed 15/15 in isolation on the same commit with a clean tree.
+
+    So the environment is probed FIRST, and a git that cannot answer here produces a SKIP naming the
+    reason instead of a red that reads like a product defect. The product assertions below are
+    untouched: a broken digest still fails.
+
+    **THE PROBE IS BOUNDED BY THE PRODUCT'S OWN NUMBER, AND THAT WAS THE BUG IN THE FIRST VERSION.**
+    Shipped 2026-08-28 with `timeout=120` against the product's 10, it was twelve times more patient
+    than the code it certifies — so on a loaded box git answered the probe in thirty seconds, the
+    probe declined to skip, the product's call timed out, `_dirty_inputs` returned `[]` and the test
+    failed `assert 0 == 1` pointing at the product. That is exactly the red this function exists to
+    prevent, and it happened in the full-suite pass that gated b745e538. The bound now has ONE
+    spelling, `orchestrator._DIRTY_STATUS_TIMEOUT_S`, imported here; the env is the product's
+    `git_subprocess_env()` for the same reason, since a probe run under a different environment is
+    not running the product's command.
+
+    **IT IS A FAITHFUL PROXY, NEVER A CERTIFICATE, AND MUST NOT BECOME ONE.** Probe and product are
+    two calls at two moments under load that moves between them, so a passing probe means "git could
+    answer within the product's own bound a moment ago", not "the product's call will". The circular
+    form that WOULD be exact — call `_dirty_inputs` and skip when it returns `[]` — is refused: it
+    skips on a real defect, which is the failure `test_the_environment_probe_tells_a_dirty_repo_from_a_non_repo`
+    exists to catch.
+    """
+    import subprocess
+
+    from looplab.engine.orchestrator import _DIRTY_STATUS_TIMEOUT_S
+    from looplab.runtime.sandbox import git_subprocess_env
+
+    try:
+        probe = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                               capture_output=True, text=True,
+                               timeout=_DIRTY_STATUS_TIMEOUT_S, env=git_subprocess_env())
+    except Exception:  # noqa: BLE001 — git missing or wedged is an environment fact, not a verdict
+        return False
+    return probe.returncode == 0 and bool(probe.stdout.strip())
+
+
+def test_the_probe_is_bounded_exactly_like_the_code_it_certifies(tmp_path, monkeypatch):
+    """A probe more generous than the product cannot certify it — the defect this file shipped once.
+
+    Driven by capturing the kwargs rather than by timing anything, because an assertion over a
+    duration is the very family of flake the guard exists to end.
+    """
+    import subprocess
+
+    from looplab.engine.orchestrator import _DIRTY_STATUS_TIMEOUT_S
+    from looplab.runtime.sandbox import git_subprocess_env
+
+    seen = {}
+    real_run = subprocess.run
+
+    def _spy(cmd, **kw):
+        if "status" in cmd:
+            seen.update(kw)
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(subprocess, "run", _spy)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _fixture_git_reports_dirty(repo)
+
+    assert seen.get("timeout") == _DIRTY_STATUS_TIMEOUT_S, (
+        "the probe must allow git exactly what the product allows it, or a passing probe says "
+        "nothing about whether the product's call could answer")
+    assert seen.get("env") == git_subprocess_env(), (
+        "the probe must run the product's command in the product's environment")
+
+
+def test_the_environment_probe_tells_a_dirty_repo_from_a_non_repo(tmp_path):
+    """The guard's own contract, driven — because in a HEALTHY environment the guard is invisible.
+
+    A mutant that makes `_fixture_git_reports_dirty` return True unconditionally cannot be caught by
+    the two tests that USE it (git works here, so they pass either way). This is the assertion that
+    kills it: the probe must answer False where git has nothing to report, or the skip it licenses
+    would fire on a real defect and hide it.
+    """
+    import subprocess
+
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    (plain / "f.py").write_text("print(0)\n")
+    assert _fixture_git_reports_dirty(plain) is False
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for a in (("init", "-q"), ("config", "user.email", "t@t.t"), ("config", "user.name", "t")):
+        subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+    (repo / "m.py").write_text("print(0)\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "i"], capture_output=True, text=True)
+    assert _fixture_git_reports_dirty(repo) is False        # committed and clean -> nothing to report
+    (repo / "m.py").write_text("print(1)\n")
+    assert _fixture_git_reports_dirty(repo) is True          # now genuinely dirty
+
+
 def test_dirty_inputs_hashes_the_diff_of_a_dirty_repo(tmp_path):
     # P0-5: a git-repo source with uncommitted edits contributes both the porcelain file LIST and a
     # sha256 DIGEST of `git diff HEAD` — the fingerprint of the change without the leak-prone patch text.
@@ -181,6 +287,8 @@ def test_dirty_inputs_hashes_the_diff_of_a_dirty_repo(tmp_path):
     assert eng._dirty_inputs({str(repo / "model.py"): {}}) == []   # committed & clean -> nothing
 
     (repo / "model.py").write_text("print(1)\n")                   # now dirty vs HEAD
+    if not _fixture_git_reports_dirty(repo):
+        pytest.skip("git could not report the fixture as dirty here — see _fixture_git_reports_dirty")
     out = eng._dirty_inputs({str(repo / "model.py"): {}})
     assert len(out) == 1 and out[0]["source"] == str(repo / "model.py")
     assert any("model.py" in ln for ln in out[0]["dirty"])
@@ -211,6 +319,8 @@ def test_dirty_inputs_untracked_heavy_file_costs_only_its_name(tmp_path):
     _git("add", "-A"); _git("commit", "-q", "-m", "init")
     (repo / "big.bin").write_bytes(b"A" * (2 * 1024 * 1024))        # untracked heavy artifact
 
+    if not _fixture_git_reports_dirty(repo):
+        pytest.skip("git could not report the fixture as dirty here — see _fixture_git_reports_dirty")
     out = _mk_engine(tmp_path / "run")._dirty_inputs({str(repo / "keep.py"): {}})
     assert len(out) == 1
     assert any("big.bin" in ln for ln in out[0]["dirty"])          # listed by name...

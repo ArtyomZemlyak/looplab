@@ -11,6 +11,7 @@
 // The tests below drive the PROPERTY through the shipped model functions, not the digest's presence.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   COMPARABILITY_DIFFERENT, COMPARABILITY_SAME, COMPARABILITY_UNKNOWN, comparabilityConflict,
@@ -134,4 +135,38 @@ test('a run whose own nodes were measured differently is detectable from the nod
   assert.equal(nodesSplitByComparability([node(1, key('a')), node(2, key('a'))]), false)
   assert.equal(nodesSplitByComparability([node(1, null), node(2, null)]), false)
   assert.equal(nodesSplitByComparability([node(1, key('a')), node(2, null)]), false)
+})
+
+test('the browser half of the rule matches the engine, case for case', () => {
+  // THE SHARED TRUTH TABLE. This module's comment says it mirrors
+  // `engine/comparability.py::comparability_status` "so the browser and the engine can never
+  // disagree", and until this fixture nothing checked it: the engine gained the `substrate`
+  // discriminator and this half did not follow for three days, so `metricComparable` stayed true —
+  // and the run-list metric sort, RegistryPanel, ParetoPanel and crossRunRank went on ordering — for
+  // exactly the pairs the engine had begun refusing. `tests/test_comparability_substrate.py` runs
+  // the same file through the Python side, so a rule added to one and not the other goes red.
+  const { cases } = JSON.parse(readFileSync(
+    new URL('../../tests/fixtures/comparability_status_cases.json', import.meta.url), 'utf8'))
+  assert.ok(cases.length >= 8, 'the fixture read too small to be the real table')
+  for (const { name, a, b, status } of cases) {
+    assert.equal(
+      comparabilityStatus({ best_metric_comparability: a }, { best_metric_comparability: b }),
+      status, name)
+  }
+
+  // AND THE SECOND PAIR-RULE, over the SAME table. `comparabilityConflict` /
+  // `nodesSplitByComparability` run their own scan (`anyKeyConflict`) rather than calling the
+  // tri-state, so before they shared `statusOfRecords` a discriminator could be added to
+  // `comparabilityStatus`, go green on both suites against this fixture, and never reach the
+  // run-list conflict banner, RegistryPanel, crossRunRank or the per-node Pareto split — which is
+  // the three-day engine/browser divergence this fixture exists to end, one function over.
+  // A conflict is exactly a PROVEN difference; `unknown` fails open everywhere in this module.
+  for (const { name, a, b, status } of cases) {
+    assert.equal(
+      comparabilityConflict([
+        { id: 'r1', task_id: 't', best_metric_comparability: a },
+        { id: 'r2', task_id: 't', best_metric_comparability: b }]),
+      status === COMPARABILITY_DIFFERENT,
+      `${name} (conflict scan must agree with the tri-state)`)
+  }
 })

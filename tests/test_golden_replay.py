@@ -4,9 +4,21 @@
 `--no-genesis --kind quadratic`); `golden_run_state.json` is the byte-stable `fold(...)` output
 captured as the current baseline. Any change to `fold` (or to a model default a folded field
 depends on) that alters the produced `RunState` for an existing log — the exact regression class
-the dispatch-table refactor must not introduce — turns this red. Additive event/model changes
-with reader-side defaults keep it green by construction (the golden log carries only the fields
-its writer wrote).
+the dispatch-table refactor must not introduce — turns this red.
+
+AN ADDITIVE **EVENT** FIELD KEEPS IT GREEN; AN ADDITIVE **MODEL** FIELD DOES NOT, and this
+paragraph said both did until 2026-08-27. The golden LOG carries only what its writer wrote, so a
+new event key is simply absent from it — but the comparison is against `model_dump()`, which emits
+every field the model declares, so a new `RunState`/`Node`/`Idea`/memo field appears in `got` at its
+default and in the checked-in snapshot not at all. That is a real difference and this test is right
+to report it; what it is NOT is a fold semantics change, and believing the sentence above is why the
+snapshot went stale rather than being regenerated in the change that added the field.
+
+So READ THE DIFF BEFORE REGENERATING. Additions with no value changes (`got` has a key the snapshot
+lacks, and every shared leaf is equal) are the additive case and the snapshot is simply behind. A
+changed VALUE on a shared key is the regression this file exists to catch, and regenerating over one
+would erase the only thing that noticed. `git diff --stat` on the snapshot is the cheap check: pure
+insertions is the first case, any deletion is the second.
 
 If this fails INTENTIONALLY (a deliberate fold semantics change), regenerate the snapshot in
 the same change and say why in the commit:

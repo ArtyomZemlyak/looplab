@@ -95,6 +95,7 @@
   "cards_dropped": [],
   "cards_enriched": [],
   "cards_merged": [],
+  "cards_reopened": [],
   "champion": null,
   "comments_revision": -1,
   "concept_consolidation": {},
@@ -321,11 +322,14 @@
         "eval_timeout": null,
         "footprint": null,
         "hypothesis": null,
+        "open_questions": [],
         "operator": "draft",
         "params": {
           "x": 6.8884,
           "y": 5.1591
         },
+        "parent_card_id": null,
+        "question_concepts": [],
         "rationale": "random seed point",
         "space": {},
         "theme": null
@@ -379,11 +383,14 @@
         "eval_timeout": null,
         "footprint": null,
         "hypothesis": null,
+        "open_questions": [],
         "operator": "draft",
         "params": {
           "x": -1.5886,
           "y": -4.8217
         },
+        "parent_card_id": null,
+        "question_concepts": [],
         "rationale": "random seed point",
         "space": {},
         "theme": null
@@ -437,11 +444,14 @@
         "eval_timeout": null,
         "footprint": null,
         "hypothesis": null,
+        "open_questions": [],
         "operator": "draft",
         "params": {
           "x": 0.2255,
           "y": -1.9013
         },
+        "parent_card_id": null,
+        "question_concepts": [],
         "rationale": "random seed point",
         "space": {},
         "theme": null
@@ -498,11 +508,14 @@
         "eval_timeout": null,
         "footprint": null,
         "hypothesis": null,
+        "open_questions": [],
         "operator": "improve",
         "params": {
           "x": 0.4047,
           "y": -2.7324
         },
+        "parent_card_id": null,
+        "question_concepts": [],
         "rationale": "perturb best node 2 (metric=8.51019194)",
         "space": {},
         "theme": null
@@ -561,11 +574,14 @@
         "eval_timeout": null,
         "footprint": null,
         "hypothesis": null,
+        "open_questions": [],
         "operator": "improve",
         "params": {
           "x": -1.0835,
           "y": -1.7074
         },
+        "parent_card_id": null,
+        "question_concepts": [],
         "rationale": "perturb best node 2 (metric=8.51019194)",
         "space": {},
         "theme": null
@@ -621,11 +637,14 @@
         "eval_timeout": null,
         "footprint": null,
         "hypothesis": null,
+        "open_questions": [],
         "operator": "improve",
         "params": {
           "x": 1.2187,
           "y": -2.5483
         },
+        "parent_card_id": null,
+        "question_concepts": [],
         "rationale": "perturb best node 2 (metric=8.51019194)",
         "space": {},
         "theme": null
@@ -684,11 +703,14 @@
         "eval_timeout": null,
         "footprint": null,
         "hypothesis": null,
+        "open_questions": [],
         "operator": "merge",
         "params": {
           "x": 0.7221,
           "y": -2.2248
         },
+        "parent_card_id": null,
+        "question_concepts": [],
         "rationale": "mean-merge of nodes 5,2",
         "space": {},
         "theme": null
@@ -748,11 +770,14 @@
         "eval_timeout": null,
         "footprint": null,
         "hypothesis": null,
+        "open_questions": [],
         "operator": "improve",
         "params": {
           "x": 0.885,
           "y": -0.9026
         },
+        "parent_card_id": null,
+        "question_concepts": [],
         "rationale": "perturb best node 5 (metric=5.57026258)",
         "space": {},
         "theme": null
@@ -802,13 +827,17 @@
   "proposed_spec": null,
   "proxy_scores": {},
   "proxy_skipped": [],
+  "repair_ledger": [],
   "report": null,
   "research": [
     {
       "at_node": 2,
       "claims": [],
       "findings": [],
+      "next_experiments": [],
+      "open_questions": [],
       "proposed_ideas": [],
+      "question_concepts": [],
       "reasoning": "",
       "recommended_directions": [],
       "sources": [],
@@ -819,7 +848,10 @@
       "at_node": 5,
       "claims": [],
       "findings": [],
+      "next_experiments": [],
+      "open_questions": [],
       "proposed_ideas": [],
+      "question_concepts": [],
       "reasoning": "",
       "recommended_directions": [],
       "sources": [],
@@ -830,7 +862,10 @@
       "at_node": 8,
       "claims": [],
       "findings": [],
+      "next_experiments": [],
+      "open_questions": [],
       "proposed_ideas": [],
+      "question_concepts": [],
       "reasoning": "",
       "recommended_directions": [],
       "sources": [],

@@ -7,6 +7,60 @@ field to a `TaskAdapter` (`looplab/adapters/tasks.py`). Pass it to `looplab run`
 looplab run path/to/task.json
 ```
 
+## Writing a `goal`: what belongs in it, and what is a leak
+
+A `goal` states the OBJECTIVE and the GROUND TRUTH the agents cannot reach with their own tools.
+Everything else they must find, because a run whose goal already contains the findings is not testing
+the framework — it is replaying an answer.
+
+**Measured on `e5small-v9-task.json`, 2026-08-28.** The goal had grown to 6,409 characters over nine
+revisions. Classified line by line: **6% was the task, 70% was findings the shipped tools would have
+produced, 24% duplicated machinery that already injects the same fact.** One line had rotted into a
+falsehood — it read "this run has already measured … node 0 scored 0.758851; node 1 scored 0.764853",
+and those two numbers belong to `e5small-dr-unified-v4`, four runs earlier. The file had been copied
+forward carrying the sentence. The run reading it had a node 0 of **0.774146** — better than both
+numbers it was being told were its own.
+
+That is the failure mode a long goal always reaches: **a memo is rewritten every cycle and a goal is
+frozen**, so a goal doing the memo's job is wrong the moment the run moves.
+
+### The rule
+
+Put a fact in the goal only if it survives all four questions:
+
+1. **Can an agent read it?** Repo contents, config values, model shape, which argument a trainer
+   passes — the Developer has `read_file` / `grep` over the repo and the model directory. If the goal
+   already says "read the repo", it may not then quote the repo.
+2. **Can an agent measure it?** "Does batch 8192 fit", "how many MiB per example", "does this import"
+   — that is `dev_probe` (F2), which exists precisely so the Developer answers this against the real
+   environment instead of guessing. A measured ceiling in a goal is a spent experiment.
+3. **Can an agent look it up in the record?** Prior-run metrics, what a champion actually ran, whether
+   a recipe helped — `list_sibling_runs`, cross-run priors, `diff_nodes`, and the rendered
+   `applied_params`. Never quote another run's number; name the tool.
+4. **Does the engine already inject it?** The GPU count and per-experiment budget are stamped into the
+   prompt from the width the run launched with; the metric pattern lives in `eval.metric`; a past
+   mistake that cost hours belongs in LESSONS, which reach the repair prompt whole. A goal repeating
+   any of these is a second copy that can disagree with the first.
+
+What is left after those four is short: the objective, where the repo and the artefacts are, the data
+selector, and any **scale or comparability caveat an agent cannot derive** — the one class of claim
+worth its characters, because the tools will happily compare two numbers that were never on one
+scale.
+
+### Keep the pins honest
+
+Every `CLAIM[…] decided:` pin is checked by `python -m looplab.core.claimpin <task.json>` before a
+launch. When you delete goal text you delete its pins with it, and `claimpin` will say
+**"NO PINS AT ALL — nothing was checked here"** rather than pass silently. Do not leave it there: pin
+whatever world-facts the trimmed goal still asserts — normally the paths — and choose a predicate
+whose literal is not itself a finding.
+
+### The dense-retrieval reference goal
+
+`docs/reference/goal-dense-retrieval.md` holds the canonical version. **Change it only when the task
+itself changes**, never to hand a run a result: every addition is a hypothesis the run no longer gets
+to form.
+
 ## Common fields
 
 Every task shares these:
@@ -427,7 +481,8 @@ which every ranking surface renders as *these are observations, not a ranking* �
 That is the state every task shipped before 2026-08-20 is in.
 
 **The comparability key, and the inversion that is the whole point.** Two numbers may be ordered only
-when their keys agree at an authority that may certify. There are three, strongest first:
+when their keys agree at an authority that may certify, **and no discriminator refuses them outright**
+(see the substrate below). There are three authorities, strongest first:
 
 | authority | material | equality proves | may certify? |
 |---|---|---|---|
@@ -485,6 +540,26 @@ parsed the candidate's config would be deciding comparability from bytes the can
 reach the key by exactly two sanctioned routes: a **file** the operator names in `eval.inputs` (its
 content decides), or a **facet** the operator writes into `comparison_contract` (their word decides, and
 the record says `declared`). Anything else is `unknown`, on purpose, and `unknown` is visible.
+
+**The substrate: a fourth field that is not a fourth authority.** Since 2026-08-24 the record also
+carries `substrate` — a digest of the editable source tree the number was produced on, HEAD *and* the
+uncommitted work (`engine/workspace.py::substrate_fingerprint`). It is a **discriminator**, and the
+distinction is the whole of its design:
+
+* It is checked **first** and can only ever **refuse**. Two numbers produced from different source
+  trees are not on one scale whatever their input keys say, so a substrate mismatch outranks even a
+  `measured` agreement.
+* It **never certifies**. Falling through a matching substrate changes nothing below it, because equal
+  code over different data is not the same evaluation.
+* Both sides must carry one. A missing substrate is silence, never "the same tree", which is what keeps
+  every log written before it shipped reading exactly as it did.
+
+The gesture it exists to catch is an operator promoting a fix into the editable repo mid-run — which
+`looplab repair-candidates` explicitly urges them to do, and which the ordinary way of doing (editing
+the working tree) leaves invisible to a HEAD-only digest. `ui/src/runIndex.js::comparabilityStatus`
+mirrors the same rule, and both halves are driven from one shared truth table
+(`tests/fixtures/comparability_status_cases.json`) so the browser and the engine cannot disagree about
+whether two numbers may be ordered.
 
 **Every stage records what it RAN ON and what it MADE — the stage identity.** Since 2026-08-17 the
 engine derives two facts per stage and writes them onto the `stage_finished` row. Neither gates
@@ -742,6 +817,45 @@ under is not in a cleaner state than one that can.
 repo task takes the corpus from **7 conflicted records to 0** (39 of the 42 records bind at
 `resolved`; 2 refuse `ambiguous`, 1 `missing`, all three falling back to `committed` with the reason
 recorded). The defaults argument is secondary to that one.
+
+**The shipped example declares one, so the tier is exercised without a GPU.** `examples/repo_task.json`
+carries `"applied_config_glob": "resolved_config.json"`, `examples/repo_example/ttrain.py` writes that
+file, and `tests/test_applied_config_glob_example.py` drives the pair end to end and asserts the record
+reaches `authority: "resolved"`. Until 2026-08-28 no task on this box declared the key at all, so this
+tier — the only reader that can see a value the eval process settled for itself — had never bound on
+anything.
+
+**Declare the glob at a config that can ANSWER a declaration, which usually means a nested one.** A
+declared coordinate needs at least two dotted parts (`declared_numeric_params`: a bare `lr` is a word,
+not a path), so a config whose keys are flat can never satisfy one and the record will bind nothing
+however correct your glob is. The example is deliberately built this way round: `config.json` is flat
+because that is the human edit surface, the trainer resolves it into `train.x`, and the committed
+carrier therefore *cannot* answer a legal declaration while the resolved one can. That asymmetry is
+the whole reason the tier exists — and it is what a real trainer does anyway, since the shape an
+operator edits is rarely the shape a framework settles.
+
+**Name a path, not a wildcard directory.** Election requires a UNIQUE match: `*.json` in the example's
+workdir matches three files and is refused `ambiguous`, falling back to `committed`. That is the same
+ceiling on guessing the resolver applies everywhere, and why
+`docs/reference/goal-dense-retrieval.md` names an exact path.
+
+**ANCHOR THE PATTERN; a recursive `**` is what makes it ambiguous, not the wildcard itself.**
+Measured 2026-08-28 by running the shipped `_resolved_carrier` over all **56 real node workdirs** on
+this box:
+
+| declared pattern | bound | ambiguous | missing |
+|---|---|---|---|
+| `vectorsearch/experiments/*/final/config.yaml` (anchored) | **52** | 3 | 1 |
+| `**/final/config.yaml` (recursive) | 17 | 39 | 0 |
+
+Same artifact, same corpus, a three-fold difference in how often the tier can answer. A single `*`
+does not cross a `/`, so the anchored form selects one experiment directory and skips the
+`…/<name>/tests/final/config.yaml` sibling that a real node also carries; `**` reaches both and every
+checkpoint directory besides, which is why 39 of 56 workdirs refuse it. The corpus figure quoted
+elsewhere — "28 of 52 nodes hold more than one `**/final/config.yaml` and on 8 the matches disagree"
+— is about the RECURSIVE shape and must not be read as a reason to leave the key undeclared.
+
+`runs/e5small-dr-unified-v10` is the first task to declare one, and it declares the anchored form.
 
 **It surfaces and never refuses.** A node that cut its epochs to fit a real time budget did the right
 thing — the champion's own config says so in a comment beside the line — and must still run, still

@@ -560,9 +560,27 @@ def _make_run(
             )
             store.append("card_build_requested", {"card_id": card_id, "generation": 0})
             if outcome == "stale" and not first_evaluated and first_metric is not None:
-                # Model the real pre-commit race: this Card was elected while node 0 was still in
-                # flight, then that evaluation moved the score/parent authority before the producer
-                # could commit it.
+                # Model a real pre-commit race. THIS USED TO BE A DIFFERENT RACE and the swap is the
+                # 2026-08-24 freshness change: the old shape evaluated node 0 and relied on the board
+                # merely FILLING to stale this Card, which was the empty-authority clause that killed
+                # nine of the ten nodes ever terminalized `superseded` across `runs/`. With that
+                # clause gone an action formed with no incumbent anchors nothing, so the board
+                # filling no longer stales anything — the engine would RE-ELECT this Card and build
+                # it, and this log would stop being something the canonical policy could produce.
+                #
+                # The race modelled instead is one of the many `speculation.py::_claim_requested_
+                # card_build` still returns "stale" for, and the one that also keeps the ledger
+                # arithmetic honest: the Card is DROPPED while its speculative build is in flight, so
+                # `card_action(card)` is gone by the time the producer commits. A retired Card also
+                # releases its reservation, which is what lets the canonical Greedy policy authorize
+                # the next staging — the old shape got that release from the staleness itself.
+                # `card_auto_dropped` and not `card_dropped`: this is the ENGINE giving up on a Card
+                # it reserved, not an operator removing one, and only the engine's own retirement is
+                # in the clean calibration vocabulary.
+                store.append("card_auto_dropped", {
+                    "id": card_id, "reason": "producer abandoned the reservation",
+                    "dropped_by": "engine",
+                })
                 store.append("node_evaluated", {
                     "node_id": 0,
                     "generation": 0,
