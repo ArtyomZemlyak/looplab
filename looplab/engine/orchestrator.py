@@ -5632,6 +5632,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # the shared attr only when a path never refreshed it (attr genuinely absent).
                 cross_run_receipt=(_rcpt if (_rcpt := getattr(researcher, "_cross_run_advisory_receipt", None))
                                    is not None else getattr(self, "_cross_run_advisory_receipt", {})),
+                # Every engine-created lifecycle promises the same generation-scoped admission
+                # receipt. Besides crash-safe speculative accounting, this is what lets the public
+                # activity projection prove "waiting for a slot" versus "evaluating".
+                eval_start_boundary=True,
                 **({"parent_generations": parent_generations} if parent_generations else {}),
                 **({"footprint_finalized": True} if footprint_finalized else {}),
                 # A legacy generation-less abort may intentionally reserve a not-yet-created slot.
@@ -5913,6 +5917,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 files=getattr(self.developer, "last_files", {}) or {},
                 deleted=getattr(self.developer, "last_deleted", []) or [],
                 generation=generation,
+                eval_start_boundary=True,
                 **({"parent_generations": parent_generations} if parent_generations else {}),
                 **({"footprint_finalized": True} if footprint_finalized else {}))
             landed = fold(self.store.read_all()).nodes.get(node.id)
@@ -6117,6 +6122,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                            or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
                     deleted=req.get("deleted") or [],
                     source="manual",
+                    eval_start_boundary=True,
                     **({"parent_generations": parent_generations} if parent_generations else {}),
                     **({"footprint_finalized": True} if footprint_finalized else {}),
                     # Cross-run provenance: a DICT when this inject seeded from a sibling run's

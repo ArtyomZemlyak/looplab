@@ -1237,13 +1237,11 @@ class SpeculationMixin:
                        if result.footprint_finalized else {}),
                     speculative=True,
                     card_build_generation=result.generation,
-                    # This lifecycle is the ONE kind whose node-budget slot can later be refunded, so
-                    # it is the one kind that must be able to PROVE it never ran across a crash.
-                    # Stamping the promise here (rather than run-wide) keeps every non-speculative
-                    # run's `node_created` bytes untouched while making the refund's evidence
-                    # per-node: the admission below appends `node_eval_started` before any sandbox
-                    # work, and `is_unevaluated_speculative_discard` refuses to refund a node that
-                    # carries no promise at all. See `events/types.py::EV_NODE_EVAL_STARTED`.
+                    # Every new lifecycle carries this public activity boundary. This speculative
+                    # subset additionally relies on it for the stricter budget-refund proof: the
+                    # admission below appends `node_eval_started` before any sandbox work, and
+                    # `is_unevaluated_speculative_discard` refuses a refund without both receipts.
+                    # See `events/types.py::EV_NODE_EVAL_STARTED`.
                     eval_start_boundary=True,
                     expected_last_seq=tail,
                 )

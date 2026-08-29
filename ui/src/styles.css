@@ -321,6 +321,21 @@ button { font: inherit; }
 .badge.reason { color: var(--fail); border-color: #7a2b2b; }
 .badge.sweep { color: var(--accent); border-color: var(--accent-dim); }
 
+/* One vocabulary for every node-status surface. The chip carries the exact execution phase in text;
+   colour is secondary, so queued vs evaluating remains clear without relying on animation or hue. */
+.activity-chip {
+  display: inline-flex; align-items: center; max-width: 100%; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; font-size: 10px; font-weight: 700; line-height: 16px;
+  padding: 0 5px; border: 1px solid var(--line-2); border-radius: 999px; color: var(--fg-dim);
+  background: color-mix(in srgb, var(--bg-3) 82%, transparent);
+}
+.activity-chip.building { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--line-2)); }
+.activity-chip.evaluating { color: var(--working); border-color: color-mix(in srgb, var(--working) 58%, var(--line-2)); }
+.activity-chip.queued { color: var(--pending); border-color: color-mix(in srgb, var(--pending) 58%, var(--line-2)); }
+.activity-chip.unknown, .activity-chip.historical { color: var(--fg-mut); border-style: dashed; }
+.activity-chip.interrupted { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 58%, var(--line-2)); }
+.activity-chip.paused { color: var(--working); border-style: dashed; }
+
 /* group membership (round-8 re-map): now a coloured LEFT EDGE bar — the body is owned by status. The
    cluster band + pill carry the group's name; this is just the per-node membership tick, so status
    (body) + group (edge) + best/working/selected (halo) never collide. */

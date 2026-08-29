@@ -2,8 +2,8 @@ import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, us
 import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel,
   useNodesInitialized, useReactFlow, useViewport } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND,
-  isSweep, sweepInfo, chipFontSize, storageGet, storageSet } from './util.js'
+import { fmt, layoutWithGroups, nodeClass, delta, workingNodeIds, operatorMeta, OPERATOR_LEGEND,
+  isSweep, sweepInfo, chipFontSize, storageGet, storageSet, nodeActivityView, NODE_ACTIVITY } from './util.js'
 import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
 import { forkChip } from './forkProvenance.js'
@@ -208,7 +208,7 @@ export function dagObjectiveSourceLabel(node) {
 }
 
 function ExpNode({ data }) {
-  const { node, state, workId, selectedId, onSelect, themeFilter, groupTint,
+  const { node, state, workIds, selectedId, onSelect, themeFilter, groupTint,
     onOpenActions, actionsOpen } = data
   const lod = useContext(LodContext)   // overview zoom → render the compact glyph instead of the full card
   const m = node.confirmed_mean ?? node.metric
@@ -262,7 +262,10 @@ function ExpNode({ data }) {
       title={runConstant.has(c) ? `${c} — carried by every experiment in this run` : c}>{c.split('/').pop()}</span>)}
   </>
   const confirmed = node.confirmed_mean != null
-  const cardCls = nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')
+  const activity = nodeActivityView(node, state)
+  const activityVisible = [NODE_ACTIVITY.BUILDING, NODE_ACTIVITY.EVALUATING,
+    NODE_ACTIVITY.QUEUED, NODE_ACTIVITY.PENDING].includes(activity.status)
+  const cardCls = nodeClass(node, state, workIds) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')
   // FX "heat" (0..1) for the reactor-core glow — only read under [data-fx]; harmless when FX is off.
   // Champion brightest, then an improving node, then plain evaluated; failed/pending stay dim.
   const coreI = node.id === state.best_node_id ? 1 : (d && d.improved) ? 0.85
@@ -282,15 +285,16 @@ function ExpNode({ data }) {
   // justification. `forkChip` is null for every node nobody branched, so an ordinary card is unchanged.
   const branch = forkChip(node)
   const cardTitle = op.label + (node.idea?.rationale ? ' — ' + stripMd(node.idea.rationale) : '')
+    + (activityVisible ? ` · ${activity.label}` : '')
     + (conceptTruth ? ` · ${conceptTruth}` : '')
     + (branch ? ` · ${branch.title}` : '')
   const selectionLabel = [
-    `Experiment #${node.id}`, op.label, node.status || 'unknown status',
+    `Experiment #${node.id}`, op.label, activity.label,
     m == null ? 'metric unavailable' : `metric ${fmt(m)}`,
     m == null ? null : dagObjectiveSourceLabel(node),
     dagFeasibilityLabel(node.feasible),
     node.id === state.best_node_id ? 'current champion' : null,
-    node.id === workId ? 'currently working' : null,
+    workIds.has(Number(node.id)) ? 'currently working' : null,
     theme ? `primary concept axis ${theme}` : null,
     conceptTruth || null,
     node.origin?.run_id ? `seeded from run ${node.origin.run_id}, experiment ${node.origin.node_id}` : null,
@@ -355,7 +359,10 @@ function ExpNode({ data }) {
       </div>
       {/* A fixed-height graph node gets exactly one context row. Failure/constraint truth wins over
           sweep detail, then merge/change copy. Provenance stays independently reachable in the header. */}
-      {node.status === 'failed'
+      {activityVisible
+        ? <div className="sub"><span className={`activity-chip ${activity.tone}`}
+          title={activity.label}>{activity.shortLabel}</span></div>
+        : node.status === 'failed'
         ? <div className="sub"><span className="badge reason">{node.error_reason || 'failed'}</span></div>
         : node.feasible === false
           ? <div className="sub"><span className="badge reason">infeasible</span></div>
@@ -452,7 +459,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
                              themeFilter = null, highlightIds = null, onNodeAction, mergeArm = null,
                              nodeMenuActions = null, compact = false }) {
-  const workId = workingId(state)
+  const workIds = useMemo(() => workingNodeIds(state), [state])
   const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
   const [groupActionKey, setGroupActionKey] = useState('')
   useEffect(() => setGroupActionKey(''), [groupMode])
@@ -652,7 +659,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         || (highlightIds && !highlightIds.has(n.id))
       rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1, width: NODE_W, height: NODE_H,
         focusable: false,
-        data: { node: n, state, workId, selectedId, onSelect, themeFilter, dim: dimmed,
+        data: { node: n, state, workIds, selectedId, onSelect, themeFilter, dim: dimmed,
                 groupTint: inLane ? tintOf(gkey) : null, onOpenActions: onNodeAction ? openActions : null,
                 // actionsOpen is injected by the cheap `nodes` memo below, keyed on menu?.nodeId — so
                 // opening/moving the action menu does NOT rebuild this whole (layout-heavy) memo.
@@ -682,7 +689,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       const offConcept = highlightIds && (!highlightIds.has(e.srcId) || !highlightIds.has(e.dstId))
       const faded = (focusSet && !onLineage && !onChamp) || offConcept
       if (faded) cls.push('faded')   // everything off-path recedes
-      const charging = e.dstId === workId && !hidden.has(e.dstId)   // this edge feeds the working node
+      const charging = workIds.has(Number(e.dstId)) && !hidden.has(e.dstId) // this edge feeds live work
       const flow = onLineage ? 'lineage' : onChamp ? 'champion' : null
       if (charging && !onLineage && !onChamp) cls.push('charge')   // plasma feed into the working node
       return {
@@ -697,7 +704,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       }
     })
     return { nodes: rfNodes, edges: rfEdges, groupKeys: [...groups.keys()] }
-  }, [projection, geometry, state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
+  }, [projection, geometry, state, selectedId, workIds, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
       themeFilter, highlightIds, fx, onNodeAction, openActions])
   const { edges, groupKeys } = base
   const activeGroupActionKey = groupKeys.includes(groupActionKey) ? groupActionKey : ''
@@ -839,9 +846,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       <Panel position="bottom-right" className="map-toggles"
         style={{ marginBottom: showMap && !compact ? 152 : 0 }}>
         <button aria-pressed={showLegend}
-                aria-label={showLegend ? 'Hide operator legend' : 'Show operator legend'}
-                className={'btn sm ghost' + (showLegend ? ' primary' : '')} title="operator legend"
-                onClick={() => setShowLegend(v => !v)}>ⓘ ops</button>
+                aria-label={showLegend ? 'Hide graph legend' : 'Show graph legend'}
+                className={'btn sm ghost' + (showLegend ? ' primary' : '')} title="node status and operator legend"
+                onClick={() => setShowLegend(v => !v)}>ⓘ status</button>
         <button aria-pressed={!compact && showMap} disabled={compact}
                 aria-label={compact ? 'Overview map unavailable on compact screens'
                   : showMap ? 'Hide overview map' : 'Show overview map'}
@@ -852,6 +859,11 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
           map{!compact && showMap ? ' ✕' : ''}</button>
       </Panel>
       {showLegend && <Panel position="top-left" className="op-legend">
+        <div className="legend-h">Node status</div>
+        <div className="legend-row"><span className="activity-chip building">building</span><span>code is being built</span></div>
+        <div className="legend-row"><span className="activity-chip evaluating">training / eval</span><span>evaluation owns the node</span></div>
+        <div className="legend-row"><span className="activity-chip queued">waiting</span><span>waiting for an evaluation slot</span></div>
+        <div className="legend-row"><span className="activity-chip unknown">unknown</span><span>legacy start evidence unavailable</span></div>
         <div className="legend-h">Operators</div>
         {OPERATOR_LEGEND.map(o => { const m = operatorMeta(o); return (
           <div className="legend-row" key={o}>

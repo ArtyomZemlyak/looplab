@@ -311,6 +311,31 @@ def announce_wrap_up(kind: str) -> bool:
     return True
 
 
+def _eval_activity_needs_owner_boundary(state) -> bool:
+    """Whether a pending node still carries the previous process's live-admission receipt."""
+
+    return any(
+        getattr(node.status, "value", node.status) == "pending"
+        and getattr(node, "eval_activity_started", False) is True
+        for node in state.nodes.values()
+    )
+
+
+def _record_engine_owner_boundary(eng) -> bool:
+    """Acknowledge resume intent and retire stale live-eval ownership in one exact lock owner."""
+
+    current = fold(eng.store.read_all())
+    resume_pending = current.resume_pending()
+    activity_recovery = _eval_activity_needs_owner_boundary(current)
+    if not (resume_pending or activity_recovery):
+        return False
+    eng.store.append(EV_RESUME_SERVED, {
+        "engine_owner_boundary": True,
+        **({"activity_recovery": True} if activity_recovery and not resume_pending else {}),
+    })
+    return True
+
+
 def wrap_up_degradation_note(eng) -> str | None:
     """The closing half of a wrap-up that ran without a model, or None when it had one.
 
@@ -891,6 +916,9 @@ def run(
             # Lift the pause and continue, mirroring `resume` (whose paused branch appends EV_RESUME).
             typer.echo(f"run dir {out} is stopped — resuming to continue with the current task/settings.")
             eng.store.append(EV_RESUME, {})
+        # ``run`` can recover an incomplete process with no resume intent; the helper still records
+        # this exact lock-owner change when an old eval admission needs retiring.
+        _record_engine_owner_boundary(eng)
         state = _run_engine_guarded(eng)
     _print_result(state)
     _note = wrap_up_degradation_note(eng)
@@ -1019,10 +1047,11 @@ def resume(
                         "resuming to continue with the current settings")
                     eng.store.append(EV_RESUME, {})
                 # P1-1: we hold the singleton lock and are about to drive the loop, so FULFILL any
-                # outstanding durable resume intent. Seq-gated in the fold, so one serve satisfies
-                # all piled-up requests; a no-op for a direct CLI resume (no intent recorded).
-                if fold(eng.store.read_all()).resume_pending():
-                    eng.store.append(EV_RESUME_SERVED, {})
+                # outstanding durable resume intent. A direct CLI recovery has no such intent, but
+                # if a pending node retains the former process's live eval receipt it needs the same
+                # exact new-owner boundary. Seq-gated in the fold, so one serve satisfies all piled
+                # requests and clears every stale live admission together.
+                _record_engine_owner_boundary(eng)
                 state = _run_engine_guarded(eng)
                 break
         if not wait_for_handoff:
@@ -1135,11 +1164,9 @@ def finalize(
         _preflight_speculation_authority(eng, current_events)
         current = fold(current_events)
 
-        # The server records a durable wake intent before spawning this process. Once singleton
-        # ownership is ours, acknowledge it even when the run is already terminal; otherwise the
-        # resume reconciler would keep treating the successfully handled request as a zombie.
-        if current.resume_pending():
-            eng.store.append(EV_RESUME_SERVED, {})
+        # Once singleton ownership is ours, acknowledge a durable wake even on a terminal run and
+        # retire any mid-eval admission left by the former process.
+        if _record_engine_owner_boundary(eng):
             current = fold(eng.store.read_all())
 
         # Crash-boundary repair: an accepted run_finished or any richer incomplete terminal scope

@@ -244,7 +244,7 @@ function agentStatus(live, log) {
   if (phase === 'spec_approval') return 'Waiting for eval-spec approval…'
   // WRITING vs RUNNING are distinct and were conflated before (both said "Running experiment"):
   //   • `building` is set from node_building until node_created folds → the Developer is WRITING code;
-  //   • a node with status 'pending' → its code is written and the sandbox is TRAINING it.
+  //   • `node.activity` splits a pending lifecycle into EVALUATING, QUEUED, or legacy UNKNOWN.
   // Parallel builds (parallel_build>1): several Developers write at once. Show the count — mirroring the
   // parallel-eval strip below — instead of naming only the last-appended build. Derive the label from the
   // `buildings` marker LIST (node_id->marker object) so the single-build label is right even after the
@@ -789,10 +789,6 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   const atLiveView = viewSeq == null || viewSeq >= liveSeq
   const visiblyLive = atLiveView && timeline.followingTail && timeline.windowAtTail
 
-  // The live frontier: the highest-id node still pending while the run runs — its proposal card stays
-  // expanded ("thinking") until it resolves. null on a finished/replayed run — AND on a STALLED/zombie
-  // run (engine_running===false): a run whose engine died mid-eval leaves a node stuck 'pending', and
-  // without this guard its node_created row would auto-expand the retained span projection forever.
   // A plain object {nodeId: generation} of EVERY node building right now (parallel_build>1 builds
   // several at once), so each concurrent build's feed row live-polls its own trace — not just the
   // singular

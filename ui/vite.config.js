@@ -143,7 +143,7 @@ export default defineConfig({
               // These pure API/live/text/timeline helpers are jointly present on every run workspace.
               // One stream gives repeated node/run/evidence vocabulary one gzip dictionary while
               // keeping charts, graph libraries, settings and owner controls independently lazy.
-              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
+              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|nodeActivity|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
               includeDependenciesRecursively: false,
             },
             {

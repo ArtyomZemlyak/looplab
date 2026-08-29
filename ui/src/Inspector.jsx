@@ -2,7 +2,7 @@ import React, { useEffect, useId, useMemo, useState, useRef } from 'react'
 import { conditionalGet, costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CONTROL,
   commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runApiPath, runNodeApiPath, submitCommand, traceDeadlineGet, traceGenerationMatches,
-  traceReadQuery } from './util.js'
+  traceReadQuery, nodeActivityStatus, nodeActivityView, NODE_ACTIVITY } from './util.js'
 import { useNodeSpanWindow, usePoll, useScopedResource, useTraceRetry, useTraceScroll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
@@ -278,30 +278,22 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     })
     return () => cancelAnimationFrame(frame)
   }, [detailScope, detailStatus, detailPending])
-  // Live-refresh the node detail (it carries n.trace spans + the agent report) while the run is ACTIVELY
-  // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Two windows, both
-  // engine-alive & not-finished (stops at terminal / engine death):
+  // Live-refresh the node detail (it carries n.trace spans + the agent report) only while the public,
+  // generation-scoped activity receipt says this exact node owns build/evaluation work. Two windows,
+  // both engine-alive & not-finished (stops at terminal / engine death):
   //   • building  — an LLM is authoring the node (propose + implement, or a repair).
-  //   • pending   — the sandbox is EVALUATING it (data_prep → train → score). Training used to show
+  //   • evaluating — the sandbox owns it (data_prep → train → score). Training used to show
   //     nothing live (no child LLM spans, and the stage op flushes only on close); command_eval now
   //     emits a `stage_started` anchor per stage so the Train/Evaluate band fills in DURING the run.
   //     A pending node's status doesn't change until it's scored, so without polling here the Trace
   //     tab froze after "Developer implement" for the whole training run.
-  const nodeStatus = state?.nodes?.[nodeId]?.status
-  const engineActive = !readOnly && !!live && live.engine_running !== false && !live.finished && nodeId != null
-  // Poll ANY pending node the user is inspecting while the engine is active (peer review). "Latest
-  // pending" was not an evaluation-ownership test: under eval_parallel>1 several nodes are evaluated
-  // concurrently, so inspecting an active OLDER pending node used to disable detail polling and freeze
-  // its live Trace/metrics. There is no client-visible eval-ownership marker, so poll the selected
-  // pending lifecycle conservatively (the poll is per-inspected-node — it never spins more than the one
-  // open node, and a pending node in an active run is genuinely in the eval pipeline).
-  const evaluatingThis = nodeStatus === 'pending' && !live?.paused
-  // Building = a RAW build marker for this node (buildingMarkers), NOT the spliced `building` flag:
-  // withBuilding skips ids already in state.nodes, so a node_reset re-build (which emits node_building
-  // for an EXISTING pending node) never sets the spliced flag — the poll then stopped and the Trace tab
-  // never showed writing/repairing during the rebuild.
-  const buildingThis = buildingMarkers(live).some(m => Number(m?.node_id) === Number(nodeId))
-  const nodeWorking = engineActive && (buildingThis || evaluatingThis)
+  const engineActive = !readOnly && !!live && live.engine_running !== false
+    && live.engine_running !== null && !live.finished && !live.paused && !live.stop_requested
+    && live.phase !== 'finalizing' && nodeId != null
+  const liveNode = live?.nodes?.[nodeId] || state?.nodes?.[nodeId]
+  const liveActivity = nodeActivityStatus(liveNode, live)
+  const nodeWorking = engineActive && [NODE_ACTIVITY.BUILDING, NODE_ACTIVITY.EVALUATING]
+    .includes(liveActivity)
   // Initial load, polling, and manual retries share one scope-owned request. A rejected or invalid
   // refresh therefore keeps last-good detail visible but explicitly stale instead of silently
   // presenting it as current. Returning the owned request lets usePoll abort it during cleanup.
@@ -530,7 +522,8 @@ export function GroupSummary({
             <tbody>{members.map(n => <tr key={n.id}>
               <td><button type="button" className="btn xs ghost" data-group-member-id={n.id}
                 aria-label={`Open experiment #${n.id}`} onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
-              <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td><td>{n.status}</td></tr>)}</tbody></table></DataTable>
+              <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
+              <td>{nodeActivityView(n, state).shortLabel}</td></tr>)}</tbody></table></DataTable>
         </>}
     </div>
   </>
@@ -1012,6 +1005,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
   // the whole point: an inherited rationale under a bare "Rationale" reads as this experiment's own
   // justification, which is the misreading the fork receipt was stamped to prevent.
   const forkProv = forkProvenance(n)
+  const activity = nodeActivityView(n, state)
   const ideaNote = field => {
     const note = forkFieldNote(forkProv, field)
     return note ? <span className="muted idea-attribution"> — {note}</span> : ''
@@ -1021,7 +1015,8 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
       <KV k="node" v={`#${n.id}`} />
       <KV k="operator" v={n.operator} />
       <KV k="parents" v={(n.parent_ids || []).join(', ') || '—'} />
-      <KV k="status" v={n.status + (n.id === state.best_node_id ? ' — champion' : '')} />
+      <KV k="activity" v={activity.label} />
+      <KV k="lifecycle" v={n.status + (n.id === state.best_node_id ? ' — champion' : '')} />
       <KV k="metric" v={fmt(n.metric)} />
       {n.confirmed_mean != null && <KV k="robust mean" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} (${n.confirmed_seeds}×)`} />}
       <KV k="feasible" v={String(n.feasible)} />
@@ -2461,15 +2456,17 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   })
   const agent = n.agent_report
   // Live status: what the node is doing RIGHT NOW. Two live states: an LLM authoring the code
-  // (building → writing / repairing / merging), or the sandbox running its eval pipeline (pending →
-  // training / scoring). `_op` is only set in the building case (the eval has no operator), so it
+  // (building → writing / repairing / merging), or the generation-scoped activity receipt saying
+  // the sandbox owns its eval pipeline (evaluating → training / scoring). `_op` is only set in the
+  // building case (the eval has no operator), so it
   // cleanly disambiguates the two.
   // Read this node's OWN raw build marker (buildingMarkers covers EVERY concurrent build AND a
   // node_reset re-build of an existing node, which the spliced `building` flag misses because
   // withBuilding never overwrites an id already in state.nodes), not the singular `live.building`.
   const _bmarker = buildingMarkers(live).find(m => Number(m?.node_id) === Number(n.id))
-  const building = working && !!_bmarker
-  const _op = building ? (_bmarker.operator || '') : ''
+  const activity = nodeActivityView(n, live)
+  const building = working && activity.status === NODE_ACTIVITY.BUILDING
+  const _op = building ? (_bmarker?.operator || n.operator || '') : ''
   const statusLabel = !working ? null
     : building
       ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')

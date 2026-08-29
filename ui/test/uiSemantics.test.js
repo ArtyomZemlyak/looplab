@@ -545,15 +545,15 @@ test('owner lifecycle is announced without duplicating the review banner', async
   assert.match(runView, /className="review-banner" role="status"/)
 })
 
-test('Inspector polls any inspected pending node and reads raw build markers (peer review)', async () => {
+test('Inspector polls every activity-owned node and reads raw reset-build markers', async () => {
   const inspector = await source('Inspector.jsx')
-  // eval_parallel>1: several nodes evaluate at once, so the poll must NOT gate on the single latest
-  // pending node (an active older node would freeze its live Trace/metrics).
+  // eval_parallel>1: several nodes evaluate at once, so ownership is per-node activity, never the
+  // single latest pending node — and queued pending nodes must not poll as if they were training.
   assert.doesNotMatch(inspector, /latestId/, 'poll ownership must not gate on the single latest pending node')
-  assert.match(inspector, /const evaluatingThis = nodeStatus === 'pending' && !live\?\.paused/)
-  // node_reset re-build: read the RAW build markers, not the spliced `building` flag (withBuilding never
-  // sets it for an id already in state.nodes), for both the poll gate and the Trace live-status label.
-  assert.match(inspector, /const buildingThis = buildingMarkers\(live\)\.some\(m => Number\(m\?\.node_id\) === Number\(nodeId\)\)/)
-  assert.match(inspector, /const nodeWorking = engineActive && \(buildingThis \|\| evaluatingThis\)/)
+  assert.match(inspector, /const liveActivity = nodeActivityStatus\(liveNode, live\)/)
+  assert.match(inspector, /\[NODE_ACTIVITY\.BUILDING, NODE_ACTIVITY\.EVALUATING\][\s\S]*?\.includes\(liveActivity\)/)
+  assert.doesNotMatch(inspector, /nodeStatus === 'pending'/)
+  // node_reset re-build: the Trace label still reads this node's raw marker for its operator-specific
+  // writing/repairing/merging copy; the shared activity helper uses that marker for ownership too.
   assert.match(inspector, /const _bmarker = buildingMarkers\(live\)\.find\(m => Number\(m\?\.node_id\) === Number\(n\.id\)\)/)
 })

@@ -1425,9 +1425,11 @@ class Node(BaseModel):
     # build from any other failed node. It rides the terminal itself, so "first terminal wins" already
     # makes it order-tolerant — no second event has to be correlated with this one.
     never_evaluated: bool = Field(default=False, exclude=True)
-    # The two halves of the DURABLE eval-start boundary (events/types.py::EV_NODE_EVAL_STARTED).
-    # `eval_start_boundary` is stamped on `node_created` and says the writer of THIS node promises to
-    # append a `node_eval_started` row before any sandbox work — so for such a node the ABSENCE of one
+    # The durable promise/receipt plus its live-owner projection
+    # (events/types.py::EV_NODE_EVAL_STARTED).
+    # `eval_start_boundary` is stamped on every current engine-written `node_created` and says the
+    # writer of THIS node promises to append a `node_eval_started` row before any sandbox work — so
+    # for such a node the ABSENCE of one
     # is evidence, not an assumption. `eval_started` is that row, folded. Together they are what makes
     # "this build never ran" survive a crash: the log used to charge evaluation cost only at the
     # terminal, and `stage_finished` rows used to be appended inside the terminal's own write-lock block
@@ -1438,7 +1440,18 @@ class Node(BaseModel):
     # fold-internal (`exclude=True`) and reader-defaulted, so an old log folds byte-identically — and,
     # carrying no boundary promise, is refused a refund rather than granted one on no evidence.
     eval_start_boundary: bool = Field(default=False, exclude=True)
+    # Durable budget receipt: at least one sandbox admission happened in this lifecycle. It stays
+    # true across an engine crash/resume so already-spent compute can never be refunded as "unused".
     eval_started: bool = Field(default=False, exclude=True)
+    # Live-owner receipt: the CURRENT engine invocation admitted this lifecycle. A new owner clears
+    # it while preserving ``eval_started``; re-admission appends another generation-matched
+    # ``node_eval_started`` row and sets it again. This separation keeps the UI's "training now"
+    # claim from reusing a historical budget fact after a process crash.
+    eval_activity_started: bool = Field(default=False, exclude=True)
+    # Timestamp of the first generation-matched eval-start row for the CURRENT owner. Duplicates in
+    # one invocation do not refresh it; a genuine re-admission after resume does. Fold-internal like
+    # the receipts above and ``None`` when no usable event timestamp was recorded.
+    eval_started_at: Optional[float] = Field(default=None, exclude=True)
 
     @property
     def robust_metric(self) -> Optional[float]:

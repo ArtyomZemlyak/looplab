@@ -872,7 +872,7 @@ class EvaluateMixin:
             )
 
     def _record_eval_start_boundary(self, node) -> bool:
-        """Append the durable eval-START boundary for one lifecycle, at most once.
+        """Append the eval-START boundary once per engine-owner admission.
 
         THE ONE SPELLING, called from two places on purpose. The dispatch decision belongs to the
         MAIN task (`_run_card_session`'s admission), and writing it there is what keeps it out of the
@@ -886,10 +886,13 @@ class EvaluateMixin:
         library callers included. In a card session that call is already satisfied by the folded flag
         and appends nothing.
 
-        Unlocked, like `_record_card_build_attempt`. That is safe because it is ONE independent
-        per-node row the fold keys by (node_id, generation) and applies SET-ONLY, AND because both
-        writers are on the main task *after* that node's own `node_created` — not because its position
-        is immaterial. This row is NOT splice-neutral, and saying it "pairs with nothing, so its splice
+        The helper is unlocked, like `_record_card_build_attempt`; its callers own serialization.
+        Card-session admission invokes it from the main task, while the evaluation-funnel backstop
+        invokes it under `_write_lock`. The row is independent per (node_id, generation): its durable
+        budget receipt is set-only, while its live-activity receipt resets on a proven owner change.
+        Both paths run *after* that node's own `node_created` — not because its position is
+        immaterial. This row is
+        NOT splice-neutral, and saying it "pairs with nothing, so its splice
         position cannot change any other event's meaning" (as this docstring did until 2026-08-06) is
         false: `_on_node_eval_started` silently DROPS a row whose node does not exist yet, and
         `Node.eval_started` is one of the durable facts
@@ -912,7 +915,7 @@ class EvaluateMixin:
         local disk.
         """
         if (getattr(node, "eval_start_boundary", False) is not True
-                or getattr(node, "eval_started", False) is True):
+                or getattr(node, "eval_activity_started", False) is True):
             return False
         self.store.append(EV_NODE_EVAL_STARTED, {
             "node_id": node.id, "generation": node.attempt})
@@ -1773,13 +1776,12 @@ class EvaluateMixin:
             # node without `eval_start_boundary` — this event is what lets a node that CAN prove it
             # keep the refund the calibration numbers depend on.
             #
-            # Scoped to the lifecycles that can ever be refunded (`eval_start_boundary`, stamped on a
-            # speculative attempt-zero `node_created`), so this is not a new per-eval append on the
-            # ordinary hot path: a run without speculation writes byte-identical logs. Normally
-            # already satisfied here — the card session's admission wrote it in the MAIN task, which
-            # is what keeps it out of the speculative election's CAS window (see
-            # `_record_eval_start_boundary`). This call is the funnel guarantee for every OTHER way
-            # into a sandbox: recovery, the legacy dispatcher, a direct library caller.
+            # Every current engine-created lifecycle carries `eval_start_boundary`. A speculative
+            # card session normally wrote the receipt at admission in the MAIN task (keeping it out
+            # of the election's CAS window); ordinary dispatch, recovery, the legacy dispatcher and
+            # direct library callers reach this funnel backstop. The one durable row therefore both
+            # protects speculative budget accounting and moves the public activity projection from
+            # "waiting for a slot" to "evaluating" before sandbox work begins.
             async with self._write_lock:
                 self._record_eval_start_boundary(node)
             workdir = self.run_dir / "nodes" / f"node_{node_id}"

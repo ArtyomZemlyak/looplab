@@ -157,6 +157,45 @@ def test_cli_resume_preserves_pending_finalize_after_error_finish(monkeypatch, t
     assert state.finished and state.stop_requested == "finalized" and state.stop_reason == "error"
 
 
+def test_direct_cli_resume_marks_a_crashed_eval_as_waiting_for_readmission(monkeypatch, tmp_path):
+    """A direct recovery has no resume_requested row, but lock ownership still changed."""
+
+    from looplab.cli import run_cmds
+
+    rd = _run_dir(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_created", {
+        "node_id": 0, "generation": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}}, "eval_start_boundary": True,
+    })
+    store.append("node_eval_started", {"node_id": 0, "generation": 0})
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = store
+
+    @contextmanager
+    def singleton(_rd):
+        yield True
+
+    monkeypatch.setattr(run_cmds, "_load_task", lambda _path, **_k: object())
+    monkeypatch.setattr(run_cmds, "_engine", lambda *_args, **_kwargs: FakeEngine())
+    monkeypatch.setattr(run_cmds, "_engine_singleton", singleton)
+    monkeypatch.setattr(run_cmds, "_run_engine_guarded", lambda eng: fold(eng.store.read_all()))
+    monkeypatch.setattr(run_cmds, "_print_result", lambda _state: None)
+    monkeypatch.setattr(run_cmds, "_exit_nonzero_if_the_run_produced_nothing", lambda *_a, **_k: None)
+
+    run_cmds.resume(rd, task_file=rd / "task.snapshot.json", max_nodes=None)
+
+    events = store.read_all()
+    served = [event for event in events if event.type == "resume_served"]
+    assert len(served) == 1 and served[0].data == {
+        "engine_owner_boundary": True, "activity_recovery": True}
+    state = fold(events)
+    assert state.nodes[0].eval_started is True
+    assert state.nodes[0].eval_activity_started is False
+
+
 # ------------------------------------------------------------------ finalize wrap-up (live engine)
 def _toy_engine(run_dir, max_nodes=4):
     from looplab.engine.orchestrator import Engine

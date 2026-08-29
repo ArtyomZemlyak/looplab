@@ -8,7 +8,7 @@ import { takeRunPanelHistoryEntry, useRunRouteState } from './useRunRouteState.j
 import { REVIEW_SAFE_VIEWS, reviewInspectorTabs, reviewPanelAllowed,
   runRouteStateHasTarget } from './runRouteState.js'
 import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
-  storageGet, storageSet, runApiPath } from './util.js'
+  storageGet, storageSet, runApiPath, nodeActivityView } from './util.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
 import GlobalMenu, { BrandMark } from './GlobalMenu.jsx'
@@ -2809,7 +2809,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           }} autoFocus>
           <option value="">Choose an experiment…</option>
           {mergeCandidates.map(node => <option key={node.id} value={node.id}>
-            #{node.id} · {node.operator || 'experiment'} · {node.status}
+            #{node.id} · {node.operator || 'experiment'} · {nodeActivityView(node, live).shortLabel}
           </option>)}
         </select>
         <button ref={mergeConfirmRef} type="submit" className="btn sm primary" disabled={!mergeTarget || mergeSubmitting}>

@@ -6,7 +6,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { fmt, fmtInt, CONTROL, commandFeedback, createIdempotencyKey, deadlineGet, getRunCommand,
   isTransientCommandReadError, retryRunCommand, runApiPath, runCommand,
-  submitCommand, traceDeadlineGet, traceGenerationMatches } from './util.js'
+  submitCommand, traceDeadlineGet, traceGenerationMatches, nodeActivityStatus,
+  NODE_ACTIVITY } from './util.js'
 import { OpIcon } from './icons.jsx'
 import Panel, { PanelPresentationContext } from './PanelShell.jsx'
 import { cardControlRecovery, cardControlSubmission, cardEditReflected }
@@ -812,11 +813,10 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
     const attempt = entryOf(nodeId)?.node?.attempt
     return Number.isSafeInteger(attempt) && attempt >= 0 ? attempt : null
   }
-  // Live-refresh only while the node is genuinely in flight, by an ALLOW-list of in-flight statuses
-  // rather than "not terminal": an absent or unrecognized status would otherwise put a 4 s poll on a
-  // node that will never move again.
-  const workingOn = nodeId => ['pending', 'running', 'building']
-    .includes(_cardText(entryOf(nodeId)?.node?.status))
+  // Live-refresh only while generation-scoped activity says the node owns build/evaluation work.
+  // Raw `pending` also includes the queue and cannot be used as an ownership test.
+  const workingOn = nodeId => [NODE_ACTIVITY.BUILDING, NODE_ACTIVITY.EVALUATING]
+    .includes(nodeActivityStatus(entryOf(nodeId)?.node))
   const fallback = <div className="muted" role="status">loading trace…</div>
   return <div className="card-trace">
     {notice && <div className="muted" role="status">{notice}</div>}

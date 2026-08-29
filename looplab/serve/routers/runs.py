@@ -64,6 +64,7 @@ from looplab.serve.paid_ledger import (
     record_terminal)
 from looplab.serve.paid_work import (
     RunCostAccountingPending, metered_run_client, run_directory_identity)
+from looplab.serve.node_activity import public_node_activity
 from looplab.serve.public_cards import PublicCardsProjectionMetadata
 # Re-exported for `tests/test_concepts_endpoint.py`, which imports it from THIS module to
 # prove the endpoint's edge-collapse mirrors the fold's tiebreak.
@@ -2074,12 +2075,14 @@ def build_router(srv) -> APIRouter:
                 if request_generation is not None:
                     request_generation = _assert_historical_generation(rd, expected_generation)
                 return {"id": nid, "status": "building",
+                        "activity": public_node_activity(st, nid),
                         "attempt": attempt or 0, "run_generation": request_generation,
                         "operator": b.get("operator"), "parent_ids": b.get("parent_ids", []),
                         "idea": None, "code": "", "annotations": [], "trace": trace,
                         "trace_revision": trace_revision}
             raise HTTPException(404, "no such node")
         out = n.model_dump(mode="json")
+        out["activity"] = public_node_activity(st, nid)
         out["annotations"] = st.annotations.get(nid, [])
         out["confirm_seeds_detail"] = st.confirm_seed_results.get(nid, {})
         # parent diff (vs the first parent's solution.py) — files-as-truth lineage

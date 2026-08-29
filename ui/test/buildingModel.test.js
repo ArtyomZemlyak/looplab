@@ -17,6 +17,9 @@ test('renders EVERY concurrent build from the buildings collection (parallel_bui
   const out = withBuilding(state)
   assert.equal(out.nodes[1].status, 'building')
   assert.equal(out.nodes[1].building, true)
+  assert.deepEqual(out.nodes[1].activity, {
+    schema: 1, status: 'building', generation: 0, evidence: 'node_building',
+  })
   assert.equal(out.nodes[1].operator, 'improve')
   assert.deepEqual(out.nodes[1].parent_ids, [5])
   assert.equal(out.nodes[2].status, 'building')          // BOTH builds spliced, not just the singular
