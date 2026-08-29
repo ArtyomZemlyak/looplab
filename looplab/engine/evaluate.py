@@ -866,7 +866,23 @@ class EvaluateMixin:
         THE REAL LEVER IS THE REBUILD DECISION, not the check's timing: `e5small-dr-unified-v9`
         built card-3 twice (42.8 min -> node 3, 69.0 min -> node 6) and card-4 twice (51.2 min ->
         node 4, 53.2 min -> node 7), and all four nodes were passed over — 3.6 h buying nothing on
-        two cards. That is #109's other half and it stays open.
+        two cards.
+        BUT A BLANKET BAR ON RE-ELECTING A DISCARDED CARD IS REFUSED, and the number is why. Over
+        the corpus EIGHT cards were built more than once, giving NINE rebuilds, and TWO produced an
+        evaluated node — `e5small-dr-unified-v9` card-2 -> node 2 -> **0.789466, which is that run's
+        CHAMPION**, and `e5small-dr-unified-v4` card-105 -> node 8 -> 0.792092, that run's
+        second-best number. A rule barring re-election after a discard would have destroyed v9's
+        best result outright. `producer_failed` bars a card for a reason that does not apply here:
+        it means the producer DIED, which is evidence about the card; a discard means the BOARD
+        MOVED, which is evidence about a moment.
+        WHAT THE SPLIT ACTUALLY SHOWS, and it is sharper than either rule: the outcome tracks WHAT
+        THE FIRST BUILD DID. Where the first build was SKIPPED with no node minted, 6 rebuilds gave
+        2 evaluated (one a champion), 2 failed nodes and 2 with no terminal in the log. Where the
+        first build MINTED a node that was then passed over, 3 rebuilds gave ZERO evaluated — v9
+        card-3 (three builds) and card-4 (two) between them. So the candidate rule is narrow: bar
+        re-election only after a MINTED-then-discarded node, never after a skipped build. n=3 in
+        that class, which is too few to ship on; this is recorded so the next reader starts from the
+        split rather than from the blanket bar the corpus refutes.
         A COUNTING TRAP WORTH INHERITING: "minted a node that never started an eval" is NOT the
         discard population. Nine further nodes match it and were merely QUEUED when their log ended
         (8.69 h, including all six of `rubertlite-dr-unified-v7`'s), so the naive predicate reports
