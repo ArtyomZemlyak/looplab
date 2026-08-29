@@ -377,6 +377,38 @@ def _is_solution_errors(stderr: str) -> tuple[list[dict], int, int]:
     return [{"message": m, "count": counts[m]} for m in top], total, len(counts)
 
 
+_FAILURE_SHAPE_KEYS = ("error_type", "runs", "num_errors", "num_timeouts")
+_FAILURE_SHAPE_RE = re.compile(
+    r"'(error_type|runs|num_errors|num_timeouts)':\s*'?([A-Za-z_]+|\d+)'?")
+
+
+def failure_shape(stderr: str) -> dict[str, Any]:
+    """The counts that say WHICH WAY a stopped evaluation stopped, or {}.
+
+    `evaluator_error` covers at least two failures that need opposite answers from the model, and
+    the reason word alone cannot tell them apart. MEASURED 2026-08-29 on two live probes:
+
+      * dsDL node_0  — eval_seconds 504.0, `num_timeouts` > 0: one instance hit the 120 s ceiling
+        and AlgoTune's early-exit failed the rest. The solver WORKS and is too slow.
+      * dsRBF node_0 — eval_seconds 35.6, `error_type: execution_error`, `num_errors: 3`,
+        `num_timeouts: 0`: the solver RAISED (its own `LinAlgError("Singular matrix in RBF
+        solve.")`). Nothing was too slow; the code is wrong.
+
+    Both printed `reason: evaluator_error` and the same "Unexpected results format" verdict, so a
+    model reading only the reason cannot tell "make it faster" from "make it correct". The
+    discriminating fields are already in the harness's own payload and were simply not carried out
+    of it. The VOCABULARY is deliberately untouched — it is registry-guarded
+    (`tests/test_algotune_bridge_says_why.py` derives it from this module's AST), and inventing a
+    word is a bigger change than surfacing evidence that already exists.
+    """
+    found: dict[str, Any] = {}
+    for key, value in _FAILURE_SHAPE_RE.findall(stderr or ""):
+        if key in found:
+            continue
+        found[key] = int(value) if value.isdigit() else value
+    return {k: found[k] for k in _FAILURE_SHAPE_KEYS if k in found}
+
+
 def _no_speedup(reason: str, *, stderr: str = "", task: str = "",
                 reported: Any = None) -> dict[str, Any]:
     """Build the `no_speedup` block: the class, the harness's own words, and the counts.
@@ -406,6 +438,9 @@ def _no_speedup(reason: str, *, stderr: str = "", task: str = "",
         # to score and "0.0000" is the harness scoring a zero, and `float()` maps both to the same
         # 0.0 that started this.
         out["speedup_reported"] = str(reported)
+    shape = failure_shape(stderr)
+    if shape:
+        out["failure_shape"] = shape
     rows, lines, distinct = _is_solution_errors(stderr)
     if rows:
         out["is_solution_errors"] = rows
