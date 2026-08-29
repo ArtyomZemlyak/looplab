@@ -328,7 +328,13 @@ def test_the_cut_and_its_missing_price_are_said_out_loud(caplog, no_sleep):
     with caplog.at_level("WARNING", logger="looplab.core.llm"):
         _client(transport).complete_text([{"role": "user", "content": "go"}])
 
-    notices = [r for r in caplog.records if r.levelname == "WARNING"]
+    # FILTERED BY LOGGER, matching the `at_level(..., logger="looplab.core.llm")` scope this
+    # test already declares. Reading `caplog.records` unfiltered counted ANY logger's warning:
+    # after the 2026-08-29 master merge the span-coverage guard
+    # (`core/tracing.py::untraced LLM generation`) also fires inside these tests, and this
+    # assertion started counting two records for one notice — but only in the FULL suite, so
+    # the file passed in isolation and failed together. The subject was always llm.py's notice.
+    notices = [r for r in caplog.records if r.levelname == "WARNING" and r.name == "looplab.core.llm"]
     assert len(notices) == 1, "a cut stream is salvaged silently, or says so more than once"
     said = notices[0].getMessage()
     assert "http://x/v1" in said and "10 characters" in said
@@ -343,7 +349,7 @@ def test_a_stream_that_was_NOT_cut_says_nothing(caplog, no_sleep):
                                  "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
     with caplog.at_level("WARNING", logger="looplab.core.llm"):
         assert _client(transport).complete_text([{"role": "user", "content": "go"}]) == "whole answer"
-    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == []
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name == "looplab.core.llm"] == []
 
 
 def test_the_notice_names_the_price_when_the_cut_WAS_priced(caplog, no_sleep):
@@ -360,7 +366,7 @@ def test_the_notice_names_the_price_when_the_cut_WAS_priced(caplog, no_sleep):
     with caplog.at_level("WARNING", logger="looplab.core.llm"):
         client.complete_text([{"role": "user", "content": "go"}])
 
-    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"][0]
+    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name == "looplab.core.llm"][0]
     assert "0.061792" in said, "the notice does not name the price the endpoint stated"
     assert "UNPRICED" not in said, "a priced call is being reported as money nobody can account"
 
@@ -622,7 +628,7 @@ def test_a_reasoning_only_cut_reports_what_it_kept_not_what_it_lacks(caplog, no_
 
     assert msg.get("content") == "" and len(msg.get("reasoning") or "") == 30, (
         "precondition: this is a reasoning-only truncation, exactly like the live one")
-    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"][0]
+    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name == "looplab.core.llm"][0]
     assert "30 characters" in said and "30 reasoning" in said, said
     assert "the 0 characters" not in said, "the notice still measures only `content`"
 

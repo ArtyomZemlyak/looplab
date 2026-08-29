@@ -1,4 +1,11 @@
-"""AN INVALID NODE IS NOT A HEALTHY NODE, AND THE HEADLINE SAID IT WAS (doc 53 §4a).
+"""
+# 2026-08-29, MERGE with master: the coordinate rendering changed from `fmt_params` to
+# `core/param_carriers.py::node_params_brief`, which prints "(none recorded)" where the old
+# spelling printed an empty dict. The three literals below follow it. What this file GUARDS is
+# unchanged and still passes on top of the new rendering: an unscored zero carries the
+# "— NOT SCORED (the eval refused to time it)" clause with the eval's own reason, a MEASURED
+# zero carries nothing extra, and a healthy line is byte-identical to a plain champion line.
+AN INVALID NODE IS NOT A HEALTHY NODE, AND THE HEADLINE SAID IT WAS (doc 53 §4a).
 
 `digest.experiments_digest` is the always-on working set: it rides on every Researcher prompt and it
 opens with one line of arithmetic — `Search so far — N experiment(s), M failed`. `M` counted
@@ -173,7 +180,7 @@ def test_the_champion_line_says_the_number_is_not_a_score():
     """`spectral_clustering`'s nine proposal prompts, over the record they were written from."""
     line = [ln for ln in _brief(_champion_state(_SCORE_LINE)).splitlines()
             if ln.startswith("Best so far:")][0]
-    assert line.startswith("Best so far: node 0 metric=0.0 params={}"), line
+    assert line.startswith("Best so far: node 0 metric=0.0 params=(none recorded)"), line
     assert digest.UNSCORED_LABEL in line, line
     # The eval's OWN verdict, not a label we invented for it: the arm read 0.0 as "the idea is
     # wrong" while its record said "the idea is right and two answers were rejected".
@@ -197,14 +204,14 @@ def test_a_measured_zero_is_still_just_a_zero():
     would fire on 47 of the corpus's 56 evaluated rows instead of 9."""
     st = _champion_state(_HEALTHY_LINE, metric=0.0)
     line = [ln for ln in _brief(st).splitlines() if ln.startswith("Best so far:")][0]
-    assert line == "Best so far: node 0 metric=0.0 params={}", line
+    assert line == "Best so far: node 0 metric=0.0 params=(none recorded)", line
 
 
 def test_a_healthy_champion_line_is_byte_identical():
     """Nothing moves where the clause is not true -- the prompt is a contract."""
     st = _champion_state(_HEALTHY_LINE, metric=1.1013)
     line = [ln for ln in _brief(st).splitlines() if ln.startswith("Best so far:")][0]
-    assert line == "Best so far: node 0 metric=1.1013 params={}", line
+    assert line == "Best so far: node 0 metric=1.1013 params=(none recorded)", line
 
 
 def test_the_clause_is_render_only_and_the_champion_does_not_move():
