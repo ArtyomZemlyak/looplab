@@ -781,20 +781,22 @@ class ResourceSchedulingMixin:
         if policy == "off" or not (spec or {}).get("editables"):
             self._read_fence_cache = None
             return None
-        # OPEN[read-fence-allow-lists-the-dir-holding-itself]
-        # proof:present:allow=[str(self.run_dir)]@looplab/engine/resources.py
-        # The fence is INSTALLED at
-        # `<run_dir>/.looplab-fence/sitecustomize.py` and the run dir is what this line allow-lists,
-        # so the fence's own source sits inside the region it exempts. The fence governs READS; an
-        # eval writes its outputs into the run dir by design, so a node process can open that file
-        # for writing and neutralise the fence for every process the run starts afterwards. Found
-        # 2026-08-21 by an agent researching probe confinement, driven end to end there:
-        # refuse -> `open(fence, "w")` -> the same read succeeds. It re-enables the incident the
-        # fence exists for (a node scoring a HUMAN's checkpoint, `rubertlite-dr-unified-v6` node 4)
-        # and it applies to EVERY run with `read_fence="deny"`, not only to a benchmark arm.
-        # The fix is not to drop the allow entry -- a run may legitimately live inside the repo it
-        # edits -- but to put the fence source where the allow entry does not reach, or to make the
-        # generated file unwritable to the process it fences (the kernel rung, not the hook).
+        # THE ALLOW ENTRY IS NOT THE HOLE, and that was measured rather than argued (2026-08-25).
+        # The item that stood here said this line allow-lists the directory holding the fence's own
+        # `sitecustomize.py`, so a node could `open(fence, "w")` and disarm the run — driven end to
+        # end, and true. But re-running it with the DEFAULT layout (`--out` outside the repo) shows
+        # `fence_inputs` had already dropped this entry: it keeps only strict DESCENDANTS of an
+        # editable root, so `allow` was `()` — and the overwrite succeeded anyway. The fence's own
+        # source is unprotected because it lives outside every fenced root, which is true of every
+        # place it could legally be written; relocating it out of the allow entry's reach would have
+        # changed nothing, because "outside the allow list" is not "inside a fenced region" and the
+        # only fenced region is the operator's tree, where the engine must not write. So the fix is
+        # the other candidate, and it lives where the file is created rather than here:
+        # `read_fence.install` -> `_harden` (mode 0444, the kernel rung) plus the template's `_SELF`
+        # (which refuses the `os.chmod`/`os.remove`/`os.rename` that would undo it).
+        #
+        # This entry stays for the reason it was always there: a run may legitimately be `--out`-ed
+        # inside the repo it edits, and then its own outputs must stay readable to its own eval.
         roots, allow, dropped, swallowed = read_fence.fence_inputs(
             spec, allow=[str(self.run_dir)])
         try:

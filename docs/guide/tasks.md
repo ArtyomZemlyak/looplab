@@ -1000,6 +1000,18 @@ model/HF cache, and every `dataset`/`data`/`references` mount **source** — a m
 read channel and is allow-listed even when it lives inside the editable tree. The fence is a no-op for
 a non-repo task and for the Docker tiers (the source is never bind-mounted into a container).
 
+**Except the fence's own file, which is the one thing in the run directory a node may not touch.**
+`<run>/.looplab-fence/sitecustomize.py` sits in that writable run directory, and until 2026-08-25 a
+node could simply overwrite it — refuse the read, `open(…/sitecustomize.py, "w")`, and every process
+the run started afterwards was unfenced, which is the incident above with none of the gates left.
+Moving the file does not help, because the only region the fence refuses is your editable tree and
+that is exactly where the engine must not write. So it is written mode `0444` (the kernel refuses the
+write; the container a node runs in holds no `CAP_DAC_OVERRIDE`) and the hook refuses every mutation
+event aimed at that directory, `os.chmod` included, whatever the allow-list says. Both rungs are
+needed: with only the mode bit a node chmods it back and rewrites the file; with only the hook, a
+native writer that raises no audit event goes straight through. What still gets past both is the
+same `python -S` child listed below — it is not fenced at all, so it can chmod and rewrite the file; that one is open.
+
 **What it cannot see, and you should know before relying on it.** It is a CPython audit hook, so it
 covers what goes through CPython and nothing else. A native reader — `safetensors`, `h5py`, `pyarrow`,
 anything calling libc directly — reads straight through it, and `safetensors` is the loader for the

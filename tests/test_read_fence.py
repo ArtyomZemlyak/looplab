@@ -861,6 +861,153 @@ def test_an_allow_prefix_that_contains_a_root_is_refused_and_reported(tmp_path):
     assert rc != 0 and CHECKPOINT not in out
 
 
+_ESCAPE = """
+    import os, subprocess, sys
+    target = {target!r}
+    fence = os.environ[{marker!r}] + "/sitecustomize.py"
+    try:
+        open(target).read()
+        print("STAGE1 read ALLOWED")
+    except Exception as exc:
+        print("STAGE1 refused", type(exc).__name__)
+    for label, attempt in (
+        ("open-w", lambda: open(fence, "w").write("# neutralised")),
+        ("chmod", lambda: os.chmod(fence, 0o644)),
+        ("unlink", lambda: os.remove(fence)),
+        ("unlink-dir-fd", lambda: os.remove("sitecustomize.py",
+                                            dir_fd=os.open(os.path.dirname(fence), os.O_RDONLY))),
+        ("rename-away", lambda: os.rename(fence, fence + ".bak")),
+        ("truncate", lambda: os.truncate(fence, 0)),
+        ("symlink-over", lambda: os.symlink("/etc/hosts", fence)),
+    ):
+        try:
+            attempt()
+            print("STAGE2 ESCAPED", label)
+        except Exception as exc:
+            print("STAGE2 blocked", label, type(exc).__name__)
+    later = subprocess.run([sys.executable, "-c", "print(open(%r).read())" % target],
+                           env=os.environ.copy(), capture_output=True, text=True)
+    print("STAGE3", "READ" if {checkpoint!r} in later.stdout else "refused")
+"""
+
+
+def test_a_node_cannot_rewrite_the_fence_that_fences_it(tmp_path):
+    """Refuse a read -> try to overwrite `<run_dir>/.looplab-fence/sitecustomize.py` -> the SAME
+    read from the next process of the run is still refused.
+
+    THE DEFECT, driven end to end on the pre-fix tree (2026-08-21, re-measured 2026-08-25): stage 1
+    refused, `open(fence, "w")` SUCCEEDED, and stage 3 printed the human's checkpoint. That is the
+    `rubertlite-dr-unified-v6` node-4 incident re-enabled from inside a node, and not for one
+    process but for every process the run starts afterwards. It applied to every run with
+    `read_fence="deny"`. The fence file is outside every fenced root by construction — which is
+    where it has to be, since the roots are the operator's tree — so nothing in the denylist ever
+    looked at it. The two rungs that close it are `install`'s `_harden` (mode 0444; `CapEff` is 0 in
+    this container, so the owner write bit binds) and the template's `_SELF` (which refuses the
+    `os.chmod`/`os.remove`/`os.rename` that would take that bit away). The seven attempts below are
+    the ones that ARE closed; the `-S` child that is not is `OPEN[...]` on `_harden`.
+
+    WHAT WOULD MAKE THIS PASS VACUOUSLY, and what refuses each:
+      * a child that never reaches the write — a crash, a missing `LOOPLAB_READ_FENCE_DIR`, a
+        `run_argv` that swallowed the argv. Every stage prints a sentinel and all three are asserted
+        PRESENT, so silence fails rather than passes;
+      * a world with no fence at all, where "the overwrite did not happen" is trivially true. Stage 1
+        must report `LoopLabSourceReadRefused` before any of this counts, and stage 3 must still be
+        refused — an unfenced world fails both;
+      * a fence file the child cannot even NAME (a `chmod` on the wrong path answers PermissionError
+        just as happily). The fence's own bytes are re-read afterwards and must still be the
+        generated source;
+      * the rungs being untested because the write is impossible for an unrelated reason — the
+        control below removes the kernel bit from OUTSIDE the fenced process and asserts the same
+        child then escapes end to end, so the capability the test denies is demonstrably real.
+    """
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    generated = Path(fence) / "sitecustomize.py"
+    assert not generated.stat().st_mode & 0o222, "the kernel rung: no write bit for anyone"
+
+    rc, out, _err, timed_out = _run(
+        _ESCAPE.format(target=str(target), marker=read_fence.FENCE_DIR_ENV, checkpoint=CHECKPOINT),
+        wd, fence)
+    assert not timed_out and rc == 0, out
+
+    assert "STAGE1 refused LoopLabSourceReadRefused" in out, out
+    assert "STAGE2 ESCAPED" not in out, out
+    # The kernel rung by name: the plain overwrite must die in the kernel, before any Python runs,
+    # because that is the rung that also covers the writers no audit hook sees.
+    assert "STAGE2 blocked open-w PermissionError" in out, out
+    # …and the hook rung guarding it, on every call that could hand the write bit back.
+    for label in ("chmod", "unlink", "unlink-dir-fd", "rename-away", "truncate", "symlink-over"):
+        assert f"STAGE2 blocked {label} LoopLabSourceReadRefused" in out, out
+    assert "STAGE3 refused" in out, out
+
+    assert "LoopLab source-tree READ FENCE" in generated.read_text(encoding="utf-8")
+    assert not generated.stat().st_mode & 0o222
+    # The refusals are in the run's own diagnostic too, one line per distinct (event, path).
+    assert any(str(generated) in line and "os.chmod" in line
+               for line in read_fence.violations(run_dir))
+
+
+def test_the_fence_overwrite_escape_is_real_once_the_kernel_rung_is_taken_away(tmp_path):
+    """The control for the test above: the capability it denies has to exist to be worth denying.
+
+    Same world, same child. The write bit is handed back from the pytest process — which is NOT
+    fenced, so `_SELF` never sees it — and the identical `open(fence, "w")` then succeeds, and the
+    next process of the run reads the human's checkpoint. This is the pre-fix behaviour, reproduced
+    inside the suite, and it is what makes the sibling test's `STAGE2 ESCAPED not in out` a claim
+    about `_harden` rather than about the child failing to try."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    generated = Path(fence) / "sitecustomize.py"
+    os.chmod(generated, 0o644)                  # exactly what `_harden` had done, undone
+
+    # Only the overwrite, so the assertions below describe THE ESCAPE and nothing else: this test
+    # characterizes the un-hardened world and must read the same before and after the fix.
+    read_it = "print(open(%r).read())" % str(target)
+    rc, out, _err, timed_out = _run(f"""
+        import os, subprocess, sys
+        try:
+            open({str(target)!r}).read()
+            print("STAGE1 read ALLOWED")
+        except Exception as exc:
+            print("STAGE1 refused", type(exc).__name__)
+        open(os.environ[{read_fence.FENCE_DIR_ENV!r}] + "/sitecustomize.py", "w").write("# gone")
+        print("STAGE2 ESCAPED open-w")
+        later = subprocess.run([sys.executable, "-c", {read_it!r}],
+                               env=os.environ.copy(), capture_output=True, text=True)
+        print("STAGE3", "READ" if {CHECKPOINT!r} in later.stdout else "refused")
+        """, wd, fence)
+    assert not timed_out and rc == 0, out
+    assert "STAGE1 refused LoopLabSourceReadRefused" in out, out
+    assert "STAGE2 ESCAPED open-w" in out, out
+    assert "STAGE3 READ" in out, out
+    assert generated.read_text(encoding="utf-8") == "# gone"
+
+
+def test_install_re_asserts_the_hardening_when_the_bytes_already_match(tmp_path):
+    """`install` returns early when the file's content is what it would write, and that early
+    return is reachable with the WRITE BIT back on: a node (or a `-S` child of one) can restore the
+    content after widening the mode, and the next `install` would otherwise see "already correct"
+    and leave the fence writable for the rest of the run."""
+    src, _sib, run_dir, _wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src)
+    generated = Path(fence) / "sitecustomize.py"
+    before = generated.read_text(encoding="utf-8")
+    os.chmod(generated, 0o666)
+
+    assert _install(run_dir, src) == fence
+    assert generated.read_text(encoding="utf-8") == before, "the early return must not rewrite"
+    assert not generated.stat().st_mode & 0o222, "…but it must re-assert the mode"
+
+    # And a REWRITE (different bytes) lands hardened too, over a 0444 destination.
+    os.chmod(generated, 0o666)
+    generated.write_text("# tampered\n", encoding="utf-8")
+    assert _install(run_dir, src) == fence
+    assert generated.read_text(encoding="utf-8") == before
+    assert not generated.stat().st_mode & 0o222
+
+
 def test_an_unrecognised_policy_settles_to_deny_not_to_warn(tmp_path):
     """`Settings` validates the enum; `EngineOptions.read_fence`, a hand-edited snapshot and a
     Strategist value do not. The generated hook tests `_POLICY == "deny"` exactly, so an unknown
