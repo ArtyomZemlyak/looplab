@@ -1064,7 +1064,21 @@ number was measured; the third qualifies **what it is a number for**:
   different claim wearing the same name. `checked` rides beside the count so "everything else agreed" and
   "nothing else was looked at" stay distinguishable, and `unresolved`/`conflicts` are counted apart from
   `diverged` — a coordinate no carrier states, and one two carriers disagree about, are neither
-  divergences nor agreements.
+  divergences nor agreements. **And a CONFLICT is printed too, in its own block, since
+  2026-08-29** — which is the case the caveat was built for and the one the tab could not show. The
+  engine raises `params_overridden` on `diverged` **or** `conflicts`
+  (`engine/champion_caveats.py::applied_params_diverged`, whose docstring says "A CONFLICT COUNTS,
+  and that is the half worth stating"), while the footnote gated on divergences alone; so a
+  conflicts-only champion showed the pill on the run row, the operator opened the tab built as the
+  answer to that pill, and nothing rendered. `rubertlite-dr-unified-v8` node 3 — the champion the
+  whole rung cites as its motivation — is exactly that shape: its two carriers disagree on
+  `batch_size` and `gradient_accumulation_steps`, so `runtime/applied_params.py` leaves both out of
+  `applied` and out of `diverged`. The block names the knob, the declared value, and **every**
+  reading with its file and line, because "two files disagree" without saying which is not an
+  answer. The two stay SEPARATE blocks and are never merged into one list: a divergence knows what
+  ran and a conflict is the run admitting it cannot say, so the conflicts block deliberately does
+  not borrow the divergence heading's "did not run", which would assert the very thing the record
+  refuses to claim.
 
 <!-- OPEN[trust-default-flips-missed-diagram-and-ui-guide] the five 2026-08-23 default flips
 (the three trust scans + both search tools, 4aab7350) updated configuration.md and the schema

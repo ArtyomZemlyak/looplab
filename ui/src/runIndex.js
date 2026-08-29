@@ -679,6 +679,55 @@ export function appliedParamsUnsettled(record) {
   }
 }
 
+// The CONFLICTED coordinates themselves, normalized, in the engine's own order.
+//
+// A conflict is NOT a weaker divergence and must not be rendered as one. A divergence says "we know
+// what ran and it is not what you declared"; a conflict says "two of this node's own carriers give
+// different numbers and static bytes cannot order them", so the run cannot say what its number is
+// filed under at all. `runtime/applied_params.py` leaves the coordinate OUT of `applied` and OUT of
+// `diverged` for exactly that reason — which is why reading `diverged` alone answered "no caveat"
+// about `rubertlite-dr-unified-v8` node 3, the champion the whole rung was built for.
+//
+// Same two rules as `appliedParamsDivergences`: a row with no `param` is DROPPED, because an
+// anonymous "something conflicts" is the slug's failure again; every number is passed through
+// UNTOUCHED, no `||` default and no coercion, since `0` is a real declared value.
+//
+// A row is kept whatever its `readings` length. The engine only appends one at two or more readings
+// (`len(seen) == 1` takes the other branch), so a shorter row is a malformed record — and dropping
+// it would silently un-render a caveat the engine DID raise, which is this defect in miniature.
+export function appliedParamsConflicts(record) {
+  const raw = record?.conflicts
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter(row => row && typeof row === 'object' && !Array.isArray(row)
+      && typeof row.param === 'string' && row.param.trim())
+    .map(row => ({
+      param: row.param.trim(),
+      declared: row.declared,
+      readings: (Array.isArray(row.readings) ? row.readings : [])
+        .filter(r => r && typeof r === 'object' && !Array.isArray(r))
+        .map(r => ({
+          applied: r.applied,
+          file: typeof r.file === 'string' ? r.file : '',
+          line: Number.isInteger(r.line) ? r.line : null,
+        })),
+    }))
+}
+
+// The one sentence about conflicted coordinates. Deliberately NOT `appliedParamsNotice`'s wording:
+// that one ends "it is filed under parameters the configuration did not use", which presumes we know
+// what was used. Here we do not, and saying so IS the caveat.
+export function appliedParamsConflictNotice(record) {
+  const rows = appliedParamsConflicts(record)
+  if (!rows.length) return ''
+  const checked = appliedParamsChecked(record)
+  const scope = checked == null ? '' : ` of ${checked} checked`
+  return `${rows.length} declared coordinate${rows.length === 1 ? '' : 's'}${scope} `
+    + `${rows.length === 1 ? 'is' : 'are'} read differently by two of this node's own configuration `
+    + 'files, and nothing in the record can order them. The experiment ran and its number still '
+    + 'counts — but the run cannot say which value it was measured at.'
+}
+
 // The one sentence the browser prints about diverged coordinates, mirroring the vocabulary of
 // `runtime/applied_params.py`. It SURFACES and never accuses: the Developer deviating from a
 // proposal is legitimate and documented (a real champion's config says so in a comment), and what

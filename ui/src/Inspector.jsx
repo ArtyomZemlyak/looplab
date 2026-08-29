@@ -18,7 +18,8 @@ import { EXTRA_METRIC_CHANNEL_HELP, EXTRA_METRIC_CHANNEL_LABEL,
   extraMetricChannel } from './extraMetrics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { nodeAppliedParams, appliedParamsDivergences, appliedParamsChecked,
-  appliedParamsNotice } from './runIndex.js'
+  appliedParamsNotice, appliedParamsConflicts,
+  appliedParamsConflictNotice } from './runIndex.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
   NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, attemptReadRequired, conversationWindow,
@@ -2808,21 +2809,18 @@ export function Metrics({ n, detail, state, runId }) {
         model owns, so the wording cannot drift from the count. It SURFACES and does not accuse: the
         Developer deviating from a proposal is legitimate and documented; what would be the defect is
         the record claiming the declared value. */}
-    {/* OPEN[conflicts-only-champion-renders-no-detail] this footnote gates on `diverged` rows
-        alone, so the sharpest caveat case — a champion whose record holds only `conflicts` —
-        opens this tab and finds nothing.
-        proof:`absent:appliedParamsUnsettled(@ui/src/Inspector.jsx`
-        REVIEW 2026-08-29 (P2 correctness): the engine raises `params_overridden` on diverged OR
-        conflicts (`engine/champion_caveats.py`), and a conflicts-only record is real — two
-        carriers disagreeing is the documented v8n3 shape, left OUT of `applied` and OUT of
-        `diverged` by `runtime/applied_params.py`. So the run row shows the slug, the operator
-        opens the Metrics tab bd022b3f built as the answer to it, and no applied-params section
-        renders — the slug-with-no-detail defect that commit fixed for diverged, still open for
-        conflicts. runIndex.js's unsettled counter (the helper that counts exactly
-        unresolved/conflicts) is exported, tested, and imported by no production module. Fix
-        direction: render the footnote when diverged OR the unsettled conflicts count is > 0,
-        with a sentence per conflict naming each reading and its file/line (already on the wire),
-        keeping conflicts counted apart from divergences as the model does. */}
+    {/* CONFLICTS RENDER TOO, and they are the SHARPER case (2026-08-29). This footnote gated on
+        `diverged` rows alone, and `engine/champion_caveats.py::applied_params_diverged` raises
+        `params_overridden` on diverged OR conflicts — its own docstring says "A CONFLICT COUNTS,
+        and that is the half worth stating". So a conflicts-only champion showed the slug on the run
+        row, the operator opened the tab bd022b3c built as the answer to that slug, and NOTHING
+        rendered: the slug-with-no-detail defect that commit fixed for divergences, still open for
+        the case it names as its own motivating champion (v8 node 3, 0.762048, whose two carriers
+        disagree on `batch_size` and `gradient_accumulation_steps`).
+        The two stay SEPARATE blocks rather than one merged list, because they are different claims
+        and the model already counts them apart: a divergence knows what ran, a conflict is the run
+        admitting it cannot say. Merging them under one heading would publish the second as the
+        first, which is the vacuous green one layer up. */}
     {appliedParamsDivergences(nodeAppliedParams(n)).length > 0 && <div className="muted">
       <b>Declared coordinates that did not run.</b> {appliedParamsNotice(nodeAppliedParams(n))}
       <ul className="applied-param-divergences">
@@ -2837,6 +2835,21 @@ export function Metrics({ n, detail, state, runId }) {
         This record does not say how many coordinates were checked, so it cannot tell you that the
         rest agreed — only that these did not.
       </span>}
+    </div>}
+    {appliedParamsConflicts(nodeAppliedParams(n)).length > 0 && <div className="muted">
+      <b>Declared coordinates the record cannot settle.</b>{' '}
+      {appliedParamsConflictNotice(nodeAppliedParams(n))}
+      <ul className="applied-param-conflicts">
+        {appliedParamsConflicts(nodeAppliedParams(n)).map(c => <li key={c.param}>
+          <code>{c.param}</code>: declared <b>{fmt(c.declared)}</b> · read as{' '}
+          {c.readings.length
+            ? c.readings.map((r, idx) => <span key={`${r.file}:${r.line}:${idx}`}>
+              {idx > 0 ? ' · ' : ''}<b className="warn">{fmt(r.applied)}</b>
+              {r.file ? <span className="muted"> in {r.file}{r.line == null ? '' : `:${r.line}`}</span> : null}
+            </span>)
+            : <span className="muted">two different values this record does not name</span>}
+        </li>)}
+      </ul>
     </div>}
     {anyUnverified && <div className="muted">
       Rows marked <b>self-reported</b> were taken from the experiment's own stdout with nothing
