@@ -1662,3 +1662,55 @@ out of the harness payload into the `no_speedup` block. The reason VOCABULARY is
 purpose — it is registry-guarded and inventing a word is a bigger change than surfacing evidence
 that already exists. Absent evidence yields `{}`, never a block of zeros, so "no data" cannot read
 as "zero timeouts". Three mutations redden.
+
+## 46. The stage switch is settled at "no effect"; the budget note now looks real
+
+dsBN2 — `edge_expansion`, $1.013, three nodes climbing 19.6656 → 147.0915 (`edge_expansion_fast.pyx`)
+→ **223.3369** (`edge_kernel.pyx`). **Test 221.8235.** `plan_step` $0.377 / 117 calls, `propose`
+$0.207 / 67, `plan` $0.184 / 47, `deep_research` $0.098 / 34.
+
+### 46.1 Stage guidance: p = 0.286 at n = 5 vs 3, and the trajectory says why to stop
+
+| stage block | n | finals | median |
+|---|---|---|---|
+| ON | 5 | 106.47, 132.70, 202.77, **221.82**, **344.43** | 202.77 |
+| OFF | 3 | 153.40, 237.12, 268.09 | 237.12 |
+
+**p = 16/56 = 0.286.** The full trajectory of this claim, one sweep at a time:
+
+    n=3 vs 3   p = 0.100   "suggestive"
+    n=4 vs 3   p = 0.314   withdrawn
+    n=5 vs 3   p = 0.286   stable at no effect
+
+The ON median moved 132.70 → 202.77 as the two newest runs joined it. The switch stays in the code
+as an operator opt-out — it demonstrably removes ~5,001 characters nothing called — but the claim
+that removing them HELPS is dead, and this is the third sweep in a row that says so more firmly.
+
+### 46.2 The budget note is associated with less research, and the number repeats exactly
+
+Both runs carrying `a78d295f`/`453c83d9` spend the same share on `deep_research`, and both sit
+strictly below every control:
+
+| run | note | `deep_research` share | calls |
+|---|---|---|---|
+| **dsBN** | yes | **9.7 %** | 33 |
+| **dsBN2** | yes | **9.7 %** | 34 |
+| dsNoStg3 | no | 11.1 % | 34 |
+| dsNoStg | no | 11.6 % | 40 |
+| dsFix1 | no | 12.2 % | 37 |
+| dsFix4 | no | 15.3 % | 51 |
+| dsNoStg2 | no | 15.7 % | 46 |
+| dsFix2 | no | 21.0 % | 60 |
+
+The honest test is against the three controls with the SAME stage setting (dsFix1/2/4, median
+15.3 %): both note-runs rank first and second, exact one-sided **p = 1/10 = 0.100** at n = 2 vs 3.
+Against all six controls it is 1/28 = 0.036, but that pool mixes stage-off runs and is the weaker
+comparison, not the stronger one.
+
+**p = 0.100 is exactly the threshold that just collapsed for §46.1**, so it is reported as
+"promising, undecided" and nothing is concluded. **dsBN3 launched on the freed lane** — a third
+note-run at the same settings, which takes the clean comparison to n = 3 vs 3.
+
+A correction to my own arithmetic: the first version of this test printed `p = 0.000`, which is
+impossible at n = 2 vs 3 (the floor is 1/10). Two identical 9.7 % values collapsed into one rank in
+my tie handling. The corrected figures are above.
