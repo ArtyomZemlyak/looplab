@@ -22,6 +22,10 @@ looplab run --no-genesis --kind quadratic --goal "min (x-3)^2" --direction min -
 looplab replay runs/demo          # rebuild state from the event log (reproducibility check)
 looplab timings runs/demo         # wall-clock: per node + run-level (from spans.jsonl), reconciled
                                   # against the run's duration (events.jsonl first->last ts), residual named
+# Tool-call repeats are measurable since 2026-08-28: each `tool` span carries
+# `repeat_streak` (every call) and `repeat_note_sent` (only when the identical-result
+# nudge fired). Before that the nudge went into the model message alone, so its firing
+# rate — and whether it changes behaviour — could not be read off any run.
 looplab tokens runs/demo          # TOKENS by phase (from spans.jsonl), reconciled against the DURABLE
                                   # llm_usage ledger; residual SIGNED and printed. The build
                                   # (plan+stages+card_build) measured 61-63% of two real runs.

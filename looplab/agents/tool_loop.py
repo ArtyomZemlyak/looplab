@@ -436,22 +436,42 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
             _tool_obs.set("capability_manifest_sha256", manifest_hash)
         for key, value in typed_result.trace_attributes().items():
             _tool_obs.set(f"result_{key}", value)
-    # Cap once, up front — appending an explicit truncation marker when the cap actually
-    # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
-    # will carry (a single expression, not two kept-in-sync copies).
-    result = _cap_tool_result(str(result))
-    # Tag the 3rd+ IDENTICAL-RESULT repeat of this (tool, canonical-args) call (see
-    # _REPEAT_NOTE: the round-robin gap the StuckDetector's 1-/2-cycle window can't
-    # cover; a changed result — a cursor poll's new chunk, a post-write re-read —
-    # resets the streak and never gets the note). The note rides OUTSIDE the cap so it
-    # can never be truncated away.
-    repeat_note = ""
-    sig = f"{name}({_canonical(args)})"
-    prev, streak = repeat_state.get(sig, (None, 0))
-    streak = streak + 1 if result == prev else 1
-    repeat_state[sig] = (result, streak)
-    if streak >= 3:
-        repeat_note = _REPEAT_NOTE.format(k=streak)
+        # Cap once, up front — appending an explicit truncation marker when the cap actually
+        # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
+        # will carry (a single expression, not two kept-in-sync copies).
+        result = _cap_tool_result(str(result))
+        # Tag the 3rd+ IDENTICAL-RESULT repeat of this (tool, canonical-args) call (see
+        # _REPEAT_NOTE: the round-robin gap the StuckDetector's 1-/2-cycle window can't
+        # cover; a changed result — a cursor poll's new chunk, a post-write re-read —
+        # resets the streak and never gets the note). The note rides OUTSIDE the cap so it
+        # can never be truncated away.
+        repeat_note = ""
+        sig = f"{name}({_canonical(args)})"
+        prev, streak = repeat_state.get(sig, (None, 0))
+        streak = streak + 1 if result == prev else 1
+        repeat_state[sig] = (result, streak)
+        if streak >= 3:
+            repeat_note = _REPEAT_NOTE.format(k=streak)
+        # THIS BLOCK MOVED INSIDE THE TOOL SPAN so the streak can be STAMPED, and that is the
+        # whole change: the note was appended to the model's message and to nothing else, so no
+        # span, event or export ever carried it. Measured on `e5small-dr-unified-v10`'s first
+        # propose phase — 370 tool calls, 71 repeated (tool, args) pairs, 101 repeats whose
+        # output was byte-identical — and the durable record could not say whether the nudge had
+        # fired once. Nobody could count its firings on any run, and nobody could answer the only
+        # question it exists for: does a nudged model stop repeating? `streak >= 3` was therefore
+        # an unvalidated constant. Reading the spans it looks like the note NEVER fires; that is
+        # an artifact of where it was appended, and this stamp is what makes the two
+        # distinguishable.
+        #
+        # ADDITIVE trace attributes only (invariant #5): no event type, no fold change, no
+        # behaviour change — the message the model receives is byte-identical, which is what
+        # `tests/test_tool_repeat_streak_is_traced.py` pins. `repeat_streak` rides on EVERY tool
+        # call, because "this call has run once" is the denominator the firings are a rate over;
+        # `repeat_note_sent` rides only when the note really went, since a flag on a call that
+        # was not nudged would be a claim nobody made.
+        _tool_obs.set("repeat_streak", streak)
+        if repeat_note:
+            _tool_obs.set("repeat_note_sent", True)
     if on_tool_result is not None:      # provenance hook: exceptions propagate
         on_tool_result(name, args, result + repeat_note)
     return result, repeat_note
