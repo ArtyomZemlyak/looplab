@@ -1568,3 +1568,46 @@ wins.
 Now that §40.2 names the abort mechanism — one 120 s timeout, then AlgoTune's early-exit failing
 every remaining run — this probe tests whether that explanation holds on a task known for it, and
 whether the repaired stack moves a tie.
+
+### 43.1 Our half of the same failure is our own 45-second first-byte guard, working
+
+§43 established that arm B's broken pipes cost $0. This sweep asked WHY they exist at all, because
+two more arrived 20 s apart on different probes and "transient" had already been the wrong answer
+twice.
+
+They come in **bursts across simultaneous probes** — 5 of 46 bursts hit more than one run:
+
+| burst | probes |
+|---|---|
+| 08-27 22:24:28 | ds3, dsFBKc |
+| 08-27 22:32:53 | ds3Hull, dsFBHull |
+| 08-28 10:38:16 | dsFix1, dsFix2, dsN3, dsN3b (**four at once**) |
+| 08-28 23:42:05 | dsBN, dsDL |
+| 08-29 01:48:58 | dsBN2, dsCH3, dsIF3x |
+
+Simultaneity across independent runs means a shared cause. Two candidates were tested and killed:
+
+* **Not an evaluation fork-storm.** Zero evaluations were in flight at any burst — but the control
+  says zero at random moments too (median 0.0 concurrent evaluations, mean 0.05), so this test has
+  no power and is reported as uninformative rather than as a negative.
+* **Not a proxy stall.** The ledger kept writing straight through every burst: 63–165 records in the
+  ±5-minute window, largest gap 37–117 s against a 2.9 s median — normal for a stream of long LLM
+  calls, and impossible if the proxy had frozen.
+
+What remains fits every measurement: our client's **`llm_header_timeout = 45 s`** first-byte window
+(`core/llm.py`, `httpx.Timeout(connect=...)`). When the upstream is briefly slow to start
+responding, every concurrent run crosses 45 s at about the same moment, gives up, and the proxy
+records `BrokenPipeError` when it finally has something to write. The 01:48:58 burst reads exactly
+that way:
+
+    01:48:19–48   heavy traffic, all 200, all billed
+    01:48:58      dsCH3   BrokenPipe   $0.00000
+    01:49:10      dsBN2   BrokenPipe   $0.00000
+    01:49:18      dsIF3x  BrokenPipe   $0.00000
+    01:50:03…     all three resume, all 200
+
+**This is the guard working, not a defect.** Nothing was billed, nothing was lost, all three runs
+retried. And it is the exact inverse of arm A's failure: theirs holds the socket for 600 s, pays for
+4.59 M completion tokens and discards them; ours gives up at 45 s having paid nothing. The
+asymmetry in §43 is a client-configuration difference, and this is the configuration that produced
+it.
