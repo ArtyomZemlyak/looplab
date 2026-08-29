@@ -37,15 +37,21 @@ const COPY = Object.freeze({
   finalization_stalled: ['Finalization needs recovery', 'The engine stopped before durable wrap-up completed.', 'Open Events'],
   stalled: ['Run engine stopped', 'No engine process is advancing this run.', 'Open Events'],
   train_monitor: ['Training looks broken', 'The live-log monitor judged this training likely wasted. Open the run to inspect the log and verdict.', 'Inspect training'],
-  // OPEN[overrun-detail-never-read] the fallback below ALWAYS wins: `normalizeRunAttention` builds
-  // its detail from this table alone and reads no measured figure off the payload, so the server's
-  // projected overrun and wall are discarded from both this card and the desktop notification, and
-  // the operator is told an experiment will miss its wall without being told by how much. Keep the
-  // untrusted-prose boundary — publish the two bounded NUMERIC hour fields and format them here.
-  // The falsifier is the FIX's own field name, not this COPY row: the row is the FALLBACK and
-  // survives the fix by design, so `present:` on it would leave the marker stuck open forever.
-  // proof:`absent:overrun_hours@ui/src/attentionModel.js`
-  // The server sends the measured hours in `detail`; this is the fallback shown when it does not.
+  // THE SERVER'S MEASURED DETAIL IS NOW USED, and the marker that stood here prescribed the wrong
+  // fix (corrected 2026-08-29). It said to publish "two bounded NUMERIC hour fields and format them
+  // here" — but `serve/attention.py` ALREADY computes the sentence from its own measurements
+  // ("projected to overrun by 4.2h beyond the deadline grace against a 10.0h wall"), and what threw
+  // it away was this module's `const [title, detail, actionLabel] = COPY[kind]`, which reads the
+  // table and never the payload. Adding numeric fields would have duplicated arithmetic the server
+  // had already done; `MEASURED_DETAIL_KINDS` below reads what it sent.
+  // THE UNTRUSTED-PROSE BOUNDARY IS KEPT AND IS THE WHOLE REASON THIS IS AN ALLOW-LIST. The server
+  // states the rule at the `train_overrun` row: its numbers are "the engine's OWN measurement of
+  // its own stage — a span, an ETA and a declared wall — not model-authored log prose, so they may
+  // ride in the envelope where the health family's verdict text deliberately may not". `train_monitor`
+  // is exactly that other family: its detail quotes an LLM's verdict about a candidate's own log, so
+  // it stays on the COPY table and no server string may replace it.
+  // The row below survives as the FALLBACK for a payload that carries no detail (an older server,
+  // or a row whose detail failed sanitisation).
   train_overrun: ['Experiment will miss its wall', 'This experiment is projected to be killed by its own deadline before it finishes. Raise the wall or stop it.', 'Inspect training'],
   asha: ['ASHA rank warning', 'Inspect the live curve. Automatic stopping requires peers at the same declared progress.', 'Inspect experiment'],
   assistant_permission: ['Assistant approval needed', 'Open Assistant to review the exact action and scope.', 'Open Assistant'],
@@ -53,6 +59,19 @@ const COPY = Object.freeze({
 
 const safeRunId = value => typeof value === 'string' && value.length > 0 && value.length <= 255
   && !CONTROL_RE.test(value) ? value : ''
+// WHICH KINDS MAY SPEAK FOR THEMSELVES. Membership means the server's `detail` for that kind is
+// built from the ENGINE's own measurements, never from model-authored text. Adding a kind here is a
+// trust decision, not a formatting one — `train_monitor` is deliberately absent because its detail
+// quotes an LLM verdict about a candidate's own log.
+export const MEASURED_DETAIL_KINDS = new Set(['train_overrun'])
+
+// A server detail is untrusted TEXT even when its numbers are trusted: bounded, single-line, and
+// control-free, on the same rule `safeContextText` applies one line down. It is deliberately more
+// generous in length (a measured sentence is longer than a label) and returns '' on anything it
+// cannot vouch for, which sends the caller back to the COPY table.
+const safeDetailText = value => typeof value === 'string' && value.trim().length > 0
+  && value.trim().length <= 400 && !CONTROL_RE.test(value) ? value.trim() : ''
+
 const safeContextText = value => typeof value === 'string' && value.trim().length > 0
   && value.trim().length <= 160 && !CONTROL_RE.test(value) ? value.trim() : ''
 const safeInteger = value => Number.isSafeInteger(value) && value >= 0 ? value : null
@@ -105,7 +124,11 @@ export function normalizeRunAttention(raw) {
   const nodeGeneration = raw.node_generation == null ? null : safeInteger(raw.node_generation)
   if ((raw.node_id != null && nodeId == null) || (raw.node_generation != null && nodeGeneration == null)) return null
   if (kind === 'approval' && (nodeId == null || nodeGeneration == null)) return null
-  const [title, detail, actionLabel] = COPY[kind]
+  const [title, fallbackDetail, actionLabel] = COPY[kind]
+  // The server's sentence when this kind is allowed to speak and actually said something;
+  // the table otherwise. Neither branch can produce an empty detail.
+  const measured = MEASURED_DETAIL_KINDS.has(kind) ? safeDetailText(raw.detail) : ''
+  const detail = measured || fallbackDetail
   const runLabel = safeContextText(raw.run_label)
   const taskId = safeContextText(raw.task_id)
   const item = {
