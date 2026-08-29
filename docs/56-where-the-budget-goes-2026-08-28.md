@@ -1714,3 +1714,40 @@ note-run at the same settings, which takes the clean comparison to n = 3 vs 3.
 A correction to my own arithmetic: the first version of this test printed `p = 0.000`, which is
 impossible at n = 2 vs 3 (the floor is 1/10). Two identical 9.7 % values collapsed into one rank in
 my tie handling. The corrected figures are above.
+
+## 47. dsRBF is the first run the novelty gate ate whole
+
+`rbf_interpolation`, **$1.006, ONE node, metric 0.0** — a total loss, the second in the corpus after
+`opus5` (§37.1). 96 min wall, **95 % LLM, 0.6 min evaluation**. Phases: `plan_step` $0.4011 / 87,
+`propose` $0.2207 / 59, `plan` $0.1484 / 36, `repropose` $0.0985 / 26, `deep_research` $0.0802 / 27.
+
+The event stream names the mechanism exactly:
+
+    node 0  propose   finished  462.4 s  ok=true    → node built, scored 0.0 (execution_error)
+    node 1  propose   finished 2254.5 s  ok=FALSE
+    node 1  novelty   finished  850.8 s  ok=FALSE   ← novelty_rejected
+    run_finished  reason=budget_exhausted  "$1.0033 of the $1.0000 set by llm_budget_usd"
+
+Forty-five of the run's ninety-six minutes went into proposing, and the second proposal — 2,254 s of
+it — was **discarded by the novelty gate**, after which the money ran out. The report the run wrote
+for itself says it plainly: *"#0 is the champion at metric=0 (draft); written without the model."*
+
+**This is not a new defect. It is a known price, and the config already carries the measurement.**
+`core/config.py` on `novelty_mode="llm"` (the default) records, from the 20-run arm-B campaign: 99
+invocations, 823 paid calls, **$1.77 of a $15.73 campaign and 6.6 of its 60.8 run-hours, for 10
+rejections**; an admitted proposal costs a median 4 calls / 10.6 s, a REJECTED one **37 calls /
+21.6 minutes**. The same note concludes the gate is **net-negative on AlgoTune** ($1.77 and 6.6 h
+spent to avoid ~$0.77 and 5.7 min of duplicate evaluation) and deliberately leaves the product
+default alone, because flipping it on one task family's evidence would be the same error as fencing
+a proposal on the log's length.
+
+What dsRBF adds is the tail of that distribution: the first run where the gate consumed the ENTIRE
+budget and left nothing. Corpus-wide the gate fired 48 times across 29 of 54 runs; failed-phase
+wall-clock totals 4,803 s in `propose` and 1,082 s in `novelty`, and **dsRBF alone is 3,104 s of
+that 5,885 — 53 %**. Its `repropose` count (26) is exactly the corpus MEDIAN, so it is an outlier in
+time, not in attempts.
+
+**dsNov launched on the freed lane** with the operator lever the config names — `novelty_mode=off`,
+confirmed in the run's own `config.snapshot.json`. It is `edge_expansion`, $1, otherwise identical
+to dsBN/dsBN2/dsBN3, so it differs from them by exactly one setting. This is the lever being
+verified BY PROBE rather than by re-reading the note that recommends it.
