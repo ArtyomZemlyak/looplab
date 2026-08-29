@@ -845,6 +845,36 @@ of how long the run took, and `timings` names the untraced share of it.
 
 ---
 
+**Was the run STARVED?** Since 2026-08-29 the command closes with an eval-occupancy block folded
+from `events.jsonl` — not from spans, so it answers on a run whose trace was cleared or never
+written:
+
+```
+eval occupancy (from events.jsonl, not spans):
+  bootstrap    89.7 min  before the first evaluation could start — not starvation
+  dead          0.0 min  (0% of the 202.3 min since) with NO evaluation running
+  concurrent evaluations — 0: 89.7 min, 1: 144.5 min, 2: 57.8 min
+  2 evaluation(s) still open at the last event — counted busy to there
+```
+
+**The bootstrap is separated and that is the whole point.** No run can evaluate before its first
+build finishes, so that stretch is not a starved lane — and folding it into one percentage is how
+the same question got two wrong answers on this box before this block existed. `dead` is a share of
+the span **since the first evaluation began**, never of the whole run.
+
+Measured across the two runs here, same engine and the same `eval_parallel: 2`:
+
+| run | bootstrap | span after it | dead | windows |
+|---|---|---|---|---|
+| `e5small-dr-unified-v9` | 1.09 h | 23.66 h | **6.61 h (28%)** | 1.41 h, then 5.20 h |
+| `e5small-dr-unified-v10` | 1.50 h | 2.82 h | 0.00 h (0%) | — |
+
+Opposite outcomes that a single all-run percentage could not tell apart. The **windows are named**
+rather than only totalled, because `12.28h → 13.69h` is what makes a starvation window findable — a
+total only says one happened. Overlapping evaluations merge into one busy stretch, so a two-lane run
+cannot report the same idle time twice, and an evaluation still open at the last event is counted
+busy to there: true of a live run, and the most a killed one can prove.
+
 ## `parser-stats`
 
 Read-only. How the structured-output parser really behaved on **your** endpoints.
