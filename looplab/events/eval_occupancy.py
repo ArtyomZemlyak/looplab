@@ -10,7 +10,22 @@ Separated, over the two runs on this box:
 
     v9   run 24.74 h | bootstrap 1.09 h | after that 23.66 h span, 6.61 h dead (28 %)
            dead 12.28h -> 13.69h (1.41 h) and 13.76h -> 18.96h (5.20 h)
-    v10  run  4.32 h | bootstrap 1.50 h | after that  2.82 h span, 0.00 h dead (0 %)
+    v10  run 13.86 h | bootstrap 1.50 h | after that 12.37 h span, 1.14 h dead (9.2 %)
+           one window, 10:25 -> 11:33
+    v11  run  6.50 h | bootstrap 1.02 h | after that  5.47 h span, 0.00 h dead (0.0 %)
+           PARTIAL — the run is live; re-derive rather than quoting this line
+
+THE v10 LINE ABOVE SAID "run 4.32 h ... 0.00 h dead (0 %)" UNTIL 2026-08-29, and it was true when
+written and false by the time anyone read it: that was a snapshot taken 4.3 h into a run that went
+on to 13.86 h and accumulated a 1.14 h dead window. A figure from a LIVE run is a measurement of a
+moment, and this file exists to stop exactly that class of error — so the v11 line carries its own
+warning rather than trusting the reader to remember.
+
+The progression across three runs of the same engine at the same `eval_parallel: 2` is the useful
+comparison, and v11's zero has a mechanism rather than being luck: its node 2 was built
+speculatively at 18:20:23 and PARKED, so when node 1's lane freed at 20:23:15 the next eval started
+at 20:23:16 — one second. The build latency that opened v9's and v10's windows was absorbed by the
+prefetch.
 
 Same engine, same `eval_parallel: 2`, opposite outcomes — which is the comparison the single
 percentage could not make. The 5.20 h window is the one that costs GPU hours and it is what
