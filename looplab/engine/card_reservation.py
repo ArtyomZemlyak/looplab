@@ -1389,6 +1389,20 @@ class CardReservationMixin:
         dropped_batch: list[dict] = []
         try:
             if len(raw) > 1 and all(action.get("kind") == "draft" for action in raw):
+                # OPEN[batch-propose-still-blocks-event-loop] the multi-draft lane's paid Researcher
+                # call still runs as one event-loop callback; only the per-action branch below was
+                # moved off the loop.
+                # proof:`present:self._consume_batch_proposal(@looplab/engine/card_reservation.py`
+                # REVIEW 2026-08-29 (P2 efficiency): `_consume_batch_proposal` -> `_propose_batch`
+                # is the same minutes-long provider wait the per-action offload was measured for
+                # (py-spy: a dead node waited 62 minutes for its terminal while both H200s idled),
+                # reachable through this sibling branch whenever a speculation-off card run stages a
+                # multi-draft lane — e.g. an occupancy-paced create fired precisely BECAUSE an eval
+                # is in flight. While it runs, no eval terminal, watchdog tick or timer can land.
+                # Fix direction: offload it the same way once the sink discipline the marker above
+                # (`offload-lane-appends-folded-events-off-main-task`) prescribes is in place —
+                # its audit rows travel the same `_append_proposal_event` protocol — or state here
+                # why the batch lane is exempt.
                 ideas, telemetry, dropped_batch = self._consume_batch_proposal(
                     proposal_state, len(raw))
                 for offset, (action, idea, record) in enumerate(
@@ -1429,6 +1443,28 @@ class CardReservationMixin:
                         # NOTHING: an AST pass over it finds zero `store.append` calls, and its audit
                         # rows go through `_append_proposal_event`, whose `_PROPOSAL_EVENT_SINK`
                         # contextvar survives `to_thread.run_sync` (driven, not assumed).
+                        # OPEN[offload-lane-appends-folded-events-off-main-task] the "writes NOTHING"
+                        # claim above is false one call deep, and the folded appends now run on the
+                        # worker thread.
+                        # proof:absent:_capture_proposal_events@looplab/engine/card_reservation.py
+                        # REVIEW 2026-08-29 (P1 correctness): the sink contextvar does survive
+                        # `to_thread.run_sync`, but NOTHING INSTALLS IT on this lane — the one
+                        # installer is `speculation.py::_prepare_raw_card_stage` (Layer 5), so in
+                        # this worker `_append_proposal_event` falls through to `self.store.append`.
+                        # `_prepare_node_idea._link` and `_apply_novelty_gate` reach it with
+                        # EV_NOVELTY_REJECTED / EV_NOVELTY_GRADED / EV_CROSS_RUN_PRIOR — all FOLDED,
+                        # and none of the three thread-append registries in `events/types.py` names
+                        # them — i.e. invariant #1's sole-writer rule is breached on a default
+                        # card lane, unregistered and unproven. These rows are authority-bearing
+                        # for `_proposal_authority_seq` (the fence that discards a paid proposal
+                        # when any non-diagnostic row lands in its equality window), and a worker-
+                        # thread append can land at instants the main-task ordering used to exclude.
+                        # The guard `test_propose_does_not_freeze_the_loop::test_the_offloaded_call_
+                        # writes_no_events` walks only `_prepare_node_idea`'s own AST and cannot see
+                        # the append one helper down, so nothing is red. Fix direction: install the
+                        # buffered-intents sink (the Layer-5 discipline in `novelty.py`) around this
+                        # call and publish the captured intents from the main task after the await —
+                        # or register + prove the seam the way `SETUP_THREAD_APPENDABLE` did.
                         idea = await anyio.to_thread.run_sync(
                             functools.partial(
                                 self._prepare_node_idea,
@@ -1829,6 +1865,22 @@ class CardReservationMixin:
         # unsafe. Use the EventStore's atomic tail CAS instead: concurrent callers either observe the
         # first drop or lose the CAS and retry against its prefix.
         def _plan(events, tail) -> None:
+            # OPEN[reopened-card-immune-to-engine-drop] idempotence is keyed on "any drop receipt
+            # ever", so an operator reopen makes the card permanently un-retirable by the engine.
+            # proof:absent:EV_CARD_REOPENED@looplab/engine/card_reservation.py
+            # REVIEW 2026-08-29 (P1 correctness): the fold resolves drop/reopen LAST-RECEIPT-WINS
+            # (`events/card_ledger.py` pops an operator drop superseded by a later reopen), but this
+            # scan still treats any historical drop as standing and returns without appending — and
+            # no engine module reads `card_reopened` receipts at all. So after drop -> reopen, every
+            # later engine retirement (`_retire_unclaimable_cards`, the failed-reservation cleanup,
+            # the node-reset re-propose that drops the superseded card) silently no-ops while its
+            # caller believes the card retired: the retire loop resets its counters and re-enters
+            # the same refuse/retire cycle, and the re-propose path leaves the superseded twin live
+            # beside its replacement — the leak `_exhausted` below exists to refuse, now silent.
+            # The ledger's own comment names this state ("permanently un-droppable by its owner")
+            # but blocks only the laundering path; the legitimate operator reopen reaches it too.
+            # Fix direction: disregard drop receipts superseded by a later reopen of the same
+            # canonical id (the fold's own index rule), or key idempotence on folded card status.
             if any(
                     event.type in {EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED}
                     and self._canonical_card_id(event.data.get("id")) == card_id

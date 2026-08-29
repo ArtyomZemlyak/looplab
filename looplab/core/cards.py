@@ -1399,6 +1399,15 @@ class Card(BaseModel):
     # an `experiment`. This is the SAME predicate `engine/research_cadence.py::is_pure_belief` applies
     # at the append site, published here so the board, the prompts, the tools and that gate read ONE
     # spelling. Frozen vocabulary for the UI contract: kinds may be added, never re-spelled.
+    # OPEN[card-kind-comment-claims-retracted-equivalence] the sentence above states as fact the
+    # equivalence `card_kind_of`'s own docstring retracted.
+    # proof:`line:SAME predicate&&is_pure_belief@looplab/core/cards.py`
+    # REVIEW 2026-08-29 (P3 docs-drift): that docstring says THEY ARE NOT ONE CALL — the two answer
+    # differently when `selection_provenance` is None (the append-site gate reads a direction, this
+    # side deliberately the conservative experiment) — and names the cost of asserting otherwise:
+    # "a reader trusts the claim and stops checking". This field comment is the wire contract
+    # readers actually open, so it is the copy most likely to be trusted. Reword it to the
+    # retracted form (same TEST, applied at the append site, divergent on a missing provenance).
     card_kind: str = CARD_KIND_EXPERIMENT
     # Identity / lineage.
     merged_into: Optional[str] = None                   # canonical id if this card was merged away

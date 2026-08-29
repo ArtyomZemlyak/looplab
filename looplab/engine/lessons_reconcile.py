@@ -70,6 +70,24 @@ class LessonReconcileMixin:
                 if pr["kind"] == "debug":
                     why = " ".join((a.idea.rationale or "").split())[:90]
                     if a.id == b.id:      # IN-NODE repair: the same node before and after its fix
+                        # OPEN[self-pair-lesson-names-no-stage] both fields this rendering reads are
+                        # structurally empty for every node that can reach it, so the durable lesson
+                        # always carries the placeholder text.
+                        # proof:`present:or (a.error_reason or "a failure")@looplab/engine/lessons_reconcile.py`
+                        # REVIEW 2026-08-29 (P2 correctness): the self-pair population is nodes with
+                        # a METRIC and `repairs > 0` — i.e. inline-repaired then EVALUATED — and the
+                        # fold sets `failed_stage`/`error_reason` only in `_on_node_failed` (one
+                        # terminal per node; both cleared on every reset), so no evaluated node
+                        # carries either. Offline, the shared `lessons.jsonl` receives "a node whose
+                        # 'a failure' stage failed was repaired in place..." verbatim; the LLM path
+                        # renders the 'eval' twin AND hands the judge `code_diff(b.code, a.code)`
+                        # over `a is b` — an empty diff — while demanding "what the REPAIR had to
+                        # change". `tests/test_developer_lesson_channel.py` fabricates evaluated
+                        # nodes WITH `failed_stage`, a state the fold cannot produce, so nothing is
+                        # red (the tier-1 trap CLAUDE.md documents). Fix direction: source the
+                        # stage and the repair account from what the fold actually keeps — the
+                        # superseded `Node.stages[]` rows, or a field folded off `node_repaired` —
+                        # and re-point the tests at fold-produced state.
                         what = getattr(a, "failed_stage", None) or (a.error_reason or "a failure")
                         out.append(_lesson(
                             pr, f"a node whose '{what}' stage failed was repaired in place and then "

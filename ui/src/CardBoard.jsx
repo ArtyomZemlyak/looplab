@@ -581,6 +581,19 @@ function _CardKanbanCard({
       {evidence.length === 0 && <span className="muted">
         {evidenceKnown ? 'No evidence nodes' : 'Evidence unavailable'}</span>}
     </div>
+    {/* OPEN[reopen-form-gated-behind-terminal-exclusion] the reopen form can render for no card:
+        it requires status 'dropped' while this enclosing disclosure requires !terminal, and
+        `terminal` is true for every dropped card.
+        proof:`absent:onControl && _cardStatus(card) === 'dropped'@ui/src/CardBoard.jsx`
+        REVIEW 2026-08-29 (P1 delivery): the two gates are mutually exclusive, so the whole reopen
+        stack (event type + five control-validation rows + fold handler + CONTROL.reopenCard + the
+        reopenable authority gate) is unreachable from the browser — the THIRD unreachability in
+        this feature; the first two were fixed while this one persisted because every guard tests
+        the model/dispatch text and nothing renders a dropped card and looks for the button
+        (SSR-driven: a dropped reopenable card renders no controls block at all). Fix direction:
+        move the reopen form out of this disclosure into a sibling block gated on the dropped +
+        reopenable pair (the other controls SHOULD stay hidden on terminal cards), and add an SSR
+        test that renders a dropped reopenable card and asserts the button exists. */}
     {onControl && !terminal && <details className="card-kanban-controls">
       <summary aria-label={`Operator controls for ${card.id}`}>Operator controls</summary>
       <form className="card-control-form" onSubmit={event => { event.preventDefault(); saveStatement() }}>

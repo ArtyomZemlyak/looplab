@@ -388,6 +388,14 @@ def backfill_receipt(candidate_s, remaining_s, *, lam: float = 1.0) -> dict:
     WOULD have admitted and let a real corpus accumulate before any admission changes. That is the
     same "measure first" shape `docs/BACKLOG.md` records for the deterministic stop gate, and it
     matters more here because the cost of a wrong admission is a real training run delayed.
+
+    OPEN[backfill-receipt-unwired] nothing in the engine calls this (or `backfill_admits`), so
+    the measure-first corpus the paragraph above depends on can never start accumulating.
+    proof:absent:backfill_receipt(@looplab/engine/orchestrator.py
+    REVIEW 2026-08-29 (P3 delivery): only tests import the pair; no site computes a candidate
+    ETA/remaining pair and writes the row, so the F1h idle-device gap this was built for stays
+    unmeasured while the rule reads as observed. Fix direction: stamp the receipt onto a
+    diagnostic row where `_occupancy_paced_creates` already deliberates, then delete this marker.
     """
     admits = backfill_admits(candidate_s, remaining_s, lam=lam)
     row = {"admits": admits, "lam": round(float(lam), 4) if isinstance(lam, (int, float)) else None}

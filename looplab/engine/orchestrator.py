@@ -6295,6 +6295,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         out: list = []
         digests: dict = {}                                          # resolved-root -> digest (once)
+        # OPEN[dirty-input-failures-fold-into-clean] every per-source git failure yields the same
+        # empty enumeration as a genuinely clean tree, so the substrate's "could not read" branch
+        # is unreachable for the very failures it names.
+        # proof:`present:if r.returncode == 0 and dirty:@looplab/engine/orchestrator.py`
+        # REVIEW 2026-08-29 (P2 correctness): `workspace.py::substrate_fingerprint` (7326e259)
+        # guards `except Exception: dirty = None` and records `"dirty": "unknown"` — its comment
+        # enumerates an index.lock, a mid-rebase tree, an EIO, a timeout. None of those can reach
+        # it: this loop swallows each source's exception with `pass` and the rc filter below drops
+        # a nonzero exit, so a wedged geesefs mount (10 s wall against this box's 105-950 ms
+        # lstats) returns [] and the node records the bare-HEAD fingerprint, byte-equal to a clean
+        # tree — `comparability` can then certify SAME across a substrate change, the exact
+        # confidently-wrong record that branch claims is now refused. Driven: monkeypatching
+        # `subprocess.run` to raise TimeoutExpired yields [] and the clean-tree digest. Fix
+        # direction: make per-source failure observable (a sentinel entry, or return None when a
+        # git tree's status raises/exits nonzero) and route it into the unknown branch.
         for src in sorted(sources or ()):
             try:
                 p = Path(src)

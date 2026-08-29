@@ -163,6 +163,22 @@ def _healed_list_elements(annotation: object, value: object) -> object:
     elif annotation == list[int]:
         # `isinstance(True, int)` is True and a bool is not a node id; `type(...) is int` is the
         # same test `sanitize_research_memo_payload` makes of these very values.
+        # OPEN[claim-node-ids-healer-drops-numeric-strings] this pre-heal silently discards node
+        # citations pydantic's own lax validation accepted until 7326e259 made `_ClaimOut` heal.
+        # proof:`present:type(item) is int]@looplab/agents/deep_research.py`
+        # REVIEW 2026-08-29 (P1 correctness): numbers-as-strings is ordinary LLM JSON (30f6aee6 in
+        # this same window measured a whole list arriving as a string), and a bare `BaseModel`
+        # coerces `["3", "5"]` to `[3, 5]` — the shipped behaviour this healer sits in front of.
+        # Running `mode="before"`, the exact-int test drops every stringified id, so a TRUE,
+        # correctly-cited claim reaches `trust/memo_verify.py` with no evidence and is durably
+        # stamped `unsupported` / "no evidence cited" — poisoning the `memo_verdict_cue` tally
+        # spliced into every proposal prompt and refusing the claim as cross-run evidence at
+        # finalization. Driven live: `_ClaimOut.model_validate({"node_ids": ["3", "5"]})` yields
+        # `[]` where the pre-window model yields `[3, 5]`. The comment above is right about junk
+        # (`"x"`, True) and overshoots on values validation itself would accept;
+        # `tests/test_memo_stringified_list_arg.py` pins only the junk case. Fix direction: keep,
+        # besides exact ints, digit-strings and integral floats (still dropping bools/junk), or
+        # skip the pre-heal for elements pydantic can coerce and let validation decide.
         healed = [item for item in value if type(item) is int]
     else:
         return value
@@ -550,6 +566,17 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
         # would push the board past its cap. Nothing offers to retire an existing belief on the
         # model's say-so, so nothing here says it will: the proposal prompt's neighbouring block
         # carries a comment about exactly what an unimplemented "the engine decides" promise cost.
+        # OPEN[memo-prompt-promises-directions-registered] the register-promise below names the
+        # legacy union field; since the question/experiment split, only `open_questions` reaches
+        # the board, so the sentence is false for every split-compliant memo.
+        # proof:`line:recommended_directions&&registered as OPEN BELIEFS@looplab/agents/deep_research.py`
+        # REVIEW 2026-08-29 (P3 docs-drift): prompt strings are contracts (CLAUDE.md).
+        # `research_cadence.py` registers `questions` — the split list when the memo filled it,
+        # the union only as fallback — and `next_experiments` entries riding the union are never
+        # board rows. A model told the union is registered has less reason to route a broad
+        # question into the channel the split was measured on v5 to need. Reword the promise to
+        # match: the question half becomes open beliefs (the union only when no split is drawn),
+        # keeping the dedup/cap warning as is.
         prefix_lines.append(
             "Your `recommended_directions` are registered as OPEN BELIEFS on that same board. "
             "Propose only directions that are genuinely NEW — a re-worded restatement of a row "

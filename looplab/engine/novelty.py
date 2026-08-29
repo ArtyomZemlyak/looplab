@@ -620,6 +620,21 @@ class NoveltyGateMixin:
                     "reason": "proposal cannot form a bounded native Card action",
                     "action": "dropped",
                 })
+            # OPEN[duplicate-receipt-lands-on-one-lane-of-three] bd182357's discarded-proposal
+            # receipt reaches the log from the per-action funnel only; this batch lane and the
+            # speculative producer both still lose a paid refused proposal in silence.
+            # proof:absent:card_duplicate@looplab/engine/novelty.py
+            # REVIEW 2026-08-29 (P2 durability): a batch draft planning `duplicate` (a busy board's
+            # ordinary answer) falls through the return below with nothing written — byte-for-byte
+            # the v8 loss bd182357 measured (24.1 min / 81 calls / 4.27M tokens -> NOTHING), one
+            # lane over — because the receipt lives only in `_prepare_node_idea._link`, whose
+            # "THE ONLY PLACE ... and nowhere else" comment overstates its own coverage. The third
+            # lane is worse: the Layer-5 producer DOES emit the receipt under its buffered-intents
+            # sink, and `speculation.py::_serve_raw_card_stage` drops `result.audit_events` on the
+            # `not result.success` early return, so the receipt is captured and then discarded.
+            # Fix direction: emit the same duplicate-kind `novelty_rejected` row from this branch
+            # (it too runs right after a paid propose and holds the hypothesis), and publish the
+            # buffered intents on the spec lane's failure path; then delete this marker.
             return plan.idea if plan.disposition in {"mint", "reuse"} else None
 
         if callable(native):

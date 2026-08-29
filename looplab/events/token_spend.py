@@ -87,6 +87,20 @@ def _tokens_of(usage) -> tuple[int, int, int]:
     # substitution the docstring above forbids, and it is not cosmetic: it inflates `attributed`,
     # drives `residual` negative, and makes `looplab tokens` print "spans over-attribute" — blaming
     # a retried provider call for a number this reader invented.
+    # OPEN[stated-zero-rule-reads-a-writer-normalized-field] the zero this rule preserves cannot
+    # reach it from the shipped writer, and the zero it CAN see is manufactured from junk.
+    # proof:`present:(counted or _states_zero(stated))@looplab/events/token_spend.py+present:_token_int(t.get("total_tokens")@looplab/core/tracing.py`
+    # REVIEW 2026-08-29 (P2 correctness): `core/tracing.py::_norm_usage` runs a TRUTHINESS chain of
+    # its own at write time, so a provider-stated total of 0 beside real parts is replaced by their
+    # sum before any span exists — the cache-served case above is unwritable — while a junk or
+    # negative `total_tokens` ('n/a', -1) beside real parts IS stored as 0 (`_token_int` maps
+    # unparseable to 0). This reader then treats that manufactured 0 as "provider explicitly
+    # reported ZERO" and drops prompt+completion from `attributed`, opening a per-call span-vs-
+    # ledger gap the CLI reports as spans under-attributing — the ledger's own `_normalize_usage`
+    # records the sum for the same payload. Driven with the real functions on both sides. Fix
+    # direction: make the writer honor presence the way this reader does (keep a stated in-range
+    # zero, store junk as ABSENT), or accept a stored zero here only when the parts are zero too;
+    # either way the cache-served claim moves to the site that decides it.
     total = counted if (counted or _states_zero(stated)) else (prompt + completion)
     return total, prompt, completion
 
@@ -95,6 +109,18 @@ def _tokens_of(usage) -> tuple[int, int, int]:
 # `PHASE_UNATTRIBUTED`, and it exists for the same reason: an unattributable call is a fact about the
 # record. Every `propose` generation lands here by construction on a card-driven run, because a
 # proposal is made BEFORE the card it may become exists.
+# OPEN[card-rows-price-propose-as-build] the sentence above is false, and the per-card rows
+# therefore price research/propose spend under a label that says BUILD.
+# proof:`line:generation lands here by construction&&card-driven run@looplab/events/token_spend.py`
+# REVIEW 2026-08-29 (P2 docs-drift/correctness): the propose span is stamped with the card id the
+# moment `_link` mints it — `orchestrator.py::stamp_proposal_span` runs INSIDE the open `propose`
+# span, and spans are written on CLOSE — so `_owning_card` resolves propose generations to the
+# card, not to this bucket. Three shipped claims disagree with that mechanism: this comment,
+# `token_spend_by_card`'s "what each experiment's BUILD cost", and the cli-reference example
+# (whose `(no card)` is 2.9% of a run where propose measures 18-25%). An operator reconciling the
+# card table against the phase table's plan+stages+card_build reads the difference as attribution
+# error. Fix direction: either key `card_of` on `card_build` spans only (build-only pricing, as
+# documented) or reword the three claims to say a card's row includes the propose that minted it.
 CARD_UNATTRIBUTED = "(no card)"
 
 # How far up a parent chain to look for a `card_id` before giving up. A build's generations sit two

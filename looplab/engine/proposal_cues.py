@@ -618,6 +618,13 @@ class ProposalCuesMixin:
         except Exception:  # noqa: BLE001 — a prompt cue may never fail the build it decorates
             return ""
         seen: dict[int, int] = {}
+        # OPEN[footprint-cue-matches-event-by-literal] the event type is matched by a bare string
+        # instead of the `events/types.py` constant.
+        # proof:`present:!= "node_created":@looplab/engine/proposal_cues.py`
+        # REVIEW 2026-08-29 (P3 architecture): CLAUDE.md trap #7 — "a typo'd literal silently
+        # no-ops". This cue already answers "" on any mismatch, so a drifted spelling would
+        # silently restore the pre-cue prompt with nothing red (the fixture fabricates events with
+        # the same literal). Compare against EV_NODE_CREATED instead.
         for event in events:
             if getattr(event, "type", None) != "node_created":
                 continue

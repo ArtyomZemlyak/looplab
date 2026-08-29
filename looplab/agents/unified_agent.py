@@ -903,6 +903,20 @@ class UnifiedAgent(WrapsDeveloper):
         # Binding only with a run state is what enables read_code / find_analogous on it; a loop that
         # ends without an emit degrades to `unreadable`, and only a raised transport failure to the
         # run-halting `unanswerable`.
+        # OPEN[triage-wall-cutoff-noted-to-nobody] the wall below cuts a sweep short and nothing
+        # anywhere records that the diagnosis was truncated.
+        # proof:absent:on_budget=@looplab/agents/unified_agent.py
+        # REVIEW 2026-08-29 (P2 delivery): `config.py`'s `triage_time_budget_s` comment and the
+        # settings-table row both say the loop's time exit tells the operator the investigation was
+        # cut short — but `_note_budget`'s observer parameter is in EXPLICIT_ONLY_LOOP_ARGS, this
+        # module passes no observer anywhere, and `_note_budget` returns immediately without one.
+        # So a triage that hits the 1200 s wall force-emits a verdict (failure kind,
+        # `reason_summary`, repair directive, NEVER_SALVAGED gating) whose durable rows carry no
+        # truncation mark — the "computed, named, documented, delivered to nobody" shape ffdb34e3
+        # closed for the repair session (`node_repaired.budget_exhausted`) one day before this
+        # wall landed one phase over. Fix direction: pass an observer from here that stashes the
+        # cutoff (the `repo_developer._note_session_budget` pattern) and stamp it beside
+        # `reason_summary` on the terminal row — or correct the two doc claims.
         return self._pilot_emit(messages, emit_spec, _finalize, _no_emit,
                                 state=state, bind_state=state is not None,
                                 transport_fallback=_transport_failed,

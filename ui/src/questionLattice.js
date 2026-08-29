@@ -305,6 +305,22 @@ export function questionClosure(card, rollup) {
 // same card list, so between them the two cover every card the wire carried — which is the property
 // that makes retiring the Directions tab safe rather than lossy.
 //
+// OPEN[research-ladder-drops-nested-or-offpage-experiments] the totality claim above does not
+// hold: an experiment whose parent is an EXPERIMENT, or whose parent id is not on the page,
+// renders in neither half.
+// proof:`present:.filter(card => !cardParentId(card))@ui/src/questionLattice.js`
+// REVIEW 2026-08-29 (P1 correctness): ResearchView draws children only for lattice rows
+// (directions), and this complement keeps only parentless cards — so a refinement-of-a-refinement
+// (dir -> exp -> exp, the shape 54dd4c9e called "perfectly ordinary" when it fixed the same
+// depth>=2 loss in directionGroups one day before 9440cff5 retired the only total view), and any
+// card whose parent fell off the 256-row wire cap, appear NOWHERE in the Research grouping
+// (SSR-driven: both shapes render in no section, no notice). styles.css still carries the
+// "lossless" claim beside ~20 lines of dead .card-direction selectors. Distinct from
+// ResearchView's nested-direction marker (a nested DIRECTION drawn twice); this is experiments
+// drawn zero times. Fix direction: make the ladder total the way the still-exported
+// directionGroups is — nest experiment-parented children under their parent wherever it draws,
+// and give parent-off-page cards a counted section instead of dropping them.
+//
 // PARENT-BASED, never concept-based: an experiment carrying `loss/contrastive` is still unfiled if
 // no question claims it, and grouping it by its tags would seat it in the lattice as though some
 // question owned it. The edge is the claim; the tags are a description.

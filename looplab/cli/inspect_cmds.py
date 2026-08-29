@@ -222,6 +222,17 @@ def tokens(run_dir: Path = typer.Argument(...),
         # here does not merely misprint the denominator: `residual` is the whole point of the
         # command, and this is its subtrahend.
         state = fold(store.read_all())
+        # OPEN[absent-ledger-collapses-to-zero] a log holding NO cost row prints "ledger: 0" and a
+        # negative residual, instead of taking the no-denominator branch below.
+        # proof:`present:int((state.llm_cost or {})@looplab/cli/inspect_cmds.py`
+        # REVIEW 2026-08-29 (P2 correctness): `RunState.llm_cost` stays None when the log carries no
+        # `llm_usage`/`llm_cost` row (usage rows lost, an externally-billed backend), and the
+        # `or {}` here collapses that None onto the very 0 whose confusion the module's own test
+        # names as a mutation ("'no ledger' becomes 'the ledger says zero'"). Reproduced: a run dir
+        # with one 400-token generation span and no cost rows prints "ledger : 0 tokens" /
+        # "residual : -400 tokens (spans over-attribute)", exit 0. Fix: keep None when
+        # `state.llm_cost is None` — the existing `is None` branch then prints the honest
+        # "n/a (no denominator)" and the two early exits already tolerate None.
         ledger_total = int((state.llm_cost or {}).get("total_tokens") or 0)
 
     if not sp_path.exists():

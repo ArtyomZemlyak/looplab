@@ -1749,6 +1749,17 @@ class SpeculationMixin:
                  and (card.status == "dropped" or card.merged_into is not None))
                 or merged_away
             ):
+                # OPEN[crash-recovery-stale-close-names-no-reason] the one remaining bare close: a
+                # head recovered after a crash whose card was dropped/merged records no
+                # `skipped_reason`.
+                # proof:`present:skipped="stale")@looplab/engine/speculation.py`
+                # REVIEW 2026-08-29 (P3 durability): 8c7af6a3 gave the other two `stale` writers a
+                # reason slug so a discarded 30M-token build stops being unattributable, and the
+                # registry already holds the right word for this exit (`card_gone`); the guard
+                # `tests/test_card_build_skip_reasons.py` scans only `_claim_requested_card_build`'s
+                # returns, so this close can never go red. Crash-recovery rows are exactly the ones
+                # read post-mortem. Fix: pass the registered reason here (or a distinct
+                # merged-away slug, registered), then delete this marker.
                 return self._append_card_build_done(request, skipped="stale")
             return False
         if not result.success:

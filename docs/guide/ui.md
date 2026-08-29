@@ -1053,6 +1053,15 @@ number was measured; the third qualifies **what it is a number for**:
   `diverged` — a coordinate no carrier states, and one two carriers disagree about, are neither
   divergences nor agreements.
 
+<!-- OPEN[trust-default-flips-missed-diagram-and-ui-guide] the five 2026-08-23 default flips
+(the three trust scans + both search tools, 4aab7350) updated configuration.md and the schema
+only; the sentence below and three spots in the process diagram still describe the old defaults.
+proof:`line:reward_hack_detect&&is off by default@docs/guide/ui.md+present:detector default OFF@docs/infographic/agent-architecture.html`
+REVIEW 2026-08-29 (P2 docs-drift): the reward-hack scan ships ON since 2026-08-23, so "an absent
+pill is silent on most runs" now describes only runs that turned it off or legacy resumes; the
+diagram's t_rh tag/sub-line, the t_lk sub-line and the Deep-Researcher "Literature/Web opt-in"
+clause carry the same stale claim. CLAUDE.md: a default change moves the settings table, the
+guide page AND the diagram in the SAME change; "Stale docs/diagram are treated as a bug." -->
 No pill is a claim that anything is wrong with the run: it is the claim that the number in the `best`
 column is not the same kind of evidence as the one beside it, and none of them moves a rank, a champion
 or a selection. **An absent pill is not a certificate either** — `reward_hack_detect` is off by default,

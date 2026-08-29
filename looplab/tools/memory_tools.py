@@ -228,6 +228,21 @@ class MemoryTools:
                 if not self._scope.allows(row):        # doc 25 TO-07 — the sibling's own predicate
                     continue
                 lrole = row.get("role")
+                # OPEN[memory-role-filter-lacks-unknown-role-escape] the Strategist reads this store
+                # as "researcher" and silently loses every developer-tagged lesson.
+                # proof:`absent:("researcher", "developer")@looplab/tools/memory_tools.py+absent:MemoryTools(settings.memory_dir, role@looplab/agents/factory.py`
+                # REVIEW 2026-08-29 (P2 delivery): the sibling this filter mirrors,
+                # `cross_run_tools.py::_role_lessons`, carries an explicit escape — an unknown role
+                # sees EVERY role — and `agents/factory.py::_shared_providers` records why: a
+                # hard-coded "researcher" for the Strategist was a measured defect there. This
+                # provider reintroduces it one tool over: `_shared_providers` takes a `role` and
+                # forwards it to CrossRunTools but constructs this class with none, so the
+                # Strategist (role "strategist") defaults to "researcher" here while its
+                # CrossRunTools sees all roles — two readers of one `lessons.jsonl` in one toolset
+                # disagreeing about what the meta-decision role may know, the exact drift doc 25
+                # TO-07 exists to end. Note the naive forward alone is WORSE under this predicate
+                # (a strategist would then match only untagged rows): add the sibling's
+                # known-role-only escape AND forward the constructor's role from the factory.
                 if lrole is not None and lrole != self.role:
                     continue                           # §role-split: untagged is shared, tagged is not
                 overlap = len(query_tokens & _toks(statement))

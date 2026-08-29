@@ -2808,6 +2808,21 @@ export function Metrics({ n, detail, state, runId }) {
         model owns, so the wording cannot drift from the count. It SURFACES and does not accuse: the
         Developer deviating from a proposal is legitimate and documented; what would be the defect is
         the record claiming the declared value. */}
+    {/* OPEN[conflicts-only-champion-renders-no-detail] this footnote gates on `diverged` rows
+        alone, so the sharpest caveat case — a champion whose record holds only `conflicts` —
+        opens this tab and finds nothing.
+        proof:`absent:appliedParamsUnsettled(@ui/src/Inspector.jsx`
+        REVIEW 2026-08-29 (P2 correctness): the engine raises `params_overridden` on diverged OR
+        conflicts (`engine/champion_caveats.py`), and a conflicts-only record is real — two
+        carriers disagreeing is the documented v8n3 shape, left OUT of `applied` and OUT of
+        `diverged` by `runtime/applied_params.py`. So the run row shows the slug, the operator
+        opens the Metrics tab bd022b3f built as the answer to it, and no applied-params section
+        renders — the slug-with-no-detail defect that commit fixed for diverged, still open for
+        conflicts. runIndex.js's unsettled counter (the helper that counts exactly
+        unresolved/conflicts) is exported, tested, and imported by no production module. Fix
+        direction: render the footnote when diverged OR the unsettled conflicts count is > 0,
+        with a sentence per conflict naming each reading and its file/line (already on the wire),
+        keeping conflicts counted apart from divergences as the model does. */}
     {appliedParamsDivergences(nodeAppliedParams(n)).length > 0 && <div className="muted">
       <b>Declared coordinates that did not run.</b> {appliedParamsNotice(nodeAppliedParams(n))}
       <ul className="applied-param-divergences">
