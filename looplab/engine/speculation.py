@@ -1689,12 +1689,39 @@ class SpeculationMixin:
             max_eval_seconds is not None
             and state.total_eval_seconds >= max_eval_seconds
         )
-        if (
-            key[1] != state.search_epoch
-            or self._terminal_intent(state)
-            or budget_exhausted
-            or not allow_commit
-        ):
+        # A LIVE PRODUCER IS NEVER STRANDED BY `commit_not_allowed` (2026-08-29), and the asymmetry
+        # between the four reasons is the whole point. Three of them are facts about the WORLD and a
+        # build made for the old one is worth nothing: the epoch rotated, the run is stopping, there
+        # is no eval time left to run the node. `commit_not_allowed` is not that. It is
+        # `CardSession.open_for_production`, whose own docstring says it answers "may this turn still
+        # START PRODUCER work" and whose justification is that "a producer started after a terminal
+        # would hold the session open for the whole of its paid provider call" — and that argument is
+        # simply false about a producer ALREADY RUNNING. Committing it starts nothing, makes no
+        # provider call, and holds the session open for no latency at all.
+        #
+        # MEASURED on `e5small-dr-unified-v10` (2026-08-29), the first run whose `skipped_reason`
+        # could name this: node 2's terminal set `boundary_owed` at 10:25:29, this branch closed
+        # card-4's head as `stale`/`commit_not_allowed`, and the producer went on running and CLOSED
+        # ITS SPAN AT 10:27:59 — 38.4 min, 248 provider calls, 12,112,124 tokens, 3.2 % of the whole
+        # run — one second before `card_build_requested` asked for the identical card again at
+        # 10:28:00. All four of that run's committed builds closed their span at or before their
+        # `card_build_done`; card-4 is the only one closed out from under a live producer.
+        #
+        # So the head is LEFT OPEN while `_spec_build_inflight` owns it, which is this file's own
+        # rule twenty lines down ("Never strand a live producer: skip while one is in-flight") applied
+        # to the one close that did not consult it. Returning False services no head, which is exactly
+        # what the caller wants here — `boundary_owed` is asking the session to RETURN, and the next
+        # turn commits the finished build against a fresh authority snapshot.
+        #
+        # It cannot wedge finalization: `_terminal_intent` is tested BEFORE this and wins the reason
+        # ladder, so a stopping run still closes the head as `run_is_stopping` with a producer live.
+        commit_refused_this_turn = not allow_commit
+        world_moved = (key[1] != state.search_epoch
+                       or self._terminal_intent(state)
+                       or budget_exhausted)
+        if commit_refused_this_turn and not world_moved and key in self._spec_build_inflight:
+            return False
+        if world_moved or commit_refused_this_turn:
             self._discard_spec_result(self._spec_builds.pop(key, None))
             return self._append_card_build_done(
                 request, skipped="stale",

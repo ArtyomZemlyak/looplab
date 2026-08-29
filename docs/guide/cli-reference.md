@@ -793,6 +793,28 @@ the skipped builds are priced from the durable log's own `card_build_requested` 
 `card_build_done` windows (`events/token_spend.py::token_spend_by_build`), charging a generation to
 a window only when its card matches *and* its start lies inside it.
 
+**One of those four refusals no longer fires at all when a producer is still running (2026-08-29),
+and the asymmetry is the point.** `_serve_card_builds` closes a head `stale` on four conditions.
+Three are facts about the WORLD — the search epoch rotated, the run is stopping, the eval budget is
+gone — so a build made for the old world is worth nothing and discarding it is right. The fourth,
+`commit_not_allowed`, is `CardSession.open_for_production`, whose own docstring says it answers
+*"may this turn still START PRODUCER work"* and justifies itself with "a producer started after a
+terminal would hold the session open for the whole of its paid provider call". That argument is
+false about a producer already running: committing one starts nothing, makes no provider call, and
+holds the session open for no latency at all.
+
+Measured on `e5small-dr-unified-v10`, the first run whose `skipped_reason` could name it — node 2's
+terminal set `boundary_owed` at 10:25:29, card-4's head closed as `commit_not_allowed`, and the
+producer went on running and **closed its span at 10:27:59**: 38.4 minutes, 248 provider calls,
+**12,112,124 tokens, 3.2 % of the whole run**, finishing one second before `card_build_requested`
+asked for the identical card again at 10:28:00. All four of that run's committed builds closed their
+span at or before their `card_build_done`; card-4 is the only one closed out from under a live
+producer. The head is now left open while `_spec_build_inflight` owns it — the same rule the two
+crash-recovery closes twenty lines below already follow ("Never strand a live producer") — and the
+next turn commits the finished build against a fresh authority snapshot. Finalization cannot wedge
+on it: `_terminal_intent` is tested first and wins the reason ladder, so a stopping run still closes
+the head as `run_is_stopping` with a producer live.
+
 **How a card is attributed.** A generation span carries no `card_id` — the `card_build` span above it
 does — so each generation is charged to the nearest ancestor that names one (4,478 of that run's
 4,511 build generations, 97 % of its generation tokens). Everything else lands in `(no card)`, which
