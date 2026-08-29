@@ -1377,3 +1377,69 @@ did compile — the timeout is the solver's, not the build's.
 This is the same shape as the 56 unexplained aborts left open in docs/53 §9, on a task not in that
 list (`discrete_log`, graded n=25). Recorded here with the harness lines that name the mechanism,
 which §9 did not have.
+
+## 41. What the reference agent does about money, and how close we now are
+
+`campaign-final/A-*.log` carries AlgoTuner's system prompt verbatim. Its second sentence is about
+cost, not about algorithms:
+
+> Every message you send incurs a cost—you will be informed of your usage and remaining budget by
+> the system.
+
+And it keeps that promise on **every** message. Counted across all arm-A logs: **1189 budget lines
+against 1184 messages**, live and per-message —
+
+    You have sent 1 messages and have used up $0.0007. You have $0.9993 remaining.
+    …
+    You have sent 124 messages and have used up $0.9934. You have $0.0066 remaining.
+
+That is the shape `453c83d9` converged on independently, and finding it here after the fact is the
+strongest argument for it: the benchmark's own agent treats a live per-message spend figure as a
+first-class part of the contract.
+
+Our coverage on dsBN, the probe running with the first half of the repair:
+
+| stage | with budget | total | |
+|---|---|---|---|
+| `plan` | 23 | 23 | 100 % |
+| `plan_step` | 147 | 150 | 98 % |
+| **`deep_research`** | **19** | **23** | **83 %** (was 0 %) |
+| `propose` | 32 | 38 | 84 % |
+| `foresight_rank` | 0 | 7 | — |
+| `hyp_prioritize` | 0 | 8 | — |
+| `novelty` | 0 | 5 | — |
+| `hypothesis_merge` | 0 | 1 | — |
+| **run total** | **221** | **255** | **87 %** |
+
+The uncovered 13 % is not the same defect and is not being "fixed" today. Every one of those calls is
+a bounded single shot with its own message list — including the four `deep_research` ones, which
+turn out to be the claim VERIFIER ("You are a strict research verifier…"), not the tool loop. None of
+them can loop, so none can spend a run. The stage that could, and did (`opus5`, §37.1), is the one
+that now carries a figure that moves.
+
+The remaining honest gap against the reference is 87 % versus ~100 %, and it is a difference of
+architecture rather than of care: AlgoTuner has ONE message stream, so one wrapper covers it; we have
+nine stages, four of which are single-shot rankers whose whole cost is 0.4–2.6 % of a run each.
+
+### 41.1 An in-flight observation, recorded so it is checked and not assumed
+
+dsBN spends **6.6 % / 22 calls** on `deep_research`, the lowest in its comparison group:
+
+| probe | deep_research share | calls |
+|---|---|---|
+| dsBN (with the note) | **6.6 %** | 22 |
+| dsNoStg3 | 11.1 % | 34 |
+| dsNoStg | 11.6 % | 40 |
+| dsFix1 | 12.2 % | 37 |
+| dsFix4 | 15.3 % | 51 |
+| dsNoStg2 | 15.7 % | 46 |
+| dsFix2 | 21.0 % | 60 |
+
+Tempting, and not a finding: dsBN is at $0.83 of $1 and unfinished, its share can still rise, and
+n = 1. Written down now so the next sweep checks the finished number instead of remembering the
+impression.
+
+Also corrected here: I opened this sweep calling dsBN's node count an anomaly ("one node at $0.82
+against six for the controls"). Wrong — the controls have **three** node DIRECTORIES each at $1.00
+and dsBN has two at $0.83, which is on pace. The six came from §37's table, which counts node-creation
+EVENTS, not directories. Two different metrics with the same name in my head.
