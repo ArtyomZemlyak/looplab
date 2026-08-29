@@ -1531,3 +1531,40 @@ reading the 4 wins / 3 ties / 3 losses table should carry this caveat with it.
 
 I nearly filed this as "transient, both runs recovered" — for the second sweep running. What made
 the difference was counting the population instead of looking at the three most recent rows.
+
+## 44. All three "losses" re-probed: two flipped, one narrowed
+
+dsDL closes the set. `discrete_log`, $1.003, two nodes, **test 14.5186**.
+
+| node | speedup | eval s | submission | |
+|---|---|---|---|---|
+| node_0 | 0.0 | 504.0 | `_dlog.pyx` + `setup.py` | `evaluator_error` — the 120 s timeout cascade of §40.2 |
+| **node_1** | **14.5385** | 35.4 | **`dlogc.pyx`** + `setup.py` | |
+
+Money: `plan_step` $0.448 / 93 calls, `propose` $0.154 / 36, `deep_research` $0.125 / 37,
+`repropose` $0.104 / 21. The run recovered from a total-loss node by rewriting the kernel under a
+different name and evaluating in 35 s instead of 504.
+
+**The consolidated picture across every task the plot report scored as a LOSS:**
+
+| task | arm A | arm B | re-probed | verdict |
+|---|---|---|---|---|
+| `integer_factorization` | 9.763 | 9.147 | **194.82** (n=3: 96.21/178.76/194.82) | **20× win** |
+| `discrete_log` | 1.542 | 1.211 | **14.52** | **9.4× win** |
+| `kcenters` | 16.434 | 12.345 | 8 runs, unchanged | still a loss — numba ceiling, no `.pyx` ever written |
+| `convex_hull` | 4.321 | 1.089 | **2.60** | narrowed 0.25× → 0.60×, still a loss; dsCH3 running at $3 |
+
+Two of the four flipped outright and a third narrowed by 2.4×. The one that did not move is the one
+where the pip repair provably changes nothing (§33: all eight kcenters runs reach their ceiling with
+numba and none has ever written a Cython source).
+
+Foreign champions on `discrete_log` mostly reach for `sympy.ntheory.residue_ntheory.discrete_log`
+(Opus 4 does it in 17 lines; Opus 4.1 adds numba at 87). Ours is a Cython Pohlig-Hellman with
+baby-step giant-step per prime-power factor — a different technique, and on this instance size it
+wins.
+
+**dsRBF launched on the freed lane**: `rbf_interpolation`, $1. It was a TIE in the report (arm A
+1.058, arm B 1.047) and it is one of the three tasks carrying the unexplained aborts of docs/53 §9.
+Now that §40.2 names the abort mechanism — one 120 s timeout, then AlgoTune's early-exit failing
+every remaining run — this probe tests whether that explanation holds on a task known for it, and
+whether the repaired stack moves a tie.
