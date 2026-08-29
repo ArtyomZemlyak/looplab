@@ -1496,3 +1496,38 @@ sends is **37,146 tokens** against the 131,072-token context. The worst case is 
 
 So there is no runaway to cap. The reference's aggressive trim is a consequence of its architecture
 (one linear message stream, no state outside the file), not a technique we are missing.
+
+## 43. 5.2 % of arm A's money bought nothing, and it is our duty to say so
+
+`check_money.sh` flagged a third `BrokenPipeError` and I went to dismiss it as transient for the
+second time. Counting instead of dismissing: the ledger holds **96** of them across the whole
+history, and they split into two completely different populations.
+
+| | count | cost | completion tokens | shape |
+|---|---|---|---|---|
+| **arm A** | 29 (in attempt a3) | **$1.1875** | 4,592,307 (median 145,125) | cut MID-STREAM |
+| **arm B** | 38 | **$0.0000** | 0 | died before the response started |
+| probes | 29 | $0.0000 | 0 | same as arm B |
+
+The arm-A ones arrive on a **precise 600-second period** — measured gaps of 601, 600, 601, 602, 600,
+601, 605, 601, 601 s. That is a timeout, not model behaviour, and it is neither of the two we
+control: the metering proxy's own is 1800 s (`proxy.py --timeout`) and the gateway's nginx
+`proxy_read_timeout` is 300 s (recorded at `proxy.py:497`). A `BrokenPipeError` means the CLIENT went
+away, so the 600 s cut is on AlgoTuner's side of the socket — most likely litellm's own request
+timeout, which is a hypothesis and labelled as one.
+
+**The money is inside the reported figure.** Arm A's a3 attempt spent **$23.0073 over 2,225 calls =
+$1.1504 per task**, against the $1.19 the comparison reports — consistent. So arm A was billed for
+those 4.59 M completion tokens and received none of them: **5.2 % of its budget, nearly one whole
+task's worth**.
+
+Arm B lost **nothing** to the same failure class. Our 38 broken pipes carry zero cost and zero
+tokens because the connection died before any response began — a client-behaviour difference, not a
+virtue.
+
+This does not change any speedup number, and it is recorded because it runs AGAINST us: the
+comparison is "equal money" in dollars billed, and in usable money arm A had about 5 % less. Anyone
+reading the 4 wins / 3 ties / 3 losses table should carry this caveat with it.
+
+I nearly filed this as "transient, both runs recovered" — for the second sweep running. What made
+the difference was counting the population instead of looking at the three most recent rows.
