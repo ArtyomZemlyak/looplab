@@ -1763,6 +1763,53 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return                            # nothing paid for is in flight -- no barrier to pay
         await self._drain_adopted_evals()
 
+    async def _drain_inflight_evaluation(self, escaping: BaseException) -> None:
+        """Let an evaluation that is ALREADY BURNING land its terminal before the spend ceiling
+        tears the run-scoped eval task group down.  No-op for every other failure.
+
+        THE DEFECT, measured on the 2026-08-24 campaign (`runs-B`).  Five of the twenty task-arms
+        finished with one more `score.log` on disk than they had `node_evaluated` events:
+        `integer_factorization` 4 node dirs / 4 score.logs / **3** events (the lost score was
+        4.0958), `spectral_clustering` 2/2/**1**, `max_clique_cpsat` 7/7/**6**,
+        `min_dominating_set` 3/3/**2** (1.0804), `multi_dim_knapsack` 5/5/**4** (2.8004, against a
+        champion of 2.8586 -- the closest call in the corpus).  The event tails are identical in all
+        five: `node_eval_started` -> `workspace_seeded` -> `research_attempted` -> ONE research
+        `llm_usage` -> a long gap while the evaluation runs -> the ceiling.  The evaluation FINISHED
+        and wrote its score to disk; the loop never saw a result it had already paid for.
+
+        THE MECHANISM.  `_spawn_research`'s task raises `BudgetExceeded` out of the CardSession's
+        `bg_task_group`, so it reaches `Engine.run` while the evaluation -- which lives in the
+        RUN-scoped `eval_tg`, a strictly outer group -- is still in its worker thread.  That thread
+        hop is `abandon_on_cancel=False`, i.e. shielded, so the eval is not abandoned: it runs to
+        completion and writes `score.log`.  The cancellation is delivered at the NEXT checkpoint,
+        which is inside `engine/evaluate.py` between the eval returning and its single
+        `EV_NODE_EVALUATED` append.  Nothing was saved by cancelling -- the compute was already
+        spent -- and the one durable record of it was lost.
+
+        THE FIX IS THE ORDERING, NOT THE STOP.  Draining here happens BEFORE `async with eval_tg`
+        exits, which is the only instant at which the children are neither cancelled nor already
+        gone.  `Engine.run`'s `raise` is unconditional and untouched, so the run still stops with
+        the same exception, the same message and the same `run_finished
+        {"reason": "budget_exhausted"}`; `finalize_run` then computes its champion and its budget
+        summary over a log that includes the node instead of one that silently omits it.
+
+        WHY THIS COSTS NOTHING IT SHOULD NOT.  The drain starts NO new work: `_drain_adopted_evals`
+        is a poll over `_eval_inflight`, the sessions have already returned, and no LLM call is
+        reachable from it -- so the ceiling cannot be crossed by a further dollar while it waits.
+        The wait is bounded by the evaluation the run had already committed to, which is the same
+        barrier the clean finish at `_run_with_llm_broker`'s exit and the abort gate at
+        `_settle_terminal_gate` both already pay, for the same stated reason (the run is ending,
+        there is no GPU left to idle).  Deliberately NOT shielded: an operator Ctrl-C is a real
+        cancellation and must still cut the wait short, and if this task is somehow entered with a
+        cancellation already pending the first `anyio.sleep` re-raises it and we fall through to
+        `raise` -- i.e. exactly today's behaviour, never worse.
+        """
+        if budget_stop_leaf(escaping) is None:
+            return                            # an ordinary crash keeps today's teardown, untouched
+        if not self._evals_inflight():
+            return                            # nothing paid for is in flight -- no barrier to pay
+        await self._drain_adopted_evals()
+
     def _enter_run(self) -> bool:
         """Authorize re-entry, recover, ACK and set up: everything before the first loop turn.
 

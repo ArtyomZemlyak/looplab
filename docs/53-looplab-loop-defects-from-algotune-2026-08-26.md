@@ -507,51 +507,50 @@ least one `node_evaluated` their snapshot could not contain, on 28 of the 30 run
 
 ## 5. A completed evaluation is discarded when the ceiling lands
 
-**CLOSED 2026-08-26.** The item was right and understated: counted over ALL twenty task-arms
-rather than the eight-arm scored corpus, **five task-arms each lost one scored node — five in
-total**, not two.
+**CLOSED 2026-08-26.** `Engine.run` now drains the in-flight evaluation before the ceiling tears
+the run-scoped eval task group down (`orchestrator.py::_drain_inflight_evaluation`), and the
+speculation-off path defers the same stop until its evaluations have joined
+(`orchestrator.py::_DeferredBudgetStop`). The run still ends on the ceiling, with the same
+exception and the same `run_finished {"reason": "budget_exhausted"}`; what changed is that the
+evaluation it overlapped is now IN the log it stops over.
 
-| task-arm | node dirs | `score.log` | `node_evaluated` | the score that was thrown away | champion |
+**The measurement was larger than this section recorded.** Re-derived across all twenty task-arms
+under `runs-B`, not the eight-arm scored corpus: **five** arms lost a scored node, not two, and
+five scores in total.
+
+| task-arm | node dirs | `score.log` | `node_evaluated` | lost score | champion |
 |---|---|---|---|---|---|
 | `integer_factorization` | 4 | 4 | **3** | 4.0958 | 8.3255 |
-| `spectral_clustering` | 2 | 2 | **1** | 0.0 (invalid) | 0.0 |
-| `max_clique_cpsat` | 7 | 7 | **6** | 0.0 (invalid) | 31.664 |
+| `spectral_clustering` | 2 | 2 | **1** | invalid results → 0.0 | 0.0 |
+| `max_clique_cpsat` | 7 | 7 | **6** | invalid results → 0.0 | 31.664 |
 | `min_dominating_set` | 3 | 3 | **2** | 1.0804 | 7.2265 |
 | `multi_dim_knapsack` | 5 | 5 | **4** | 2.8004 | 2.8586 |
 
-The honest-bound sentence below no longer holds either: `multi_dim_knapsack` threw away 2.8004
-against a champion of 2.8586 — a 2 % gap, well inside single-measurement noise. That one could
-have chosen a different champion.
+The last row is the near miss the two-arm reading could not see: 2.8004 against a champion of
+2.8586, inside the ±25 % single-draw noise item 6 measures on this benchmark. All five event tails
+are the SAME five rows — `node_eval_started` → `workspace_seeded` → `research_attempted` → one
+research `llm_usage` → a long silence → the ceiling — which is what identifies the mechanism rather
+than merely counting its victims.
 
-**The mechanism, and it is exact rather than inferred.** All five event tails are the same five
-rows — `node_eval_started`, `workspace_seeded`, `research_attempted`, one research `llm_usage`, a
-long silence, the ceiling — and every `score.log` mtime falls 24–190 s AFTER the research call that
-crossed the ceiling and 1–3 s BEFORE `finalize_step{begun}`.
+**The mechanism, exactly.** The last paid call in every one of the five is the *overlapped deep
+research* `_spawn_research` starts beside the evaluation. It crosses the ceiling and raises
+`BudgetExceeded` out of the CardSession's `bg_task_group`, while the evaluation — which since F1f
+lives in the RUN-scoped group `Engine.run` owns, a strictly outer one — is still inside
+`anyio.to_thread.run_sync(self._run_eval, …)`. That hop is `abandon_on_cancel=False`, i.e.
+shielded, so the cancellation cannot abandon it: the subprocess ran to completion and wrote
+`score.log` (24–190 s after the ceiling fired, per the timestamps). The cancel was then delivered at
+the first checkpoint *after* it returned, which sits between the eval finishing and its single
+`EV_NODE_EVALUATED` append in `engine/evaluate.py`. Cancelling saved nothing — the compute was
+already spent — and lost the only durable record of it.
 
-The last paid call is the overlapped deep research spawned beside the eval. It raises
-`BudgetExceeded` out of the CardSession's background group, while the eval — which since F1f lives
-in the RUN-scoped group, strictly outer — is still inside `await anyio.to_thread.run_sync(...)`.
-That hop is `abandon_on_cancel=False`, so anyio ignores the cancellation until the worker thread
-finishes: the subprocess ran to completion and wrote its score, and the cancel landed at the first
-checkpoint after it returned, between the eval finishing and its single `node_evaluated` append.
-**Cancelling saved nothing. It only destroyed the record.**
-
-`Engine.run` now drains an in-flight evaluation before re-raising, from inside the eval task group
-— the one instant its children are neither cancelled nor gone — and only when the escaping
-exception carries a `BudgetExceeded` leaf. The speculation-off path had the same defect one frame
-lower and gets a deferred-stop sink tested at the only choke every admission passes through.
-`budget_stop_leaf` moved to `core/errors.py` so the engine and the CLI cannot drift on what "the
-ceiling" means. The hard stop is untouched: same exception object, same message, same
-`run_finished {"reason": "budget_exhausted"}`, and no LLM call is reachable from the drain.
-
-**Two risks stated rather than hidden.** The drain is unbounded in wall clock — a ceiling hit
-during a ten-hour training now waits for it instead of exiting, which is the point, and Ctrl-C
-still cuts it because it is deliberately not shielded. And the `run()`-level drain is correct only
-because the eval group is run-scoped: a refactor moving evals back inside the session group would
-make it too late again, and nothing red would say so.
-
-2180 budget/finalize/orchestrator/eval/research tests green; seven mutations were used, including
-the one that proves the run still terminates.
+**Not weakened, and that is tested as hard as the fix.** The drain starts no new work and can reach
+no LLM call, both dispatch branches test for a deferred stop BEFORE starting an evaluation (in the
+parallel branch at the refill point, which is the only place every route to an admission passes
+through), and `Engine.run`'s `raise` is untouched. Seven mutations — dropping the drain hook,
+draining unconditionally, handing `_spawn_research` the raw task group, dropping the serial
+admission gate, dropping the refill-point gate, never re-raising the deferred stop, and widening the
+facade's `except` to `BaseException` — each turn `tests/test_budget_ceiling_drains_the_inflight_eval.py`
+red.
 
 The original finding:
 
