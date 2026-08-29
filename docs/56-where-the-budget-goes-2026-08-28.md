@@ -1443,3 +1443,56 @@ Also corrected here: I opened this sweep calling dsBN's node count an anomaly ("
 against six for the controls"). Wrong — the controls have **three** node DIRECTORIES each at $1.00
 and dsBN has two at $0.83, which is on pace. The six came from §37's table, which counts node-creation
 EVENTS, not directories. Two different metrics with the same name in my head.
+
+## 42. dsBN sets the corpus record — and destroys §38's stage-guidance signal
+
+`edge_expansion`, $1.008, two nodes, **test 344.4251** — the highest final on this task in the whole
+corpus, ahead of dsNoStg3's 268.09. Both nodes shipped `solver_kernel.pyx` + `setup.py`: node_0
+256.6588, node_1 **357.8648**, itself the corpus's highest single node. 108 min wall, 89 min LLM
+(82 %), 1.4 min evaluation. Money: `plan_step` $0.5554 / 150 calls, `propose` $0.2256 / 71,
+`deep_research` $0.0980 / 33, `plan` $0.0804 / 24.
+
+**dsBN ran with the stage block ON.** Adding it to §38's comparison:
+
+| stage block | n | finals | median |
+|---|---|---|---|
+| ON | 4 | 106.47, 132.70, 202.77, **344.43** | 167.73 |
+| OFF | 3 | 153.40, 237.12, 268.09 | 237.12 |
+
+The exact one-sided rank test over C(7,3) = 35 assignments now gives **p = 11/35 = 0.314**, against
+0.100 yesterday. **§38's "suggestive at p = 0.10" is withdrawn.** One additional run in the ON arm
+collapsed it, which is what a p of 0.10 at n = 3 vs 3 always meant.
+
+One confound must be stated rather than buried: dsBN is not a pure ON control. It carried
+`a78d295f`, the session-start budget note, which dsFix1/2/4 did not. So either that note is worth a
+great deal at n = 1, or 344.43 is inside the ON band's natural spread and the band is simply wide.
+**dsBN2 is running on the freed lane** to separate them — same task, same model, same $1, stage
+block ON, and carrying `453c83d9` (the LIVE note). Against dsBN 344.43 it says whether the record
+repeats; against dsFix1/2/4 it says whether the note is doing the work.
+
+### 42.1 453c83d9 verified by probe: the figure now moves inside a session
+
+The previous sweep's repair was committed unverified. dsBN2's first six `deep_research` generations:
+
+    call 1: $0.0000    call 4: $0.0035
+    call 2: $0.0011    call 5: $0.0049
+    call 3: $0.0022    call 6: $0.0077
+
+One new reminder per turn, appended only when the figure changed — against the seven identical
+`$0.0000` lines dsBN showed under the session-start version. The fix does what it claimed.
+
+§41.1's in-flight observation also resolves: dsBN's FINISHED `deep_research` share is **9.7 % over 33
+calls**, not the 6.6 % / 22 seen mid-run. That is below all six controls (11.1–21.0 %) but only just,
+at n = 1 — recorded, not concluded.
+
+### 42.2 The reference caps history at five messages; we do not need to
+
+`config.yaml` gives arm A `max_messages_in_history=5` — the agent is effectively memoryless beyond
+its last five turns, relying on the file on disk. Ours carries far more. Measured whether that costs
+us, over every $1 `edge_expansion` run with at least 20 generations (n = 28): median prompt growth
+from the first fifth of a run to the last is **×1.08**, and the median LARGEST prompt any run ever
+sends is **37,146 tokens** against the 131,072-token context. The worst case is dsFB2 at ×2.11 and
+53,671 tokens, still under half the window.
+
+So there is no runaway to cap. The reference's aggressive trim is a consequence of its architecture
+(one linear message stream, no state outside the file), not a technique we are missing.
