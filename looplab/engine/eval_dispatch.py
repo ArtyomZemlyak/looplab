@@ -795,7 +795,12 @@ class EvalDispatchMixin:
                     since=command_eval.attempt_freshness_floor(
                         _attempt_started, stages,
                         (node.rerun_stage if node is not None else None)
-                        if start_stage is _UNSET else start_stage))
+                        if start_stage is _UNSET else start_stage),
+                    # The pipeline the coordinates are claimed about. A `merge` + `score` node
+                    # averages two parents' weights and trains nothing, so every training coordinate
+                    # the rung compares for it governed nothing — 4 of the 12 records on this box,
+                    # one of them a champion. The engine holds this here and used to discard it.
+                    pipeline_stages=[s.get("name") for s in (stages or ())])
             except Exception:  # noqa: BLE001 - a record may never cost a node its terminal
                 res.applied_params = None
         else:

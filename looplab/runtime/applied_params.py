@@ -237,7 +237,8 @@ def _resolved_carrier(workdir, pattern, *, since, confine=None):
 
 
 def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=None,
-                        since: Optional[float] = None, confine=None) -> Optional[dict]:
+                        since: Optional[float] = None, confine=None,
+                        pipeline_stages=()) -> Optional[dict]:
     """The `metric_provenance.applied_params` record for one eval, or `None`.
 
     `None` — not an empty record — when the node declares no comparable coordinate or no carrier
@@ -256,6 +257,7 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
          "declared": int,                      # declared coordinates that were comparable at all
          "applied": {key: float},              # what the carrier says each answered coordinate is
          "diverged": [{param, declared, applied, line, match}],
+         "stages": [str],                      # THE PIPELINE THESE COORDINATES ARE CLAIMED ABOUT
          "unresolved": {key: "absent" | "ambiguous" | "conflict"},
                                                # `absent`/`ambiguous` are `param_carriers`' two words
                                                # for one document's answer; `conflict` is THIS
@@ -397,6 +399,40 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
                     "checked": len(applied),
                     "applied": dict(sorted(applied.items())),
                     "diverged": diverged}
+    # THE PIPELINE THESE COORDINATES ARE CLAIMED ABOUT (2026-08-29), because without it the record
+    # is unreadable in the one case where it is most confidently wrong.
+    #
+    # This function answers "what did the configuration say your declared coordinates were worth",
+    # and every reader — the champion caveat, the Metrics tab, the operator — takes the answer to
+    # mean the number was PRODUCED at those coordinates. That inference needs a pipeline that could
+    # have consumed them, and nothing on the record said what the pipeline was.
+    #
+    # MEASURED over every `events.jsonl` on this box: of the TWELVE `node_evaluated` rows carrying an
+    # `applied_params` record, FOUR ran no training stage at all — three `e5small-dr-unified-v4`
+    # merge nodes and one `e5small-dr-unified-v10` merge node, each a `merge` + `score` pipeline that
+    # averages two parents' weights and scores the average. Their declared params are `merge_idea`'s
+    # ARITHMETIC MEAN of the parents' declarations, and their workdir still carries the committed
+    # `config.yaml` the Developer wrote, so the rung dutifully compares the two and reports
+    # divergences on `batch_size`, `learning_rate` and `n_epochs`. NOT ONE of those coordinates
+    # governed anything: the node ran zero epochs at no batch size and no learning rate.
+    #
+    # AND IT REACHES A CHAMPION. `e5small-dr-unified-v4` node 13 — 0.793411, the second-best number
+    # on this box — is one of the four, and `champion_metric_caveats` raises `params_overridden` on
+    # it, citing `config.yaml:265`'s 2048 against a declared 4096 for a node that batched nothing.
+    # The caveat's CONCLUSION is arguably right for a merge node (an averaged model occupies no
+    # training coordinates at all) and its EVIDENCE is spurious, which is worse than either.
+    #
+    # THIS RECORDS AND DOES NOT DECIDE. It is a fact the engine already holds at the bind site and
+    # threw away, it mints nothing, gates nothing, and changes no caveat — whether
+    # `params_overridden` should fire for a pipeline that could not apply its coordinates is a
+    # SELECTION question and needs its own measurement. What it buys is that the question is now
+    # answerable FROM THE RECORD instead of by re-deriving `stage_finished` rows from the log, which
+    # is how the four above had to be found. Absent on every log written before today, and every
+    # reader defaults it to silence (invariant #5).
+    stage_names = [name for name in (
+        str(s).strip() for s in (pipeline_stages or ()) if s is not None) if name]
+    if stage_names:
+        record["stages"] = stage_names
     if conflicts:
         record["conflicts"] = sorted(conflicts, key=lambda row: row["param"])
     if unresolved:
