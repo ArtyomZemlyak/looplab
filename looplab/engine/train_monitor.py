@@ -1121,10 +1121,33 @@ def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan,
     # OPEN[overrun-grace-bar] the alert bar subtracts a grace CEILING that may never be granted, so a
     # projected overrun inside it is silently suppressed. The noise it exists to stop is real (a
     # 40-second overrun on a ten-hour stage is not worth an interrupt), so the fix is a bar keyed on
-    # the PROJECTION's own precision rather than on a discretionary rescue — and nobody has measured
-    # that precision, so the number is not inventable here. `projected_overrun_s` is stamped
-    # unfiltered above either way, so the durable record already holds what the engine knew.
+    # the PROJECTION's own precision rather than on a discretionary rescue — see the measurement
+    # BELOW the proof line for what the corpus can and cannot say about that precision.
+    # `projected_overrun_s` is stamped unfiltered above either way, so the durable record already
+    # holds what the engine knew.
     # proof:`present:beyond = over - max(0.0, grace)@looplab/engine/train_monitor.py`
+    #
+    # WHAT THE CORPUS CAN AND CANNOT SAY, measured 2026-08-29 so the next reader starts here.
+    # Across every preserved log on this box there are 179 `train_monitor_alert` rows and exactly
+    # SIX carry a projection — all six on `e5small-dr-unified-v8` node 4's `train` stage, over 3.5
+    # hours (17:57:11 -> 21:31:22). That scarcity is the first finding: a projection needs an ETA,
+    # which needs a progress bar with a total, and 173 of 179 alerts had none.
+    #
+    # STABILITY, which IS measurable: 2870.0 / 3586.1 / 3336.0 / 3491.7 / 3427.5 / 3602.7 s — mean
+    # 3385.7, stdev 271.5, spread +/-10.8 % of the mean; dropping only the FIRST reading gives mean
+    # 3488.8, stdev 111.3, spread +/-3.8 % over three hours. The projection does not wander.
+    #
+    # ACCURACY, which is NOT measurable and this is the honest limit: node 4 has NO terminal at all
+    # — no `stage_finished`, no `node_failed`, no `node_evaluated` after 21:31:22, because the run
+    # was retired while it was still training. So the six warnings were never confronted with an
+    # outcome, and nothing here says whether ~3400 s was RIGHT. A bar keyed on precision still needs
+    # a projection that a finished stage later falsified or confirmed, and this box has none.
+    #
+    # THE SUPPRESSION THIS MARKER FEARS HAS NEVER FIRED, and that is checkable rather than assumed:
+    # a suppressed case is exactly an alert carrying `projected_overrun_s` and NOT
+    # `overrun_beyond_grace_s`, and there are ZERO. All six cleared the 1800 s grace outright
+    # (beyond 1070.0-1802.7 s). So the bar has cost this box nothing so far — which lowers the
+    # urgency without answering the question, since one node at one grace is not a rate.
     try:
         from looplab.runtime.sandbox import resolve_deadline_grace
         grace = float(resolve_deadline_grace(grace_cap, wall))
