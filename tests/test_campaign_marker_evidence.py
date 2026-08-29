@@ -69,7 +69,13 @@ def _harness() -> str:
     # assignments or `set -u` aborts the substitution. `METER_LOG` is deliberately left unset by
     # default: that is the "no meter" shape, in which `successful_calls` answers "" and the rung
     # keeps its pre-2026-08-25 behaviour. A test that wants the rung ARMED exports it itself.
-    parts = ["set -u", "LANE_COUNT=4", "CORES_PER_LANE=22", 'ARM="${ARM:-B}"', 'T="${T:-svm}"']
+    # `LANE_LAYOUT` joined this stub on 2026-08-29, when the merge brought in the campaign's own
+    # `layout=$LANE_LAYOUT` in the REGIME line. The production script assigns it at line 265, well
+    # before `record_done` reads it, so `set -u` is satisfied there; what was incomplete was this
+    # harness, which extracts the function away from its assignment. The value mirrors the script's
+    # own default rather than inventing one.
+    parts = ["set -u", "LANE_COUNT=4", "CORES_PER_LANE=22", 'LANE_LAYOUT="whole_cores"',
+             'ARM="${ARM:-B}"', 'T="${T:-svm}"']
     for name in _FUNCTIONS:
         found = re.search(rf"^{name}\(\) \{{.*?^\}}$", src, re.M | re.S)
         assert found, f"campaign.sh no longer defines {name}()"

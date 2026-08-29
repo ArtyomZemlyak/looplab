@@ -374,6 +374,17 @@ def marker_state(final_dir: Path | None, arm: str, task: str, runs_root: Path | 
             return "wall_cut"
         if "state=stall_cut" in text:
             return "stall_cut"
+        # A TASK-ARM THE OPERATOR SKIPPED IS NOT ONE THAT FINISHED, and the difference has to
+        # survive into the table. `campaign.sh::already_measured` skips on ANY non-empty marker
+        # that is not a wall cut, so writing one is how a running campaign is told to stop taking
+        # new work without touching the driver a live bash is reading. That mechanism is right; it
+        # just leaves a marker that looks exactly like a completed run to every later reader.
+        # Measured need, 2026-08-26: five CP-SAT task-arms were skipped by decision, and without
+        # this branch the summary would have counted them among the finished and listed none of
+        # them as absent. Restored at the 2026-08-29 merge, where resolving this hunk in favour of
+        # the other side's `stall_cut` dropped it.
+        if "state=operator_skip" in text:
+            return "skipped"
         return "done"
     if (final_dir / f"{arm}-{task}.refused").exists():
         return "refused"
@@ -649,6 +660,66 @@ def main() -> int:
         print("\nShipped reference models (AlgoTuner's loop driving OTHER models — context, not a "
               "control:\nthose rows differ from ours in the model AND were produced elsewhere).")
         for task, _, _, _, _, _ in rows:
+            ref = _reference_models(summary, task)
+            ours = {k: v for k, v in ref.items() if args.model_fragment.lower() in k.lower()}
+            others = {k: v for k, v in ref.items() if k not in ours}
+            if not others:
+                continue
+            best = max(others.items(), key=lambda kv: kv[1])
+            print(f"  {task:<{width}}  best reference {best[0]} = {best[1]:.4f}  "
+                  f"(median {sorted(others.values())[len(others) // 2]:.4f} over {len(others)})")
+    # WHAT THE PAIR ACTUALLY COST. Printed for every run, not only when something is wrong: a
+    # comparison at "the same $1 budget" is a claim about money, and a claim about money that is
+    # never checked against the meter is a claim about a config file.
+    meter_path = args.meter or (args.final_dir.parent / "meter" / "meter.jsonl"
+                                if args.final_dir else None)
+    spend = metered_spend(meter_path) if meter_path else {}
+    if spend:
+        ceiling = args.budget_usd
+        over = []
+        for task, *_rest in rows:
+            for arm in ("A", "B"):
+                attempt = _scored_attempt(args.final_dir, arm, task)
+                if attempt is None:            # no marker -> no reported score -> nothing to judge
+                    continue
+                spent, uncounted = spend.get((arm, task, attempt), (0.0, 0.0))
+                if ceiling > 0 and spent > ceiling * 1.05:
+                    over.append((task, arm, spent, uncounted))
+        totals = {arm: sum(v[0] for (a, _, _), v in spend.items() if a == arm)
+                  for arm in ("A", "B")}
+        print(f"\nmetered spend: arm A ${totals.get('A', 0.0):.2f}, arm B "
+              f"${totals.get('B', 0.0):.2f} (the proxy's ledger, not either loop's own).")
+        if over:
+            over.sort(key=lambda r: -r[2])
+            print(f"{len(over)} task-arm(s) drew MORE than the ${ceiling:.2f} ceiling they were "
+                  f"given, so those pairs are NOT matched on budget:")
+            for task, arm, spent, uncounted in over:
+                tail = (f", ${uncounted:.3f} of it on streams that ended with no usage frame and "
+                        f"so cost that loop's own ledger nothing"
+                        if uncounted > 0.05 * ceiling else "")
+                print(f"  {task:<{width - 2}} arm {arm}  ${spent:.3f}{tail}")
+        else:
+            print(f"every task-arm stayed within 5% of its ${ceiling:.2f} ceiling.")
+
+    skipped = sorted(t for t, _, _, _, st, *_ in rows if st == "skipped")
+    if skipped:
+        print(f"{len(skipped)} task-arm(s) were SKIPPED by the operator and never ran, so this "
+              f"table is over {len(rows) - len(skipped)} of {len(rows)} tasks: "
+              + ", ".join(skipped))
+    unfinished = sorted(t for t, _, _, _, st, *_ in rows if st in ("unfinished", "refused"))
+    if unfinished:
+        print(f"{len(unfinished)} task-arm(s) have no .done marker from campaign.sh and are still "
+              f"OWED, so any score left behind for them is not reported: " + ", ".join(unfinished))
+    print("\nspeedup = baseline_ms / optimized_ms, both timed here. 100% instance validity is "
+          "required:\na 0.0000 means the solver was WRONG somewhere, not that it was not faster.\n"
+          "That sentence is only true because a zero the ARENA is responsible for is printed as "
+          "`--`\nwith its reason (see NOT_SOLVERS_FAULT); it was false about every such row before "
+          "2026-08-23.")
+
+    if args.reference:
+        print("\nShipped reference models (AlgoTuner's loop driving OTHER models — context, not a "
+              "control:\nthose rows differ from ours in the model AND were produced elsewhere).")
+        for task, *_rest in rows:
             ref = _reference_models(summary, task)
             ours = {k: v for k, v in ref.items() if args.model_fragment.lower() in k.lower()}
             others = {k: v for k, v in ref.items() if k not in ours}

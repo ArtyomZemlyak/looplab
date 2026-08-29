@@ -176,7 +176,7 @@ say "прогон rc=$? за $(( $(date +%s) - S ))с"
 # свёртку и знает `state.best()`. Проба обязана выбирать так же, иначе она меряет не то, что цикл
 # счёл лучшим, — то есть меряет не цикл.
 if python "$ROOT/looplab/benchmarks/algotune/extract_champion.py" \
-     --run-dir "$OUT/runs/$TASK/run" --out "$OUT/champion_solver.py" >> "$LOG" 2>&1; then
+     --run-dir "$OUT/runs/$TASK/run" --all-files --out "$OUT/champion_solver.py" >> "$LOG" 2>&1; then
   CH="$OUT/champion_solver.py"
 else
   CH=""

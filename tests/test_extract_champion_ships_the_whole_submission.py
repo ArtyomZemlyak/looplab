@@ -21,6 +21,12 @@ harness that failed to deliver the submission.
 `campaign.sh:768` calls this same script, so a compiled champion would have scored zero in a
 campaign too — which is why this is pinned rather than left to the probe scripts.
 """
+
+# 2026-08-29, MERGE: sibling extraction became OPT-IN (`--all-files`) on the other side of the
+# merge, where this branch copied siblings unconditionally. The flag is kept -- `campaign.sh`
+# already passes it -- and `run_probe.sh`, which did NOT, now passes it too: without that a
+# probe extracts `solver.py` alone and loses exactly the compiled champion this file exists
+# to protect. These calls pass the flag for the same reason the real callers do.
 from __future__ import annotations
 
 import json
@@ -63,7 +69,7 @@ def test_every_file_the_champion_committed_lands_beside_the_solver(tmp_path):
     out = tmp_path / "submit" / "champion_solver.py"
 
     proc = subprocess.run(
-        [sys.executable, str(EXTRACT), "--run-dir", str(run), "--out", str(out)],
+        [sys.executable, str(EXTRACT), "--run-dir", str(run), "--all-files", "--out", str(out)],
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
@@ -84,7 +90,7 @@ def test_the_operator_s_planted_files_are_not_shipped_as_the_candidate_s_work(tm
                    "description.txt": "the task\n"})
     out = tmp_path / "submit" / "champion_solver.py"
 
-    subprocess.run([sys.executable, str(EXTRACT), "--run-dir", str(run), "--out", str(out)],
+    subprocess.run([sys.executable, str(EXTRACT), "--run-dir", str(run), "--all-files", "--out", str(out)],
                    capture_output=True, text=True, timeout=120, check=True)
 
     assert (out.parent / "_ext.pyx").exists()
@@ -99,7 +105,7 @@ def test_a_single_file_champion_is_unchanged(tmp_path):
     out = tmp_path / "submit" / "champion_solver.py"
 
     proc = subprocess.run(
-        [sys.executable, str(EXTRACT), "--run-dir", str(run), "--out", str(out)],
+        [sys.executable, str(EXTRACT), "--run-dir", str(run), "--all-files", "--out", str(out)],
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert sorted(p.name for p in out.parent.iterdir()) == ["champion_solver.py"]

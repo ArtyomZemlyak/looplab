@@ -80,7 +80,7 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(content, encoding="utf-8")
 
-    extra = 0
+    extra = []
     if args.all_files:
         # THE WHOLE WORKING SET, because a champion is no longer one file. `make_task.py` grants an
         # `edit_surface` of `solver.py, *.py, *.pyx, *.pxd, setup.py, pyproject.toml`, and a node
@@ -117,10 +117,14 @@ def main() -> int:
             if not isinstance(body, str):
                 continue
             (args.out.parent / name).write_text(body, encoding="utf-8")
-            extra += 1
+            extra.append(name)
 
     print(f"champion node {best.id} (metric={best.metric}) -> {args.out}"
-          + (f" (+{extra} sibling file(s))" if args.all_files else ""))
+          # NAMED, not merely counted: "+2 sibling file(s)" tells an operator a number, and the
+          # question they are actually asking after a champion scored `solver_unloadable` is WHICH
+          # files travelled. Kept from this branch's side of the 2026-08-29 merge.
+          + (f" (+{len(extra)} sibling file(s): {', '.join(extra)})"
+             if args.all_files and extra else ""))
     return 0
 
 
