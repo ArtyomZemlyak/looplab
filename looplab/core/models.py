@@ -699,8 +699,24 @@ class Idea(BaseModel):
     # that had to spend its proposal to record a question would record none.
     #
     # OPEN[researcher-questions-not-appended] the CARRIER ships here and no engine path reads it yet,
-    # so a registered question rides `node_created` and becomes no board row.
+    # so a registered question would ride `node_created` and become no board row.
     # proof:absent:idea_registered_questions@looplab/engine/research_cadence.py
+    #
+    # MEASURED 2026-08-29 AND THE WRITER SIDE IS MISSING TOO — whoever takes this must wire BOTH ends
+    # or it stays inert. Over every `node_created` row on this box (9 on `e5small-dr-unified-v9`,
+    # 3 on the live v10): **0 of 12 Ideas carry a filled `open_questions`**, and `open_questions`
+    # occurs ZERO times in `agents/roles.py`, `agents/unified_agent.py` and `search/panel.py` — the
+    # Researcher is never ASKED for one, so nothing rides today and the sentence above describes a
+    # hazard rather than an observation. `Idea.open_questions` also has no consumer anywhere outside
+    # this model and the memo path's own same-named field.
+    #
+    # THE PRIOR QUESTION IS THEREFORE WHETHER IT SHOULD BE WIRED AT ALL, not how. The deep-research
+    # channel already delivers questions end to end and was seen doing it on v10: 4 `open_questions`
+    # -> 4 `hypothesis_added` -> 4 `direction` cards, and 2 of them gained `experiment` children whose
+    # `parent_card_id` survived the fold. A second question channel earns its keep only if a
+    # Researcher mid-PROPOSAL has questions the deep-research pass does not, and nobody has measured
+    # that. Ask for it in the emit schema first, look at what comes back, and only then build the
+    # append — the reverse order ships another field nothing fills.
     #
     # WHY IT IS STAGED rather than inlined: `EV_HYPOTHESIS_ADDED` is FOLDED, so appending it from the
     # main task inside a reservation's window moves `speculation._proposal_authority_seq`'s max-seq
