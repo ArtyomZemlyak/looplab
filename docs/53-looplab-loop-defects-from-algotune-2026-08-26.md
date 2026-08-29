@@ -19,9 +19,10 @@ shared reference. Total measured spend on those eight: **$8.029**.
 
 ---
 
-## 0. Three claims that did NOT survive re-measurement
+## 0. Four claims that did NOT survive re-measurement
 
-Recorded first, so nothing downstream rests on them.
+Recorded first, so nothing downstream rests on them. The fourth was this document's OWN item 2 and
+is the largest of them: see there.
 
 * **"LoopLab never profiles / constant factors are invisible to the loop."** False. Of **492
   `run_probe` calls** across the eight task-arms, **197 (40.0 %) contain a timing harness**
@@ -34,6 +35,10 @@ Recorded first, so nothing downstream rests on them.
   citation is not. `"trials"` appears in exactly one shape (`"trials":[]`, inside `node_evaluated`)
   and only in three task-arms, so it is not the universal marker it was quoted as. What IS
   universal is that **no score in the corpus was measured twice** — item 6.
+* **"The novelty gate is 66.3 % of the budget and every rejection was overridden."** False on both
+  counts, and the method that produced it is reproduced and named in item 2. The gate's own
+  adjudication is **$0.1141 of $17.6867 (0.6 %)** over the full 20-arm corpus; all 10 completed
+  rejections changed the idea that was built. `REFUTED` — item 2.
 
 ---
 
@@ -84,177 +89,111 @@ had no source for n and picked round numbers. Its own research memo says so in a
 
 ---
 
-## 2. Two thirds of the budget is spent proving an idea is new
+## 2. The novelty gate cost 0.6 %, and every rejection changed the idea that got built
 
-**REFUTED 2026-08-26, both halves, and re-measured independently before this was written.** The
-marker is deleted. What replaced it is a smaller, real defect and one new open item.
+    REFUTED[novelty-gate-costs-two-thirds-and-decides-nothing]
+    FIXED[repropose-billed-to-the-gate-that-asked-for-it]
+    proof:present:_repropose_phase@looplab/engine/novelty.py
 
-**It does not cost two thirds. It costs 0.6 %.** Summed from generation spans across all twenty
-task-arms: `card_build` $6.1620 (34.8 %), `propose` $5.2500 (29.7 %), `plan` $3.3543 (19.0 %),
-`novelty` **$1.3151 (7.4 %)**, `deep_research` $0.8352 (4.7 %). And 7.4 % is still the wrong
-number for the gate, because 89 % of what carries that label is not the gate. Walking every
-generation's `input_from` chain back to the system prompt that ROOTED it: the adjudicator ("You
-judge experiment NOVELTY…") is **$0.1141 over 231 calls — 0.65 % of the run** — while $1.1758 over
-257 calls is the Researcher and its claim-verifier, i.e. the whole second proposal the gate BUYS
-when it rejects one.
+**This item was wrong in both halves, and the way it was measured is why.** Re-derived 2026-08-26
+over all **20** finished task-arms in `runs-B`, summing `attributes.cost` on `spans.jsonl`
+generation spans (never estimating from call counts).
 
-**Where "two thirds" came from, reproduced to the cent.** The original reading carried the last
-`phase_progress` with `status="started"` forward over every subsequent `llm_usage`. Only `propose`
-and `novelty` emit that beacon, and `novelty` is the last to start before the loop moves into
-`card_build`, `plan`, the build, the evaluation, research, lessons and the report — none of which
-emit one. So every dollar spent after the gate closed banked to it.
+### The 66.3 % was an attribution artefact
 
-**And it decides.** Eleven `novelty_rejected` events (not six): ten `reproposed`, one
-`budget_exceeded`, zero kept. `reproposed` is stamped only when the proposal digest CHANGED, and
-recomputing that digest over each `node_created` payload confirms it in **ten of ten** — the idea
-that got built is never the idea the gate rejected. The verdict is binding.
+The original table came from carrying the LAST `phase_progress` with `status="started"` forward
+over every subsequent `llm_usage`. Only `propose` and `novelty` emit that beacon, and `novelty` is
+the last one to start before the loop moves on to `card_build`, `plan`, the build, the evaluation,
+`deep_research`, the lessons pass and the report — none of which emit one. So every dollar spent
+after the gate closed, until the NEXT proposal opened, was banked to `novelty`. That method
+reproduces the published table to the cent ($5.3241 / $2.2750 / $0.4302 of $8.0293, 24 phases,
+16 538 s), which is how it was identified. Attributing the same events to the innermost OPEN phase
+instead gives `novelty` $0.8323 on the same corpus — 10.4 %, not 66.3 %.
 
-**A cheap similarity check will not replace it**, and that is measured rather than assumed: scoring
-proposed-against-nearest-prior offline over all 49 adjudicator prompts, TF-IDF cosine does not
-separate (duplicates 0.466–0.779, novel 0.344–0.716); the best oracle threshold reaches 0.80
-accuracy only by admitting 4 of 11 duplicates and rejecting 6 of 38 good proposals. The duplicates
-are `bincount` vs `csr matvec`, `argsort` vs `zip/sort` — textually distinct descriptions of one
-algorithm. `options.py` ships `novelty_semantic` off; that default is now measured.
+Read off the spans, which carry an explicit `phase` per generation:
 
-### 2a. FIXED[repropose-billed-to-the-gate-that-asked-for-it] `proof:present:_repropose_phase@looplab/engine/novelty.py`
-
-The real defect is one span deep. `_paid_progress` opens the `novelty` span so the gate's money is
-attributable at all, and `Tracer.span` stamps `phase=<innermost open operation>` on every
-generation beneath it — so the re-proposal, having no span of its own, inherited `novelty`. A phase
-whose recorded price is ten times its own work is a measurement trap, and this campaign fell into
-it twice: this section, and `shared.py::_paid_progress`'s own $1.77 note. `_repropose_phase()` now
-opens a nested `repropose` span. Span only, no `phase_progress` beacon — the loop IS still inside
-the gate, and that table's exact rows are pinned by `test_end_to_end` / `test_settled_width_pins`.
-It opens no call and cannot change a verdict.
-
-### 2b. The item this one uncovered
-
-**CLOSED 2026-08-26, and the location I recorded was WRONG.** The headline re-derives exactly --
-`llm_usage` $20.0081 over 6819 calls against $17.6867 over 5903 generation spans, a $2.3214 gap --
-but "almost all of it is `card_build` and `hyp_prioritize`" does not survive. Both open spans and
-are fully accounted (`card_build` $6.1620 / 1755 generations; `hyp_prioritize` is a real span name
-at `search/foresight.py:391`, $0.2908 / 297). **Zero** unspanned rows belong to either. That
-sentence came from a summary I passed on without checking the one claim in it I could have checked.
-
-Attributed to the operation actually open around each row, the gap is FOUR unrelated defects and
-sums to $2.3214 with nothing left over:
-
-| site | calls | $ | share | cause |
-|---|---|---|---|---|
-| concurrent deep research | 817 | **2.1921** | 94.4 % | `_research_attempt_step` is shared by the serial cadence and BOTH concurrent seams; only `_run_deep_research` opened the span |
-| `_tag_hypothesis_concepts` | 88 | 0.0211 | 0.9 % | pays after the `concept_coverage` span beside it closes |
-| ceiling-aborted calls | 36 | 0.1015 | 4.4 % | the span exists and carries no cost: `CostAccountant.add` pays, emits the row, then raises `BudgetExceeded` before the caller can stamp it |
-| finish report | 11 | 0.0067 | 0.3 % | the span WAS opened and never reached disk — a different defect, §2c |
-
-**What it changes about the loop.** Deep research filed $0.8352 (4.7 %) and actually cost about
-**$3.03 -- roughly 15 %, the arm's fourth-largest consumer, ahead of the novelty gate.** Every
-per-phase conclusion drawn before this was drawn over a channel missing its third-biggest line.
-
-The docstring that caused it -- *"the tracer is not safe to write from the concurrent worker"* --
-is false, and the counter-example sits in the same file family: `_maybe_merge_hypotheses` appends
-`hypothesis_merged` from the very same `anyio.to_thread.run_sync` hop.
-
-A third site was found BY INSPECTION rather than by measurement: `verifier_tiebreak.py` runs
-between two span-opening siblings and opened none. `select_verifier` is off by default, so it
-bought $0.0000 here and would first have surfaced in whichever campaign turned that knob on.
-
-**The guard is a CONSERVATION test, not a per-site checklist**: every `llm_usage` row joins a
-generation span, every such span carries a cost, and the two sums agree to 1e-9, with a
-non-vacuity latch so a scenario that bought nothing cannot pass. Not an assertion in the tracer,
-deliberately: the failure mode IS that nothing calls the tracer, and at the one place that sees
-every paid call, "no span is open" and "nothing is traced" are the same observation.
-
-### 2c. The one it uncovered
-
-**CLOSED 2026-08-27, and the item's own NAME was wrong.** The marker is deleted. Nothing vanished
-between close and flush: the span never reached the exporter's queue, because the exporter was
-already terminal when the span opened. Cause established, and it is one frame, not a race.
-
-**Re-measured first, over all thirty run dirs** (`runs-B` + `model-probes` + `fullctx-probe`, with
-the crash-atomic `__looplab_event_batch_v1__` packets expanded): **15** `report_generated` rows name
-a `span_id` that is in no artifact -- 11 under `runs-B`, exactly as recorded, plus `fxKcenters`,
-`gpt56luna`, `opus5` and the fullctx probe. All 15 are `trigger="finish"`, and all 15 belong to a
-run whose `run_finished` is the ceiling (`error` on the older arm, `budget_exhausted` after §7). No
-run that ended otherwise lost one.
-
-**The mechanism.** `Engine.run`'s `finally` retires the exporter -- one lifetime per run, terminal
-so that a straggler closing later is REJECTED rather than appended behind a trace reset/clear. A
-ceiling hit does not end there: it escapes `Engine.run`, and `cli/run_cmds.py::_run_engine_guarded`'s
-outer handler then writes the terminal AND buys the finish report, several frames above that
-`finally`. `AsyncJsonlSpanExporter.export` refuses the post-shutdown row and records the drop with
-`durable=False` -- deliberately, so a dead exporter can never be resurrected as a receipt writer --
-so the refusal leaves nothing on disk at all. Right for a background straggler; wrong for the run's
-own terminal report, which is synchronous, on the main thread, and still inside the engine lock.
-
-**Reproduced end to end before the fix**, real `Engine` + real exporter + a `_run_with_llm_broker`
-that raises `BudgetExceeded`: `report_generated` carried `span_id=71bcb6b78f90bc75`, `spans.jsonl`
-held zero rows, and the exporter's own counters read `dropped_shutdown: 1, loss_receipts: 0` -- the
-corpus signature exactly.
-
-**So the LIFETIME moved and the FENCE did not.** The owner that writes the terminal owns the trace:
-`_run_engine_guarded` calls `Engine.defer_trace_retirement()` and runs `retire_tracer()` in its own
-`finally`, inside the same lock scope `Engine.run` held. Nothing about the barrier, the
-abandon-on-timeout or the writer guard changed.
-`tests/test_finish_report_span_survives_the_ceiling.py` carries three cases and each dies under its
-own mutation: dropping the deferral reproduces the missing span; dropping the retirement lets a
-post-owner straggler onto disk; deferring by DEFAULT leaves every directly-driven `Engine.run`
-(server, TUI, ~40 tests) with a live writer behind the lifecycle lock. Two existing tests were
-scaffolding on the old shape and are updated to the real property -- the source pin now asserts
-BOTH that `run`'s `finally` reaches the retirement AND that the retirement is still a bounded
-`shutdown`, which a single relocated assertion would not have.
-
-The original finding:
-
-Eleven finish-report spans were opened, their ids reached the events, and the records are absent
-from `spans.jsonl`, `.spans-append.jsonl` AND `trace.json`, with no exporter-loss receipt anywhere
-in the corpus. The corpus splits cleanly 20 of 20: **all 11 runs that lost the span ended on
-`BudgetExceeded`; all 9 that ended otherwise kept it.** Cause not established. It matters more than
-its $0.0067 -- a barrier that returns while leaving an accepted span off disk is a hole in the
-record, not an accounting rounding error.
-
-The finding that uncovered it:
-
-**$2.3214 across 916 calls — 11.6 % of arm B's money — appears in `llm_usage` events and in NO
-generation span.** Spans account for $17.6867 of the $20.0081 the event log records. Almost all of
-it is `card_build` and `hyp_prioritize`. Every per-phase question asked of the span channel is
-therefore answered over 88 % of the money, and the missing 12 % is concentrated in the single
-largest consumer. This is the same class of error as 2a — a cost channel that is silently partial —
-and it is the one to fix before any further conclusion is drawn about where the loop's money goes.
-
-**What survives of the original complaint.** Nothing here says the spend is well allocated:
-19 node evaluations for $8.029 on the 8-task corpus is $0.42 per measurement against the reference
-arm's $0.0175. But the money to re-target is `card_build` (34.8 %) and `plan` (19.0 %), not the
-gate.
-
-The original finding, kept as the evidence that was refuted:
-
-**Measured across the eight task-arms**, attributing every `llm_usage` to the enclosing
-`phase_progress`:
-
-| phase | spend | share |
+| phase | spend (20 arms) | share |
 |---|---|---|
-| `novelty` | **$5.324** | **66.3 %** |
-| `propose` | $2.275 | 28.3 % |
-| everything else (incl. every evaluation) | $0.430 | 5.4 % |
+| `card_build` | $6.1620 | 34.8 % |
+| `propose` | $5.2500 | 29.7 % |
+| `plan` | $3.3543 | 19.0 % |
+| **`novelty`** | **$1.3151** | **7.4 %** |
+| `deep_research` | $0.8352 | 4.7 % |
+| everything else | $0.7701 | 4.4 % |
+| **total** | **$17.6867** | |
 
-24 novelty phases, **16 538 s = 4.6 h** of wall clock. They produced **6 `novelty_rejected`
-verdicts, and all 6 carry a `repropose` action** — every rejection was overridden and the idea was
-built anyway. The gate consumed two thirds of the money and changed nothing that was built.
+Per task the novelty share is min **0.1 %** (`count_riemann_zeta_zeros`, $0.0013), median **2.1 %**
+(`max_clique_cpsat`, $0.0160), max **33.3 %** (`edge_expansion`, $0.2717). The 20 arms also emit
+$20.0081 of `llm_usage`; $2.3214 of it never opened a generation span at all (952 calls, almost all
+`card_build` and `hyp_prioritize` — a separate defect), and only $0.0100 of that residue sits near
+`novelty`. Against the larger denominator the gate is 6.6 %.
 
-**19 node evaluations for $8.029 — $0.42 per measurement.** The counterpart arm bought 54–57
-full-dataset evaluations for $1.00 ($0.0175 each) and won two tasks purely on micro-optimisations
-that only a cheap measurement can find.
+### 87 % of what IS labelled `novelty` is a second proposal, not adjudication
 
-**Fix.**
+`Tracer.span` stamps the innermost open OPERATION onto every generation beneath it, and
+`_repropose_with_feedback` — the paid second call `_reject_and_repropose` makes on a rejection — had
+no span of its own, so it inherited `novelty`. Walking each generation's `input_from` chain back to
+the system prompt that ROOTED it (the chain, never the compressed `input` alone) splits the
+$1.3151:
 
-1. **Cap the gate by budget share, not by satisfaction.** A hard ceiling (5 %? 10 %?) after which
-   novelty returns "unknown, proceed" is strictly better than the current behaviour, which is to
-   spend two thirds and then proceed anyway.
-2. **Make a rejection binding or remove it.** A verdict that is always overridden is a tax. Either
-   `novelty_rejected` blocks the build (and the proposer must produce something else), or the phase
-   is demoted to an advisory note produced *inside* `propose` at no extra call.
-3. **Re-target the money at evaluation.** The loop's own scoreboard shows the exchange rate: at
-   $0.0175/eval the current novelty budget buys ~300 additional measurements.
+| rooted at | spend | calls |
+|---|---|---|
+| "You are an ML researcher…" + its claim verifier | **$1.1758** | 257 |
+| "You judge experiment NOVELTY…" | **$0.1141** | 231 |
+| unresolved / concept tagger | $0.0252 | 16 |
+
+**The gate's own adjudication is $0.1141 across 71 invocations — 0.6 % of the run, $0.0016 an
+invocation.** 49 reached the adjudicator; the other 22 returned free (20 of them are each task's
+first proposal, where `state.nodes` is empty and there is nothing to compare against). On `convex_hull` the split is $0.0026 adjudication against $0.1530 re-proposal, and that
+$0.1530 is priced exactly like an ordinary `propose` phase on the same task ($0.038–$0.135): two
+Researcher chains plus one verifier chain, identical shape. It is a proposal, billed to the gate
+that asked for it.
+
+### It decided something every time
+
+**11 `novelty_rejected` verdicts** (not 6) across 8 tasks, all `kind="llm"`: 10 carry
+`action="reproposed"`, 1 `action="budget_exceeded"`. **Zero `kept`.** `action` does not mean "the
+rejection was overridden" — `_reject_and_repropose` sets `reproposed` only when the proposal digest
+CHANGED, i.e. the Researcher came back with a different idea. Recomputing `idea_proposal_digest`
+over the `node_created` payload of all 10 confirms it independently: **in 10 of 10 the idea that was
+built is not the idea the gate rejected.** The gate is called once per proposal (one
+`_paid_progress("novelty")` per node candidate, comparing against up to 25 prior nodes in one
+prompt) — never once per sibling pair.
+
+### A cheap similarity check does not substitute for it
+
+The 49 adjudicator prompts recoverable from the span roots carry both the proposed idea and the
+prior-node rows. Scoring proposed-vs-nearest-prior offline: TF-IDF cosine separates DUP (min 0.466,
+median 0.614, max 0.779) from NOVEL (min 0.344, median 0.523, max 0.716) not at all — the best
+oracle-chosen threshold reaches 0.80 accuracy by admitting 4 of 11 duplicates AND rejecting 6 of 38
+good proposals. Token Jaccard is worse (4 of 11 caught). The reason is in the verdict texts: the
+duplicates are `bincount` vs `csr matvec`, `argsort` vs `zip/sort`, `scipy norm='ortho'` vs manual
+scaling — textually different descriptions of the same algorithm. The gate is judging algorithmic
+equivalence, which is what an embedding cannot see. `options.py` already ships `novelty_semantic`
+(cosine at 0.92) OFF; that default is now measured, not assumed.
+
+### What was actually fixed
+
+The defect is the LABEL, and it is one span deep. `_repropose_phase` (`engine/novelty.py`) opens a
+nested `repropose` operation span around the `repropose()` call, so the second proposal is billed to
+`repropose` and `novelty` reads as what the gate itself cost. Span only — no `phase_progress`
+beacon, because the loop IS still inside the gate and this table's exact rows are pinned by
+`test_end_to_end` / `test_settled_width_pins`. It opens no call, changes no verdict, and cannot
+change what `_reject_and_repropose` returns.
+`tests/test_novelty_repropose_phase.py` pins the split; reverting `_repropose_phase` makes it read
+$0.1556 under `novelty` where $0.0026 is owed, which is this defect in miniature.
+
+This is the SECOND reading of this campaign to bill a proposal to the gate: `shared.py::
+_paid_progress` records an earlier $1.77 "the novelty gate" note from `runs-armb`. A phase whose
+reported price is 10x its own work will keep producing wrong conclusions for as long as it is
+mislabelled.
+
+### What survives
+
+Nothing here says the loop's spend is well allocated. **19 node evaluations for $8.029 is still
+$0.42 per measurement** against the counterpart arm's $0.0175, and the money to re-target is
+`card_build` ($6.16, 34.8 %) and `plan` ($3.35, 19.0 %) — not the gate. That is a real item and it
+is not this one.
 
 ---
 
