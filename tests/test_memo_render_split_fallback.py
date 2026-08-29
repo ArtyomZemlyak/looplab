@@ -22,7 +22,11 @@ import pathlib
 
 from looplab.tools import run_tools
 
-_SRC = pathlib.Path(inspect.getsourcefile(run_tools)).read_text()
+# `encoding=` is load-bearing: `run_tools.py` carries em-dashes, and a bare `read_text()` decodes
+# with the LOCALE codec — cp125x on the Windows CI shards, where this module then dies at COLLECTION
+# (`UnicodeDecodeError: 'charmap' codec can't decode byte 0x8f`) and takes its whole shard's
+# collection down with it. Observed on every pytest-windows shard since this file landed.
+_SRC = pathlib.Path(inspect.getsourcefile(run_tools)).read_text(encoding="utf-8")
 
 
 def _dirs_for(memo: dict) -> list[str]:
