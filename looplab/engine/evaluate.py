@@ -852,6 +852,27 @@ class EvaluateMixin:
         introduces NO third spelling: it calls `SpeculationMixin._speculative_link_matches`, the
         engine's own one, already used by `_run_card_session`'s admission gate.
 
+        A MID-BUILD FRESHNESS RE-CHECK WOULD RECOVER NOTHING, measured 2026-08-29 so nobody builds
+        one on the intuition that checking earlier must help. The build is paid FIRST and freshness
+        is re-checked LAST, which reads like a lever: catch the staleness halfway through and refund
+        half the build. Over every event log preserved on this box there are 104 card builds, of
+        which 20 produced no evaluation — 11 closed with no node (3.37 h) and NINE minted a node the
+        run then passed over (7.75 h). For each of those nine, the first board-moving event inside
+        its own build window (`node_evaluated` / `node_failed` / `card_added` / `hypothesis_merged` /
+        `card_dropped`) is: NONE. Zero, on all nine. The board did not move DURING any discarded
+        build, so an earlier check had nothing to detect and the recoverable upper bound is
+        0.00 h of 7.75 h. Staleness arises at or after the build's end, which is exactly where the
+        check already runs.
+        THE REAL LEVER IS THE REBUILD DECISION, not the check's timing: `e5small-dr-unified-v9`
+        built card-3 twice (42.8 min -> node 3, 69.0 min -> node 6) and card-4 twice (51.2 min ->
+        node 4, 53.2 min -> node 7), and all four nodes were passed over — 3.6 h buying nothing on
+        two cards. That is #109's other half and it stays open.
+        A COUNTING TRAP WORTH INHERITING: "minted a node that never started an eval" is NOT the
+        discard population. Nine further nodes match it and were merely QUEUED when their log ended
+        (8.69 h, including all six of `rubertlite-dr-unified-v7`'s), so the naive predicate reports
+        19.81 h of waste against a true 11.12 h. A discard needs proof the lane later freed and the
+        node was passed over anyway.
+
         The producer appends the link only after the consumer claims the build as the selection it
         actually wanted, and `_run_card_session` re-runs `speculative_card_is_fresh` immediately
         before dispatch — so the link is the durable, replay-visible half of a confirmation the
