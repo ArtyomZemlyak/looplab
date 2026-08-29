@@ -495,6 +495,38 @@ receipt, and what each bucket means. The unknown bucket is stated first and deli
 written before 2026-08-19 has no receipts, and "no receipt" means *nobody can say whether anything
 looked*, never "clean". See [Evaluation rigor](concepts.md#trust-the-sandbox).
 
+### The stop account
+
+`run`, `resume` and `inspect` all print a **`stop:`** line, and `inspect` adds a
+**`stop evidence:`** line. Both come from `looplab/events/stop_account.py`, which answers one
+question from the durable record alone: *why did this run stop, and is it owed more work?*
+
+`finished=False` used to be the whole answer, and it conflated three different states. Measured over
+20 real runs, 8 ended with no `run_finished` event at all — 4 auto-paused after a Developer crash,
+1 after the Researcher's provider fallback, and 3 were killed from outside by a harness wall. Each
+had said why, durably, in `events.jsonl`; the fold kept the class and dropped the sentence. The
+twelve that *did* finish were no better: every one folded to `stop_reason="error"`, which reads as a
+crash, and not one had crashed — all twelve stopped on the operator's own `llm_budget_usd` ceiling,
+which the `run_finished` row named on the same row.
+
+The `disposition` is one of four:
+
+| disposition | means | owed more work? |
+|---|---|---|
+| `finished` | the run wrote its own terminal | no — but read the detail: a spend ceiling is not a crash |
+| `paused` | resumable, with the pausing writer's own words quoted | yes — `looplab resume RUN_DIR` |
+| `no_boundary` | the log has no end in it: the process died without writing one | yes, and only the supervisor that killed it can say how |
+| `no_log` | there is no readable event log | nothing to say |
+
+`no_boundary` is deliberately the whole of what the engine claims when it dies without a terminal.
+Nothing of ours observed the signal — there is no `SIGTERM` handler, and the default disposition
+runs no `finally` and no `atexit` — so naming the cause would be the engine classifying something it
+neither did nor computed. That is the same ownership rule the failure classifier applies: the engine classifies what it
+*did* or *computed*, never what it merely suspects.
+
+The reason text is a projection of bytes already in the log, so `looplab replay` agrees with the log
+it replayed.
+
 ## `comparability`
 
 Print, for each run directory, the comparability key its champion's number carries — and **refuse**

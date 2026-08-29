@@ -174,7 +174,8 @@ DELTA_CEILING_VALUE = 135_000
 DELTA_CEILING_DEFAULT = 0
 
 
-def abort_is_not_retryable(model: str, usage: dict, *, stamp: int) -> tuple[list, list]:
+def abort_is_not_retryable(model: str, usage: dict, *, stamp: int,
+                           truncated: bool = True) -> tuple[list, list]:
     """The ending that makes a cut generation an ANSWER rather than an exception.
 
     Returns `(frames, wire)` -- the same three-part ending twice, once as objects for the
@@ -204,16 +205,28 @@ def abort_is_not_retryable(model: str, usage: dict, *, stamp: int) -> tuple[list
     no usage, the price on a chunk with `choices: []`, because `stream_options.include_usage` reads
     usage only off the empty-choices chunk. This adds the sentinel behind them.
     """
+    # `finish_reason` ONLY WHEN THE STREAM REALLY WAS CUT (`truncated`). On the adapted
+    # (non-streaming) route `_reassemble` takes the LAST non-empty finish_reason it sees, so an
+    # UNCONDITIONAL `truncated` here overwrote a perfectly good `stop` and handed the client a
+    # completed answer labelled as cut -- which LoopLab's `_envelope_is_truncated` then refuses to
+    # cache while warning that the provider cut it. A stream that saw `[DONE]` is not cut.
+    _choice = {"index": 0, "delta": {}}
+    if truncated:
+        _choice["finish_reason"] = STREAM_TRUNCATED_FINISH_REASON
     cut = {"id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
-           "created": stamp,
-           "choices": [{"index": 0, "delta": {},
-                        "finish_reason": STREAM_TRUNCATED_FINISH_REASON}]}
+           "created": stamp, "choices": [_choice]}
     priced = {"id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
               "created": stamp, "choices": [], "usage": usage}
     wire = [b"data: " + json.dumps(cut).encode() + b"\n\n",
             b"data: " + json.dumps(priced).encode() + b"\n\n",
             b"data: [DONE]\n\n"]
-    return [cut, priced], wire
+    # WITHOUT `id`/`model` for the reassembling caller. `_reassemble` carries every key it does not
+    # handle from the LAST frame that had one, so appending these whole replaced the real
+    # completion's `id` with "meter-estimate" and its `model` with whatever the REQUEST asked for --
+    # on exactly the cut calls that most need correlating with the gateway's own record. Only
+    # `choices` and `usage` are wanted there; both are handled explicitly by the reassembler.
+    collectable = [{k: v for k, v in f.items() if k in ("choices", "usage")} for f in (cut, priced)]
+    return collectable, wire
 
 
 class Pricing:
@@ -450,16 +463,29 @@ class Handler(BaseHTTPRequestHandler):
         the old shape would drop a real, paid request out of the ledger -- the one thing this file
         must never do.
 
-        The two are told apart by the segment itself, not by a length count, because both forms have
-        the same number of `/` once the tail is long enough: `/m/A/t/v1/chat/completions` and
-        `/m/A/t/a3/v1/chat` both split into six. `/v1` is where the UPSTREAM path begins, so a
-        fourth segment that is not `v1` is an attempt id and a fourth segment that IS `v1` is the
-        tail. An attempt id may therefore not be spelled `v1`; `campaign.sh` spells them `a<N>`.
+        The two are told apart by WHERE THE UPSTREAM PATH BEGINS, not by a length count, because both
+        forms have the same number of `/` once the tail is long enough: `/m/A/t/v1/chat/completions`
+        and `/m/A/t/a3/v1/chat` both split into six.
+
+        The test is that the REMAINDER starts with `v1`, not merely that the fourth segment does not.
+        Those differ on a shape the repo documents: a client whose `base_url` already carries `/v1`
+        sends `/m/A/task/chat/completions`, whose fourth segment is `chat`. Reading "not v1" as "an
+        attempt id" made that request proxy to `<upstream>/completions` -- a 404 at the gateway --
+        and filed its row under `attempt="chat"`, inventing a bucket the campaign never allocated.
+        A metered call arriving on the short path must be METERED, not refused, which is exactly
+        what that shape stopped being.
+
+        An attempt id may therefore not be spelled `v1`; `campaign.sh` spells them `a<N>`, and it
+        always emits the attempt form WITH `/v1` (`$METER_BASE/m/$ARM/$T/$ATTEMPT/v1`). The residual
+        is the un-emitted `/m/A/t/a3/chat/completions` -- an attempt id with a `/v1`-less tail -- 
+        which reads as no attempt and a tail of `/a3/chat/completions`; nothing in this repo
+        produces it, and guessing would re-open the defect above.
         """
         path = self.path
         if path.startswith("/m/"):
             parts = path.split("/", 5)          # ['', 'm', arm, task, seg, rest]
-            if len(parts) >= 6 and parts[4] != "v1":
+            if (len(parts) >= 6 and parts[4] != "v1"
+                    and (parts[5] == "v1" or parts[5].startswith("v1/"))):
                 return parts[2], parts[3], parts[4], "/" + parts[5]
             if len(parts) >= 5:
                 return parts[2], parts[3], "", "/" + "/".join(parts[4:])
@@ -789,6 +815,7 @@ class Handler(BaseHTTPRequestHandler):
             row["stream_adapted"] = True
         collected: list = []
         tally = {"attempts": 1, "queued_s": 0.0}
+        answered = False        # did the CLIENT get an HTTP response? see the tail below
         try:
             resp, attempts, queued_s = self._open_upstream(req, tally)
             row.update({"attempts": attempts, "queued_s": round(queued_s, 2)})
@@ -806,6 +833,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._fail(502, f"upstream {type(exc).__name__}: {exc}", arm, task, attempt, t0)
             return
+
+        # Read ONCE from the upstream response, before any frame is parsed: it is a property of the
+        # response, not of any frame, and re-reading it per frame would say the same thing N times.
+        _hdr_cost = _header_cost(dict(resp.headers))
 
         if not collect_for_client:
             self.send_response(resp.status)
@@ -875,10 +906,28 @@ class Handler(BaseHTTPRequestHandler):
         # `APIConnectionError` -- one of the three exception types AlgoTuner's ten-attempt loop
         # retries. The frames were correct and unreadable, which is the same thing as absent.
         wire_tail = b""
+        # `[DONE]` IS HELD BACK, NOT FORWARDED IN PLACE. A spec-compliant SSE client stops at the
+        # terminator -- openai-python's `Stream.__stream__` BREAKS on it and LoopLab's
+        # `defer_inband_error` keeps that rule -- so an estimate emitted after it reaches nobody,
+        # which is exactly where the synthesized usage frame used to go whenever a stream ended
+        # tidily WITHOUT a usage frame. It is also the flag the row below needs: a stream that
+        # reached `[DONE]` ended, whatever else it did or did not carry.
+        done_seen = False
+        swallow_blank = False
         try:
             for line in resp:
                 out = line
-                if line.startswith(b"data: ") and not line.startswith(b"data: [DONE]"):
+                if line.startswith(b"data: [DONE]"):
+                    done_seen = True
+                    swallow_blank = True         # ...and the blank line that terminates IT
+                    continue                     # re-emitted at the very end, after the estimate
+                if swallow_blank:
+                    # The `\n` that closed the held `[DONE]` event goes with it; anything else on
+                    # this line is an ordinary frame and is forwarded normally.
+                    swallow_blank = False
+                    if not line.strip():
+                        continue
+                if line.startswith(b"data: "):
                     try:
                         frame = json.loads(line[6:])
                     except ValueError:
@@ -888,7 +937,15 @@ class Handler(BaseHTTPRequestHandler):
                     if isinstance(frame, dict):
                         for ch in (frame.get("choices") or []):
                             d = ch.get("delta") or {}
-                            if d.get("content") or d.get("reasoning_content"):
+                            # `reasoning` too: `_reassemble` above reads BOTH spellings
+                            # (`reasoning_content` here, `reasoning` on an OpenRouter-shaped
+                            # gateway) and two halves of one file disagreeing about what a
+                            # reasoning delta is means a cut reasoning stream in the second
+                            # shape counts ZERO deltas, skips the estimate entirely, and is
+                            # recorded `metered: false, cost: 0.0` -- the silent under-count
+                            # the estimator exists to close.
+                            if (d.get("content") or d.get("reasoning_content")
+                                    or d.get("reasoning")):
                                 deltas += 1
                     if isinstance(frame, dict) and isinstance(frame.get("usage"), dict):
                         usage_frame_seen = True
@@ -899,6 +956,16 @@ class Handler(BaseHTTPRequestHandler):
                             model or frame.get("model", ""))
                         if usage.get("cost") is not None:
                             cost, basis = float(usage["cost"]), "upstream"
+                        elif _hdr_cost is not None:
+                            # THE GATEWAY'S OWN INVOICE, read on this route too. `_header_cost` was
+                            # consulted only in `_proxy`, so with `METER_STREAM_ADAPT=1` the very
+                            # same non-streaming call was priced by IMPUTATION while the unadapted
+                            # one was priced by the header -- a price that depends on the transport,
+                            # which is the difference the adapter exists to remove. Latent today
+                            # (this gateway emits 0.0, which `_header_cost` rightly refuses as "not
+                            # a price") and load-bearing the day it stops being.
+                            cost, basis = _hdr_cost, "upstream-header"
+                            usage["cost"] = cost
                         else:
                             cost = pin * rate_in + pout * rate_out
                             usage["cost"] = cost
@@ -1016,7 +1083,8 @@ class Handler(BaseHTTPRequestHandler):
                 # AND THE SENTINEL BEHIND THEM. `abort_is_not_retryable` owns all three parts and
                 # the reasoning for them; what matters here is that a cut leaves through ONE door,
                 # so the streamed client and the reassembled one cannot end differently.
-                frames, wire = abort_is_not_retryable(model, usage, stamp=int(time.time()))
+                frames, wire = abort_is_not_retryable(model, usage, stamp=int(time.time()),
+                                                          truncated=not done_seen)
                 if collect_for_client:
                     collected.extend(frames)    # `[DONE]` is a wire sentinel, not a frame
                 else:
@@ -1034,12 +1102,39 @@ class Handler(BaseHTTPRequestHandler):
                 # exactly what it would have seen either way.
                 whole = json.dumps(self._reassemble(collected)).encode()
                 self._send(resp.status, whole, {"Content-Type": "application/json"})
+                answered = True
             else:
                 self.wfile.flush()
         except Exception as exc:  # noqa: BLE001 - a broken client must not take the server down
             row["error"] = f"{type(exc).__name__}: {exc}"
         finally:
             resp.close()
+
+        # THE ADAPTED ROUTE MUST ALWAYS ANSWER. On the streaming route the headers went out before
+        # the loop, so a mid-stream failure still leaves the client a truncated body it can salvage.
+        # On this route nothing has been written yet and `_send` lives inside the `try`, so an
+        # upstream reset or a decode error returned with NO status line at all: a keep-alive client
+        # (httpx/litellm pool every one of them) blocks until its own timeout, while the ledger
+        # records the call as a 200. Driven 2026-08-25 against an upstream that resets mid-chunk.
+        #
+        # The partial reassembly is sent rather than a bare 502 whenever any frame arrived, because
+        # preserving a cut generation is what this adapter is FOR -- discarding it here would repeat,
+        # one layer down, the loss `core/llm.py`'s stream salvage was written to stop.
+        if collect_for_client and not answered:
+            try:
+                if collected:
+                    partial = self._reassemble(collected)
+                    for _ch in (partial.get("choices") or []):
+                        _ch["finish_reason"] = STREAM_TRUNCATED_FINISH_REASON
+                    self._send(200, json.dumps(partial).encode(),
+                               {"Content-Type": "application/json"})
+                else:
+                    self._send(502, json.dumps({"error": {
+                        "message": row.get("error") or "upstream stream failed before any frame",
+                        "type": "meter_stream_failed"}}).encode(),
+                        {"Content-Type": "application/json"})
+            except Exception:  # noqa: BLE001 - the socket may already be gone; the row still lands
+                pass
 
         latency_ms = round((time.time() - t0) * 1000, 1)
         row.update({"status": resp.status, "latency_ms": latency_ms, "prompt_tokens": pin,
@@ -1049,25 +1144,31 @@ class Handler(BaseHTTPRequestHandler):
         if prompt_basis:
             row["prompt_tokens_basis"] = prompt_basis
         if basis == "estimated_from_deltas":
-            row["prompt_chars"] = prompt_chars
-            # `stream_aborted` STAYS TRUE FOR BOTH CAUSES and the cause goes in its own key.
-            # Downstream the flag means "this call was truncated and priced from deltas" --
-            # `compare_arms.py` counts money on it -- and a ceiling cut is exactly that. Which of
-            # the two happened is a different question, so it gets a different field rather than a
-            # changed meaning for an existing one: making `stream_aborted` mean "gateway only"
-            # would silently drop ceiling cuts out of every spend column that already reads it.
-            row["stream_aborted"] = True
-            if cut_by_meter:
-                row["stream_cut_by"] = "meter_delta_ceiling"
-                row["meter_delta_ceiling"] = ceiling
-                row["note"] = (f"the meter cut this stream at its {ceiling}-delta ceiling after "
-                               f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
-                               f"(EXACT for what was forwarded, a floor for what upstream generated)"
-                               f" and a prompt of {pin} tokens ({prompt_basis})")
-            else:
-                row["note"] = ("upstream ended the stream with no usage frame after "
-                               f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
-                               f"(a FLOOR) and a prompt of {pin} tokens ({prompt_basis})")
+               row["prompt_chars"] = prompt_chars
+               # `stream_aborted` MEANS THE STREAM NEVER REACHED ITS TERMINATOR, not "we had to
+               # estimate it". Keyed on the basis, a stream that ended cleanly with `[DONE]` and
+               # merely carried no usage frame was stamped aborted -- a claim about the TRANSPORT
+               # drawn from a fact about the PRICING, and the two are independent.
+               #
+               # A METER CEILING CUT IS STILL AN ABORT, and unconditionally so: this proxy closed the
+               # socket itself, so the stream demonstrably did not finish. The cause goes in its own
+               # key rather than changing what the flag means -- `compare_arms.py` counts money on
+               # `stream_aborted`, and making it mean "gateway only" would drop ceiling cuts out of
+               # every spend column that already reads it.
+               if cut_by_meter:
+                   row["stream_aborted"] = True
+                   row["stream_cut_by"] = "meter_delta_ceiling"
+                   row["meter_delta_ceiling"] = ceiling
+                   row["note"] = (f"the meter cut this stream at its {ceiling}-delta ceiling after "
+                                  f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
+                                  f"(EXACT for what was forwarded, a floor for what upstream generated)"
+                                  f" and a prompt of {pin} tokens ({prompt_basis})")
+               else:
+                   if not done_seen:
+                       row["stream_aborted"] = True
+                   row["note"] = ("upstream ended the stream with no usage frame after "
+                                  f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
+                                  f"(a FLOOR) and a prompt of {pin} tokens ({prompt_basis})")
         elif not basis and row.get("error"):
             # THE ROW MUST NOT CONTRADICT ITSELF. The synthesis above lives inside the `try`, so any
             # exception while forwarding -- a client that hung up is the one that happens; five

@@ -71,7 +71,13 @@ def test_an_empty_answer_still_records_the_size_and_the_reason():
                                                       "no tool_calls in response")
     assert gen.seen["usage"] == usage
     assert gen.seen["error"] == "no tool_calls in response"
-    assert gen.seen["output"] == "" or isinstance(gen.seen["output"], str)
+    # The output was STAMPED and it is exactly `""`. `x == "" or isinstance(x, str)` stood here and
+    # is true of every string, so it asserted nothing at all about the case this test exists for;
+    # what matters is that an empty answer still reaches the generation as a key rather than being
+    # dropped, because a MISSING `output` and an EMPTY one read differently to every consumer of the
+    # trace. `in` first, so a dropped key fails with "output was never stamped" instead of KeyError.
+    assert "output" in gen.seen, "an empty answer must still stamp `output`, not drop the key"
+    assert gen.seen["output"] == ""
 
 
 def test_both_error_branches_route_through_the_one_stamp():

@@ -16,6 +16,7 @@ from typing import Optional
 
 from looplab.core.models import (EXTRA_METRIC_AUTO, apply_engine_extra_metric_channels,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
+from looplab.engine.evaluate import _redacted_tail
 from looplab.engine.shared import effective_researcher_eval_timeout
 from looplab.engine.speculation_gate import engine_authored_artifacts
 from looplab.events.replay import fold
@@ -462,7 +463,7 @@ class EvalDispatchMixin:
         # without opening a log. A stderr tail cannot be read by a tool.
         self.store.append(EV_RUN_SETUP_FINISHED,
                           {"command": cmd, "exit_code": rc, "timed_out": timed,
-                           "stderr_tail": self._redact((err or "")[-2000:]),
+                           "stderr_tail": _redacted_tail(self._redact, err, 2000),
                            "env_delta": self._env_delta_since(watch, before),
                            "dropped_requirements": dropped})
         if rc != 0 or timed:
@@ -473,7 +474,7 @@ class EvalDispatchMixin:
             unsat = deps.unsatisfied_requirements((err or "") + (out or ""))
             named = ("; no distribution for: " + ", ".join(sorted(unsat))) if unsat else ""
             raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}){named}; see {log}\n"
-                               + self._redact((err or out or "")[-500:]))
+                               + _redacted_tail(self._redact, err or out, 500))
 
     def _retry_without_unsatisfiable(self, declared, out, err, cwd, to, log):
         """Retry the DERIVED declaration install once, minus the lines pip could not resolve.

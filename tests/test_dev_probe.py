@@ -24,11 +24,72 @@ import pytest
 from looplab.runtime import landlock, read_allowlist, read_fence
 from looplab.tools import dev_probe
 from looplab.tools._base import RESULT_CAP, stream_tails
-from looplab.tools.dev_probe import _MAX_TIMEOUT, DevProbeTools
+from looplab.tools.dev_probe import _MAX_CODE_CHARS, _MAX_TIMEOUT, DevProbeTools
+
+# WHY A PROBE-EXECUTING TEST CAN SKIP, AND EXACTLY ONE CANNOT.
+#
+# `confine_reads` defaults True and FAILS CLOSED: on a kernel with no Landlock the probe REFUSES to
+# run rather than running with a boundary it does not have. That is the right production behaviour
+# and it is what this container has ("no Landlock support"; Docker's default seccomp answers ENOSYS,
+# so a great many CI sandboxes qualify) — so every test here that actually EXECUTES a probe died on
+# `exit=3 ... landlock_create_ruleset failed`, including pre-existing ones whose subject is not
+# confinement at all, and the repo's own "the suite runs fully offline" contract went with them.
+#
+# The gate wraps `execute` rather than being a module-level `pytestmark` for two reasons: a
+# file-level mark also skips the many tests here that only DERIVE (grants, fence inputs, the
+# mutation-event table re-derivation), which run perfectly well on any kernel; and wrapping the one
+# entry point every probe goes through means a test added later inherits it without having to know.
+# An arm that explicitly asks for `confine_reads=False` — the hook is the confinement there — still
+# runs everywhere, as it always did.
+#
+# And the refusal itself is a documented contract, so it gets the one test below that runs ONLY on
+# such a kernel. Before this it was exercised by accident, as 21 unexplained failures.
+_NO_LANDLOCK = landlock.unavailable_reason()
+
+
+@pytest.fixture(autouse=True)
+def _skip_when_the_kernel_cannot_confine(monkeypatch, request):
+    """Skip any test that EXECUTES a confined probe on a kernel without Landlock.
+
+    Wrapped at `execute` rather than at `_probe`, because a third of the probe-running tests here
+    build their own `DevProbeTools` (they need a repo spec, a mount, a staged workdir) and call
+    `execute` directly — a gate on the helper would have left those red. The wrapper runs inside the
+    TEST's own frame, so `pytest.skip` propagates as a skip rather than being caught by anything.
+
+    Tests that only DERIVE — grants, fence inputs, the mutation-event table re-derivation from a
+    recording audit hook — never reach `execute` and go on running everywhere, which is why this is
+    not a module-level `pytestmark`. An arm that explicitly asks for `confine_reads=False` (the hook
+    is the confinement there) also runs everywhere, unchanged.
+    """
+    if not _NO_LANDLOCK or request.node.get_closest_marker("skipif"):
+        return
+    original = DevProbeTools.execute
+
+    def _guarded(self, name, args):
+        # Only a call that would really LAUNCH a child. The argument-validation arms
+        # (`{}`, `None`, blank code, over-long code) are refused by `_probe` before any interpreter
+        # starts, so they are kernel-independent and must keep running here.
+        code = str((args or {}).get("code") or "") if isinstance(args, dict) else ""
+        launches = bool(code.strip()) and len(code) <= _MAX_CODE_CHARS
+        if name == "run_probe" and launches and getattr(self, "confine_reads", True):
+            pytest.skip(f"the probe's kernel read rung fails closed here: {_NO_LANDLOCK}")
+        return original(self, name, args)
+
+    monkeypatch.setattr(DevProbeTools, "execute", _guarded)
 
 
 def _probe(code, **kw):
     return DevProbeTools(timeout_s=kw.pop("timeout_s", 30), **kw).execute("run_probe", {"code": code})
+
+
+@pytest.mark.skipif(not _NO_LANDLOCK, reason="this kernel HAS Landlock, so nothing is refused")
+def test_a_confined_probe_refuses_to_run_at_all_where_the_kernel_cannot_confine_it():
+    """FAIL CLOSED, said out loud. The alternative — running unconfined and reporting success — is
+    the two-day gap this rung was added to close, so the refusal must name the missing mechanism
+    rather than look like an ordinary probe failure."""
+    out = DevProbeTools(timeout_s=30).execute("run_probe", {"code": "print('should not run')"})
+    assert "should not run" not in out, "a probe RAN on a kernel that cannot confine it"
+    assert "andlock" in out or "confine" in out, out
 
 
 @pytest.fixture()

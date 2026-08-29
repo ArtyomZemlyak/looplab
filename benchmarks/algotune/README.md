@@ -224,6 +224,20 @@ restarting the process" — and pins the benchmark to a fixed CPU set (below).
 
 ### Pin the CPUs, and reap the workers
 
+OPEN[readme-stale-self-descriptions] four sentences in this README describe machinery that no
+longer exists or no longer behaves as stated, each one an instruction an operator would follow.
+proof:present:BENCH_CPUS@benchmarks/algotune/README.md
+REVIEW 2026-08-25 (docs): (1) the paragraph below names a `taskset` mask variable that NO shipped
+file reads — pinning is per-lane (`LANE_CPUS`, owned by campaign.sh's lane scheduler), so an
+operator exporting the named variable believes they have pinned and nothing changes. (2) The
+"budget must be SPEND" section above still describes `run_evaluator.py` and a `--no-baseline-cache`
+flag — neither exists anywhere in the tree; that was the abandoned in-process wrapper whose
+replacement (`patch_baseline_cache.py`) says the wrapper "is gone". (3) "The campaign uses 4 h
+purely as a hung-process guard" — campaign.sh now defaults `HARD_TIMEOUT=0` (no wall) with the
+40-minute STALL bound instead. (4) docs/52's launch block and fence_foreign_results.sh still name
+`run_both_arms.sh` / `run_final.sh`, drivers not in the repo. Fix: rewrite the four sentences to
+the shipped mechanisms; each is one edit at the place this marker's window names.
+
 Both arms carry the **same** `taskset` mask (`BENCH_CPUS`, default `0-5`), leaving the rest for the
 campaign driver, the LLM client and the OS. A timing taken on a busy core is not comparable to one
 taken on an idle core, and no amount of averaging recovers that after the fact.

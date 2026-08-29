@@ -34,6 +34,7 @@ difference between proving the marker is withheld and pinning the text of a `cas
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -42,10 +43,17 @@ import pytest
 
 CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign.sh"
 
-# The functions under test, plus the two variables `record_done` reads out of the campaign's
-# preamble (the regime it stamps into every marker).
-_FUNCTIONS = ("run_started_evidence", "next_attempt", "already_measured", "record_done",
-              "refuse_to_start", "final_banner")
+# The functions under test, plus the variables `record_done` reads out of the campaign's preamble
+# (the regime it stamps into every marker, and the arm/task its rc=0 evidence check is ABOUT).
+#
+# `successful_calls` is in this list because `record_done`'s rc=0 arm CALLS it. Without it the
+# harness ran that arm against an undefined command AND an unbound `$ARM`, so under `set -u` the
+# command substitution aborted, `OK_CALLS` came back empty, and the "a run that paid for nothing
+# gets NO MARKER" rung was never once executed by this file — while every marker assertion below
+# still passed. A guard whose subject is missing from the extraction list is a guard that cannot
+# go red when the subject is deleted, which is the whole reason the extraction asserts by NAME.
+_FUNCTIONS = ("run_started_evidence", "successful_calls", "next_attempt", "already_measured",
+              "record_done", "refuse_to_start", "final_banner")
 
 
 def _harness() -> str:
@@ -56,7 +64,12 @@ def _harness() -> str:
     (`cd "$AT"`, `source .venv/bin/activate`, a live endpoint).
     """
     src = CAMPAIGN.read_text(encoding="utf-8")
-    parts = ["set -u", "LANE_COUNT=4", "CORES_PER_LANE=22"]
+    # `ARM` and `T` are read as GLOBALS by `record_done`'s rc=0 arm (the marker path is a
+    # positional but the meter lookup is not), so the harness has to stand in for `run_one`'s
+    # assignments or `set -u` aborts the substitution. `METER_LOG` is deliberately left unset by
+    # default: that is the "no meter" shape, in which `successful_calls` answers "" and the rung
+    # keeps its pre-2026-08-25 behaviour. A test that wants the rung ARMED exports it itself.
+    parts = ["set -u", "LANE_COUNT=4", "CORES_PER_LANE=22", 'ARM="${ARM:-B}"', 'T="${T:-svm}"']
     for name in _FUNCTIONS:
         found = re.search(rf"^{name}\(\) \{{.*?^\}}$", src, re.M | re.S)
         assert found, f"campaign.sh no longer defines {name}()"
@@ -283,6 +296,52 @@ def test_a_refusal_after_the_run_started_is_its_own_state(tmp_path):
     marker = done.read_text()
     assert "state=stopped_after_start" in marker, marker
     assert "state=wall_cut" not in marker, marker
+
+
+def _meter_log(root, rows) -> str:
+    """A `meter.jsonl` in the shape `benchmarks/meter/proxy.py` writes it (stdlib `json.dumps`,
+    i.e. `": "` after every key — which is the spacing `successful_calls`' own `grep` matches)."""
+    path = root / "meter.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return str(path)
+
+
+def test_rc0_with_no_successful_call_writes_no_marker(tmp_path):
+    """The 2026-08-25 rung, DRIVEN rather than pinned. A total endpoint outage exits 0 in seconds
+    having bought nothing; a marker would make every later resume skip the task for ever."""
+    run = _run_that_started(tmp_path)
+    done = tmp_path / "B-svm.done"
+    log = _meter_log(tmp_path, [{"arm": "B", "task": "svm", "attempt": "a1", "status": 503,
+                                 "error": "no available workers"}])
+    got = _bash(f'METER_LOG="{log}"; ATTEMPT=a1; record_done "{done}" 0 0 "0-21" "{run}"', tmp_path)
+    assert not done.exists(), done.read_text()
+    assert "NO SUCCESSFUL CALLS" in got.stdout, got.stdout + got.stderr
+
+
+def test_rc0_with_a_successful_call_still_writes_its_marker(tmp_path):
+    """The other half, so the rung above cannot be satisfied by refusing every marker: positive
+    evidence for THIS attempt writes the marker and records the count it was decided on."""
+    run = _run_that_started(tmp_path)
+    done = tmp_path / "B-svm.done"
+    log = _meter_log(tmp_path, [
+        {"arm": "B", "task": "svm", "attempt": "a1", "status": "200"},
+        {"arm": "B", "task": "svm", "attempt": "a0", "status": "200"},   # another attempt: not ours
+        {"arm": "A", "task": "svm", "attempt": "a1", "status": "200"},   # the other arm
+    ])
+    _bash(f'METER_LOG="{log}"; ATTEMPT=a1; record_done "{done}" 0 0 "0-21" "{run}"', tmp_path)
+    assert done.exists()
+    assert "ok_calls=1" in done.read_text(), done.read_text()
+
+
+def test_an_unreadable_meter_log_leaves_the_old_behaviour(tmp_path):
+    """"" and "0" are different answers and only "0" refuses. A bookkeeping gap is not evidence
+    that a run bought nothing, so the marker is still written."""
+    run = _run_that_started(tmp_path)
+    done = tmp_path / "B-svm.done"
+    got = _bash(f'METER_LOG="{tmp_path}/nope.jsonl"; ATTEMPT=a1; '
+                f'record_done "{done}" 0 0 "0-21" "{run}"', tmp_path)
+    assert done.exists(), got.stdout + got.stderr
+    assert "NO SUCCESSFUL CALLS" not in got.stdout
 
 
 def test_the_marker_carries_the_attempt_that_wrote_it(tmp_path):

@@ -275,11 +275,19 @@ class AuditMixin:
         `_scored_output_evidence`), `eval_dispatch.py`'s `run_setup_finished.stderr_tail` and its
         RuntimeError message, `train_monitor`/`asha_monitor`'s reason), so the split lands once.
 
-        ORDER, for the three that CAP: `evaluate.py::_redacted_tail` calls this on the WHOLE stream
-        and slices afterwards. Capping first severs a straddling secret's head and hands this
-        function a fragment its shape rules no longer match — driven in
+        ORDER, for the five that CAP: every one goes through `evaluate.py::_redacted_tail`, which
+        calls this on the WHOLE stream and slices afterwards. Capping first severs a straddling
+        secret's head and hands this function a fragment its shape rules no longer match — driven in
         `tests/test_scored_output_evidence.py`. `_eval_failure_text`'s 500-char prompt window is the
         stated exception and says why there.
+
+        THE TWO IN `eval_dispatch.py` WERE THE ORDER DEFECT ITSELF until this was re-read: they
+        spelled `self._redact(text[-n:])` while this docstring already enumerated them above and
+        the paragraph below still claimed the sliced-first order was the rule — one docstring
+        asserting both halves of the contradiction thirteen lines apart, which is the recorded-in-
+        one-place/true-in-another shape CLAUDE.md names. `run_setup_finished.stderr_tail` is the
+        worse of the two because it is a DURABLE FOLDED field: a pip index URL with an inline token
+        straddling the 2,000-char cut landed on `events.jsonl` as a fragment and stayed there.
 
         **`self._redact_output` no longer gates the whole pass** — see `core/redact.py`'s docstring.
         It defaults to False, so gating everything on it meant the DEFAULT path persisted a
@@ -288,8 +296,9 @@ class AuditMixin:
         `redact_persisted_text`. Known credential shapes and the operator's own secret env VALUES
         are now always masked; the flag gates only the high-entropy pass, whose false positives
         (a legitimate 24-char data hash or model checksum) are what made it opt-in in the first
-        place. Redaction is applied to the BOUNDED tail its callers already sliced, not to the full
-        stream, so its cost stays proportional to what is persisted.
+        place. Redaction is applied to the WHOLE stream and the result is sliced afterwards (see
+        ORDER above), so its cost is one regex pass over the eval's bounded ~64 KB capture per
+        persisted tail rather than over the window.
         """
         if not text:
             return text

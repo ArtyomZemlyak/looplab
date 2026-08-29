@@ -1926,7 +1926,11 @@ class OpenAICompatibleClient:
         stamp, bounded by `tracing._TRACE_TEXT_CAP` (64,000 chars) like every other traced text.
         """
         thinking, answer = _clean_thinking(msg.get("content") or "", _reasoning_of(msg))
-        gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking)            .usage(usage).cost(_usage_cost(usage)).error(reason)
+        # Split over two lines like the sibling stamp in `chat`'s success path: the run of spaces
+        # mid-chain that used to sit here was a dropped ` \` continuation, valid Python that read as
+        # a merge artifact at ~150 columns.
+        gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking) \
+           .usage(usage).cost(_usage_cost(usage)).error(reason)
 
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:
         tool = {"type": "function",
@@ -2681,6 +2685,27 @@ def run_cost_accountant(settings) -> "CostAccountant":
     Cost accounting for a run whose ceiling is 0.0 (no limit) is unchanged: the accountant is still
     shared, which only makes `find_cost_accountants` dedupe to one entry instead of N.
     """
+    # OPEN[run-accountant-splits-on-settings-copy] "one accountant per run" is ORDER-dependent: a
+    # `model_copy` taken before the first client splits the ceiling.
+    # proof:absent:run_cost_accountant@looplab/agents/factory.py
+    # REVIEW 2026-08-25 (correctness): the cache rides the settings object's `__dict__`, and
+    # pydantic's `model_copy` copies that dict SHALLOWLY -- so a copy taken AFTER a client exists
+    # shares this accountant, while a copy taken BEFORE mints its own (driven: `Settings()`, copy,
+    # call this on both -> two objects; attach first, copy after -> one shared object). The default
+    # `run` path is saved by ordering luck alone: `agents/preflight.py::preflight_role_endpoints`
+    # happens to build the first client from the PARENT settings before
+    # `agents/factory.py::build_unified_agent` forks it (the `unified_agent=False` copy). On the
+    # `wrap_up_only` path (`cli/run_cmds.py` builds the finalize engine with preflight SKIPPED,
+    # `_engine(..., wrap_up_only=True)`), the copy comes FIRST: the unified roles' clients meter on
+    # the copy's accountant while the deep-researcher/report-writer clients built from the parent
+    # meter on a second one -- the 2x ceiling this docstring says was removed, back on the one entry
+    # point that still spends (paid curation, memo verification, the report). Fix direction: make
+    # the fork sites inherit explicitly -- call this function on the PARENT before any `model_copy`
+    # in `build_unified_agent` / `make_developer_factory` (one line each), or attach once in
+    # `cli/__init__.py::_engine` right after settings resolve. Worth a sentence beside
+    # `object.__setattr__` too: once attached, `copy.deepcopy(settings)` raises TypeError (the
+    # accountant holds a `threading.Lock`); no production site deepcopies Settings today, so that
+    # half is latent.
     existing = getattr(settings, _RUN_ACCOUNTANT_ATTR, None)
     if isinstance(existing, CostAccountant):
         return existing

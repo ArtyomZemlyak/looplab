@@ -19,6 +19,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 FENCE = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "fence_foreign_results.sh"
 
 
@@ -84,11 +86,38 @@ def test_arena_can_still_walk_results_while_the_fence_is_closed(tmp_path):
     assert (results / "o4-mini" / "pagerank" / "solver.py").read_text().startswith("# a finished")
 
 
+def _mode_000_denies_a_walk(tmp_path) -> bool:
+    """Does `chmod 000` actually stop a directory listing HERE? PROBED, never assumed.
+
+    `CAP_DAC_OVERRIDE` (i.e. root, which is how a container routinely runs a suite) reads a mode-000
+    directory perfectly well, and so do some FUSE/overlay mounts that do not enforce owner bits at
+    all. The falsifier below is a NEGATIVE CONTROL over the ABANDONED chmod design, so on such a
+    box the premise it is built on is simply false and the assertion fails while the fence itself is
+    fine — the shipped move-aside design is root-safe, which is part of why it replaced the chmod
+    one. Probing beats an `os.geteuid() == 0` skip because it also covers the mount case and it
+    keeps the control live wherever the premise really does hold.
+    """
+    probe = tmp_path / "_chmod_probe"
+    (probe / "inner").mkdir(parents=True)
+    probe.chmod(0o000)
+    try:
+        list(probe.iterdir())
+        return False
+    except PermissionError:
+        return True
+    finally:
+        probe.chmod(0o755)
+        shutil.rmtree(probe, ignore_errors=True)
+
+
 def test_chmod_000_would_have_failed_this_test(tmp_path):
     """Non-vacuous by construction: the abandoned implementation, run against the same assertion.
 
     Without this, a fence that did nothing at all would pass the test above's walk.
     """
+    if not _mode_000_denies_a_walk(tmp_path):
+        pytest.skip("mode 000 does not deny a walk on this box (root, or a mount that ignores "
+                    "owner bits), so the abandoned chmod design cannot be used as a control here")
     at, results, env = _fenced_tree(tmp_path)
     victim = results / "Claude Opus 4.1"
     victim.chmod(0o000)

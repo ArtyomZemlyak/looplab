@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -78,8 +79,24 @@ if (_REPO / "looplab" / "__init__.py").exists() and str(_REPO) not in sys.path:
 def _to_float(value):
     """`looplab.core.parse.to_float(finite=True)` — "the one spelling of COERCING scalar parsing",
     which also rejects NaN/inf. Four hand-rolled copies of this lived here; `float("inf")` parses
-    fine and would have been printed as a speedup and averaged into the arm means."""
-    from looplab.core.parse import to_float
+    fine and would have been printed as a speedup and averaged into the arm means.
+
+    THE BOOTSTRAP ABOVE FINDS THE PACKAGE; IT CANNOT INSTALL ITS DEPENDENCIES. `looplab.core.parse`
+    imports pydantic, so under ALGOTUNE's interpreter — the one seven driver scripts actually use —
+    `sys.path` alone still ended the campaign's last step in a `ModuleNotFoundError`, one import
+    deeper than the one that was fixed. So the shared spelling is TRIED and a two-line equivalent
+    stands in when the environment cannot supply it. The fallback is deliberately the whole of
+    `to_float(v, finite=True)` and nothing else: it is a copy, which this file's history says to
+    avoid, and it is a smaller cost than a comparison table that cannot print. Keep them identical.
+    """
+    try:
+        from looplab.core.parse import to_float
+    except Exception:                      # noqa: BLE001 - no package, or no pydantic in THIS venv
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return None
+        return None if not math.isfinite(f) else f
     return to_float(value, finite=True)
 
 
@@ -252,12 +269,22 @@ def _fmt(value: float | None) -> str:
 _ARM_A_SOLVER_FAULT = frozenset({"missing_metrics"})
 
 
-def arm_a_failure(algotune_root: Path, task: str) -> tuple:
+def arm_a_failure(algotune_root: Path, task: str, model_fragment: str = "") -> tuple:
     """`(is_solver_fault, reason, stamp)` for arm A on this task, from the arena's own record.
 
     The file is a MERGE TARGET — `AlgoTuner/main.py::update_failure_json` loads it and `setdefault`s
     into it — so rows from earlier campaigns survive a rerun. The timestamp is returned with the
     reason so a caller can say which campaign it belongs to instead of assuming this one.
+
+    WHICH RECORD, and it is NOT "the first one". Iterating and returning on the first dict answered
+    with whatever model happened to be inserted FIRST — in a merge target that is routinely an OLD
+    campaign's row sitting beside this one's, so the current `missing_metrics` +
+    `final_eval_success=True` record was never read and arm A's real zero printed `--` again: the
+    exact asymmetry the caller was corrected for. So the same two rules `_arm_a` uses, for the same
+    reasons: filter by `model_fragment` (empty = every model, the historical behaviour when the
+    caller has no fragment to give), and among the matches prefer the NEWEST `timestamp_utc` rather
+    than dict order, which carries no meaning here at all. A record with no timestamp sorts oldest,
+    so a stamped row always outranks an unstamped one.
     """
     try:
         raw = json.loads((algotune_root / "reports" / "agent_failures.json").read_text("utf-8"))
@@ -266,17 +293,51 @@ def arm_a_failure(algotune_root: Path, task: str) -> tuple:
     row = raw.get(task) or {}
     if not isinstance(row, dict):
         return (False, "", "")
-    for _model, rec in row.items():
-        if not isinstance(rec, dict):
-            continue
-        reason = str(rec.get("reason") or "")
-        if reason in _ARM_A_SOLVER_FAULT and "final_eval_success=True" in str(rec.get("details") or ""):
-            return (True, reason, str(rec.get("timestamp_utc") or ""))
-        return (False, reason, str(rec.get("timestamp_utc") or ""))
-    return (False, "", "")
+    matches = [rec for name, rec in row.items()
+               if isinstance(rec, dict)
+               and (not model_fragment or model_fragment.lower() in str(name).lower())]
+    if not matches:
+        return (False, "", "")
+    rec = max(matches, key=lambda r: str(r.get("timestamp_utc") or ""))
+    reason = str(rec.get("reason") or "")
+    stamp = str(rec.get("timestamp_utc") or "")
+    if reason in _ARM_A_SOLVER_FAULT and "final_eval_success=True" in str(rec.get("details") or ""):
+        return (True, reason, stamp)
+    return (False, reason, stamp)
 
 
-def marker_state(final_dir: Path | None, arm: str, task: str) -> str:
+# A HARNESS CUT: the run was stopped by this harness rather than on its own terms. Both members are
+# TERMINAL (a `.done`, so a resume does not re-run them) and both are REPORTED-BUT-NEVER-AVERAGED,
+# because the mean may only hold task-arms that ran to the ceiling they are compared at.
+#
+# One tuple rather than a second copy of the rule: the wall-cut test was already spelled three times
+# in two languages (here, `already_measured` and `final_banner` in campaign.sh) and adding a state by
+# editing every copy is how the copies come apart -- a resume then skips a task the banner reports as
+# owed, or averages a clock-killed run the report excludes.
+#   wall_cut  - `timeout` fired (rc=124). The clock, not the budget.
+#   stall_cut - the stall guard fired: the run's own log stopped growing for STALL_TIMEOUT. Added
+#               2026-08-25; before it, a stall kill arrived as rc=143, indistinguishable from an
+#               operator's Ctrl-C, so it got NO marker and the task was re-run from scratch for
+#               ever, spending a fresh full budget each time to stall in the same place.
+HARNESS_CUT_STATES: tuple[str, ...] = ("wall_cut", "stall_cut")
+# (row phrase, footer phrase) — one row is about ONE arm and the footer counts many, so they cannot
+# be one string without the grammar going wrong in whichever place it was not written for.
+_CUT_PHRASES = {
+    "wall_cut": ("cut at the wall clock (rc=124)", "were cut at the WALL CLOCK (rc=124)"),
+    "stall_cut": ("stall-cut (its own log stopped growing)",
+                  "were STALL-CUT (the run's own log stopped growing)"),
+}
+
+
+def _cut_phrase(state: str, *, footer: bool = False) -> str:
+    """What to call a harness cut in a sentence."""
+    pair = _CUT_PHRASES.get(state)
+    if pair is None:
+        return f"were stopped by the harness ({state})" if footer else f"stopped by the harness ({state})"
+    return pair[1] if footer else pair[0]
+
+
+def marker_state(final_dir: Path | None, arm: str, task: str, runs_root: Path | None = None) -> str:
     """What `campaign.sh` says about this task-arm: `"done"`, `"refused"` or `"unfinished"`.
 
     Read from the driver's own markers rather than re-derived, because they encode a decision this
@@ -311,17 +372,8 @@ def marker_state(final_dir: Path | None, arm: str, task: str) -> str:
             return "done"
         if "state=wall_cut" in text or "rc=124" in text:
             return "wall_cut"
-        # A TASK-ARM THE OPERATOR SKIPPED IS NOT ONE THAT FINISHED, and the difference has to
-        # survive into the table. `campaign.sh::already_measured` skips on ANY non-empty marker
-        # that is not a wall cut, so writing one is how a running campaign is told to stop taking
-        # new work without touching the driver a live bash is reading. That mechanism is right; it
-        # just leaves a marker that looks exactly like a completed run to every later reader.
-        # Measured need, 2026-08-26: five CP-SAT task-arms were skipped by decision, and without
-        # this branch the summary would have counted them among the finished and listed none of
-        # them as absent. The pair is already excluded from the means -- `agent_summary.json`
-        # carries no score for a task that never ran -- so what this adds is the WORD for it.
-        if "state=operator_skip" in text:
-            return "skipped"
+        if "state=stall_cut" in text:
+            return "stall_cut"
         return "done"
     if (final_dir / f"{arm}-{task}.refused").exists():
         return "refused"
@@ -337,20 +389,31 @@ def marker_state(final_dir: Path | None, arm: str, task: str) -> str:
     #
     # So the marker is asked first and the RUN is asked second. Only a task with neither a marker
     # nor a run that reached its own ceiling is owed.
-    if _run_reached_its_ceiling(final_dir, arm, task):
+    if _run_reached_its_ceiling(final_dir, arm, task, runs_root):
         return "done"
     return "unfinished"
 
 
-def _run_reached_its_ceiling(final_dir: Path, arm: str, task: str) -> bool:
+def _run_reached_its_ceiling(final_dir: Path, arm: str, task: str,
+                             runs_root: Path | None = None) -> bool:
     """Did this task-arm stop because it spent its budget, rather than because it was killed?
 
     The evidence is the run's own event log: a `run_finished` naming the spend ceiling, or a metered
     total at or above the ceiling the snapshot records. Both are written by the run, not by the
     driver, so a killed driver cannot forge either. Absent or unreadable evidence answers False —
     a task with no record of finishing is owed, which is the safe direction.
+
+    `runs_root` IS PASSED IN, never guessed. This used to derive `<final-dir>/../runs-<arm>`, a
+    sibling layout the shipped defaults do not produce: `campaign.sh` defaults `CAMPAIGN_RUNS` to
+    `camp-runs` and `box-jhub-l40s.sh` keeps that name, so on the documented setup the path never
+    existed, this always answered False, and the drained-at-a-task-boundary rescue the docstring
+    above argues for ($1.003 and $1.002 of $1.00, two real results) was excluded anyway. `main()`
+    already takes `--runs-root` and `campaign.sh` prints the correct invocation — the table honoured
+    it and this helper did not. The old sibling guess is kept only as the FALLBACK for a caller that
+    has no runs root to give (`campaign_status.py` passes its own), because every miss here fails
+    toward "less credit", which is the safe direction and is why nobody noticed.
     """
-    runs = final_dir.parent / f"runs-{arm}"
+    runs = Path(runs_root) if runs_root is not None else final_dir.parent / f"runs-{arm}"
     events = runs / task / "run" / "events.jsonl"
     snapshot = runs / task / "run" / "config.snapshot.json"
     if not events.exists():
@@ -481,16 +544,23 @@ def main() -> int:
             vb, why = _arm_b_final(args.final_dir / f"B-{task}.final.json")
         else:
             vb, why = _arm_b_train(args.runs_root / task / "run"), ""
+        # WHOSE SENTENCE IS THIS? `_arm_b_final` answers with a bare reason SLUG
+        # (`no_valid_speedups`), which names no arm and therefore needs the `B:` label; every
+        # sentence the fallbacks below write already opens with "arm A" or "arm B". Labelling both
+        # the same way is what printed `[B: arm A cut at the wall clock]` in the one report an
+        # operator reads the arms' health from.
+        why_is_a_bare_reason = bool(why)
         # BOTH ARMS' MARKERS, and the same words for both. Until 2026-08-24 this line read only
         # arm B's, so the wall-cut exclusion, the WALL-CUT banner and the "still owed" line were
         # arm-B-only — and in the campaign of 2026-08-23 arm A was wall-cut on 13 of 19 tasks
         # against arm B's 3. All thirteen printed as `--`, indistinguishable from "arm A was never
         # run", and the mean a reader takes away said nothing about one arm hitting the clock on two
         # thirds of the suite.
-        state = marker_state(args.final_dir, "B", task)
-        state_a = marker_state(args.final_dir, "A", task)
+        state = marker_state(args.final_dir, "B", task, args.runs_root)
+        state_a = marker_state(args.final_dir, "A", task, args.runs_root)
         if va is None:
-            fault, a_reason, a_stamp = arm_a_failure(args.algotune_root.resolve(), task)
+            fault, a_reason, a_stamp = arm_a_failure(args.algotune_root.resolve(), task,
+                                                     args.model_fragment)
             if fault:
                 # Scored, not dropped — the same treatment arm B's `invalid_results` already gets.
                 va = 0.0
@@ -504,24 +574,17 @@ def main() -> int:
             # that are is the mixed-population failure this whole module is written against.
             why = why or f"arm B {state} (campaign.sh wrote no .done marker)"
             vb = None
-        elif vb is not None and state == "wall_cut":
-            # A WALL CUT IS NOT A BUDGET. The number is real — the champion was scored — but the run
-            # it came from was stopped by a clock rather than by the ceiling every other row is
-            # compared at, so it is REPORTED and not AVERAGED. Kept visible rather than dropped
-            # because the operator needs to see that the wall is binding at all: three of the five
+        elif vb is not None and state in HARNESS_CUT_STATES:
+            # A HARNESS CUT IS NOT A BUDGET. The number is real — the champion was scored — but the
+            # run it came from was stopped by this harness rather than by the ceiling every other row
+            # is compared at, so it is REPORTED and not AVERAGED. Kept visible rather than dropped
+            # because the operator needs to see that the bound is binding at all: three of the five
             # cuts measured on 2026-08-23 had not reached the budget, one of them at $0.14 of $1.00.
-            why = why or "arm B cut at the wall clock (rc=124), not by the budget"
-        if va is not None and state_a == "wall_cut":
-            why = why or "arm A cut at the wall clock (rc=124), not by the budget"
-        cut = "wall_cut" in (state, state_a)
-        # THE ROW'S STATE HAS TO SPEAK FOR BOTH ARMS. It used to carry arm B's marker alone, with
-        # arm A's consulted only for the wall-cut flag two lines up -- so an arm-A `operator_skip`
-        # reached the table as arm B's `done` and the "skipped" line never printed. The wall-cut
-        # precedence is unchanged (a clock beats bookkeeping); a skip on either side is named when
-        # neither arm was cut.
-        skipped = "skipped" in (state, state_a)
-        rows.append((task, va, vb, why,
-                     "wall_cut" if cut else ("skipped" if skipped else state)))
+            why = why or f"arm B {_cut_phrase(state)}, not by the budget"
+        if va is not None and state_a in HARNESS_CUT_STATES:
+            why = why or f"arm A {_cut_phrase(state_a)}, not by the budget"
+        cut = next((st for st in (state, state_a) if st in HARNESS_CUT_STATES), None)
+        rows.append((task, va, vb, why, cut or state, why_is_a_bare_reason))
         # A wall-cut row on EITHER side is PRINTED (above) and not PAIRED: the mean is the one number
         # a reader takes away, and it may only contain task-arms that ran to the ceiling they are
         # compared at. Which arm hit the clock does not change that.
@@ -532,10 +595,10 @@ def main() -> int:
         print("WARNING: --final-dir not given, so arm B's column is its TRAIN metric while "
               "arm A's is a TEST score. Those are different splits and must not be read as "
               "a comparison.")
-    width = max(len(t) for t, _, _, _, _ in rows)
+    width = max(len(t) for t, _, _, _, _, _ in rows)
     print(f"{'task':<{width}}  {'A: AlgoTuner':>13}  {'B: LoopLab':>11}   winner")
     print("-" * (width + 42))
-    for task, va, vb, why, _state in rows:
+    for task, va, vb, why, _state, bare_reason in rows:
         if va is None or vb is None:
             winner = "(incomplete)"
         elif va == vb:
@@ -544,7 +607,9 @@ def main() -> int:
             winner = "A" if va > vb else "B"
         # The REASON travels with the row. A `--` and a `0.0000` both used to be bare, and the whole
         # point of the split above is that the operator can see which of the two this is and why.
-        note = f"   [B: {why}]" if why else ""
+        # The label is carried on the ROW, not read out of the building loop's last iteration:
+        # `why_is_a_bare_reason` is set per task above and this is a separate pass over `rows`.
+        note = (f"   [B: {why}]" if bare_reason else f"   [{why}]") if why else ""
         print(f"{task:<{width}}  {_fmt(va):>13}  {_fmt(vb):>11}   {winner}{note}")
 
     print("-" * (width + 42))
@@ -557,57 +622,20 @@ def main() -> int:
               f"{mean_a:>13.4f}  {mean_b:>11.4f}")
         print(f"{'wins':<{width}}  {wins_a:>13}  {wins_b:>11}   "
               f"({len(paired) - wins_a - wins_b} tied)")
-    incomplete = sum(1 for _, va, vb, _, _ in rows if va is None or vb is None)
+    incomplete = sum(1 for _, va, vb, _, _, _ in rows if va is None or vb is None)
     if incomplete:
         print(f"\n{incomplete} of {len(rows)} tasks are missing an arm and are EXCLUDED from the "
               f"means above — a missing run is not a zero.")
-    unmeasured = sorted(t for t, _, _, why, _ in rows if why in NOT_SOLVERS_FAULT)
+    unmeasured = sorted(t for t, _, _, why, _, _ in rows if why in NOT_SOLVERS_FAULT)
     if unmeasured:
         print(f"of those, {len(unmeasured)} arm-B row(s) are the ARENA producing no measurement "
               f"(not a wrong solver): " + ", ".join(unmeasured))
-    wall_cut = sorted(t for t, _, _, _, st in rows if st == "wall_cut")
-    if wall_cut:
-        print(f"{len(wall_cut)} task-arm(s) were cut at the WALL CLOCK (rc=124) rather than by the "
-              f"budget, so their scores are shown but left out of the mean: " + ", ".join(wall_cut))
-    # WHAT THE PAIR ACTUALLY COST. Printed for every run, not only when something is wrong: a
-    # comparison at "the same $1 budget" is a claim about money, and a claim about money that is
-    # never checked against the meter is a claim about a config file.
-    meter_path = args.meter or (args.final_dir.parent / "meter" / "meter.jsonl"
-                                if args.final_dir else None)
-    spend = metered_spend(meter_path) if meter_path else {}
-    if spend:
-        ceiling = args.budget_usd
-        over = []
-        for task, _, _, _, _ in rows:
-            for arm in ("A", "B"):
-                attempt = _scored_attempt(args.final_dir, arm, task)
-                if attempt is None:            # no marker -> no reported score -> nothing to judge
-                    continue
-                spent, uncounted = spend.get((arm, task, attempt), (0.0, 0.0))
-                if ceiling > 0 and spent > ceiling * 1.05:
-                    over.append((task, arm, spent, uncounted))
-        totals = {arm: sum(v[0] for (a, _, _), v in spend.items() if a == arm)
-                  for arm in ("A", "B")}
-        print(f"\nmetered spend: arm A ${totals.get('A', 0.0):.2f}, arm B "
-              f"${totals.get('B', 0.0):.2f} (the proxy's ledger, not either loop's own).")
-        if over:
-            over.sort(key=lambda r: -r[2])
-            print(f"{len(over)} task-arm(s) drew MORE than the ${ceiling:.2f} ceiling they were "
-                  f"given, so those pairs are NOT matched on budget:")
-            for task, arm, spent, uncounted in over:
-                tail = (f", ${uncounted:.3f} of it on streams that ended with no usage frame and "
-                        f"so cost that loop's own ledger nothing"
-                        if uncounted > 0.05 * ceiling else "")
-                print(f"  {task:<{width - 2}} arm {arm}  ${spent:.3f}{tail}")
-        else:
-            print(f"every task-arm stayed within 5% of its ${ceiling:.2f} ceiling.")
-
-    skipped = sorted(t for t, _, _, _, st in rows if st == "skipped")
-    if skipped:
-        print(f"{len(skipped)} task-arm(s) were SKIPPED by the operator and never ran, so this "
-              f"table is over {len(rows) - len(skipped)} of {len(rows)} tasks: "
-              + ", ".join(skipped))
-    unfinished = sorted(t for t, _, _, _, st in rows if st in ("unfinished", "refused"))
+    for _st in HARNESS_CUT_STATES:
+        _cut = sorted(t for t, _, _, _, st, _ in rows if st == _st)
+        if _cut:
+            print(f"{len(_cut)} task-arm(s) {_cut_phrase(_st, footer=True)} rather than by the budget, so their "
+                  f"scores are shown but left out of the mean: " + ", ".join(_cut))
+    unfinished = sorted(t for t, _, _, _, st, _ in rows if st in ("unfinished", "refused"))
     if unfinished:
         print(f"{len(unfinished)} task-arm(s) have no .done marker from campaign.sh and are still "
               f"OWED, so any score left behind for them is not reported: " + ", ".join(unfinished))
@@ -620,7 +648,7 @@ def main() -> int:
     if args.reference:
         print("\nShipped reference models (AlgoTuner's loop driving OTHER models — context, not a "
               "control:\nthose rows differ from ours in the model AND were produced elsewhere).")
-        for task, _, _, _, _ in rows:
+        for task, _, _, _, _, _ in rows:
             ref = _reference_models(summary, task)
             ours = {k: v for k, v in ref.items() if args.model_fragment.lower() in k.lower()}
             others = {k: v for k, v in ref.items() if k not in ours}

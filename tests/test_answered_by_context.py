@@ -395,6 +395,17 @@ def test_every_agent_side_toolset_is_composed_through_the_one_helper():
     # path — the engine holds a run, not a settings object — so routing it through `compose_tools`
     # would mean inventing a settings argument for four frames, not adding a keyword. Listed, not
     # silently tolerated.  proof:absent:settings@looplab/engine/failure_diagnosis.py::_diag_tools
+    # OPEN[composite-exemptions-keyed-by-basename] the exemption set admits every file of a given
+    # NAME anywhere in the package, not the specific sites the prose above argues for.
+    # proof:`present:found = {name.split(":")[0] for name in offenders}@tests/test_answered_by_context.py`
+    # REVIEW 2026-08-25 (guard-test): offenders are keyed on `path.name` over the whole `looplab/`
+    # walk, so a NEW hand-rolled `CompositeTools(...)` in ANY `__init__.py` -- or in any future
+    # module that happens to share a basename with an exempted one (a second `assistant.py`,
+    # another `genesis.py`) -- passes this guard silently, which is precisely the "silently opts
+    # its whole phase out of the flag" defect the test exists to catch. The prose exempts SITES
+    # (`cli/__init__.py`, `serve/assistant.py`, ...) while the set exempts NAMES. Fix: key
+    # `found`/`declared` on `path.relative_to(PKG)` so each exemption names one file, and the
+    # two-way assertion keeps its teeth.
     declared = {
         "repo_developer.py", "__init__.py", "genesis.py", "train_monitor.py",
         "assistant.py", "boss.py", "run_tools.py", "failure_diagnosis.py",

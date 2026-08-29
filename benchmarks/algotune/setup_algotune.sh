@@ -112,8 +112,10 @@ if old not in s:
     raise SystemExit("   FAILED: upstream shape changed; narrow the filter by hand "
                      "(see README, 'Known upstream bug')")
 s = s.replace(old, new, 1)
-# close the `if (` that the replacement opened: the original line ended with `):` two lines down
-s = s.replace(new + '\n                ):', new + '\n                ):', 1)
+# NOTHING CLOSES THE `if (` HERE, because `new` above already balances it. A line claiming to do
+# that used to sit at this point and replaced a string with ITSELF -- a no-op wearing a comment
+# describing work it was not doing, which is the recorded-fact drift the claim-pin rule exists for.
+# The `ast.parse` gate below is what actually proves the rewrite is syntactically whole.
 p.write_text(s, encoding="utf-8")
 if '"site-packages" not in module_file' not in p.read_text(encoding="utf-8"):
     raise SystemExit("   FAILED: narrowing did not take")

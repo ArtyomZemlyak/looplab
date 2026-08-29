@@ -17,10 +17,25 @@
 # inside a candidate. No agent has done it and nothing suggests either would — but a benchmark that
 # relies on nobody thinking of something is not measuring what it claims to.
 #
-# So: mode 000 for the duration, restored afterwards. Not moved, because the fork tracks all 2,831
-# files and a moved tree would no longer be the commit the campaign names. `CapEff` is 0 in this
-# container, so the owner bits are enforced against us too — checked, not assumed.
+# So: MOVED ASIDE into `$HOLD` for the duration, and moved back afterwards.
+#
+# `chmod 000` was the first design and it took a live campaign down within half an hour: the arena's
+# own `scripts/evaluate_results.py` discovers work by iterating EVERY directory under `results/`, so
+# the first unreadable one raises `PermissionError` and the evaluator dies before it writes
+# `evaluate_summary.json` — two task-arms scored 0.0 in 0.1 s and it read as a solver fault. A fence
+# has to hide the foreign work WITHOUT blinding the ruler, and only the move does both
+# (`tests/test_algotune_fence_keeps_results_walkable.py` asserts each obligation separately).
+#
+# WHAT THE MOVE COSTS, stated rather than promised away: while the fence is closed the fork's
+# `git status` shows all 2,831 tracked files as deletions, so a `git` operation taken mid-campaign
+# sees a tree that is not the commit the campaign names. `open` restores them exactly, and it
+# restores from the HOLDING DIRECTORY rather than from `$STATE`, so losing the record never means
+# losing the data.
 set -u
+# The ours-vs-foreign predicate is SOURCED, not spelled here: this file used to carry it twice,
+# so `check` verified the fence with its own second copy of the fence's rule.
+# shellcheck source=benchmarks/algotune/ours.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ours.sh"
 AT=${FENCE_ALGOTUNE_ROOT:-/var/tmp/looplab-bench/AlgoTune}
 STATE=${FENCE_STATE:-/var/tmp/looplab-bench/.foreign_results_moved}
 HOLD=${FENCE_HOLD:-/var/tmp/looplab-bench/.foreign_results_held}
@@ -66,7 +81,13 @@ case "${1:-}" in
     done
     held=$(wc -l < "$STATE")
     n=0
+    # `[ -d "$D" ] || continue` FIRST, exactly as the held-restore loop above does: `set -u` does
+    # not set nullglob, so an empty `results/` leaves `$D` as the literal pattern, `basename` yields
+    # `*`, no skip pattern matches it, and the loop recorded a `*` row in $STATE, errored on `mv`
+    # and then printed "closed 1 foreign result directories" about nothing. The realistic trigger is
+    # the double-close the idempotence note above documents the driver doing.
     for D in "$AT/results"/*/; do
+      [ -d "$D" ] || continue
       B="$(basename "$D")"
       is_foreign "$B" || continue
       printf '%s\n' "$B" >> "$STATE"
@@ -92,13 +113,28 @@ case "${1:-}" in
     ;;
   check)
     require_git
+    # A TREE THAT IS NOT THERE IS NOT A CLEAN ONE. Without this, a wrong or misspelled
+    # `FENCE_ALGOTUNE_ROOT` -- the default points at one box's absolute path -- printed "all foreign
+    # result directories are closed" and exited 0 while 2,831 other models' finished solutions sat
+    # unfenced wherever the checkout really is. A verifier that passes about a directory it never
+    # found is worse than no verifier: it is the one command an operator runs to be told it is safe
+    # to start. Same class as `check_leaks.sh`'s own recorded defect ("answers clean about
+    # directories it never looked at").
+    if [ ! -d "$AT/results" ]; then
+      echo "CANNOT CHECK: no results directory at $AT/results" >&2
+      echo "  (set FENCE_ALGOTUNE_ROOT to the AlgoTune checkout both arms are pointed at)" >&2
+      exit 2
+    fi
     bad=0
     for D in "$AT/results"/*/; do
+      [ -d "$D" ] || continue          # unmatched glob is a literal `*`, not a foreign directory
       B="$(basename "$D")"
       is_foreign "$B" || continue
       echo "  STILL PRESENT: $B"; bad=1
     done
-    [ "$bad" = "0" ] && echo "all foreign result directories are closed" || echo "SOME ARE READABLE"
+    # "STILL PRESENT", not "READABLE": the shipped design MOVES the directories aside, so what a
+    # failure means here is that they are still in `results/` — not that their mode bits are open.
+    [ "$bad" = "0" ] && echo "all foreign result directories are closed" || echo "SOME ARE STILL PRESENT"
     exit $bad
     ;;
   *) echo "usage: $0 close|open|check"; exit 2 ;;

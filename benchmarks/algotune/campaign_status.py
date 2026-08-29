@@ -114,15 +114,53 @@ def _wall_minutes(out: Path, arm: str, task: str) -> int | None:
     return None
 
 
+class _AsFile:
+    """A `Path`-shaped stand-in that hands `compare_arms`' readers an ALREADY-PARSED payload.
+
+    Both readers there take a path and `json.loads` it, which is right for a tool that runs once;
+    this one polls and reads each file once per tick. The shim is four lines and keeps the RULES on
+    one side of the fence — the alternative is re-implementing them here, which is the drift that
+    made this file print arm A's numbers under arm B's banner in the first place.
+    """
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def read_text(self, *_a, **_k):
+        return json.dumps(self._payload)
+
+    def __truediv__(self, _other):
+        return self          # `arm_a_failure` builds `root / "reports" / "agent_failures.json"`
+
+    @classmethod
+    def root_for(cls, payload):
+        return cls(payload)
+
+
 def _arm_a_number(summary: dict, failures: dict, task: str, fragment: str):
-    """`(speedup, reason)` for arm A out of AlgoTuner's own summary. Arm A's file, arm A only."""
-    raw = next((v.get("final_speedup") for k, v in (summary.get(task) or {}).items()
-                if fragment.lower() in str(k).lower() and isinstance(v, dict)), None)
-    value = CA._to_float(raw)
+    """`(speedup, reason)` for arm A out of AlgoTuner's own summary. Arm A's file, arm A only.
+
+    THE LOOKUP ITSELF IS `compare_arms`', not a second copy of it. This used to re-spell it as a
+    first-match `next()` over the fragment-matching model rows, and the two then DISAGREED on the
+    routine input: `agent_summary.json` holds several names for one model (`deepseek-v4-flash` and
+    `deepseek-v4-flash-0731` both match the default fragment), and `_arm_a`'s documented
+    LAST-WRITER-DOES-NOT-WIN rule keeps a real number that a trailing "N/A" row would otherwise
+    overwrite. With an "N/A" under the short key and a real 1.42 under the long one, the end-of-
+    campaign report scored the task and this live status printed it as failed.
+
+    `_compare_arms`'s own docstring lists this among the decisions that "must not be re-made here,
+    because a second copy of a rule is the drift" — so it is made there. The dict is still accepted
+    (the caller reads the file once for every task) and `_arm_a` is fed through a tiny shim rather
+    than a re-read, because its rule is over the ROWS and not over the file.
+    """
+    value = CA._arm_a(_AsFile({task: summary.get(task) or {}}), fragment).get(task)
     if value is not None:
         return value, ""
-    reason = next((v.get("reason") for v in (failures.get(task) or {}).values()
-                   if isinstance(v, dict)), None)
+    raw = next((v.get("final_speedup") for k, v in (summary.get(task) or {}).items()
+                if isinstance(v, dict) and fragment.lower() in str(k).lower()), None)
+    # And the REASON through the same reader as the report's, so a merge-target file holding an old
+    # campaign's row beside this one's answers with the newest match rather than with dict order.
+    _fault, reason, _stamp = CA.arm_a_failure(_AsFile.root_for(failures), task, fragment)
     return None, str(reason or raw or "no record in agent_summary.json")
 
 
@@ -196,9 +234,16 @@ def main() -> int:
             value, reason = _arm_a_number(summary, failures, task, args.model_fragment)
         else:
             value, reason = _arm_b_number(args.out, runs_root, task)
-        state = CA.marker_state(args.out, args.arm, task)
+        # The SAME runs root this file already resolved for `_arm_b_number`, handed to the marker
+        # reader rather than left to its sibling-name guess: `marker_state`'s ceiling rescue reads a
+        # run's own event log, and pointing it at a directory the shipped `CAMPAIGN_RUNS` default
+        # never produces made that rescue dead code.
+        state = CA.marker_state(args.out, args.arm, task, runs_root)
         wall = _wall_minutes(args.out, args.arm, task)
-        if state == "wall_cut":
+        if state in CA.HARNESS_CUT_STATES:
+            # Delegated, not re-tested: `compare_arms.HARNESS_CUT_STATES` is the one place that says
+            # which states mean "this harness stopped the run". A membership test spelled here would
+            # be the fourth copy of that rule, and the copies are what come apart.
             wall_cut.append(task)
         elif state in ("unfinished", "refused"):
             owed.append(task)
@@ -223,7 +268,7 @@ def main() -> int:
         # THE MEANS EXCLUDE WHAT THEY MUST, on the same rule `compare_arms.py` applies: a wall-cut
         # task-arm was stopped by a clock rather than by the budget every other row is compared at,
         # so it is shown and not averaged.
-        comparable = [(t, v, w) for t, v, w, st in scored if st not in ("wall_cut",)]
+        comparable = [(t, v, w) for t, v, w, st in scored if st not in CA.HARNESS_CUT_STATES]
         if comparable:
             values = sorted(v for _, v, _ in comparable)
             walls = [w for _, _, w in comparable if w is not None]
@@ -235,7 +280,7 @@ def main() -> int:
         print(f"\n{len(blank)} task-arm(s) produced no number. That is NOT a zero and NOT a low "
               f"score -- see this file's docstring.")
     if wall_cut:
-        print(f"{len(wall_cut)} task-arm(s) were CUT AT THE WALL CLOCK (rc=124/state=wall_cut) "
+        print(f"{len(wall_cut)} task-arm(s) were STOPPED BY THE HARNESS (a wall cut or a stall cut) "
               f"rather than by the budget, so they are shown and not averaged: "
               + ", ".join(sorted(wall_cut)))
     if owed:

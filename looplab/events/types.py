@@ -466,7 +466,13 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
     # UI stepper would render, so an entry no run ever reaches shows the operator a step that never
     # completes. Add one here only together with its append site.
 }
-PROGRESS_STATUSES: frozenset[str] = frozenset({"started", "finished"})
+# The two statuses get NAMES for the same reason the event type does: a beacon has no reader that
+# fails loudly, so a reader comparing against a bare `"started"` degrades to "nothing is open"
+# rather than raising. `PROGRESS_STATUSES` is DERIVED from them so the validation set and the
+# names cannot drift apart, and its value is unchanged.
+PROGRESS_STARTED = "started"
+PROGRESS_FINISHED = "finished"
+PROGRESS_STATUSES: frozenset[str] = frozenset({PROGRESS_STARTED, PROGRESS_FINISHED})
 
 
 def assert_progress_phase(stage: str, phase: str, status: str) -> None:

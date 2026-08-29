@@ -4,6 +4,22 @@
 #
 # The list is not a guess: every entry is a leak this project actually had.
 set -u
+# shellcheck source=benchmarks/algotune/ours.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ours.sh"
+# OPEN[check-leaks-pinned-to-one-box] the leak checker answers "чисто" about directories it never
+# looked at, and flags the repo's own baseline cache as stale.
+# proof:`present:ROOT=/var/tmp/looplab-bench@benchmarks/algotune/check_leaks.sh`
+# REVIEW 2026-08-25 (correctness): three hardcodes, each defeating the tool's one job on any box
+# but the original. (1) ROOT ignores BENCH_ROOT, which every other script here honours. (2) The
+# marker and memory sweeps walk FIXED directory-name lists, so a campaign under the shipped
+# defaults (campaign/ + camp-runs/, per campaign.sh and box-jhub-l40s.sh) is invisible: section 1
+# reports clean while that campaign's .done markers will make the next run skip every task -- the
+# precise leak the section exists for, and the same hardcoded-name defect snapshot.sh documents
+# having already caused an incident one file over. (3) Section 3 counts files not containing "r3"
+# as stale, but the repo's own patch_baseline_cache.py writes names with no such generation token
+# at all (`<task>__<subset>[__wNxC].json`), so every CURRENT cache file it produces is reported as
+# a leak. Fix: `ROOT="${BENCH_ROOT:-...}"`, discover campaign*/runs-*/camp-runs by glob, and derive
+# the current-generation test from the patch's real naming rather than a literal one box used once.
 ROOT=/var/tmp/looplab-bench
 BAD=0
 say() { printf "  %-52s %s\n" "$1" "$2"; }
@@ -34,7 +50,13 @@ for D in ws-A ws-B ws-armb ws-deep; do
 done
 
 echo "== 5. ЧУЖОЕ ДЕРЕВО (накопленные каталоги кандидатов и сводки)"
-N=$(ls -d "$ROOT/AlgoTune/results"/LoopLab* "$ROOT/AlgoTune/results"/diag* "$ROOT/AlgoTune/results"/recheck* 2>/dev/null | wc -l)
+N=0
+for _D in "$ROOT/AlgoTune/results"/*/; do
+  [ -d "$_D" ] || continue
+  # SOURCED predicate: this line listed three of the six spellings, so a campaign that left
+  # `REC-<pid>/` behind was reported clean and the next campaign inherited it.
+  result_dir_is_ours "$(basename "$_D")" && N=$((N + 1))
+done
 S=$(ls "$ROOT/AlgoTune/reports"/evaluate_summary.*.json 2>/dev/null | wc -l)
 [ "$N$S" != "00" ] && { say "AlgoTune/results,reports" "$N каталогов, $S сводок"; BAD=1; } || say "AlgoTune/results,reports" "чисто"
 A=$(ls "$ROOT/AlgoTune/reports/agent_summary.json" 2>/dev/null | wc -l)

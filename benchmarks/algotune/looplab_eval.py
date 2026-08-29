@@ -676,7 +676,37 @@ def _emit(out: dict[str, Any]) -> None:
     _sweep_artefacts()
 
 
-def _rules_violation(root: Path, solver: Path) -> str:
+# The operator's PLANTED files, which are not part of any candidate's submission. Declared by
+# `make_task.py::main` as the task's `protect` list (`[f"reference_{task}.py", "description.txt"]`)
+# and repeated here as a DEFAULT only -- `--protect` lets the caller pass the declaration itself, so
+# renaming the planted reference does not silently start copying the grader's own source into the
+# scored directory beside the candidate.
+DEFAULT_PROTECT = ("description.txt",)
+DEFAULT_PROTECT_PREFIXES = ("reference_",)
+
+
+def submission_files(solver: Path, protect: tuple = DEFAULT_PROTECT,
+                     protect_prefixes: tuple = DEFAULT_PROTECT_PREFIXES) -> list:
+    """Every file this candidate SUBMITS beside its solver, in a stable order.
+
+    ONE enumeration, because two callers ask the same question for opposite reasons and a
+    disagreement between them is a hole: the copy loop decides what gets SCORED, and the rules check
+    decides what gets VALIDATED. While the rules check read only `solver.py`, a candidate could put
+    a banned primitive in a helper module -- `edit_surface` grants `*.py`, `*.pyx`, `*.pxd`,
+    `setup.py` and `pyproject.toml` -- and submit it unvalidated. Arm A cannot do that: AlgoTune
+    validates at EDIT time, on every file its editor writes.
+    """
+    out = []
+    for extra in sorted(solver.parent.iterdir()):
+        if extra.name == solver.name or extra.is_dir():
+            continue
+        if extra.name in protect or extra.name.startswith(tuple(protect_prefixes)):
+            continue
+        out.append(extra)
+    return out
+
+
+def _rules_violation(root: Path, solver: Path, extras: list = ()) -> str:
     """AlgoTune's own verdict on this candidate, or "" when it is clean.
 
     Their validator, imported from their checkout — not a reimplementation and not a copied list.
@@ -698,8 +728,20 @@ def _rules_violation(root: Path, solver: Path) -> str:
     finally:
         if sys.path and sys.path[0] == str(root):
             sys.path.pop(0)
+    # EVERY submitted Python source, not just `solver.py`. The rule is a FAIRNESS guarantee and it
+    # is only as wide as the submission: validating one file while copying five means a speedup can
+    # be obtained with a primitive the other arm was forbidden, which is precisely the incomparable
+    # number this flag exists to refuse. `.pyx`/`.pxd` are deliberately NOT fed to the validator --
+    # it parses Python with `ast` and Cython is not Python, so it would raise SyntaxError on every
+    # legitimate Cython submission and the arm below would report the evaluator's failure instead.
+    # That residual is real and is stated rather than papered over.
+    checked = [solver] + [e for e in extras if e.suffix == ".py"]
     try:
-        return str(check_code_for_tampering(solver.read_text(encoding="utf-8")) or "")
+        for path in checked:
+            verdict = str(check_code_for_tampering(path.read_text(encoding="utf-8")) or "")
+            if verdict:
+                return verdict if path is solver else f"{path.name}: {verdict}"
+        return ""
     except SyntaxError as exc:
         # Their validator re-raises a syntax error rather than reporting it, and a solver that does
         # not parse is the EVALUATOR's failure to report, not a rules violation.
@@ -726,7 +768,7 @@ def build_decision(submitted):
     pure-Python fallback without ever being told the kernel was dead weight.
     """
     has_recipe = "setup.py" in submitted or "pyproject.toml" in submitted
-    sources = sorted(n for n in submitted if n.endswith((".pyx", ".pyi")))
+    sources = sorted(n for n in submitted if n.endswith((".pyx", ".pxd")))
     if sources and not has_recipe:
         return False, ("not run: " + ", ".join(sources) + " submitted with no setup.py or "
                        "pyproject.toml, so nothing was compiled and the pure-Python path was graded")
@@ -791,6 +833,14 @@ def main() -> int:
                          "the emitted `subset` is what the evaluator will ACTUALLY score, with the "
                          "evidence for it under `subset_evidence` (see subset_actually_scored).")
     ap.add_argument("--timeout", type=int, default=7200, help="Seconds to allow the evaluator.")
+    ap.add_argument("--protect", default="",
+                    help="Comma-separated files the OPERATOR planted, which are not part of any "
+                         "candidate's submission and must never be copied into the scored "
+                         "directory. This is the task's own `protect` declaration "
+                         "(make_task.py writes it into the task JSON); passing it keeps ONE "
+                         "declaration instead of two spellings that drift. A name ending in `*` is "
+                         "a prefix. Empty = the historical default "
+                         "(`description.txt` and `reference_*`).")
     ap.add_argument("--solver-file-only", action="store_true",
                     help="Submit ONLY --solver, the way this bridge behaved before 2026-08-24. "
                          "Default is to submit every file the node wrote beside it and to run the "
@@ -823,8 +873,16 @@ def main() -> int:
                "no_speedup": _no_speedup("no_solver")})
         return 0
 
+    # The declaration wins where it is given; the literals below are only a fallback for a caller
+    # that has no task JSON to read (a hand invocation, an older campaign).
+    _protect, _protect_prefixes = DEFAULT_PROTECT, DEFAULT_PROTECT_PREFIXES
+    if args.protect.strip():
+        _declared = [x.strip() for x in args.protect.split(",") if x.strip()]
+        _protect = tuple(x for x in _declared if not x.endswith("*"))
+        _protect_prefixes = tuple(x[:-1] for x in _declared if x.endswith("*")) or ("\0",)
+
     if args.enforce_rules:
-        violation = _rules_violation(root, src)
+        violation = _rules_violation(root, src, submission_files(src, _protect, _protect_prefixes))
         if violation:
             # NOT a score of zero, and not a crash to repair: this candidate was never eligible.
             # Arm A cannot produce such a solver at all — AlgoTune validates at EDIT time and simply
@@ -869,13 +927,8 @@ def main() -> int:
     # `--inplace`, same 1800 s ceiling the editor uses.
     _submitted = []
     if not args.solver_file_only:
-        for extra in sorted(src.parent.iterdir()):
-            if extra.name == src.name or extra.is_dir():
-                continue
-            # The two files the operator PLANTED are not the candidate's submission, and copying
-            # them would put the grader's own source inside the scored directory.
-            if extra.name == "description.txt" or extra.name.startswith("reference_"):
-                continue
+        # Same enumeration the rules check above ran on, so what is SCORED is what was VALIDATED.
+        for extra in submission_files(src, _protect, _protect_prefixes):
             shutil.copy2(extra, dest_dir / extra.name)
             _submitted.append(extra.name)
     build_note = ""
@@ -960,10 +1013,43 @@ def main() -> int:
     # So: glob the timings this run could use BEFORE it runs, and compare after. A file that appears
     # or changes during the run means the reference was measured here, which means the number below
     # is not about the candidate. `_emit` is told to refuse it rather than print it.
+    #
+    # OPEN[baseline-guard-watches-the-wrong-clone] in the documented two-clone workflow this
+    # fingerprints a `.baseline_times` the arena never writes.
+    # proof:absent:--baseline-times-dir@benchmarks/algotune/campaign.sh
+    # REVIEW 2026-08-25 (correctness): `patch_baseline_cache.py` bakes its cache dir at PATCH time
+    # (default: beside the patch script that ran, docs/52 SS6 runs it from the working clone) while
+    # `DEFAULT_TIMES_DIR` here resolves beside THIS file at RUN time (docs/51 SS7 runs the campaign
+    # from the pinned `looplab-armb` clone). Nothing passes `--baseline-times-dir` and nothing checks
+    # the pairing, so the guard can fingerprint a directory nothing writes and stay silent. The glob
+    # and the reassigned-`subset` closure were fixed 2026-08-25; this half needs the cache dir read
+    # out of the patched `baseline_manager.py` (or a refusal when the watched dir does not match the
+    # patch's embedded one). Its companion: `campaign.sh` has no re-score path for a refused
+    # champion pass -- `record_done` writes the marker regardless and `already_measured` never
+    # re-runs it -- and the refusal BRANCH itself is executed by no test (see the annotation in
+    # tests/test_algotune_refuses_baseline_measured_in_pass.py).
+    # ONE KEY, FIXED BEFORE THE RUN, and a glob that matches what the patch really writes.
+    #
+    # `patch_baseline_cache.py` names a per-instance cache `<task>__<subset>[__<regime>].json`, and
+    # its regime segment is the EMPTY string whenever workers <= 1 — which docs/51 SS10 mandates and
+    # `campaign.sh` never overrides, so on every campaign run to date the file is the bare
+    # `<task>__<subset>.json`. The old pattern demanded a literal `__` plus a third segment, so it
+    # matched NOTHING in the serial regime: both fingerprints were `{}`, compared equal, and the
+    # reference-timed-in-pass refusal — the whole point of this block — could not fire on the one
+    # configuration the campaign actually runs. `*` after the subset matches both spellings.
+    #
+    # And `_times_key` is bound HERE rather than read out of `subset` at call time: `subset` is
+    # REASSIGNED after the run by `subset_from_stderr` (the `subset_mismatch` case), so a closure
+    # over it made the before-glob and the after-glob cover DIFFERENT splits and produced a refusal
+    # whose `timings_written` listed files that had existed all along. Refusing on a mismatch is
+    # right; explaining it with a fabricated cause is not, and `subset_evidence` already states the
+    # real one.
+    _times_key = f"{args.task}__{subset}"
+
     def _baseline_fingerprint() -> dict:
         try:
             return {f.name: (f.stat().st_mtime_ns, f.stat().st_size)
-                    for f in args.baseline_times_dir.glob(f"{args.task}__{subset}__*.json")}
+                    for f in args.baseline_times_dir.glob(f"{_times_key}*.json")}
         except OSError:
             return {}
 
@@ -1090,6 +1176,21 @@ def main() -> int:
 
     out: dict[str, Any] = {"speedup": 0.0, "eval_seconds": elapsed, "subset": subset,
                            "subset_evidence": subset_evidence}
+    # WHAT WAS SUBMITTED AND WHETHER IT BUILT, on the record rather than only on stderr.
+    #
+    # `build_note` used to be printed and then dropped, so a `setup.py build_ext` that FAILED was
+    # invisible in the JSON and the run continued to the arena, where the solver's `import fast`
+    # died and the verdict came back `solver_unloadable` — a reason `compare_arms.py` classifies as
+    # SOLVERS_FAULT and averages into arm B's mean as a real 0.0. The build is OUR step (this bridge
+    # invokes it), so a reader has to be able to tell "the candidate's extension would not compile"
+    # from "the candidate's python would not import", and one of those is upstream of the other.
+    # Nested for `json_line_extras`' reason: a top-level numeric key here would be swept into the
+    # node's `extra_metrics` as an undeclared `auto` measurement.
+    # Only when there is something to say: a one-file submission that needed no build adds no key,
+    # so the single-solver path keeps the exact shape `test_a_real_speedup_is_untouched` pins.
+    if _submitted or build_note:
+        out["submission"] = {"files": _submitted, "build_ran": bool(build_note),
+                             "build": build_note or "not needed (no .pyx/.pxd/setup.py submitted)"}
 
     if not summary.exists():
         out["error"] = "evaluate_summary.json not produced"

@@ -247,6 +247,20 @@ identified call away from working.
 
 ## 8. The campaign as launched, 2026-08-20
 
+OPEN[docs52-launch-block-contradicts-docs51-regime] the launch block below and docs/51 §10 cannot
+both be true of one campaign.
+proof:`present:ALGOTUNE_EVAL_WORKERS=auto@docs/52-bench-box-jhub-l40s-2026-08-20.md`
+REVIEW 2026-08-25 (docs): docs/51 §10 measures the parallel eval regime inflating the metric ~75 %
+and mandates the opposite of this block ("leave `ALGOTUNE_EVAL_WORKERS` unset ... every campaign so
+far is serial"). A reader reproducing from this block gets numbers docs/51 declares invalid (the
+solver pass parallel while the reference stays serial — the oracle half ships OFF and broken); a
+reader following docs/51 runs serial, where the bridge's reference-timed-in-pass guard cannot fire
+at all (its glob never matches serial-regime cache names — see the annotation at
+`_baseline_fingerprint` in `benchmarks/algotune/looplab_eval.py`). Either way one of the two shipped
+protections is inoperative. Fix: date-stamp this block as superseded by docs/51 §10 (or drop the
+`auto`), and make campaign.sh refuse or warn when a >1 value is inherited from the environment —
+the regime is "part of the measurement" by the driver's own header.
+
 ```
 20 tasks | 4 lanes x 22 cores (of 96, quota 90) | ALGOTUNE_EVAL_WORKERS=auto | $0.02 per task-arm
 model gateway/deepseek-v4-flash through the meter, per-task paths
