@@ -62,17 +62,28 @@ list.
     instead of hiding it, and the cap stays a one-constant operator decision.
     proof:present:_MAX_IS_SOLUTION_EXAMPLES@benchmarks/algotune/looplab_eval.py
 
-    OPEN[algotune-invalid-analysis-stops-at-the-evaluator] the per-instance `is_solution` CODE
-    CONTEXT arm A is shown cannot reach arm B's bridge: `evaluate_code_on_dataset` attaches
-    `invalid_solution_analysis` only under a `baseline_manager`, and `scripts/evaluate_results.py`
-    calls it without one and writes a summary of `final_speedup` alone. Closing it means patching
-    the AlgoTune checkout (a `patch_*.py` beside the others), not the bridge.
-    proof:absent:invalid_solution_analysis@benchmarks/algotune/setup_algotune.sh
+THE PER-INSTANCE ANALYSIS NOW ARRIVES TOO, and it took a patch to the checkout rather than a better
+parser here. `evaluate_code_on_dataset` attached AlgoTune's own `invalid_solution_analysis` — the
+code context of the `is_solution` line that rejected an instance, which arm A's agent is shown three
+of — only under `if baseline_manager and ...`, an argument that chooses where the REFERENCE TIMINGS
+come from and that `scripts/evaluate_results.py` does not pass; and `update_single_result` wrote a
+summary of `final_speedup` alone. `benchmarks/algotune/patch_invalid_solution_analysis.py` removes
+the gate and widens the summary row, `setup_algotune.sh` applies and verifies it, and the block
+below carries it into `no_speedup`. Measured end to end on 2026-08-25 against a COPY of the campaign
+checkout (the live one was scoring an arm), a `convex_hull` solver that drops one hull vertex on a
+deterministic fifth of instances, warm reference timings, `ALGOTUNE_EVAL_WORKERS=6`, 191 s::
 
-    Pinned on `setup_algotune.sh` rather than on this bridge because the bridge already NAMES the
-    analysis in prose, and a proof an index can satisfy from a COMMENT is the one thing an open item
-    may not rest on. `setup_algotune.sh` enumerates every deviation applied to the third-party
-    checkout, so the day this item closes, the step that closes it lands there as a command.
+    "evaluator_verdict": "Speedup N/A due to invalid results: 86/100 valid (86.0%)",
+    "is_solution_errors": [{"message": "Not all points are contained within the convex hull.",
+                            "count": 20}],
+    "invalid_solution_analysis": ["  370:         # Check that all points are contained within ...
+                                   372:             if self._point_outside_hull(point, hull_points):
+                                   373:                 logging.error(\"Not all points are ...\")
+                                 > 374:                 return False", ... ]
+
+The control is the same solver, the same task and the same regime against the same checkout with
+`--revert` applied: identical verdict, identical counts, and no `invalid_solution_analysis` key at
+all. That is what makes the key the patch's doing and not the run's.
 """
 from __future__ import annotations
 
@@ -96,15 +107,15 @@ RECORDED_MODEL = "REC-90409"
 RECORDED_TASK = "spectral_clustering"
 
 
-def _bridge():
-    """Import `looplab_eval.py` by path — it is a script under `benchmarks/`, not a package."""
-    spec = importlib.util.spec_from_file_location("looplab_eval_under_test", BRIDGE)
+def _by_path(path: Path, name: str):
+    """Import a `benchmarks/algotune/*.py` script by path — they are scripts, not a package."""
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-LE = _bridge()
+LE = _by_path(BRIDGE, "looplab_eval_under_test")
 
 
 # ------------------------------------------------------------------------------------------------
@@ -456,3 +467,424 @@ def test_the_bridge_has_exactly_one_printer():
                             for kw in node.keywords)]
     assert len(printers) == 2, \
         f"{len(printers)} stdout printers; every JSON line must leave through _emit"
+
+
+# ------------------------------------------------------------------------------------------------
+# The per-instance analysis: WHY, and not only HOW OFTEN
+# ------------------------------------------------------------------------------------------------
+# This was an open item in this module's docstring until 2026-08-25, and its own line said what
+# closing it would take: "patching the AlgoTune checkout (a `patch_*.py` beside the others), not the
+# bridge". Both halves are here, and the marker is deleted because closing IS the deletion.
+#
+# THE TWO REASONS IT COULD NOT GET HERE, neither of them in `looplab_eval.py`:
+#
+#   1. `AlgoTuner/utils/evaluator/main.py` accumulates `all_invalid_analyses` across every chunk and
+#      then attaches it only under `if baseline_manager and all_invalid_analyses:`.
+#      `baseline_manager` selects where the REFERENCE TIMINGS come from -- its three other uses are
+#      all in the first thirty lines of that function -- and `scripts/evaluate_results.py` resolves
+#      the timings itself and passes `baseline_times=` instead. So the argument is None under the
+#      one caller this bridge uses, and the list is discarded unread.
+#   2. `update_single_result` writes `{"final_speedup": "<str>"}` and nothing else, and that summary
+#      is the bridge's ONLY structured channel (`_find_result`).
+#
+# So the tests below drive `patch_invalid_solution_analysis.py`'s OWN anchor strings, EXECUTED. A
+# test that asserted the patch file contains some text would be satisfied by a comment; these build
+# a miniature checkout out of the anchors, run the patch on it, import the result and CALL it.
+
+PATCH = _by_path(ROOT / "benchmarks" / "algotune" / "patch_invalid_solution_analysis.py",
+                 "patch_invalid_solution_analysis_under_test")
+SUBSET_PATCH = _by_path(ROOT / "benchmarks" / "algotune" / "patch_eval_subset.py",
+                        "patch_eval_subset_beside_it")
+SETUP = ROOT / "benchmarks" / "algotune" / "setup_algotune.sh"
+
+# Three contexts in the shape `ResultAggregator._extract_invalid_contexts` actually produces —
+# copied down from the 2026-08-25 verification run, not invented. `ValidationContext.
+# format_for_display()` returns the numbered source of the reference's own `is_solution` with `>`
+# on the line that rejected the solution, and NO header: the "Invalid Example #1:" wrapper is
+# added later by `message_writer`, for arm A's chat transcript, and never reaches the summary.
+# The third is Case 2 of that function, which has no source line to point at.
+_CONTEXTS = [
+    "\n".join([
+        "  370:         # Check that all points are contained within or on the boundary",
+        "  371:         for point in points:",
+        "  372:             if self._point_outside_hull(point, hull_points):",
+        '  373:                 logging.error("Not all points are contained within the hull.")',
+        "> 374:                 return False",
+    ]),
+    "\n".join([
+        "  364:             # Cross product should be positive for counter-clockwise ordering",
+        "  365:             cross_product = v1[0] * v2[1] - v1[1] * v2[0]",
+        "  366:             if cross_product < 0:",
+        '> 367:                 logging.error("Hull is not convex or not ordered ccw.")',
+        "  368:                 return False",
+    ]),
+    "Problem: 47\nIssue: Solver returned None (no output)",
+]
+
+
+def _summary_with(analysis, *, speedup: str = "N/A") -> str:
+    row = {"final_speedup": speedup}
+    if analysis is not None:
+        row["invalid_solution_analysis"] = analysis
+    return json.dumps({RECORDED_TASK: {RECORDED_MODEL: row}})
+
+
+def test_the_analysis_reaches_the_no_speedup_block(tmp_path):
+    """THE ITEM. The same recorded stderr, and a summary written by a PATCHED checkout.
+
+    On the pre-2026-08-25 bridge this fails with `KeyError: 'invalid_solution_analysis'`: the key
+    is right there in the record `_find_result` returned, and nothing reads it.
+    """
+    root = _checkout(tmp_path, stderr=REAL_STDERR, summary=_summary_with(_CONTEXTS))
+    out = _score(tmp_path, root)
+
+    why = out["no_speedup"]
+    # Everything the bridge already said still stands, unmoved.
+    assert out["speedup"] == 0.0
+    assert why["reason"] == "invalid_results"
+    assert (why["instances_valid"], why["instances_total"]) == (94, 100)
+    # ...and now the part that says WHICH check rejected the solution.
+    assert why["invalid_solution_analysis"] == _CONTEXTS
+    assert "Not all points are contained within the hull" in \
+        why["invalid_solution_analysis"][0]
+    assert why["invalid_solution_analysis"][0].splitlines()[-1].startswith("> 374:"), \
+        "the `>` marker is what names the line that rejected the solution"
+
+    # And it stays OUT of the metric plumbing, the reason `no_speedup` is a nested object at all:
+    # `json_line_extras` sweeps every other top-level key into undeclared `auto` extra_metrics.
+    from looplab.runtime.sandbox import json_line_extras, json_line_metric
+    line = json.dumps(out)
+    assert json_line_metric(line, "speedup") == 0.0
+    assert json_line_extras(line, "speedup") == {"eval_seconds": pytest.approx(out["eval_seconds"])}
+
+
+def test_an_unpatched_checkout_is_silent_and_not_wrong(tmp_path):
+    """The key is ABSENT, never empty, when the checkout does not carry the patch.
+
+    Same contract as `ALGOTUNE_EVAL_SUBSET`, which an unpatched `evaluate_results.py` ignores: the
+    bridge must run against a freshly cloned or `--revert`ed checkout and print exactly what it
+    printed before, so that nothing downstream can come to require the new key.
+    """
+    root = _checkout(tmp_path, stderr=REAL_STDERR, summary=REAL_SUMMARY)
+    why = _score(tmp_path, root)["no_speedup"]
+    assert "invalid_solution_analysis" not in why
+    # The stderr-scraped residual is what such a checkout still gets, and it is untouched.
+    assert why["is_solution_errors_distinct"] == 3
+
+
+def test_a_pathological_context_cannot_become_the_json_line(tmp_path):
+    """This line is read by `runtime/sandbox.py` and lands in a node's `score.log`; one context
+    with a dataset pasted into it may not be the whole of it. A cut must SAY it was cut."""
+    huge = "x" * (LE._MAX_ANALYSIS_CHARS * 4)
+    root = _checkout(tmp_path, stderr=REAL_STDERR,
+                     summary=_summary_with([huge, huge, huge, huge, huge]))
+    shown = _score(tmp_path, root)["no_speedup"]["invalid_solution_analysis"]
+    assert len(shown) == LE._MAX_ANALYSIS_EXAMPLES
+    assert shown[0].startswith("x" * LE._MAX_ANALYSIS_CHARS)
+    assert "truncated" in shown[0]
+    assert len(shown[0]) < LE._MAX_ANALYSIS_CHARS * 2
+
+
+@pytest.mark.parametrize("junk", [None, [], "a string, not a list", [None, 3, ""], {"a": 1}])
+def test_a_summary_that_says_nothing_usable_adds_no_key(tmp_path, junk):
+    """Upstream may reshape this file; it has before (`_find_result`). Every shape that is not a
+    non-empty list of non-empty strings must degrade to the pre-patch line, not to `[]` or a crash.
+    """
+    root = _checkout(tmp_path, stderr=REAL_STDERR, summary=_summary_with(junk))
+    assert "invalid_solution_analysis" not in _score(tmp_path, root)["no_speedup"]
+
+
+def test_identical_contexts_are_not_collapsed(tmp_path):
+    """PER-INSTANCE, and the verification run is why this is pinned rather than left to taste.
+
+    The real 2026-08-25 run against a convex_hull solver wrong on 14 of 100 instances sampled three
+    of them and all three had failed the SAME check — `evaluate_summary.json` carried three
+    byte-identical contexts. Deduplicating here would make "3 shown" mean a different thing on this
+    line than it means to arm A, which is shown the same list undeduplicated; and the collapsed view
+    already exists one key up, in `is_solution_errors`, WITH its occurrence count.
+    """
+    root = _checkout(tmp_path, stderr=REAL_STDERR,
+                     summary=_summary_with([_CONTEXTS[0]] * 3))
+    why = _score(tmp_path, root)["no_speedup"]
+    assert why["invalid_solution_analysis"] == [_CONTEXTS[0]] * 3
+
+
+def test_a_scored_run_still_carries_nothing(tmp_path):
+    """The positive path keeps its exact shape even when the record HAS an analysis on it."""
+    root = _checkout(tmp_path, stderr="2026-08-22 04:07:31 - INFO - Evaluation complete\n",
+                     summary=_summary_with(_CONTEXTS, speedup="1.4200"))
+    out = _score(tmp_path, root)
+    assert out["speedup"] == pytest.approx(1.42)
+    assert "no_speedup" not in out
+    assert "invalid_solution_analysis" not in out
+
+
+# ------------------------------------------------------------------------------------------------
+# The patch itself, EXECUTED against a checkout built from its own anchors
+# ------------------------------------------------------------------------------------------------
+
+_MAIN_STUB = '''\
+import logging
+
+
+class AttributedList(list):
+    pass
+
+
+def evaluate_code_on_dataset(all_invalid_analyses, baseline_manager=None):
+    attributed_results = AttributedList([])
+{anchor}
+        # Limit to first 3 invalid analyses as per the original logic
+        attributed_results.invalid_solution_analysis = all_invalid_analyses[:3]
+    return attributed_results
+'''
+
+_EVAL_STUB = '''\
+import json
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass
+class EvaluationResult:
+    """Result of evaluating a single model on a task."""
+
+    task_name: str
+    display_model_name: str
+    speedup: float | None
+    success: bool
+{result_anchor}
+
+def run_one(result, results):
+    if True:
+        try:
+            if True:
+{capture_anchor}
+        finally:
+            pass
+    return result
+
+
+def load_split(task_instance):
+    if True:
+        try:
+            if True:
+{dataset_anchor}
+                evaluate(data_subset="test",)
+                return test_problems
+        finally:
+            pass
+
+
+def evaluate(**kwargs):
+    return kwargs
+
+
+def update_single_result(result, summary_file):
+    summary_data = {{}}
+    for _attempt in range(1):
+        try:
+            if True:
+                if result.success and result.speedup is not None:
+                    speedup_str = f"{{result.speedup:.4f}}"
+                else:
+                    speedup_str = "N/A"
+
+                if result.task_name not in summary_data:
+                    summary_data[result.task_name] = {{}}
+
+{summary_anchor}
+
+                with open(summary_file, "w") as f:
+                    json.dump(summary_data, f, indent=2)
+                return
+        finally:
+            pass
+'''
+
+
+def _fake_checkout(tmp_path: Path) -> Path:
+    """An AlgoTune-shaped tree whose two files are made OUT OF the patch's own anchor strings.
+
+    The anchors are not copied here: they are read off the patch module, so a patch that stops
+    matching upstream and gets its anchors re-derived takes this fixture with it, and a patch whose
+    anchors no longer occur in its own fixture cannot pass.
+    """
+    root = tmp_path / "AlgoTune"
+    main = root / "AlgoTuner" / "utils" / "evaluator" / "main.py"
+    script = root / "scripts" / "evaluate_results.py"
+    main.parent.mkdir(parents=True)
+    script.parent.mkdir(parents=True)
+    main.write_text(_MAIN_STUB.format(anchor=PATCH.MAIN_ANCHOR), encoding="utf-8")
+    script.write_text(_EVAL_STUB.format(
+        result_anchor=PATCH.RESULT_ANCHOR,
+        capture_anchor=PATCH.CAPTURE_ANCHOR,
+        dataset_anchor=SUBSET_PATCH.DATASET_ANCHOR,
+        summary_anchor=PATCH.SUMMARY_ANCHOR), encoding="utf-8")
+    # The fixture has to be a real file before the patch touches it, or the patch is being proved
+    # against something that was never valid Python.
+    for path in (main, script):
+        ast.parse(path.read_text(encoding="utf-8"))
+    return root
+
+
+def _load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_gate_that_discarded_the_analysis_is_gone_and_the_attach_happens(tmp_path):
+    """REASON 1, executed. `baseline_manager=None` is what `evaluate_results.py` passes.
+
+    Before the patch this function returns a list with no `invalid_solution_analysis` attribute at
+    all, whatever the workers found.
+    """
+    root = _fake_checkout(tmp_path)
+    main = root / "AlgoTuner" / "utils" / "evaluator" / "main.py"
+
+    before = _load(main, "at_main_before")
+    assert not hasattr(before.evaluate_code_on_dataset(["a", "b"], baseline_manager=None),
+                       "invalid_solution_analysis"), "the fixture no longer reproduces the defect"
+
+    assert PATCH.main(["--algotune-root", str(root)]) == 0
+    after = _load(main, "at_main_after")
+    assert after.evaluate_code_on_dataset(["a", "b"], baseline_manager=None) \
+        .invalid_solution_analysis == ["a", "b"]
+    # Upstream's own cap of three is upstream's, and the patch does not touch it.
+    assert after.evaluate_code_on_dataset(list("abcde"), baseline_manager=None) \
+        .invalid_solution_analysis == ["a", "b", "c"]
+
+
+def test_the_summary_the_patch_writes_is_the_row_the_bridge_reads(tmp_path):
+    """REASON 2, executed, and the round trip closed: THEIR writer -> OUR reader.
+
+    `update_single_result` is called for real, on a real `EvaluationResult`, and the JSON it leaves
+    on disk is handed to `looplab_eval.py::_find_result` — the same function the bridge uses. Two
+    files agreeing on a key is the seam this is guarding, so neither side gets to be a mock.
+    """
+    root = _fake_checkout(tmp_path)
+    script = root / "scripts" / "evaluate_results.py"
+    assert PATCH.main(["--algotune-root", str(root)]) == 0
+    module = _load(script, "at_eval_after")
+
+    result = module.EvaluationResult(task_name=RECORDED_TASK, display_model_name=RECORDED_MODEL,
+                                     speedup=None, success=False)
+    assert result.invalid_solution_analysis == [], "the field must default to empty, never None"
+    result.invalid_solution_analysis = list(_CONTEXTS)
+    out = tmp_path / "evaluate_summary.json"
+    module.update_single_result(result, out)
+
+    record = LE._find_result(json.loads(out.read_text(encoding="utf-8")),
+                             RECORDED_TASK, RECORDED_MODEL)
+    assert record["final_speedup"] == "N/A", "the speedup field keeps its exact shape and type"
+    assert LE._invalid_analysis(record["invalid_solution_analysis"]) == _CONTEXTS
+
+
+def test_a_run_that_scored_writes_a_byte_identical_summary(tmp_path):
+    """ADDITIVE means additive: a solver that passed every check must leave the file it left
+    before, or the patch has changed the artefact every published number is read off."""
+    root = _fake_checkout(tmp_path)
+    script = root / "scripts" / "evaluate_results.py"
+    before = _load(script, "at_eval_unpatched")
+    good = dict(task_name=RECORDED_TASK, display_model_name=RECORDED_MODEL,
+                speedup=1.42, success=True)
+    plain = tmp_path / "plain.json"
+    before.update_single_result(before.EvaluationResult(**good), plain)
+
+    assert PATCH.main(["--algotune-root", str(root)]) == 0
+    after = _load(script, "at_eval_patched")
+    patched = tmp_path / "patched.json"
+    after.update_single_result(after.EvaluationResult(**good), patched)
+
+    assert patched.read_bytes() == plain.read_bytes()
+    assert json.loads(patched.read_text(encoding="utf-8")) == \
+        {RECORDED_TASK: {RECORDED_MODEL: {"final_speedup": "1.4200"}}}
+
+
+def test_the_patch_is_idempotent_and_reverts(tmp_path):
+    root = _fake_checkout(tmp_path)
+    script = root / "scripts" / "evaluate_results.py"
+    assert PATCH.main(["--algotune-root", str(root)]) == 0
+    once = script.read_bytes()
+    assert PATCH.main(["--algotune-root", str(root)]) == 0
+    assert script.read_bytes() == once, "a second application is not a no-op"
+    assert PATCH.main(["--algotune-root", str(root), "--revert"]) == 0
+    assert PATCH.MARKER not in script.read_text(encoding="utf-8")
+
+
+def test_reverting_this_patch_does_not_revert_the_train_test_split(tmp_path):
+    """THE BACKUP-NAME TRAP, and it is the reason this patch does not use the plain `.orig`.
+
+    `patch_eval_subset.py` backs the SAME file up to `evaluate_results.py.orig`, and that backup
+    holds pristine upstream. A second patch reverting through it would restore the checkout to a
+    state that scores every LoopLab node on the TEST split while the bridge still stamps
+    `"subset": "train"` — the leak that patch's own docstring calls "the exact class of thing this
+    whole comparison exists to exclude", reintroduced by an unrelated `--revert`.
+    """
+    root = _fake_checkout(tmp_path)
+    script = root / "scripts" / "evaluate_results.py"
+    subset_rc = subprocess.run(
+        [sys.executable, str(ROOT / "benchmarks" / "algotune" / "patch_eval_subset.py"),
+         "--algotune-root", str(root)], capture_output=True, text=True)
+    assert subset_rc.returncode == 0, subset_rc.stderr
+    assert SUBSET_PATCH.MARKER in script.read_text(encoding="utf-8")
+
+    assert PATCH.main(["--algotune-root", str(root)]) == 0
+    assert PATCH.main(["--algotune-root", str(root), "--revert"]) == 0
+
+    text = script.read_text(encoding="utf-8")
+    assert PATCH.MARKER not in text
+    assert SUBSET_PATCH.MARKER in text, \
+        "reverting the analysis patch took the train/test split patch with it"
+    ast.parse(text)
+
+
+def test_the_patch_refuses_a_checkout_it_does_not_recognise(tmp_path):
+    """A silent half-application is the failure mode `setup_algotune.sh` step 2 was written about.
+    An anchor that stops matching must be loud, and it must not leave a written file behind."""
+    root = _fake_checkout(tmp_path)
+    main = root / "AlgoTuner" / "utils" / "evaluator" / "main.py"
+    main.write_text("def evaluate_code_on_dataset():\n    return []\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as caught:
+        PATCH.main(["--algotune-root", str(root)])
+    assert "re-derive the anchor" in str(caught.value) or "nothing matched" in str(caught.value)
+
+
+# ------------------------------------------------------------------------------------------------
+# `setup_algotune.sh` is the ledger of deviations, so the step must be IN it, as a command
+# ------------------------------------------------------------------------------------------------
+
+def _commands(path: Path) -> str:
+    """The script with every comment-only line removed.
+
+    The open item this closes was pinned `absent:invalid_solution_analysis@setup_algotune.sh`
+    precisely so that a COMMENT could not satisfy it (CLAUDE.md: "a proof an index can satisfy from
+    a COMMENT is the one thing an open item may not rest on"). The marker is deleted now, so this
+    is what keeps that discipline after the fact.
+    """
+    return "\n".join(line for line in path.read_text(encoding="utf-8").splitlines()
+                     if not line.strip().startswith("#"))
+
+
+def test_setup_algotune_applies_the_patch_as_a_command():
+    commands = _commands(SETUP)
+    assert "patch_invalid_solution_analysis.py" in commands, \
+        "the deviation is not applied by the script that enumerates every deviation"
+    assert "invalid_solution_analysis" in commands, \
+        "no command in setup_algotune.sh names the key it is there to deliver"
+
+
+def test_setup_algotune_verifies_the_patch_took():
+    """Both halves, each checked on what is actually different about it. `grep
+    invalid_solution_analysis` passes on an UNTOUCHED `main.py` — upstream names the key a dozen
+    times there — so the evaluator half must be checked on the GATE's absence instead."""
+    commands = _commands(SETUP)
+    assert "if baseline_manager and all_invalid_analyses:" in commands
+    assert "scripts/evaluate_results.py" in commands
+
+
+def test_the_setup_script_still_parses():
+    assert subprocess.run(["bash", "-n", str(SETUP)], capture_output=True).returncode == 0
