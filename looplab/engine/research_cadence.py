@@ -606,7 +606,48 @@ class ResearchCadenceMixin:
         # proposed as real work, but this writer reads only the legacy union and open questions. A
         # schema-valid memo that omits the optional compatibility field therefore appends its paid
         # `research_completed` row yet emits no hint, card or executable proposal for its concrete
-        # list. Route that list through the real proposal intake (or a dedicated bounded hint).
+        # list.
+        # AMENDED 2026-08-29 — THIS REVIEW'S OWN PARENTHETICAL REMEDY IS SPENT, and re-deriving it
+        # is what the next reader must not repeat. It said "route that list through the real
+        # proposal intake (or a dedicated bounded hint)"; the second half cannot work.
+        # `agents/hints.py::render_hint_directives` is the ONLY renderer of `state.hints`, and it
+        # FILTERS deep-research rows out on BOTH keys — `source == "deep_research"` and the
+        # `DEEP_RESEARCH_HINT_PREFIX` text, the second catching rows folded from logs older than the
+        # stamp — deliberately, because model output must not be relabelled as operator authority.
+        # So a second hint appended here would be a second channel with no reader, which is the
+        # defect one field over (`RunTools._research_memo` keyed on a `summary` no writer produced,
+        # dead from the commit that added it) reintroduced by its own fix. That is also why the
+        # EXISTING directions hint is not the delivery path it reads as: what actually reaches the
+        # proposal prompt is the `EV_HYPOTHESIS_ADDED` board (`agents/roles.py::board_prompt_lines`)
+        # plus the memo summary pushed by `_state_brief`, and the pull tool `read_research_memo`.
+        # A BOARD ROW IS ALSO THE WRONG DESTINATION and that is the whole point of the split: a
+        # concrete one-change experiment registered as an open belief is a row owning no action,
+        # unbuildable by construction, which is the defect the paragraph below records for
+        # `recommended_directions`. So the remaining route is the PROPOSAL INTAKE and nothing else,
+        # and it cannot be taken from here: this is the background research task, which invariant #1
+        # bounds to `BACKGROUND_APPENDABLE`, and minting a card is the main task's own append.
+        # WHAT IS ALREADY DELIVERED, so the gap is narrower than "no reader": `tools/run_tools.py`
+        # renders `open_questions + next_experiments` as the memo's directions when
+        # `recommended_directions` is empty, so an AGENTIC Researcher that reads the memo sees them
+        # (measured there: 71 of 78 concrete experiments, 91 %, already appear in the union). The
+        # genuine hole is the NON-agentic proposal path, which pulls nothing.
+        # MEASURED 2026-08-29, over every run directory on this box, and it decides the disposition.
+        # All NINE runs record `unified_agent: true` in `config.snapshot.json` and every one PULLS
+        # the memo — `read_research_memo` appears 138 / 139 / 216 / 229 / 252 / 342 / 362 / 698 /
+        # 2,091 times in their `spans.jsonl`. So the non-agentic proposal path, the only route this
+        # marker still describes, is UNREACHABLE here.
+        # AND THE REACHABLE PATH IS ALREADY FIXED BUT HAS NEVER RUN. `git merge-base --is-ancestor`
+        # says `899f6244` — the `run_tools.py` fallback that renders `open_questions +
+        # next_experiments` as the memo's directions — is an ancestor of NEITHER `e6d7d680` (v9's
+        # launch) NOR `1280de6d` (v10's), and IS on master. A running engine pins its own code, so
+        # every memo on disk was written by a process that could not deliver these entries, and
+        # every FUTURE run can. That is what the v9 evidence actually shows: 18 memos, 11 with a
+        # filled `next_experiments`, and memo 4 is `(next 7, directions 0, questions 0)` — a
+        # schema-valid memo whose ONLY content is the concrete list, which steered nothing in that
+        # run because the reader did not exist yet, not because the design lacks one.
+        # SO THIS IS NOT CODE WORK. It is unexercised delivery: the next run launched from master
+        # is what turns 11-of-18 memos from unreadable into read, and the marker stays only until a
+        # run carrying `899f6244` shows a `next_experiments` entry reaching a proposal.
         # WHAT BECOMES A BOARD ROW is now what the memo itself called a QUESTION, not everything it
         # would try next. `recommended_directions` was described to the model as "specific next
         # experiments to try", so it correctly returned experiments and every one of them landed as
