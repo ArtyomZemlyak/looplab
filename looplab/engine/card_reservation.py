@@ -1443,39 +1443,55 @@ class CardReservationMixin:
                         # NOTHING: an AST pass over it finds zero `store.append` calls, and its audit
                         # rows go through `_append_proposal_event`, whose `_PROPOSAL_EVENT_SINK`
                         # contextvar survives `to_thread.run_sync` (driven, not assumed).
-                        # OPEN[offload-lane-appends-folded-events-off-main-task] the "writes NOTHING"
-                        # claim above is false one call deep, and the folded appends now run on the
-                        # worker thread.
-                        # proof:absent:_capture_proposal_events@looplab/engine/card_reservation.py
-                        # REVIEW 2026-08-29 (P1 correctness): the sink contextvar does survive
-                        # `to_thread.run_sync`, but NOTHING INSTALLS IT on this lane — the one
-                        # installer is `speculation.py::_prepare_raw_card_stage` (Layer 5), so in
-                        # this worker `_append_proposal_event` falls through to `self.store.append`.
-                        # `_prepare_node_idea._link` and `_apply_novelty_gate` reach it with
-                        # EV_NOVELTY_REJECTED / EV_NOVELTY_GRADED / EV_CROSS_RUN_PRIOR — all FOLDED,
-                        # and none of the three thread-append registries in `events/types.py` names
-                        # them — i.e. invariant #1's sole-writer rule is breached on a default
-                        # card lane, unregistered and unproven. These rows are authority-bearing
-                        # for `_proposal_authority_seq` (the fence that discards a paid proposal
-                        # when any non-diagnostic row lands in its equality window), and a worker-
-                        # thread append can land at instants the main-task ordering used to exclude.
-                        # The guard `test_propose_does_not_freeze_the_loop::test_the_offloaded_call_
-                        # writes_no_events` walks only `_prepare_node_idea`'s own AST and cannot see
-                        # the append one helper down, so nothing is red. Fix direction: install the
-                        # buffered-intents sink (the Layer-5 discipline in `novelty.py`) around this
-                        # call and publish the captured intents from the main task after the await —
-                        # or register + prove the seam the way `SETUP_THREAD_APPENDABLE` did.
-                        idea = await anyio.to_thread.run_sync(
-                            functools.partial(
-                                self._prepare_node_idea,
-                                action,
-                                proposal_state,
-                                researcher=self.researcher,
-                                prospective_node_id=proposal_node_ceiling + offset,
-                                source=source,
-                                proposal_events=proposal_events,
+                        # The "writes NOTHING" claim above was FALSE ONE CALL DEEP until 2026-08-29
+                        # (shipped by the sink below): `_prepare_node_idea._link` and
+                        # `_apply_novelty_gate` reach `_append_proposal_event`, which falls through
+                        # to `self.store.append` whenever no sink is installed — and the one
+                        # installer was `speculation.py::_prepare_raw_card_stage` (Layer 5), never
+                        # this lane. The guard `test_propose_does_not_freeze_the_loop::
+                        # test_the_offloaded_call_writes_no_events` walks only `_prepare_node_idea`'s
+                        # own AST and cannot see an append one helper down, which is why nothing was
+                        # red for it.
+                        #
+                        # THE SINK IS THE FIX, and it is Layer 5's own discipline rather than a second
+                        # one: `_capture_proposal_events` buffers every `_append_proposal_event` into
+                        # a list instead of writing, and the MAIN TASK publishes them below. Without
+                        # it `_prepare_node_idea._link` and `_apply_novelty_gate` reach
+                        # `self.store.append` from this worker with EV_NOVELTY_REJECTED /
+                        # EV_NOVELTY_GRADED / EV_CROSS_RUN_PRIOR — all FOLDED, and named by none of
+                        # `events/types.py`'s three thread-append registries, so invariant #1's
+                        # sole-writer rule was breached on a DEFAULT card lane, unregistered and
+                        # unproven. Verified by driving it: `novelty_rejected` is in neither
+                        # BACKGROUND_APPENDABLE, SETUP_THREAD_APPENDABLE,
+                        # NON_CARD_SELECTION_BACKGROUND_APPENDABLE nor DIAGNOSTIC_EVENTS.
+                        #
+                        # It is not only a registry violation. These rows are AUTHORITY-BEARING for
+                        # `speculation.py::_proposal_authority_seq`, the fence that discards a paid
+                        # proposal when any non-diagnostic row lands inside its max-seq equality
+                        # window — the same hazard invariant #1 records for `train_monitor_alert`. A
+                        # worker-thread append lands at instants the main-task ordering excluded, so
+                        # the loss it can cause is a proposal the run already paid for.
+                        with self._capture_proposal_events() as captured:
+                            idea = await anyio.to_thread.run_sync(
+                                functools.partial(
+                                    self._prepare_node_idea,
+                                    action,
+                                    proposal_state,
+                                    researcher=self.researcher,
+                                    prospective_node_id=proposal_node_ceiling + offset,
+                                    source=source,
+                                    proposal_events=proposal_events,
+                                )
                             )
-                        )
+                        # PUBLISHED FROM THE MAIN TASK, and published WHETHER OR NOT the idea formed.
+                        # A refused proposal is exactly when the receipt matters most: the discard
+                        # receipt (`bd182357`) exists because a paid propose that produced no card
+                        # left no trace at all, and dropping the intents on `idea is None` would
+                        # restore that silence for the case it was written for. Layer 5 drops them
+                        # only when it ABANDONS and re-makes the proposal, which this lane never does.
+                        for _event_type, _data, _trace_id, _span_id in captured:
+                            self.store.append(_event_type, _data,
+                                              trace_id=_trace_id, span_id=_span_id)
                     if idea is None:
                         continue
                     prepared.append((

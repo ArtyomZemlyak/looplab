@@ -152,6 +152,22 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    `tests/test_setup_thread_appendable.py` proves splice-position neutrality. UI/CLI append
    only *control intents* (allow-listed in `serve/protocol.py::CONTROL_EVENTS`, enforced by
    `serve/routers/control.py`).
+   *The offloaded PROPOSAL is not a seam at all, and that is the point* (2026-08-29):
+   `card_reservation.py` runs `_prepare_node_idea` on `anyio.to_thread.run_sync` because it is a
+   paid Researcher call with no `await` in it, and `aaef33d3` justified that with "it writes
+   NOTHING". That was false one call deep — `_prepare_node_idea._link` and `_apply_novelty_gate`
+   reach `_append_proposal_event`, which falls through to `store.append` unless a sink is installed,
+   and the sole installer was Layer 5. So `EV_NOVELTY_REJECTED` / `EV_NOVELTY_GRADED` /
+   `EV_CROSS_RUN_PRIOR` — all FOLDED, all named by none of the three registries above — appended
+   from a worker on a DEFAULT card lane. The fix is NOT a fourth registry entry: the lane now runs
+   under `novelty.py::_capture_proposal_events`, which buffers the intents, and the MAIN TASK
+   publishes them after the await, so the seam disappears rather than being widened. Registering
+   them instead would have asserted a splice-position neutrality nobody proved, and these rows are
+   authority-bearing for `_proposal_authority_seq` — the fence that discards a paid proposal when a
+   non-diagnostic row lands in its equality window. The publish is deliberately NOT gated on the
+   idea forming: a refused proposal is exactly the case the discard receipt (`bd182357`) exists for.
+   The guard that missed this walked `_prepare_node_idea`'s OWN AST and could not see one helper
+   down; `tests/test_offload_lane_writes_no_folded_events.py` follows the call instead.
    *Concurrent build fan-out* (canonical `llm_parallel`; legacy `parallel_build`) is a further
    accepted seam: `_create_node` runs
    in worker threads (`anyio.to_thread`) that append their own node's FOLDED events (`node_created`,
