@@ -6268,7 +6268,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         from looplab.search.speculation_quality import speculation_environment_fingerprint
         return speculation_environment_fingerprint()
 
-    def _dirty_inputs(self, sources: "Iterable[str] | None") -> list:
+    def _dirty_inputs(self, sources: "Iterable[str] | None") -> "list | None":
         """P0-5 dirty-input enumeration: for each git-repo workspace source, the uncommitted-file LIST
         (`git status --porcelain`) plus a bounded DIGEST of the actual diff vs HEAD (`git diff HEAD`) —
         the EXPLICIT record of which inputs differ from a clean checkout AND a content fingerprint of
@@ -6343,21 +6343,28 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         out: list = []
         digests: dict = {}                                          # resolved-root -> digest (once)
-        # OPEN[dirty-input-failures-fold-into-clean] every per-source git failure yields the same
-        # empty enumeration as a genuinely clean tree, so the substrate's "could not read" branch
-        # is unreachable for the very failures it names.
-        # proof:`present:if r.returncode == 0 and dirty:@looplab/engine/orchestrator.py`
-        # REVIEW 2026-08-29 (P2 correctness): `workspace.py::substrate_fingerprint` (7326e259)
-        # guards `except Exception: dirty = None` and records `"dirty": "unknown"` — its comment
-        # enumerates an index.lock, a mid-rebase tree, an EIO, a timeout. None of those can reach
-        # it: this loop swallows each source's exception with `pass` and the rc filter below drops
-        # a nonzero exit, so a wedged geesefs mount (10 s wall against this box's 105-950 ms
-        # lstats) returns [] and the node records the bare-HEAD fingerprint, byte-equal to a clean
-        # tree — `comparability` can then certify SAME across a substrate change, the exact
-        # confidently-wrong record that branch claims is now refused. Driven: monkeypatching
-        # `subprocess.run` to raise TimeoutExpired yields [] and the clean-tree digest. Fix
-        # direction: make per-source failure observable (a sentinel entry, or return None when a
-        # git tree's status raises/exits nonzero) and route it into the unknown branch.
+        # A SOURCE WE COULD NOT READ MAKES THE WHOLE ENUMERATION UNKNOWN, and until 2026-08-30 it
+        # made it CLEAN. `workspace.py::substrate_fingerprint` guards this call with
+        # `except Exception: dirty = None` and records `"dirty": "unknown"`, naming an index.lock, a
+        # mid-rebase tree, an EIO and a timeout — and not one of them could reach that branch,
+        # because this loop swallowed every per-source exception with a bare `pass` and returned the
+        # same `[]` a genuinely clean tree returns. A wedged geesefs mount (a 10 s wall against this
+        # box's 105-950 ms lstats) therefore recorded the bare-HEAD fingerprint, byte-equal to a
+        # clean checkout, and `comparability` could certify SAME across a substrate change — exactly
+        # the confidently-wrong record that branch exists to refuse. Driven by monkeypatching
+        # `subprocess.run` to raise TimeoutExpired.
+        #
+        # ONLY AN EXCEPTION COUNTS AS UNREADABLE — a NONZERO exit deliberately does not. `git status`
+        # answers 128 for "not a git repository", which is the ordinary condition of a plain data
+        # mount; treating that as unknown would put nearly every run into the unknown branch and say
+        # nothing. So the residue is stated rather than hidden: a source whose git exits nonzero for
+        # a reason OTHER than not-being-a-repo still folds into the clean reading, and separating
+        # those needs git's own stderr text, which is a weaker signal than the exception this raises.
+        #
+        # `None` REACHES BOTH CALLERS CORRECTLY: the fingerprint takes its documented `unknown`
+        # branch, and `run_started.dirty_inputs` records null instead of an empty list that would
+        # claim nothing was dirty.
+        unreadable = False
         for src in sorted(sources or ()):
             try:
                 p = Path(src)
@@ -6373,9 +6380,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     if digests[root] is not None:
                         entry["diff_digest"] = digests[root]
                     out.append(entry)
-            except Exception:  # noqa: BLE001 — git missing / not a repo / timeout: no enumeration
-                pass
-        return out
+            except Exception:  # noqa: BLE001 — git missing / timeout / EIO: this source is UNREADABLE
+                unreadable = True
+        return None if unreadable else out
 
     def _seed_workspace(self, workdir) -> None:
         return self.workspace.seed_workspace(workdir)
