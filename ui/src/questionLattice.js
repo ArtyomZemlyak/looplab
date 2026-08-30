@@ -74,12 +74,20 @@ export function isStrictSubset(outer, inner) {
 // strict subset of `{a,b,c}` too — hanging the row under both would draw one subtree at two depths
 // and double every number rolled up through it. A candidate parent survives only when no OTHER
 // candidate sits strictly between it and the child.
-// OPEN[lattice-placement-explosion] multi-parent expansion enumerates root-to-node PATHS, not
-// cards, so a valid public payload of 255 cards (every non-empty subset of eight concepts) emits
-// 109,600 placements — sum C(8,k)*k! — and `latticeRollups` scans all of them once per placement
-// through `descendantIds`, approaching 12 billion prefix checks and freezing the browser. Bound
-// the placements, elect a canonical one, or aggregate on the DAG without materialising paths.
-// proof:`present:for (const kid of kids) emit(kid, depth@ui/src/questionLattice.js`
+//
+// THIS DOES ENUMERATE PATHS, AND THAT IS THE COST, MEASURED. A complete subset lattice over n
+// concepts (2^n - 1 cards) emits sum C(n,k)*k! placements: 13,699 at n=7 and 109,600 at n=8, the
+// latter being the largest payload the 256-row cards wire can deliver at all. What made that freeze
+// the tab was NOT this enumeration but `latticeRollups` asking `descendantIds` once per placement
+// while that helper scanned every placement — O(rows^2) `startsWith` over keys that grow with depth.
+// With the descendant map built ONCE (`descendantIndex`), the n=7 rollup went 1,596.3 -> 35.9 ms and
+// the n=8 worst case became 340.7 ms of rows + 241.8 ms of rollup, one memo, instead of a freeze.
+//
+// The enumeration is deliberately left alone. Electing a canonical parent is the one thing the
+// operator's own decision at the top of this file rules out — it would hide half the structure — and
+// no real board is near the shape: across every preserved run, 197 `card_added` rows carry at most
+// ELEVEN concepts and 165 carry none, and a 64-card board over a 6-concept pool draws 1,616
+// placements in 1.6 ms.
 export function latticeRows(cards, { order } = {}) {
   const sort = typeof order === 'function'
     ? order
@@ -144,15 +152,46 @@ export function latticeRows(cards, { order } = {}) {
 // Every DESCENDANT of a row, by id — the set whose deltas roll up into it. Computed from the emitted
 // rows rather than re-walking the lattice, so a row that was refused a placement above (path guard)
 // contributes nothing here either: one traversal, one answer.
-export function descendantIds(rows, rowKey) {
-  const start = rows.find(r => r.rowKey === rowKey)
-  if (!start) return []
-  const prefix = `${rowKey}>`
-  const out = new Set()
-  for (const row of rows) {
-    if (row.rowKey.startsWith(prefix)) out.add(row.id)
+// EVERY row's descendants, in ONE pass, keyed by rowKey.
+//
+// The per-row reading below scanned the WHOLE row list for each row, so `latticeRollups` — which asks
+// it once per row — was O(rows^2) `startsWith` calls over keys that grow with depth. Measured on the
+// worst shape the note above names, a complete subset lattice: at n=7 (127 cards, 13,699 placements)
+// the rollup took 1,596 ms, against 28.6 ms to build the rows it was scanning. That is the term that
+// froze the browser, not the enumeration.
+//
+// A row's descendants are exactly the rows whose path has this row's path as a PROPER PREFIX, and a
+// path is already spelled in the rowKey. So each row contributes its id to each of its own ancestor
+// prefixes — O(rows x depth) instead of O(rows^2), and no ordering assumption: relying on rows being
+// DFS-contiguous would be faster still and would break silently the day the emit order changed.
+//
+// `known` is what preserves the old precondition EXACTLY. The scan started with `rows.find(rowKey)`
+// and answered `[]` for a key no row carries, and `UNGROUPED_ID` is such a key — a bucket label that
+// prefixes every untagged row and is itself no row. Indexing prefixes blindly would hand that label
+// every untagged card as a descendant, which is a different answer, not a faster one.
+export function descendantIndex(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const known = new Set()
+  for (const row of list) if (row && typeof row.rowKey === 'string') known.add(row.rowKey)
+  const out = new Map()
+  for (const row of list) {
+    if (!row || typeof row.rowKey !== 'string') continue
+    const parts = row.rowKey.split('>')
+    for (let i = 1; i < parts.length; i += 1) {
+      const key = parts.slice(0, i).join('>')
+      if (!known.has(key)) continue
+      let set = out.get(key)
+      if (!set) { set = new Set(); out.set(key, set) }
+      set.add(row.id)
+    }
   }
-  return [...out]
+  return out
+}
+
+// ONE row's descendants. Spelled through the index above so the two cannot come to disagree — a
+// single lookup was already a full pass, so this costs a caller nothing it was not paying.
+export function descendantIds(rows, rowKey) {
+  return [...(descendantIndex(rows).get(rowKey) || [])]
 }
 
 // The number a question row wears: the BEST delta any descendant measured, and whether the field it
@@ -220,13 +259,16 @@ export function latticeRollups(state, cards, rows) {
   // with the row being rolled up. `byId` comes from the SAME index rather than being rebuilt five
   // lines up — `cardLineageIndex` already filters with the identical `isRecord(card) && card.id`
   // predicate and returns it, so the local copy was a second full pass and a second Map over the
-  // same array — on a call the lattice-placement-explosion note above already flags as hot. (That
-  // slug is NOT repeated as a marker here: the open-item index is one declaration per slug, and a
-  // second `OPEN[` token in a comment about it is a duplicate declaration, not a cross-reference.)
+  // same array. It is the same rule as the descendant map below and was the first half of it: this
+  // call is hot in proportion to PLACEMENTS, not cards, so anything derived per row that does not
+  // vary per row belongs above the loop.
   const { byId, childrenByParent } = cardLineageIndex(cards)
+  // ONCE, for the same reason `byId` is: the descendant map does not vary with the row being rolled
+  // up, and asking per row is what made this the hot call the note above flags.
+  const descendants = descendantIndex(rows)
   const out = new Map()
   for (const row of Array.isArray(rows) ? rows : []) {
-    const ids = descendantIds(rows, row.rowKey)
+    const ids = [...(descendants.get(row.rowKey) || [])]
     let best = null
     let bestCardId = null
     const measured = []

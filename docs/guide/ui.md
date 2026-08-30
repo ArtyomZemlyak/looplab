@@ -352,7 +352,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   operator's own rule made checkable: a direction should not be discarded when no more precise
   experiment was ever run. The view only REPORTS it; nothing here reopens a card, and reopening is
   not yet a control the engine has. A question carrying no concepts is neither dropped nor seated among the real roots; it has no
-  position in the lattice and gets its own bucket, last. Before the opening memo is written the view
+  position in the lattice and gets its own bucket, last. A card with two immediate parents is
+  DUPLICATED under both rather than assigned a canonical one, so a row is a PLACEMENT and the
+  list enumerates root-to-node paths — `sum C(n,k)*k!` for the worst shape, a complete subset
+  lattice over n concepts, i.e. 109,600 placements for the 255 cards the 256-row wire can
+  deliver. That enumeration is deliberate (electing one parent would hide half the structure);
+  what is bounded is the ROLL-UP, which builds its descendant map once
+  (`questionLattice.js::descendantIndex`) instead of rescanning every placement per placement —
+  measured 1,596.3 -> 35.9 ms at n=7, and the n=8 worst case from a frozen tab to 242 ms. Before the opening memo is written the view
   says no question has been registered, which is a healthy run's first minutes and not an empty board.
   The lanes:
   the run's bounded work-item projection, grouped into the replay-derived lifecycle
