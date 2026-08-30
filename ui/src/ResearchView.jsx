@@ -10,10 +10,10 @@
 // tree keeps: a number is shown with what qualifies it or not at all.
 import React, { useMemo, useState } from 'react'
 
-import { cardIsDirection, childrenByParent } from './cardLineageModel.js'
+import { cardIsDirection, childrenByParent, descendantsOf } from './cardLineageModel.js'
 import { isRecord } from './panelPrimitives.js'
 import { UNGROUPED_ID, latticeRollups, latticeRows, questionClosure,
-  unfiledExperiments } from './questionLattice.js'
+  offPageParentExperiments, unfiledExperiments } from './questionLattice.js'
 
 const _text = value => (typeof value === 'string' ? value.trim() : '')
 const _delta = value => `${value > 0 ? '+' : ''}${Number(value.toFixed(4))}`
@@ -67,6 +67,12 @@ export default function ResearchView({ cards, state, renderCard }) {
   // the Directions tab's "Not filed under any direction" group stays the only surface that has it —
   // which is exactly why that tab cannot be retired until this exists.
   const unfiled = useMemo(() => unfiledExperiments(all), [all])
+  // The third bucket that makes the ladder TOTAL. A card whose `parent_card_id` names a card this
+  // page does not hold — clipped by the 256-row wire cap — is not unfiled and is under no visible
+  // question, so before this it rendered nowhere at all. It gets its own counted section rather
+  // than being folded into unfiled, because "filed under something you cannot see here" and
+  // "nobody filed this" are different facts.
+  const offPage = useMemo(() => offPageParentExperiments(all), [all])
   // `state?.nodes`, not `state`: `latticeRollups` reads nothing else off the run state, while
   // `useRunState` replaces the whole snapshot object on every 2.5 s poll. Depending on `state` paid
   // the full rollup — now real work, since `cardEvidenceNodes` started returning evidence — for
@@ -137,7 +143,9 @@ export default function ResearchView({ cards, state, renderCard }) {
     <ol className="research-lattice">
       {shown.map((row) => {
         const roll = rollups.get(row.rowKey) || {}
-        const kids = childKids.get(row.id) || []
+        // DESCENDANTS, not immediate children: a refinement of a refinement is still this
+        // question's work, and drawing only one level put it in no section at all.
+        const kids = descendantsOf(row.id, childKids)
         const isCollapsed = collapsed.has(row.rowKey)
         const branch = visible.some(r => r.rowKey.startsWith(`${row.rowKey}>`))
         const added = addedConcepts(row, byRowKey)
@@ -238,6 +246,20 @@ export default function ResearchView({ cards, state, renderCard }) {
         Researcher proposed {unfiled.length === 1 ? 'it' : 'them'} without naming a direction
       </div>
       <div className="research-experiments">{unfiled.map(card => renderCard(card))}</div>
+    </section>}
+    {/* Same rule as the unfiled block: rendered only when occupied, and hidden under a concept
+        filter — the parent this card names is off the page, so no concept here can speak for it. */}
+    {!concept && offPage.length > 0 && <section className="research-unfiled"
+      aria-labelledby="research-offpage-h">
+      <h3 id="research-offpage-h" className="research-unfiled-h">
+        Filed under a question not on this page <span className="muted">{offPage.length}</span>
+      </h3>
+      <div className="muted card-empty">
+        {offPage.length === 1 ? 'this experiment names' : 'these experiments name'} a parent the
+        board did not send — the run has a question for {offPage.length === 1 ? 'it' : 'them'},
+        beyond the row cap this view receives
+      </div>
+      <div className="research-experiments">{offPage.map(card => renderCard(card))}</div>
     </section>}
   </div>
 }

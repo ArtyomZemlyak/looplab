@@ -305,25 +305,41 @@ export function questionClosure(card, rollup) {
 // same card list, so between them the two cover every card the wire carried — which is the property
 // that makes retiring the Directions tab safe rather than lossy.
 //
-// OPEN[research-ladder-drops-nested-or-offpage-experiments] the totality claim above does not
-// hold: an experiment whose parent is an EXPERIMENT, or whose parent id is not on the page,
-// renders in neither half.
-// proof:`present:.filter(card => !cardParentId(card))@ui/src/questionLattice.js`
-// REVIEW 2026-08-29 (P1 correctness): ResearchView draws children only for lattice rows
-// (directions), and this complement keeps only parentless cards — so a refinement-of-a-refinement
-// (dir -> exp -> exp, the shape 54dd4c9e called "perfectly ordinary" when it fixed the same
-// depth>=2 loss in directionGroups one day before 9440cff5 retired the only total view), and any
-// card whose parent fell off the 256-row wire cap, appear NOWHERE in the Research grouping
-// (SSR-driven: both shapes render in no section, no notice). styles.css still carries the
-// "lossless" claim beside ~20 lines of dead .card-direction selectors. Distinct from
-// ResearchView's nested-direction marker (a nested DIRECTION drawn twice); this is experiments
-// drawn zero times. Fix direction: make the ladder total the way the still-exported
-// directionGroups is — nest experiment-parented children under their parent wherever it draws,
-// and give parent-off-page cards a counted section instead of dropping them.
-//
+// THE LADDER IS TOTAL AGAIN (2026-08-29), and it took a THIRD bucket to make the claim true.
+// Two shapes rendered in neither half. (1) An experiment whose parent is an EXPERIMENT — the
+// refinement-of-a-refinement `54dd4c9e` called "perfectly ordinary" when it fixed the same depth>=2
+// loss in `directionGroups` — because `ResearchView` reads children only for LATTICE rows, which
+// are questions, so a depth-2 card is grouped under its parent and never asked for. That half is
+// fixed in the view, which now walks a question's descendants rather than only its immediate kids.
+// (2) A card whose parent id is not on this page at all, clipped by the 256-row wire cap: it is not
+// unfiled — the run HAS a question for it — so folding it in here would assert the opposite.
+// `offPageParentExperiments` is its own counted bucket for exactly that reason, and the caller
+// renders it with its own sentence.
 // PARENT-BASED, never concept-based: an experiment carrying `loss/contrastive` is still unfiled if
 // no question claims it, and grouping it by its tags would seat it in the lattice as though some
 // question owned it. The edge is the claim; the tags are a description.
+// THE CARDS WHOSE PARENT THIS PAGE DOES NOT HOLD. Not unfiled and not under a question: the edge
+// exists and names a card the wire clipped, so the honest statement is "filed under something you
+// cannot see here", which is a different sentence from "nobody filed this".
+//
+// Together with `unfiledExperiments` and the questions' own descendants this covers every
+// non-direction card the wire carried — the totality the comment above claims and
+// `nestedDirectionNotAChild`'s sibling test now drives.
+export function offPageParentExperiments(cards, { order } = {}) {
+  const rows = (Array.isArray(cards) ? cards : []).filter(c => isRecord(c) && c.id)
+  const known = new Set(rows.map(c => String(c.id)))
+  const sort = typeof order === 'function'
+    ? order
+    : (a, b) => String(a.id).localeCompare(String(b.id))
+  return rows
+    .filter(card => !cardIsDirection(card))
+    .filter(card => {
+      const parent = cardParentId(card)
+      return !!parent && !known.has(String(parent))
+    })
+    .sort(sort)
+}
+
 export function unfiledExperiments(cards, { order } = {}) {
   const rows = (Array.isArray(cards) ? cards : []).filter(c => isRecord(c) && c.id)
   const sort = typeof order === 'function'

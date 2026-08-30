@@ -69,6 +69,34 @@ export function childrenByParent(cards) {
   }
   return out
 }
+// EVERY experiment under a question, not only its immediate ones. `ResearchView` draws children for
+// LATTICE rows, which are questions — so a refinement-of-a-refinement (question -> exp -> exp) was
+// grouped under its experiment parent and then never asked for, rendering in no section at all.
+// `54dd4c9e` fixed the identical depth>=2 loss in `directionGroups` one day before `9440cff5`
+// retired the only total view, which is how the ladder inherited it.
+//
+// Breadth-first from the question's own children, with a VISITED set: `parent_card_id` is a
+// free-form edge the fold does not check for cycles, and a self- or mutual-parent pair would
+// otherwise hang the render. Depth is not capped — a cap would silently drop the deepest card,
+// which is the defect this walk exists to end — and the visited set already bounds the work to the
+// card count.
+export function descendantsOf(parentId, byParent) {
+  const out = []
+  if (!parentId || !(byParent instanceof Map)) return out
+  const seen = new Set([String(parentId)])
+  const queue = [String(parentId)]
+  while (queue.length) {
+    for (const child of byParent.get(queue.shift()) || []) {
+      const id = String(child?.id ?? '')
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      out.push(child)
+      queue.push(id)
+    }
+  }
+  return out
+}
+
 
 // The parent id as the wire actually carries it. `Card.child_card_ids` is deliberately NOT on the
 // wire (`serve/public_cards.py` says why), so the inverse edge is rebuilt HERE from the same card
