@@ -872,7 +872,11 @@ def test_the_memo_prompt_promises_only_what_the_append_site_enforces():
 
     state = fold(_board_events("a running question", ("an open belief",)))
     brief = state_brief(state)
-    assert "the engine drops a direction that duplicates an open belief" in brief
+    # "one that duplicates", not "a direction that duplicates", since 2026-08-30: the promise now
+    # names `open_questions` as what gets registered, so the noun it drops is a QUESTION. The
+    # property this test is for — the block promises the two append-site rules and nothing more — is
+    # unchanged and is still driven below; only the noun moved with the field it describes.
+    assert "drops one that duplicates an open belief" in brief
     assert "past its cap" in brief
     # Driven, not read: both promises hold at the append site.
     assert admit_research_beliefs(["an open belief"], ["an open belief"]) == []

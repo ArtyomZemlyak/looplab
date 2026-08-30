@@ -604,24 +604,27 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
         # would push the board past its cap. Nothing offers to retire an existing belief on the
         # model's say-so, so nothing here says it will: the proposal prompt's neighbouring block
         # carries a comment about exactly what an unimplemented "the engine decides" promise cost.
-        # OPEN[memo-prompt-promises-directions-registered] the register-promise below names the
-        # legacy union field; since the question/experiment split, only `open_questions` reaches
-        # the board, so the sentence is false for every split-compliant memo.
-        # proof:`line:recommended_directions&&registered as OPEN BELIEFS@looplab/agents/deep_research.py`
-        # REVIEW 2026-08-29 (P3 docs-drift): prompt strings are contracts (CLAUDE.md).
-        # `research_cadence.py` registers `questions` — the split list when the memo filled it,
-        # the union only as fallback — and `next_experiments` entries riding the union are never
-        # board rows. A model told the union is registered has less reason to route a broad
-        # question into the channel the split was measured on v5 to need. Reword the promise to
-        # match: the question half becomes open beliefs (the union only when no split is drawn),
-        # keeping the dedup/cap warning as is.
+        # THE PROMISE NAMES THE FIELD THAT IS ACTUALLY REGISTERED, since 2026-08-30. It used to say
+        # `recommended_directions` — the legacy UNION — and `research_cadence.py` registers
+        # `questions`, which is `open_questions` when the memo filled it and the union only as a
+        # fallback. So every `next_experiments` entry riding the union was promised a board row it
+        # never gets. MEASURED on the live `e5small-dr-unified-v11`: its three non-empty memos drew
+        # the split (`open_questions` 4/3/2, `next_experiments` 6/8/5, `recommended_directions`
+        # exactly their sum 10/11/7), so the sentence was false about 19 entries out of 28 — and a
+        # model told the union is registered has less reason to route a broad question into the
+        # channel the split was measured on v5 to need. Prompt strings are contracts (CLAUDE.md).
+        #
+        # The dedup/cap warning is unchanged: it was true and stays true of whatever is registered.
         prefix_lines.append(
-            "Your `recommended_directions` are registered as OPEN BELIEFS on that same board. "
-            "Propose only directions that are genuinely NEW — a re-worded restatement of a row "
-            "above is not a new experiment, and the engine drops a direction that duplicates an "
-            "open belief or that would push the open board past its cap. If a row above is wrong, "
-            "superseded, or already answered, say so in `findings` and name its CARD_ID instead of "
-            "restating it as a direction; retiring a belief is the operator's call, not the memo's.")
+            "Your `open_questions` are registered as OPEN BELIEFS on that same board (if you draw "
+            "no question/experiment split, the whole `recommended_directions` list is registered "
+            "instead). Your `next_experiments` are NOT board rows — they are concrete work for the "
+            "proposal step to pick up. Propose only questions that are genuinely NEW — a re-worded "
+            "restatement of a row above is not a new belief, and the engine drops one that "
+            "duplicates an open belief or that would push the open board past its cap. If a row "
+            "above is wrong, superseded, or already answered, say so in `findings` and name its "
+            "CARD_ID instead of restating it; retiring a belief is the operator's call, not the "
+            "memo's.")
 
     def experiment_line(n) -> str:
         if n.status is NodeStatus.failed:
