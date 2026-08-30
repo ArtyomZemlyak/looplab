@@ -3048,8 +3048,42 @@ class TrainingMonitorMixin:
                             armed_at, arm_looks = anyio.current_time(), 0
                             sp.set("kill_armed", True)
                         sp.set("next_check_s", round(next_sleep, 2))
+                        # The same precondition the alert body uses for the projection, hoisted so
+                        # the gate and the body agree about when a projection is even possible.
+                        measured_for_gate = trajectory_row(trajectory)
+                        # THE CLOCK IS NOT A HEALTH VERDICT, and until 2026-08-30 it could only
+                        # be heard through one. `stamp_projected_overrun` was called INSIDE the
+                        # branch below, so a stage whose measured ETA cannot fit its own declared
+                        # wall recorded that fact only if the judge ALSO had a health concern —
+                        # and a run that is training perfectly is exactly the case where it does
+                        # not. MEASURED on `e5small-dr-unified-v11` node 2: judged healthy on every
+                        # tick that emitted (correctly — loss 41.46 -> 23.62, descending), so every
+                        # row was suppressed by the rule below, and its train stage was SIGKILLed by
+                        # its own 36000 s wall at step 1764/2109 — 84 %, 9h56m21s, 10.0 GPU-hours,
+                        # then charged a full retrain. 2109 steps x 19.35 s/it = 11.3 h against a
+                        # 10 h wall, decidable hours earlier by the projection this line discarded.
+                        #
+                        # Node 3 of the same run shows the asymmetry that hid it: it happened to
+                        # draw a `watch` early, so `last_event_status` opened the gate and all 12 of
+                        # its rows carry `projected_overrun_s`. The signal was never missing — it
+                        # was conditional on an unrelated fact.
+                        #
+                        # DERIVED ONCE, HERE, and read twice. `stamp_projected_overrun` stays a
+                        # stamp and not a decision (its own docstring's rule), so it fills a scratch
+                        # dict that the gate consults and the alert then absorbs — one derivation,
+                        # so the row's numbers and the reason it was written cannot disagree.
+                        # Only `overrun_beyond_grace_s` opens the gate, never the raw projection: a
+                        # 40-second overrun on a ten-hour stage is the noise the grace bar exists to
+                        # swallow, and this must not become a second, louder spelling of it.
+                        _overrun_fields: dict = {}
+                        if measured_for_gate is not None:
+                            stamp_projected_overrun(
+                                _overrun_fields, trajectory, resolved, log_plan,
+                                grace_cap=getattr(self, "eval_deadline_grace_s", None))
+                        _wall_unreachable = "overrun_beyond_grace_s" in _overrun_fields
                         if (verdict.status != "healthy"
-                                or last_event_status in ("watch", "broken")):
+                                or last_event_status in ("watch", "broken")
+                                or _wall_unreachable):
                             # healthy is normally trace-only, but the transition from an alert
                             # is a durable recovery edge. Without it, projections can only ever discover the
                             # old bad verdict and keep warning after the live curve has recovered.
@@ -3074,7 +3108,7 @@ class TrainingMonitorMixin:
                             # run that had gone 24.28 -> 22.90. Additive and fold-ignored; an
                             # absent `trajectory` means the engine measured nothing (an old row, or
                             # a log printing no parseable loss), NEVER that the loss was flat.
-                            measured = trajectory_row(trajectory)
+                            measured = measured_for_gate
                             if measured is not None:
                                 alert["trajectory"] = measured
                                 # THE PROJECTION AGAINST THE WALL, while it is still cheap to act
@@ -3084,9 +3118,10 @@ class TrainingMonitorMixin:
                                 # discarded 7.78 GPU-hours. The deadline judge is the LAST line and
                                 # is right to refuse a run two hours short; this is the first one.
                                 # Additive and fold-ignored — it records that the engine knew.
-                                stamp_projected_overrun(
-                                    alert, trajectory, resolved, log_plan,
-                                    grace_cap=getattr(self, "eval_deadline_grace_s", None))
+                                # Computed above the write gate (see the note there) so that a
+                                # HEALTHY stage which cannot finish in time still gets a row; this
+                                # absorbs that one derivation rather than repeating it.
+                                alert.update(_overrun_fields)
                             if trajectory_veto:
                                 alert["trajectory_veto"] = True
                             if role_withheld:
