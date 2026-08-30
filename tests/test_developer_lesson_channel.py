@@ -102,11 +102,19 @@ def test_the_developer_toolset_actually_carries_it(tmp_path):
 
 # --------------------------------------------------------- write side: an in-node repair is a pair
 
-def _node(nid, *, metric=None, repairs=0, parents=(), status=None, failed_stage=None):
+def _node(nid, *, metric=None, repairs=0, parents=(), status=None):
+    """NO `failed_stage` and NO `error_reason`, because the fold cannot produce them here.
+
+    These fixtures used to set `failed_stage="mine"` on an EVALUATED node — a state no event log
+    folds to (`_on_node_failed` is their only writer and every reset clears them), which is exactly
+    why the placeholder rendering they were meant to cover stayed green for months. What a self
+    pair may be told about its own repairs comes off `RunState.repair_ledger`; that is driven
+    against a REAL fold in `tests/test_self_pair_repair_account.py`, and the selection rule below
+    reads neither field."""
     from looplab.core.models import NodeStatus
     return SimpleNamespace(id=nid, metric=metric, repairs=repairs, parent_ids=list(parents),
                            tombstoned=False, status=status or NodeStatus.evaluated,
-                           failed_stage=failed_stage, error_reason=None,
+                           failed_stage=None, error_reason=None,
                            idea=SimpleNamespace(params={}, rationale="r"), code="")
 
 
@@ -123,7 +131,7 @@ def test_a_node_repaired_in_place_becomes_a_developer_pair():
     and that is precisely 'what code change fixed a crash'."""
     from looplab.engine.memory import select_comparison_pairs
 
-    st = _state([_node(0, metric=0.5, repairs=2, failed_stage="mine")])
+    st = _state([_node(0, metric=0.5, repairs=2)])
     pairs = select_comparison_pairs(st, k=5)
     assert [(p["kind"], p["a"], p["b"]) for p in pairs] == [("debug", 0, 0)]
 
@@ -141,8 +149,8 @@ def test_the_star_lineage_that_produced_zero_developer_lessons_now_produces_them
     a failed parent and the old rule yielded nothing for this role."""
     from looplab.engine.memory import select_comparison_pairs
 
-    champion = _node(3, metric=0.79, repairs=1, failed_stage="train")
-    child = _node(6, metric=0.78, repairs=1, parents=[3], failed_stage="mine")
+    champion = _node(3, metric=0.79, repairs=1)
+    child = _node(6, metric=0.78, repairs=1, parents=[3])
     pairs = select_comparison_pairs(_state([champion, child]), k=10)
     kinds = [(p["kind"], p["a"], p["b"]) for p in pairs]
     assert ("debug", 3, 3) in kinds and ("debug", 6, 6) in kinds

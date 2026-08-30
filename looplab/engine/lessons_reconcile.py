@@ -24,6 +24,73 @@ from looplab.events.replay import fold
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_RECONCILED
 
 
+# The self-pair rendering reads at most this many repair rows and this much of each rationale. The
+# prompt block it replaces was capped at 2000 characters of diff; a repair account is denser than a
+# diff, so the bound is on ROWS rather than on characters — a truncated middle row would read as a
+# repair that changed nothing.
+_SELF_PAIR_REPAIR_ROWS = 6
+_SELF_PAIR_RATIONALE = 220
+_SELF_PAIR_PATHS = 6
+
+
+def self_pair_repair_account(state, node) -> dict:
+    """What the FOLD knows about the repairs an in-node (self) pair is a claim about.
+
+    THE ONE SOURCE, because the two obvious ones are structurally empty for exactly this
+    population. A self pair is offered for a node with a METRIC and `repairs > 0` — inline-repaired
+    and then EVALUATED — and:
+
+      * `Node.failed_stage` / `Node.error_reason` are written only by `_on_node_failed` and cleared
+        by every reset, so an evaluated node carries neither. Measured over every event log on the
+        box (9 runs, 23 self-pair nodes): **0 of 23** carry either. That is what made the fallback
+        lesson say "a node whose 'a failure' stage failed" and the judge prompt say "failed its
+        'eval' stage" — placeholder text, in a durable row that leaves the run.
+      * `Node.stages[]` is last-wins BY NAME, so the retry that finally succeeded REPLACED the
+        failing row. `stage_row_superseded` is therefore false for the whole population — **0 of
+        23** — which retires the "read the superseded stage rows" fix this item was filed with.
+
+    `RunState.repair_ledger` is what survives: one fold-produced row per (node, attempt,
+    generation) carrying the failure `reason` the repair answered, the `paths` it changed and its
+    `rationale`. Measured on the same corpus: **19 of 23** nodes have a row with a reason and
+    **22 of 23** have one with paths. The four that do not are pre-column logs (`reason: None`,
+    `rubertlite-dr-unified-v6`) and one generation mismatch — and they get SILENCE rather than a
+    placeholder, which is the whole point of the fix.
+
+    Returns `{reasons, paths, rationales, repairs}`, everything de-duplicated in first-seen order
+    so a node repaired four times for one cause does not read as four causes. Hoisted out of the
+    render expressions for the reason CLAUDE.md's guard-test ladder gives at tier 2: a rule buried
+    in an f-string is a rule no test can state."""
+    gen = getattr(node, "attempt", None)
+    rows = [r for r in (getattr(state, "repair_ledger", None) or [])
+            if isinstance(r, dict) and r.get("node_id") == getattr(node, "id", None)
+            and r.get("generation") == gen]
+    reasons: list[str] = []
+    paths: list[str] = []
+    rationales: list[str] = []
+    for r in rows[:_SELF_PAIR_REPAIR_ROWS]:
+        why = r.get("reason")
+        if isinstance(why, str) and why.strip() and why not in reasons:
+            reasons.append(why.strip())
+        for path in (r.get("paths") or []):
+            if isinstance(path, str) and path and path not in paths:
+                paths.append(path)
+        text = r.get("rationale")
+        if isinstance(text, str) and text.strip():
+            rationales.append(" ".join(text.split())[:_SELF_PAIR_RATIONALE])
+    return {"reasons": reasons, "paths": paths[:_SELF_PAIR_PATHS], "rationales": rationales,
+            "repairs": int(getattr(node, "repairs", 0) or 0)}
+
+
+def self_pair_cause_phrase(account: dict) -> str:
+    """`failed with 'crash, timeout'`, or a bare `failed` when the ledger names no cause.
+
+    The empty answer is deliberately not a word: "a failure" and "eval" were the placeholders this
+    rendering used to emit, and a lesson that names a cause nobody recorded is worse than one that
+    names none."""
+    causes = ", ".join(account.get("reasons") or ())
+    return f"failed with '{causes}'" if causes else "failed"
+
+
 class LessonReconcileMixin:
     """The lessons cluster's comparative/reconcile half. See the module docstring for the mixin
     convention (`self` is the LessonMemory)."""
@@ -70,28 +137,19 @@ class LessonReconcileMixin:
                 if pr["kind"] == "debug":
                     why = " ".join((a.idea.rationale or "").split())[:90]
                     if a.id == b.id:      # IN-NODE repair: the same node before and after its fix
-                        # OPEN[self-pair-lesson-names-no-stage] both fields this rendering reads are
-                        # structurally empty for every node that can reach it, so the durable lesson
-                        # always carries the placeholder text.
-                        # proof:`present:or (a.error_reason or "a failure")@looplab/engine/lessons_reconcile.py`
-                        # REVIEW 2026-08-29 (P2 correctness): the self-pair population is nodes with
-                        # a METRIC and `repairs > 0` — i.e. inline-repaired then EVALUATED — and the
-                        # fold sets `failed_stage`/`error_reason` only in `_on_node_failed` (one
-                        # terminal per node; both cleared on every reset), so no evaluated node
-                        # carries either. Offline, the shared `lessons.jsonl` receives "a node whose
-                        # 'a failure' stage failed was repaired in place..." verbatim; the LLM path
-                        # renders the 'eval' twin AND hands the judge `code_diff(b.code, a.code)`
-                        # over `a is b` — an empty diff — while demanding "what the REPAIR had to
-                        # change". `tests/test_developer_lesson_channel.py` fabricates evaluated
-                        # nodes WITH `failed_stage`, a state the fold cannot produce, so nothing is
-                        # red (the tier-1 trap CLAUDE.md documents). Fix direction: source the
-                        # stage and the repair account from what the fold actually keeps — the
-                        # superseded `Node.stages[]` rows, or a field folded off `node_repaired` —
-                        # and re-point the tests at fold-produced state.
-                        what = getattr(a, "failed_stage", None) or (a.error_reason or "a failure")
+                        # The CAUSE and the FILES come from the run's own repair ledger, which is
+                        # the only fold-produced record that survives for this population — see
+                        # `self_pair_repair_account` for the measurement that decided it (0 of 23
+                        # corpus nodes carry `failed_stage`/`error_reason`, 0 of 23 have a
+                        # superseded stage row, 19 and 22 of 23 have a ledger reason and paths).
+                        # The offline lesson is durable and LEAVES the run into the shared store,
+                        # so it names what was recorded or nothing at all.
+                        acct = self_pair_repair_account(state, a)
+                        where = ", ".join(acct["paths"][:3])
                         out.append(_lesson(
-                            pr, f"a node whose '{what}' stage failed was repaired in place and then "
-                                f"scored" + (f": {why}" if why else ""), "supported", 0.5))
+                            pr, f"a node that {self_pair_cause_phrase(acct)} was repaired in place"
+                                + (f" ({where})" if where else "") + " and then scored"
+                                + (f": {why}" if why else ""), "supported", 0.5))
                         continue
                     out.append(_lesson(pr, f"a node failing with '{b.error_reason or 'error'}' "
                                            f"was fixed" + (f": {why}" if why else ""),
@@ -111,13 +169,26 @@ class LessonReconcileMixin:
             a, b = state.nodes[pr["a"]], state.nodes[pr["b"]]
             if pr["kind"] == "debug" and a.id == b.id:
                 # IN-NODE repair. There is no cross-node diff to show — both sides ARE this node —
-                # so name the stage that failed and how many attempts it took, and say plainly that
-                # the interesting difference is the repair, not a rival experiment.
-                head = (f"P{i} (in-node repair): #{a.id} failed its "
-                        f"'{getattr(a, 'failed_stage', None) or a.error_reason or 'eval'}' stage, was "
-                        f"repaired {int(getattr(a, 'repairs', 0) or 0)} time(s) in place, and then "
+                # so name the cause and how many attempts it took, and say plainly that the
+                # interesting difference is the repair, not a rival experiment.
+                #
+                # `code_diff(b.code, a.code)` below is `a` against ITSELF, i.e. always empty, so
+                # this block used to demand "what the REPAIR had to change" and then show the judge
+                # nothing at all. The repair ledger IS that answer — cause, files, rationale — and
+                # it takes the diff's place rather than sitting beside an empty one.
+                self_acct = self_pair_repair_account(state, a)
+                head = (f"P{i} (in-node repair): #{a.id} "
+                        f"{self_pair_cause_phrase(self_acct)}, was "
+                        f"repaired {self_acct['repairs']} time(s) in place, and then "
                         f"reached metric={a.metric:.4g}. The lesson is what the REPAIR had to change, "
                         f"not which experiment won.")
+                if self_acct["paths"] or self_acct["rationales"]:
+                    lines = []
+                    if self_acct["paths"]:
+                        lines.append("Files the repairs changed: "
+                                     + ", ".join(self_acct["paths"]))
+                    lines += [f"- {text}" for text in self_acct["rationales"]]
+                    head += "\nWhat the repairs said they were doing:\n" + "\n".join(lines)
             elif pr["kind"] == "debug":
                 head = (f"P{i} (debug): #{b.id} FAILED with '{b.error_reason or 'error'}'; its "
                         f"repair #{a.id} reached metric={a.metric:.4g}.")
