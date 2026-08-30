@@ -702,13 +702,27 @@ class Idea(BaseModel):
     # so a registered question would ride `node_created` and become no board row.
     # proof:absent:idea_registered_questions@looplab/engine/research_cadence.py
     #
-    # MEASURED 2026-08-29 AND THE WRITER SIDE IS MISSING TOO — whoever takes this must wire BOTH ends
-    # or it stays inert. Over every `node_created` row on this box (9 on `e5small-dr-unified-v9`,
-    # 3 on the live v10): **0 of 12 Ideas carry a filled `open_questions`**, and `open_questions`
-    # occurs ZERO times in `agents/roles.py`, `agents/unified_agent.py` and `search/panel.py` — the
-    # Researcher is never ASKED for one, so nothing rides today and the sentence above describes a
-    # hazard rather than an observation. `Idea.open_questions` also has no consumer anywhere outside
-    # this model and the memo path's own same-named field.
+    # RE-MEASURED 2026-08-30 AND THE 2026-08-29 PREMISE WAS WRONG. That note said "the Researcher is
+    # never ASKED for one", inferred from `open_questions` occurring ZERO times in `agents/roles.py`,
+    # `agents/unified_agent.py` and `search/panel.py`. Grepping those files is the wrong instrument:
+    # the ask travels through the MODEL, not through a literal. `IdeaEmission` derives from `Idea`
+    # and the producer emits `IdeaEmission.model_json_schema()`, so this field's own description has
+    # reached the model on every proposal since it landed — verified by dumping the schema.
+    #
+    # SO THE PRESCRIBED FIRST STEP ("ask in the emit schema, look at what comes back") WAS ALREADY
+    # DONE, AND THE ANSWER IS ZERO: over every `node_created` row on this box — 155, not the 12 that
+    # note counted — **0 carry a filled `open_questions`**. The carrier itself is sound end to end
+    # (`IdeaEmission.to_idea` -> `durable_idea_payload` -> `Idea(**payload)` all preserve it, driven
+    # in `tests/test_open_questions_ask.py`), so nothing is being dropped; the Researcher simply
+    # never volunteers one.
+    #
+    # WHAT CHANGED, and it is the only untested lever: the user turn now ASKS IN PROSE. This repo has
+    # already measured that prose outranks a schema-level cue, and that turn enumerated
+    # params/rationale/space/hypothesis and never questions. The append half stays open and stays
+    # gated on what comes back — a fresh run under this prompt is the measurement, and if it is zero
+    # again the honest close is `DECLINED` with that number, not a second question channel.
+    # `Idea.open_questions` still has no consumer outside this model and the memo path's own
+    # same-named field.
     #
     # THE PRIOR QUESTION IS THEREFORE WHETHER IT SHOULD BE WIRED AT ALL, not how. The deep-research
     # channel already delivers questions end to end and was seen doing it on v10: 4 `open_questions`
