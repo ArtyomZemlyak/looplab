@@ -87,20 +87,14 @@ def _tokens_of(usage) -> tuple[int, int, int]:
     # substitution the docstring above forbids, and it is not cosmetic: it inflates `attributed`,
     # drives `residual` negative, and makes `looplab tokens` print "spans over-attribute" — blaming
     # a retried provider call for a number this reader invented.
-    # OPEN[stated-zero-rule-reads-a-writer-normalized-field] the zero this rule preserves cannot
-    # reach it from the shipped writer, and the zero it CAN see is manufactured from junk.
-    # proof:`present:(counted or _states_zero(stated))@looplab/events/token_spend.py+present:_token_int(t.get("total_tokens")@looplab/core/tracing.py`
-    # REVIEW 2026-08-29 (P2 correctness): `core/tracing.py::_norm_usage` runs a TRUTHINESS chain of
-    # its own at write time, so a provider-stated total of 0 beside real parts is replaced by their
-    # sum before any span exists — the cache-served case above is unwritable — while a junk or
-    # negative `total_tokens` ('n/a', -1) beside real parts IS stored as 0 (`_token_int` maps
-    # unparseable to 0). This reader then treats that manufactured 0 as "provider explicitly
-    # reported ZERO" and drops prompt+completion from `attributed`, opening a per-call span-vs-
-    # ledger gap the CLI reports as spans under-attributing — the ledger's own `_normalize_usage`
-    # records the sum for the same payload. Driven with the real functions on both sides. Fix
-    # direction: make the writer honor presence the way this reader does (keep a stated in-range
-    # zero, store junk as ABSENT), or accept a stored zero here only when the parts are zero too;
-    # either way the cache-served claim moves to the site that decides it.
+    # THE WRITER AGREES SINCE 2026-08-30, and until then this rule was defending a case it could
+    # never see. `core/tracing.py::_norm_usage` ran a truthiness chain of its own, so a stated 0 was
+    # replaced by `p + c` before any span existed — the cache-served turn above was UNWRITABLE —
+    # while a junk or negative total ("n/a", -1) is truthy and `_token_int` maps it to 0, so the one
+    # zero this reader could ever meet was MANUFACTURED, and honouring it dropped prompt+completion
+    # from `attributed`. `core/tracing.py::_stated_total` now applies this same presence rule at
+    # write time. The two cannot be spelled once — `core` may not import `events` — so they are
+    # driven against each other in `tests/test_stated_token_total.py`.
     total = counted if (counted or _states_zero(stated)) else (prompt + completion)
     return total, prompt, completion
 
