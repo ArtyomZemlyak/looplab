@@ -6673,6 +6673,50 @@ correct one.
 `action_owner_missing` and whose seed statement matches no `hypothesis_added` row. That query is one
 fold and is the thing to re-run, not this table.
 
+
+### §0.23 The backfill rule cannot start measuring, because neither of its two inputs exists (2026-08-30)
+
+`engine/cadence.py::backfill_admits` / `backfill_receipt` are a designed scheduling rule — given a
+candidate that needs `candidate_s` and a device whose current occupant has `remaining_s` left, is
+admitting the candidate now worth the delay it imposes? The docstring says the receipt is "recorded
+rather than acted on while the rule is being observed", i.e. a measure-first corpus accumulates
+before any admission changes. The review finding (`backfill-receipt-unwired`) is that nothing calls
+either function, so that corpus can never start.
+
+**The finding is TRUE.** Grepping `looplab/` finds exactly one call — `backfill_receipt`'s own call
+to `backfill_admits`, inside the same file. Every other importer is a test.
+
+**And it cannot be wired, because BOTH arguments are facts the engine does not hold.**
+
+| input | who could produce it | measured |
+|---|---|---|
+| `candidate_s` — how long the waiting node will take | nothing | **0** producers of a per-node duration estimate anywhere in `looplab/`. `search/proxy.py` and `search/surrogate.py` predict a METRIC; `effective_eval_time_budget` is a leash, not a forecast |
+| `remaining_s` — how long the running eval has left | `LossTrajectory.eta_s`, via the training watchdog | **21 of 272** `train_monitor_alert` rows across every preserved log carry one (7.7 %), because an ETA needs a progress bar with a total — and it counts training STEPS, so it excludes the score stage and the tail |
+
+**The one wiring that would "work" is the one the function refuses by design.** The declared stage
+`timeout` is always available and is the obvious stand-in for `candidate_s` — but it is a WALL, not
+a duration (36,000 s on this box's training stages), so every candidate would price as enormous and
+the rule would refuse everything. `backfill_admits`' own docstring already forbids it: *"REFUSES ON
+ANY UNKNOWN … admitting on a guess is how a scheduler turns one idle device into two late
+experiments."* Feeding it a wall is that guess.
+
+**The prescribed site has already recorded its refusal to take this.** The marker said to "stamp the
+receipt onto a diagnostic row where `_occupancy_paced_creates` already deliberates". That method's
+docstring answers it in advance under **"NO NEW EVENT, and that is a decision rather than an
+omission"**: a row there "would still be an append per poll turn for the whole of a multi-hour
+evaluation, i.e. an unbounded log written to record that nothing happened." It is also the wrong
+question — that site decides whether to BUILD inventory behind a busy device, and holds no candidate
+duration at all.
+
+**So: DECLINED, and the code STAYS.** What is missing is a MEASUREMENT the engine could acquire —
+a per-node duration forecast — not a flaw in the rule. The refusal half is already driven by
+`tests/test_backfill_decision.py::test_any_unknown_or_impossible_input_refuses`, so the thing that
+would make a careless future wiring dangerous is the thing already guarded.
+
+**What would reopen it:** a producer of a per-node duration estimate landing anywhere in `looplab/`.
+At that point the receipt has both arguments and the measure-first corpus can begin; until then
+wiring it writes `why: "unknown_duration"` forever.
+
 ### §0.21 The claim LADDER is designed, mostly already shipped, and its last rule cannot fire yet (2026-08-26)
 
 Two settled design records (operator tasks #57/#58) were taken off the queue to be BUILT and were

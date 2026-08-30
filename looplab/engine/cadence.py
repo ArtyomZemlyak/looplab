@@ -389,13 +389,34 @@ def backfill_receipt(candidate_s, remaining_s, *, lam: float = 1.0) -> dict:
     same "measure first" shape `docs/BACKLOG.md` records for the deterministic stop gate, and it
     matters more here because the cost of a wrong admission is a real training run delayed.
 
-    OPEN[backfill-receipt-unwired] nothing in the engine calls this (or `backfill_admits`), so
-    the measure-first corpus the paragraph above depends on can never start accumulating.
-    proof:absent:backfill_receipt(@looplab/engine/orchestrator.py
-    REVIEW 2026-08-29 (P3 delivery): only tests import the pair; no site computes a candidate
-    ETA/remaining pair and writes the row, so the F1h idle-device gap this was built for stays
-    unmeasured while the rule reads as observed. Fix direction: stamp the receipt onto a
-    diagnostic row where `_occupancy_paced_creates` already deliberates, then delete this marker.
+    DECLINED[backfill-receipt-unwired] measured: 0 producers of a per-node duration estimate
+    anywhere in `looplab/`, and 21 of 272 `train_monitor_alert` rows carry the `eta_s` the other
+    argument would come from — docs/BACKLOG.md §0.23
+
+    The finding is TRUE and the wiring is still refused, because BOTH arguments are facts the engine
+    does not hold. `candidate_s` — how long the waiting node will take — has NO producer at all:
+    `search/proxy.py` and `search/surrogate.py` forecast a METRIC, and `effective_eval_time_budget`
+    is a leash rather than a forecast. `remaining_s` exists only as `LossTrajectory.eta_s`, on 7.7 %
+    of alert rows, and it counts training STEPS, so it excludes the score stage and the tail.
+
+    THE ONE AVAILABLE STAND-IN IS THE ONE THIS MODULE REFUSES BY DESIGN. A stage's declared
+    `timeout` is always there and is the obvious substitute for `candidate_s` — but it is a WALL,
+    not a duration (36,000 s on this box's training stages), so every candidate would price as
+    enormous and the rule would refuse everything. `backfill_admits` above already forbids exactly
+    that: "REFUSES ON ANY UNKNOWN … admitting on a guess is how a scheduler turns one idle device
+    into two late experiments."
+
+    AND THE PRESCRIBED SITE HAS ALREADY RECORDED ITS REFUSAL. The review said to stamp this onto a
+    diagnostic row in `orchestrator.py::_occupancy_paced_creates`; that method answers it in advance
+    under "NO NEW EVENT, and that is a decision rather than an omission" — a row there is an append
+    per poll turn for the whole of a multi-hour evaluation. It is also the wrong question: that site
+    decides whether to BUILD inventory behind a busy device and holds no candidate duration.
+
+    THE CODE STAYS. What is missing is a measurement the engine could acquire — a per-node duration
+    forecast — not a flaw in the rule; and the half that makes a careless wiring dangerous is
+    already driven by `tests/test_backfill_decision.py::test_any_unknown_or_impossible_input_refuses`.
+    Re-open when a duration forecaster lands: at that point the receipt has both arguments and the
+    measure-first corpus can begin. Until then, wiring it writes `why: "unknown_duration"` forever.
     """
     admits = backfill_admits(candidate_s, remaining_s, lam=lam)
     row = {"admits": admits, "lam": round(float(lam), 4) if isinstance(lam, (int, float)) else None}
