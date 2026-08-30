@@ -1082,12 +1082,19 @@ class EvaluateMixin:
             from looplab.trust.leakage import code_leakage_findings
             sigs += code_leakage_findings(scan_src)
         if TRUST_DETECTOR_CRITIC in detectors:
-            from looplab.trust.critic import critic_findings
+            from looplab.trust.critic import critic_findings, scorer_is_in_tree
             # Host-graded tasks (MLE-bench &c.) score a submission file out-of-process,
             # so the critic's in-code `metric` checks don't apply — hand it the expected
             # submission filename so it checks the right output contract instead.
+            #
+            # And a task whose eval stage runs a HARNESS over the candidate (AlgoTune:
+            # `looplab_eval.py --solver solver.py`) has no in-code output contract at all —
+            # the candidate is a library. `scorer_is_in_tree` answers that from the task the
+            # engine already holds; `getattr` keeps the `Engine.__new__` unit engines working.
             sigs += critic_findings(node.idea, scan_src,
-                                    submission_file=self._graded_output_name())
+                                    submission_file=self._graded_output_name(),
+                                    scorer_in_tree=scorer_is_in_tree(
+                                        getattr(self, "task", None)))
         return sigs
 
     def _trust_scan_surface(self, node) -> str:
