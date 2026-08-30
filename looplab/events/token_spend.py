@@ -107,20 +107,22 @@ def _tokens_of(usage) -> tuple[int, int, int]:
 
 # The bucket for a generation whose ancestry names no card — the per-card twin of
 # `PHASE_UNATTRIBUTED`, and it exists for the same reason: an unattributable call is a fact about the
-# record. Every `propose` generation lands here by construction on a card-driven run, because a
-# proposal is made BEFORE the card it may become exists.
-# OPEN[card-rows-price-propose-as-build] the sentence above is false, and the per-card rows
-# therefore price research/propose spend under a label that says BUILD.
-# proof:`line:generation lands here by construction&&card-driven run@looplab/events/token_spend.py`
-# REVIEW 2026-08-29 (P2 docs-drift/correctness): the propose span is stamped with the card id the
-# moment `_link` mints it — `orchestrator.py::stamp_proposal_span` runs INSIDE the open `propose`
-# span, and spans are written on CLOSE — so `_owning_card` resolves propose generations to the
-# card, not to this bucket. Three shipped claims disagree with that mechanism: this comment,
-# `token_spend_by_card`'s "what each experiment's BUILD cost", and the cli-reference example
-# (whose `(no card)` is 2.9% of a run where propose measures 18-25%). An operator reconciling the
-# card table against the phase table's plan+stages+card_build reads the difference as attribution
-# error. Fix direction: either key `card_of` on `card_build` spans only (build-only pricing, as
-# documented) or reword the three claims to say a card's row includes the propose that minted it.
+# record.
+#
+# A `propose` GENERATION DOES NOT LAND HERE, and this comment claimed the opposite until 2026-08-30.
+# `orchestrator.py::stamp_proposal_span` stamps the card id INSIDE the open `propose` span the moment
+# `_link` mints the card, and spans are written on CLOSE, so the id is on the row `_owning_card`
+# walks to. MEASURED on `runs/rubertlite-dr-unified-v9` by folding its real spans twice, with and
+# without the propose phase: ALL 27,436,262 propose tokens resolve to a real card and `(no card)`
+# gains exactly 0 of them. Per card the propose share is 18.2 %-62.0 % of the row (card-5 is 62 %),
+# so the old sentence was not a rounding error about a corner — it was backwards about a quarter of
+# the run.
+#
+# THE ATTRIBUTION IS RIGHT AND THE LABEL WAS WRONG, which is why this was fixed by rewording rather
+# than by narrowing `card_of` to `card_build` spans: the proposal that minted a card is money spent
+# on THAT experiment's behalf, and moving 25.3 % of the run into `(no card)` would make this bucket
+# the largest row in the table and tell the operator less than it does now. What a card's row prices
+# is the whole experiment — the propose that minted it AND the build that followed.
 CARD_UNATTRIBUTED = "(no card)"
 
 # How far up a parent chain to look for a `card_id` before giving up. A build's generations sit two
@@ -131,7 +133,13 @@ _CARD_ANCESTRY_HOPS = 60
 
 
 def token_spend_by_card(spans, card_nodes=None, ledger_total=None) -> dict:
-    """Fold parsed span rows into a per-CARD token breakdown — what each experiment's BUILD cost.
+    """Fold parsed span rows into a per-CARD token breakdown — what each experiment COST.
+
+    NOT the build alone, and the docstring said "BUILD cost" until 2026-08-30. A card's row includes
+    the `propose` that minted it, because `stamp_proposal_span` puts the card id on the open propose
+    span and `_owning_card` walks to it — measured at 18.2 %-62.0 % of a row on
+    `runs/rubertlite-dr-unified-v9`. An operator reconciling this table against the phase table's
+    plan+stages+card_build read that difference as attribution error; it is the propose.
 
     MEASURED, and the reason this exists beside the per-phase fold: on `e5small-dr-unified-v9` at
     17.6 h, cards 3 and 4 cost 35.3M + 33.6M = 68.9M tokens — 21.0 % of the run's 327.6M — and every

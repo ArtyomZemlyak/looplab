@@ -817,10 +817,14 @@ the head as `run_is_stopping` with a producer live.
 
 **How a card is attributed.** A generation span carries no `card_id` — the `card_build` span above it
 does — so each generation is charged to the nearest ancestor that names one (4,478 of that run's
-4,511 build generations, 97 % of its generation tokens). Everything else lands in `(no card)`, which
-is where every `propose` generation belongs by construction: a proposal is made before the card it
-may become exists. The section is suppressed entirely on a run where no card resolves, i.e. every
-serial-path run.
+4,511 build generations, 97 % of its generation tokens). A `propose` generation resolves to a card
+too, and not to `(no card)`: `stamp_proposal_span` puts the card id on the open `propose` span the
+moment the card is minted, and spans are written on close. So **a card's row prices the whole
+experiment — the proposal that minted it and the build that followed** — which is why it can exceed
+the phase table's plan+stages+card_build for that card. Measured on `rubertlite-dr-unified-v9`, all
+27,436,262 propose tokens land under a real card and the propose share of a card's row runs
+18.2 %-62.0 %. `(no card)` holds what genuinely resolves to none. The section is suppressed entirely
+on a run where no card resolves, i.e. every serial-path run.
 
 **Why the phase is not simply stamped on `llm_usage` instead.** That was the obvious fix and it is
 the wrong one: `engine/costs.py` appends the row from an outbox drain and a reconcile retry loop as
