@@ -209,6 +209,11 @@ def tokens(run_dir: Path = typer.Argument(...),
     # The DENOMINATOR: the durable ledger's own sum. Read first so a run with tracing off still
     # learns what it spent, even though it can never learn where.
     ledger_total = None
+    # WHY there is no denominator, because the two reasons have different remedies and the existing
+    # message named only one of them: a missing/unreadable events.jsonl is a different fact from a
+    # readable log that simply records no spend, and telling an operator "no readable events.jsonl"
+    # about a log the command just folded would be its own false claim.
+    ledger_absent = "no readable events.jsonl"
     state = None
     if ev_path.exists():
         store = EventStore(ev_path)
@@ -222,21 +227,29 @@ def tokens(run_dir: Path = typer.Argument(...),
         # here does not merely misprint the denominator: `residual` is the whole point of the
         # command, and this is its subtrahend.
         state = fold(store.read_all())
-        # OPEN[absent-ledger-collapses-to-zero] a log holding NO cost row prints "ledger: 0" and a
-        # negative residual, instead of taking the no-denominator branch below.
-        # proof:`present:int((state.llm_cost or {})@looplab/cli/inspect_cmds.py`
-        # REVIEW 2026-08-29 (P2 correctness): `RunState.llm_cost` stays None when the log carries no
-        # `llm_usage`/`llm_cost` row (usage rows lost, an externally-billed backend), and the
-        # `or {}` here collapses that None onto the very 0 whose confusion the module's own test
-        # names as a mutation ("'no ledger' becomes 'the ledger says zero'"). Reproduced: a run dir
-        # with one 400-token generation span and no cost rows prints "ledger : 0 tokens" /
-        # "residual : -400 tokens (spans over-attribute)", exit 0. Fix: keep None when
-        # `state.llm_cost is None` — the existing `is None` branch then prints the honest
-        # "n/a (no denominator)" and the two early exits already tolerate None.
-        ledger_total = int((state.llm_cost or {}).get("total_tokens") or 0)
+        # ABSENT IS NOT ZERO. `RunState.llm_cost` stays None when the log carries no
+        # `llm_usage`/`llm_cost` row at all — usage rows lost, or an externally-billed backend — and
+        # an `or {}` here collapsed that None onto the very 0 whose confusion `test_token_spend.py`
+        # already names as a mutation of the pure function ("'no ledger' becomes 'the ledger says
+        # zero'"). The function was right and its CALLER threw the distinction away one line before
+        # the call. Reproduced before the fix: a run dir with one 400-token generation span and no
+        # cost rows printed "ledger : 0 tokens" and "residual : -400 tokens (spans
+        # over-attribute)" at exit 0 — a claim that the run was billed nothing AND that its spans
+        # over-attribute, neither of which the log says.
+        if state.llm_cost is None:
+            ledger_absent = "the log carries no llm_usage or llm_cost row"
+        else:
+            ledger_total = int(state.llm_cost.get("total_tokens") or 0)
+
+    def _ledger_total_line() -> str:
+        # ONE spelling, three call sites. Two of them printed `{ledger_total or 0:,}`, which is the
+        # same absent-reads-as-zero claim in a shorter sentence.
+        if ledger_total is None:
+            return f"ledger total: n/a ({ledger_absent})"
+        return f"ledger total: {ledger_total:,} tokens"
 
     if not sp_path.exists():
-        typer.echo(f"ledger total: {ledger_total or 0:,} tokens")
+        typer.echo(_ledger_total_line())
         typer.echo("no spans.jsonl — the ledger records totals only, so the split is unavailable.")
         raise typer.Exit(2)
 
@@ -256,7 +269,7 @@ def tokens(run_dir: Path = typer.Argument(...),
         # total nor the damage count, so the one message the operator got ("no generation spans
         # found") named the record rather than the reader and read identically to a run that simply
         # never traced. Both facts are already in hand at this point.
-        typer.echo(f"ledger total: {ledger_total or 0:,} tokens")
+        typer.echo(_ledger_total_line())
         if unreadable or out["damaged"]:
             typer.echo(f"no generation spans could be read; {unreadable + out['damaged']} damaged "
                        f"span row(s) stepped over — the split is unavailable because spans.jsonl is "
@@ -280,7 +293,7 @@ def tokens(run_dir: Path = typer.Argument(...),
     typer.echo("")
     typer.echo(f"attributed : {out['attributed']:>14,} tokens over {out['calls']:,} generation spans")
     if out["ledger_total"] is None:
-        typer.echo("ledger     :            n/a  (no readable events.jsonl — no denominator)")
+        typer.echo(f"ledger     :            n/a  ({ledger_absent} — no denominator)")
     else:
         typer.echo(f"ledger     : {out['ledger_total']:>14,} tokens (llm_usage, the durable record)")
         # SIGNED and never clamped: a retried provider call opens two spans against one billed row,
