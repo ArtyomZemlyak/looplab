@@ -29,6 +29,17 @@ import pathlib
 from looplab.engine import card_reservation, novelty
 from looplab.events import types as event_types
 
+# OPEN[offload-sink-guards-scan-one-file] every AST guard below parses card_reservation.py ONLY,
+# so none covers the BATCH wrapper `_await_batch_proposal` in the engine's spine module (2026-08-30)
+# — and the behavioral twins in test_propose_does_not_freeze_the_loop stub the paid callee, so no
+# test drives the REAL `_propose_batch` closure under a watched store. A direct folded
+# `store.append` added under that closure (exactly the fix the duplicate-receipt marker in
+# novelty.py prescribes for its drop branch) would run on the worker thread with every guard green —
+# the miss-shape this module's own docstring documents, reintroduced one lane over.
+# proof:absent:orchestrator@tests/test_offload_lane_writes_no_folded_events.py
+# REVIEW 2026-08-30 (P2 guard coverage): extend the scan to the wrapper's home module (the same
+# `getsourcefile` pattern), and drive the real closure once — stub only the provider call, watch the
+# store, assert zero folded appends land off the loop thread.
 _SRC = pathlib.Path(inspect.getsourcefile(card_reservation)).read_text(encoding="utf-8")
 # ONE parse, shared by every assertion below. Each test parsing its own copy was the first version
 # and it made the `with`-wrapper test VACUOUSLY RED: node identity (`n is offload`) can never hold

@@ -198,6 +198,18 @@ class NoveltyGateMixin:
     """The engine's novelty/dedup gate cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
 
+    # OPEN[proposal-sink-offload-publish-hand-rolled-thrice] the capture->offload->publish triple
+    # and the 4-tuple unpack-and-append loop this sink feeds are now hand-written at three/four
+    # sites (card_reservation.py's per-action lane, orchestrator.py's batch wrapper, and
+    # speculation.py's two audit_events loops) — the batch wrapper's own docstring states the rule
+    # it then violates one lane over: two hand-written offloads are two chances to forget the sink.
+    # proof:absent:_publish_proposal_events@looplab/engine/novelty.py
+    # REVIEW 2026-08-30 (P2 reuse/altitude): hoist ONE offload-with-sink helper and ONE publish
+    # helper beside this sink (which owns the contextvar and the tuple shape), leaving Layer 5's
+    # conditional-publish POLICY at its call sites; that helper is also the natural carrier of the
+    # publish-in-finally durability fix and the one place a 5th tuple field or a tail-fenced
+    # append_many could land without the four copies drifting. A fourth paid lane that forgets the
+    # wrapper re-breaches invariant #1 exactly as aaef33d3 did.
     @contextmanager
     def _capture_proposal_events(self):
         """Buffer proposal audit events so a worker never writes the folded log.
@@ -569,6 +581,20 @@ class NoveltyGateMixin:
                     pass
         return False
 
+    # OPEN[propose-batch-main-task-contract-stale] the docstring's closing sentence — runs in the
+    # MAIN task, so the SHARED researcher has no pool race — is false since 2026-08-30.
+    # proof:`line:MAIN task before the build fan-out&&no pool race@looplab/engine/novelty.py`
+    # Both call sites now run this on an anyio worker thread (`orchestrator.py::_await_batch_proposal`),
+    # and the no-race property survives only because the main task awaits it serially. Meanwhile the
+    # unfrozen loop lets eval tasks drive the SAME object (under the shipped `unified_agent=True`
+    # the researcher IS the developer) through `crash_repair.py`'s triage_crash/repair_critic while
+    # this function mutates `_novelty_feedback` (below) and nulls telemetry attrs in its `finally` —
+    # attr sets disjoint TODAY, so latent, but the exclusivity is stated nowhere and guarded by
+    # nothing, and the sentence a maintainer would consult asserts the opposite placement.
+    # REVIEW 2026-08-30 (P2 stale contract / latent race): correct the sentence (serialized behind
+    # the main task's await, executed on a worker) and state which attrs the concurrent eval-task
+    # consumers of the shared facade may touch; `_capture_proposal_events`' docstring likewise still
+    # names Layer 5 as the only sink installer — there are three now, this lane included.
     @in_llm_lane("build")
     def _propose_batch(self, state: RunState, n: int) -> list:
         """Variant-1 Phase 2 — the ONE shared-researcher pass that yields up to N DISTINCT seed

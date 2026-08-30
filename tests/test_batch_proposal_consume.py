@@ -176,6 +176,17 @@ def test_a_junk_row_does_not_stop_the_valid_ones_after_it():
 # method the chunk has left is not a weaker guard, it is no guard at all.
 _CALL_SITES = ("_handle_create_actions", "_stage_card_creates")
 
+# OPEN[batch-consume-guard-stranded] RED AT HEAD: the pin below still names the pre-offload direct
+# call, and both call sites were re-routed through `Engine._await_batch_proposal` (2026-08-30)
+# without this guard moving in the same change — both parametrizations fail against production code
+# whose property still holds.
+# proof:`present:"_consume_batch_proposal(" in source@tests/test_batch_proposal_consume.py`
+# REVIEW 2026-08-30 (P1 correctness): re-point the pin at the awaited wrapper — and pin the wrapper's
+# own delegation to the shared consume funnel too, because the cheapest way to green THIS assertion
+# is to revert a call site to the sync call, i.e. the stranded guard actively rewards restoring the
+# 62-minute event-loop freeze. CLAUDE.md: a contract change must move its tests in the SAME change,
+# and the re-point is only legitimate after re-checking the property where the code went.
+
 
 @pytest.mark.parametrize("method", _CALL_SITES)
 def test_both_call_sites_go_through_the_shared_consume(method):

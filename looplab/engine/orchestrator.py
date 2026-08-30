@@ -2439,6 +2439,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # `retry_attach` stays off (default): these Ideas came from the shared batch
                     # proposal and never crossed `_prepare_node_idea._link`, so no earlier pass
                     # planned an attach for this pass to agree with.
+                    #
+                    # OPEN[chunk-scored-against-stale-across-offload] `state` here was folded BEFORE
+                    # the minutes-long awaited batch propose above, and `_reserve_node_build`'s plan
+                    # re-folds everything else fresh but records this anchor VERBATIM into the
+                    # immutable Card receipt — so a best-improving terminal landing mid-propose
+                    # (impossible pre-offload: the loop was frozen) mints a durable receipt scored
+                    # against a superseded node, silently. The card lane REFUSES on exactly this
+                    # drift (`_stage_prepared_card`'s best fence); this lane records it.
+                    # proof:`line:_a, _idea,&&scored_against=state.best_node_id@looplab/engine/orchestrator.py`
+                    # REVIEW 2026-08-30 (P2 record integrity): either re-fold for the anchor at
+                    # reservation time, or record both anchors (proposed-against vs committed-at) —
+                    # the receipt is read by the freshness ladder, card_selection and
+                    # speculation_quality's replicate invariants, which assume it names the best at
+                    # reservation.
                     self._reserve_node_build(
                         _a, _idea, scored_against=state.best_node_id,
                         source="researcher",
@@ -4949,6 +4963,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `_triage_crash` / `_repair_error_context` / `_prepare_env` live in
     # looplab/engine/crash_repair.py (CrashRepairMixin — inherited, zero call-site churn).
 
+    # OPEN[consume-batch-docstring-names-retired-callers] the docstring below still says the two
+    # call sites "each read that protocol by hand" and names one of them `run`'s chunk — since
+    # 2026-08-30 neither calls this directly (both await `_await_batch_proposal`, whose own
+    # docstring names the chunk's real home `_handle_create_actions`), so a caller-hunting reader
+    # is sent to methods that no longer contain the call.
+    # proof:`line:Two call sites&&concurrent-build chunk@looplab/engine/orchestrator.py`
+    # REVIEW 2026-08-30 (P3 doc drift): one sentence — both call sites now reach this through the
+    # awaited wrapper (worker thread + main-task publish) — and one name fix.
     def _consume_batch_proposal(self, state, width: int):
         """Run one batched proposal and READ its three-attribute result. Returns
         ``(ideas, telemetry, dropped)``.
@@ -5022,9 +5044,33 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         concurrent task by name — and a beacon that stayed behind would announce the phase from a
         thread that is no longer in it.
         """
+        # OPEN[batch-offload-shares-default-thread-limiter] the offload below rides anyio's shared
+        # 40-token default thread pool — the pool each in-flight `_run_eval` worker holds a token of
+        # for its eval's whole multi-hour duration — so at operator-raised `eval_parallel` near or
+        # above 40 (the schema admits 1024) the paid proposal QUEUES BEHIND the evals before it even
+        # starts: board starvation through the pool instead of the loop.
+        # proof:absent:limiter=@looplab/engine/orchestrator.py
+        # REVIEW 2026-08-30 (P2 capacity): `evaluate.py::_watch_limiter` names this exact hazard and
+        # gave the watchdog tick its own pool for it; the proposal lanes (this one and the
+        # per-action offload in card_reservation.py) got none. Give them a small dedicated
+        # CapacityLimiter the way the watchdog has one.
         with self._capture_proposal_events() as captured:
             result = await anyio.to_thread.run_sync(
                 functools.partial(self._consume_batch_proposal, state, width))
+        # OPEN[batch-offload-drops-buffered-receipts-on-raise] the publish below runs only on a
+        # clean return: a raise from the offloaded funnel (BudgetExceeded included — whose
+        # `budget_exceeded` novelty_rejected is appended by `_reject_and_repropose` BEFORE the
+        # re-raise precisely so "the rejection is on the log even though the run is ending", and
+        # which both shipped researchers propagate) exits the capture and discards every buffered
+        # folded receipt from the batch's completed rolls. Pre-offload each row was durable at emit
+        # time; driven at HEAD both ways. Cancellation at the await is NOT the trigger — the
+        # non-abandoned wait is shielded and this sync loop runs before the next checkpoint.
+        # proof:`present:for _event_type, _data, _trace_id, _span_id in captured:@looplab/engine/orchestrator.py`
+        # REVIEW 2026-08-30 (P1 durability): publish `captured` in a try/finally (append is sync and
+        # legal during unwind) or ferry it out through the result the way Layer 5's
+        # `SpecRawStageResult.audit_events` does; the per-action lane in card_reservation.py shares
+        # the shape. (A raise also skips the chunk caller's `_record_dropped_batch_cards`, but it
+        # did pre-offload too — the buffered sink rows are the regression, not that half.)
         for _event_type, _data, _trace_id, _span_id in captured:
             self.store.append(_event_type, _data, trace_id=_trace_id, span_id=_span_id)
         return result

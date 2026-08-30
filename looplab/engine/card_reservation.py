@@ -1396,6 +1396,27 @@ class CardReservationMixin:
                 # card run stages a multi-draft lane, e.g. an occupancy-paced create fired precisely
                 # BECAUSE an eval is in flight, and while it ran no eval terminal, watchdog tick or
                 # timer could land. On the shipped default width it is the path a run takes.
+                #
+                # OPEN[batch-staging-stale-fence-discards-paid-batch] the await below is the batch
+                # branch's FIRST suspension point between the authority fold above (1386-1388) and
+                # the staging loop, and `_stage_prepared_card._plan`'s fence compares the fresh fold
+                # against that stale snapshot — so one best-IMPROVING eval terminal, or one
+                # `research_completed`/`hint`/strategy row (all BACKGROUND_APPENDABLE, all hashed by
+                # `_proposal_cue_fence`), landing during the minutes-long paid propose refuses EVERY
+                # idea of the batch at staging: a final None per `retry_tail_cas`'s precondition
+                # rule, with NO receipt on this lane, followed by one MORE paid serial try
+                # (orchestrator's create branch) and a re-paid batch next turn.
+                # proof:`present:await self._await_batch_proposal(@looplab/engine/card_reservation.py`
+                # REVIEW 2026-08-30 (P1 durability/economics): pre-offload this was unreachable — the
+                # frozen loop meant no fence input could move mid-propose (only
+                # SETUP_THREAD_APPENDABLE/llm_usage thread rows could land, none a fence input); the
+                # occupancy-paced case this very comment advertises makes it ROUTINE, and a single
+                # moved fence now discards N paid ideas at once where the per-action lane risks one.
+                # The refusal itself is the designed answer to moved authority; what is missing is
+                # the receipt (CARD_BUILD_SKIP_REASONS' `stale` pattern one lane over) and/or a
+                # post-await re-validation, so the loss is at least countable. Same silence class as
+                # the `duplicate-receipt-lands-on-one-lane-of-three` marker in novelty.py (that one
+                # covers the propose-time duplicate; this one the staging fence).
                 ideas, telemetry, dropped_batch = await self._await_batch_proposal(
                     proposal_state, len(raw))
                 for offset, (action, idea, record) in enumerate(
