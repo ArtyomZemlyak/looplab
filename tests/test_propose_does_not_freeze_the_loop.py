@@ -114,3 +114,114 @@ def test_the_offloaded_call_writes_no_events():
     assert appends == [], (
         "`_prepare_node_idea` must not write to the durable log: it now runs off the main task, "
         f"and the contract reserves selection-affecting writes for it. Found: {appends}")
+
+
+@pytest.mark.anyio
+async def test_the_BATCH_lane_also_leaves_the_loop_thread(tmp_path):
+    """The sibling branch, driven — and the reason the test above never covered it.
+
+    `_stage_card_creates` splits on `len(raw) > 1 and all(kind == "draft")`. The test above passes a
+    SINGLE draft, so it has always exercised the per-action branch; the multi-draft branch called
+    `_consume_batch_proposal` straight on the loop and no test in the suite passed two. On the
+    shipped default width the batch path is the one a run actually takes, so the larger half of the
+    62-minute freeze was the uncovered one.
+
+    Mutation: drop the `await ... to_thread.run_sync` from `_await_batch_proposal` and the paid call
+    runs on the loop thread again — the identity assertion below fails, and so does the tick counter.
+    """
+    from tests.test_card_speculation_engine import _engine
+
+    engine, _producer = _engine(tmp_path / "batch-loop-turns", depth=0)
+    release = threading.Event()
+    ticks = 0
+    observed = {}
+    loop_thread = threading.get_ident()
+
+    def _blocking_batch(_state, _n):
+        # Observed FROM INSIDE the blocking call, for the reason the per-action test records: ticks
+        # counted from the start cannot tell a frozen loop from a slow one, because a frozen loop
+        # still shows what it accumulated BEFORE the freeze.
+        observed["thread"] = threading.get_ident()
+        observed["before"] = ticks
+        time.sleep(0.15)
+        observed["after"] = ticks
+        release.set()
+        return []
+
+    engine._propose_batch = _blocking_batch
+
+    async def _ticker():
+        nonlocal ticks
+        while not release.is_set():
+            ticks += 1
+            await anyio.sleep(0.005)
+
+    from looplab.events.replay import fold
+    state = fold(engine.store.read_all())
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_ticker)
+        tg.start_soon(engine._stage_card_creates,
+                      [{"kind": "draft"}, {"kind": "draft"}], state)
+        with anyio.fail_after(6):
+            while not release.is_set():
+                await anyio.sleep(0.005)
+
+    assert observed.get("thread") not in (None, loop_thread), (
+        "the paid batch proposal must run on a WORKER thread. Running it on the loop thread is the "
+        "freeze itself, and it is what this branch did")
+    assert observed.get("after", 0) > observed.get("before", 0), (
+        "the loop must keep turning while the batch proposal is in flight — no eval terminal, "
+        "watchdog tick or timer can land while it does not")
+
+
+@pytest.mark.anyio
+async def test_the_batch_lane_s_folded_rows_are_appended_by_the_MAIN_task(tmp_path):
+    """The half an AST walk cannot see, and the half that breaks invariant #1 when it is missing.
+
+    `_propose_batch` reaches `_append_proposal_event`, which falls through to `store.append` unless a
+    sink is installed. `novelty_rejected` is FOLDED and is in none of the three thread-append
+    registries, and it is authority-bearing for `_proposal_authority_seq` — the fence that discards a
+    paid proposal when a non-diagnostic row lands in its equality window. So an offload without the
+    capture is worse than no offload.
+
+    Mutation: delete the `with self._capture_proposal_events()` wrapper and the append happens on the
+    WORKER thread — exactly the breach, and green under any test that only checks the row exists.
+    """
+    from looplab.events.types import EV_NOVELTY_REJECTED
+    from tests.test_card_speculation_engine import _engine
+
+    engine, _producer = _engine(tmp_path / "batch-sink", depth=0)
+    loop_thread = threading.get_ident()
+    append_threads: list[int] = []
+    observed = {}
+
+    real_append = engine.store.append
+
+    def _watched_append(event_type, data=None, **kw):
+        if event_type == EV_NOVELTY_REJECTED:
+            append_threads.append(threading.get_ident())
+        return real_append(event_type, data, **kw)
+
+    engine.store.append = _watched_append
+
+    def _rejecting_batch(_state, _n):
+        observed["thread"] = threading.get_ident()
+        engine._append_proposal_event(EV_NOVELTY_REJECTED, {"reason": "duplicate"})
+        return []
+
+    engine._propose_batch = _rejecting_batch
+
+    from looplab.events.replay import fold
+    state = fold(engine.store.read_all())
+    await engine._stage_card_creates([{"kind": "draft"}, {"kind": "draft"}], state)
+
+    assert observed.get("thread") not in (None, loop_thread), "precondition: it really ran off-loop"
+    assert append_threads == [loop_thread], (
+        f"the folded row must be appended by the MAIN task, got {append_threads} against a loop "
+        f"thread of {loop_thread}. Mutation: drop the capture sink and the worker writes it")
+    kinds = [e.type for e in engine.store.read_all()]
+    assert EV_NOVELTY_REJECTED in kinds, (
+        "and it must still be WRITTEN — mutation: capture the intents and never publish them, or "
+        "publish only when an idea formed, which loses exactly the refused-proposal receipt "
+        "`bd182357` exists for")

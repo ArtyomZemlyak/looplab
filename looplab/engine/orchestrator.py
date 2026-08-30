@@ -2408,7 +2408,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned
                 # 1:1 with _ideas), so each build emits ITS OWN
                 # hypothesis_ranked/foresight_selected.
-                _ideas, _telem, _dropped_batch = self._consume_batch_proposal(
+                _ideas, _telem, _dropped_batch = await self._await_batch_proposal(
                     state, len(_chunk))
                 if not _ideas:
                     self._record_dropped_batch_cards(_dropped_batch)
@@ -4972,6 +4972,48 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             telemetry.extend([None] * (len(ideas) - len(telemetry)))
         dropped = list(getattr(self, "_pending_batch_dropped", None) or [])
         return ideas, telemetry, dropped
+
+    async def _await_batch_proposal(self, state, width: int):
+        """`_consume_batch_proposal`, OFF the event-loop thread, with its folded audit rows published
+        by the MAIN TASK. Returns exactly what that funnel returns.
+
+        THE PER-ACTION LANE WAS MOVED OFF THE LOOP AND THIS SIBLING WAS NOT. `_propose_batch` is the
+        same minutes-long paid provider wait with no `await` in it, so as one event-loop callback it
+        stopped everything: no eval terminal, no watchdog tick, no timer could land. Measured on the
+        live engine with py-spy for the per-action twin — asyncio's `_run_once` sat below a
+        `threading.join` with no coroutine frame between, and a node whose training had already died
+        waited 62 MINUTES for its terminal while both H200s idled. On the shipped default width the
+        BATCH path is the one a run actually takes, so this was the larger half of that defect.
+
+        ONE HELPER, BOTH CALL SITES, for the reason `_consume_batch_proposal` itself is one funnel:
+        `_handle_create_actions`' concurrent-build chunk and `_stage_card_creates`' multi-draft branch
+        are both on the main task and both blocked identically. Two hand-written offloads would be two
+        chances to forget the sink.
+
+        THE SINK IS NOT OPTIONAL AND IS THE WHOLE REASON THIS IS NOT A ONE-LINE `to_thread`.
+        `_propose_batch` reaches `_append_proposal_event` (novelty.py), which falls through to
+        `self.store.append` whenever no sink is installed — writing EV_NOVELTY_REJECTED and friends.
+        Those are FOLDED and named by NONE of `events/types.py`'s three thread-append registries, so
+        appending them from a worker breaches invariant #1's sole-writer rule; worse, they are
+        AUTHORITY-BEARING for `speculation.py::_proposal_authority_seq`, the fence that discards a
+        paid proposal when a non-diagnostic row lands inside its equality window. Buffer, then
+        publish from here. This is Layer 5's own discipline, not a second one.
+
+        PUBLISHED WHETHER OR NOT ANY IDEA FORMED, exactly as the per-action lane publishes: a refused
+        proposal is when the receipt matters most, and gating the publish on a non-empty result would
+        restore the silence `bd182357` exists to end.
+
+        The `_progress` beacon INSIDE `_consume_batch_proposal` deliberately travels to the worker
+        with it. It is a direct `store.append` of a DIAGNOSTIC type, which invariant #1 permits a
+        concurrent task by name — and a beacon that stayed behind would announce the phase from a
+        thread that is no longer in it.
+        """
+        with self._capture_proposal_events() as captured:
+            result = await anyio.to_thread.run_sync(
+                functools.partial(self._consume_batch_proposal, state, width))
+        for _event_type, _data, _trace_id, _span_id in captured:
+            self.store.append(_event_type, _data, trace_id=_trace_id, span_id=_span_id)
+        return result
 
     def _fail_reserved_build(self, *, node_id: int, card_id: Optional[str], generation: int,
                              reason: str, error: str, drop_card: bool = True,

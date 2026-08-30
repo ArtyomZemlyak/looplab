@@ -1390,21 +1390,13 @@ class CardReservationMixin:
         dropped_batch: list[dict] = []
         try:
             if len(raw) > 1 and all(action.get("kind") == "draft" for action in raw):
-                # OPEN[batch-propose-still-blocks-event-loop] the multi-draft lane's paid Researcher
-                # call still runs as one event-loop callback; only the per-action branch below was
-                # moved off the loop.
-                # proof:`present:self._consume_batch_proposal(@looplab/engine/card_reservation.py`
-                # REVIEW 2026-08-29 (P2 efficiency): `_consume_batch_proposal` -> `_propose_batch`
-                # is the same minutes-long provider wait the per-action offload was measured for
-                # (py-spy: a dead node waited 62 minutes for its terminal while both H200s idled),
-                # reachable through this sibling branch whenever a speculation-off card run stages a
-                # multi-draft lane — e.g. an occupancy-paced create fired precisely BECAUSE an eval
-                # is in flight. While it runs, no eval terminal, watchdog tick or timer can land.
-                # Fix direction: offload it the same way once the sink discipline the marker above
-                # (`offload-lane-appends-folded-events-off-main-task`) prescribes is in place —
-                # its audit rows travel the same `_append_proposal_event` protocol — or state here
-                # why the batch lane is exempt.
-                ideas, telemetry, dropped_batch = self._consume_batch_proposal(
+                # OFF THE EVENT-LOOP THREAD, through the SAME helper the other batch call site
+                # uses — see `orchestrator.py::_await_batch_proposal` for why the sink is not
+                # optional and why the beacon travels with it. This branch is reachable whenever a
+                # card run stages a multi-draft lane, e.g. an occupancy-paced create fired precisely
+                # BECAUSE an eval is in flight, and while it ran no eval terminal, watchdog tick or
+                # timer could land. On the shipped default width it is the path a run takes.
+                ideas, telemetry, dropped_batch = await self._await_batch_proposal(
                     proposal_state, len(raw))
                 for offset, (action, idea, record) in enumerate(
                         zip(raw, ideas, telemetry)):

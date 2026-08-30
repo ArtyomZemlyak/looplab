@@ -168,6 +168,19 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    idea forming: a refused proposal is exactly the case the discard receipt (`bd182357`) exists for.
    The guard that missed this walked `_prepare_node_idea`'s OWN AST and could not see one helper
    down; `tests/test_offload_lane_writes_no_folded_events.py` follows the call instead.
+   **The BATCH lane joined it on 2026-08-30 and was the larger half.** `_stage_card_creates` splits
+   on `len(raw) > 1 and all(kind == "draft")`, and only the per-action branch had been moved, so the
+   multi-draft branch ran `_consume_batch_proposal` -> `_propose_batch` — the same minutes-long paid
+   provider wait — as ONE event-loop callback; on the shipped default width that is the path a run
+   actually takes. The second call site, `_handle_create_actions`' concurrent-build chunk, was on the
+   main task too. Both now go through `orchestrator.py::_await_batch_proposal`, ONE helper for the
+   reason `_consume_batch_proposal` is one funnel — two hand-written offloads are two chances to
+   forget the sink, and `_propose_batch` reaches the same `_append_proposal_event`. Its `_progress`
+   beacon travels to the worker deliberately: a direct `store.append` of a DIAGNOSTIC type is what
+   this invariant permits a concurrent task by name, and a beacon left behind would announce a phase
+   from a thread no longer in it. Driven, not pinned — `tests/test_propose_does_not_freeze_the_loop.py`
+   asserts the paid call's thread is NOT the loop's and that the folded row is appended from the
+   loop's, which is the half an AST walk cannot see.
    *Concurrent build fan-out* (canonical `llm_parallel`; legacy `parallel_build`) is a further
    accepted seam: `_create_node` runs
    in worker threads (`anyio.to_thread`) that append their own node's FOLDED events (`node_created`,
