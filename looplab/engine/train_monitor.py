@@ -1172,6 +1172,30 @@ def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan,
     # `overrun_beyond_grace_s`, and there are ZERO. All six cleared the 1800 s grace outright
     # (beyond 1070.0-1802.7 s). So the bar has cost this box nothing so far — which lowers the
     # urgency without answering the question, since one node at one grace is not a rate.
+    #
+    # BOTH PARAGRAPHS ABOVE ARE NOW FALSIFIED, by `e5small-dr-unified-v11` node 3 (2026-08-30). They
+    # were true when written and the population moved under them, which is the drift CLAUDE.md warns
+    # about — so read them as history and this as the state.
+    #
+    # ACCURACY IS NOW MEASURABLE, because for the first time a projection was CONFRONTED WITH AN
+    # OUTCOME. That node's first `train` attempt drew TWELVE consecutive projections (977.2 / 1013.4
+    # / 1056.8 / 1092.3 / 1095.2 / 1098.6 / 1108.3 / 1111.5 / 1118.5 / 1118.6 / 1120.3 / 1120.6 s
+    # over 9h51m, i.e. even steadier than node 4's) and then ENDED: `stage_finished train
+    # status=timeout exit=-9 seconds=36008.207` against the manifest's declared 36000 s, at
+    # 2948/3150 steps. The projection was RIGHT — the stage did not fit — and 10.0 GPU-hours were
+    # spent finding out. Its MAGNITUDE under-reported, in exactly the direction `projected_overrun_s`
+    # promises: at the last tick (08:34:00) the stage had 506 s of wall left and an `eta_s` of
+    # 2390.3, so the true remaining overrun was ~1884 s against a stamped 1120.6 — 59 % of it. A bar
+    # keyed on precision must therefore be keyed on the projection being an UNDER-estimate, never on
+    # it being centred.
+    #
+    # AND THE SUPPRESSION HAS NOW FIRED, twelve times, on that node. Every one of those twelve rows
+    # carries `projected_overrun_s` and NOT `overrun_beyond_grace_s`: the wall is 36000 s, so the
+    # AUTO grace ceiling is min(10 %, 30 min) = 1800 s, and every projection sat under it. The
+    # engine knew from 23:30 on 08-29 — 9h12m before the kill — that the stage would not fit, wrote
+    # that down twelve times, and opened nothing, because a real overrun smaller than a rescue that
+    # was never granted is indistinguishable here from no overrun at all. That is the exact failure
+    # this marker describes, it is no longer hypothetical, and its price on this box is one node.
     try:
         from looplab.runtime.sandbox import resolve_deadline_grace
         grace = float(resolve_deadline_grace(grace_cap, wall))
