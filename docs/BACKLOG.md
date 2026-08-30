@@ -6627,6 +6627,52 @@ file exists to end. `tests/test_best_of_n.py` drives the broken selection AND th
   check-stage judge already names the cause in prose and the vocabulary flattens it. Whether
   `check_failed` should carry that judge's own attribution is the next question of this shape.]
 
+
+### §0.22 A "broken work item filed as a question" that cannot be told from a question (2026-08-30)
+
+`search/card_selection.py::unconsumed_card_inventory` skips every row `card_is_direction` answers
+True for. That predicate is action OWNERSHIP: `selection_provenance.action_source == "none"`, which
+the model holds equivalent to `action_owner_count == 0`. The review finding
+(`receiptless-work-reads-as-question`) said a card whose ownership receipt is MISSING **or
+AMBIGUOUS** earns the same answer as a genuine research question, so a broken WORK item is filed as
+a direction and counted by nothing.
+
+**Half of that is false by construction, and it is the half that would have mattered.**
+`events/card_ledger.py` computes `action_source` as `"none"` only when `owner_count == 0`; at
+`owner_count > 1` it is either the single source name or `"mixed"` — never `"none"`. So an
+AMBIGUOUS card is already an `experiment` to `card_kind_of`, already counted as inventory, and
+already carries `action_owner_ambiguous` on the board. Only the MISSING case can reach the clause
+at all.
+
+**And the MISSING case has never happened here.** Folding every event log on the box (9 runs):
+
+| | |
+|---|---|
+| cards | **245** |
+| rows `card_is_direction` skips | **45** |
+| of those, traceable to a registered `hypothesis_added` belief | **45 of 45** |
+| of those, a work item with a missing receipt | **0 of 45** |
+| identity kind of all 45 | `legacy_hash` (blockers `action_owner_missing` + `freshness_unknown` + `identity_not_native`) |
+
+**DIRECTION OF HARM, if it ever fires.** `unconsumed_card_inventory` is the ceiling on unconsumed
+PREFETCH, so a row it misses is UNDER-counted and the run buys MORE. That is wasted paid builds. It
+is not the failure this clause was written for: OVER-counting is what refused the raw producer lane
+on `runs/rubertlite-dr-unified-v6` for seven hours with GPU 1 at 0 %, six questions against a
+ceiling of one.
+
+**The obvious discriminator is unsound and that is why this is declined rather than fixed.**
+`identity.kind == "native"` beside `action_owner_missing` looks like exactly the missing signal —
+all 45 real directions are `legacy_hash` shadows, so the clause would be inert today. But native is
+the mint path, not the ROLE: a directions-as-first-class-rows board can author a native card that
+legitimately owns no action, and the conjunct would then count real questions as inventory and
+re-open the seven-hour starvation. A discriminator has to read what the row IS, and no field says
+that; the marker's own sentence — "closing it needs a signal that does not exist yet" — is the
+correct one.
+
+**What would reopen it:** a card in any run whose `selection_blockers` contain
+`action_owner_missing` and whose seed statement matches no `hypothesis_added` row. That query is one
+fold and is the thing to re-run, not this table.
+
 ### §0.21 The claim LADDER is designed, mostly already shipped, and its last rule cannot fire yet (2026-08-26)
 
 Two settled design records (operator tasks #57/#58) were taken off the queue to be BUILT and were

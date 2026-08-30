@@ -826,6 +826,62 @@ def test_stale_and_merged_native_work_items_fail_closed():
     assert "merged_work_items" in merged.selection_blockers
 
 
+def test_an_AMBIGUOUS_owner_is_still_WORK_and_is_still_counted_as_inventory():
+    """The half of `receiptless-work-reads-as-question` that is FALSE BY CONSTRUCTION, driven.
+
+    That review finding said a card whose ownership receipt is MISSING *or AMBIGUOUS* earns the same
+    `action_source: "none"` as a research question, so `unconsumed_card_inventory` files it as a
+    direction and nothing counts it. `card_ledger` writes `"none"` only at `owner_count == 0`; at
+    two owners it writes the single source name or `"mixed"`. So an ambiguous card is an
+    `experiment` to `card_kind_of`, is counted as prefetch inventory, and wears
+    `action_owner_ambiguous` on the board — three statements, all asserted here, because the decline
+    recorded in `docs/BACKLOG.md` §0.22 rests on them and a silent change to any one would make it
+    wrong rather than red.
+    """
+    from looplab.core.cards import card_is_direction
+    from looplab.search.card_selection import unconsumed_card_inventory
+
+    state = fold(_events([
+        *_baseline(),
+        _native_card_added("merge-a", "proposal A"),
+        _native_card_added("merge-b", "proposal B"),
+        ("card_merged", {"canonical": "merge-a", "aliases": ["merge-b"]}),
+    ]))
+    card = state.cards["merge-a"]
+    assert card.selection_provenance.action_owner_count > 1, "the fixture must really be ambiguous"
+    assert "action_owner_ambiguous" in card.selection_blockers
+    assert card.selection_provenance.action_source != "none"
+    assert card_is_direction(card) is False, (
+        "an ambiguous owner is a WORK item — mislabelling it a direction is what the finding "
+        "claimed already happens")
+    assert unconsumed_card_inventory(state) >= 1, (
+        "and it must be counted: a row the board holds and nothing can consume must bound the "
+        "prefetch, not be invisible to it")
+
+
+def test_the_kind_predicate_answers_experiment_for_every_multi_owner_spelling():
+    """The truth table the merge fixture above CANNOT reach, and the reason it is written out.
+
+    A merge of two `card_added` owners folds to `sources == {"card_added"}`, so that fixture proves
+    `count > 1` and never `action_source == "mixed"` — a mutant making `card_kind_of` read `"mixed"`
+    as a direction survived it. `"mixed"` is reachable in the ledger only by merging owners of
+    DIFFERENT sources, and it is the exact spelling the declined finding assumed was `"none"`.
+    So the rule is stated here instead: `direction` is `action_source == "none"` and nothing else.
+    """
+    from looplab.core.cards import Card, CardSelectionProvenance, card_is_direction
+
+    def _card(source, count):
+        return Card(id="c", statement="s", seed_statement="s", status="proposed", verdict="open",
+                    selection_provenance=CardSelectionProvenance(
+                        action_source=source, action_owner_count=count))
+
+    assert card_is_direction(_card("none", 0)) is True, "no owner at all IS the direction case"
+    for source, count in (("card_added", 1), ("card_added", 2), ("node", 1), ("mixed", 2),
+                          ("mixed", 257)):
+        assert card_is_direction(_card(source, count)) is False, (
+            f"{source!r} with {count} owner(s) is WORK — only 'none' is a direction")
+
+
 def test_public_dto_allowlists_selection_proof_and_downgrades_incomplete_claims():
     card = fold(_events([*_baseline(), _native_card_added()])).cards["opaque-work-item"]
     dto = public_cards({card.id: card})[card.id]
