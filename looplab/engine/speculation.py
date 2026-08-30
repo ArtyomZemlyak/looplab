@@ -80,7 +80,8 @@ CARD_BUILD_SKIP_REASONS = (
     "commit_not_allowed",        # the outer gate refused the commit
     "selection_limit_reached",   # card_budget_used hit the selection limit
     "not_selected_now",          # selection no longer picks this card — the build is INTACT
-    "card_gone",                 # the card left the board
+    "card_gone",                 # the card is ABSENT from the board (merged away, or never folded)
+    "card_dropped",              # the card is PRESENT and administratively dead (status=="dropped")
     "card_action_changed",       # the card's action is not the one this was built for
     "reservation_refused",       # the node reservation would not form
     "idea_changed",              # the reserved idea differs from the built one
@@ -1774,18 +1775,20 @@ class SpeculationMixin:
                  and (card.status == "dropped" or card.merged_into is not None))
                 or merged_away
             ):
-                # OPEN[crash-recovery-stale-close-names-no-reason] the one remaining bare close: a
-                # head recovered after a crash whose card was dropped/merged records no
-                # `skipped_reason`.
-                # proof:`present:skipped="stale")@looplab/engine/speculation.py`
-                # REVIEW 2026-08-29 (P3 durability): 8c7af6a3 gave the other two `stale` writers a
-                # reason slug so a discarded 30M-token build stops being unattributable, and the
-                # registry already holds the right word for this exit (`card_gone`); the guard
-                # `tests/test_card_build_skip_reasons.py` scans only `_claim_requested_card_build`'s
-                # returns, so this close can never go red. Crash-recovery rows are exactly the ones
-                # read post-mortem. Fix: pass the registered reason here (or a distinct
-                # merged-away slug, registered), then delete this marker.
-                return self._append_card_build_done(request, skipped="stale")
+                # THE TWO DEAD SHAPES ARE TWO REASONS, because the comment above already treats
+                # them as two facts and a post-mortem reader needs the same split. A DROPPED card is
+                # PRESENT and administratively dead — somebody or something ended it, and the build
+                # was discarded for a decision made about the card. A MERGED-AWAY card is ABSENT: its
+                # work now belongs to a canonical, and the same request against that canonical is
+                # the thing to look for. `card_gone` keeps the meaning it already has one function
+                # up (`card is None`); `card_dropped` is the new registered word for the other.
+                #
+                # This close is the one crash-recovery rows land on, i.e. exactly the rows read
+                # after the fact — which is why it was the last bare `stale` left and why leaving it
+                # bare was worse here than anywhere else.
+                return self._append_card_build_done(
+                    request, skipped="stale",
+                    skipped_reason="card_gone" if merged_away else "card_dropped")
             return False
         if not result.success:
             self._discard_spec_result(self._spec_builds.pop(key, None))
