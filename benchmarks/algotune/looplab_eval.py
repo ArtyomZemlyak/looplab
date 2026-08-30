@@ -685,7 +685,7 @@ DEFAULT_PROTECT = ("description.txt",)
 DEFAULT_PROTECT_PREFIXES = ("reference_",)
 
 # THE ARENA'S EDITING SURFACE, which is also the outer bound of what a candidate can have written.
-# `editor_functions.py` dispatches on the file's suffix (line 2109: `.pyx`/`.pxd`, with `setup.py`
+# `editor_functions.py` dispatches on the file's suffix (`.pyx`/`.pxd`, with `setup.py`
 # or `pyproject.toml` as the build recipe) and everything else it writes is Python. A file outside
 # this set beside the solver was put there by the OPERATOR, not the model.
 #
