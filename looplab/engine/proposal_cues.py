@@ -60,6 +60,7 @@ class ProposalCuesMixin:
     PROPOSAL_CUES = (
         "_cue_complexity",
         "_cue_eval_budget",
+        "_cue_llm_budget",
         "_cue_experiment_time_budget",
         "_cue_gpu_contract",
         "_cue_failure_reflection",
@@ -108,6 +109,66 @@ class ProposalCuesMixin:
             steering.append({"kind": "eval_budget", "remaining_seconds": rem,
                              "total_seconds": float(max_es), "stance": stance_key})
         return hint, steering
+
+    def _cue_llm_budget(self, state: RunState, parent, _r):
+        """The MONEY left, for the role that decides what to spend it on.
+
+        NOT gated on `budget_aware`, and that asymmetry is the finding. `budget_aware` (A5) is an
+        experiment knob over the EVAL-SECONDS cue above; a spend ceiling is not an experiment, it is
+        the constraint that ends the run. MEASURED over the probe corpus on 2026-08-29, with span
+        inputs RESOLVED through `benchmarks/algotune/span_input.py` (reading the raw `input` field
+        undercounts a chained prompt -- that error is what this measurement exists to avoid):
+
+            plan_step       6037 / 8298  = 72.8 %  see a money figure
+            deep_research    899 / 2795  = 32.2 %
+            propose            0 / 3753  =  0.0 %
+            repropose          0 / 1010  =  0.0 %
+            plan               0 / 2236  =  0.0 %
+            foresight_rank     0 /  662  =  0.0 %
+            hyp_prioritize     0 /  678  =  0.0 %
+
+        The Developer, who only implements what it is handed, is told the budget three times in
+        four. The five roles that choose WHAT TO TRY NEXT have never been told once in 8,339
+        generations -- while 50 of 50 finished runs end on `budget_exhausted` and none on any other
+        reason, `max_eval_seconds` being None on every one of them.
+
+        The bill: $3.6067 of $100.2691 corpus spend (3.6 %) lands AFTER the last evaluated node, in
+        a draw that never completes. 16 of 69 runs end holding one, 11 of them with no files at all.
+        dsDL2 is the clean case -- $0.3058 of its $1.0041, 30 % of the run, bought a node with an
+        empty `files` map, on a task where the difference between its 2.8369 and dsDL's 14.5186 is
+        that dsDL got a SECOND draw and dsDL2 did not.
+
+        Returns "" for every reason the note in `deep_research.py::_budget_note` returns "" -- no
+        accountant, no limit, a non-finite figure -- so a run with no `llm_budget_usd` gets a
+        byte-identical prompt to before.
+        """
+        try:
+            from looplab.engine.costs import find_cost_accountants
+            accountants = find_cost_accountants(self)
+        except Exception:                       # noqa: BLE001 — a cue must never end a run
+            return "", []
+        limit = 0.0
+        spent = 0.0
+        for acct in accountants:
+            try:
+                lim = float(getattr(acct, "limit", None) or 0.0)
+                spent += float(getattr(acct, "spent", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return "", []
+            limit = max(limit, lim)
+        if limit <= 0 or not math.isfinite(limit) or not math.isfinite(spent) or spent < 0:
+            return "", []
+        rem = max(0.0, limit - spent)
+        frac = rem / limit
+        stance_key = "explore" if frac > 0.5 else "selective" if frac > 0.2 else "exploit"
+        stance = ("explore broadly — most of the money is unspent" if stance_key == "explore" else
+                  "be selective — over half the money is gone" if stance_key == "selective" else
+                  "propose something that can be BUILT AND SCORED with what is left; a draw the "
+                  "run cannot finish evaluating scores nothing at all")
+        hint = (f"\nSpend guidance: ${spent:.4f} of ${limit:.4f} spent, ${rem:.4f} left "
+                f"({frac:.0%} remaining); {stance}.")
+        return hint, [{"kind": "llm_budget", "remaining_usd": rem, "total_usd": limit,
+                       "stance": stance_key}]
 
     def _cue_experiment_time_budget(self, state: RunState, parent, _r):
         # Experiment TIME-BUDGET cue (repo tasks): a training that cannot finish inside the per-experiment
