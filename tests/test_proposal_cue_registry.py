@@ -32,6 +32,13 @@ from looplab.engine.proposal_cues import ProposalCuesMixin
 EXPECTED_ORDER = (
     "_cue_complexity",
     "_cue_eval_budget",
+    # RE-PINNED 2026-08-29, deliberately. `_cue_llm_budget` sits immediately after the eval-seconds
+    # cue because it is the same sentence about a different currency, and it goes BEFORE everything
+    # that describes what to build: a proposer has to know what it can afford before it reads what
+    # went wrong last time. Measured reason: 50 of 50 finished probe runs end on `budget_exhausted`
+    # and 0 on eval seconds, while `propose`/`repropose`/`plan` saw a money figure in 0 of 7,006
+    # resolved prompts and `plan_step` saw one in 72.8 % of 8,298.
+    "_cue_llm_budget",
     "_cue_experiment_time_budget",
     "_cue_gpu_contract",
     "_cue_failure_reflection",
