@@ -100,3 +100,72 @@ def test_it_lands_within_a_few_percent_on_a_real_nine_hour_node():
     late_total = 29988.0 + late.eta_s
     assert abs(early_total - actual_total_s) / actual_total_s < 0.10, early_total / 3600
     assert abs(late_total - actual_total_s) / actual_total_s < 0.05, late_total / 3600
+
+
+# ------------------------------------------------------- the two ends must share ONE progress bar
+
+def test_a_SANITY_BAR_paired_with_a_young_train_bar_no_longer_INVENTS_an_overrun():
+    """The dangerous mix, and the reason this was fixed on 2026-08-30 rather than left noted.
+
+    `_latest_progress` reports the LAST counter in a tick's tail, whichever lane rendered it, and
+    109 of the 109 stage logs above 200 KB on this box carry more than one bar lane. Pairing
+    `rows[0]`'s done with `rows[-1]`'s done/total therefore subtracted two unrelated counters. Most
+    mixes only DEFLATE the rate, but a first window ending on a near-complete eval-on-start /
+    sanity-check bar and a last window on a young train bar gives a small positive `advanced` over a
+    real span, which OVERSTATES the per-step time.
+
+    That became load-bearing in `ac189252`: a beyond-grace `projected_overrun_s` now opens the
+    durable alert gate on its own, so an inflated ETA can mint a row about a stage that fits.
+
+    Here: a 2-step sanity bar completes, then 98 training steps in 600 s. The old pairing read
+    "98 steps in 600 s" as the TRAIN rate (6.1 s/step) and projected 10,490 remaining steps at
+    ~17.8 hours. There is only one train-bar window, so the honest answer is that no rate is
+    measurable yet.
+
+    Mutation: pair `rows[0]` with `rows[-1]` again and this returns a number instead of None.
+    """
+    windows = [_w(2, 0.0, total=2), _w(100, 600.0, total=10590)]
+    assert summarize_trajectory(windows).eta_s is None
+
+
+def test_an_in_epoch_VALIDATION_interlude_is_skipped_not_treated_as_a_wall():
+    """Coverage matters as much as correctness here. A validation bar between two train-bar windows
+    is the ORDINARY shape, so refusing whenever the previous window is on another lane would answer
+    None for most real runs and withdraw the projection entirely.
+
+    The pair is taken from the two TRAIN windows across the interlude: 100 steps in 20 s. The wall
+    time includes the validation, so the rate comes out deflated — the conservative direction.
+
+    Mutation: stop the walk at the first foreign total (the first cut of this fix) and this is None.
+    """
+    windows = [_w(100, 0.0, total=1000), _w(3, 10.0, total=361), _w(200, 20.0, total=1000)]
+    assert summarize_trajectory(windows).eta_s == (1000 - 200) * (20.0 / 100) == 160.0
+
+
+def test_no_earlier_window_on_this_lane_answers_None():
+    """Mutation: fall back to `rows[0]` when nothing matches, and the mixed pair is back."""
+    assert summarize_trajectory([_w(50, 0.0, total=361), _w(120, 10.0, total=10590)]).eta_s is None
+
+
+def test_a_bar_that_RESTARTED_inside_its_own_lane_is_not_a_rate():
+    """Equal totals do not prove one continuous count: an epoch bar re-rendering from 0 shares its
+    total with the bar before it. The nearest same-lane window being AHEAD of the last one is that
+    restart, and everything older belongs to a previous cycle.
+
+    THE FIXTURE HAS TO REACH PAST THE RESTART, and the first one did not: with every earlier window
+    AHEAD of the last, a mutant that scans on finds no usable anchor either and answers None for its
+    own reason. The mutation run said so. Here the oldest window (done 20) sits BEHIND the last
+    (done 30), so scanning past the restart at done 900 finds it and measures 10 steps in 20 s —
+    a plausible 1940 s ETA computed across a counter reset.
+
+    Mutation: `continue` past the restart instead of refusing, and this returns 1940.0.
+    """
+    assert summarize_trajectory([_w(20, 0.0), _w(900, 10.0), _w(30, 20.0)]).eta_s is None
+
+
+def test_the_ordinary_single_lane_run_is_UNCHANGED():
+    """The regression guard: with one bar throughout, the anchor is the immediately preceding window
+    and the arithmetic is exactly what it always was."""
+    assert summarize_trajectory([_w(100, 0.0), _w(200, 10.0)]).eta_s == 80.0
+    assert summarize_trajectory([_w(50, 0.0), _w(100, 5.0), _w(200, 15.0)]).eta_s == (
+        (1000 - 200) * (10.0 / 100))
