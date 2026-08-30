@@ -11,6 +11,7 @@ import math
 
 from looplab.core.models import NodeStatus, RunState, normalize_steering_context
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
+from looplab.events.types import EV_NODE_CREATED
 from looplab.search.coverage import latest_live_snapshot
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
@@ -618,15 +619,13 @@ class ProposalCuesMixin:
         except Exception:  # noqa: BLE001 — a prompt cue may never fail the build it decorates
             return ""
         seen: dict[int, int] = {}
-        # OPEN[footprint-cue-matches-event-by-literal] the event type is matched by a bare string
-        # instead of the `events/types.py` constant.
-        # proof:`present:!= "node_created":@looplab/engine/proposal_cues.py`
-        # REVIEW 2026-08-29 (P3 architecture): CLAUDE.md trap #7 — "a typo'd literal silently
-        # no-ops". This cue already answers "" on any mismatch, so a drifted spelling would
-        # silently restore the pre-cue prompt with nothing red (the fixture fabricates events with
-        # the same literal). Compare against EV_NODE_CREATED instead.
+        # THE CONSTANT, NOT THE SPELLING (CLAUDE.md trap #7: "a typo'd literal silently no-ops").
+        # This cue answers "" on any mismatch, so a drifted literal here would quietly restore the
+        # pre-cue prompt with nothing red — and a fixture that fabricates its events with the SAME
+        # literal cannot see the drift either, which is why `tests/test_footprint_cue_event_type.py`
+        # builds its rows from `EV_NODE_CREATED` itself.
         for event in events:
-            if getattr(event, "type", None) != "node_created":
+            if getattr(event, "type", None) != EV_NODE_CREATED:
                 continue
             data = getattr(event, "data", None) or {}
             idea = data.get("idea") or {}
