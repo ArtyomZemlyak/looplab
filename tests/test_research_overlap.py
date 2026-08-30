@@ -43,6 +43,68 @@ def test_memo_sig_ignores_whitespace_only_directions():
     assert research_memo_sig(_memo("s", ["d", "  "])) == research_memo_sig(_memo("s", ["d"]))
 
 
+# ------------------------------------------- the signature covers the SPLIT output, not just the union
+
+def _split(summary="s", directions=(), questions=(), experiments=()):
+    return {"summary": summary, "recommended_directions": list(directions),
+            "open_questions": list(questions), "next_experiments": list(experiments)}
+
+
+def test_two_memos_differing_ONLY_in_open_questions_are_not_the_same_memo():
+    """THE DEFECT. The prompt asks for `open_questions` and `next_experiments` beside the legacy
+    union; the signature read only the union, so two memos with the same summary and no directions
+    hashed identically. The repeat loop's convergence gate then treated the later PAID answer as
+    converged and never recorded it.
+
+    MUTATION: drop `open_questions` from the joined blob and this goes red.
+    """
+    a = _split(questions=["does the negative pool size matter below 4k?"])
+    b = _split(questions=["is the teacher checkpoint the bottleneck?"])
+    assert research_memo_sig(a) != research_memo_sig(b)
+
+
+def test_two_memos_differing_ONLY_in_next_experiments_are_not_the_same_memo():
+    a = _split(experiments=["sweep dcl_threshold over 0.1/0.2/0.4"])
+    b = _split(experiments=["raise gradient accumulation to 4"])
+    assert research_memo_sig(a) != research_memo_sig(b)
+
+
+def test_a_BOUNDARY_moving_between_two_NON_EMPTY_lists_changes_the_signature():
+    """Why the fields are delimited rather than newline-joined, and the shape that actually proves
+    it. Move the boundary between two lists that are BOTH non-empty and a newline join produces the
+    same bytes in the same order:
+
+        ["s", "a\nb", "c", ""]  ->  "s\na\nb\nc\n"
+        ["s", "a", "b\nc", ""]  ->  "s\na\nb\nc\n"
+
+    i.e. "two directions and one question" and "one direction and two questions" are one memo. That
+    is a real disagreement about what the Researcher concluded, hashed as convergence.
+
+    MY FIRST VERSION OF THIS TEST WAS VACUOUS AND THE MUTANT SAID SO: it moved a single item between
+    two lists whose neighbours were EMPTY, and the empty fields leave distinct newline runs
+    (`...teacher\n` vs `\n...teacher`), so a newline join separates them anyway and the mutation
+    stayed green. The collision needs both lists non-empty.
+
+    MUTATION: join the four parts with "\n" instead of "\x1e" and this goes red.
+    """
+    wide = _split(directions=["a", "b"], questions=["c"])
+    narrow = _split(directions=["a"], questions=["b", "c"])
+    assert research_memo_sig(wide) != research_memo_sig(narrow)
+
+
+def test_a_memo_with_NO_split_fields_still_hashes_by_its_union():
+    """170 of the 178 preserved memos predate the split and carry neither key. They must keep
+    behaving exactly as they did — absent and empty are the same memo."""
+    absent = {"summary": "s", "recommended_directions": ["d"]}
+    empty = _split(directions=["d"])
+    assert research_memo_sig(absent) == research_memo_sig(empty)
+
+
+def test_the_split_lists_get_the_same_whitespace_treatment_as_the_union():
+    assert research_memo_sig(_split(questions=["q", "   "])) == research_memo_sig(_split(questions=["q"]))
+    assert research_memo_sig(_split(experiments=[" e "])) == research_memo_sig(_split(experiments=["e"]))
+
+
 # --------------------------------------------------------------------- adaptive repeat cadence (pure)
 
 class _CadenceHost:

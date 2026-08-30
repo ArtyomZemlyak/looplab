@@ -228,17 +228,35 @@ def research_memo_sig(memo) -> str:
             return memo.get(key)
         return getattr(memo, key, None)
 
-    summary = str(_get("summary") or "").strip()
-    directions = [str(d).strip() for d in (_get("recommended_directions") or []) if str(d).strip()]
-    # OPEN[research-memo-signature-omits-split-output] the convergence key still covers only the
-    # legacy compatibility projection, not the two new memo outputs.
-    # proof:`line:blob = summary&&join(directions)@looplab/engine/research_cadence.py`
-    # REVIEW 2026-08-27 (P1 delivery): two valid memos with the same summary and an empty legacy
-    # union hash identically even when their open questions and concrete experiments differ. The
-    # repeated-research loop then treats the later paid answer as converged and never records it.
-    # Include both split lists in a canonical, field-delimited signature; the existing whitespace
-    # normalization can otherwise stay unchanged.
-    blob = summary + "\n" + "\n".join(directions)
+    def _list(key):
+        return [str(v).strip() for v in (_get(key) or []) if str(v).strip()]
+
+    # EVERY OUTPUT THE MEMO CARRIES, not just the legacy union. `recommended_directions` was the
+    # whole content of a memo when this was written; the prompt now asks for `open_questions` and
+    # `next_experiments` beside it, and two memos differing ONLY in those hashed identically — so
+    # the repeat loop treated the later PAID answer as converged and never recorded it.
+    #
+    # NOT YET SEEN, and the corpus is small enough to say why rather than to reassure: across every
+    # preserved log there are 178 memos, and only 8 carry the split fields at all (v11, the only run
+    # on code that asks for them) — `open_questions` filled on 5, `next_experiments` on 6. Zero have
+    # an empty `recommended_directions` beside a filled split list, and zero collide under either
+    # signature. So this is a latent hole in a population that is about to grow, fixed while it is
+    # still cheap, and not a rescue.
+    #
+    # FIELD-DELIMITED with `\x1e` (ASCII record separator) rather than concatenated: a newline join
+    # over three lists lets content MOVE between them without changing the hash — a question that
+    # becomes a direction is a different memo and must read as one. The character cannot appear in a
+    # model's text field, so no value can forge a boundary.
+    #
+    # IN-PROCESS ONLY and therefore free to change: the signature is `_research_attempt_step`'s
+    # return and the overlap loop's `last_sig`, and it is written to no event, no snapshot and no
+    # sidecar (grep `research_memo_sig`). Widening it cannot move a fold, a replay or a receipt.
+    blob = "\x1e".join([
+        str(_get("summary") or "").strip(),
+        "\n".join(_list("recommended_directions")),
+        "\n".join(_list("open_questions")),
+        "\n".join(_list("next_experiments")),
+    ])
     return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()[:16]
 
 
