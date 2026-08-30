@@ -5082,7 +5082,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # sits past the last stage span, so without this its generations land with no span open at
         # all -- billed, and absent from every trace surface. Measured 2026-08-29 over 68 probe
         # runs: 105 of 25,430 billed calls ($0.19 of $100.27) had no `span_id`, all of them in this
-        # window; `run.log` names the site as `tool_loop.py:821`. One span here also covers what
+        # window; `run.log` names the site as `tool_loop.py::drive_tool_loop`. One span here also covers what
         # reflection calls in turn (`_reflect_lessons`, `_comparative_lessons`), which is why those
         # two need none of their own.
         with self._op_span("reflection"):
