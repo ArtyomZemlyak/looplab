@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 184
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 185
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -132,7 +132,16 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # healthy TURN budget, which is the shape no turn count can see. It sits next to
 # `developer_session_time_budget_s` and carries the same 1200, because the two bound consecutive
 # phases of one blocked thread.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "5b88df0a54f9549fae203f3bf40b110ea8e758a6074cb5f05dd80a954bac06ea"
+# (185 since `single_command_divergence_watch`, and this row is a CORRECTION rather than a feature.
+# The field shipped in `7813032e` with no form row and no uncurated entry, so
+# `_reconcile_settings_fields` has been RED on master since that merge — a targeted suite that did
+# not include `tests/test_stage_environment.py` is what let it through, which is exactly the failure
+# mode "read the EXIT line" exists for. A row and not an uncurated entry: the honest reasons in that
+# registry are "open key set", "legacy alias", "not operator-typed" and "second-order tuning whose
+# PARENT FEATURE already has a row", and the deterministic divergence watchdog has no row of its own
+# — `train_monitor_*` is the LLM judge beside it, a different rung. So the parent clause is false
+# here and the field gets the row it should have had.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "f8e0345a83af7e4f2782456332cf079f08812d3c04a90c819c0dbeacee1c243a"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

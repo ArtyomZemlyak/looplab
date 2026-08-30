@@ -295,6 +295,17 @@ Three things it refuses, all at declaration time:
   pool lease and the container's `--gpus`; `LOOPLAB_*` is the engine's own settings namespace and
   includes `LOOPLAB_READ_FENCE_DIR`, the marker that installs the [source-tree read
   fence](generating-code.md). A declared value would silently override the run's own treatment.
+  **This refuses what the operator may DECLARE, and nothing can refuse what the node's own code
+  ASSIGNS at runtime** — a process cannot stop its own children from setting an environment
+  variable. That gap is real and was measured on `e5small-dr-unified-v11` node 3: its launcher put
+  `CUDA_VISIBLE_DEVICES = "0"` and `"1"` into two child processes, which REPLACED the engine's
+  one-device fence with PHYSICAL ordinals, so a sub-run landed on the GPU a sibling node was
+  training on — three out-of-memory failures naming two resident processes (113.44 + 19.85 GiB,
+  113.45 + 19.85 GiB, 57.23 + 81.98 GiB) and a `train` stage dead at 5,079 s. The rung against it
+  is a SENTENCE, not a check: every Developer prompt now says the fence arrives in the environment,
+  must be inherited rather than set, and that a child which sets it can destroy a sibling's work
+  (`adapters/repo_developer.py::_gpu_footprint_note`). Inherit the fence and index logically from
+  `torch.cuda.device_count()`.
 * **Anything that looks like a credential** — by name (`*_TOKEN`, `*_KEY`, `*_PASSWORD`, `AUTH`,
   `COOKIE`, `WEBHOOK`, `DSN`, …) or by value (a URL carrying inline `user:password@`). This is the
   one place the refusal is about *durability rather than danger*: a declared environment is written

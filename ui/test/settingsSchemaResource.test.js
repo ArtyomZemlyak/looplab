@@ -107,7 +107,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   than by bumping the number: the catalogue was 184 keys and removing exactly
   //   `triage_time_budget_s` gave back 183, so this is one real addition with nothing renamed
   //   away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 184)
+  //   184 -> 185 (2026-08-30): `single_command_divergence_watch`, a CORRECTION and not a
+  //   feature — the field shipped in `7813032e` with no catalogue row at all, so the
+  //   python-side reconciliation was red on master from that merge until now.
+  assert.equal(Object.keys(schema.fieldByKey).length, 185)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')

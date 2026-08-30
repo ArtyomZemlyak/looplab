@@ -72,13 +72,30 @@ def test_a_single_device_reads_as_singular_and_names_the_failure_it_prevents():
     assert "invalid device ordinal" in note
 
 
-def test_an_UNSTATED_footprint_says_nothing_rather_than_guessing():
-    """A role told "some GPUs" is worse off than one told nothing."""
-    assert _dev()._gpu_footprint_note(_idea()) == "", (
-        "MUTATION: default the count to 1 when the footprint is absent and this goes red — a "
-        "guessed fence is a claim the engine never made")
-    assert _dev()._gpu_footprint_note(_idea({})) == ""
-    assert _dev()._gpu_footprint_note(_idea({"gpus": None})) == ""
+def _states_a_count(note: str) -> bool:
+    """Does this note claim a DEVICE COUNT? The count sentence is the only part that can.
+
+    Split out on 2026-08-30, when the note gained a second, count-FREE half
+    (`_FENCE_INHERITANCE_NOTE`). The tests below used `== ""` to mean "claims no count", and those
+    two stopped being the same statement — so re-asserting emptiness would have been asserting the
+    absence of the new sentence rather than the property it was written for.
+    """
+    return "DECLARED" in note
+
+
+def test_an_UNSTATED_footprint_CLAIMS_NO_COUNT_rather_than_guessing():
+    """A role told "some GPUs" is worse off than one told nothing.
+
+    RE-VERIFIED rather than made green (2026-08-30): this asserted `== ""`, and the note is no
+    longer empty here — an undeclared footprint now carries the count-free fence sentence, which is
+    the case the `e5small-dr-unified-v11` node 3 incident was in. The property is unchanged and is
+    now stated directly: no COUNT may be invented.
+    """
+    for absent in (_idea(), _idea({}), _idea({"gpus": None})):
+        note = _dev()._gpu_footprint_note(absent)
+        assert not _states_a_count(note), (
+            "MUTATION: default the count to 1 when the footprint is absent and this goes red — a "
+            "guessed fence is a claim the engine never made")
 
 
 class _Carrier:
@@ -102,7 +119,7 @@ def test_a_BOOL_is_not_a_device_count():
     A footprint of `{"gpus": true}` states no count at all; announcing "1 GPU" about it would be
     the engine inventing a fence width out of a flag.
     """
-    assert _dev()._gpu_footprint_note(_Carrier({"gpus": True})) == "", (
+    assert not _states_a_count(_dev()._gpu_footprint_note(_Carrier({"gpus": True}))), (
         "MUTATION: relax `type(raw) is int` to `isinstance(raw, int)` and this goes red")
     # And the guard must not have become a blanket refusal on the way.
     assert "DECLARED 3 GPUs" in _dev()._gpu_footprint_note(_Carrier({"gpus": 3}))
@@ -114,16 +131,26 @@ def test_the_model_ALSO_refuses_a_bool_footprint_one_layer_up():
         "if this ever starts passing a bool through, the note's own guard is the only thing left")
 
 
-def test_a_ZERO_or_NEGATIVE_count_states_nothing():
-    assert _dev()._gpu_footprint_note(_idea({"gpus": 0})) == ""
-    assert _dev()._gpu_footprint_note(_idea({"gpus": -1})) == ""
+def test_a_ZERO_or_NEGATIVE_count_states_no_count():
+    assert not _states_a_count(_dev()._gpu_footprint_note(_idea({"gpus": 0})))
+    assert not _states_a_count(_dev()._gpu_footprint_note(_idea({"gpus": -1})))
 
 
 def test_it_is_TOTAL_over_junk_because_a_prompt_cue_must_never_fail_a_build():
-    """Same contract as `_time_budget_note`: a bare/unit-test dev with no idea states nothing."""
+    """Same contract as `_time_budget_note`: a prompt cue may never raise.
+
+    RE-VERIFIED 2026-08-30, and the contract genuinely MOVED rather than the test being made green.
+    It asserted `== ""` for every junk carrier; since the count-free fence sentence is spliced
+    whenever no count is known, a carrier that merely states no footprint now gets it. That is
+    deliberate and is the point of the change — the REPAIR path is the one that rewrites a launcher,
+    and node 3 re-ran the same broken device map three times. What must not move is TOTALITY: no
+    input may raise, and no input without a declared count may claim one.
+    """
     dev = _dev()
     for junk in (None, "an idea", 7, object()):
-        assert dev._gpu_footprint_note(junk) == ""
+        note = dev._gpu_footprint_note(junk)
+        assert isinstance(note, str), "MUTATION: let the guard raise and every build dies here"
+        assert not _states_a_count(note)
 
 
 def test_BOTH_prompt_phases_carry_it_and_the_repair_path_is_the_one_that_matters():
@@ -173,3 +200,49 @@ def test_it_rides_BESIDE_the_time_budget_note_in_both_places():
                  if isinstance(i, ast.Call) and isinstance(i.func, ast.Attribute)}
         assert {"_time_budget_note", "_gpu_footprint_note"} <= attrs, (
             f"{name} must carry both notes; found {sorted(attrs & {'_time_budget_note', '_gpu_footprint_note'})}")
+
+
+# ------------------------------------------------------ the fence is INHERITED, never re-declared
+
+def test_the_fence_sentence_rides_an_UNDECLARED_footprint_which_is_the_measured_case():
+    """THE PROPERTY, and the state the incident was actually in.
+
+    `e5small-dr-unified-v11` node 3 declared NO footprint, so the count sentence stayed silent and
+    the Developer that wrote its two-process launcher was told nothing about devices at all. Its
+    children then SET `CUDA_VISIBLE_DEVICES` to physical "0"/"1", replacing the engine's fence, and
+    one of them landed on the GPU a sibling node was training on: three OOMs naming two resident
+    processes (113.44 + 19.85, 113.45 + 19.85, 57.23 + 81.98 GiB), `train` dead at 5,079 s.
+    """
+    note = _dev()._gpu_footprint_note(_idea())
+    assert "INHERIT IT, NEVER SET IT" in note, (
+        "MUTATION: return '' for an undeclared footprint and this goes red — which is exactly the "
+        "branch node 3 took")
+    assert "CUDA_VISIBLE_DEVICES" in note
+
+
+def test_it_names_the_CONSEQUENCE_and_not_only_the_rule():
+    """An instruction with no failure attached is one the role can reason its way around — node 3's
+    launcher carried a comment explaining why its own device map was safe."""
+    note = _dev()._gpu_footprint_note(_idea())
+    assert "PHYSICAL" in note, "the ordinals a child names are physical — that IS the mechanism"
+    assert "silent" in note, "the failure looks like an OOM in your own run"
+    assert "another experiment" in note or "sibling" in note, (
+        "MUTATION: drop the collision clause and the note reads as advice about YOUR node only")
+
+
+def test_it_says_WHAT_TO_DO_and_not_only_what_to_avoid():
+    """`runtime/deps.py`'s rule, one layer up: a refusal that does not say what to write is the
+    INERT repair this whole note family exists to prevent."""
+    note = _dev()._gpu_footprint_note(_idea())
+    assert "device_count()" in note, "the role needs a way to learn its own width"
+    assert "index logically from 0" in note
+
+
+def test_a_DECLARED_footprint_carries_BOTH_halves():
+    """The two are independent facts: how many devices, and whose fence it is."""
+    note = _dev()._gpu_footprint_note(_idea({"gpus": 2}))
+    assert "INHERIT IT, NEVER SET IT" in note
+    assert "DECLARED 2 GPUs AND WILL GET AT MOST THAT MANY" in note, (
+        "MUTATION: replace the count sentence with the fence note and this goes red")
+    assert note.index("INHERIT IT") < note.index("DECLARED 2 GPUs"), (
+        "the count sentence is the SPECIFIC one and reads last, as it did before this landed")
