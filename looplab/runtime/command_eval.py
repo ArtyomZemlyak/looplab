@@ -1847,6 +1847,10 @@ class _EvalExec:
     span: object
     on_deadline: object = None
     deadline_grace_max_s: Optional[float] = None
+    # Whether the SINGLE-command path arms the deterministic divergence watchdog. Defaulted here
+    # (and last, so the non-default fields above keep their order) so a bare construction gains no
+    # kill authority it did not ask for — the same rule the LEGACY snapshot row states for a resume.
+    divergence_watch: bool = False
 
 
 @dataclass
@@ -2663,22 +2667,13 @@ def _run_single(command: list, ex: _EvalExec, *, timeout: float) -> _EvalRun:
         # multi-hour), not just a short scorer — so it gets the STALL watchdog too (health_check
         # stays off here: the NaN scan is for declared training stages, and a scorer may legitimately
         # print 'nan'; the stall watchdog is output-based and safe for any command).
-        # OPEN[single-command-eval-has-no-divergence-watchdog] the ONE eval path with no
-        # deterministic divergence kill at all.
-        # proof:absent:single_command_divergence_watch@looplab/core/config.py
-        #
-        # The stated reason above is about a SCORER, while this branch's own first line says the
-        # command IS the training. `engine/train_monitor.py::eval_log_plan` already relies on that
-        # asymmetry in the opposite direction: it grants `LOG_ROLE_TRAINING` here precisely because
-        # the LLM watchdog is this path's only early stop. What it needs before it can flip is the
-        # false-positive number nobody has taken — how often a scoring phase inside a
-        # single-command eval prints a `loss`/`grad_norm` immediately followed by nan/inf, which is
-        # what `_StageHealthMonitor._PAT` actually matches. Every single-command run preserved here
-        # (`rubertlite-dense-retrieval` node 7, `rubert-dr-0804`, `rubert-dr-0807`) is evidence for
-        # that count. The proof is over the FIX's own symbol and not over this comment: adding
-        # `health_check=True` to the call below would leave every word of this paragraph in place,
-        # so a text predicate here could never go red. The fix needs an operator switch, because
-        # the false-positive population is a property of the deployment's scorers.
+        # THE DIVERGENCE WATCHDOG IS ARMED HERE TOO SINCE 2026-08-30, under
+        # `Settings.single_command_divergence_watch`. The stated worry was a SCORER inside such a run
+        # legitimately printing `loss: nan`, and the number had never been taken: replaying the
+        # shipped `_StageHealthMonitor` over every preserved log on this box, it fires on 0 of 110
+        # `score.log` scoring phases (30 MB) and 0 of 1 `eval.log`, against 2 of 133 `train.log`
+        # which are the TRUE positives this rung exists for. It stays a SWITCH because that
+        # population is a property of the deployment's scorers, not of the engine.
         # `run.signals` is the AUTHENTICATED watchdog verdict, exactly as the staged branch above uses
         # it. `err` mixes the watchdog's marker with the CANDIDATE's own stderr, so
         # `STALL_SENTINEL in err` is forgeable: a solution that prints its metric, echoes the
@@ -2690,7 +2685,7 @@ def _run_single(command: list, ex: _EvalExec, *, timeout: float) -> _EvalRun:
         run.rc, run.out, run.err, run.timed_out = run_argv(
             ex.wrap_argv(ex.bound(command, timeout), str(ex.wd)), ex.wd, timeout + ex.grace, ex.env,
             ex.max_output_bytes, ex.cancel,
-            log_path=ex.log("eval.log"),
+            log_path=ex.log("eval.log"), health_check=bool(ex.divergence_watch),
             stall_timeout=_stall_window_for(ex.stall_timeout, timeout, ex.stall_cap),
             signals=run.signals, on_deadline=ex.on_deadline,
             deadline_grace_max_s=ex.deadline_grace_max_s)
@@ -2717,7 +2712,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      deadline_grace_max_s: Optional[float] = None,
                      subject: Optional[list] = None,
                      subject_glob: Optional[list] = None,
-                     stage_key_fn=None) -> RunResult:
+                     stage_key_fn=None,
+                     divergence_watch: bool = False) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
     (defaults to the repo/workdir root, NOT the eval `cwd` subdir — so a root-level
@@ -2820,7 +2816,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     _ex = _EvalExec(wd=wd, env=env, cancel=cancel, max_output_bytes=max_output_bytes, grace=grace,
                     is_docker=is_docker, wrap=wrap, stall_timeout=stall_timeout,
                     stall_cap=stall_cap, bound=_bound, wrap_argv=_w, log=_log, span=_sp,
-                    on_deadline=on_deadline, deadline_grace_max_s=deadline_grace_max_s)
+                    on_deadline=on_deadline, deadline_grace_max_s=deadline_grace_max_s,
+                    divergence_watch=bool(divergence_watch))
     # ONE object carries what either path produced into the metric read below, so the tail can never
     # read a name the branch that ran happened not to bind (doc 25 RA-02).
     _run = (_run_stages(stages, _ex, timeout=timeout, start_stage=start_stage, metric=metric,

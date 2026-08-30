@@ -694,6 +694,9 @@ class EvalDispatchMixin:
                 start_stage=((node.rerun_stage if node is not None else None)
                              if start_stage is _UNSET else start_stage),  # Phase 2: re-run from a stage
                 stall_cap=self.eval_stall_timeout_s,          # #6: operator-set silence-before-kill cap (0 = off)
+                # The single-command path's deterministic divergence stop (Settings; see the field's
+                # comment for the 0-of-110 scorer measurement that decided the default).
+                divergence_watch=bool(getattr(self, "single_command_divergence_watch", False)),
                 check_fn=check_fn,                            # Phase 3: optional inter-stage agentic verify
                 # THE STAGE IDENTITY INSTRUMENT. Derives each stage's reuse key before it runs and
                 # its outputs' content identity when its artifact contract passes; both ride on the
