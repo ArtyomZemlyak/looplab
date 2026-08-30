@@ -649,6 +649,30 @@ MEASURE = (
     "tens of seconds of `eval_train`, which runs it over a hundred. So profile freely and "
     "measure rarely. It profiles ONE instance and reports no speedup and no validity -- it tells "
     "you where your time is, never whether you are winning. "
+    # THE THIRD MEASUREMENT, and the only one that answers a question the model INVENTS.
+    #
+    # The arena's agent has two commands for this -- `reference <input>` and `eval_input <input>`
+    # (`campaign-final/A-integer_factorization.log`, the system prompt's command list) -- and over
+    # arm A's twenty task-arms it used them 119 and 97 times, against 177 `eval` calls. They are its
+    # two most-used diagnostics after the score itself, and the transcript shows what for:
+    # `reference {"composite": 15}` issued verbatim "to understand the problem sizes".
+    #
+    # We cannot copy the SHAPE: `run_dev_command(name)` takes a name and no arguments on purpose,
+    # so the operator's argv cannot be forged, and a `--input` flag on the checker would be a door
+    # the model has no way to open. But the CAPABILITY is already here and always was -- the
+    # reference module sits in the staged tree, and `run_probe` runs Python over that tree.
+    #
+    # It is the AFFORDANCE that was missing, and the corpus says so: 3,124 probes, of which 95
+    # (3.0 %) import the reference at all and 72 (2.3 %) call `is_solution` or `generate_problem`.
+    # The models were writing timing loops by hand next to a module that answers the question.
+    " AND YOU CAN ASK THE REFERENCE ANYTHING, ON AN INPUT YOU MAKE UP. `reference_<task>.py` is a "
+    "real module sitting in your staged tree, so a `run_probe` can import it and call it: "
+    "`generate_problem(n, random_seed=k)` builds an instance, `solve(problem)` returns the "
+    "reference's own answer, and `is_solution(problem, answer)` says whether YOUR answer would be "
+    "accepted and logs the reason when it would not. That is how you learn the input's SHAPE and "
+    "SCALE, what edge cases the reference refuses, and whether a faster-but-different formula is "
+    "still acceptable -- none of which `eval_train` or `profile` will ever tell you. It costs a "
+    "probe, it writes nothing, and it touches no baseline. "
     "THE REPORTED SCORE IS ON A SPLIT YOU CANNOT SEE. Train is what you tune against; the champion "
     "is finally scored on held-out instances from the same generator. So anything that fits the "
     "train instances SPECIFICALLY -- a lookup table, a hard-coded answer, a threshold tuned to one "
