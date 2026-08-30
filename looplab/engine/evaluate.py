@@ -2502,30 +2502,34 @@ class EvaluateMixin:
                 # objective can descend as written. Logs go FIRST in the composite so a name
                 # collision cannot shadow `read_log`, which is the only reader that knows this
                 # attempt's byte floor.
-                _repair_tools = await anyio.to_thread.run_sync(
-                    diagnosis_tools, self, workdir, _log_plan, _log_snapshot,
-                    abandon_on_cancel=True)
-                # READ FRESH, NOT FROM `events_at_start`. Every alert this reads was appended
-                # DURING the attempt that just died — a snapshot taken before the node started
-                # contains, by construction, none of them. This is the one place in the node loop
-                # where that distinction is the whole point of the read.
-                # OPEN[monitor-verdicts-read-on-event-loop] this fresh read runs ON the event loop
-                # while the line above it already pays for a worker hop.
-                # proof:present:_durable_monitor_verdicts(self.store.read_all(),@looplab/engine/evaluate.py
-                # REVIEW 2026-08-25 (efficiency): `read_all()` is incrementally cached, but the
-                # increment here is exactly one multi-hour attempt's appends (stage rows, cost rows,
-                # up to `_MAX_MONITOR_LLM_CALLS` alert rows — parsed on this thread), and the
-                # `_durable_monitor_verdicts` walk after it is O(whole log) pure Python per failed
-                # attempt. Both run between two awaits, so every concurrent eval's terminal and the
-                # whole serve/read side stall behind them — the same event-loop-callback shape that
-                # moved `card_reservation._stage_card_creates` off-thread on 2026-08-22, ONE DAY
-                # after this line landed on the loop. The fix is already half-paid: fold this read
-                # into the `to_thread.run_sync` immediately above (`EventStore` serializes via its
-                # own locks, so a worker-thread read is sanctioned — invariant #1's own note), or
-                # thread the rows out of the same lambda that builds `diagnosis_tools`. Delete this
-                # marker with the fix.
-                _monitor_verdicts = _durable_monitor_verdicts(self.store.read_all(), node_id,
-                                                              generation)
+                #
+                # THE MONITOR VERDICTS ARE READ IN THE SAME HOP, and the read is deliberately FRESH
+                # rather than from `events_at_start`. Every alert it wants was appended DURING the
+                # attempt that just died, so a snapshot taken before the node started contains, by
+                # construction, none of them — this is the one place in the node loop where that
+                # distinction is the whole point of the read.
+                #
+                # IT RODE HERE ON THE LOOP THREAD UNTIL 2026-08-30, and the honest number is small:
+                # `read_all()` warm plus the O(whole log) `_durable_monitor_verdicts` walk measured
+                # 1.0 + 0.51 ms on the largest healthy log on this box (e5small-dr-unified-v4, 10.3
+                # MB, 12,579 events) and 0.7 + 0.22 ms on rubertlite-dr-unified-v8 — once per FAILED
+                # attempt, i.e. tens of milliseconds across a whole run. The note that used to sit
+                # here said "every concurrent eval's terminal and the whole serve/read side stall
+                # behind them", which overstates it by three orders of magnitude against the paid
+                # propose call that motivated the comparison. It is folded in anyway because the
+                # hop is ALREADY PAID one line up and the term is O(log) in a run that only grows:
+                # what the loop thread is worth is not decided per call site.
+                #
+                # A worker-thread READ is sanctioned by invariant #1's own note — `EventStore`
+                # serializes `append`/`read_all` through its own locks — and nothing in this hop
+                # writes: `_durable_monitor_verdicts` is a pure filter over rows, which is what makes
+                # it safe to move where `_stage_card_creates`' proposal needed a capture sink first.
+                def _repair_inputs():
+                    return (diagnosis_tools(self, workdir, _log_plan, _log_snapshot),
+                            _durable_monitor_verdicts(self.store.read_all(), node_id, generation))
+
+                _repair_tools, _monitor_verdicts = await anyio.to_thread.run_sync(
+                    _repair_inputs, abandon_on_cancel=True)
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
                                             depth=_depth,
