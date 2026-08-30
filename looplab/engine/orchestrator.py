@@ -4375,17 +4375,31 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # research_completed/hint/hypothesis_added AFTER _dispatch_evals returns — possibly
                 # past finalize. Waiting for the append (bounded, far shorter than the compute path)
                 # is safer.
-                # OPEN[failed-initial-research-tick-receipted-again] the initial trigger is consumed
-                # only after the entire receipt -> compute -> multi-append record path succeeds.
-                # proof:absent:initial_trigger_consumed@looplab/engine/orchestrator.py
-                # REVIEW 2026-08-27 (P2 durability/cost): if `_record_deep_research` appends
-                # `research_completed` and a later hint/card append raises, this catch retries with
-                # the original cadence/strategist label. The next tick buys the same think again,
-                # writes a second durable receipt and can duplicate the completed memo because
-                # `last_sig` is still empty. Consume the one-shot trigger once its receipt/paid pass
-                # starts, while retaining an explicit status if a pre-receipt failure may retry it.
+                # THE ONE-SHOT TRIGGER IS CONSUMED HERE, at the same instant its DURABLE receipt is
+                # taken, and not at the bottom of the try. `_research_attempt_step` opens with
+                # `_record_research_attempt`, which spends the cadence/strategist gate BEFORE the
+                # provider call precisely so an interrupted think is not re-paid; leaving the
+                # in-process label set until every later statement succeeded made this loop
+                # disagree with that receipt on all three non-completing exits — the `except` below,
+                # `sig is None`, and the converged `continue` — each of which resumed the next tick
+                # still wearing the initial trigger and therefore wrote a SECOND `research_attempted`
+                # and bought the same think again.
+                #
+                # The captured `this_trig` still rides THIS pass, so the receipt, the memo's own
+                # `trigger` column and the span label are byte-identical to what they were; only the
+                # NEXT tick degrades to `repeat`, which is a real pass that still thinks and still
+                # records — it simply writes no second receipt for a gate already spent.
+                #
+                # A PRE-RECEIPT failure (the thread pool refusing the hop; the receipt append itself
+                # cannot raise — `_record_research_attempt` degrades to `attempt_id=None`) therefore
+                # spends the in-process label with nothing durable behind it. That is deliberate and
+                # costs nothing: the next tick's `repeat` pass records a memo, and the durable gate
+                # counts recorded memos as well as attempts (`_cadence_research_marks`), so the
+                # cadence advances either way. An explicit retry status for that window would be a
+                # second gate answering a question the receipt already answers.
+                this_trig, trig = trig, "repeat"
                 sig, recorded = await anyio.to_thread.run_sync(
-                    functools.partial(self._research_attempt_step, snap, trig,
+                    functools.partial(self._research_attempt_step, snap, this_trig,
                                       manual=False, last_sig=last_sig),
                     abandon_on_cancel=False)
                 if sig is None:
@@ -4404,7 +4418,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 last_sig = sig
                 converged = 0
                 next_sleep = base
-                trig = "repeat"              # subsequent passes are repeats, not the initial due trigger
+                # `trig` was already consumed above, before the paid hop — see that comment.
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation (evals joined) — must propagate
             except BudgetExceeded:

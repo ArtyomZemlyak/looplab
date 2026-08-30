@@ -672,6 +672,39 @@ class ResearchCadenceMixin:
         # signal travels on the memo/open-hypothesis channels. Widening it would put new text into
         # old logs' channel for no reader. Where a memo drew no distinction `questions` falls back
         # to `directions`, so every log already on disk folds byte-identically.
+        # EVERYTHING BELOW IS A PROJECTION OF A MEMO THAT IS ALREADY DURABLE, so it may not fail the
+        # PASS. Until 2026-08-30 these appends were unguarded and a raise in any of them travelled
+        # out of `_research_attempt_step` into the overlap loop's `except Exception`, which retried
+        # with the ORIGINAL cadence/strategist trigger and an unset `last_sig` — buying the same
+        # think again, writing a second `research_attempted` receipt and appending a SECOND
+        # `research_completed` for a memo already on disk. The paid artifact is the memo; the hint
+        # and the board rows are steering derived FROM it, and the memo body carries every
+        # direction either way, so re-paying a provider because a projection append was refused is
+        # strictly the worse trade.
+        #
+        # NOT SILENT, and that is the whole of the difference from swallowing: the loss is logged at
+        # WARNING naming which channel and how many rows, because a board that quietly did not grow
+        # is the "the run paid for a think-hard review and the board stayed empty" failure this
+        # method has now been fixed for three times.
+        #
+        # DELIBERATELY NOT WIDENED TO THE MEMO APPEND ITSELF. If `EV_RESEARCH_COMPLETED` is refused
+        # nothing durable exists, the trigger gate is still spent by the receipt, and the raise is
+        # exactly the signal the caller needs; swallowing there would discard a paid think in
+        # silence. The boundary is "is the memo on disk", not "is this an append".
+        try:
+            self._record_research_steering(memo, memo_d, directions, questions)
+        except BudgetExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001 — see above: a durable memo is not undone by this
+            _LOG.warning("deep research: memo recorded but its steering projections failed "
+                         "(%d direction hint row(s), %d question row(s)): %s",
+                         1 if directions else 0, len(questions or []), exc)
+
+    def _record_research_steering(self, memo, memo_d: dict, directions: list,
+                                  questions: list) -> None:
+        """The hint + open-belief projections of an ALREADY-DURABLE memo. Split out of
+        `_record_deep_research` so the boundary "the memo is on disk" is a place in the code and not
+        a comment — the caller's one `try` covers exactly this and nothing above it."""
         if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
             # The prefix comes from `agents/hints.py`, which FILTERS on it — a deep-research row
