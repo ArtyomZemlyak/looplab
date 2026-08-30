@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { runConstantConcepts, authoritativeNodeConcepts } from '../src/nodeProjection.js'
+import { authoritativeNodeConcepts, orderConceptTags, runConstantConcepts } from '../src/nodeProjection.js'
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 const sourceOf = name => readFileSync(join(SRC, name), 'utf8')
@@ -100,12 +100,19 @@ test('a tombstoned or aborted experiment is outside the population', () => {
 
 test('the DAG orders the chips by the split and never drops one', () => {
   const dag = sourceOf('Dag.jsx')
-  // The strip renders `conceptTags`, which is `allConceptTags` re-ORDERED — both halves are spread in,
-  // so a concept cannot be lost by the reorder. A regression here is a chip the operator stops seeing.
-  assert.ok(dag.includes(
-    '[...allConceptTags.filter(c => !runConstant.has(c)), ...allConceptTags.filter(c => runConstant.has(c))]'),
-  'the DAG must reorder by the split, keeping BOTH halves')
-  assert.ok(dag.includes('runConstantConcepts'), 'the DAG must read the shared rule, not re-derive one')
+  // This USED to pin the inline expression `[...allConceptTags.filter(c => !runConstant.has(c)), …]`
+  // that stood in ExpNode — a positive source pin, i.e. one comment away from vacuous, and one that
+  // could only ever go red for a MOVE rather than for a behaviour change. It went red for exactly that
+  // when the rule was hoisted to `nodeProjection.js::orderConceptTags` so the run-level fact could be
+  // derived once per canvas instead of once per card. The rule is now DRIVEN at its own contract in
+  // `dagRunConstantOnce.test.js`, which includes an equivalence check against that very expression.
+  // What belongs here is the JOIN: the DAG must read the SHARED rule and never re-derive one.
+  assert.ok(dag.includes('orderConceptTags'), 'the DAG must order the chips through the shared rule')
+  assert.ok(dag.includes('runConstantConcepts'), 'the DAG must read the shared split, not re-derive one')
   // …and the run-wide chips are LABELLED, so the strip cannot be re-read as "this experiment is about ESCI".
   assert.ok(dag.includes("carried by every experiment in this run"))
+  // The property the old pin was reaching for, asserted instead of spelled: a REORDER keeps both halves.
+  const { tags, ownCount } = orderConceptTags(['data/esci', 'loss/temperature'], new Set(['data/esci']))
+  assert.deepEqual(tags, ['loss/temperature', 'data/esci'], 'run-wide last, nothing dropped')
+  assert.equal(ownCount, 1, "and the note's count is of the node's OWN tags")
 })

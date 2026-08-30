@@ -9,7 +9,7 @@ import { nodeChip } from './report.js'
 import { forkChip } from './forkProvenance.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts } from './conceptChips.js'
-import { conceptMaterializationStatus, runConstantConcepts } from './nodeProjection.js'
+import { conceptMaterializationStatus, orderConceptTags, runConstantConcepts } from './nodeProjection.js'
 import { dagCollapsedKey, dagLayoutProjection } from './dagProjection.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
@@ -207,6 +207,10 @@ export function dagObjectiveSourceLabel(node) {
   return objectiveSourceCaveated(source) ? `objective ${OBJECTIVE_SOURCE_LABEL[source.channel]}` : null
 }
 
+// One shared empty set, so a card with no run-level fact in its `data` keeps a STABLE memo key
+// across renders instead of minting a fresh Set identity every time.
+const EMPTY_RUN_CONSTANT = new Set()
+
 function ExpNode({ data }) {
   const { node, state, workIds, selectedId, onSelect, themeFilter, groupTint,
     onOpenActions, actionsOpen } = data
@@ -240,22 +244,19 @@ function ExpNode({ data }) {
   // and the expander still lists them all — and the run-wide ones are marked so the strip cannot be
   // re-read as "this experiment is about ESCI". Empty (hence today's order) whenever the split cannot
   // be made over every experiment: see nodeProjection.js::runConstantConcepts.
-  // OPEN[dag-run-constant-per-node-recompute] N x O(N.|tags|) identical work per poll tick.
-  // proof:present:(efficiency):@ui/src/Dag.jsx
-  // REVIEW 2026-08-18 (efficiency): a RUN-level fact derived inside the per-NODE component — every
-  // ExpNode computes `runConstantConcepts(state, …)`, an intersection over ALL active experiments'
-  // canonicalized memberships, in its own useMemo whose deps (`state.node_concepts`, `state.nodes`,
-  // …) get fresh identities on every poll of a live run, so an N-node canvas does N × O(N·|tags|)
-  // identical work per tick for a value that is the same in every component. Fix direction: compute
-  // once in Dag (or the canvas/layout memo) and pass the Set through node `data`.
-  const runConstant = useMemo(() => runConstantConcepts(
-    state, (ids, key) => nodeCanonicalConcepts(state.node_concepts, key, state.concept_consolidation || {})),
-    [state.node_concepts, state.nodes, state.aborted_nodes, state.concept_consolidation,
-      state.node_concept_materialization_receipts])
-  const conceptTags = useMemo(() => (runConstant.size
-    ? [...allConceptTags.filter(c => !runConstant.has(c)), ...allConceptTags.filter(c => runConstant.has(c))]
-    : allConceptTags), [allConceptTags, runConstant])
-  const ownConceptCount = conceptTags.length - conceptTags.filter(c => runConstant.has(c)).length
+  //
+  // The set arrives as a PROP and is never derived here. "Constant across the run" is a RUN-level fact,
+  // and deriving it per CARD made an N-node canvas run the same O(N·|tags|) intersection N times on
+  // every poll tick, for a value identical in every component — measured on the largest canvas this box
+  // has drawn (rubertlite-dense-retrieval, 81 nodes, the real canonicalizer): 22.2 ms per tick against
+  // 0.275 ms computed once, i.e. 21.96 ms of duplicate work, and O(N²) in nodes. `base` already re-runs
+  // on every state revision and already closes over `state`, so the fact is derived there and shared.
+  // An ABSENT prop is the same empty set the fail-closed rule returns — no claim, arrival order kept,
+  // nothing marked run-wide — which is what keeps a card rendered outside that memo honest rather than
+  // silently re-deriving a second answer.
+  const runConstant = data.runConstant || EMPTY_RUN_CONSTANT
+  const { tags: conceptTags, ownCount: ownConceptCount } = useMemo(
+    () => orderConceptTags(allConceptTags, runConstant), [allConceptTags, runConstant])
   const conceptPreview = <>
     {conceptStatus === 'partial' && <span className="nc-tag more" title="Incomplete concept materialization">PARTIAL</span>}
     {conceptTags.slice(0, 2).map(c => <span key={c} className={'nc-tag' + (runConstant.has(c) ? ' run-wide' : '')}
@@ -578,6 +579,11 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     const groupOrder = new Map([...groups.keys()].map((k, i) => [k, i]))
     const tintOf = (k) => groupColor(k, groupOrder.get(k))
     const banded = groupMode === 'theme' || groupMode === 'niche'
+    // A RUN-level fact, derived ONCE per state revision and handed to every card through `data`: the
+    // concepts EVERY active experiment carries, which therefore say nothing about any one of them.
+    // See the note in ExpNode for why it may not be derived there (22.2 ms/tick vs 0.275 ms at N=81).
+    const runConstant = runConstantConcepts(state,
+      (ids, key) => nodeCanonicalConcepts(state.node_concepts, key, state.concept_consolidation || {}))
 
     // Focus+context (Prefect-style): the transitive ancestor+descendant set of the SELECTED node — the
     // rest of the forest dims so "how did we get to this experiment / where did it lead" reads on a
@@ -659,7 +665,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         || (highlightIds && !highlightIds.has(n.id))
       rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1, width: NODE_W, height: NODE_H,
         focusable: false,
-        data: { node: n, state, workIds, selectedId, onSelect, themeFilter, dim: dimmed,
+        data: { node: n, state, workIds, selectedId, onSelect, themeFilter, dim: dimmed, runConstant,
                 groupTint: inLane ? tintOf(gkey) : null, onOpenActions: onNodeAction ? openActions : null,
                 // actionsOpen is injected by the cheap `nodes` memo below, keyed on menu?.nodeId — so
                 // opening/moving the action menu does NOT rebuild this whole (layout-heavy) memo.
