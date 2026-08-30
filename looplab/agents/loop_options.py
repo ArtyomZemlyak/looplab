@@ -165,6 +165,11 @@ EXPLICIT_ONLY_LOOP_ARGS: tuple[str, ...] = (
     "on_budget",                                # …and the one that fires when the loop RAN OUT
     "nudge_prompt", "stuck_prompt",             # prompt CONTRACTS — kept verbatim at the owning site
     "emit_retries",                             # per-call; nothing derives it from Settings
+    # Whether a forced emit on an exit with NO retry turn may skip `validate`. A per-call
+    # POLICY that belongs beside the callback it modifies: only the repair session wants it,
+    # and a settings bundle that could turn it on for the stages caller would silently
+    # disable the operator's wall-budget and manifest-collision checks.
+    "terminal_salvage",
 )
 
 

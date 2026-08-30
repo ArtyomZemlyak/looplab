@@ -1723,6 +1723,14 @@ class LLMRepoDeveloper:
                           self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
                           finalize=_finish, validate=_validate_repair,
+                          # THE ONE CALLER THAT OPTS IN. On an exit with no turn left, bouncing this
+                          # summary only drops it and falls to the `lambda m: ""` below — which
+                          # discards `rollback_stage` and leaves `repair_verdict` empty, so
+                          # `is_developer_stuck` can never fire. Accepting an unverified summary is
+                          # strictly better, and the durable `inert`/`unmet` verdicts grade it on
+                          # BYTES downstream. No other caller may have this: the stages session's
+                          # `validate` is the operator's wall budget and manifest-collision fence.
+                          terminal_salvage=True,
                           fallback=lambda m: "", on_budget=self._note_session_budget,
                       **self._session_opts())
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
