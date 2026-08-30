@@ -13,7 +13,8 @@ import re
 from looplab.core.models import Idea
 
 
-def critique(idea: Idea, code: str, *, submission_file: str | None = None) -> list[dict]:
+def critique(idea: Idea, code: str, *, submission_file: str | None = None,
+             scorer_in_tree: bool = True) -> list[dict]:
     """Return a list of {issue, detail} the critic flags (empty == looks fine).
 
     `submission_file`: set when the run is graded OUT-OF-PROCESS by a host grader (MLE-bench, and
@@ -23,6 +24,19 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None) -> li
     that merely doesn't happen to use the word "metric" (e.g. an MLE-bench solution that writes
     submission.csv). When host-graded we therefore swap the metric checks for a check that the
     submission file is actually written. Left None for legacy in-workdir grading.
+
+    `scorer_in_tree`: False when the eval command's entrypoint is NOT a file in the candidate's own
+    tree — a task-supplied harness that takes the submission as an ARGUMENT and prints the score
+    itself. Then the candidate is a library with no output contract at all, and `no_metric_output`
+    is the same category error the paragraph above describes for MLE-bench. MEASURED on the
+    AlgoTune corpus 2026-08-29: the critic ran on 34 nodes and flagged `no_metric_output` on 34 of
+    34, because the eval stage runs `benchmarks/algotune/looplab_eval.py --solver solver.py` and
+    the solver prints nothing, ever. Switching the check to the task's DECLARED metric key would
+    have made it WORSE, not better — that key is `speedup`, and 0 of 213 solvers reference it
+    against 5 that mention `metric`.
+
+    `hardcoded_metric` is NOT suppressed with it: that one is the hard gate, and a literal metric
+    value sitting in a candidate is suspicious no matter who computes the score.
     """
     code = code or ""
     issues: list[dict] = []
@@ -44,8 +58,9 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None) -> li
                            "detail": f"code never references '{name}' — the host grader would have "
                                      "no submission to score"})
     else:
-        # In-workdir grading: the solution must compute and emit the metric itself.
-        if "metric" not in code:
+        # In-workdir grading: the solution must compute and emit the metric itself -- but only
+        # when the thing being RUN is the solution. See `scorer_in_tree` in the docstring.
+        if scorer_in_tree and "metric" not in code:
             issues.append({"issue": "no_metric_output",
                            "detail": "code never references 'metric' — it may not emit the required score"})
         # Flag a literal metric value ({"metric": 0.95}) ONLY when nothing in the code assigns the
@@ -126,7 +141,32 @@ def _param_is_referenced(pname: str, code: str) -> bool:
     return bool(leaf) and leaf != pname and bool(re.search(rf"\b{re.escape(leaf)}\b", code))
 
 
-def critic_findings(idea, code: str, *, submission_file: str | None = None) -> list[dict]:
+def scorer_is_in_tree(task) -> bool:
+    """Whether the eval command RUNS a file from the candidate's own tree.
+
+    True — today's behaviour — whenever the entrypoint resolves to an in-repo path, and equally
+    when there is no task/eval to ask: an unknown answer must not start suppressing checks by
+    itself. False only when `entrypoint_candidates` resolves NOTHING from any scoring command,
+    which is this codebase's own existing notion of "LoopLab cannot protect the code the score
+    stage runs" (`repo_task.py::eval_entrypoint_unprotected`) and is exactly what an out-of-tree
+    harness like `looplab_eval.py --solver solver.py` looks like — measured: it resolves to [].
+    """
+    ev = getattr(task, "eval", None)
+    if ev is None:
+        return True
+    try:
+        from looplab.adapters.repo_task import entrypoint_candidates
+        argvs = [getattr(ev, "command", None) or []]
+        for st in (getattr(ev, "stages", None) or []):
+            argvs.append((st.get("command") if isinstance(st, dict)
+                          else getattr(st, "command", None)) or [])
+        return any(bool(entrypoint_candidates(argv)) for argv in argvs)
+    except Exception:                       # noqa: BLE001 — an advisory rung must never raise
+        return True
+
+
+def critic_findings(idea, code: str, *, submission_file: str | None = None,
+                    scorer_in_tree: bool = True) -> list[dict]:
     """`critique`'s issues as gate-visible trust findings (doc 25 CT-10).
 
     The `critic:` namespace decides gating, not presentation: `critic:hardcoded_metric` EXCLUDES a
@@ -136,5 +176,6 @@ def critic_findings(idea, code: str, *, submission_file: str | None = None) -> l
     from looplab.trust.findings import CRITIC_NS, finding
 
     return [finding(CRITIC_NS + str(row["issue"]), row["detail"])
-            for row in critique(idea, code, submission_file=submission_file)
+            for row in critique(idea, code, submission_file=submission_file,
+                                scorer_in_tree=scorer_in_tree)
             if row.get("issue")]

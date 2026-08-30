@@ -5000,7 +5000,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         "_load_reflection_priors_both": ("lessons", None),
         "_empty_state_for_fp": ("lessons", None),
         "_task_fingerprint": ("lessons", None),
-        "_write_reflection_note": ("lessons", "enrichment"),
+        # `_write_reflection_note` is NOT here: it now opens its own `_op_span("reflection")` and so
+        # is no longer a one-line delegator, exactly like `_maybe_distill_lessons` /
+        # `_maybe_refresh_lessons` / `_maybe_reconcile_lessons`, which have always been out of this
+        # table for the same reason. The guard below refuses a stale entry precisely because a
+        # registry that claims to check a lane it no longer reaches "reads as coverage".
         "_reflect_lessons": ("lessons", "enrichment"),
         "_append_lessons": ("lessons", None),
         "_comparative_lessons": ("lessons", "enrichment"),
@@ -5089,7 +5093,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     @in_llm_lane("enrichment")
     def _write_reflection_note(self, final: RunState) -> None:
-        return self.lessons.write_reflection_note(final)
+        # Own op-trace, like the three `lessons_*` siblings below. Run-end reflection is PAID and
+        # sits past the last stage span, so without this its generations land with no span open at
+        # all -- billed, and absent from every trace surface. Measured 2026-08-29 over 68 probe
+        # runs: 105 of 25,430 billed calls ($0.19 of $100.27) had no `span_id`, all of them in this
+        # window; `run.log` names the site as `tool_loop.py:821`. One span here also covers what
+        # reflection calls in turn (`_reflect_lessons`, `_comparative_lessons`), which is why those
+        # two need none of their own.
+        with self._op_span("reflection"):
+            return self.lessons.write_reflection_note(final)
 
     @in_llm_lane("enrichment")
     def _reflect_lessons(self, final: RunState, best, fp: list) -> list:
