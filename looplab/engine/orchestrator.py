@@ -56,6 +56,7 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_deriv
 from looplab.engine.audit import AuditMixin
 from looplab.engine.cadence import occupancy_due
 from looplab.engine.card_reservation import (CardReservationMixin, _BuildReservation,
+                                             scored_anchor,
                                             _discarded_proposal_text)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
@@ -2435,26 +2436,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Proposal is complete before durable reservation: a native Card receipt must
                 # bind the exact immutable statement/action.  The MAIN TASK serially commits
                 # card_added -> node_building for each idea, then workers only implement.
+                # ONE FOLD FOR BOTH HALVES of the score fence. `state` here was folded before the
+                # minutes-long awaited propose above, and `_reserve_node_build._plan` re-folds fresh
+                # under the CAS — so reading the id here and the ATTEMPT there recorded a pair the
+                # proposal was never scored against, and the card then read `current` in exactly the
+                # case the generation is in the receipt to catch. The stale ID is not the defect and
+                # is deliberately kept: see `scored_anchor`.
+                _anchor_id, _anchor_attempt = scored_anchor(state)
                 _reserved = [
                     # `retry_attach` stays off (default): these Ideas came from the shared batch
                     # proposal and never crossed `_prepare_node_idea._link`, so no earlier pass
                     # planned an attach for this pass to agree with.
                     #
-                    # OPEN[chunk-scored-against-stale-across-offload] `state` here was folded BEFORE
-                    # the minutes-long awaited batch propose above, and `_reserve_node_build`'s plan
-                    # re-folds everything else fresh but records this anchor VERBATIM into the
-                    # immutable Card receipt — so a best-improving terminal landing mid-propose
-                    # (impossible pre-offload: the loop was frozen) mints a durable receipt scored
-                    # against a superseded node, silently. The card lane REFUSES on exactly this
-                    # drift (`_stage_prepared_card`'s best fence); this lane records it.
-                    # proof:`line:_a, _idea,&&scored_against=state.best_node_id@looplab/engine/orchestrator.py`
-                    # REVIEW 2026-08-30 (P2 record integrity): either re-fold for the anchor at
-                    # reservation time, or record both anchors (proposed-against vs committed-at) —
-                    # the receipt is read by the freshness ladder, card_selection and
-                    # speculation_quality's replicate invariants, which assume it names the best at
-                    # reservation.
+                    # The score fence's two halves are bound ABOVE, from one fold, since
+                    # 2026-08-31. `state` here is the pre-propose fold and `_plan` re-folds fresh
+                    # under the CAS, so reading the id here and the ATTEMPT there recorded a pair
+                    # the proposal was never scored against. Half of the original finding was
+                    # WRONG and is deliberately not fixed: the stale ID is the correct record —
+                    # `cards.py::card_score_fence_state` narrowed champion-equality away on
+                    # 2026-08-13 because it killed cards permanently on an unrelated node's win,
+                    # and `card_selection` asks only that the anchor be live. Both readers want
+                    # the champion the proposal was scored under.
                     self._reserve_node_build(
-                        _a, _idea, scored_against=state.best_node_id,
+                        _a, _idea, scored_against=_anchor_id,
+                        scored_against_attempt=_anchor_attempt,
                         source="researcher",
                         steering_context=(
                             (_tel or {}).get("_steering_context", [])
@@ -5060,20 +5065,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             with self._capture_proposal_events() as captured:
                 result = await anyio.to_thread.run_sync(
                     functools.partial(self._consume_batch_proposal, state, width))
-        # OPEN[batch-offload-drops-buffered-receipts-on-raise] the publish below runs only on a
-        # clean return: a raise from the offloaded funnel (BudgetExceeded included — whose
-        # `budget_exceeded` novelty_rejected is appended by `_reject_and_repropose` BEFORE the
-        # re-raise precisely so "the rejection is on the log even though the run is ending", and
-        # which both shipped researchers propagate) exits the capture and discards every buffered
-        # folded receipt from the batch's completed rolls. Pre-offload each row was durable at emit
-        # time; driven at HEAD both ways. Cancellation at the await is NOT the trigger — the
-        # non-abandoned wait is shielded and this sync loop runs before the next checkpoint.
-        # proof:`present:for _event_type, _data, _trace_id, _span_id in captured:@looplab/engine/orchestrator.py`
-        # REVIEW 2026-08-30 (P1 durability): publish `captured` in a try/finally (append is sync and
-        # legal during unwind) or ferry it out through the result the way Layer 5's
-        # `SpecRawStageResult.audit_events` does; the per-action lane in card_reservation.py shares
-        # the shape. (A raise also skips the chunk caller's `_record_dropped_batch_cards`, but it
-        # did pre-offload too — the buffered sink rows are the regression, not that half.)
         # PUBLISHED ON THE WAY OUT, since 2026-08-31, and the `finally` is the whole of the fix.
         # A RAISE from the offloaded funnel discarded every buffered row: `_reject_and_repropose`
         # appends `budget_exceeded` through this sink and then RE-RAISES — its docstring says
@@ -5581,6 +5572,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if reserved is None:
             proposal_events = self.store.read_all()
             proposal_state = fold(proposal_events)
+            # Both halves of the score fence, from THIS fold — the paid propose below runs between
+            # here and the reservation. See `card_reservation.scored_anchor`.
+            _proposal_anchor_id, _proposal_anchor_attempt = scored_anchor(proposal_state)
             if self._build_parent_snapshot(proposal_state, action) is None:
                 return
             prospective_node_id = self._node_id_ceiling(proposal_events, proposal_state)
@@ -5608,7 +5602,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             with self._progress(PROGRESS_STAGE_BUILD, "reserve", node_id=prospective_node_id,
                                 prospective=True, operator=action.get("kind")):
                 reserved = self._reserve_node_build(
-                    action, idea, scored_against=proposal_state.best_node_id,
+                    action, idea, scored_against=_proposal_anchor_id,
+                    scored_against_attempt=_proposal_anchor_attempt,
                     source=source, steering_context=steering_context,
                     # The ordinary build spine, and the ONE site that commits an attach. `_link` above
                     # planned with the same flag, so a `debug` re-attempt of a question card-N already
@@ -6159,6 +6154,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         researcher here — but everything downstream (eval, confirmation, best-selection, lineage)
         is identical to an agent-authored node, so a hand-added winner can be selected as best."""
         state = fold(self.store.read_all())
+        _op_anchor_id, _op_anchor_attempt = scored_anchor(state)
         prepared = self._prepare_injected_node(state, req)
         idea = prepared.idea
         parents = prepared.parent_ids
@@ -6172,7 +6168,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 "parent_generations": parent_generations,
             },
             idea,
-            scored_against=state.best_node_id,
+            scored_against=_op_anchor_id,
+            scored_against_attempt=_op_anchor_attempt,
             source="operator",
             implementation_ref=implementation_ref,
             # NO ATTACH HERE, deliberately (`retry_attach` defaults off and this site keeps it off).

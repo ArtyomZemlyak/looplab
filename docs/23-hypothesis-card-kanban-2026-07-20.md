@@ -924,6 +924,29 @@ if omitted, force a fold-semantics rewrite. Land these in 1a/1b:
   a live node at that exact attempt (it need NOT still be the champion — amended 2026-08-13, see the
   **Layer-3 safety boundary** list item 3); without one, the writer must explicitly set the empty marker.
   Missing legacy fence data stays unknown and never becomes selection-ready.
+  **Both halves of the triple must be read from ONE fold** (amended 2026-08-31,
+  `card_reservation.scored_anchor`). `_reserve_node_build` takes `scored_against` from whatever its
+  CALLER folded and then re-folds fresh inside `_plan` under the log-tail CAS; taking the ATTEMPT
+  from that second fold recorded an (old id, new attempt) pair whenever the anchor re-ran in
+  between, and the fence's verdict is decided by exactly that field
+  (`scored_against_generation != anchor_attempt -> stale`). So the receipt read `current` in the one
+  case the generation exists to catch. It was unreachable while the paid propose ran ON the loop
+  thread — the loop was frozen, so the two folds were the same log — and offloading the batch
+  propose to a worker opened the window to the propose's whole duration. Callers that name an
+  anchor id therefore name its attempt too; the stale ID is deliberately NOT corrected, per item 3
+  above.
+
+```mermaid
+flowchart LR
+  F1["fold #1 (caller)<br/>best_node_id = 1<br/>attempt = 0"] -->|scored_against = 1| R
+  F1 -.->|"scored_anchor(): attempt = 0<br/>(added 2026-08-31)"| R
+  P["paid propose<br/>OFFLOADED to a worker<br/>— the loop keeps folding"] --> R
+  N["node 1 re-runs mid-propose<br/>attempt 0 -> 1"] --> F2
+  F2["fold #2 (_plan, under the CAS)<br/>node 1 attempt = 1"] -->|"attempt, BEFORE the fix"| R
+  R["card_added receipt"] --> V{"card_score_fence_state<br/>generation == live attempt?"}
+  V -->|"(1, 1) two folds"| C["current — WRONG:<br/>the metric it was scored on is gone"]
+  V -->|"(1, 0) one fold"| S["stale — correct"]
+```
 - `RunState.cards: dict[str,Card]=default_factory(dict)`, assigned only inside `_derive_cards`.
 - **Reserve now** the operator-override maps + the final-overlay phase:
   `RunState.card_priority_pins`/`card_operator_edits`/`card_resource_pins` (`default_factory=dict`), even

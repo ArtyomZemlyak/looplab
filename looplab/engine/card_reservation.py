@@ -115,6 +115,33 @@ from looplab.search.card_selection import (META_CARD_ID, SpeculativeSelectionCon
 CLAIM_ATTACHED_FIELD = "card_attached"
 
 
+def scored_anchor(state) -> tuple[Optional[int], Optional[int]]:
+    """The `(best_node_id, attempt)` a proposal is scored under, read from ONE fold.
+
+    Both halves of the card's score fence must come from the same `state` object. They used to be
+    read from two: the caller passed `scored_against=state.best_node_id` from its own fold, and
+    `_card_score_snapshot` then took `node.attempt` from the FRESH fold `_reserve_node_build._plan`
+    takes under the CAS. That was unreachable-by-construction while the propose ran on the loop
+    thread — the loop was frozen, so the two folds were the same log — and `_await_batch_proposal`
+    offloading the paid propose to a worker opened the window to the propose's whole duration.
+
+    The pair matters more than either half. `cards.py::card_score_fence_state` answers `stale`
+    exactly on `scored_against_generation != anchor_attempt`, so an anchor that RE-RAN mid-propose
+    got the OLD id beside its NEW attempt and read `current` — the one case the generation is in
+    the receipt to catch. The stale id alone is not a defect and must not be "fixed": the ladder
+    narrowed champion-equality away on 2026-08-13, deliberately, and `card_selection` asks only
+    that the anchor be live. Both readers want the champion the proposal was scored under.
+
+    `(None, None)` on an empty board is the honest answer, not a refusal — `_card_score_snapshot`
+    turns a `None` id into the `scored_against_empty` triple.
+    """
+    node_id = state.best_node_id
+    if node_id is None:
+        return None, None
+    node = state.nodes.get(node_id)
+    return node_id, (None if node is None else node.attempt)
+
+
 def _fold(events):
     """Fold THROUGH the orchestrator module attribute — see the module docstring.
 
@@ -734,7 +761,9 @@ class CardReservationMixin:
     @staticmethod
     def _card_score_snapshot(
             state: RunState,
-            requested: Optional[int]) -> Optional[tuple[Optional[int], Optional[int], bool]]:
+            requested: Optional[int],
+            requested_attempt: Optional[int] = None,
+            ) -> Optional[tuple[Optional[int], Optional[int], bool]]:
         """Identity of the node a card is scored against: `(id, attempt, empty)`, or None to REFUSE.
 
         The two falsy-looking outcomes are different answers and both are load-bearing. A bare
@@ -743,6 +772,21 @@ class CardReservationMixin:
         legitimately nothing to score against yet (no best node); that is a valid snapshot and it
         compares equal across two folds, which is what the pre-launch freshness fence needs.
         Every caller therefore checks ``is None`` BEFORE unpacking.
+
+        ``requested_attempt`` EXISTS BECAUSE THE ID AND THE ATTEMPT MUST COME FROM ONE FOLD. This
+        runs inside `_reserve_node_build._plan`, under a fresh `_fold(events)`, while `requested`
+        comes from whatever the caller folded — and since the batch propose was offloaded to a
+        thread, the loop keeps running and those two folds can be minutes apart. Reading the
+        attempt from the fresh state while taking the id from the old one mints a pair the
+        proposal was never scored against: if the anchor RE-RAN mid-propose, the receipt records
+        the new attempt beside the old id, and `cards.py::card_score_fence_state` compares exactly
+        that field to the live attempt — so the card reads ``current`` precisely when the metric it
+        was scored against no longer exists. That comparison is the whole reason the generation is
+        in the receipt ("the metric the proposal was scored against no longer exists even though
+        the id does"). Callers that name an anchor therefore name its attempt too, and the fence
+        can then honestly answer ``stale``. The STALE ID ITSELF IS NOT THE DEFECT: the freshness
+        ladder narrowed away champion-equality on 2026-08-13 on purpose, and `card_selection`
+        only checks the anchor is live — both want the champion the proposal was scored under.
         """
         score_id = state.best_node_id if requested is None else requested
         if score_id is None:
@@ -752,7 +796,8 @@ class CardReservationMixin:
         node = state.nodes.get(score_id)
         if node is None or node.tombstoned or score_id in state.aborted_nodes:
             return None
-        return score_id, node.attempt, False
+        attempt = node.attempt if requested_attempt is None else requested_attempt
+        return score_id, attempt, False
 
     @classmethod
     def _next_available_card_id(cls, events, state: RunState, excluded=()) -> str:
@@ -933,6 +978,7 @@ class CardReservationMixin:
     def _plan_native_card(cls, events, state: RunState, idea: Idea, *, parents: list[int],
                           parent_generations: dict[str, int], scored_against: Optional[int],
                           source: str, at_node: int,
+                          scored_against_attempt: Optional[int] = None,
                           implementation_ref: Optional[str] = None, excluded=(),
                           steering_context=(), cross_run_receipt=None,
                           superseded_card_id: Optional[str] = None,
@@ -976,7 +1022,7 @@ class CardReservationMixin:
         # NODE's Idea is rebuilt through the same validators at every fold, so the un-healed value was
         # already not what replay saw, only what the Developer was handed.
         idea = cls._fixed_point_idea(idea)
-        score_snapshot = cls._card_score_snapshot(state, scored_against)
+        score_snapshot = cls._card_score_snapshot(state, scored_against, scored_against_attempt)
         if score_snapshot is None:
             return _CardReservationPlan("invalid", None, None, None)
         score_id, score_generation, score_empty = score_snapshot
@@ -1095,6 +1141,7 @@ class CardReservationMixin:
 
     def _reserve_node_build(self, action: dict, idea: Optional[Idea] = None, *,
                             scored_against: Optional[int] = None,
+                            scored_against_attempt: Optional[int] = None,
                             source: str = "researcher",
                             implementation_ref: Optional[str] = None,
                             steering_context=(), cross_run_receipt=None,
@@ -1149,7 +1196,9 @@ class CardReservationMixin:
                 plan = self._plan_native_card(
                     events, state, idea, parents=parents,
                     parent_generations=parent_generations,
-                    scored_against=scored_against, source=source, at_node=node_id,
+                    scored_against=scored_against,
+                    scored_against_attempt=scored_against_attempt,
+                    source=source, at_node=node_id,
                     implementation_ref=implementation_ref, steering_context=steering_context,
                     cross_run_receipt=cross_run_receipt,
                     retry_attach=retry_attach,

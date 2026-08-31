@@ -20,6 +20,7 @@ import anyio
 
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import Idea, durable_idea_payload
+from looplab.engine.card_reservation import scored_anchor
 from looplab.events.replay import fold
 from looplab.events.types import EV_ABLATE
 
@@ -182,6 +183,7 @@ class AblationMixin:
         fail or discard the reservation AND drop the developer telemetry. A second copy is exactly
         where one half of one of those pairs goes missing without anything noticing.
         """
+        _anchor_id, _anchor_attempt = scored_anchor(state)
         reservation = self._reserve_node_build(
             {
                 "kind": "refine_block",
@@ -189,7 +191,9 @@ class AblationMixin:
                 "parent_generations": {str(parent_id): generation},
             },
             idea,
-            scored_against=state.best_node_id,
+            # One fold for both halves of the score fence (card_reservation.scored_anchor).
+            scored_against=_anchor_id,
+            scored_against_attempt=_anchor_attempt,
             source="engine",
             # `retry_attach` stays OFF (its default). An ablation child is `refine_block`, which the
             # attach resolver refuses anyway — but the flag is a per-call-site AUTHORITY, not a
