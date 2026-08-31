@@ -5347,6 +5347,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # node and raise a provider pause naming a failure that is not happening now.
             if proposed and self._refuse_degraded_proposal(candidate, main_task=False):
                 return None
+            # WHICH BOUND ENDED THE PAID PROPOSE, if any. `roles.RESEARCHER_OUTPUT_ATTRS` carries
+            # the rule; the Researcher sets it per call and "" means the model emitted on its own
+            # terms. Surfaced HERE because `_link` is the one funnel every proposal passes through,
+            # so a lane that forgets to look cannot exist. Warning-only on purpose: with
+            # `agent_max_turns`/`agent_time_budget_s` both shipping at 0 this can only fire for an
+            # operator who set a cap, and the value of saying so is telling a TRUNCATED proposal
+            # from a converged one — the distinction a cap destroys if nobody records it.
+            if proposed:
+                _bound = str(getattr(researcher, "last_budget_exhausted", "") or "")
+                if _bound:
+                    _LOG.warning(
+                        "the proposal for node %s was cut short by its %s budget — it did not "
+                        "emit on its own terms, so treat it as TRUNCATED rather than converged",
+                        prospective_node_id, _bound)
             linked = (candidate if isinstance(candidate, Idea)
                       else Idea.model_validate(candidate)).model_copy(deep=True)
             linked.card_id = None  # a Researcher/plugin can never claim writer namespace authority

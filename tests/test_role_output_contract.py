@@ -10,9 +10,10 @@ from __future__ import annotations
 import re
 
 from _source_scan import iter_sources, scan
-from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS, RESEARCHER_ACTION_ATTRS
+from looplab.agents.roles import (DEVELOPER_OUTPUT_ATTRS, RESEARCHER_ACTION_ATTRS,
+                                  RESEARCHER_OUTPUT_ATTRS)
 
-_ALL = set(DEVELOPER_OUTPUT_ATTRS) | set(RESEARCHER_ACTION_ATTRS)
+_ALL = set(DEVELOPER_OUTPUT_ATTRS) | set(RESEARCHER_ACTION_ATTRS) | set(RESEARCHER_OUTPUT_ATTRS)
 
 # Consumer probes: getattr(<expr>, "<attr>") over developer/researcher/wrapper handles.
 _CONSUMER = re.compile(r'getattr\([A-Za-z_][\w.]*,\s*"((?:last_|choose_)[a-z_]+)"')
@@ -47,7 +48,9 @@ def test_every_producer_write_is_registered():
 
 def test_registry_attrs_still_have_producers_and_consumers():
     consumers, producers = scan(_CONSUMER), scan(_PRODUCER)
-    for attr in DEVELOPER_OUTPUT_ATTRS:
+    # The two ASSIGNMENT registries share one rule; only `RESEARCHER_ACTION_ATTRS` is different
+    # (its members are methods, checked separately below).
+    for attr in (*DEVELOPER_OUTPUT_ATTRS, *RESEARCHER_OUTPUT_ATTRS):
         assert attr in consumers, f"{attr}: no engine consumer left — registry rot"
         assert attr in producers, f"{attr}: no producer left — registry rot"
     for attr in RESEARCHER_ACTION_ATTRS:
@@ -74,7 +77,8 @@ def test_foresight_panel_forwards_the_registry_attrs():
     panel.__dict__["base"] = _Base()
     # Registry-driven + identity-asserted (no `or callable` escape hatch): the __getattr__
     # proxy must return the BASE's object for every registered attr it doesn't define itself.
-    for attr in (*DEVELOPER_OUTPUT_ATTRS, *RESEARCHER_ACTION_ATTRS):
+    for attr in (*DEVELOPER_OUTPUT_ATTRS, *RESEARCHER_ACTION_ATTRS,
+                 *RESEARCHER_OUTPUT_ATTRS):
         setattr(_Base, attr, getattr(_Base, attr, object()))
         # `==`, not `is`: a bound method is re-created per getattr; equality means same
         # function + same instance, which IS the delegation guarantee we're asserting.

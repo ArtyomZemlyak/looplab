@@ -317,6 +317,23 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     "last_budget_exhausted")
 RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
 
+# The RESEARCHER's outbound ASSIGNMENTS, the mirror of `DEVELOPER_OUTPUT_ATTRS` above.
+# `RESEARCHER_ACTION_ATTRS` could not hold these: its contract test needle-checks `def {attr}(`,
+# because an action is a METHOD. These are values a role writes during a call and the engine reads
+# after it, so they need the assignment-scanning half of the same contract.
+RESEARCHER_OUTPUT_ATTRS: tuple[str, ...] = (
+    # WHICH BOUND ENDED THE PROPOSE LOOP ("turns" / "time"), "" when the model emitted on its own
+    # terms. Exactly the `last_budget_exhausted` argument the Developer half already carries, and
+    # for a sharper reason here: `agent_max_turns` and `agent_time_budget_s` both ship at 0 (no
+    # cap), so today the turn count IS where a proposal converged — which is what makes the
+    # measured distribution (24..319 turns over v11's nineteen proposals, median 62) trustworthy.
+    # The moment any cap is set, a TRUNCATED proposal and a CONVERGED one become indistinguishable
+    # in the record unless this is carried. `tool_loop.py::_note_budget` has announced it through
+    # `on_budget` since it was written; `on_budget` is in `EXPLICIT_ONLY_LOOP_ARGS`, so it can only
+    # ever arrive at a call site by hand, and the Researcher's was the one that never passed it.
+    "last_budget_exhausted",
+)
+
 # Duck-typed attributes that answer "does building one node make provider calls at all?" — the seam
 # `engine/orchestrator.py::_build_calls_an_llm` reads, and the other half of the same AUTO width
 # decision `adapters/tasks.py::TASK_OPTIONAL_HOOKS::gpu_capable` already covers. Registered for the

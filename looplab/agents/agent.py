@@ -310,6 +310,20 @@ class ToolUsingResearcher:
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
         ]
+        # WHICH BOUND ENDED THIS PROPOSE, or "" when the model emitted on its own terms.
+        # `tool_loop.py::_note_budget` has announced every cutoff since it was written, and
+        # `on_budget` is in `EXPLICIT_ONLY_LOOP_ARGS` — it can NEVER arrive through `loop_opts`, so
+        # a call site that does not pass it by hand is announcing to nobody. Crash triage passes it;
+        # the Developer session passes it; this was the one paid loop that did not, which mattered
+        # the moment anyone wanted to CAP it: with `agent_max_turns` at 0 today the turn count is
+        # where a proposal converged, and under a cap a truncated proposal would be
+        # indistinguishable from a converged one in the record. Reset per call, never accumulated.
+        self.last_budget_exhausted = ""
+
+        def _note_cutoff(payload) -> None:
+            kind = (payload or {}).get("kind") if isinstance(payload, dict) else None
+            self.last_budget_exhausted = str(kind or "")[:32]
+
         try:
             # Every loop OPTION (the turn/time/context budgets included) is folded into
             # self.loop_opts once in __init__ (see there) — pass the merged bundle straight through,
@@ -327,7 +341,7 @@ class ToolUsingResearcher:
                             else "the Developer (single-shot implement)"),
                 handoff=getattr(self, "handoff", True),
                 finalize=self._finalize, fallback=self._fallback,
-                validate=self._validate_emit, **self.loop_opts)
+                validate=self._validate_emit, on_budget=_note_cutoff, **self.loop_opts)
             return bind_idea_to_board_card(result, self._visible_board_cards)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run
             raise

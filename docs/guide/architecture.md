@@ -184,6 +184,38 @@ flowchart LR
   POL -->|"proposal remade"| X["dropped, deliberately"]
 ```
 
+### The paid propose loop, and what bounds it
+
+A card's proposal is an agentic tool loop: the Researcher reads the repo, siblings and the board
+before emitting one Idea. It is the most expensive per-card operation in the engine and its cost has
+been measured across three runs of the same task:
+
+| run | LLM turns per card | tool calls per card | median wall | median prompt tokens/call |
+|---|---|---|---|---|
+| v4 | 28.6 | 45.7 | 5.2 min | 27 011 |
+| v11 | 93.2 | 135.6 | 11.4 min | 50 177 |
+| v12 | 107.0 | 189.0 | 33.3 min | 52 231 |
+
+Nothing bounds it. `agent_max_turns`, `agent_time_budget_s` and `agent_context_budget_chars` all
+ship at "no cap", so a proposal runs until the model emits. On v11's nineteen proposals the turn
+counts were 24 … 319 (median 62) and **two proposals were 35% of the run's entire propose budget**.
+
+Because there is no cap today, a proposal's turn count *is* where it converged — which is what makes
+that distribution trustworthy. The moment a cap exists the two become indistinguishable, so the
+**receipt ships before the cap**: `roles.RESEARCHER_OUTPUT_ATTRS.last_budget_exhausted` names which
+bound ended a propose ("turns"/"time"), `""` when the model emitted on its own terms.
+
+```mermaid
+flowchart LR
+  P["ToolUsingResearcher.propose"] -->|"on_budget= (EXPLICIT_ONLY,<br/>never via LoopOptions)"| L["drive_tool_loop"]
+  L -->|"model emits"| E["Idea — last_budget_exhausted = ''"]
+  L -->|"turn/time budget gone"| N["_note_budget → salvage emit"]
+  N --> C["last_budget_exhausted = 'turns' | 'time'"]
+  E --> F["_prepare_node_idea._link<br/>the ONE funnel every proposal crosses"]
+  C --> F
+  F -->|"non-empty"| W["operator warning:<br/>TRUNCATED, not converged"]
+```
+
 ## Where each piece lives in the code
 
 | Concept | Module |
