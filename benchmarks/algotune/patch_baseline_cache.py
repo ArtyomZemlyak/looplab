@@ -85,7 +85,13 @@ PATCH = '''        {marker}
         #
         # Fail-OPEN in both directions: an unreadable cache re-measures, and an unwritable one still
         # returns a correct measurement. This must never be able to turn a good run into a bad one.
-        _ll_cache_dir = {cache_dir!r}
+        # READ FROM THE ENVIRONMENT, defaulting to the path this script was pointed at. The first
+        # version baked the path in, and the file DEPLOYED on this box does not -- somebody
+        # improved the arena's copy without updating the generator, and re-running this script
+        # would have silently undone it. Found 2026-08-31 by diffing the two.
+        _ll_cache_dir = os.environ.get(
+            'ALGOTUNE_BASELINE_CACHE_DIR',
+            {cache_dir!r})
         _ll_key = None
         if not force_regenerate and not test_mode and max_samples is None:
             try:
@@ -109,7 +115,25 @@ PATCH = '''        {marker}
                     _ll_w, _ll_c = _ll_par.resolve_workers()
                 except Exception:
                     _ll_w, _ll_c = 1, 1
-                _ll_regime = "" if _ll_w <= 1 else f"__w{{_ll_w}}x{{_ll_c}}"
+                # THE LANE WIDTH IS PART OF THE MEASUREMENT, and the serial key used to hide
+                # it. At `workers <= 1` the pool is bypassed entirely: solver and reference both
+                # run in the LANE's whole cpuset, so a reference taken by a 22-core lane and
+                # reused by an 8-core one puts numerator and denominator on different machines.
+                #
+                # `r3`, not `r2`: from 2026-08-24 a lane is built out of WHOLE PHYSICAL CORES
+                # (sibling pairs) rather than a contiguous CPU-number range, which changed which
+                # silicon a lane owns -- so every reference taken before it is from another
+                # instrument and must never be reused.
+                #
+                # Both were present in the DEPLOYED patch and absent here. Re-running the old
+                # generator would have renamed every key on disk (`__w22x1r3` -> `__w22x1`),
+                # making the whole existing ruler unreachable and silently re-measuring a new one.
+                try:
+                    _ll_lane = len(os.sched_getaffinity(0))
+                except (AttributeError, OSError):
+                    _ll_lane = 0
+                _ll_regime = (f"__lane{{_ll_lane}}r3" if _ll_w <= 1
+                              else f"__w{{_ll_w}}x{{_ll_c}}r3")
                 _ll_key = _ll_os.path.join(
                     _ll_cache_dir, f"{{_ll_task}}__{{subset}}{{_ll_regime}}.json")
                 if _ll_os.path.exists(_ll_key):
@@ -138,6 +162,25 @@ WRITE_PATCH = '''                    self._cache[subset] = baseline_times
                     # Persist ONLY a complete set: upstream retries until the count matches the
                     # dataset exactly, and a partial one would make later nodes score against a
                     # denominator drawn from a different number of instances.
+                    # ONLY WRITE INTO A CACHE SOMEBODY DELIBERATELY POINTED AT -- the same
+                    # rule `looplab_eval.py::_regime_mismatch` already applies to REFUSING a run,
+                    # and the two sides disagreed. That guard returns None (off) when neither
+                    # ALGOTUNE_BASELINE_CACHE_DIR nor --baseline-times-dir was given, on the good
+                    # ground that it must not police a directory nobody asked about. The write
+                    # side had no such restraint and defaulted straight into the live ruler.
+                    #
+                    # So an invocation with the variable unset escaped the guard AND minted a new
+                    # regime in the repo's own `.baseline_times`. Measured 2026-08-31: a
+                    # reference-against-itself diagnostic run without the variable added
+                    # `edge_expansion__train__lane22r3.json` and `pde_heat1d__train__lane22r3.json`
+                    # beside the campaign's `__w22x1r3` set -- a SECOND ruler, 28.2 ms against
+                    # 44.6 ms on the same instances, waiting for the next run at workers <= 1.
+                    # Reads still fall back to the default; only minting does not.
+                    if _ll_key and not os.environ.get('ALGOTUNE_BASELINE_CACHE_DIR'):
+                        logging.warning(
+                            "LOOPLAB baseline cache NOT WRITTEN: no ALGOTUNE_BASELINE_CACHE_DIR, "
+                            "so this run may not mint a ruler in %s", _ll_cache_dir)
+                        _ll_key = None
                     if _ll_key:
                         try:
                             import json as _ll_json2, os as _ll_os2
