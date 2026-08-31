@@ -8,6 +8,7 @@ by the main engine task.  The mixin is inert unless both Card selection and a po
 from __future__ import annotations
 
 import functools
+import collections
 import logging
 import time
 from dataclasses import dataclass, field, replace
@@ -2321,6 +2322,33 @@ class SpeculationMixin:
         raw_consumed, raw_staged = self._serve_raw_card_stage()
         if not raw_consumed:
             return
+        if not raw_staged:
+            # A PREPARED PROPOSAL WAS ABANDONED, and until 2026-08-31 that left no trace of any kind.
+            # Measured on v12: node 2's card took FIVE propose phases — four speculative ones
+            # completed `ok: true` and staged nothing (604.8 + 317.7 + 139.8 + 524.5 s = 26.5 min of
+            # its 44.6-minute bill) before the fifth minted `card-2`. The run has zero
+            # `novelty_rejected` / `card_auto_dropped` rows and its console had zero `refused` lines.
+            #
+            # THE RECEIPT DROP ABOVE IS DELIBERATE AND IS NOT WHAT THIS FIXES. `_consume_prepared_
+            # raw_stage` republishes the audit prefix only on an ATTACH refusal, because "on a
+            # stale-fence refusal the whole proposal is being abandoned and re-made, so dropping
+            # them keeps the log honest" — republishing novelty rows for work about to be repeated
+            # would double-count it. A COUNTED LINE carries no novelty rows, so it cannot.
+            #
+            # `_stage_card_creates` has counted its refusals since 6262f3a1; that counter is on the
+            # CREATE lane and this one reaches `_stage_prepared_card` by another route, so it had
+            # none. The slug comes from the same `_card_stage_refusal` that lane records, in the
+            # same `CARD_STAGE_REFUSALS` vocabulary. The DURATION is deliberately not repeated here:
+            # it is already on this phase's `phase_progress` row, and one number in two places is
+            # how they drift.
+            reason = str(getattr(self, "_card_stage_refusal", "") or "unrecorded")
+            counter = getattr(self, "_spec_raw_stage_abandoned", None)
+            if counter is None:
+                counter = self._spec_raw_stage_abandoned = collections.Counter()
+            counter[reason] += 1
+            _LOG.warning(
+                "the speculative lane abandoned a prepared proposal: %s (%d so far this run; the "
+                "seconds it cost are on its own phase_progress row)", reason, counter[reason])
         session.progressed = True
         # THE COMMIT ABOVE IS DELIBERATELY UNGATED, and `gates.stopping` is the gate it is ungated
         # against.  A prepared raw stage is already PAID FOR, and `_spec_raw_stage_result` counts in

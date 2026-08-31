@@ -260,6 +260,44 @@ flowchart TB
   U --> FIN
 ```
 
+### What a card actually costs to propose
+
+A card is not proposed once. Measured on `runs/e5small-dr-unified-v12`, node 2's `card-2` took
+**five** propose phases:
+
+| phase | seconds | lane | outcome |
+|---|---|---|---|
+| seq 1997 | 604.8 | speculative | abandoned |
+| seq 2074 | 317.7 | speculative | abandoned |
+| seq 2124 | 139.8 | speculative | abandoned |
+| seq 2202 | 524.5 | speculative | abandoned |
+| seq 2303 | 1092.8 | create | `card_added card-2` |
+| **total** | **≈2679 s = 44.6 min** | | for ONE card |
+
+The four abandoned ones are 26.5 of those 44.6 minutes, and until 2026-08-31 they left **no trace
+of any kind** — the run has zero `novelty_rejected` / `card_auto_dropped` rows and its console log
+had zero `refused` lines.
+
+**The receipt drop is deliberate and stays.** `_consume_prepared_raw_stage` republishes a proposal's
+audit prefix on an ATTACH refusal only: on a stale-fence refusal "the whole proposal is being
+abandoned and re-made, so dropping them keeps the log honest" — republishing novelty rows for work
+about to be repeated would double-count it. What was missing is the ACCOUNTING, which carries no
+novelty rows and cannot double-count: one counted warning per abandonment, naming the slug from the
+same `CARD_STAGE_REFUSALS` vocabulary the create lane has counted since `6262f3a1`.
+
+The seconds are deliberately not repeated in that line — they are already on the phase's own
+`phase_progress` row, and one number in two places is how they drift.
+
+```mermaid
+flowchart TB
+  P["speculative propose<br/>(paid, minutes)"] --> S["_stage_prepared_card"]
+  S -->|"card_id"| C["card_added — the bill ends here"]
+  S -->|"None: attach refused"| A["audit prefix PUBLISHED<br/>the work is handed to the serial spine"]
+  S -->|"None: a fence moved"| D["prefix DROPPED — deliberate,<br/>the proposal is being re-made"]
+  D --> W["counted warning: which slug, how many<br/>(added 2026-08-31 — this was silence)"]
+  W --> P
+```
+
 ## Where each piece lives in the code
 
 | Concept | Module |
