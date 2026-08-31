@@ -20,11 +20,13 @@ do. So the protocol has one owner now, and these pin it.
 from __future__ import annotations
 
 import inspect
+import textwrap
 
 import pytest
 
 from looplab.core.models import Idea
 from looplab.engine.orchestrator import Engine
+from tests._source_scan import called_names
 
 
 class _Host:
@@ -176,28 +178,78 @@ def test_a_junk_row_does_not_stop_the_valid_ones_after_it():
 # method the chunk has left is not a weaker guard, it is no guard at all.
 _CALL_SITES = ("_handle_create_actions", "_stage_card_creates")
 
-# OPEN[batch-consume-guard-stranded] RED AT HEAD: the pin below still names the pre-offload direct
-# call, and both call sites were re-routed through `Engine._await_batch_proposal` (2026-08-30)
-# without this guard moving in the same change — both parametrizations fail against production code
-# whose property still holds.
-# proof:`present:"_consume_batch_proposal(" in source@tests/test_batch_proposal_consume.py`
-# REVIEW 2026-08-30 (P1 correctness): re-point the pin at the awaited wrapper — and pin the wrapper's
-# own delegation to the shared consume funnel too, because the cheapest way to green THIS assertion
-# is to revert a call site to the sync call, i.e. the stranded guard actively rewards restoring the
-# 62-minute event-loop freeze. CLAUDE.md: a contract change must move its tests in the SAME change,
-# and the re-point is only legitimate after re-checking the property where the code went.
+# RE-POINTED 2026-08-31, at the AWAITED WRAPPER, and the chain is pinned in TWO links rather than
+# one. `56764cbd` routed both call sites through `Engine._await_batch_proposal` — the offload that
+# took the minutes-long paid batch proposal off the event-loop thread — and did not move this guard
+# in the same change, so both parametrizations went RED against production code whose property
+# still held. That is the contract-change rule in CLAUDE.md, broken by the commit this file guards.
+#
+# WHY TWO LINKS AND NOT ONE. Pinning only "the call site reaches the wrapper" leaves the cheapest
+# way to green a future failure being to revert a call site to the direct sync
+# `_consume_batch_proposal` — i.e. a one-link guard actively REWARDS restoring the 62-minute
+# event-loop freeze the offload exists to end. So the call sites must name the wrapper, and the
+# wrapper must name the funnel; neither half alone is the property.
+#
+# The negatives ride BOTH links for the same reason they rode the call sites: what must not come
+# back is READING the attribute protocol by hand, wherever the chunk now lives.
 
 
 @pytest.mark.parametrize("method", _CALL_SITES)
-def test_both_call_sites_go_through_the_shared_consume(method):
+def test_both_call_sites_go_through_the_awaited_offload(method):
     source = inspect.getsource(getattr(Engine, method))
-    assert "_consume_batch_proposal(" in source, f"{method} reads the attribute protocol by hand"
+    # AST, NOT A SUBSTRING, and this one was caught by its own mutation harness rather than
+    # reasoned about. `_stage_card_creates` carries a `# proof:` line naming
+    # `await self._await_batch_proposal(` verbatim, so a text pin over its source was satisfied by
+    # that COMMENT — reverting the real call to the sync `_consume_batch_proposal` left the guard
+    # GREEN. That is precisely the "a guard test must not be satisfiable by a COMMENT" rule, and the
+    # marker this test closes exists because the same guard had already gone stale once.
+    called = called_names(getattr(Engine, method))
+    assert any(name.endswith("_await_batch_proposal") for name in called), (
+        f"{method} no longer CALLS the offloaded batch proposal — a direct "
+        "`_consume_batch_proposal(` here is the event-loop freeze restored")
+    assert not any(name.endswith("_consume_batch_proposal") for name in called), (
+        f"{method} calls the funnel DIRECTLY again, on the event-loop thread")
     # Assigning the attributes back to [] is each caller's own reset, which deliberately stays; what
     # must not come back is READING them.
     assert 'getattr(self, "_pending_batch_telemetry"' not in source, (
         f"{method} reads the telemetry attribute directly again")
     assert 'getattr(self, "_pending_batch_dropped"' not in source, (
         f"{method} reads the dropped attribute directly again")
+
+
+def test_the_awaited_wrapper_delegates_to_the_SHARED_consume():
+    """The second link. Without it the pin above is satisfiable by hollowing the wrapper out."""
+    source = inspect.getsource(Engine._await_batch_proposal)
+    assert "_consume_batch_proposal" in source, (
+        "the offload must still go through the ONE funnel — reading the attribute protocol inside "
+        "the wrapper is the same defect one frame down")
+    assert 'getattr(self, "_pending_batch_telemetry"' not in source
+    assert 'getattr(self, "_pending_batch_dropped"' not in source
+
+
+def test_the_wrapper_really_OFFLOADS_and_publishes_from_the_main_task():
+    """...and it is an OFFLOAD, not a rename. Both halves, because either alone is a different bug:
+    a sync call on the loop is the freeze, and a `to_thread` with no capture is the invariant-#1
+    breach (`_append_proposal_event` falls through to `store.append` with no sink installed).
+
+    AST, not substrings, for the two calls that must be PRESENT — a comment naming either would
+    satisfy a text pin, which is exactly what CLAUDE.md's ladder warns about.
+    """
+    import ast
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(Engine._await_batch_proposal)))
+    called = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                called.add(func.attr)
+            elif isinstance(func, ast.Name):
+                called.add(func.id)
+    assert "run_sync" in called, "the paid batch proposal must leave the event-loop thread"
+    assert "_capture_proposal_events" in called, (
+        "the folded proposal events must be BUFFERED — an uncaptured offload appends them from a "
+        "worker, which invariant #1 forbids and `_proposal_authority_seq` is fenced on")
 
 
 @pytest.mark.parametrize("method", _CALL_SITES)
