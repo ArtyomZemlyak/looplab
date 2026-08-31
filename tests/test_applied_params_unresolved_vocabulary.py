@@ -74,3 +74,55 @@ def test_a_boolean_carrier_value_still_reads_as_absent_and_that_is_the_declined_
     assert record["applied"] == {"loss.temperature": 0.05}
     assert record["unresolved"] == {"loss.use_batch_centering": param_carriers.UNRESOLVED_ABSENT}
     assert record["checked"] == 1 and record["declared"] == 2
+
+
+def _tmp(files: dict):
+    import pathlib
+    import tempfile
+
+    root = pathlib.Path(tempfile.mkdtemp())
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return root
+
+
+def test_an_AMBIGUOUS_document_survives_a_settled_reading_from_another_carrier():
+    """THE PROPERTY: `ambiguous` is a fact about the DECLARATION, so no other carrier settles it.
+
+    The document branch already refuses to let a later `absent` overwrite it — "it is a fact about
+    the DECLARATION, not about one file" — and until 2026-08-31 the settle loop popped it anyway
+    whenever any carrier answered the key once. The record then said the coordinate was cleanly
+    answered about a node whose own config defines it at two or more leaves, possibly at two OTHER
+    numbers.
+
+    MUTATION: restore the bare `unresolved.pop(key, None)` and this goes red.
+    """
+    root = _tmp({
+        "config.yaml": ("train:\n  training:\n    batch_size: 512\n"
+                        "test:\n  training:\n    batch_size: 64\n"),
+        "train.py": "config.training.batch_size = 4096\n",
+    })
+    record = bind_applied_params({"training.batch_size": 8192.0}, str(root),
+                                 carriers=("config.yaml", "train.py"))
+    assert record is not None, "the .py carrier must answer, or this fixture proves nothing"
+    assert record["applied"] == {"training.batch_size": 4096.0}, (
+        "the settled reading still rides — this fix withholds nothing")
+    assert record["unresolved"] == {"training.batch_size": param_carriers.UNRESOLVED_AMBIGUOUS}, (
+        "MUTATION: pop unconditionally and the plural document vanishes from the record")
+
+
+def test_an_ABSENT_marker_is_still_popped_by_a_settled_reading():
+    """The negative control, and the half the narrowing must not eat: a carrier that simply does not
+    mention the key says nothing about the declaration, so a later answer settles it clean."""
+    root = _tmp({
+        "config.yaml": "loss:\n  temperature: 0.05\n",
+        "train.py": "config.training.batch_size = 4096\n",
+    })
+    record = bind_applied_params({"training.batch_size": 8192.0}, str(root),
+                                 carriers=("config.yaml", "train.py"))
+    assert record is not None
+    assert record["applied"] == {"training.batch_size": 4096.0}
+    assert "unresolved" not in record or "training.batch_size" not in record["unresolved"], (
+        "MUTATION: keep every marker and an ordinary answered coordinate reads as unresolved")

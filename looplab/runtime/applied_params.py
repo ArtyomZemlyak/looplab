@@ -259,6 +259,12 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
          "diverged": [{param, declared, applied, line, match}],
          "stages": [str],                      # THE PIPELINE THESE COORDINATES ARE CLAIMED ABOUT
          "unresolved": {key: "absent" | "ambiguous" | "conflict"},
+                                               # A KEY MAY APPEAR IN BOTH `applied` AND HERE, since
+                                               # 2026-08-31, and only as `ambiguous`: one carrier
+                                               # answered the coordinate and ANOTHER was unreadably
+                                               # plural about it. `absent` and `conflict` stay
+                                               # mutually exclusive with `applied` — nothing was
+                                               # said, and two carriers disagreed, respectively.
                                                # `absent`/`ambiguous` are `param_carriers`' two words
                                                # for one document's answer; `conflict` is THIS
                                                # function's own third (UNRESOLVED_CONFLICT below) and
@@ -356,29 +362,40 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
     #
     # So a conflicted coordinate is NOT in `applied`; it rides in `conflicts` with EVERY reading and
     # the file each came from, and `unresolved` names it `conflict`. Surfaced, never settled.
-    # OPEN[applied-ambiguous-popped-by-python-settle] a document's `ambiguous` refusal is silently
-    # popped here when a `.py` carrier answers the same key.
-    # proof:line:where[key]&&(rel,@looplab/runtime/applied_params.py
-    # REVIEW 2026-08-25 (correctness): the document branch above is careful that an `ambiguous`
-    # refusal "OUTRANKS a later `absent`" — it is a fact about the DECLARATION — but the Python
-    # branch offers its reading without touching `unresolved`, and this pop then erases the marker
-    # whenever the `.py` side settles to one value. The record that results says K = 4096, clean,
-    # about a node whose own config document defines K at two or more leaves (possibly two OTHER
-    # numbers): a three-way disagreement rendered as a single answered coordinate, which is the
-    # settling this block's own heading forbids — the ambiguous document's readings never reach
-    # `readings`, so the conflict rule cannot see them either. Reachable on this corpus: the
-    # measured bare-suffix shapes (a `batch_size`-family declaration matching sibling `train.*` and
-    # `test.*` leaves) plus the same key assigned once in `train.py`, i.e. the 51-of-54
-    # both-families population. Fix direction: only pop an `absent` marker here — keep `ambiguous`
-    # beside the applied value (or demote the coordinate to `conflicts` with the document named as
-    # unreadably plural), then delete this marker.
+    # AN `ambiguous` REFUSAL SURVIVES A SETTLED READING, and only `absent` is popped. The document
+    # branch above is already careful that `ambiguous` "OUTRANKS a later `absent`" because it is a
+    # fact about the DECLARATION rather than about one file — and until 2026-08-31 this pop erased it
+    # anyway, whenever any other carrier settled the same key to one value. The `.py` branch is the
+    # reachable route: it offers its reading without touching `unresolved`.
+    #
+    # WHAT THAT RECORD SAID. `K = 4096`, clean, about a node whose own config document defines K at
+    # two or more leaves — possibly at two OTHER numbers — i.e. a three-way disagreement rendered as
+    # a single answered coordinate, which is exactly the settling this block's heading forbids. The
+    # ambiguous document's readings never reach `readings`, so the conflict rule cannot see them
+    # either; the marker was the only trace, and the pop removed it.
+    #
+    # KEPT BESIDE THE APPLIED VALUE, not demoted to `conflicts`, and the distinction is the point:
+    # `conflict` means two carriers each ANSWERED once and disagreed. An ambiguous document answered
+    # ZERO times. Reusing the word would make it mean two things, which is the coarse-vocabulary
+    # defect this file exists to end. A key may now appear in `applied` AND in `unresolved`, and that
+    # pair is the honest reading — one carrier answered, another was unreadably plural.
+    #
+    # NOT SEEN ON THIS CORPUS, and the number is NOT reconciled: re-deriving over all 61 preserved
+    # workdirs (743 declared coordinates) finds ZERO document-`ambiguous` answers, while
+    # `core/param_carriers.py`'s own recorded corpus figure is "5 refused as ambiguous" over 529
+    # comparable declarations. The two do not agree and this comment does not pretend they do — the
+    # re-derivation walks the whole workdir rather than the carriers the ENGINE staged, and it
+    # silently skips a document that fails to parse. So this ships on CONSTRUCTION: the pop is
+    # provably wrong for `ambiguous` by the document branch's own stated rule, and narrowing it
+    # cannot lose information the record already holds.
     for key, seen in readings.items():
         if len(seen) == 1:
             value = next(iter(seen))
             rel, line, how = seen[value]
             applied[key] = value
             where[key] = (rel, line, how)
-            unresolved.pop(key, None)
+            if unresolved.get(key) != param_carriers.UNRESOLVED_AMBIGUOUS:
+                unresolved.pop(key, None)
         else:
             unresolved[key] = UNRESOLVED_CONFLICT
             conflicts.append({"param": key, "declared": declared[key],
