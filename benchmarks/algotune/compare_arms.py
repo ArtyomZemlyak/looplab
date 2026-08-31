@@ -228,6 +228,27 @@ def _arm_b_final(final_json: Path) -> tuple[float | None, str]:
     return value, reason
 
 
+def _arm_b_regime(final_json: Path) -> str | None:
+    """The RULER this row was measured on, if the row says.
+
+    A speedup is a ratio and its denominator is a reference measured under a regime: `__lane<N>r3`
+    when the evaluation pool is bypassed, `__w<W>x<C>r3` otherwise. On this box those two references
+    sum to 3898 ms and 2976 ms over the same hundred instances, so a table that averages rows from
+    both is averaging numbers off two instruments. Until 2026-08-30 no result carried its regime at
+    all, which is why this reads defensively: a row from an older campaign simply says nothing, and
+    "unstated" is reported as itself rather than folded into whichever key happens to be present.
+    """
+    try:
+        row = json.loads(final_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    block = row.get("eval_regime") if isinstance(row, dict) else None
+    if not isinstance(block, dict):
+        return None
+    key = block.get("key")
+    return str(key) if key else None
+
+
 def _arm_b_train(run_dir: Path) -> float | None:
     """The LoopLab run's own champion metric — a TRAIN number, reported only as context."""
     if not (run_dir / "events.jsonl").exists():
@@ -734,6 +755,28 @@ def main() -> int:
         print(f"{len(skipped)} task-arm(s) were SKIPPED by the operator and never ran, so this "
               f"table is over {len(rows) - len(skipped)} of {len(rows)} tasks: "
               + ", ".join(skipped))
+    # ONE TABLE, ONE INSTRUMENT -- or say so. `looplab_eval.py::_emit` stamps `eval_regime` on
+    # every line it prints, so a mean taken across two baseline regimes is now visible instead of
+    # being a property of the environment two scripts happened to run under. Rows written before
+    # 2026-08-30 carry no regime and are counted as "unstated" rather than assumed to match.
+    seen_regimes: dict[str, list[str]] = {}
+    for task, *_rest in rows:
+        key = _arm_b_regime(args.final_dir / f"B-{task}.final.json") if args.final_dir else None
+        seen_regimes.setdefault(key or "unstated", []).append(task)
+    stated = {k: v for k, v in seen_regimes.items() if k != "unstated"}
+    if len(stated) > 1:
+        print("ARM B'S ROWS WERE MEASURED ON MORE THAN ONE BASELINE REGIME, so the mean above is "
+              "taken\nacross two instruments and is not one number:")
+        for key in sorted(stated):
+            print(f"  {key:<14} {len(stated[key])} task(s): " + ", ".join(sorted(stated[key])))
+        if "unstated" in seen_regimes:
+            print(f"  {'unstated':<14} {len(seen_regimes['unstated'])} task(s) whose result "
+                  f"predates the regime being recorded at all")
+    elif stated and "unstated" in seen_regimes:
+        print(f"{len(seen_regimes['unstated'])} of {len(rows)} arm-B rows do not state the "
+              f"baseline regime they were measured on;\nthe rest say {next(iter(stated))}. A row "
+              f"that does not say cannot be shown to be comparable.")
+
     unfinished = sorted(t for t, _, _, _, st, *_ in rows if st in ("unfinished", "refused"))
     if unfinished:
         print(f"{len(unfinished)} task-arm(s) have no .done marker from campaign.sh and are still "
