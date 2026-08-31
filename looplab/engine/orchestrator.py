@@ -5054,9 +5054,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # gave the watchdog tick its own pool for it; the proposal lanes (this one and the
         # per-action offload in card_reservation.py) got none. Give them a small dedicated
         # CapacityLimiter the way the watchdog has one.
-        with self._capture_proposal_events() as captured:
-            result = await anyio.to_thread.run_sync(
-                functools.partial(self._consume_batch_proposal, state, width))
+        captured: list = []
+        try:
+            with self._capture_proposal_events() as captured:
+                result = await anyio.to_thread.run_sync(
+                    functools.partial(self._consume_batch_proposal, state, width))
         # OPEN[batch-offload-drops-buffered-receipts-on-raise] the publish below runs only on a
         # clean return: a raise from the offloaded funnel (BudgetExceeded included — whose
         # `budget_exceeded` novelty_rejected is appended by `_reject_and_repropose` BEFORE the
@@ -5071,8 +5073,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # `SpecRawStageResult.audit_events` does; the per-action lane in card_reservation.py shares
         # the shape. (A raise also skips the chunk caller's `_record_dropped_batch_cards`, but it
         # did pre-offload too — the buffered sink rows are the regression, not that half.)
-        for _event_type, _data, _trace_id, _span_id in captured:
-            self.store.append(_event_type, _data, trace_id=_trace_id, span_id=_span_id)
+        # PUBLISHED ON THE WAY OUT, since 2026-08-31, and the `finally` is the whole of the fix.
+        # A RAISE from the offloaded funnel discarded every buffered row: `_reject_and_repropose`
+        # appends `budget_exceeded` through this sink and then RE-RAISES — its docstring says
+        # "appended BEFORE re-raising so the rejection is on the log even though the run is ending"
+        # — and both shipped researchers propagate it. Pre-offload each row was durable at emit
+        # time; buffering silently made the publish conditional on a clean return. `store.append`
+        # is sync and legal during unwind. Cancellation was never the trigger (the non-abandoned
+        # wait is shielded, so this ran before the next checkpoint) and is unaffected.
+        finally:
+            for _event_type, _data, _trace_id, _span_id in captured:
+                self.store.append(_event_type, _data, trace_id=_trace_id, span_id=_span_id)
         return result
 
     def _fail_reserved_build(self, *, node_id: int, card_id: Optional[str], generation: int,

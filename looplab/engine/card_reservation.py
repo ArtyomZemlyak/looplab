@@ -1485,27 +1485,38 @@ class CardReservationMixin:
                         # window — the same hazard invariant #1 records for `train_monitor_alert`. A
                         # worker-thread append lands at instants the main-task ordering excluded, so
                         # the loss it can cause is a proposal the run already paid for.
-                        with self._capture_proposal_events() as captured:
-                            idea = await anyio.to_thread.run_sync(
-                                functools.partial(
-                                    self._prepare_node_idea,
-                                    action,
-                                    proposal_state,
-                                    researcher=self.researcher,
-                                    prospective_node_id=proposal_node_ceiling + offset,
-                                    source=source,
-                                    proposal_events=proposal_events,
+                        captured: list = []
+                        try:
+                            with self._capture_proposal_events() as captured:
+                                idea = await anyio.to_thread.run_sync(
+                                    functools.partial(
+                                        self._prepare_node_idea,
+                                        action,
+                                        proposal_state,
+                                        researcher=self.researcher,
+                                        prospective_node_id=proposal_node_ceiling + offset,
+                                        source=source,
+                                        proposal_events=proposal_events,
+                                    )
                                 )
-                            )
-                        # PUBLISHED FROM THE MAIN TASK, and published WHETHER OR NOT the idea formed.
-                        # A refused proposal is exactly when the receipt matters most: the discard
-                        # receipt (`bd182357`) exists because a paid propose that produced no card
-                        # left no trace at all, and dropping the intents on `idea is None` would
-                        # restore that silence for the case it was written for. Layer 5 drops them
-                        # only when it ABANDONS and re-makes the proposal, which this lane never does.
-                        for _event_type, _data, _trace_id, _span_id in captured:
-                            self.store.append(_event_type, _data,
-                                              trace_id=_trace_id, span_id=_span_id)
+                            # PUBLISHED FROM THE MAIN TASK, and published WHETHER OR NOT the idea formed.
+                            # A refused proposal is exactly when the receipt matters most: the discard
+                            # receipt (`bd182357`) exists because a paid propose that produced no card
+                            # left no trace at all, and dropping the intents on `idea is None` would
+                            # restore that silence for the case it was written for. Layer 5 drops them
+                            # only when it ABANDONS and re-makes the proposal, which this lane never does.
+                        # …AND PUBLISHED ON THE WAY OUT, since 2026-08-31, because a RAISE from the offloaded
+                        # call discarded every buffered row. `_reject_and_repropose` appends `budget_exceeded`
+                        # through this very sink and then RE-RAISES — its own docstring says "appended BEFORE
+                        # re-raising so the rejection is on the log even though the run is ending" — and both
+                        # shipped researchers propagate it. Pre-offload every row was durable at emit time;
+                        # buffering made the publish conditional on a clean return without anyone deciding that.
+                        # `store.append` is sync and legal during unwind, so the `finally` costs nothing and keeps
+                        # the promise the sink was introduced to keep.
+                        finally:
+                            for _event_type, _data, _trace_id, _span_id in captured:
+                                self.store.append(_event_type, _data,
+                                                  trace_id=_trace_id, span_id=_span_id)
                     if idea is None:
                         continue
                     prepared.append((

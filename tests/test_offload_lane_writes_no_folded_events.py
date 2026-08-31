@@ -218,3 +218,53 @@ def test_the_sink_really_diverts_the_append():
     engine._append_proposal_event("novelty_rejected", {"node_id": 2})
     assert [e for e, _d in engine.store.rows] == ["novelty_rejected"], (
         "outside the sink the helper must still write immediately")
+
+
+@pytest.mark.parametrize("label", [lane[0] for lane in _LANES])
+def test_the_publish_SURVIVES_a_raise_from_the_offloaded_call(label):
+    """A buffered receipt must not be lost because the paid call ended badly.
+
+    `_reject_and_repropose` appends `budget_exceeded` through this very sink and then RE-RAISES —
+    its own docstring says "appended BEFORE re-raising so the rejection is on the log even though
+    the run is ending" — and both shipped researchers propagate `BudgetExceeded`. Buffering the
+    intents silently made the publish conditional on a CLEAN RETURN: pre-offload every row was
+    durable at emit time.
+
+    MUTATION: turn the `finally` back into a plain post-`with` loop and this goes red — the publish
+    then sits outside the handler that a raise unwinds through.
+    """
+    publish = next(n for n in ast.walk(_lane_function(label))
+                   if isinstance(n, ast.For) and isinstance(n.iter, ast.Name)
+                   and n.iter.id == "captured")
+    protected = [n for n in ast.walk(_lane_function(label))
+                 if isinstance(n, ast.Try)
+                 and any(x is publish for handler in n.finalbody for x in ast.walk(handler))]
+    assert protected, (
+        f"the {label} lane must publish its captured intents from a `finally`; on the clean-return "
+        "path alone a BudgetExceeded from inside the offload discards every buffered receipt")
+
+
+@pytest.mark.parametrize("label", [lane[0] for lane in _LANES])
+def test_the_buffer_is_BOUND_before_the_try_so_the_finally_can_read_it(label):
+    """The half that turns the fix into an AttributeError if it is half-applied: a `finally` that
+    reads `captured` needs the name bound BEFORE the `try`, or a raise inside the `with`'s own
+    setup unwinds into a NameError that masks the original exception.
+
+    MUTATION: delete the `captured = []` line above the `try`.
+    """
+    fn = _lane_function(label)
+    tries = [n for n in ast.walk(fn) if isinstance(n, ast.Try)
+             and any(isinstance(x, ast.Name) and x.id == "captured"
+                     for h in n.finalbody for x in ast.walk(h))]
+    assert tries, f"the {label} lane has no `finally` reading `captured`"
+    bound_before = [n for n in ast.walk(fn)
+                    if isinstance(n, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "captured" for t in n.targets)
+                    and n.lineno < min(t.lineno for t in tries)]
+    ann = [n for n in ast.walk(fn)
+           if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+           and n.target.id == "captured" and n.value is not None
+           and n.lineno < min(t.lineno for t in tries)]
+    assert bound_before or ann, (
+        f"the {label} lane must bind `captured` before the `try`, or the `finally` raises "
+        "NameError and hides the real failure")
