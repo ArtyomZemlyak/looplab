@@ -189,7 +189,23 @@ if python "$ROOT/looplab/benchmarks/algotune/extract_champion.py" \
      --run-dir "$OUT/runs/$TASK/run" --all-files --out "$OUT/champion_solver.py" >> "$LOG" 2>&1; then
   CH="$OUT/champion_solver.py"
 else
+  # ВЫХОД 1 И ВЫХОД 2 — РАЗНЫЕ ОТВЕТЫ, а `if ...; then` их не различает. Извлекатель специально
+  # разделил их, и оба вызывающих различие выбрасывали:
+  #   1 — свёртка говорит, что чемпиона нет (нет лога, нет лучшего узла, в наборе нет solver.py).
+  #       Это факт О ПРОГОНЕ и законный «НЕТ».
+  #   2 — лог не удалось ПРОЧИТАТЬ или `looplab` не удалось ИМПОРТИРОВАТЬ. Это факт О МОСТЕ, и о
+  #       прогоне он не говорит ничего: оценки лежат в events.jsonl, чемпион извлекается заново,
+  #       без повторной траты бюджета. Измерено 31.08 на пробе `accEE`: её сводка сказала
+  #       «чемпион: НЕТ», пока её же лог держал 27.466 и 221.5387.
+  CHRC=$?
   CH=""
+  if [ "$CHRC" = 2 ]; then
+    say "ОТКАЗ: СЛОМАН МОСТ — extract_champion вышел с 2. Это НЕ «прогон без чемпиона»."
+    say "       оценки целы: $OUT/runs/$TASK/run/events.jsonl"
+    say "       повтори без нового прогона: python $ROOT/looplab/benchmarks/algotune/extract_champion.py \\"
+    say "         --run-dir $OUT/runs/$TASK/run --all-files --out $OUT/champion_solver.py"
+    exit 2
+  fi
 fi
 say "чемпион: ${CH:-НЕТ}"
 [ -n "$CH" ] && (

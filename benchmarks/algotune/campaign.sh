@@ -1088,7 +1088,29 @@ PROTEOF
           ${CHAMPION_PROTECT:+--protect "$CHAMPION_PROTECT"}) \
           > "$OUT/B-$T.final.json" 2>>"$OUT/B-$T.log"
     else
-      echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"
+      # EXIT 1 AND EXIT 2 ARE DIFFERENT ANSWERS, and this used to be one `else`. The extractor was
+      # rewritten to separate them and BOTH its callers threw the distinction away: `if cmd; then`
+      # cannot tell them apart, so a broken bridge was recorded as a run that found nothing.
+      #   1 - the FOLD says there is no champion: no event log, no best node, no `solver.py` in the
+      #       committed set. That is a fact about the RUN and a legitimate null.
+      #   2 - the log could not be READ or `looplab` could not be IMPORTED. That is a fact about
+      #       THIS HARNESS and says nothing whatever about the run -- the scores are still in
+      #       `events.jsonl` and the champion can be re-extracted without spending the budget
+      #       again. Measured 2026-08-31 on the `accEE` probe, whose summary read "champion: NONE"
+      #       while its own log held 27.466 and 221.5387.
+      CHRC=$?
+      if [ "$CHRC" = 2 ]; then
+        echo '{"speedup": null, "harness_failure": "extract_champion_rc2",' \
+             '"error": "champion extraction FAILED (exit 2): a broken bridge, NOT a run without a' \
+             'champion. The scores are in the run event log and can be re-extracted."} ' \
+          > "$OUT/B-$T.final.json"
+        echo "  [$(date +%H:%M:%S)][$CPUS] $T: BROKEN BRIDGE -- extract_champion exited 2, so this" \
+             "row is a harness failure and NOT a null result. Re-extract and re-score without"
+        echo "      re-running the task:  python $REPO/benchmarks/algotune/extract_champion.py" \
+             "--run-dir $TASK_ROOT/run --all-files --out $TASK_ROOT/champion/solver.py"
+      else
+        echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"
+      fi
     fi
     record_done "$MARKER" "$RC" "$S" "$CPUS" "$TASK_ROOT/run"
     [ -s "$MARKER" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm B done ($(cat "$MARKER"))"
