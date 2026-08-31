@@ -158,10 +158,21 @@ Nine of docs/53's fourteen items are closed and two were retired by decision. Wh
 
 ## 58.9 Documentation that is now actively wrong
 
-- **"There is no dollar budget"** appears in `docs/02-architecture.md` and `docs/guide/concepts.md`,
-  including in caveats added to fix earlier untruths. The field exists —
-  `Settings.llm_budget_usd` is threaded into `CostAccountant(limit=…)` — and it is the ceiling that
-  ends every campaign run in `budget_exhausted`.
+- **One sentence about the dollar budget, not four.** This bullet said `"There is no dollar
+  budget"` appears in `docs/02-architecture.md` and `docs/guide/concepts.md`. Re-derived
+  2026-08-31: that string appears in NEITHER — it is a paraphrase of four different sentences that
+  was written inside quotation marks, which is the defect §57.4 objects to elsewhere. Of the four,
+  three are accurate about the shipped DEFAULT (`llm_budget_usd` is `0.0`, i.e. no ceiling unless
+  the operator sets one): `02-architecture.md` line 15 "without a *configured* dollar hard stop",
+  its cost-governance bullet, which is about a gateway-enforced hierarchical budget and an
+  80 %/100 % stop that genuinely do not ship, and `guide/concepts.md`'s "no *configured*
+  run-dollar limit". The one that is actually wrong is `02-architecture.md`'s
+  **"shipped Settings expose no hard dollar cap"** — Settings do expose one. `Settings.llm_budget_usd`
+  is threaded into `CostAccountant(limit=…)` by `core/llm.py::run_cost_accountant`, and it is the
+  ceiling that ends every campaign run in `budget_exhausted`.
+  CLAIM[architecture-says-settings-expose-no-dollar-cap] `docs/02-architecture.md` still carries the
+  sentence this bullet calls wrong, and `Settings` still carries the field that makes it wrong.
+  decided:`present:shipped Settings expose no hard dollar cap@docs/02-architecture.md+present:llm_budget_usd: float@looplab/core/config.py`
 - **docs/53 §11 "Order to fix in" is stale end to end**: its first item is "novelty gate, 66.3 % of
   budget", which §2 of the same document refutes (the real cost is 0.6 %). One of its five lines
   still holds.
