@@ -135,7 +135,7 @@ same way … and as the campaign".
 
 Provenance cannot be resolved from the tree: docs/51 §10 and docs/52 §8 contradict each other on
 this point and carry an OPEN marker
-(`OPEN[docs52-launch-block-contradicts-docs51-regime]`), and nothing from that era survives under
+(an OPEN marker with the slug `docs52-launch-block-contradicts-docs51-regime`), and nothing from that era survives under
 `runs-B/`, `model-probes/` or `campaign-final/`. The NAMES are reused and the paths exist today —
 `runs-archive/model-probes/` holds three probes from 08-31, `/var/tmp/looplab-bench/model-probes/`
 three more, and every `campaign-final/` on disk belongs to the 08-24 campaign — so the correct
