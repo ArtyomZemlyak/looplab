@@ -441,6 +441,84 @@ PYMETER
   fi
 fi
 export PYTHONPATH="$REPO"
+
+# THE TWO COLD-BASELINE FUSES, DECLARED HERE INSTEAD OF LEFT AMBIENT.
+#
+# Every speedup this campaign reports is a RATIO, and this driver said nothing at all about the
+# denominator. `looplab_eval.py` carries two guards over that half and BOTH were disarmed by the
+# silence:
+#
+#   * `_regime_mismatch` opens with `if not (ALGOTUNE_BASELINE_CACHE_DIR or "--baseline-times-dir"
+#     in sys.argv): return None` -- deliberately, so a unit test cannot be refused because of a
+#     data directory it never asked for. The campaign set neither, so on every campaign run to date
+#     that guard returned None on its FIRST LINE and no regime was ever checked.
+#   * `_baseline_fingerprint`, which backs the `baseline_measured_in_pass` refusal, watches
+#     `--baseline-times-dir`, whose default resolves beside `looplab_eval.py` in whatever clone the
+#     bridge is executed from -- not necessarily the directory the patched `BaselineManager`
+#     writes. Its own comment says so and names this file as the proof (`proof:absent:
+#     --baseline-times-dir@benchmarks/algotune/campaign.sh`).
+#
+# WHAT THE SILENCE COST, measured. A cold cache is not a slow measurement, it is a different one:
+# when AlgoTune has no per-instance reference for this (task, subset, regime) it measures one in
+# the same pass and the CANDIDATE IS NEVER TIMED -- the evaluator reports the reference against
+# itself at ~1.0 whatever was submitted. That is eight of this campaign's twenty final numbers.
+#
+# And the WIDTH is what decides whether the cache is cold. With nothing set, `resolve_workers`
+# answers 1 worker and the arena keys `__lane<N>r3`; `run_probe.sh` declares `auto` and keys
+# `__w<N>x1r3`. The reference cache on the live box holds `__w22x1r3` entries, so the campaign
+# missed every one of them and re-timed -- while the probes hit. The two references sum to 3898 ms
+# and 2976 ms over the same hundred instances, a 24 % difference in the denominator of every
+# speedup, and the campaign and the probes were reporting numbers off two different instruments
+# with nothing in either record saying which.
+#
+# So the ruler is DECLARED, in the same words `run_probe.sh` declares it, and both halves stay
+# overridable for a side experiment that means to use another one.
+
+# WHICH DIRECTORY, ASKED OF THE PATCH RATHER THAN GUESSED.
+#
+# `patch_baseline_cache.py` bakes the cache path into `BaselineManager` AT PATCH TIME, out of the
+# clone that ran it, and this driver may be a different clone (docs/51 SS7 runs the campaign from
+# the pinned `looplab-armb`). Pointing the guard at `$REPO`'s own `.baseline_times` would
+# reproduce the exact defect it is being armed against -- fingerprinting a directory nothing
+# writes -- so the value is READ OUT of the patched file, and $REPO's is only the fallback for a
+# checkout that carries no patch at all.
+baseline_cache_dir() {   # $1 = AlgoTune root. Echoes the directory the patch really writes.
+  python3 - "$1" "$REPO" <<'PYEOF'
+import re, sys
+from pathlib import Path
+patched = Path(sys.argv[1]) / "AlgoTuner" / "utils" / "evaluator" / "baseline_manager.py"
+try:
+    src = patched.read_text(encoding="utf-8", errors="replace")
+except OSError:
+    src = ""
+# The assignment in either shape the patch has worn: a bare literal, or an
+# `os.environ.get('ALGOTUNE_BASELINE_CACHE_DIR', '<default>')`. The first ABSOLUTE path in it is
+# the answer -- the env-var NAME is quoted too and does not start with a slash.
+m = re.search(r"_ll_cache_dir\s*=\s*(.{0,400}?)\n\s*_ll_key", src, re.S)
+found = re.findall(r"['\"](/[^'\"]*)['\"]", m.group(1)) if m else []
+print(found[0] if found else str(Path(sys.argv[2]) / "benchmarks" / "algotune" / ".baseline_times"))
+PYEOF
+}
+
+declare_baseline_ruler() {
+  # BOTH FUSES, and the width that decides which reference file they name.
+  #
+  # `auto` is one worker per core of the lane (`__w<N>x1r3`), which is what `run_probe.sh`
+  # declares and what the live reference cache is keyed for. `1` is not a quieter setting of the
+  # same instrument, it is a DIFFERENT one: at workers <= 1 the pool is bypassed and both halves
+  # run in the lane's whole cpuset, keyed `__lane<N>r3`.
+  ALGOTUNE_BASELINE_CACHE_DIR="${ALGOTUNE_BASELINE_CACHE_DIR:-$(baseline_cache_dir "$AT")}"
+  export ALGOTUNE_BASELINE_CACHE_DIR
+  export ALGOTUNE_EVAL_WORKERS="${ALGOTUNE_EVAL_WORKERS:-auto}"
+  # Pinned at the arena's own default rather than inherited: a box profile that set this would
+  # move the regime key under a campaign that never mentioned it.
+  export ALGOTUNE_EVAL_CORES_PER_WORKER="${ALGOTUNE_EVAL_CORES_PER_WORKER:-1}"
+  # The guard globs this directory; a missing one makes `_baseline_fingerprint` answer `{}` both
+  # times and compare equal, which is the silence again by another route.
+  mkdir -p "$ALGOTUNE_BASELINE_CACHE_DIR" 2>/dev/null || true
+}
+declare_baseline_ruler
+
 mkdir -p "$OUT" "$WS"
 # `.refused` is THIS invocation's tally of task-arms that never started, so a fixed-and-re-run
 # arm must not inherit the last one's. Only the tally is cleared -- never a `.done` marker, which
@@ -951,6 +1029,10 @@ PROTEOF
 
 echo "arm $ARM | $NTASKS tasks | $LANE_COUNT lanes x $CORES_PER_LANE cores from core $CORE_OFFSET (of $NPROC) | budget \$$BUDGET_USD"
 echo "model $ALGOTUNE_MODEL_KEY | llm ${METER_BASE:-$LOOPLAB_LLM_BASE_URL}${METER_BASE:+ (metered, per-attempt paths)}"
+# The RULER, in the log, beside the model. A speedup is a ratio and this names the instrument
+# that measured its denominator; every number below is only comparable to numbers from the
+# same two values.
+echo "baseline cache $ALGOTUNE_BASELINE_CACHE_DIR | eval workers $ALGOTUNE_EVAL_WORKERS x $ALGOTUNE_EVAL_CORES_PER_WORKER core(s)"
 reap_orphan_workers
 
 # One PID slot per lane, assigned by ACTUAL freeness. Round-robin by index would hand task N+k the
