@@ -55,6 +55,7 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_deriv
                                    settle_width, settled_width_refusal)
 from looplab.engine.audit import AuditMixin
 from looplab.engine.cadence import occupancy_due
+from looplab.engine.novelty import proposal_limiter
 from looplab.engine.card_reservation import (CardReservationMixin, _BuildReservation,
                                              scored_anchor,
                                             _discarded_proposal_text)
@@ -5050,21 +5051,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         concurrent task by name — and a beacon that stayed behind would announce the phase from a
         thread that is no longer in it.
         """
-        # OPEN[batch-offload-shares-default-thread-limiter] the offload below rides anyio's shared
-        # 40-token default thread pool — the pool each in-flight `_run_eval` worker holds a token of
-        # for its eval's whole multi-hour duration — so at operator-raised `eval_parallel` near or
-        # above 40 (the schema admits 1024) the paid proposal QUEUES BEHIND the evals before it even
-        # starts: board starvation through the pool instead of the loop.
-        # proof:absent:limiter=@looplab/engine/orchestrator.py
-        # REVIEW 2026-08-30 (P2 capacity): `evaluate.py::_watch_limiter` names this exact hazard and
-        # gave the watchdog tick its own pool for it; the proposal lanes (this one and the
-        # per-action offload in card_reservation.py) got none. Give them a small dedicated
-        # CapacityLimiter the way the watchdog has one.
+        # RIDES THE PROPOSAL POOL, not anyio's shared 40-token default, since 2026-08-31. An
+        # in-flight `_run_eval` holds a default token for its whole multi-hour duration and
+        # `eval_parallel` is admitted to 1024, so at a raised width the paid proposal queued behind
+        # the evals before it even started. See `novelty.proposal_limiter` for the derivation of the
+        # size and for the two sibling lanes that share it.
         captured: list = []
         try:
             with self._capture_proposal_events() as captured:
                 result = await anyio.to_thread.run_sync(
-                    functools.partial(self._consume_batch_proposal, state, width))
+                    functools.partial(self._consume_batch_proposal, state, width),
+                    limiter=proposal_limiter())
         # PUBLISHED ON THE WAY OUT, since 2026-08-31, and the `finally` is the whole of the fix.
         # A RAISE from the offloaded funnel discarded every buffered row: `_reject_and_repropose`
         # appends `budget_exceeded` through this sink and then RE-RAISES — its docstring says

@@ -142,6 +142,13 @@ def scored_anchor(state) -> tuple[Optional[int], Optional[int]]:
     return node_id, (None if node is None else node.attempt)
 
 
+def _proposal_limiter():
+    """Lazy hop to `novelty.proposal_limiter` — the same shape the monitors use for
+    `evaluate._watch_limiter`, and it keeps the import graph one-directional at module load."""
+    from looplab.engine.novelty import proposal_limiter
+    return proposal_limiter()
+
+
 def _fold(events):
     """Fold THROUGH the orchestrator module attribute — see the module docstring.
 
@@ -1582,6 +1589,8 @@ class CardReservationMixin:
                         captured: list = []
                         try:
                             with self._capture_proposal_events() as captured:
+                                # The proposal pool, not anyio's default — see
+                                # `novelty.proposal_limiter`.
                                 idea = await anyio.to_thread.run_sync(
                                     functools.partial(
                                         self._prepare_node_idea,
@@ -1591,7 +1600,8 @@ class CardReservationMixin:
                                         prospective_node_id=proposal_node_ceiling + offset,
                                         source=source,
                                         proposal_events=proposal_events,
-                                    )
+                                    ),
+                                    limiter=_proposal_limiter(),
                                 )
                             # PUBLISHED FROM THE MAIN TASK, and published WHETHER OR NOT the idea formed.
                             # A refused proposal is exactly when the receipt matters most: the discard

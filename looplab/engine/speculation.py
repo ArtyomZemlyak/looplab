@@ -126,6 +126,13 @@ class SpecBuildResult:
 _PRODUCER_ERROR_CAP = 2_048
 
 
+def _proposal_limiter():
+    """Lazy hop to `novelty.proposal_limiter` — the same shape the monitors use for
+    `evaluate._watch_limiter`, and it keeps the import graph one-directional at module load."""
+    from looplab.engine.novelty import proposal_limiter
+    return proposal_limiter()
+
+
 def producer_error_text(exc: BaseException, prefix: str = "") -> str:
     return f"{prefix}{type(exc).__name__}: {exc}"[:_PRODUCER_ERROR_CAP]
 
@@ -1967,6 +1974,7 @@ class SpeculationMixin:
     ) -> None:
         try:
             try:
+                # The proposal pool, not anyio's default — see `novelty.proposal_limiter`.
                 result = await anyio.to_thread.run_sync(
                     functools.partial(
                         self._prepare_raw_card_stage,
@@ -1978,6 +1986,7 @@ class SpeculationMixin:
                         roles,
                     ),
                     abandon_on_cancel=False,
+                    limiter=_proposal_limiter(),
                 )
             except Exception as exc:
                 # Mirror the request-driven producer guard: one raw proposal fault yields a consumed,

@@ -39,6 +39,33 @@ _IDEA_IDENTITY_MAX_TOKENS = 2_048
 _IDEA_IDENTITY_CACHE_MAX = 1_024
 _IDEA_VEC_KEY_CHARS = 4_096
 
+# THE PROPOSAL LANES GET THEIR OWN THREAD POOL, for the reason `evaluate.py::_watch_limiter`
+# already records about the watchdog: every bare `to_thread.run_sync` draws on anyio's shared
+# 40-token default, and `evaluate.py::_evaluate` offloads `self._run_eval` onto it with NO limiter,
+# holding one token for the eval's whole multi-hour duration. `eval_parallel` is admitted to 1024
+# by the schema (`core/config.py`) and `parallel_build` to 64, so at an operator-raised width the
+# evals pin the pool and the PAID proposal queues behind them before it starts — board starvation
+# through the pool rather than through the loop, and invisible in every span because the queueing
+# happens before the offloaded call begins.
+#
+# THE SIZE IS DERIVED, NOT PICKED. Three lanes install the proposal sink and each is bounded to one
+# in flight: `orchestrator.py::_await_batch_proposal` and the per-action offload in
+# `card_reservation.py` are the two arms of ONE `if` on the loop task (serial, and the per-action
+# arm is a plain `for` with an `await` in the body), and `speculation.py::_produce_raw_card_stage`
+# is gated by the `_spec_raw_stage_inflight` boolean. Two can be in flight at once; four is that
+# bound doubled. Process-wide and lazily built so importing this module never touches the loop.
+_PROPOSAL_THREADS = 4
+_PROPOSAL_LIMITER = None
+
+
+def proposal_limiter():
+    """The dedicated pool every offloaded PROPOSAL rides. One object per process, never per call."""
+    global _PROPOSAL_LIMITER
+    if _PROPOSAL_LIMITER is None:
+        import anyio
+        _PROPOSAL_LIMITER = anyio.CapacityLimiter(_PROPOSAL_THREADS)
+    return _PROPOSAL_LIMITER
+
 
 def _idea_vec_key(text: str) -> tuple[int, str]:
     """Cache key for one idea text's embedding — CONTENT, never `hash(text)`.

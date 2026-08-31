@@ -112,6 +112,47 @@ other work items that test the same hypothesis), **cross-run memory**
     instead, so the group syscall that would take the engine down with it is never issued — the tree
     still dies, just by a route that cannot overshoot.
 
+### Thread pools: which work can starve which
+
+Every bare `anyio.to_thread.run_sync` draws on anyio's **shared 40-token default** pool.
+`engine/evaluate.py::_evaluate` offloads `_run_eval` onto it with no limiter and holds one token for
+that eval's entire multi-hour duration, and `eval_parallel` is admitted to 1024 by
+`core/config.py` (`parallel_build` to 64). So at a raised width the evals pin the default pool and
+anything else that offloads queues behind them **before its call begins** — a wait no span records,
+because the span opens inside the offloaded function.
+
+Two kinds of work are therefore given their own pool rather than the default:
+
+| Pool | Size | Who rides it | Why it must not queue behind an eval |
+|---|---|---|---|
+| `evaluate.py::_watch_limiter` | 8 | watchdog / ASHA / train-monitor ticks | a liveness poll that queues goes blind exactly when a kill matters |
+| `novelty.py::proposal_limiter` | 4 | the three proposal lanes | a paid proposal that queues starves the board while the GPUs idle |
+
+The proposal size is **derived**: the batch lane (`orchestrator.py::_await_batch_proposal`) and the
+per-action lane (`card_reservation.py`) are the two arms of one `if` on the loop task, and
+`speculation.py::_produce_raw_card_stage` is gated by the `_spec_raw_stage_inflight` boolean — at
+most two coexist, doubled for headroom.
+
+```mermaid
+flowchart TB
+  subgraph D["anyio default pool — 40 tokens"]
+    E1["_run_eval #1<br/>holds a token for HOURS"]
+    E2["_run_eval #2 … #N"]
+    B["draft builds (parallel_build ≤ 64)"]
+  end
+  subgraph W["watch pool — 8"]
+    T["abort / reset / train / ASHA ticks"]
+  end
+  subgraph P["proposal pool — 4"]
+    P1["_consume_batch_proposal"]
+    P2["_prepare_node_idea (per-action)"]
+    P3["_prepare_raw_card_stage (speculative)"]
+  end
+  E1 -.->|"would have blocked"| P1
+  E1 -.->|"would have blocked"| T
+  P -->|"cannot be starved by an eval"| OK["board keeps producing"]
+```
+
 ## Where each piece lives in the code
 
 | Concept | Module |
