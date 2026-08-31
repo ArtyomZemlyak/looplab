@@ -214,9 +214,20 @@ class NoveltyGateMixin:
     def _capture_proposal_events(self):
         """Buffer proposal audit events so a worker never writes the folded log.
 
-        Legacy/main-task proposal paths keep appending immediately.  Layer 5 installs this context in
-        its isolated Researcher worker, then publishes the bounded intents from the main task only if
-        the prepared Card still passes its lifecycle/cue fence.
+        Legacy/main-task proposal paths keep appending immediately.  Layer 5
+        (`speculation.py::_prepare_raw_card_stage`) installs this context in its isolated Researcher
+        worker, then publishes the bounded intents from the main task only if the prepared Card
+        still passes its lifecycle/cue fence.
+
+        THREE INSTALLERS SINCE 2026-08-30, not one, and this sentence named only Layer 5 until
+        2026-08-31. The two offloaded proposal lanes install it for the reason Layer 5 does and then
+        publish UNCONDITIONALLY: `card_reservation.py::_stage_card_creates` (per-action) and
+        `orchestrator.py::_await_batch_proposal` (batch). Both moved their paid provider wait onto a
+        worker thread, where `_append_proposal_event` would otherwise fall through to `store.append`
+        and breach invariant #1's sole-writer rule with FOLDED, authority-bearing rows. Layer 5's
+        conditional publish is its own election rule and not the general contract: a refused
+        proposal is exactly when the receipt matters most (`bd182357`), so the offload lanes publish
+        whether or not an idea formed, and from a `finally` so a raise cannot discard the buffer.
         """
 
         intents: list[tuple[str, dict, Optional[str], Optional[str]]] = []
@@ -581,20 +592,6 @@ class NoveltyGateMixin:
                     pass
         return False
 
-    # OPEN[propose-batch-main-task-contract-stale] the docstring's closing sentence — runs in the
-    # MAIN task, so the SHARED researcher has no pool race — is false since 2026-08-30.
-    # proof:`line:MAIN task before the build fan-out&&no pool race@looplab/engine/novelty.py`
-    # Both call sites now run this on an anyio worker thread (`orchestrator.py::_await_batch_proposal`),
-    # and the no-race property survives only because the main task awaits it serially. Meanwhile the
-    # unfrozen loop lets eval tasks drive the SAME object (under the shipped `unified_agent=True`
-    # the researcher IS the developer) through `crash_repair.py`'s triage_crash/repair_critic while
-    # this function mutates `_novelty_feedback` (below) and nulls telemetry attrs in its `finally` —
-    # attr sets disjoint TODAY, so latent, but the exclusivity is stated nowhere and guarded by
-    # nothing, and the sentence a maintainer would consult asserts the opposite placement.
-    # REVIEW 2026-08-30 (P2 stale contract / latent race): correct the sentence (serialized behind
-    # the main task's await, executed on a worker) and state which attrs the concurrent eval-task
-    # consumers of the shared facade may touch; `_capture_proposal_events`' docstring likewise still
-    # names Layer 5 as the only sink installer — there are three now, this lane included.
     @in_llm_lane("build")
     def _propose_batch(self, state: RunState, n: int) -> list:
         """Variant-1 Phase 2 — the ONE shared-researcher pass that yields up to N DISTINCT seed
@@ -605,8 +602,26 @@ class NoveltyGateMixin:
         directions already taken THIS batch as a transient avoidance directive (reusing the
         `_novelty_feedback` channel the researcher already reads), applying the normal vs-history
         novelty gate, and DROPPING an intra-batch near-duplicate. Distinct-by-construction and
-        backend-agnostic; returns 1..N ideas (fewer only if the researcher can't diversify). Runs in
-        the MAIN task before the build fan-out, so it uses `self.researcher` (no pool race)."""
+        backend-agnostic; returns 1..N ideas (fewer only if the researcher can't diversify).
+
+        WHERE THIS RUNS, corrected 2026-08-31 — the sentence here said "in the MAIN task before the
+        build fan-out, so it uses `self.researcher` (no pool race)", and the first half went false
+        on 2026-08-30. Both call sites now execute this ON AN ANYIO WORKER THREAD, through
+        `orchestrator.py::_await_batch_proposal`, because it is a minutes-long paid provider wait
+        with no `await` in it and as one event-loop callback it stopped everything.
+
+        THE NO-RACE PROPERTY SURVIVES, but for a different reason than the old sentence gave, and
+        the reason is worth stating because it is now load-bearing rather than incidental: the main
+        task AWAITS this hop serially, so no second batch proposal is ever in flight beside it. What
+        the unfrozen loop DOES admit is a concurrent EVAL task driving the same object — under the
+        shipped `unified_agent=True` the researcher IS the developer — through `crash_repair.py`'s
+        triage_crash / repair_critic while this function mutates `_novelty_feedback` below and nulls
+        the telemetry attributes in its `finally`.
+
+        THOSE ATTRIBUTE SETS ARE DISJOINT TODAY and that is the whole of the safety: this lane owns
+        `_novelty_feedback` and the `_pending_batch_*` trio; the eval-task consumers own the repair
+        and triage paths and touch neither. It is not enforced anywhere, so a new attribute shared
+        between the two is a real race and this paragraph is the only place that says so."""
         n = max(1, int(n))
         self._pending_batch_dropped = []
         # Keep the exact returned objects as a one-shot capability for the rare unreserved

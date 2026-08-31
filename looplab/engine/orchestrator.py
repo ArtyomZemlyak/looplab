@@ -4963,23 +4963,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `_triage_crash` / `_repair_error_context` / `_prepare_env` live in
     # looplab/engine/crash_repair.py (CrashRepairMixin — inherited, zero call-site churn).
 
-    # OPEN[consume-batch-docstring-names-retired-callers] the docstring below still says the two
-    # call sites "each read that protocol by hand" and names one of them `run`'s chunk — since
-    # 2026-08-30 neither calls this directly (both await `_await_batch_proposal`, whose own
-    # docstring names the chunk's real home `_handle_create_actions`), so a caller-hunting reader
-    # is sent to methods that no longer contain the call.
-    # proof:`line:Two call sites&&concurrent-build chunk@looplab/engine/orchestrator.py`
-    # REVIEW 2026-08-30 (P3 doc drift): one sentence — both call sites now reach this through the
-    # awaited wrapper (worker thread + main-task publish) — and one name fix.
     def _consume_batch_proposal(self, state, width: int):
         """Run one batched proposal and READ its three-attribute result. Returns
         ``(ideas, telemetry, dropped)``.
 
         `_propose_batch` (novelty.py) signals its results through three instance attributes rather
         than a return value: `_pending_batch_telemetry`, `_pending_batch_dropped` and
-        `_pending_batch_novelty_gated`. Two call sites — `run`'s concurrent-build chunk and
-        `_stage_card_creates` — each read that protocol by hand, including the padding rule and the
-        snapshot-before-reset ordering (doc 25 ES-08).
+        `_pending_batch_novelty_gated`. Two call sites — `_handle_create_actions`' concurrent-build
+        chunk and `card_reservation.py::_stage_card_creates` — used to read that protocol by hand,
+        including the padding rule and the snapshot-before-reset ordering (doc 25 ES-08), which is
+        what this funnel replaced.
+
+        NEITHER CALLS THIS DIRECTLY ANY MORE (2026-08-30): both `await _await_batch_proposal`, which
+        runs this on a worker thread under `_capture_proposal_events` and publishes the buffered
+        folded rows from the main task. A reader hunting callers of THIS name finds the wrapper, not
+        the two methods; the chunk also left `run` for `_handle_create_actions` (doc 25 ES-05), so
+        the old name sent that reader somewhere the call had never been.
 
         The padding is load-bearing: telemetry must align 1:1 with `ideas` so each build emits ITS
         OWN hypothesis_ranked/foresight_selected. A short list silently shifts every later idea's
@@ -4988,7 +4987,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         Both `dropped` and `telemetry` are SNAPSHOTTED (copied) here, so a caller may reset the
         attributes at whatever point its own durability ordering requires without losing what it is
         about to record. Resetting stays at the call sites precisely because that ordering differs:
-        `run` clears after the reservations are durable, `_stage_card_creates` clears in a `finally`.
+        `_handle_create_actions` clears after the reservations are durable, `_stage_card_creates`
+        clears in a `finally`.
         """
         # The BATCH proposal's progress beacon, and the one that matters most: on the shipped default
         # width this — not `_prepare_node_idea` from `_create_node_scoped` — is the path a run
