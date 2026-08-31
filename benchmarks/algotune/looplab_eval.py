@@ -684,6 +684,18 @@ def _emit(out: dict[str, Any]) -> None:
 DEFAULT_PROTECT = ("description.txt",)
 DEFAULT_PROTECT_PREFIXES = ("reference_",)
 
+# THE ARENA'S EDITING SURFACE, which is also the outer bound of what a candidate can have written.
+# `editor_functions.py` dispatches on the file's suffix (`.pyx`/`.pxd`, with `setup.py`
+# or `pyproject.toml` as the build recipe) and everything else it writes is Python. A file outside
+# this set beside the solver was put there by the OPERATOR, not the model.
+#
+# This is not a guess about what a submission might contain. MEASURED over the 69-probe corpus on
+# 2026-08-29: every file the loop has ever written to a node is `.py` (301) or `.pyx` (86) -- not
+# one `.log`, not one `.json`. Meanwhile the probe roots into which `run_probe.sh` extracts the
+# champion held 136 `.log` and 65 `.json` files, and each of them was being reported as part of the
+# candidate's submission and copied into the scored directory beside its solver.
+SUBMITTABLE_SUFFIXES = (".py", ".pyx", ".pxd", ".toml")
+
 
 def submission_files(solver: Path, protect: tuple = DEFAULT_PROTECT,
                      protect_prefixes: tuple = DEFAULT_PROTECT_PREFIXES) -> list:
@@ -699,6 +711,8 @@ def submission_files(solver: Path, protect: tuple = DEFAULT_PROTECT,
     out = []
     for extra in sorted(solver.parent.iterdir()):
         if extra.name == solver.name or extra.is_dir():
+            continue
+        if extra.suffix not in SUBMITTABLE_SUFFIXES:
             continue
         if extra.name in protect or extra.name.startswith(tuple(protect_prefixes)):
             continue

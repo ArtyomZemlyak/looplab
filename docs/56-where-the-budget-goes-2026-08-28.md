@@ -1751,3 +1751,1149 @@ time, not in attempts.
 confirmed in the run's own `config.snapshot.json`. It is `edge_expansion`, $1, otherwise identical
 to dsBN/dsBN2/dsBN3, so it differs from them by exactly one setting. This is the lever being
 verified BY PROBE rather than by re-reading the note that recommends it.
+
+<!-- Sections 48-71 were reconstructed on 2026-08-30 from the session transcript, after the
+     2026-08-29 container restart destroyed the working tree that held them. The prose is the
+     transcript's verbatim heredoc text; the section-to-commit map is in the recovery commit's
+     message. Nothing here was re-derived or paraphrased -- where the transcript was silent, the
+     recovery says so rather than filling in. -->
+
+## 48. The night's four finals: one loss closed, one claim weakened, one signal at p = 0.05
+
+| probe | task | budget | test | what it was for |
+|---|---|---|---|---|
+| **dsCH3** | `convex_hull` | **$3** | **12.1764** | is the last loss a budget shape? |
+| dsIF4 | `integer_factorization` | $1 | 79.5759 | fourth $1 point against the $3 one |
+| dsBN3 | `edge_expansion` | $1 | 212.8573 | third budget-note run |
+| dsNov | `edge_expansion` | $1 | 235.1685 | `novelty_mode=off`, n = 1 |
+
+### 48.1 `convex_hull` — the last unclosed loss, closed with money
+
+| | speedup |
+|---|---|
+| arm A (AlgoTuner) | 4.321 |
+| arm B (campaign) | 1.089 |
+| dsCH, $1 | 2.5955 — **a loss**, 0.60× of arm A |
+| **dsCH3, $3** | **12.1764** — **a 2.8× win** over arm A |
+
+§40 read the $1 result as a budget shape rather than a capability gap: `$0.62` of the dollar went
+before the first node existed, evaluation costs 72.8 s, and one node is all a dollar buys on 267,021
+instances. Three dollars bought five nodes and the reading holds. **Every task the plot report
+scored as a loss has now been re-probed, and three of the four flipped**: `integer_factorization`
+(20×), `discrete_log` (9.4×), `convex_hull` (2.8×). Only `kcenters` stands, and that is the one task
+where the pip repair provably cannot help (§33). n = 1 at $3, so dsCH4 is running to repeat it.
+
+### 48.2 §45 weakened by its own fourth point
+
+dsIF4 came in at **79.5759**, the lowest $1 run on the task. The $1 arm is now
+79.58 / 96.21 / 178.76 / 194.82 (median 137.48) and the single $3 run's **155.06 sits INSIDE that
+range**. §45's headline — "three dollars bought less than one" — was written at n = 3 vs 1 and is
+now "indistinguishable at n = 4 vs 1". The spend-vs-quality question is open again, and this is the
+third claim this campaign has had to withdraw on its own next measurement.
+
+### 48.3 The budget note reaches p = 0.050, the floor at this sample size
+
+All three runs carrying `a78d295f`/`453c83d9` beat all three controls at the same settings:
+
+| with the note | without |
+|---|---|
+| 344.4251 | 202.7654 |
+| 221.8235 | 132.70 |
+| 212.8573 | 106.4716 |
+| **median 221.82** | **median 132.70** |
+
+Rank sum **15 of a possible 15** — a perfect separation — and the exact one-sided test over all
+C(6,3) = 20 assignments gives **p = 1/20 = 0.050**, the smallest value n = 3 vs 3 can produce.
+Median ratio **×1.68**.
+
+Set against the stage-guidance switch, which this document tracked through 0.100 → 0.314 → 0.286 and
+then abandoned: same threshold at the start, opposite trajectory. **A caveat that must travel with
+this number**: new controls can no longer be produced, because the note has no off switch — it ships
+unconditionally. The three controls are older runs, so this is a before/after comparison, not a
+randomised one, and everything else that changed between those dates is confounded with it. dsBN4 is
+running to take it to n = 4 vs 3, where the floor becomes 1/35 = 0.029.
+
+`dsNov` (`novelty_mode=off`, confirmed in its own snapshot) landed at **235.1685** with the note also
+present, so it belongs to neither arm above. dsNov2 is running for n = 2.
+
+## 49. The novelty gate is free to turn off, and `read_code` was blind for 2,486 calls
+
+### 49.1 dsNov2 closes the gate question on MONEY, not on the number
+
+`edge_expansion`, $1.007, three nodes 110.5775 → **250.6628** (`edge_expansion_kernel.pyx`) →
+32.7723; champion node_1, **test 251.86**. Its `novelty` and `repropose` phases cost **$0.0000 over
+0 calls** — the `novelty_mode=off` lever does exactly what its config note says.
+
+| run | gate | `novelty`+`repropose` | share of run | final |
+|---|---|---|---|---|
+| dsNov | off | **$0.0000** | 0.0 % | 235.17 |
+| dsNov2 | off | **$0.0000** | 0.0 % | 251.86 |
+| dsBN | llm | $0.0035 | 0.3 % | 344.43 |
+| dsBN2 | llm | $0.0995 | **9.8 %** | 221.82 |
+| dsBN3 | llm | $0.0909 | **9.1 %** | 212.86 |
+
+Medians: off **243.51** (n = 2), llm **221.82** (n = 3). The ranges overlap heavily — the highest
+run of all, 344.43, is an `llm` one — so **the final number does not decide this at n = 2 vs 3 and
+is not claimed to**. What is decided is the price: ~9 % of a $1 run, returned in full, on a task
+family where `core/config.py`'s own 20-run measurement already found the gate net-negative
+($1.77 of $15.73 and 6.6 of 60.8 hours, for 10 rejections). The operator lever works; the case for
+pulling it is the money, and it is measured twice now.
+
+### 49.2 `read_code` returned a filename it made up, 2,486 times
+
+Following the second concrete complaint in the corpus (`glm53f`: "I can't read node 0's code —
+read_code returned essentially empty") to its cause: **2,486 of 2,492** `read_code` calls came back
+under 200 characters, every one of them
+
+    # solution.py of experiment #0
+    other files: ['solver.py']
+
+The method printed a HARDCODED `solution.py` header, then `n.code`, then the NAMES of `n.files`. On
+every AlgoTune node `n.code` is empty — the work lives in `files` — so the answer was a wrong
+filename and a list of filenames, and the `no code recorded` guard could not fire because `n.files`
+is non-empty. `read_code` is the third most-called tool in `propose` (764 calls) after `repo_read`
+and `read_experiment`, so the phase whose whole job is to improve existing code has been proposing
+without seeing it for the entire corpus.
+
+Fixed in `d066da36`: the files are printed, solver-bearing first so a spent budget never cuts the
+file the reader came for, each with its real name and size, truncation marked, and anything left out
+NAMED rather than counted. Three mutations redden; the 767 tests around `run_tools`, the digest and
+the cross-run readers stay green.
+
+**dsRC launched** carrying this fix AND the card fix of `2d3c2d43` (verified in its own card text),
+against dsBN/dsBN2/dsBN3 — 344.43 / 221.82 / 212.86 — which ran with a blind `read_code` and a card
+that told a Researcher to run a Developer's command. Neither fix has been verified by probe until it
+finishes, and both are stated as unverified until then.
+
+## 50. The measurement was the problem: `edge_expansion` at $1 is BIMODAL, and n = 3 cannot see past it
+
+dsBN4 finished at **test 27.5655** — the fourth budget-note run, and the lowest. Its two nodes say
+what happened: node_0 wrote `cutcount.pyx`, the kernel BUILT (`build_ext ok`) and computed **wrong
+values** (`no_valid_speedups`; proposed 90.75 against a reference 14.234), scoring 0.0; node_1 then
+retreated to pure Python and scored 27.31. A working build that produces wrong numbers sent the run
+back to the pre-repair band.
+
+**§48.3's p = 0.050 is withdrawn.** With dsBN4 the budget-note arm is 27.57 / 212.86 / 221.82 /
+344.43 against controls 106.47 / 132.70 / 202.77, rank sum 19 of 22, exact one-sided
+**p = 7/35 = 0.200**. That is the fourth claim this campaign has retracted on its own next
+measurement, and the second switch to go from "significant at n = 3" to nothing on point four.
+
+### 50.1 Why every one of these signals collapsed
+
+All 27 `edge_expansion` runs at $1 on deepseek-v4-flash, sorted:
+
+    344 268 252 237 235 229 222 213 207 203 153 133 106 | 48 32 30 29 28 28 28 28 28 28 27 27 19
+
+Range **18.5 – 344.4**, ratio **19×**, coefficient of variation **87 %**. That is not scatter around
+a mean — it is two populations, and the variable that separates them is one bit:
+
+| does the CHAMPION ship a compiled kernel | n | median | range |
+|---|---|---|---|
+| yes | 14 | **217.3** | 27.8 – 344.4 |
+| no | 13 | **27.8** | 18.5 – 48.5 |
+
+An **8×** median gap, and the groups barely touch. So a comparison of final speedups at n = 3 is a
+comparison of how many runs in each arm happened to land the high mode. Inside the repaired arms the
+rate is 11 of 12 champions, so the modes are no longer a coin flip — but **one mode-miss is worth
+more than any switch**, and dsBN4 alone moved p from 0.050 to 0.200.
+
+**The methodological conclusion, which corrects how this document has been arguing for four
+sweeps**: no loop-switch A/B on `edge_expansion` at $1 is decidable at n ≤ 4 by comparing finals.
+The stage block (0.100 → 0.314 → 0.286), the budget note (0.100 → 0.050 → 0.200) and the novelty
+gate (overlapping at n = 2 vs 3) all measured the same thing — mode assignment — and none measured
+its switch. What IS decidable at this sample size is the money (the novelty gate's ~9 % of a run,
+§49.1) and the bit itself: whether the champion carries a working kernel.
+
+Two consequences, and both are changes to what gets measured rather than to the loop:
+
+* Future switch comparisons on this family report the **kernel-landing rate** — a binary outcome —
+  beside the median, because the rate is what the median is actually made of.
+* `integer_factorization` is the tighter ruler for the same question: its four $1 runs span
+  79.58 – 194.82, a ratio of **2.4×** against edge_expansion's 19×.
+
+**dsRC2 launched** beside dsRC so the `read_code` + card verification starts at n = 2 rather than
+n = 1 — which is the first thing this section says is worthless.
+
+## 51. dsIF5, the train→test question nobody had asked, and a zero that had a name
+
+dsIF5 — `integer_factorization`, $1.012, three nodes 104.9736 → **208.5143** (`_pollard_rho.pyx`) →
+124.0001, champion node_1, **test 286.5205**. 149 min wall, 86 % LLM, 1.6 min evaluation. It is the
+task's best result and its champion carries a working kernel.
+
+**Correction to §50's recommendation.** I called `integer_factorization` the tighter ruler at "2.4×"
+— that was n = 4. At n = 5 it is 79.58 / 96.21 / 178.76 / 194.82 / 286.52, ratio **3.6×**. Still six
+times tighter than `edge_expansion`'s 19×, and the mode gap is smaller too (the one champion without
+a kernel, dsIF4 at 79.58, sits 2.3× below the kernel median rather than 8× below), so the
+recommendation holds with the corrected number. The $3 run's 155.06 is now BELOW the $1 median of
+178.76.
+
+### 51.1 Train → test drift, measured for the first time
+
+Every number this document compares is a TEST final, while the loop optimises on TRAIN. That
+relation had never been measured. Across all 54 probes with both figures, `test / best-train-node`:
+
+| | value |
+|---|---|
+| median | **0.986** |
+| mean | 0.973 |
+| range | 0.000 – 1.374 |
+| runs where test < best train | **42 of 54** |
+
+So there is no systematic drift worth correcting for — the mild pessimism is what selecting a
+maximum on one split and reporting the other does. Per task:
+
+| task | n | median | range |
+|---|---|---|---|
+| `integer_factorization` | 6 | **0.993** | 0.985 – 1.374 |
+| `edge_expansion` | 32 | 0.989 | 0.000 – 1.015 |
+| `convex_hull` | 6 | 0.978 | 0.949 – 1.009 |
+| `kcenters` | 8 | 0.926 | 0.905 – 0.955 |
+
+`integer_factorization` has the best median AND the widest positive tail (dsIF3 ×1.27, dsIF5 ×1.37)
+— its graded set is four instances, so a split difference moves the number. Worth carrying when its
+finals are read.
+
+### 51.2 The 0.000 in that range is ds3, and it cost a whole run
+
+`ds3` folds to **train 156.4328 → test 0.00**. Its champion, node 0, shipped `cutcounter.pyx` with
+**no `setup.py`** — the bridge of the day answered `build_ext failed rc=2` about a file the model
+never wrote (the message `3be289eb` replaced), nothing built the extension, and the solver's import
+of it failed on the graded pass. **Node 2 of the same run shipped a recipe and scored 142.3965**, so
+the loop had a working alternative and champion selection, reading the train metric alone, took the
+broken one.
+
+Fixed in `8604dfbc`: `extract_champion.py` now WARNS, on the bridge's own condition, that the
+champion ships a Cython source nothing will build and that the graded pass will score it 0.0. It
+warns rather than refuses — the choice is the loop's and `campaign.sh` branches on the exit code —
+but the warning arrives before the zero instead of after it.
+
+**dsIF6 launched** on the freed lane: `integer_factorization` at **$3**, the second point on the
+spend curve for this task, against the $1 arm's five (median 178.76) and dsIF3x's single 155.06. It
+is deliberately on the task §50 identified as the tighter ruler rather than on `edge_expansion`,
+where §50 showed a comparison at this sample size cannot mean anything.
+
+## 52. `read_code` verified BY PROBE, and the last reference command answered
+
+### 52.1 The fix works, measured on running probes rather than argued
+
+`read_code` (`d066da36`) needed a probe, not a claim. dsRC and dsRC2 carry it; dsBN*–dsBN4 ran with
+the old one. Both sets are on the same task, model and budget, so this is the same call in the same
+place before and after:
+
+| | calls | returned under 200 chars | median length |
+|---|---|---|---|
+| before (dsBN, dsBN2, dsBN3, dsBN4) | 71 | **71 (100 %)** | **87** |
+| after (dsRC, dsRC2) | 24 | **0 (0 %)** | **2,817** |
+
+A **32×** increase in what the phase is handed, and the content is the solver's own source rather
+than a header and a filename. This does not need the runs to finish and is not waiting on them; the
+finals will say whether it changes the NUMBER, which §50 warns cannot be decided at n = 2 anyway.
+
+### 52.2 `revert`, the last AlgoTuner command with no counterpart here
+
+The reference agent's ten commands have now all been walked. `revert` was the last one left, and it
+restores its single mutable `solver.py` from a snapshot. We have no such command, and the corpus
+says we need no such command:
+
+* **`node_repaired` fires ZERO times** across all 57 probes. Nothing is ever edited in place; every
+  node is a fresh directory and a fresh submission, so there is no editor state to roll back.
+* The 1,200 "revert" mentions in model reasoning are the model's own PLAN language — "if it fails,
+  revert", "revert to the baseline (which still exists as node #0)" — not requests for a tool. One
+  states our architecture back to us: *"each experiment starts from a clean slate and the Developer
+  re-implements"*.
+
+So the operation `revert` performs for AlgoTuner — **get me the previous version of the code** — is
+performed here by `read_code` against the earlier node. Which is exactly the call that returned
+nothing 2,486 times. The gap was never a missing command; it was the substitute being broken, and
+§52.1 is the measurement that it no longer is.
+
+That closes the command-surface comparison begun in §36: of AlgoTuner's ten, `profile`/`profile_lines`
+were measured and declined (§38.1, no signal), the editor's syntax gate was measured and declined
+(§33.1, zero offenders), the validator's line-level context is unreachable through the script we call
+and would have fired zero times (§36), and `revert` needs no counterpart. Nothing on that surface is
+outstanding.
+
+## 53. dsRC, and a correction to every "% of wall clock" this document has printed
+
+dsRC — `edge_expansion`, $1.022, three nodes 24.8688 → **149.3394** (`edge_cut.pyx` + `setup.py`) →
+140.9803; champion node_1, **test 149.5423**, kernel at the champion. It is the first run carrying
+BOTH of yesterday's fixes: the rewritten `read_code` (`d066da36`) and the card's tool-holder sentence
+(`2d3c2d43`). Money: `plan_step` $0.392 / 113, `plan` $0.189 / 49, `deep_research` $0.175 / 57,
+`propose` $0.167 / 50.
+
+Against the pre-fix arm — dsBN 344.43, dsBN2 221.82, dsBN3 212.86, dsBN4 27.57 — dsRC's 149.54 sits
+inside the range and **decides nothing at n = 1**, which is what §50 says about this task at this
+sample size and is not walked back here. What IS decided is §52.1's measurement, which needed no
+finals: `read_code` returns real source now, 0 empty of 24 against 71 of 71 before.
+
+### 53.1 The number that could not be true
+
+dsRC's time analysis printed **"LLM 95 min (101 % of wall)"** over a 94-minute run. Generations
+OVERLAP — speculation runs up to two at once — so `sum(duration_s)` double-counts and is not a
+fraction of anything. Measured over 60 probes:
+
+| | |
+|---|---|
+| median overlap | **0 %** |
+| range | 0 – 16.3 % |
+| runs where the naive sum EXCEEDED the wall clock | **6** — dsNov2 105 %, dsRC 101 %, dsFix4 101 %, dsNoStg2 101 %, dsBN4 100 % |
+
+**So every "LLM X % of wall" figure in §9, §34, §45, §47 and §51 is inflated by that run's overlap.**
+For most runs the correction is zero; for the six above it is 9–16 points. dsRC's real occupied time
+is 85 of 94 minutes — **90 %**, not 101 %. The shape of those sections' argument does not change (the
+loop is LLM-bound and evaluation is 1–5 % of wall), but the figures were arrived at by a method that
+could produce an impossible answer, and did, five more times than I noticed.
+
+The committed script was NOT the source: `plot_corpus_v2.py` stores `llm_s` and never divides it by
+`wall_s`. The error lived in the ad-hoc sweep analysis — i.e. in this document's prose. So the
+durable fix puts the right quantity where a future reader will find it: `_union_seconds()` merges
+the intervals and `llm_busy_s` sits BESIDE `llm_s`, because the sum is a real quantity too — what
+the provider billed wall-clock for — and only the union may be divided by a run's wall clock
+(`e1715704`, mutation-checked).
+
+**dsRC3 launched** on the freed lane, taking the `read_code` + card verification to n = 3 against the
+four pre-fix runs — the sample size §50 says is the minimum worth arguing from, and still short of
+what that section says would settle it.
+
+## 54. A 1.3 GB core dump the sweep's own check had never seen fire
+
+The core-dump line of the liveness check has printed `0` on every previous pass. This one printed
+**1**: `AlgoTune/core`, **1,316,196,352 bytes**, written at 10:57:52 by `AlgoTune/.venv/bin/python`
+with a candidate's `bsp_wrap.cpython-311-x86_64-linux-gnu.so` loaded. A compiled kernel killed the
+arena's evaluator by signal and it dumped its whole address space into the CWD.
+
+The evaluation **survived** — the harness isolates the crash and the score arrived — so the harm is
+purely disk: twenty such runs is 26 GB on a box with 78 GB free, and the campaign runs four lanes at
+once.
+
+`looplab_check.py::_run_isolated` has capped `RLIMIT_CORE` since 2026-08-28, for this exact reason
+and with a measured 1.4 GB behind it. The REAL evaluator did not — **the cheap checker was protected
+and the expensive one was not**. Fixed in `e513c89f`: `preexec_fn` sets the limit in the child
+between fork and exec, best-effort.
+
+Its second test is not a claim about a flag: it runs a child that really dies of SIGSEGV, capped and
+uncapped, and asserts the capped one leaves nothing. It skips loudly where `kernel.core_pattern`
+pipes cores to a helper, because there neither arm writes a file and the guard would pass vacuously
+in both directions. On this host it did not skip.
+
+## 55. dsRC2, and the verification arm stated at the size it actually is
+
+dsRC2 — `edge_expansion`, $1.016, three nodes **208.1972** (`edge_cut.pyx` + `setup.py`) → 162.5632 →
+19.1604; champion node_0, **test 206.3095**, kernel at the champion. Money: `plan_step` $0.359 / 115,
+`propose` $0.212 / 53, `repropose` $0.158 / 34, `plan` $0.157 / 40. Time, computed the way §53.1 says
+it must be: wall 118 min, LLM **occupied** 107 min = **91 %** (union of the generation intervals, not
+their sum), evaluation 2.1 min.
+
+The `read_code` + card verification arm now reads:
+
+| | runs | median |
+|---|---|---|
+| after the fixes | 149.54, 206.31 | 177.93 |
+| before | 27.57, 212.86, 221.82, 344.43 | 217.34 |
+
+Rank sum 5, exact one-sided **p = 13/15 = 0.867**. **This decides nothing**, and by §50's own
+arithmetic it could not: at n = 2 vs 4 on a task whose outcome is a bimodal bit with an 8× gap, the
+test has no power in either direction. Reported here so the arm is on record at the size it actually
+is, rather than left to look like a pending win. What IS established, and needed no finals, is
+§52.1: `read_code` returns real source now — 0 empty of 24 against 71 of 71 before.
+
+**dsRC4 launched** beside dsRC3, taking that arm toward n = 4 vs 4.
+
+## 56. The card fix verified by probe — and the first attempt to verify it was contaminated by the fix
+
+§52.1 verified `read_code` by probe. The card fix of `2d3c2d43` had not been, so this sweep did it.
+The claim was narrow: a Researcher should stop spending turns discovering that
+`run_dev_command(...)` — named in the card, addressed to the Developer — is not on its tool surface.
+
+**The first measurement said the fix made things WORSE**: 9 of 224 generations after against 9 of
+311 before, i.e. 4.0 % against 2.9 %. Reading the "after" example explains it —
+
+> my list. The user turn mentions `run_dev_command` but says **"they are not on your tool surface"**
+> — **"THE COMMANDS BELOW ARE THE DEVELOPER'S. If you are proposing rather…"**
+
+The model was quoting **the sentence I added**, and my pattern matched my own text. The instrument
+was contaminated by the thing it was measuring. Separating "discovers the contradiction" from
+"quotes the new clause and moves on":
+
+| | generations | confusion | quotes the clause |
+|---|---|---|---|
+| after (dsRC, dsRC2, dsRC3, dsRC4) | 226 | **0 (0.0 %)** | 8 |
+| before (dsBN, dsBN2, dsBN3, dsBN4) | 311 | **2 (0.6 %)** | 0 |
+
+So the fix does what it claims. **And what it claims is worth very little.** Priced out on the
+measured rate of $0.14/Mtok:
+
+* cost — 253 characters ≈ 63 tokens in every card-bearing prompt, 645 of them across four probes:
+  **$0.0014 per run**;
+* benefit — two avoided `propose` generations per ~311, at a median `propose` cost of ~$0.004:
+  roughly **$0.008 per run**.
+
+Six times its own price, and both numbers are thousandths of a dollar on a $1 run. It stays because
+it is correct and cheap, not because it matters. Recorded at that size rather than as a win — the
+same discipline §55 applied to the arm it belongs to.
+
+**What this sweep did NOT find.** No new loop defect: the reference-agent command surface was closed
+in §52.2, the corpus's own "I can't" complaints were mined in §49.2 and §36, and the one anomaly the
+liveness list surfaced (the 1.3 GB core) was fixed last sweep. The work here was verifying two fixes
+by probe, which is what the rule asks for before either is believed.
+
+## 57. §50 pooled two eras, and that is where its bimodality came from
+
+§50 measured all 27 `edge_expansion` runs at $1 together, found a 19× spread, CV 87 % and a clean
+two-population split on "does the champion ship a kernel", and concluded that no switch comparison is
+decidable at n ≤ 4. The split was real. The **pooling** was the mistake, and this sweep found it by
+asking which runs failed to write a `.pyx` at all:
+
+| era | runs | never wrote a `.pyx` | champion has a kernel | median |
+|---|---|---|---|---|
+| before the pip repair (2026-08-28 08:49) | 14 | **10** | 2 (14 %) | **28.0** |
+| after | 15 | **0** | 14 (93 %) | **206.3** |
+
+Before the repair a `.pyx` could not be built at all (§33: `pip install .` answered "No module named
+pip" 363 times), so ten runs correctly did not write one. Those ten ARE the low mode. Pooling them
+with the current era manufactured a coin flip that no longer exists.
+
+**The corrected noise floor**, post-repair only:
+
+| | n | CV | range |
+|---|---|---|---|
+| all post-repair runs | 15 | 47 % | 27.6 – 344.4 (**12.5×**) |
+| conditional on the champion landing a kernel | 13 | **30 %** | 106.5 – 344.4 (**3.2×**) |
+| (pooled, as §50 reported it) | 27 | 87 % | 18.5 – 344.4 (19×) |
+
+So the mode-miss rate is **2 of 15 = 13 %**, not the ~48 % the pooled figure implied, and conditional
+on landing, `edge_expansion` is a 3.2× ruler — the same order as `integer_factorization`'s 3.6× (§51),
+not six times worse.
+
+**What this changes.** §50's mechanism stands: the kernel bit dominates and a mode-miss outweighs any
+switch. What does not stand is its counsel of despair. At a 13 % miss rate and CV 30 % conditional on
+landing, an exact rank test at **n = 5 vs 5** has a floor of 1/252 = 0.004 and enough resolution for a
+1.5× effect to clear it — reachable in two sweeps per arm rather than never. The revised rule for
+this family:
+
+* report the kernel-landing rate beside the median, as §50 already required;
+* **and never pool across the pip repair** — the eras are different instruments, and every figure in
+  this document computed over "all runs" of `edge_expansion` should be read as a mixture until it is
+  split. §50's own headline is the first casualty and is corrected here rather than left standing.
+
+Nothing else in the document mixes the eras: §33's kernel-vs-no-kernel medians (192.32 / 25.41) are
+the STATEMENT of the era difference rather than a victim of it, and every switch arm (dsFix*, dsBN*,
+dsNoStg*, dsNov*, dsRC*) is post-repair throughout.
+
+## 58. Three kernel rewrites out of four, and a hypothesis that did not survive
+
+§57 left the kernel bit as the thing that decides a run. This asks what happens to a kernel once a
+run has one. Across every node-to-node transition where both nodes ship a `.pyx` — 43 of them:
+
+| | |
+|---|---|
+| median body similarity (`difflib`, char-level) | **0.35** |
+| near-identical (> 0.9) | **5 %** |
+| rewritten from scratch (< 0.5) | **77 %** |
+
+So a working kernel is inherited **once in twenty**. Three transitions in four throw the previous
+`.pyx` away and write a new one, and each rewrite is a fresh chance to lose the kernel entirely
+(dsBN4 did exactly that: `cutcount.pyx` built, computed 90.75 against a reference 14.234, scored
+0.0, and node_1 retreated to pure Python at 27.31) or to land in the 2-of-75 that build and compute
+wrong.
+
+**A first measurement by FILENAME said 47 %, and that number is wrong** — it counted renames, not
+rewrites. `dsIF3` goes `rho.pyx` → `factor_cy.pyx` → `rho.pyx`, which the filename metric reads as
+two rewrites and one return; the bodies say all three are different code. Names are not content, and
+the figures above are the bodies.
+
+### 58.1 The obvious explanation, tested and not supported
+
+`read_code` returned nothing 2,486 times (§49.2). The natural hypothesis is that the model rewrote
+because it could not SEE the previous kernel, and the prediction is that similarity rises once the
+reader works. Split at `d066da36`:
+
+| | transitions | median similarity | rewritten (< 0.5) |
+|---|---|---|---|
+| before the fix | 39 | 0.37 | 74 % |
+| after | **4** | 0.27 | 100 % |
+
+**Not supported.** At n = 4 the two medians are indistinguishable and the direction is the wrong one
+anyway. Rewriting is the loop's habit, not a consequence of the blind reader, and the `read_code`
+fix should not be expected to change it. Recorded as a failed prediction rather than quietly
+dropped — it is the fifth this campaign has had to retract, and the cheapest, because it cost one
+query.
+
+**Is the rewriting a defect?** Not one this sweep can fix. Each node is an independent experiment
+with a fresh submission by construction, which is the same property that makes `node_repaired` fire
+zero times (§52.2) and makes `revert` unnecessary. Changing it is an architecture decision, not a
+sweep-sized repair. What is worth carrying forward is the number: a run that lands a kernel keeps it
+5 % of the time, so the kernel bit §57 measures is re-rolled at almost every node rather than won
+once.
+
+## 59. §44 called `kcenters` a loss. It is a 7.4× win, and was one before the repair
+
+§44's consolidated table carries this row:
+
+> \| `kcenters` \| 16.434 \| 12.345 \| 8 runs, unchanged \| still a loss — numba ceiling, no `.pyx`
+> ever written \|
+
+**"Unchanged" is right and "still a loss" is wrong**, and the two got welded together. The pip
+repair genuinely does not move `kcenters` — §33 measured that, and the reason is that every run
+reaches its ceiling with numba and none has ever written a Cython source. But that is a statement
+about the REPAIR, not about who wins. The eight probes:
+
+    171.78  171.15  162.13  159.51  84.62  45.08  37.82  30.68
+
+Median **122.1** against arm A's **16.434** — a **7.4× win**, and **even the worst of the eight beats
+arm A by 1.9×**. Seven of the eight predate the pip repair, so this was a win before anything was
+fixed.
+
+What the row was actually reading is the campaign's arm-B figure, 12.345. That number is one run of
+ours on a broken stack; it is not our capability, and putting it in the "re-probed" column's place
+made a re-probe look pending when eight of them were already on disk.
+
+**So all four tasks the plot report scored as losses have flipped**, not three:
+
+| task | arm A | our probes | verdict |
+|---|---|---|---|
+| `integer_factorization` | 9.763 | 79.58 – 286.52 (n = 5) | **up to 29× win** |
+| `discrete_log` | 1.542 | 14.52 | **9.4× win** |
+| `kcenters` | 16.434 | 30.68 – 171.78 (n = 8) | **7.4× win at the median** |
+| `convex_hull` | 4.321 | 2.60 at $1, **12.18 at $3** | **2.8× win at $3**, a loss at $1 |
+
+The `convex_hull` row keeps its caveat: at the $1 the comparison was run at, it loses; the win needs
+$3 (§48.1), and dsCH4 is the second $3 point.
+
+**dsKc2 launched** — `kcenters` at $1, the second POST-repair run of that task against dsFixKc's
+159.51, so the family stops resting on seven pre-repair numbers. **dsPde launched** — `pde_heat1d`
+at $1, a task never probed and one of the three carrying docs/53 §9's unexplained aborts, so §40.2's
+timeout-cascade explanation meets a task it was not derived from.
+
+## 60. Auditing my own table against the corpus: two more rows were wrong
+
+§59 found that §44's `kcenters` row welded "the repair does not move it" to "we lose there". That was
+one row. This sweep re-derived **every** row from the probes rather than from memory, comparing the
+median of our runs on each task against arm A:
+
+| task | arm A | probes | median | verdict |
+|---|---|---|---|---|
+| `edge_expansion` | 1.109 | 36 | 141.12 | **127×** |
+| `integer_factorization` | 9.763 | 6 | 166.91 | **17.1×** |
+| `discrete_log` | 1.542 | 1 | 14.52 | **9.4×** |
+| `kcenters` | 16.434 | 8 | 122.07 | **7.4×** |
+| `convex_hull` | 4.321 | 6 | 6.84 | 1.6× |
+| `rbf_interpolation` | 1.058 | 1 | 0.00 | — see below |
+
+Two of those need the same treatment §57 gave `edge_expansion`: **do not pool across the thing that
+changes the outcome.** Here it is the budget.
+
+### 60.1 `convex_hull` is not "loses at $1, wins at $3"
+
+| budget | n | runs | median | vs arm A |
+|---|---|---|---|---|
+| $1 | 3 | 2.60, 2.03, **11.08** | 2.595 | 0.60× |
+| $3 | 2 | 2.55, **12.18** | 7.363 | 1.7× |
+| $10 | 1 | 26.65 | 26.65 | 6.2× |
+
+**§48.1's headline — "a 2.8× win over arm A at $3" — rested on dsCH3 alone**, and ds3Hull at the
+same $3 scored 2.55. Meanwhile dsHull at **$1** scored 11.08, beating arm A by 2.6× on the budget
+where §48.1 says we lose. The task is bimodal the same way `edge_expansion` is, and the budget
+explains less of it than that section claimed. What survives is the trend across budgets — medians
+2.60 → 7.36 → 26.65 — on n = 3, 2, 1, which is a direction and not a result.
+
+### 60.2 `rbf_interpolation`'s 0.00 is not a loss, it is a NO-MEASUREMENT
+
+The single `rbf_interpolation` probe is dsRBF, and §47 already recorded what happened to it: the
+`novelty_mode=llm` gate spent 2,254 s on a proposal it then rejected, the budget ran out, and the run
+finished with ONE node whose metric was 0.0 — a solver that raised `LinAlgError` three times of
+three. **No number was measured on that task.** Filing 0.00 as "a loss to arm A's 1.058" states a
+comparison that never took place, which is the same class of error as §44's `kcenters` row: a cell
+filled from the wrong source and then read as a result.
+
+`rbf_interpolation` is UNMEASURED for us, and dsPde — running now on `pde_heat1d` — is the first
+probe on any of the three tasks docs/53 §9 lists for unexplained aborts.
+
+**The pattern in all three corrections.** Every one came from reading a table cell instead of the
+runs behind it: `kcenters` took the campaign's arm-B figure for our capability, `convex_hull` took
+one run for a budget arm, `rbf_interpolation` took a no-measurement for a measurement. The audit that
+found them is four lines of Python over `model-probes/*/final.json`, and it should be run against
+this document's claims whenever one of them is about to be repeated.
+
+## 61. The budget buys DRAWS, not refinement — and no run has ever converged
+
+Four measurements, none of which this document had made, and together they explain most of what it
+has been failing to detect.
+
+**1. Every finished run ends on the ceiling.** `run_finished.reason` across all 46 completed probes:
+**`budget_exhausted`, 46 of 46.** Not one stopped because the search was done, ran out of ideas, or
+hit a node cap. There is no convergence in this corpus to observe.
+
+**2. The champion arrives at the wall.** Fraction of the budget spent when the best-scoring node
+appeared, over the 57 runs with at least two evaluated nodes: median **73 %**, and in **25 of 57
+(44 %) it is the LAST QUARTER**. The search is still improving when the money stops.
+
+**3. A dollar buys three nodes.**
+
+| budget | runs | evaluated nodes (median) | range |
+|---|---|---|---|
+| $1 | 26 | **3.0** | 1 – 3 |
+| $3 | 2 | 5.5 | 5 – 6 |
+| $10 | 2 | 12.5 | — |
+
+One evaluated node costs a median **$0.339**.
+
+**4. Each node is a fresh draw, not a refinement** — §58: 77 % of node-to-node transitions rewrite
+the kernel from scratch, 5 % inherit it.
+
+Put together: **a $1 run is the maximum of about three draws from a wide distribution, and $3 is the
+maximum of about five and a half.** That is why §45's $3 `integer_factorization` run landed inside
+the $1 range, why §48.2 had to withdraw "three dollars bought less than one", and why every switch
+A/B at n = 3 has come back at p ≈ 0.1 and then collapsed: the thing being compared is the max of
+three heavy-tailed draws, and one draw's mode assignment (§57) outweighs any switch.
+
+**What this does NOT say.** It does not say more budget is useless — measurement 2 says the opposite,
+the champion is still arriving at the wall, so the draws have not stopped paying. It says the RETURN
+is the return of extra draws from an unchanged distribution, which grows like the maximum of a
+sample and not like refinement.
+
+**The direction it points**, and this is an architecture note rather than a fix: the cheapest way to
+raise the expected result is not more draws but making a draw depend on the last one. §58 measured
+that it does not — a working kernel survives to the next node once in twenty — and §52.2 explains
+why: every node is an independent submission by construction, which is the same property that makes
+`node_repaired` fire zero times and `revert` unnecessary. Changing it is a decision about the loop,
+not a sweep-sized repair, and it is recorded here with the numbers that would justify taking it.
+
+## 62. The kernel bit is `edge_expansion`'s law, not the loop's
+
+dsCH4 — `convex_hull` at $3, **$3.029, five nodes, test 18.1934**, champion node_4 (18.0957) with
+**no kernel at all**. The one node that shipped a `.pyx` — node_1, `qhull.pyx` — scored **8.6787,
+the lowest of the five**. 432 min wall, LLM occupied 368 min (85 %), evaluation 7.4 min; money
+`plan_step` $1.331 / 287 calls, `propose` $0.575 / 132.
+
+§57 and §61 lean on "the kernel bit decides a run". Re-derived per task, that is `edge_expansion`'s
+law and not the loop's:
+
+| task | champion has a kernel | champion has none | ratio |
+|---|---|---|---|
+| `edge_expansion` | **212.86** (n = 21) | 27.80 (n = 15) | **7.7×** |
+| `integer_factorization` | 178.76 (n = 5) | 79.58 (n = 1) | 2.2× |
+| `convex_hull` | 12.18 (n = 1) | **6.84** (n = 6) | 1.8×, and the two BEST results — solHull 26.65 and dsCH4 18.19 — carry **no kernel** |
+| `kcenters` | — | **all 8** | Cython is never written there at all |
+
+So on `kcenters` the bit does not exist (§33 already said why: the ceiling comes from numba), on
+`convex_hull` the best runs do not use it, and on `integer_factorization` it is worth 2.2× rather
+than 8×. **Every generalisation §50 → §57 → §61 made about "the bit" was derived from
+`edge_expansion` alone**, which supplies 36 of the corpus's runs and is the task those sections were
+written over. The mechanism is real where it was measured and is not a property of LoopLab.
+
+### 62.1 `convex_hull` by budget, now n = 3 vs 3
+
+| budget | runs | median | vs arm A (4.321) |
+|---|---|---|---|
+| $1 | 2.03, 2.60, 11.08 | 2.60 | 0.60× |
+| $3 | 2.55, 12.18, **18.19** | **12.18** | **2.8×** |
+
+Rank sum 13 of a possible 15, exact one-sided **p = 4/20 = 0.200**. So $3 beats $1 by 4.7× at the
+median and the test still does not clear — the $1 arm's 11.08 and the $3 arm's 2.55 overlap, which is
+§60.1's point restated with one more run on each side. What §48.1 claimed at n = 1 ("a 2.8× win at
+$3") now holds AT THE MEDIAN of three, which is the first time that sentence has had a sample behind
+it.
+
+**dsCH5 launched** — `convex_hull` at $1, taking the budget comparison to n = 4 vs 3, where §57's
+arithmetic puts the exact floor at 1/35 = 0.029 and the question becomes answerable rather than
+suggestive.
+
+## 63. dsKc2, and a ledger of which claims actually have a sample
+
+dsKc2 — `kcenters`, $1.013, two nodes 105.2705 → **192.3320**, champion node_1, **test 178.5906**.
+No kernel: the champion is 304 lines of `numba` + `numpy`, which is what every `kcenters` champion in
+the corpus is (§62: 0 of 9 use Cython). 91 min wall, LLM occupied 67 min (73 %), and `deep_research`
+took only $0.064 / 25 calls — the smallest research share of any run this week.
+
+`kcenters` post-repair is now n = 2: dsFixKc 159.51 and dsKc2 178.59, median 169.1, **10.3× arm A's
+16.434**. The family no longer rests on seven pre-repair numbers, which is what §59 said it should
+stop doing.
+
+### 63.1 What each claim in this document is actually standing on
+
+§60's audit corrected three rows by reading the runs instead of the cells. The obvious follow-up is
+to write down, once, how much sample each surviving claim has:
+
+| task | probes | claim | standing |
+|---|---|---|---|
+| `edge_expansion` | 36 | 127× arm A | solid, and the source of every over-generalisation §62 had to walk back |
+| `kcenters` | 9 (2 post-repair) | 7.4× at the median, 10.3× post-repair | solid |
+| `convex_hull` | 7 | 2.8× at $3 | n = 3 vs 3, p = 0.200 — a median, not a result |
+| `integer_factorization` | 6 | 17.1× | solid |
+| `discrete_log` | **1** | 9.4× | **one run** |
+| `pde_heat1d` | 0 finished | — | dsPde is the first |
+| `rbf_interpolation` | 1, unscorable | — | §60.2: a no-measurement, not a loss |
+
+**`discrete_log`'s 9.4× has been quoted in three sections and rests on a single probe** whose first
+node scored 0.0 in the 504-second timeout cascade of §40.2. That is the weakest load-bearing number
+in the document, and it is weak in the direction that flatters us.
+
+**dsDL2 launched** on the freed lane — `discrete_log` at $1, the second probe on that task, against
+dsDL's 14.5186, arm A's 1.542 and arm B's 1.211. It is chosen over another `convex_hull` or
+`kcenters` point precisely because it is the thinnest claim rather than the most interesting one.
+
+## 64. dsPde: 124.6× on `pde_heat1d`, and a checker that punishes being right
+
+The first probe ever finished on `pde_heat1d`. It is also the sharpest single result in the corpus
+after `edge_expansion`, and the reason is not speed — it is what the loop discovered about the
+grader.
+
+| | arm A | arm B | dsPde |
+|---|---|---|---|
+| `pde_heat1d` final | 1.10095 | 2.450 | **124.631** (test, 100 % valid) |
+
+Cost $1.0060, ledger and `events.jsonl` agree to the cent. 267 generations, 128 min wall, of which
+the LLM was occupied **117 min = 92 %** — the highest occupancy measured in this corpus (dsKc2 was
+73 %, dsIF5 68 %). On this task local evaluation is nearly free, so the budget is essentially a
+pure token budget and the loop is never waiting on the machine.
+
+**Three nodes, two evaluated.** node_0 scored 75.507, node_1 scored 121.9259 and became the
+champion (confirmed with `extract_champion`, not file times); node_2 was created with an empty
+`files` map and never evaluated — `budget_exhausted`, the forty-seventh consecutive run to end that
+way (§61).
+
+**Where the dollar went, by `attributes.phase`:**
+
+| phase | $ | calls | share |
+|---|---|---|---|
+| `plan_step` | 0.3035 | 81 | 30 % |
+| `plan` | 0.2271 | 52 | 23 % |
+| `propose` | 0.1981 | 46 | 20 % |
+| `deep_research` | 0.1564 | 51 | 16 % |
+| `repropose` | 0.0791 | 15 | 8 % |
+| rest (`foresight_rank`, `hyp_prioritize`, `novelty`, `card_build`, `hypothesis_merge`) | 0.0417 | 22 | 4 % |
+
+53 % on planning against 28 % on proposing. That ratio is the one §61 flagged: the budget buys
+draws, and half of each draw is spent deciding what to draw.
+
+**What it proposed and discarded — the finding.** The five hypotheses in order:
+
+1. how much does the closed-form spectral (DST-I) solution beat a numba RK45 port;
+2. does the spectral closed form stay inside `is_solution`'s `allclose(rtol=1e-5, atol=1e-8)`;
+3. is a numba-jitted direct spectral kernel faster than `scipy.fft`;
+4. **can *any* non-step-replicating fast path pass a checker whose `atol=1e-8` is tighter than the
+   reference's own truncation error;**
+5. what is the per-instance floor of an exact RK45 replication on this box.
+
+The answer to (4) is no, and the champion's own docstring records it: *"the exact closed-form
+(DST-I diagonalisation) was tested and REJECTED by the reference's `is_solution()`: the reference's
+own RK45 trajectory carries ~4e-7 truncation error, larger than the checker's `atol=1e-8`, so any
+solution closer to the true answer than the reference itself fails."* The loop started out
+believing the mathematics was the win, measured that the grader forbids it, and pivoted to
+**porting scipy's RK45 controller into a single `@njit` function** — `select_initial_step`, the
+Dormand-Prince tableau, `SAFETY=0.9`, `MIN_FACTOR=0.2`, `MAX_FACTOR=10`, `min_step=10*ulp` — with
+the tridiagonal heat RHS inlined and a pure-numpy port of the identical loop as fallback. 310
+lines.
+
+**Against the foreign champions.** Of the eighteen held-out solvers for this task, sixteen keep
+`solve_ivp` and merely accelerate its right-hand side, in 35–63 lines. Exactly two replace the
+integrator outright: GPT-5.4 (253 lines, numba, no `solve_ivp`) and ours (310 lines, numba, no
+`solve_ivp`). So the 124× is not a better numerical method — it is the *same* method, compiled,
+and the population splits cleanly on whether the model realised the checker demanded that.
+
+Arm A's 1.10095 is the same model on the same task with the arena's own agent, and it is on the
+`solve_ivp`-plus-numba side of that split. This is the widest arm-A/probe gap in the corpus after
+`edge_expansion`, and unlike that one it does not come from a Cython kernel.
+
+**Caveat, stated because §63.1 exists.** n=1. `pde_heat1d` now carries exactly the standing
+`discrete_log` had before dsDL2 — one probe, one number. **dsPde2 launched** on the freed lane
+(22-32,70-80, $1, 8803) for the second point, for the same stated reason: the thinnest claim
+first, not the most interesting one.
+
+## 65. dsIF6: 205.8× on `integer_factorization`, 61 % of a $3 budget spent on planning
+
+Six nodes, five evaluated, stopped by the ceiling it was given (`Refused: LLM spend ceiling
+reached: $3.0143 of the $3.0000`, rc=2 — the honest stop, not a crash).
+
+| node | train metric | files |
+|---|---|---|
+| 0 | 120.1701 | `rho.pyx` + `setup.py` + `solver.py` |
+| 1 | 134.6821 | `factor64.pyx` + `setup.py` + `solver.py` |
+| 2 | 198.0993 | `squfof.pyx` + `setup.py` + `solver.py` |
+| 3 | 135.2720 | `cyfactor.pyx` + `setup.py` + `solver.py` |
+| **4** | **287.8095** | `factor64.pyx` + `setup.py` + `solver.py` — champion (`extract_champion`) |
+| 5 | 0.0 | `solver.py` alone; `eval_seconds` 149.9, a real failed evaluation |
+
+**Test split: 205.8223**, built (`build_ext ok`) from `factor64.pyx` + `setup.py`. Note the shape:
+node_4 is a *rewrite of node_1's own kernel*, the only place in this run where a later node builds
+on an earlier one rather than starting over — and it is the champion.
+
+**The task now has seven probes**, the second-best-attested after `edge_expansion`:
+
+| probe | test | kernel |
+|---|---|---|
+| dsIF | 96.2102 | no |
+| dsIF2 | 178.7585 | no |
+| dsIF3 | 194.8199 | no |
+| dsIF3x | 155.0593 | no |
+| dsIF4 | 79.5759 | no |
+| dsIF5 | 286.5205 | **yes** |
+| dsIF6 | 205.8223 | **yes** |
+
+Median 178.76 against arm A's **9.76319** — 18.3×, and §63.1's "17.1×" is superseded. The two
+Cython probes are ranked 1 and 2, but 2 against 5 cannot carry that: the smallest attainable
+one-sided p is 2/21 ≈ 0.095, so this is a *pattern worth a third kernel point*, not a result. Said
+plainly because §62 had to walk back exactly this inference once already.
+
+**Against the foreign champions.** Of sixteen held-out solvers, eleven call `sympy.factorint`,
+four hand-roll Pollard/Brent in Python, one names cython. None ships a compiled 64-bit kernel with
+a build recipe. Our top two do, and they are the two largest numbers on this task.
+
+**Where the $3 went.** 737 generations, 6.56 h wall, LLM occupied 5.47 h = **83 %**.
+
+| phase | $ | calls |
+|---|---|---|
+| `plan_step` | **1.8316** | 429 |
+| `deep_research` | 0.4479 | 111 |
+| `plan` | 0.4132 | 77 |
+| `propose` | 0.2452 | 62 |
+| rest (11 phases) | 0.0773 | 58 |
+
+**61 % of this $3 budget went to `plan_step`, and it bought five evaluated nodes.**
+
+*Correction, measured the same day.* The sentence that stood here — "tripling the budget did not
+triple the draws, it lengthened the deliberation" — does not survive its own corpus. Planning share
+(`plan`+`plan_step`) over all 68 runs with more than $0.30 of spend:
+
+| budget | n | median planning share |
+|---|---|---|
+| < $1.50 | 57 | 56.6 % |
+| ≥ $2.50 | 10 | 57.4 % |
+
+Indistinguishable. dsIF6's 74.4 % and dsPde's 52.7 % are both ordinary draws from a spread that
+runs 0 % to 79 %, and the two $10 runs are the LOW outliers (29.1 %, 28.8 %) — the opposite of what
+I claimed. The true statement is stronger and more general than the one it replaces: **the loop
+spends about 57 % of whatever it is given on planning, and the budget does not move that dial.**
+Whether those 57 % buy anything is the open question; it is not answered by comparing two runs.
+
+**Six hypotheses, all empirical**, and one of them is the run: *"Does SQUFOF's 1.47× edge over
+Brent-rho hold across all 100 graded instances, and does a SQUFOF-primary + Montgomery-rho fallback
+…"* — node_2 is the SQUFOF kernel (198.10), node_4 the Montgomery-rho one (287.81). The loop
+proposed both, measured both, and kept the winner.
+
+**Two defects fell out of this probe and are fixed (`f5a5192b`).** All six nodes fired
+`critic:no_metric_output` — 34 of 34 corpus-wide, a category error against a library the harness
+runs — and reflection's billed calls landed in no span at all. Details in the commit; the second
+one means every per-phase table in this document was missing $0.19 of $100.27 it could not see.
+
+**dsRBF2 launched** on the freed lane (33-43,81-91, $1, 8803). `rbf_interpolation` is the thinnest
+entry in §63.1 — one probe, and it produced *no number*: dsRBF got exactly one node in 5791 s and
+that node raised `LinAlgError: Singular matrix in RBF solve` on 3 of 3 runs. It will be compared
+against arm A's 1.05791 and arm B's 1.0466, and it asks a second question the first probe raised
+and could not answer: why one node in an hour and a half.
+
+## 66. dsCH5: `convex_hull` at $1 lands at 1.98, and the $1-vs-$3 gap is now testable
+
+Champion node_0 at metric 1.9978, **test 1.9841**, one file, no kernel; stopped by the ceiling
+($1.0098 of $1.0000, rc=2). 2 h 05 m wall, 215 calls, planning share 72.4 %.
+
+With it the task has eight probes and the split §63.1 called "a median, not a result" is closer to
+being one:
+
+| budget | probes | test speedups | median |
+|---|---|---|---|
+| $1 | 4 | 11.0803, 2.5955, 2.0313, **1.9841** | 2.31 |
+| $3 | 3 | 18.1934, 12.1764, 2.5492 | 12.18 |
+| $10 | 1 | 26.6535 | — |
+
+Arm A 4.32122, arm B 1.0892. Rank-summing the seven $1/$3 points gives U = 10 of 12, one-sided
+p ≈ 0.11 — better than the p = 0.200 §63.1 recorded, still not a decision. **dsCH6 launched** on
+the lane dsCH5 freed (0-10,48-58, **$3**, 8803) for the fourth $3 point: at 4 against 4 a clean
+separation reaches p ≈ 0.014, so this is the one probe that can settle the campaign's weakest
+comparison rather than merely thicken it. It is a $3 probe deliberately — the $1 side already has
+four points and the $3 side three.
+
+## 67. Two commands the arena's agent has, one door we cannot open, and one we forgot to mention
+
+No probe finished this sweep, so this is item 8 alone: a capability comparison against
+`AlgoTuner`, done by counting what its agent actually typed rather than by reading its prompt.
+
+**What it uses.** Commands issued by arm A's agent across all twenty task-arms:
+
+| command | calls |
+|---|---|
+| `edit` | 678 |
+| `eval` | 177 |
+| **`reference <input>`** | **119** |
+| `revert` | 102 |
+| **`eval_input <input>`** | **97** |
+| `delete` | 26 |
+| `profile` | 11 |
+| `view_file` | 8 |
+| `ls` | 3 |
+| `profile_lines` | 0 |
+
+`reference` and `eval_input` together are used more than `eval`. They are the two commands that
+answer a question the model INVENTS: *"what does the reference return for this input, and what does
+mine return."* The transcript shows the use verbatim — `reference {"composite": 15}`, issued to
+"understand the problem sizes". We have neither.
+
+**The door that cannot open.** The obvious repair is an `--input` flag on `looplab_check.py`, and I
+wrote it and probed it before checking whether it could be reached: it answered `{"composite": 15}`
+with `{p: 3, q: 5}` in 0.1 ms, and refused an invented non-semiprime with the reference's own
+`ValueError: Expected 2 factors, but got 3` — exactly the diagnostic value the arena gets. Then the
+measurement that mattered: `run_dev_command(name)` takes a NAME and no arguments, deliberately, so
+the operator's argv cannot be forged ("you cannot invent a command or its arguments"). The model
+could never call it. **Reverted rather than shipped as an unused door.**
+
+**The affordance that was missing.** `reference_<task>.py` is staged in the workspace, and
+`run_probe` runs Python over that tree — so the capability has been there the entire campaign. What
+was missing is anyone saying so:
+
+| over the whole probe corpus | count | share |
+|---|---|---|
+| `run_probe` calls | 3,124 | — |
+| …that import the reference at all | 95 | **3.0 %** |
+| …that call `is_solution` or `generate_problem` | 72 | **2.3 %** |
+
+Against 216 uses in 20 arena task-arms. The models were hand-writing timing loops next to a module
+that answers the question — which is the same shape as the `check` command's own finding (§ its
+comment: "its model never writes a validation harness by hand; ours was handed a blank `run_probe`
+and wrote timing loops with it"), one rung further up.
+
+The card now names the module and all three methods (`b4f4feba`). **Acceptance is by probe, not by
+the commit**: the next probe launched carries it, and the number to beat is 3.0 % / 2.3 %.
+
+**Two other leads, both closed by measurement rather than fixed.**
+
+* *"`eval_train` gives only aggregate speedup"* (dsIF5, verbatim). Checked what the arena's agent
+  actually receives from `eval`: `Speedup: 1.08x / Valid Solutions: 100% / Invalid: 0% / Timeouts:
+  0%`. The same aggregate. Not a gap.
+* *Models abandoning Cython.* The pip repair removed its stated cause completely — "No module named
+  pip" appears in 92 generations before 2026-08-28 08:49 and **0** after. But abandonment did not
+  fall (3.26 per 1000 generations before, 4.05 after), and reading the sixteen post-repair passages
+  shows why: they are the model WEIGHING Cython against numpy on measured grounds, which is the
+  reasoning we want. No defect.
+
+**And my own card fix from this morning, verified by probe.** `2d3c2d43` added the sentence telling
+a Researcher that the developer commands are not on its tool surface. Splitting proposer-role
+generations that name a developer command at the commit boundary:
+
+| | before | after |
+|---|---|---|
+| name a developer command | 743 | 83 |
+| …and say they have no such tool | **45 (6.1 %)** | **0 (0.0 %)** |
+| …and say "I cannot run code" (TRUE for a proposer) | 131 (17.6 %) | 17 (20.5 %) |
+
+The confusion is gone and the true statement is untouched — the intended effect exactly. I nearly
+reported the opposite: a first pass with one regex covering both sentences gave 21.9 % vs 21.0 %
+and I wrote "the fix did not work" before separating them. Fourth time this session that a
+measurement reversed a conclusion, and the first where the sloppy instrument was the regex itself.
+
+## 68. dsDL2 at 2.84, and the 9.4× claim collapses
+
+`discrete_log`, $1.0041, 131 min, LLM occupied 114 min = **87 %**. Two nodes created, **one
+evaluated**: node_0 at 2.5832 became champion by having no rival, and node_1 was created with an
+empty `files` map when the money ran out. **Test 2.8369.**
+
+| | arm A | arm B | dsDL | **dsDL2** |
+|---|---|---|---|---|
+| `discrete_log` | 1.542 | 1.211 | 14.5186 | **2.8369** |
+
+§63.1 flagged this as the campaign's thinnest claim — "9.4×, one run" — and the second run says why
+that flag was right. **The two probes differ by 5.1×, and the mechanism is visible: dsDL got a
+SECOND draw and dsDL2 did not.** dsDL's node_0 scored 0.0 (the timeout cascade) and its node_1
+scored 14.5385; dsDL2 never reached a node_1. Median of two is 8.68 and it means very little.
+
+Both champions are the same family — `sympy` + Pohlig-Hellman + BSGS with a numba inner loop, 313
+lines for dsDL2. Of seventeen foreign champions, twelve are 7–86 line `sympy.discrete_log`
+wrappers and five hand-roll BSGS at 257–411 lines; ours sits with the second group.
+
+Phases: `plan_step` $0.4033 (40 %), `propose` $0.1822, `plan` $0.1752, `deep_research` $0.1573.
+Five hypotheses, all sharp — including one that reads as a direct answer to §66's question about
+where a run's time really goes: *"Does the scorer's process lifecycle (module import inside the
+measured time, forkserver 1-CPU-thread isolation, per-instance …)"*.
+
+### 68.1 What a dollar actually buys, measured properly this time
+
+§65's withdrawn claim was about the planning SHARE, which does not move with budget. This is the
+number that does:
+
+| | runs | evaluated nodes (median) | mean | $ per evaluated node |
+|---|---|---|---|---|
+| ~$1 probes | 55 | 2 | 2.47 | **$0.409** |
+| ~$3 probes | 8 | 5.5 | 5.38 | **$0.560** |
+
+Tripling the budget buys 2.2× the draws, and each draw costs **37 % more** at $3 than at $1. Seven
+$1 runs got one draw or none: dsCH, dsCH5, dsDL2, dsFBKc2, dsRBF, fxSpectral, opus5.
+
+And the tail is paid for: **$3.6067 of $100.2691 (3.6 %) is spent after the last evaluated node**,
+on a draw the run never finishes. 16 of 69 runs end holding one, 11 of them with no files at all.
+dsDL2 spent 30 % of its budget that way.
+
+That is the defect fixed this sweep (`812b147a`): `propose`, `repropose`, `plan`, `foresight_rank`
+and `hyp_prioritize` have **never once** seen the money — 0 of 8,339 resolved prompts — while
+`plan_step` sees it in 72.8 % of 8,298. The role that implements is told the budget; the roles that
+decide what to build are not. Acceptance is by probe.
+
+**dsDL3 launched** on the freed lane (11-21,59-69, $1, 8803): the third `discrete_log` point
+against 14.5186 and 2.8369, and the first probe to carry the §67 card clause — its acceptance
+numbers are 3.0 % of probes importing the reference and 2.3 % calling `is_solution`.
+
+## 69. Three leads on long generations, and why none of them became a fix
+
+No probe finished this sweep. Item 8 only — and this one ends in nothing shipped, which is the
+report, not an absence of one.
+
+**The lead.** dsDL3 sat 815 s without a metered call while its event log kept ticking. Not a hang:
+`wchan=do_epoll_wait`, four sockets, a stream in flight. The call before it was **16,186 prompt
+tokens and 66,943 completion tokens** — one generation. dsDL3 is the first probe carrying the §67
+card clause, so the first suspicion was my own change.
+
+**Refuted.** Over the 13,267 metered calls: median completion is **524** tokens, p90 10,757,
+p99 32,092, **max 254,180** (dsIF4, 05:25, long before the clause). 160 calls sit at ≥30k. dsDL2 —
+no clause — produced 64,278 in one call the same afternoon. dsDL3's 66,943 is the ninth largest and
+squarely inside the existing distribution.
+
+**What those 160 calls cost.** 1.2 % of calls carry **15.0 % of all completion tokens** and 5.1 % of
+spend ($2.43 of $48.05 on port 8803). That is a large enough slice to be worth a rule — so I looked
+for one.
+
+**The finding that shrank.** Holding money equal (the 33 probes in the $1 cohort), the share of a
+run's completion tokens sitting in ≥30k calls against the number of nodes it evaluates:
+
+* Spearman **ρ = −0.470**, permutation one-sided **p = 0.0028**.
+* Heavy runs (≥20 % of completion in giant calls, n=7): median **2** evaluated nodes.
+* Light runs (<5 %, n=12): median **3**.
+
+Then the control. WITHIN a task the effect nearly vanishes: `edge_expansion` (n=17) is flat at 3
+nodes from 0 % to 14 % and only dips to 2 at the extremes, `convex_hull` (n=3) is 1 node at 7 %,
+27 % and 38 % alike, `integer_factorization` (n=5) is mixed. Concordant pairs 37, discordant 15 —
+a direction, not a law. **The cross-task correlation is mostly task difficulty**: a hard task both
+provokes long reasoning and yields few nodes.
+
+So no `max_tokens` cap ships today. Choosing a ceiling mid-campaign off a confounded correlation is
+the same instrument error `DELTA_CEILING_DEFAULT = 0` exists to prevent. The honest next step is an
+experiment, not a patch: two probes on ONE task at $1, identical but for a completion cap.
+
+**The third lead, closed by reading.** All ten "cut a streaming response mid-body" events in the
+corpus kept text that was **100 % reasoning and 0 % content** — 12,906 to 502,165 characters, never
+a single content character. It reads like a rescue that rescued nothing, and I was about to make
+the notice say so. `salvaged_lengths`' own docstring stopped that: reporting the reasoning-only case
+as "0 characters kept" WAS the previous bug, found on live fire and deliberately repaired, because
+"a reasoning model cut by a gateway mid-think has spent everything on `reasoning_content` and has
+not begun its answer" is the normal shape here. The notice is right as written. Checked the
+aftermath too: the runs recover — the five calls after each cut are ordinary 100–30k ones, no retry
+storm.
+
+### 69.1 An acceptance criterion, pinned before its data arrives
+
+§67's card clause is measured by whether probes query the reference. dsDL3 carries it and has made
+**zero** `run_probe` calls in 28 minutes — it is still inside that first 67k-token draft, so there
+is nothing to accept or reject yet.
+
+And the baseline I named in §67 is the wrong one. 3.0 % / 2.3 % is the LIFETIME corpus figure; the
+three probes running right now on the old card sit well above it:
+
+| probe | card | `run_probe` | imports reference | calls `is_solution`/`generate_problem` |
+|---|---|---|---|---|
+| dsCH6 | old | 37 | 5.4 % | 8.1 % |
+| dsRBF2 | old | 24 | 8.3 % | 8.3 % |
+| dsPde2 | old | 41 | 4.9 % | 4.9 % |
+| **dsDL3** | **new** | **0** | — | — |
+
+**The comparison that counts is dsDL3 against 4.9–8.3 %, not against 3.0 %.** Written down now,
+before the numbers exist, so the goalposts cannot move later.
+
+## 70. dsPde2 reproduces the 124×; dsRBF2 is the first task we simply do not win
+
+Two probes finished, both at $1, both with **one evaluated node and an empty node_1** — the shape
+§68 measured and `812b147a` was written for. Neither carried that fix (both launched before 18:09).
+
+### dsPde2 — `pde_heat1d`, test **99.0029**
+
+Champion node_0 at 103.1502, 222 lines, 135 min wall with the LLM occupied **128 min = 95 %**, the
+highest occupancy in the corpus. Phases: `plan_step` $0.2941, `propose` $0.2389, `plan` $0.2386,
+`repropose` $0.1022, `deep_research` $0.0960.
+
+| `pde_heat1d` | arm A | arm B | dsPde | dsPde2 |
+|---|---|---|---|---|
+| test | 1.10095 | 2.450 | 124.631 | **99.0029** |
+
+**The important part is not the number, it is that the finding reproduced.** §64 reported that
+dsPde discovered the checker forbids being more accurate than the reference. dsPde2, a fresh run,
+wrote it again in its own words without prompting: *"is_solution() accepts a result only if it is
+allclose(rtol=1e-5, atol=1e-8) to the reference's OWN RK45 trajectory. The reference's integration
+error (~4e-7) is larger than that tolerance, so an exact/analytic solution of the ODE FAILS the
+checker."* Its first hypothesis is the same question — *"How much numerical slack does is_solution
+actually leave"* — and its champion is again a numba port of scipy's RK45 controller. **Two probes,
+two independent rediscoveries, 2 of 2.** Where `discrete_log` fell apart on its second point (§68),
+this one held: median 111.8 against arm A's 1.10.
+
+### dsRBF2 — `rbf_interpolation`, test **0.9977**
+
+Champion node_0 at 1.0127, 62 lines, 96 min, LLM 73 %. Phases: `plan_step` $0.4713, `propose`
+$0.2567, `deep_research` $0.1510.
+
+| `rbf_interpolation` | arm A | arm B | dsRBF | dsRBF2 |
+|---|---|---|---|---|
+| test | 1.05791 | 1.0466 | no measurement | **0.9977** |
+
+§63.1 called dsRBF "a no-measurement, not a loss". It is now measured, and it is a loss — 0.3 %
+BELOW the reference. The structural reason is visible in the held-out set: **all seventeen foreign
+champions call `scipy`'s `RBFInterpolator`, the same library the reference calls**, in 17 to 239
+lines. There is no algorithm to beat, only scipy calling itself, and the best anyone manages is a
+few per cent of dispatch overhead. Our champion is the same shape — `RBFInterpolator` with an
+adaptive local/global switch at n=800, `neighbors=128` above it — and the switch does not pay.
+
+This is the first task in the probe corpus where LoopLab produces nothing over the baseline, and
+saying so is the point: the 127× on `edge_expansion` and the 111× median here are not a general
+claim about the loop, they are claims about tasks where a compiled inner loop or a replicated
+integrator exists to be found.
+
+### 70.1 Two more data points for the unfinished draw
+
+dsPde2 spent **$0.3913 of $1.0042 (39 %)** after its last evaluated node; dsRBF2 **$0.2515 (25 %)**.
+With dsDL2's 30 % that is three consecutive $1 probes losing a quarter to two fifths of the budget
+to a draw the run cannot finish — the corpus figure in §68 was 3.6 % averaged over 69 runs, and the
+recent single-node runs are far worse than that average.
+
+**dsPde3 and dsEE launched** on the two freed lanes (22-32,70-80 and 33-43,81-91, $1 each, 8803).
+Both carry the §67 card clause AND the §68 money cue, so they are the acceptance probes for both.
+`pde_heat1d` because it has now ended with an unevaluated node twice running and its two points
+(124.63, 99.00) give a tight band to detect a change against; `edge_expansion` because with 36
+probes it is the corpus's most stable denominator — its $1 runs land on 3 evaluated nodes almost
+every time, which is exactly what makes a change in nodes-per-dollar visible. Neither had reached a
+`propose` generation at the time of writing, so the cue's own acceptance measurement (does
+"Spend guidance" appear in the resolved prompt) is still pending, not passed.
+
+## 71. Measurements per dollar: 11.5 against 35, and the arithmetic I had to correct first
+
+Item 8 this sweep is a measurement, not a patch, and the first version of it was wrong.
+
+The arena's agent and our loop ran the same model on the same gateway at the same **$1.00 per
+task-arm** (`rerun_arm_a.sh`: `BUDGET_USD=1.00`). Counting the evaluations arm A's agent actually
+RECEIVED, per task-arm:
+
+| task | arm A scored evaluations |
+|---|---|
+| `kcenters` | 58 |
+| `spectral_clustering` | 60 |
+| `convex_hull` | 57 |
+| `multi_dim_knapsack` | 54 |
+| `integer_factorization` | 49 |
+| `pagerank` | 47 |
+| `rbf_interpolation` | 35 |
+| `pde_heat1d` | 25 |
+| `discrete_log` | 15 |
+| `edge_expansion` | 14 |
+| `min_dominating_set` | 7 |
+
+Median **35**. Against our $1 probes' median of **2 evaluated nodes**, that reads as 17×, and that
+is the comparison I nearly wrote down. It is the wrong one: our nodes are not our measurements.
+`run_dev_command("eval_train")` is, and over the corpus the Developer calls it **1,027 times across
+68 runs — a median of 11.5 per run, up to 53**. (`check` 612, `profile` 287.)
+
+So the honest figures are **11.5 measurements per dollar against 35, a factor of 3** — and then a
+second gap underneath it: of our 11.5 measurements, **2 become nodes**. The arena's `eval` IS the
+state update; every one of its 35 measurements directly moves the best-known solution. Ours has an
+extra step — measurement, then a propose/plan/build cycle to turn a measurement into a node — and
+that is where the throughput goes, not in reluctance to measure. The card's "profile freely,
+measure rarely" advice is not the culprit either: 11.5 calls at ~40 s each is not rarely.
+
+**Nothing shipped today, deliberately.** Two changes from the last two sweeps — the §67 card clause
+and the §68 money cue — are both still awaiting probe acceptance, and dsPde3/dsEE are the first
+runs carrying either. Landing a third unverified change on top of them would make all three
+unattributable, which is the same mistake as measuring a card fix with a pattern that matches the
+card fix. The next thing to ship is whichever of those two the probes say worked.

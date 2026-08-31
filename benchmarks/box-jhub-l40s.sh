@@ -43,6 +43,29 @@ export CAMPAIGN_RUNS="${CAMPAIGN_RUNS:-$BENCH_ROOT/camp-runs}"
 export METER_BASE="${METER_BASE:-http://127.0.0.1:8801}"
 export METER_PORT="${METER_PORT:-8801}"
 export METER_RPM="${METER_RPM:-45}"          # under the endpoint's published 50/min for this key
+# WHICH CORES THE METER MAY USE. Not a lane: the meter is infrastructure every lane talks to, so a
+# lane it shares is a lane whose timings include somebody else's proxy.
+#
+# Under the regime the finished campaign actually ran -- `lanes=4 cores_per_lane=22`, which every
+# `campaign-final/*.done` marker records beside its own cpu list -- the lanes are 0-10+48-58,
+# 11-21+59-69, 22-32+70-80 and 33-43+81-91, i.e. 44 of this box's 48 physical cores, and the four
+# left over are 44-47 with their siblings 92-95. That is what they are free FOR. Note that this is
+# NOT the shipped default the header above describes (20 lanes x 2 cpus, which occupies physical
+# cores 0-19 and their siblings); the lane count and width are the operator's `LANES` /
+# `CORES_PER_LANE`, so the profile has to name which regime a core range is stated against.
+#
+# 44-47+92-95 is off the lanes in BOTH, and that is not asserted here in prose:
+# `tests/test_the_meter_is_pinned_off_the_lanes.py` runs `campaign.sh`'s own lane planner against
+# this box's real `thread_siblings_list` for each regime and asserts the pin is disjoint from every
+# lane it produces.
+#
+# It lives here rather than in start_meter.sh because it is a fact about this box's core layout, and
+# it lives in a FILE rather than in a driver because that is how it was lost: on 2026-08-29 the
+# pinning was done by run_final.sh, which was never committed and went with /var/tmp when the
+# container restarted. The meter then came back on 0-95 -- measured at 0.0 % CPU, so nothing was
+# actually spoiled, but it was one busy proxy away from contaminating a lane and nothing would have
+# said so.
+export METER_CPUS="${METER_CPUS:-44-47,92-95}"
 export METER_LOG="${METER_LOG:-$BENCH_ROOT/meter/meter.jsonl}"
 
 export LOOPLAB_LLM_MODEL="${LOOPLAB_LLM_MODEL:-deepseek-v4-flash}"

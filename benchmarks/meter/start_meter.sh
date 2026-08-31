@@ -42,7 +42,19 @@ fi
 # process's command line. `proxy.py::main` already reads METER_API_KEY from the environment, so the
 # fix is to export the variable and drop the flag: same idempotence, zero proxy changes. (The proxy
 # itself is clean — rows and stderr never carry headers or the key.)
-setsid nohup python3 "$HERE/proxy.py" --port "$PORT" --upstream "$UPSTREAM" --api-key "$KEY" \
+# PINNED OFF THE LANES, or loudly not. See METER_CPUS in the box profile for why; in short, the
+# meter is infrastructure every lane talks to, and a lane it shares is a lane whose timings include
+# a proxy. An unset METER_CPUS is not silently accepted: an unpinned meter is a measurement risk the
+# operator should have to read about, not discover in `taskset -p` three hours into a campaign.
+if [ -n "${METER_CPUS:-}" ] && command -v taskset > /dev/null; then
+  PIN=(taskset -c "$METER_CPUS")
+  echo "meter pinned to $METER_CPUS (off the lanes)"
+else
+  PIN=()
+  echo "WARNING: METER_CPUS unset or no taskset -- the meter is UNPINNED and may land on a lane," >&2
+  echo "         which puts its CPU into somebody's timings. Source the box profile first." >&2
+fi
+setsid nohup "${PIN[@]}" python3 "$HERE/proxy.py" --port "$PORT" --upstream "$UPSTREAM" --api-key "$KEY" \
     --log "$LOG" --rpm "$RPM" >> "$STDOUT" 2>&1 < /dev/null &
 sleep 2
 if S="$(alive)" && [ -n "$S" ]; then

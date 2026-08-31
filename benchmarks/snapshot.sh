@@ -9,7 +9,9 @@
 #
 # What is deliberately NOT copied: `.venv` (6.3 GB, rebuilt by two uv commands) and `.hf_datasets`
 # (872 MB and growing, re-downloaded on first use). Copying either onto an S3-backed FUSE mount
-# costs more than recreating it.
+# costs more than recreating it. Everything else here is either a bundle of a git checkout (both
+# of them, since 2026-08-30 -- see 1b for what it cost to learn that ours counted too) or a
+# measurement that no command can reproduce.
 #
 # NOTE: the AlgoTune checkout must NOT be shallow. A bundle made from a `--depth 1` clone names
 # parents it does not carry, and `git clone <bundle>` fails with "remote did not send all necessary
@@ -30,6 +32,8 @@ mkdir -p "$OUT" || { echo "cannot create $OUT"; exit 1; }
 
 echo "snapshot -> $OUT"
 
+SHORT=0
+
 # 1. The patched third-party checkout, as a bundle with history.
 if [ -d "$SRC/AlgoTune/.git" ]; then
   ( cd "$SRC/AlgoTune" && git bundle create "$OUT/AlgoTune.bundle" --all 2>/dev/null ) \
@@ -41,6 +45,34 @@ if [ -d "$SRC/AlgoTune/.git" ]; then
   fi
   ( cd "$SRC/AlgoTune" && git log --oneline -3 > "$OUT/AlgoTune-HEAD.txt"; git status --porcelain \
       > "$OUT/AlgoTune-dirty.txt" )
+fi
+
+# 1b. OUR OWN repo, as a bundle, for exactly the same reason.
+#
+# Measured 2026-08-30, from the wreck. `PROVENANCE.txt` had faithfully recorded
+# `looplab:  af0e4772 ... (0 dirty files)` at 19:11 on 2026-08-29. Four minutes later the container
+# restarted; `/var/tmp` -- the container's own writable layer, where BENCH_ROOT lives -- came back
+# empty, and that sha named an object no surviving repository contained. Thirty-seven commits made
+# between 07:11 and 19:06 that day went with it: five code fixes with their falsifying tests, two of
+# them still awaiting acceptance by a probe that was running at the time, and twenty-four sections
+# of docs/56. The published branch stopped at 07:11 because pushing is something a person remembers
+# to do and a snapshot is something that runs every thirty minutes.
+#
+# A sha is not a backup. It is a RECEIPT for a backup this script was not taking. The third-party
+# checkout above had been bundled since the first version; our own repo -- the one whose loss
+# actually costs work -- was only ever named. The uncommitted tree goes along as a patch, because
+# "(0 dirty files)" is a claim worth being able to CHECK, and a dirty tree is worth being able to
+# restore.
+if [ -d "$SRC/looplab/.git" ]; then
+  ( cd "$SRC/looplab" && git bundle create "$OUT/looplab.bundle" --all 2>/dev/null ) \
+    && echo "  looplab.bundle        $(du -h "$OUT/looplab.bundle" | cut -f1)  ($(cd "$SRC/looplab" && git log --oneline -1))" \
+    || { echo "  BUNDLE FAILED        looplab -- OUR COMMITS ARE NOT IN THIS SNAPSHOT"; SHORT=$((SHORT + 1)); }
+  ( cd "$SRC/looplab" && git log --oneline -3 > "$OUT/looplab-HEAD.txt"
+    git status --porcelain > "$OUT/looplab-dirty.txt"
+    git diff HEAD > "$OUT/looplab-uncommitted.patch" ) 2>/dev/null
+else
+  echo "  MISSING              looplab.bundle -- $SRC/looplab/.git absent, so NO commit of ours is archived"
+  SHORT=$((SHORT + 1))
 fi
 
 # 2. Measurements. These are the irreplaceable half.
@@ -57,7 +89,6 @@ fi
 # an ENOSPC part-way through a recursive copy is the ORDINARY failure, not an exotic one -- and it
 # produces exactly the artifact this header calls the worst outcome. `cp`'s own stderr is kept for
 # the same reason: "COPY FAILED" without the errno sends the operator back to the mount to guess.
-SHORT=0
 copy() {  # $1 = path under $SRC (or absolute), $2 = label
   if [ ! -e "$1" ]; then
     echo "  MISSING              $2 -- $1 does not exist, so it is NOT in this snapshot"
@@ -91,9 +122,60 @@ for D in "$SRC"/campaign*; do
   FOUND_CAMPAIGN=$((FOUND_CAMPAIGN + 1))
   copy "$D" "$(printf '%-21s' "$(basename "$D")")"
 done
-if [ "$FOUND_CAMPAIGN" = 0 ]; then
-  echo "  MISSING              no $SRC/campaign* directory -- NO campaign markers or scores archived"
-  SHORT=$((SHORT + 1))
+
+# EVERY tree of finished RUNS -- where a probe's `events.jsonl` and `spans.jsonl` actually live.
+#
+# This is the rawest measurement on the box: what the loop proposed, what each call cost, which node
+# became champion and why. docs/56 is written FROM these, and until 2026-08-30 not one byte of them
+# was archived. The 2026-08-29 restart took sixty-nine runs and about $100 of metered spend with it
+# and left every conclusion drawn from them uncheckable -- the campaign markers survived, the
+# evidence behind them did not.
+#
+# Copied ONCE, not once per snapshot. A finished run is immutable, so eight rotating copies would be
+# seven copies of the same bytes on a shared S3-backed mount. They accumulate in a sibling archive
+# the prune below never touches, and each snapshot records what the archive held at its moment.
+# `cp -ru` keeps the sync incremental, which matters because a LIVE run's directory grows while this
+# script is reading it.
+RUNS_ARCHIVE="${SNAPSHOT_RUNS_ARCHIVE:-$DEST/../runs-archive}"
+FOUND_RUNS=0
+for D in "$SRC"/runs-* "$SRC"/model-probes "$SRC"/probes; do
+  [ -d "$D" ] || continue
+  FOUND_RUNS=$((FOUND_RUNS + 1))
+  B="$(basename "$D")"
+  if mkdir -p "$RUNS_ARCHIVE" && cp -ru "$D" "$RUNS_ARCHIVE/"; then
+    N=$(find "$RUNS_ARCHIVE/$B" -name events.jsonl 2>/dev/null | wc -l)
+    echo "  runs -> archive       $B $(du -sh "$RUNS_ARCHIVE/$B" 2>/dev/null | cut -f1) ($N run records)"
+    echo "$B $N $RUNS_ARCHIVE/$B" >> "$OUT/runs-manifest.txt"
+  else
+    echo "  COPY FAILED          $B -- the per-run events and spans are NOT archived"
+    SHORT=$((SHORT + 1))
+  fi
+done
+# WHICH MODE THE BOX IS IN IS NOT A SHORTFALL. Campaigns and probe runs are two INDEPENDENT ways of
+# measuring here, and either can be absent because it is simply not in use.
+#
+# This was got wrong twice in two days, in opposite directions, and both times the cost was real.
+# First the campaign check alone made every cycle on a freshly rebuilt box exit 1; the timer then
+# refused to record the fingerprint -- correctly, by its own rule -- and re-wrote a 110 MB snapshot
+# every thirty minutes without pruning, since the prune sits downstream of the completeness check.
+# Nine snapshots and 3.0 GB. Making the claim conditional on "neither exists" fixed that case and
+# broke the next one within the hour: two probes started, `model-probes/` appeared, `campaign*` did
+# not, and the same unbounded loop resumed under a new name.
+#
+# So the question this block used to ask -- "is every mode present?" -- is the wrong question. What
+# the archive owes is everything that EXISTS, and `copy` above already counts a source that is there
+# and could not be read. An absent MODE is reported, because an operator reading a restore should
+# know which of the two this box was doing, but it is not a shortfall.
+#
+# What this does NOT weaken: the 2026-08-29 loss was never an absence this could have caught. The
+# runs were present the whole time and simply not copied, because no line of the script knew they
+# existed. That is fixed by the copying, not by an alarm.
+if [ "$FOUND_CAMPAIGN" = 0 ] && [ "$FOUND_RUNS" = 0 ]; then
+  echo "  (idle box: neither $SRC/campaign* nor a run tree -- nothing has been measured here yet.)"
+elif [ "$FOUND_CAMPAIGN" = 0 ]; then
+  echo "  (no $SRC/campaign* -- this box is running probes, not a campaign. Not a shortfall.)"
+elif [ "$FOUND_RUNS" = 0 ]; then
+  echo "  (no $SRC/runs-*, model-probes or probes tree -- campaign only, no standalone probes.)"
 fi
 
 # 3. Which commit of OUR repo produced them, and what the box looked like.
@@ -101,6 +183,7 @@ fi
   echo "snapshot $STAMP"
   echo "looplab:  $(cd "$SRC/looplab" && git log --oneline -1) ($(cd "$SRC/looplab" && git status --porcelain | wc -l) dirty files)"
   echo "AlgoTune: $(cd "$SRC/AlgoTune" && git log --oneline -1)"
+  echo "runs archive: $RUNS_ARCHIVE (not pruned; see runs-manifest.txt for what it held)"
   echo "nproc $(nproc) | cpu.max $(cat /sys/fs/cgroup/cpu.max 2>/dev/null) | free $(free -g | awk '/Mem:/{print $7}')G"
 } > "$OUT/PROVENANCE.txt"
 cat "$OUT/PROVENANCE.txt"
@@ -120,9 +203,50 @@ if [ "$SHORT" -gt 0 ]; then
   exit 1
 fi
 
-# Keep the last N snapshots; the measurements accumulate and the mount is shared.
+# Keep the last N snapshots; the measurements accumulate and the mount is shared. But AGE IS NOT
+# WORTH, and this prune used to act as if it were.
+#
+# Found 2026-08-31, one restart too late to be theoretical. `ls | head -n -KEEP` deletes the OLDEST
+# directories, full stop. On this box the oldest were the eight taken on 2026-08-29 -- the only ones
+# holding `campaign-final/` (twenty task-arms, both arms, the finished paired campaign) and the
+# meter ledgers. Every snapshot taken after the container restart holds two git bundles and nothing
+# measured, because nothing has been measured here since. Nine of those would have arrived within
+# five hours, and the prune would have traded the irreplaceable for the reproducible, silently, as
+# ordinary successful operation. The bundles regenerate from git in a minute; the campaign does not
+# regenerate at all.
+#
+# So worth is asked about, not assumed. A snapshot is MEASURED if it carries a campaign directory or
+# a non-empty runs manifest; unmeasured ones are spent first, oldest among them going first, and the
+# newest snapshot is never a candidate whatever it holds -- it is the current state of the box.
+# Only if that is not enough does the prune reach a measured snapshot, and then it says so out loud,
+# because deleting one is a real loss rather than housekeeping.
 KEEP="${SNAPSHOT_KEEP:-8}"
-ls -1d "$DEST"/2* 2>/dev/null | head -n -"$KEEP" | while read -r old; do
-  echo "  pruning $old"; rm -rf "$old"
-done
+_measured() {  # $1 = snapshot dir -- does it hold anything that cannot be recomputed?
+  compgen -G "$1/campaign*" > /dev/null && return 0
+  # runs-manifest.txt lines are "<tree> <count> <archive path>"; a count of 0 means the tree was
+  # there and empty, which is not evidence of anything.
+  [ -s "$1/runs-manifest.txt" ] \
+    && awk '{ if ($2 + 0 > 0) f = 1 } END { exit !f }' "$1/runs-manifest.txt" && return 0
+  return 1
+}
+ALL=$(ls -1d "$DEST"/2* 2>/dev/null | sort)
+TOTAL=$(printf '%s\n' "$ALL" | grep -c . )
+OVER=$((TOTAL - KEEP))
+if [ "$OVER" -gt 0 ]; then
+  NEWEST=$(printf '%s\n' "$ALL" | tail -1)
+  UNMEASURED=""; MEASURED=""
+  for D in $ALL; do
+    [ "$D" = "$NEWEST" ] && continue
+    if _measured "$D"; then MEASURED="$MEASURED $D"; else UNMEASURED="$UNMEASURED $D"; fi
+  done
+  for D in $UNMEASURED $MEASURED; do
+    [ "$OVER" -gt 0 ] || break
+    if _measured "$D"; then
+      echo "  pruning $D  -- WITH MEASUREMENTS: every unmeasured snapshot was already spent"
+    else
+      echo "  pruning $D  (carries no campaign and no runs; the checkouts in it regenerate from git)"
+    fi
+    rm -rf "$D"; OVER=$((OVER - 1))
+  done
+fi
 exit 0

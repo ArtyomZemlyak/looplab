@@ -19,6 +19,24 @@ import pathlib
 import sys
 from pathlib import Path
 
+# THE REPO ROOT, because `python benchmarks/algotune/extract_champion.py` puts the SCRIPT's
+# directory on sys.path and not the root, so `from looplab.events.replay import fold` below raises
+# ModuleNotFoundError unless looplab happens to be pip-installed into the interpreter. It is not on
+# this box.
+#
+# Measured 2026-08-31 on a finished probe rather than reasoned about. `accEE` ran to its ceiling
+# (rc=0, 6321 s) and evaluated two nodes -- 27.466 then 221.5387 on train -- and its own summary
+# read "champion: NONE", because this import failed and run_probe.sh takes a non-zero exit as "no
+# champion". The scores were never in danger: they are in events.jsonl. What was in danger is the
+# reading, and a probe that reports nothing looks exactly like a probe that found nothing.
+#
+# The same ModuleNotFoundError killed `compare_arms.py` at the end of the 2026-08-29 campaign --
+# `run_final-relaunch.log` closes with that traceback -- which is why five sibling scripts here
+# already carry these three lines. This one was the sixth and did not.
+_REPO = Path(__file__).resolve().parents[2]
+if (_REPO / "looplab" / "__init__.py").exists() and str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
@@ -52,6 +70,17 @@ def main() -> int:
         # A run whose log cannot be READ is a broken BRIDGE, not a run without a champion, and it
         # must not be reported as one. Only a fold-level failure below is "no champion".
         print(f"cannot read the event log at {log}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    except ImportError as exc:
+        # THE SAME RULE AS `OSError` ABOVE, for the failure that actually happened. `c32ebeb0` put
+        # the repo root on `sys.path` and removed the CAUSE; it left the CLASSIFICATION, so the day
+        # this script is moved, vendored or run against a tree without `looplab/__init__.py` it
+        # reports "could not fold" and `run_probe.sh` writes "champion: NONE" -- the exact sentence
+        # accEE's summary carried while its own events.jsonl held 27.466 and 221.5387. An import
+        # that fails says nothing whatever about the run; only a fold that fails does.
+        print(f"cannot import looplab to fold {args.run_dir}: {type(exc).__name__}: {exc}\n"
+              f"  (this is a BROKEN BRIDGE, not a run without a champion -- the scores are in "
+              f"{log} and can still be read)", file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - a broken run is "no champion", not a crash
         print(f"could not fold {args.run_dir}: {type(exc).__name__}: {exc}", file=sys.stderr)

@@ -97,7 +97,12 @@ def test_the_registry_is_not_empty_and_covers_all_three_sub_objects():
     """A derivation that silently found nothing would make every test above pass vacuously."""
     assert len(REGISTRY) >= 30
     assert {sub for sub, _lane in REGISTRY.values()} == {"lessons", "holdout", "workspace"}
-    assert sum(1 for _sub, lane in REGISTRY.values() if lane == "enrichment") >= 8
+    # 7, not 8, since 2026-08-29: `_write_reflection_note` left the table when it gained its own
+    # `_op_span("reflection")` — run-end reflection was making BILLED calls with no span open, so
+    # its money appeared in no trace surface (measured: 105 of 25,430 calls, $0.19 of $100.27,
+    # across 49 of 68 probe runs). The floor is a vacuity guard, so it tracks the real count; it is
+    # lowered here deliberately rather than by reflex, and the entry it lost is named above.
+    assert sum(1 for _sub, lane in REGISTRY.values() if lane == "enrichment") >= 7
 
 
 # ------------------------------------------------------------------ the seam still intercepts
