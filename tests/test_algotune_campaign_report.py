@@ -527,10 +527,29 @@ def test_the_snapshot_holds_the_campaign_that_is_running(tmp_path):
 def test_a_snapshot_that_could_not_copy_something_says_so_and_exits_nonzero(tmp_path):
     """It used to `return 0` on a missing path, so an EMPTY archive exited 0 and campaign.sh's
     `|| echo "(snapshot failed...)"` could never fire. An archive that is silently empty is worse
-    than none: it is one somebody restores from."""
-    proc, dest = _snapshot(tmp_path, ())
+    than none: it is one somebody restores from.
+
+    RE-AIMED 2026-08-31, at the run-tree copy rather than at an absent campaign. The old body
+    asserted "NO campaign markers or scores archived" -- a message `b1f55f51` deleted when it ruled
+    that WHICH MODE the box is in is not a shortfall (campaigns and probe runs are two independent
+    ways of measuring, and either may simply not be in use). That made this test red on the branch
+    and it was the last assertion in the tree still holding the retired contract. What did NOT
+    change, and is what this test was always about, is a source the archive OWES and could not
+    write: `runs-*`/`model-probes` carry each run's events.jsonl and spans.jsonl, the evidence
+    every number is read from, and until now nothing exercised their failure arm at all.
+    """
+    root = _bench_root(tmp_path, ())
+    run = root / "model-probes" / "dsX" / "runs" / "r1"
+    run.chmod(0o000)                        # present, owed, and unreadable
+    dest = tmp_path / "snapshots"
+    try:
+        proc = subprocess.run(["bash", str(SNAPSHOT), str(dest)], capture_output=True, text=True,
+                              timeout=180, env=dict(os.environ, BENCH_ROOT=str(root)))
+    finally:
+        run.chmod(0o755)                    # or pytest cannot clean its own tmp tree up
+
     assert proc.returncode == 1, proc.stdout
-    assert "NO campaign markers or scores archived" in proc.stdout, proc.stdout
+    assert "the per-run events and spans are NOT archived" in proc.stdout, proc.stdout
     assert "INCOMPLETE SNAPSHOT" in proc.stdout
 
 

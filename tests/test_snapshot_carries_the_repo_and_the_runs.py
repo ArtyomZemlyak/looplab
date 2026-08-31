@@ -244,12 +244,39 @@ def test_a_box_running_probes_without_a_campaign_is_complete(tmp_path):
             / "events.jsonl").exists()
 
 
-def test_a_source_that_exists_and_cannot_be_read_is_still_a_shortfall(tmp_path):
-    """The alarm that must survive all this: `copy` counts a source that is THERE and unreadable.
-    That is the case the exit code was built for, and it is untouched by mode-awareness."""
+def test_a_named_source_that_is_not_there_is_counted(tmp_path):
+    """One half of the exit-code contract: a source the script NAMES and cannot find."""
     src = _bench_root(tmp_path)
     _rmtree(src / "AlgoTune" / "reports")
 
     result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
     assert result.returncode == 1, result.stdout
+    assert "INCOMPLETE SNAPSHOT: 1 source(s)" in result.stdout
+
+
+def test_a_source_that_exists_and_cannot_be_read_is_still_a_shortfall(tmp_path):
+    """The alarm that must survive all this: `copy` counts a source that is THERE and unreadable.
+    That is the case the exit code was built for, and it is untouched by mode-awareness.
+
+    IT HAS TO BE UNREADABLE, not absent. Until 2026-08-31 this test DELETED the directory, so it
+    exercised the `MISSING` arm one branch above and said nothing at all about the `COPY FAILED`
+    arm its own name and docstring describe. Driven: with the whole `cp`-failure branch cut out of
+    `snapshot.sh` -- the counter, the message and all -- the old body still passed. That branch is
+    the one the header calls the worst outcome ("a snapshot that copied nothing at all still
+    printed PROVENANCE.txt and exited 0"), and on a geesefs S3 mount a part-way `cp` failure is the
+    ORDINARY error rather than an exotic one.
+    """
+    src = _bench_root(tmp_path)
+    reports = src / "AlgoTune" / "reports"
+    (reports / "agent_summary.json").write_text('{"score": 1.0}\n')
+    reports.chmod(0o000)                    # there, named, and unreadable -- the geesefs case
+    try:
+        result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
+    finally:
+        reports.chmod(0o755)                # or pytest cannot clean its own tmp tree up
+
+    assert result.returncode == 1, result.stdout
+    assert "COPY FAILED" in result.stdout, (
+        "a source that is present and unreadable was archived silently\n" + result.stdout)
+    assert "MISSING" not in result.stdout, "it is not absent; it is unreadable\n" + result.stdout
     assert "INCOMPLETE SNAPSHOT: 1 source(s)" in result.stdout
