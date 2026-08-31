@@ -56,6 +56,14 @@ def test_the_card_still_builds_and_carries_the_clause(tmp_path):
     arena = Path("/var/tmp/looplab-bench/AlgoTune")
     if not arena.exists():
         pytest.skip("no arena checkout on this box")
+    # AND its train split, which is a SEPARATE thing to have. `--full-context` on the command line
+    # means "I require this" and `make_task` exits 1 rather than building a card that claims context
+    # it does not have -- so on a box whose `.hf_datasets` did not survive (snapshot.sh deliberately
+    # never copied it: 872 MB, re-downloadable) this test failed instead of skipping, which is a
+    # report about the box wearing the clothes of a report about the card. The clause itself is
+    # still checked without any dataset by the three tests above.
+    if make_task.train_dataset(arena, "integer_factorization") is None:
+        pytest.skip("no train split for integer_factorization on this box (.hf_datasets absent)")
     out = subprocess.run(
         [sys.executable, str(ROOT / "benchmarks" / "algotune" / "make_task.py"),
          "--algotune-root", str(arena), "--task", "integer_factorization",
