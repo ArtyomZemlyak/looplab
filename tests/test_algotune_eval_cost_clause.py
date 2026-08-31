@@ -65,9 +65,19 @@ def _make_root(tmp_path: Path, task: str) -> Path:
 def _spec(tmp_path: Path, *flags: str, task: str = "fake_task") -> dict:
     root = _make_root(tmp_path, task)
     out = tmp_path / ("ws_" + ("_".join(f.lstrip("-") for f in flags) or "default"))
+    # THE ENGINE HAS TO BE REACHABLE FROM THE CHILD, or this builds the OTHER card. `make_task.py`
+    # is run BY PATH, so `sys.path[0]` is `benchmarks/algotune` and the repo root is not on it
+    # whatever pytest's own rootdir does; `session_budget_s()` then returns None and the card says
+    # "a wall clock nobody shows you" instead of the fraction. That is the same defect the two
+    # drivers had (`campaign.sh` exported PYTHONPATH, `run_probe.sh` did not, and their cards
+    # differed by exactly this sentence), so the test states it the way they now both do rather
+    # than inheriting whatever PYTHONPATH the caller happened to have.
+    import os
+
     subprocess.run([sys.executable, str(MAKE_TASK), "--algotune-root", str(root),
                     "--task", task, "--out-dir", str(out), *flags],
-                   check=True, capture_output=True, text=True)
+                   check=True, capture_output=True, text=True,
+                   env=dict(os.environ, PYTHONPATH=str(ROOT)))
     return json.loads((out / f"algotune_{task}.json").read_text(encoding="utf-8"))
 
 

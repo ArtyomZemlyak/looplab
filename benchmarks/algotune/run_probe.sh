@@ -150,6 +150,13 @@ fi
 export ALGOTUNE_BASELINE_CACHE_DIR="$ROOT/looplab/benchmarks/algotune/.baseline_times"
 export ALGOTUNE_EVAL_WORKERS=auto
 export ALGOTUNE_MIN_TIMEOUT_S=120
+# И ТОТ ЖЕ КОРЕНЬ РЕПОЗИТОРИЯ, что у кампании. `make_task.py` запускается по пути, поэтому
+# `sys.path[0]` — это `benchmarks/algotune`, а не рабочий каталог: `cd "$ROOT/looplab"` выше
+# движок импортируемым НЕ делает. `session_budget_s()` при этом возвращает None, и карточка теряет
+# долю сессии — измерено 2026-08-30 на синтетическом чекауте: кампания (PYTHONPATH выставлен)
+# печатает «bounded at <N> s ... about 3 % of your session», проба — «bounded by a wall clock
+# nobody shows you». Одна и та же карточка, разные предложения, и число сравнивается как одно.
+export PYTHONPATH="$ROOT/looplab${PYTHONPATH:+:$PYTHONPATH}"
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET"
 
 python3 "$ROOT/looplab/benchmarks/algotune/make_task.py" --algotune-root "$ROOT/AlgoTune" \

@@ -519,6 +519,29 @@ declare_baseline_ruler() {
 }
 declare_baseline_ruler
 
+# THE GOAL CARD IS PART OF THE ARM, not something an operator has to remember to export.
+#
+# `run_probe.sh` builds its card with `--deliver --one-card --enforce-rules`. This driver passed
+# NOTHING but `${MAKE_TASK_ARGS:-}`, and the default of that is empty -- measured on af13b4dd,
+# `--enforce-rules` appears once in `run_probe.sh` and zero times here. Two consequences, both
+# measured 2026-08-30 by building both cards over one synthetic checkout:
+#
+#   * the goal was 5,010 characters against the probe's 10,111 -- no YOUR OUTPUT IS THE FILE, no
+#     ONE HYPOTHESIS, no rules and no solution space -- so a campaign number and a probe number are
+#     answers to two different questions;
+#   * `--enforce-rules` also rides into the `eval_train` and `score` commands, and without it
+#     nothing runs AlgoTune's OWN validator over the candidate. Arm A cannot even WRITE a solver
+#     that violates those rules -- `editor_functions.py` refuses the edit -- so arm B could submit
+#     one, score it, and win on a primitive the other arm is physically unable to use. That is not
+#     a comparison, and it is invisible in the result.
+#
+# It is a SEPARATE variable from `MAKE_TASK_ARGS` on purpose. That one is documented as carrying
+# goal VARIANTS and is appended after this; folding the base card into its default would mean an
+# operator who exports `MAKE_TASK_ARGS=--role-split` silently loses all three flags -- the same
+# class of defect, arriving through the fix for it.
+CARD_ARGS="${CARD_ARGS:---deliver --one-card --enforce-rules}"
+
+
 mkdir -p "$OUT" "$WS"
 # `.refused` is THIS invocation's tally of task-arms that never started, so a fixed-and-re-run
 # arm must not inherit the last one's. Only the tally is cleared -- never a `.done` marker, which
@@ -1015,7 +1038,7 @@ run_one() {                       # $1 = task, $2 = cpu list
     # to be readable off the `task.snapshot.json` the run preserves for itself.
     # shellcheck disable=SC2086
     python "$REPO/benchmarks/algotune/make_task.py" --algotune-root "$AT" --task "$T" \
-        --out-dir "$WS" ${MAKE_TASK_ARGS:-} >/dev/null 2>&1
+        --out-dir "$WS" $CARD_ARGS ${MAKE_TASK_ARGS:-} >/dev/null 2>&1
     S=$(date +%s)
     # Per-task memory and knowledge dirs: LoopLab can mine its own past runs and a shared store,
     # and AlgoTuner has no equivalent -- left shared, arm B would reach task 12 with eleven prior
@@ -1078,6 +1101,7 @@ echo "model $ALGOTUNE_MODEL_KEY | llm ${METER_BASE:-$LOOPLAB_LLM_BASE_URL}${METE
 # that measured its denominator; every number below is only comparable to numbers from the
 # same two values.
 echo "baseline cache $ALGOTUNE_BASELINE_CACHE_DIR | eval workers $ALGOTUNE_EVAL_WORKERS x $ALGOTUNE_EVAL_CORES_PER_WORKER core(s)"
+echo "card $CARD_ARGS ${MAKE_TASK_ARGS:-}"
 reap_orphan_workers
 
 # One PID slot per lane, assigned by ACTUAL freeness. Round-robin by index would hand task N+k the
