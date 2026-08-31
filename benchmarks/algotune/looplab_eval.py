@@ -195,8 +195,9 @@ DEFAULT_TIMES_DIR = Path(
 # Now the guard and the record read the same function, and a drift between what is refused and what
 # is reported is not expressible.
 #
-# OPEN[regime-replica-reads-the-wrong-env-var] is UNCHANGED and still applies to this function: it
-# reads `ALGOTUNE_CORES_PER_WORKER` where the arena's `resolve_workers` reads
+# The open item declared at `_regime_mismatch` -- `regime-replica-reads-the-wrong-env-var`, and it
+# is DECLARED there, not here, because a slug names exactly one item -- applies to this function
+# too: it reads `ALGOTUNE_CORES_PER_WORKER` where the arena's `resolve_workers` reads
 # `ALGOTUNE_EVAL_CORES_PER_WORKER`, and omits that helper's clamp. Behaviour is preserved here
 # deliberately -- moving the guard's answer is a different finding from recording it -- and both
 # spellings default to 1, which is what the campaign now pins.
@@ -1087,19 +1088,28 @@ def main() -> int:
     # or changes during the run means the reference was measured here, which means the number below
     # is not about the candidate. `_emit` is told to refuse it rather than print it.
     #
-    # OPEN[baseline-guard-watches-the-wrong-clone] in the documented two-clone workflow this
-    # fingerprints a `.baseline_times` the arena never writes.
-    # proof:absent:--baseline-times-dir@benchmarks/algotune/campaign.sh
-    # REVIEW 2026-08-25 (correctness): `patch_baseline_cache.py` bakes its cache dir at PATCH time
-    # (default: beside the patch script that ran, docs/52 SS6 runs it from the working clone) while
-    # `DEFAULT_TIMES_DIR` here resolves beside THIS file at RUN time (docs/51 SS7 runs the campaign
-    # from the pinned `looplab-armb` clone). Nothing passes `--baseline-times-dir` and nothing checks
-    # the pairing, so the guard can fingerprint a directory nothing writes and stay silent. The glob
-    # and the reassigned-`subset` closure were fixed 2026-08-25; this half needs the cache dir read
-    # out of the patched `baseline_manager.py` (or a refusal when the watched dir does not match the
-    # patch's embedded one). Its companion: `campaign.sh` has no re-score path for a refused
-    # champion pass -- `record_done` writes the marker regardless and `already_measured` never
-    # re-runs it -- and the refusal BRANCH itself is executed by no test (see the annotation in
+    # WHICH DIRECTORY THIS WATCHES SHIPPED 2026-08-30, so the marker that stood here is deleted.
+    # `patch_baseline_cache.py` bakes its cache dir at PATCH time (docs/52 SS6 runs it from the
+    # working clone) while `DEFAULT_TIMES_DIR` resolves beside THIS file at RUN time (docs/51 SS7
+    # runs the campaign from the pinned `looplab-armb` clone), so this fingerprint could watch a
+    # directory nothing writes and stay silent -- and did, on every campaign run to date. What
+    # landed is exactly the remedy that item prescribed: `campaign.sh::baseline_cache_dir` READS
+    # the path out of the patched `baseline_manager.py` and exports it as the environment name
+    # `DEFAULT_TIMES_DIR` above resolves from, so the watched directory is the written one by
+    # construction rather than by coincidence of clones. The glob and the reassigned-`subset`
+    # closure were fixed 2026-08-25.
+    #
+    # ITS COMPANION DID NOT SHIP, and it is its own item now because it was never about which
+    # directory is watched:
+    # OPEN[campaign-cannot-re-score-a-refused-champion-pass] a champion pass this block REFUSES is
+    # recorded as terminal and is never scored again.
+    # proof:absent:RETRY_REFUSED@benchmarks/algotune/campaign.sh
+    # REVIEW 2026-08-30 (correctness): this refusal is the right verdict and costs almost nothing to
+    # repeat -- the champion is already extracted and the reference cache is warm the second time --
+    # but `record_done` writes the marker whatever the scoring pass said, and `already_measured`
+    # re-runs nothing that carries one. `RETRY_WALL_CUT=1` is the shape the answer takes: one flag
+    # that reopens exactly one class of marker, and the environment name in the predicate above is
+    # the one a fix would add. The refusal BRANCH is also executed by no test (see the annotation in
     # tests/test_algotune_refuses_baseline_measured_in_pass.py).
     # ONE KEY, FIXED BEFORE THE RUN, and a glob that matches what the patch really writes.
     #
