@@ -291,8 +291,40 @@ RUNS_ARCHIVE="${SNAPSHOT_RUNS_ARCHIVE:-$DEST/../runs-archive}"
 archive_tree() {  # $1 = source tree, $2 = archive root. Sets ARCH_REPAIRED / ARCH_STILL_SHORT.
   local S="$1" A="$2" B rel ssz dsz rc=0
   B="$(basename "$S")"
-  ARCH_REPAIRED=0; ARCH_STILL_SHORT=0
+  ARCH_REPAIRED=0; ARCH_STILL_SHORT=0; ARCH_SUPERSEDED=0
   mkdir -p "$A" || return 1
+
+  # AN ARCHIVED FILE LONGER THAN ITS SOURCE IS EVIDENCE THE SOURCE NO LONGER HAS, and `cp -ru` was
+  # about to overwrite it. The repair loop below already states the rule -- "LONGER than the source
+  # is left alone, the archive is the durable half" -- and `cp -ru` runs BEFORE that loop can apply
+  # it: `-u` copies whenever the SOURCE is newer, and a shorter file written seconds ago is newer
+  # than the long one archived yesterday. By the time the loop looks, both are short and it sees
+  # nothing to repair.
+  #
+  # This is not hypothetical. `campaign.sh` does `rm -rf "$TASK_ROOT"` at the start of every attempt
+  # and the task root is keyed by TASK, not by attempt, so attempt 2 writes a fresh, shorter
+  # events.jsonl at the very path attempt 1's was archived from. Driven here 2026-08-31 on the real
+  # `archive_tree`: 400 lines in the archive, then a 50-line second attempt, and the archive came
+  # back 50 lines with zero rows of attempt 1 left in it -- rc=0, no message.
+  #
+  # So the superseded copy is kept beside the new one instead of under it. `.superseded-N` rather
+  # than an attempt number because this function cannot see attempts; what it can see, and all it
+  # needs to, is that something shorter is about to replace something longer.
+  while IFS= read -r -d '' rel; do
+    local asz ssz2 n
+    asz=$(stat -c %s "$A/$B/$rel" 2>/dev/null) || continue
+    ssz2=$(stat -c %s "$S/$rel" 2>/dev/null) || continue
+    [ "$asz" -gt "$ssz2" ] || continue
+    n=1
+    while [ -e "$A/$B/$rel.superseded-$n" ]; do n=$((n + 1)); done
+    if cp -p "$A/$B/$rel" "$A/$B/$rel.superseded-$n"; then
+      ARCH_SUPERSEDED=$((ARCH_SUPERSEDED + 1))
+      echo "  kept $B/$rel as .superseded-$n ($asz bytes) -- the source is now $ssz2" >&2
+    else
+      rc=1
+    fi
+  done < <(find "$S" -type f -printf '%P\0' 2>/dev/null)
+
   cp -ru "$S" "$A/" || rc=1
   while IFS= read -r -d '' rel; do
     # The source can vanish mid-walk -- `campaign.sh` rm -rf's a task root to start an attempt --
@@ -315,6 +347,8 @@ while IFS= read -r D; do
   B="$(basename "$D")"
   if archive_tree "$D" "$RUNS_ARCHIVE"; then
     N=$(find "$RUNS_ARCHIVE/$B" -name events.jsonl 2>/dev/null | wc -l)
+    [ "${ARCH_SUPERSEDED:-0}" -gt 0 ] && \
+      echo "  $ARCH_SUPERSEDED file(s) kept as .superseded-N: a shorter source replaced a longer archive"
     R=""
     [ "$ARCH_REPAIRED" -gt 0 ] && R=", $ARCH_REPAIRED re-copied SHORT of its source"
     echo "  runs -> archive       $B $(du -sh "$RUNS_ARCHIVE/$B" 2>/dev/null | cut -f1) ($N run records$R)"
