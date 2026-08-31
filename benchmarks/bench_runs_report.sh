@@ -76,51 +76,61 @@ echo "$FOUND run(s). AGE_S is staleness of events.jsonl; STALL_TIMEOUT is ${STAL
 # The discriminator is stated in the sweep brief and is now applied here: an evaluation that
 # returned in about a tenth of a second never ran the solver at all.
 echo
-ZFOUND=0
-for R in "${ROOTS[@]}"; do
-  while IFS= read -r SL; do
-    [ -s "$SL" ] || continue
-    OUT=$(python3 - "$SL" <<'PY'
+# ONE PASS OVER EVERY ROOT, DEDUPED. The first cut walked each root separately and printed a line
+# per score.log -- and a finished run exists TWICE, once in the live tree and once in the archive,
+# so `remPde4 node_0` was reported as two zeros within an hour of this section shipping. The reader
+# of a sweep needs to know how many zeros there are, not how many copies of the evidence exist.
+# The path LIST goes in a file, not down stdin: `python3 -` reads its PROGRAM from stdin, so
+# piping find into a heredoc'd script gives the interpreter two things on one channel and the
+# script sees an empty stdin. It printed "no zero-scoring nodes" over a box that had one.
+_ZL="$(mktemp)"
+find -L "${ROOTS[@]}" -name score.log 2>/dev/null | sort > "$_ZL"
+python3 - "$_ZL" <<'PY'
 import json, os, sys
-p = sys.argv[1]
-try:
-    j = json.loads(open(p, errors="replace").read().strip())
-except Exception:
-    sys.exit(0)
-sp = j.get("speedup")
-if isinstance(sp, (int, float)) and sp > 0:
-    sys.exit(0)                       # a real score is not a zero
-secs = float(j.get("eval_seconds") or 0.0)
-ns = j.get("no_speedup") or {}
-reason = str(ns.get("reason") or ("speedup is null" if sp is None else "unstated"))
-verdict = str(ns.get("evaluator_verdict") or "")[:70]
-errs = ns.get("is_solution_errors") or []
-detail = ""
-if errs:
-    first = errs[0] if isinstance(errs[0], dict) else {"message": str(errs[0])}
-    detail = "  " + str(first.get("message") or "")[:90]
-# THE SWEEP LIST'S OWN RULE: ~0.1 s means the evaluation never reached the solver.
-flag = "RULER (never reached the solver)" if secs < 1.0 else "solver"
-node = os.path.basename(os.path.dirname(p))
-run = p.split("/runs/", 1)[0].rsplit("/", 1)[-1] if "/runs/" in p else "?"
-print(f"  {run:<10} {node:<8} {secs:>7.1f}s  {flag:<32} {reason}")
-if verdict:
-    print(f"             {verdict}")
-if detail:
-    print(f"           {detail}")
-PY
-)
-    if [ -n "$OUT" ]; then
-      [ "$ZFOUND" -eq 0 ] && echo "ZERO-SCORING NODES (reason read from nodes/<id>/score.log):"
-      ZFOUND=$((ZFOUND + 1))
-      echo "$OUT"
-    fi
-  done < <(find -L "$R" -name score.log 2>/dev/null | sort)
-done
-[ "$ZFOUND" -eq 0 ] && echo "no zero-scoring nodes on this box"
 
-# EXPLICIT, because the line above is the last statement and `[ ... ] && echo` returns 1 when the
-# test is false -- so FINDING a zero made this report exit non-zero, i.e. "the instrument failed"
-# whenever it had something to say. Caught by its own test within the hour; the same shape as
-# `cmd | tail` returning tail's status.
+seen = {}
+for line in open(sys.argv[1]):
+    path = line.strip()
+    if not path:
+        continue
+    try:
+        j = json.loads(open(path, errors="replace").read().strip())
+    except Exception:
+        continue
+    sp = j.get("speedup")
+    if isinstance(sp, (int, float)) and sp > 0:
+        continue                       # a real score is not a zero
+    node = os.path.basename(os.path.dirname(path))
+    run = path.split("/runs/", 1)[0].rsplit("/", 1)[-1] if "/runs/" in path else "?"
+    key = (run, node)
+    seen.setdefault(key, []).append((path, j))
+
+if not seen:
+    print("no zero-scoring nodes on this box")
+    sys.exit(0)
+
+print("ZERO-SCORING NODES (reason read from nodes/<id>/score.log):")
+for (run, node), copies in sorted(seen.items()):
+    _, j = copies[0]
+    sp = j.get("speedup")
+    secs = float(j.get("eval_seconds") or 0.0)
+    ns = j.get("no_speedup") or {}
+    reason = str(ns.get("reason") or ("speedup is null" if sp is None else "unstated"))
+    # THE SWEEP LIST'S OWN RULE: ~0.1 s means the evaluation never reached the solver.
+    flag = "RULER (never reached the solver)" if secs < 1.0 else "solver"
+    dupes = f"  [{len(copies)} copies]" if len(copies) > 1 else ""
+    print(f"  {run:<10} {node:<8} {secs:>7.1f}s  {flag:<32} {reason}{dupes}")
+    verdict = str(ns.get("evaluator_verdict") or "")[:70]
+    if verdict:
+        print(f"             {verdict}")
+    errs = ns.get("is_solution_errors") or []
+    if errs:
+        first = errs[0] if isinstance(errs[0], dict) else {"message": str(errs[0])}
+        print("           " + str(first.get("message") or "")[:90])
+PY
+rm -f "$_ZL"
+
+# EXPLICIT, because a `[ ... ] && echo` tail returns 1 when the test is false -- so FINDING a zero
+# made this report exit non-zero, i.e. "the instrument failed" whenever it had something to say.
+# Caught by its own test within the hour; the same shape as `cmd | tail` returning tail's status.
 exit 0

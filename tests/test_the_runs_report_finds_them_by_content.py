@@ -202,3 +202,49 @@ def test_a_score_log_with_no_reason_still_appears(tmp_path):
     assert "node_0" in r.stdout and "unstated" in r.stdout, (
         "a zero carrying no no_speedup block was dropped instead of flagged:\n" + r.stdout
     )
+
+
+def test_one_zero_in_two_places_is_reported_once(tmp_path):
+    """A finished run exists twice -- live tree and archive -- and that is not two zeros.
+
+    Within an hour of the zeros section shipping it printed `remPde4 node_0` twice, because it
+    walked each root separately and printed a line per score.log. The reader of a sweep needs the
+    number of ZEROS, not the number of copies of the evidence.
+    """
+    root = tmp_path / "bench"
+    archive = tmp_path / "runs-archive"
+    _mk_run(root, "model-probes/dup/runs/t/run")
+    for base in (root, archive):
+        _mk_score(base, "model-probes/dup/runs/t/run/nodes/node_0",
+                  speedup=0.0, eval_seconds=60.7, reason="no_valid_speedups")
+
+    import os
+    env = dict(os.environ)
+    env["BENCH_ROOT"] = str(root)
+    env["SNAPSHOT_RUNS_ARCHIVE"] = str(archive)
+    r = subprocess.run(["bash", str(TREES)], capture_output=True, text=True, timeout=300, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    hits = [l for l in r.stdout.splitlines() if "node_0" in l and "no_valid_speedups" in l]
+    assert len(hits) == 1, f"one zero was reported {len(hits)} times:\n" + r.stdout
+    assert "2 copies" in hits[0], (
+        "deduped, but silently -- a reader cannot tell a deduped zero from a single-copy one:\n"
+        + hits[0]
+    )
+
+
+def test_the_zero_section_actually_reads_its_input(tmp_path):
+    """`python3 -` takes its PROGRAM from stdin; piping the path list there empties sys.stdin.
+
+    That defect printed "no zero-scoring nodes on this box" over a box that had one -- the worst
+    possible failure for this section, because silence is exactly what a clean box looks like.
+    """
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/q/runs/t/run")
+    _mk_score(root, "model-probes/q/runs/t/run/nodes/node_0",
+              speedup=0.0, eval_seconds=60.7, reason="no_valid_speedups")
+    r = _run(root)
+    assert "no zero-scoring nodes" not in r.stdout, (
+        "the section reported a clean box while a zero sat in front of it:\n" + r.stdout
+    )
+    assert "no_valid_speedups" in r.stdout
