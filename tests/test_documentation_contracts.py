@@ -91,7 +91,10 @@ def test_index_mentions_every_numbered_document():
     #   moves this number, which is the whole point of the literal. It did NOT go in together the
     #   first time: `af0c99c0` added the document alone and left both guards red for half an hour,
     #   which is exactly the drift this count exists to catch, caught by it.
-    assert len(numbered) == 55, "the derived numbered-document inventory changed"
+    #   55 -> 56 (2026-08-30): doc 57, the mega-review of the rnd branch. No collision — 57 was
+    #   free. The document, its index row, its mkdocs nav row and this count move in one change;
+    #   the same change also wires 53/55/56 into the nav, which their own changes had not.
+    assert len(numbered) == 56, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
