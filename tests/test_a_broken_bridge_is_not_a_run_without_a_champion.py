@@ -17,6 +17,12 @@ Reproduced 2026-08-31 against the real script: a run directory whose `events.jso
 exits 2, one with a log and no evaluated node exits 1, and before this fix both callers emitted the
 same "no champion" verdict.
 
+AND OBSERVED, not only reproduced. On 2026-08-31 at 09:56 a probe was started on the live stand
+without a `LOOPLAB_LLM_API_KEY` / `LOOPLAB_LLM_API_KEY_BASE_URL` pair. The engine refused in one
+second, `extract_champion` returned non-zero, and `run_probe.sh` printed `чемпион: НЕТ` -- so a
+missing CREDENTIAL was reported in the same words as "the loop searched and found nothing". The
+run had no fold at all; nothing about it was a fact about the loop.
+
 Driven by extracting each caller's real branch and RUNNING it over both shapes, with the real
 extractor in the middle.
 """
