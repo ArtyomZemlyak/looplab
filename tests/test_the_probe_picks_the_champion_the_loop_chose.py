@@ -143,6 +143,35 @@ def test_the_whole_submission_travels_with_it(tmp_path):
     assert {"champion_solver.py", "_ext.pyx", "setup.py"} <= beside, beside
 
 
+def _shim_body() -> str:
+    """The file, checked to BE a shim before anybody runs it.
+
+    THIS CHECK IS A SAFETY INTERLOCK AND NOT A STYLE ASSERTION. The pre-repair `run_model_probe.sh`
+    hardcodes `ROOT=/var/tmp/looplab-bench` -- the live stand -- with no environment override, and
+    it makes directories under `$ROOT/model-probes/`, touches the fence and opens a run directory
+    before any of its own refusals can fire. So a test that COPIES this file and executes it is
+    safe only while the file is one `exec` line, and the moment somebody restores the old body to
+    watch this test go red, the test itself runs the old body against the live stand.
+
+    That is not hypothetical: it happened on 2026-08-31 at 09:56 during exactly that mutation. It
+    cost no money (the run refused in a second for want of a credential pair) but it wrote a
+    directory into the live `model-probes/`, left an `engine.lock`, and the 10:09 snapshot carried
+    that empty directory into the archive that is supposed to hold measurements only.
+
+    So the shape is asserted FIRST and the execution below only ever reaches a shim. A mutation now
+    reddens this file without touching anything outside `tmp_path`.
+    """
+    body = SHIM.read_text(encoding="utf-8")
+    assert body.startswith("#!"), body[:80]
+    live = [ln for ln in body.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    assert len(live) == 1, f"NOT A SHIM, and it is not safe to execute a copy of it: {live}"
+    assert live[0].startswith("exec "), live
+    assert "run_probe.sh" in live[0], live
+    assert "/var/tmp/looplab-bench" not in body, (
+        "the shim names the live stand; a copy of it must never be executed by a test")
+    return body
+
+
 def test_the_old_name_runs_the_repaired_script(tmp_path):
     """`run_model_probe.sh` must be a redirection and not a second copy of the rule.
 
@@ -150,9 +179,10 @@ def test_the_old_name_runs_the_repaired_script(tmp_path):
     argv, so this asserts what the old name actually EXECUTES and what it hands over — including
     the optional task, meter and budget arguments the old copy never had.
     """
+    body = _shim_body()          # the interlock: nothing is executed unless it IS the shim
     here = tmp_path / "algotune"
     here.mkdir()
-    (here / "run_model_probe.sh").write_bytes(SHIM.read_bytes())
+    (here / "run_model_probe.sh").write_text(body, encoding="utf-8")
     (here / "run_model_probe.sh").chmod(0o755)
     recorded = tmp_path / "argv.txt"
     (here / "run_probe.sh").write_text(
@@ -167,12 +197,8 @@ def test_the_old_name_runs_the_repaired_script(tmp_path):
     assert recorded.read_text(encoding="utf-8").splitlines() == args, recorded.read_text()
 
 
-def test_the_old_name_carries_no_second_implementation(tmp_path):
+def test_the_old_name_carries_no_second_implementation():
     """The other half of "one rule, one place": whatever the shim does, it must not select a
-    champion, copy a solver or spend a budget on its own again."""
-    body = SHIM.read_text(encoding="utf-8")
-    assert body.startswith("#!"), body[:80]
-    live = [ln for ln in body.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
-    assert len(live) == 1, f"the shim grew a body again: {live}"
-    assert live[0].startswith("exec "), live
-    assert "run_probe.sh" in live[0], live
+    champion, copy a solver or spend a budget on its own again. Same predicate the interlock uses,
+    stated once."""
+    _shim_body()
