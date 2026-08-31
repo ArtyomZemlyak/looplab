@@ -125,6 +125,91 @@ def test_the_per_run_evidence_is_archived_not_just_the_campaign_markers(tmp_path
 
 
 
+# ------------------------------------------------------------------ the archive ACROSS snapshots
+#
+# Everything above runs the script ONCE. Three claims in the runs-archive block are about what the
+# SECOND run does -- "copied ONCE, not once per snapshot", `cp -ru` keeping the sync incremental
+# "because a LIVE run's directory grows while this script is reading it", and an archive that
+# accumulates in a sibling the prune never touches -- and no test had ever invoked `snapshot.sh`
+# twice into the same archive, so none of them was checked.
+
+
+def _run_log(src, tree, probe, run):
+    return src / tree / probe / "runs" / run / "run"
+
+
+def test_a_finished_run_is_copied_once_not_once_per_snapshot(tmp_path):
+    """`cp -ru`, not `cp -r`.
+
+    A finished run is immutable, so re-copying it every thirty minutes is seven copies of the same
+    bytes onto a shared S3-backed FUSE mount -- the cost this whole sibling-archive design exists
+    to avoid, and the reason the runs do not simply ride inside each rotating snapshot.
+
+    Whether `cp` wrote the file again is observed by making the archived copy DISTINGUISHABLE from
+    its source and newer than it, which is exactly the condition `-u` tests. A second pass that
+    re-copies overwrites the sentinel; one that honours `-u` leaves it alone.
+    """
+    src = _bench_root(tmp_path)
+    dest, archive = tmp_path / "snapshots", tmp_path / "runs-archive"
+    assert _snapshot(src, dest, archive).returncode == 0
+
+    archived = archive / "model-probes" / "dsPde3" / "runs" / "r1" / "run" / "events.jsonl"
+    source = _run_log(src, "model-probes", "dsPde3", "r1") / "events.jsonl"
+    archived.write_text(archived.read_text() + '{"sentinel": "not rewritten"}\n')
+    import os
+    os.utime(archived, ns=(source.stat().st_mtime_ns + 60 * 10**9,) * 2)
+
+    result = _snapshot(src, dest, archive)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "sentinel" in archived.read_text(), (
+        "the second snapshot re-copied a finished run that had not changed; at a thirty-minute "
+        "cadence that is the same bytes written to geesefs eight times a day\n" + result.stdout)
+
+
+def test_the_archive_is_the_union_of_what_the_box_has_ever_held(tmp_path):
+    """Incremental must not mean partial, and accumulating must not mean re-copying.
+
+    The `-u` above is only safe if the other half holds: a run that GREW between snapshots is
+    picked up (the live-run case the comment names), a run that appeared is picked up, and a run
+    that has since been deleted from BENCH_ROOT stays archived -- the archive is a sibling the
+    prune never reaches, and that is what makes it the durable half.
+    """
+    import os
+    src = _bench_root(tmp_path)
+    dest, archive = tmp_path / "snapshots", tmp_path / "runs-archive"
+    assert _snapshot(src, dest, archive).returncode == 0
+    first_manifest = (next(iter(sorted(dest.glob("2*")))) / "runs-manifest.txt").read_text()
+    assert "model-probes 1" in first_manifest, first_manifest
+
+    # A live run appends while the box keeps working, and a second probe starts.
+    live = _run_log(src, "model-probes", "dsPde3", "r1") / "events.jsonl"
+    live.write_text(live.read_text() + '{"type": "llm_usage", "data": {"cost": 0.0031}}\n')
+    os.utime(live, ns=(live.stat().st_mtime_ns + 60 * 10**9,) * 2)
+    second = _run_log(src, "model-probes", "dsHull", "r1")
+    second.mkdir(parents=True)
+    (second / "events.jsonl").write_text('{"type": "node_evaluated"}\n')
+
+    result = _snapshot(src, dest, archive)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    archived = archive / "model-probes" / "dsPde3" / "runs" / "r1" / "run" / "events.jsonl"
+    assert "0.0031" in archived.read_text(), (
+        "a run that grew between snapshots was not re-read, so the archive holds a truncated "
+        "prefix of the evidence\n" + result.stdout)
+    assert (archive / "model-probes" / "dsHull" / "runs" / "r1" / "run" / "events.jsonl").exists()
+
+    # Each snapshot records what the archive held AT ITS MOMENT, so a restorer can tell a run that
+    # was never archived from one archived and later lost.
+    latest = sorted(dest.glob("2*"))[-1]
+    assert "model-probes 2" in (latest / "runs-manifest.txt").read_text()
+
+    # And what BENCH_ROOT has since dropped is still there: /var/tmp is the container's writable
+    # layer, so "gone from the box" is the ordinary case, not the exotic one.
+    _rmtree(src / "model-probes" / "dsPde3")
+    assert _snapshot(src, dest, archive).returncode == 0
+    assert "0.0031" in archived.read_text(), "the archive lost a run the box no longer has"
+
+
 def _rmtree(path):
     for child in sorted(path.rglob("*"), reverse=True):
         child.rmdir() if child.is_dir() else child.unlink()
