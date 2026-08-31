@@ -124,18 +124,6 @@ def test_the_per_run_evidence_is_archived_not_just_the_campaign_markers(tmp_path
     assert "model-probes 1" in (out / "runs-manifest.txt").read_text()
 
 
-def test_a_missing_run_tree_makes_the_snapshot_report_itself_incomplete(tmp_path):
-    """The exit code is the claim: silence about an absent source is the failure mode this
-    script's own header calls the worst outcome."""
-    src = _bench_root(tmp_path)
-    for p in sorted((src / "model-probes").rglob("*"), reverse=True):
-        p.rmdir() if p.is_dir() else p.unlink()
-    (src / "model-probes").rmdir()
-
-    result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
-    assert result.returncode == 1, result.stdout
-    assert "NO per-run evidence archived" in result.stdout
-
 
 def _rmtree(path):
     for child in sorted(path.rglob("*"), reverse=True):
@@ -166,17 +154,6 @@ def test_an_idle_box_is_not_reported_as_a_shortfall(tmp_path):
     out = next((tmp_path / "snapshots").glob("2*"))
     assert (out / "looplab.bundle").exists()
 
-
-def test_a_campaign_without_its_runs_is_still_a_shortfall(tmp_path):
-    """The 2026-08-29 shape exactly: campaign-final/ survived the restart and the sixty-nine runs
-    behind its numbers did not. Silence here is what made the archive look sufficient."""
-    src = _bench_root(tmp_path)
-    _rmtree(src / "model-probes")
-
-    result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
-    assert result.returncode == 1, result.stdout
-    assert "NO per-run evidence archived" in result.stdout
-    assert "idle box" not in result.stdout
 
 
 def _fake_snapshot(dest, stamp, *, measured):
@@ -240,3 +217,39 @@ def test_when_only_measured_snapshots_are_left_the_prune_says_what_it_is_deletin
     assert result.returncode == 0, result.stdout + result.stderr
     assert not oldest.exists(), result.stdout
     assert "WITH MEASUREMENTS" in result.stdout, result.stdout
+
+
+def test_a_box_running_probes_without_a_campaign_is_complete(tmp_path):
+    """The live case that broke the previous version of this rule within the hour.
+
+    Campaigns and probe runs are two independent ways of measuring here. Requiring both made every
+    cycle on a probes-only box exit 1, which made `snapshot_timer.sh` refuse the fingerprint and
+    re-write a 110 MB snapshot every thirty minutes without pruning -- the same unbounded loop the
+    "neither exists" condition had just been introduced to stop, resurfacing under a new name as
+    soon as two probes started and `model-probes/` appeared.
+
+    What the archive owes is everything that EXISTS. An absent mode is reported so a restorer knows
+    what this box was doing; it is not a shortfall.
+    """
+    src = _bench_root(tmp_path)
+    _rmtree(src / "campaign-final")
+
+    result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
+    assert result.returncode == 0, result.stdout
+    assert "INCOMPLETE" not in result.stdout
+    assert "running probes, not a campaign" in result.stdout
+
+    # And the runs it DOES have still travel -- "not a shortfall" may never come to mean "skipped".
+    assert (tmp_path / "runs-archive" / "model-probes" / "dsPde3" / "runs" / "r1" / "run"
+            / "events.jsonl").exists()
+
+
+def test_a_source_that_exists_and_cannot_be_read_is_still_a_shortfall(tmp_path):
+    """The alarm that must survive all this: `copy` counts a source that is THERE and unreadable.
+    That is the case the exit code was built for, and it is untouched by mode-awareness."""
+    src = _bench_root(tmp_path)
+    _rmtree(src / "AlgoTune" / "reports")
+
+    result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
+    assert result.returncode == 1, result.stdout
+    assert "INCOMPLETE SNAPSHOT: 1 source(s)" in result.stdout

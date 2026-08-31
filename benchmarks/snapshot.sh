@@ -151,33 +151,31 @@ for D in "$SRC"/runs-* "$SRC"/model-probes "$SRC"/probes; do
     SHORT=$((SHORT + 1))
   fi
 done
-# AN IDLE BOX IS NOT A SHORTFALL, and telling them apart is the difference between a signal and a
-# nuisance that fills a shared mount.
+# WHICH MODE THE BOX IS IN IS NOT A SHORTFALL. Campaigns and probe runs are two INDEPENDENT ways of
+# measuring here, and either can be absent because it is simply not in use.
 #
-# Measured 2026-08-31, by starting the timer on a freshly rebuilt box: with no campaign and no runs
-# yet, every cycle exited 1, `snapshot_timer.sh` refused to record the fingerprint ("an incomplete
-# archive is not done"), and it therefore re-wrote a 110 MB snapshot every thirty minutes and never
-# pruned -- because the prune is deliberately downstream of the completeness check. Nine snapshots
-# and 3.0 GB accumulated before this was noticed. The campaign half of that behaviour predates the
-# run half; adding a second always-missing source is what made it visible.
+# This was got wrong twice in two days, in opposite directions, and both times the cost was real.
+# First the campaign check alone made every cycle on a freshly rebuilt box exit 1; the timer then
+# refused to record the fingerprint -- correctly, by its own rule -- and re-wrote a 110 MB snapshot
+# every thirty minutes without pruning, since the prune sits downstream of the completeness check.
+# Nine snapshots and 3.0 GB. Making the claim conditional on "neither exists" fixed that case and
+# broke the next one within the hour: two probes started, `model-probes/` appeared, `campaign*` did
+# not, and the same unbounded loop resumed under a new name.
 #
-# So the claim is made conditional on the situation, which is what makes it a claim at all: if
-# NEITHER a campaign nor a run tree exists, nothing has been measured on this box yet and the
-# snapshot is complete for what there is. If EITHER exists, the other's absence is a real shortfall
-# -- and that is exactly the 2026-08-29 shape, where campaign-final/ survived and the sixty-nine
-# runs behind its numbers did not.
+# So the question this block used to ask -- "is every mode present?" -- is the wrong question. What
+# the archive owes is everything that EXISTS, and `copy` above already counts a source that is there
+# and could not be read. An absent MODE is reported, because an operator reading a restore should
+# know which of the two this box was doing, but it is not a shortfall.
+#
+# What this does NOT weaken: the 2026-08-29 loss was never an absence this could have caught. The
+# runs were present the whole time and simply not copied, because no line of the script knew they
+# existed. That is fixed by the copying, not by an alarm.
 if [ "$FOUND_CAMPAIGN" = 0 ] && [ "$FOUND_RUNS" = 0 ]; then
-  echo "  (idle box: no $SRC/campaign* and no run tree -- nothing has been measured here yet, so"
-  echo "   this snapshot is short of nothing. It carries both checkouts and whatever else exists.)"
-else
-  if [ "$FOUND_CAMPAIGN" = 0 ]; then
-    echo "  MISSING              no $SRC/campaign* directory -- NO campaign markers or scores archived"
-    SHORT=$((SHORT + 1))
-  fi
-  if [ "$FOUND_RUNS" = 0 ]; then
-    echo "  MISSING              no $SRC/runs-*, model-probes or probes tree -- NO per-run evidence archived"
-    SHORT=$((SHORT + 1))
-  fi
+  echo "  (idle box: neither $SRC/campaign* nor a run tree -- nothing has been measured here yet.)"
+elif [ "$FOUND_CAMPAIGN" = 0 ]; then
+  echo "  (no $SRC/campaign* -- this box is running probes, not a campaign. Not a shortfall.)"
+elif [ "$FOUND_RUNS" = 0 ]; then
+  echo "  (no $SRC/runs-*, model-probes or probes tree -- campaign only, no standalone probes.)"
 fi
 
 # 3. Which commit of OUR repo produced them, and what the box looked like.
