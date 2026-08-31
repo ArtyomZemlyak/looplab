@@ -19,6 +19,24 @@ import pathlib
 import sys
 from pathlib import Path
 
+# THE REPO ROOT, because `python benchmarks/algotune/extract_champion.py` puts the SCRIPT's
+# directory on sys.path and not the root, so `from looplab.events.replay import fold` below raises
+# ModuleNotFoundError unless looplab happens to be pip-installed into the interpreter. It is not on
+# this box.
+#
+# Measured 2026-08-31 on a finished probe rather than reasoned about. `accEE` ran to its ceiling
+# (rc=0, 6321 s) and evaluated two nodes -- 27.466 then 221.5387 on train -- and its own summary
+# read "champion: NONE", because this import failed and run_probe.sh takes a non-zero exit as "no
+# champion". The scores were never in danger: they are in events.jsonl. What was in danger is the
+# reading, and a probe that reports nothing looks exactly like a probe that found nothing.
+#
+# The same ModuleNotFoundError killed `compare_arms.py` at the end of the 2026-08-29 campaign --
+# `run_final-relaunch.log` closes with that traceback -- which is why five sibling scripts here
+# already carry these three lines. This one was the sixth and did not.
+_REPO = Path(__file__).resolve().parents[2]
+if (_REPO / "looplab" / "__init__.py").exists() and str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
