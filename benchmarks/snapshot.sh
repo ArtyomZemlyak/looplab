@@ -122,10 +122,6 @@ for D in "$SRC"/campaign*; do
   FOUND_CAMPAIGN=$((FOUND_CAMPAIGN + 1))
   copy "$D" "$(printf '%-21s' "$(basename "$D")")"
 done
-if [ "$FOUND_CAMPAIGN" = 0 ]; then
-  echo "  MISSING              no $SRC/campaign* directory -- NO campaign markers or scores archived"
-  SHORT=$((SHORT + 1))
-fi
 
 # EVERY tree of finished RUNS -- where a probe's `events.jsonl` and `spans.jsonl` actually live.
 #
@@ -155,9 +151,33 @@ for D in "$SRC"/runs-* "$SRC"/model-probes "$SRC"/probes; do
     SHORT=$((SHORT + 1))
   fi
 done
-if [ "$FOUND_RUNS" = 0 ]; then
-  echo "  MISSING              no $SRC/runs-*, model-probes or probes tree -- NO per-run evidence archived"
-  SHORT=$((SHORT + 1))
+# AN IDLE BOX IS NOT A SHORTFALL, and telling them apart is the difference between a signal and a
+# nuisance that fills a shared mount.
+#
+# Measured 2026-08-31, by starting the timer on a freshly rebuilt box: with no campaign and no runs
+# yet, every cycle exited 1, `snapshot_timer.sh` refused to record the fingerprint ("an incomplete
+# archive is not done"), and it therefore re-wrote a 110 MB snapshot every thirty minutes and never
+# pruned -- because the prune is deliberately downstream of the completeness check. Nine snapshots
+# and 3.0 GB accumulated before this was noticed. The campaign half of that behaviour predates the
+# run half; adding a second always-missing source is what made it visible.
+#
+# So the claim is made conditional on the situation, which is what makes it a claim at all: if
+# NEITHER a campaign nor a run tree exists, nothing has been measured on this box yet and the
+# snapshot is complete for what there is. If EITHER exists, the other's absence is a real shortfall
+# -- and that is exactly the 2026-08-29 shape, where campaign-final/ survived and the sixty-nine
+# runs behind its numbers did not.
+if [ "$FOUND_CAMPAIGN" = 0 ] && [ "$FOUND_RUNS" = 0 ]; then
+  echo "  (idle box: no $SRC/campaign* and no run tree -- nothing has been measured here yet, so"
+  echo "   this snapshot is short of nothing. It carries both checkouts and whatever else exists.)"
+else
+  if [ "$FOUND_CAMPAIGN" = 0 ]; then
+    echo "  MISSING              no $SRC/campaign* directory -- NO campaign markers or scores archived"
+    SHORT=$((SHORT + 1))
+  fi
+  if [ "$FOUND_RUNS" = 0 ]; then
+    echo "  MISSING              no $SRC/runs-*, model-probes or probes tree -- NO per-run evidence archived"
+    SHORT=$((SHORT + 1))
+  fi
 fi
 
 # 3. Which commit of OUR repo produced them, and what the box looked like.
