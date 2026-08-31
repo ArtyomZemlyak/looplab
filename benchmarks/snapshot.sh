@@ -150,18 +150,65 @@ done < <(bench_campaign_trees "$SRC")
 # the prune below never touches, and each snapshot records what the archive held at its moment.
 # `cp -ru` keeps the sync incremental, which matters because a LIVE run's directory grows while this
 # script is reading it.
+#
+# BUT `-u` CANNOT REPAIR WHAT IT ONCE COPIED SHORT, and on this mount copying short is the ordinary
+# failure. `-u` copies when the SOURCE is newer than the destination, and a destination truncated by
+# an ENOSPC part-way through today's cycle carries TODAY's mtime -- newer than the frozen mtime of
+# the finished run it is supposed to be a copy of. So `-u` skips it for ever, and every later cycle
+# reports success over it.
+#
+# Driven end to end 2026-08-31 on a 200,000-line events.jsonl with `ulimit -f` standing in for the
+# ENOSPC: the cycle that failed left 33,390 lines in the archive; the next cycle, which exited 0 and
+# printed the file as an archived run, left 33,390 lines. The manifest counted it as a whole run,
+# because the manifest counts FILES BY NAME.
+#
+# So the repair asks the only question `-u` cannot: is the archived file SHORTER than its source?
+# These are append-only logs, so shorter means unfinished, and `cp -ru` has already handled every
+# case where the source is merely newer. The incrementality the comment above defends is untouched:
+# a finished run whose archived copy is the same length (or longer -- see below) is not re-read.
+#
+# The verify is separate from the repair on purpose. `cp` exiting 0 is not the claim the archive
+# needs; "the bytes are there" is, and until now nothing checked it, which is how a truncated run
+# spent a day being reported as archived.
 RUNS_ARCHIVE="${SNAPSHOT_RUNS_ARCHIVE:-$DEST/../runs-archive}"
+archive_tree() {  # $1 = source tree, $2 = archive root. Sets ARCH_REPAIRED / ARCH_STILL_SHORT.
+  local S="$1" A="$2" B rel ssz dsz rc=0
+  B="$(basename "$S")"
+  ARCH_REPAIRED=0; ARCH_STILL_SHORT=0
+  mkdir -p "$A" || return 1
+  cp -ru "$S" "$A/" || rc=1
+  while IFS= read -r -d '' rel; do
+    # The source can vanish mid-walk -- `campaign.sh` rm -rf's a task root to start an attempt --
+    # and a file that is no longer there is not a shortfall in the archive.
+    ssz=$(stat -c %s "$S/$rel" 2>/dev/null) || continue
+    dsz=$(stat -c %s "$A/$B/$rel" 2>/dev/null || echo -1)
+    [ "$dsz" -lt "$ssz" ] || continue
+    # LONGER than the source is left alone: the box's writable layer is where a run gets deleted or
+    # restarted, and the archive is the durable half. Only SHORT is a defect.
+    if cp -p "$S/$rel" "$A/$B/$rel"; then ARCH_REPAIRED=$((ARCH_REPAIRED + 1)); else rc=1; fi
+    dsz=$(stat -c %s "$A/$B/$rel" 2>/dev/null || echo -1)
+    if [ "$dsz" -lt "$ssz" ]; then ARCH_STILL_SHORT=$((ARCH_STILL_SHORT + 1)); rc=1; fi
+  done < <(find "$S" -type f -printf '%P\0' 2>/dev/null)
+  return $rc
+}
 FOUND_RUNS=0
 while IFS= read -r D; do
   [ -n "$D" ] || continue
   FOUND_RUNS=$((FOUND_RUNS + 1))
   B="$(basename "$D")"
-  if mkdir -p "$RUNS_ARCHIVE" && cp -ru "$D" "$RUNS_ARCHIVE/"; then
+  if archive_tree "$D" "$RUNS_ARCHIVE"; then
     N=$(find "$RUNS_ARCHIVE/$B" -name events.jsonl 2>/dev/null | wc -l)
-    echo "  runs -> archive       $B $(du -sh "$RUNS_ARCHIVE/$B" 2>/dev/null | cut -f1) ($N run records)"
+    R=""
+    [ "$ARCH_REPAIRED" -gt 0 ] && R=", $ARCH_REPAIRED re-copied SHORT of its source"
+    echo "  runs -> archive       $B $(du -sh "$RUNS_ARCHIVE/$B" 2>/dev/null | cut -f1) ($N run records$R)"
     echo "$B $N $RUNS_ARCHIVE/$B" >> "$OUT/runs-manifest.txt"
   else
     echo "  COPY FAILED          $B -- the per-run events and spans are NOT archived"
+    if [ "$ARCH_STILL_SHORT" -gt 0 ]; then
+      echo "                       $ARCH_STILL_SHORT file(s) in the archive are SHORTER than the"
+      echo "                       source they claim to copy -- that is a TRUNCATED run, and the"
+      echo "                       manifest above counts files by name and cannot see it"
+    fi
     SHORT=$((SHORT + 1))
   fi
 done < <(bench_run_trees "$SRC")
