@@ -56,6 +56,15 @@ def one_call(base_url: str, api_key: str, model: str, max_tokens: int, timeout: 
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key,
                  "Accept-Encoding": "identity"},
         method="POST")
+    # OPEN[probe-endpoint-disables-the-egress-proxy] the probe still forces direct egress — the
+    # exact defect `proxy.py::main` measured (403 refusals climbing 13% -> ~100%) and fixed.
+    # proof:present:ProxyHandler({})@benchmarks/meter/probe_endpoint.py
+    # REVIEW 2026-08-30 (measurement-validity): an EMPTY mapping force-disables proxying; the meter
+    # now reads the env (`ProxyHandler()` with no argument) and a test pins it — for the meter
+    # only. This probe is the tool that CHOOSES the endpoint and is "recorded with the campaign as
+    # the state of the endpoint at that time", yet it measures through a different egress path than
+    # the campaign runs on: against an outside endpoint it reports escalating 403s the metered
+    # campaign would not see (or, early in the day, the reverse). Same one-line fix as the meter's.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     t0 = time.time()
     try:

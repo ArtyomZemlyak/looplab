@@ -659,6 +659,16 @@ def _stream_usage(value) -> dict:
 #     is ours. Refusing every other member made the template unreachable on a qwen model.
 # A key whose value is not a mapping cannot be inspected, so it counts as the whole knob — fail
 # closed, since an operator writing `reasoning: "high"` means the depth.
+# OPEN[reasoning-depth-knobs-missing-live-spellings] the registry omits depth spellings real
+# endpoints accept, so the clash refusal silently admits for them exactly the double-spelling it
+# exists to refuse.
+# proof:`absent:"think":@looplab/core/llm.py`
+# REVIEW 2026-08-30 (registry-coverage): unregistered but live: top-level `enable_thinking`
+# (SGLang/vLLM take it in `extra_body` directly, outside `chat_template_kwargs`), and Ollama's
+# native boolean knob for the same thing. An operator setting `llm_reasoning="high"` beside one of
+# those in `llm_reasoning_extra` ships both spellings and the provider picks — the measured
+# $0.019/25-minute failure mode, un-refused. The conflict test is parametrized from this registry,
+# so each addition is one line here and zero elsewhere.
 REASONING_DEPTH_KNOBS: dict = {
     "reasoning_effort": None,                                   # OpenAI / Ollama-v1 / DeepSeek
     "thinking": None,                                           # Anthropic: type + budget_tokens
@@ -1276,6 +1286,20 @@ class OpenAICompatibleClient:
             # guard fired, the APITimeoutError is a fact about the socket arriving after the fact
             # about the call. Reading the class alone would send a 220k-token cut generation to
             # `_policy_connection` and re-buy thirty minutes of it.
+            # OPEN[barren-cut-usage-frame-is-discarded] a cut stream that produced NOTHING but whose
+            # gateway still priced it re-raises here, and the `usage` this loop already captured —
+            # the frame `defer_inband_error` reordered past the error precisely so it could be
+            # read — dies with the exception: the call reaches the ledger as neither spend nor a
+            # CALL, and the retry then re-spends.
+            # proof:absent:_bill_barren_cut@looplab/core/llm.py
+            # REVIEW 2026-08-30 (money): driven with error-frame + $0.01/50-token usage frame and
+            # max_retries=1: two real HTTP requests, `accountant.calls == 1, priced_calls == 0,
+            # spent == 0.0`. That is defect #2 from this file's own header ("not as spend, not even
+            # as a CALL"), fixed for the productive cut and still open for the priced barren one —
+            # and an asymmetry against `complete_text_stream`, which bills this same shape through
+            # `_stream_envelope_is_billable(usage_observed=True)`, so "keeping the two streaming
+            # paths on ONE rule" is not yet true. Bill observed usage before the re-raise (an
+            # `_account_keepalive_stall`-shaped helper; the accountant is one attribute away).
             if not ((_inband_stream_error(exc) or "held" in inband)
                     and _interrupted_stream_is_salvageable(
                         produced_content=bool(content), produced_tool_calls=bool(tcs),

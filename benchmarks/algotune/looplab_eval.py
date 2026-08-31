@@ -991,6 +991,12 @@ def main() -> int:
     # under it left site-packages at 358 entries unchanged and the module imported from the target
     # via PYTHONPATH. Per-invocation directory, so two concurrent evaluations cannot shadow each
     # other either.
+    # OPEN[bridge-leaks-a-piptarget-dir-per-eval] this tempdir is created per invocation and never
+    # joins the artefact cleanup, so a campaign leaks one compiled-extension directory per eval
+    # onto the disk the watchdog alarms at 15 GB free.
+    # proof:absent:(_pip_target)@benchmarks/algotune/looplab_eval.py
+    # REVIEW 2026-08-30 (hygiene): `_ARTEFACTS` above is exactly the registry for this (keep-flag
+    # respected, best-effort removal); one append after the mkdtemp closes it.
     _pip_target = tempfile.mkdtemp(prefix="looplab-piptarget-")
     env["PIP_TARGET"] = _pip_target
     env["PYTHONPATH"] = os.pathsep.join([_pip_target] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
@@ -1099,6 +1105,20 @@ def main() -> int:
                 or "--baseline-times-dir" in sys.argv):
             return None
         raw = (os.environ.get("ALGOTUNE_EVAL_WORKERS") or "").strip().lower()
+        # OPEN[regime-replica-reads-the-wrong-env-var] the replica reads a cores-per-worker
+        # variable the arena does not, and omits `resolve_workers`' clamp, so it can compute a key
+        # the arena will never write and refuse a correctly-matched cache.
+        # proof:present:get("ALGOTUNE_CORES_PER_WORKER@benchmarks/algotune/looplab_eval.py
+        # REVIEW 2026-08-30 (correctness): the helper this replicates reads
+        # ALGOTUNE_EVAL_CORES_PER_WORKER (`parallel_eval.py::resolve_workers`, and
+        # `patch_parallel_eval.py` tells operators to set exactly that name) and clamps workers to
+        # `allowed // cores_per_worker`. With the EVAL_ spelling set to 2, or workers above the
+        # lane width, the two computations diverge and the refusal's remedy ("set
+        # ALGOTUNE_EVAL_WORKERS to match") cannot satisfy the guard.
+        # `test_algotune_refuses_a_regime_mismatch.py::test_the_replicated_rule_matches_the_arenas_own`
+        # pins `cores = 1` and workers below the affinity width, so neither drift dimension can go
+        # red. Read both spellings (theirs first) and carry the clamp — or import the rule when the
+        # arena is importable and keep the replica only as the fallback.
         try:
             cores = max(1, int(os.environ.get("ALGOTUNE_CORES_PER_WORKER") or 1))
             width = len(os.sched_getaffinity(0))

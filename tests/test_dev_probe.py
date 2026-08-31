@@ -61,6 +61,19 @@ def _skip_when_the_kernel_cannot_confine(monkeypatch, request):
     not a module-level `pytestmark`. An arm that explicitly asks for `confine_reads=False` (the hook
     is the confinement there) also runs everywhere, unchanged.
     """
+    # OPEN[landlock-skip-guard-defeated-by-any-skipif] the exclusion below matches ANY `skipif`
+    # marker, and one launcher-driving test also bypasses the wrapper by calling `execute_result`
+    # directly — two tests here are RED, not skipped, on every kernel without Landlock.
+    # proof:present:get_closest_marker("skipif")@tests/test_dev_probe.py
+    # REVIEW 2026-08-30 (baseline-red): `test_the_engines_own_interpreter_is_what_answers` carries
+    # an unrelated os.name skipif, so this guard waves it through and it fails on
+    # `landlock_create_ruleset failed`; `test_a_confinement_that_cannot_be_built_refuses_to_run_
+    # and_says_so` never traverses the wrapped `execute` (and its premise also breaks where the
+    # interpreter prefix is single-component — see the marker in dev_probe.py::_confined_allow).
+    # The header here says these guards restored the "suite runs fully offline" contract; it is
+    # broken again, 2 red out of the box on this container. Key the exclusion on the SPECIFIC
+    # Landlock skip (a custom marker), and gate `execute_result`, the funnel `execute` delegates
+    # to.
     if not _NO_LANDLOCK or request.node.get_closest_marker("skipif"):
         return
     original = DevProbeTools.execute

@@ -124,6 +124,15 @@ def check(reference: Path, solver: Path, n: int, size: int, seed: int, timeout: 
     """
     # A MISSING `Solver` IS A FILE-LEVEL FACT, reported ONCE. Asked per-instance it would come back
     # as n identical rows, which reads like n failures. Checked in the parent, before any fork.
+    # OPEN[solver-check-requires-a-literal-class-statement] a valid solver that BINDS `Solver`
+    # (import or assignment) is refused by this regex while the arena's loader accepts it.
+    # proof:present:search(r"^\s*class@benchmarks/algotune/looplab_check.py
+    # REVIEW 2026-08-30 (correctness): the arena resolves the module ATTRIBUTE — as
+    # `_run_isolated`'s own `getattr(solver_mod, "Solver", None)` does one function up — so
+    # `from impl import Solver` or `Solver = make_solver()` scores fine and this checker tells the
+    # Developer its solver "defines no `Solver` class", steering a rewrite the grader never
+    # required. Resolve the attribute (import the module the way `_run_isolated` does, or fall
+    # back to the regex only as a fast pre-check that can acquit, never convict).
     if not re.search(r"^\s*class\s+Solver\b", solver.read_text(encoding="utf-8", errors="replace"), re.M):
         return {"ok": False, "error": f"{solver.name} defines no `Solver` class"}
     rows = []

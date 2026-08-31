@@ -376,6 +376,16 @@ def jsonl_row_count(path) -> int:
     which must never be collapsed into a zero.
     """
     with open(path, 'rb') as handle:
+        # OPEN[jsonl-row-count-reads-the-whole-store] the whole file, plus a list of all its rows,
+        # in memory — on the synchronous prompt-assembly path, per inventory sweep, over stores
+        # that grow monotonically across runs.
+        # proof:present:handle.read().split@looplab/tools/_base.py
+        # REVIEW 2026-08-30 (robustness): the sibling reader this replaces (`core/memory_window`)
+        # caps at 2 MiB for exactly this path, and `SiblingRunTools.inventory`'s own comment
+        # refuses a ~2.5 s fold here — while this read is unbounded and runs 2-3x per prompt
+        # (`collect_inventory` + the `hide_empty_tools` offer). Count lines in chunks (constant
+        # memory), and above a byte ceiling answer the contract's UNKNOWN — "could not look" is a
+        # value this vocabulary already has.
         return sum(1 for row in handle.read().split(b'\n') if row.strip())
 
 

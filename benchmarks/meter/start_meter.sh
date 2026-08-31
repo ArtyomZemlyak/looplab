@@ -34,6 +34,14 @@ if S="$(alive)" && [ -n "$S" ]; then
   exit 0
 fi
 
+# OPEN[meter-key-rides-argv] the gateway API key is passed as an argv flag, world-readable in
+# /proc/<pid>/cmdline for the meter's whole multi-day lifetime on the shared JupyterHub box.
+# proof:`present:--api-key "$KEY"@benchmarks/meter/start_meter.sh`
+# REVIEW 2026-08-30 (security): the deployment this script exists for is the box CLAUDE.md's
+# `_on_shared_hub` describes — one origin, many users — and every one of them can read another
+# process's command line. `proxy.py::main` already reads METER_API_KEY from the environment, so the
+# fix is to export the variable and drop the flag: same idempotence, zero proxy changes. (The proxy
+# itself is clean — rows and stderr never carry headers or the key.)
 setsid nohup python3 "$HERE/proxy.py" --port "$PORT" --upstream "$UPSTREAM" --api-key "$KEY" \
     --log "$LOG" --rpm "$RPM" >> "$STDOUT" 2>&1 < /dev/null &
 sleep 2

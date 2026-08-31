@@ -74,6 +74,15 @@ def _harness() -> str:
     # before `record_done` reads it, so `set -u` is satisfied there; what was incomplete was this
     # harness, which extracts the function away from its assignment. The value mirrors the script's
     # own default rather than inventing one.
+    # OPEN[campaign-test-stubs-lag-the-marker-rename] four tests here are RED because the extracted
+    # functions now call a harness-cut classifier helper the extraction does not carry.
+    # proof:absent:marker_is_harness_cut@tests/test_campaign_marker_evidence.py
+    # REVIEW 2026-08-30 (baseline-red): the 2026-08-29 merge replaced the single `wall_cut` with
+    # the HARNESS_CUT_STATES family, and `final_banner`/`record_done` now call a helper function
+    # that `_FUNCTIONS` does not list — so the extracted bash dies with "command not found" and the
+    # banner assertions fail (`final_banner` prints COMPLETE with no WALL-CUT line). Production is
+    # fine; the harness lags the rename, the same way 41d111a's LANE_LAYOUT did. Add the helper to
+    # `_FUNCTIONS` (it is a top-level `name() {` block like the others).
     parts = ["set -u", "LANE_COUNT=4", "CORES_PER_LANE=22", 'LANE_LAYOUT="whole_cores"',
              'ARM="${ARM:-B}"', 'T="${T:-svm}"']
     for name in _FUNCTIONS:

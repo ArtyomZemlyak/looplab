@@ -920,6 +920,17 @@ def test_a_node_cannot_rewrite_the_fence_that_fences_it(tmp_path):
         control below removes the kernel bit from OUTSIDE the fenced process and asserts the same
         child then escapes end to end, so the capability the test denies is demonstrably real.
     """
+    # OPEN[fence-write-falsifier-fails-under-root] this test is unconditionally RED on any
+    # privileged runner: the kernel rung it asserts is the write bit, and a process holding the
+    # DAC-override capability ignores file modes.
+    # proof:absent:geteuid@tests/test_read_fence.py
+    # REVIEW 2026-08-30 (baseline-red): reproduced on this container (suite runs as root): STAGE2
+    # ESCAPED open-w while every hook-rung probe still refuses — the falsifier is right about the
+    # capability being real and wrong about whose kernel refuses it. The prior review already
+    # recorded "one falsifier fails under root". Skip (with the reason named) when the effective
+    # uid is 0 or the DAC-override bit is in CapEff — the sibling control test demonstrates the
+    # denied capability from OUTSIDE and keeps the pair honest — and see the marker on `_harden`
+    # for the production half of the same precondition.
     src, _sib, run_dir, wd, _models = _world(tmp_path)
     target = src / "experiments" / "baseline" / "final" / "model.safetensors"
     fence = _install(run_dir, src)

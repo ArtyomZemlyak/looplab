@@ -168,6 +168,13 @@ nav:
       - Benchmark landscape + local plan (2026-08-19): 50-benchmark-landscape-and-local-plan-2026-08-19.md
       - "AlgoTune arm: operational notes (2026-08-20)": 51-algotune-arm-operational-notes-2026-08-20.md
       - "Bench box: JupyterHub + L40S (2026-08-20)": 52-bench-box-jhub-l40s-2026-08-20.md
+      # 53/55/56 were written after the three rows above and never wired in; found by the
+      # 2026-08-30 mega-review (`validation.nav.omitted_files: info` means strict cannot catch an
+      # omitted page, so a nav row has to arrive WITH its document).
+      - What AlgoTune says about our loop (2026-08-26): 53-looplab-loop-defects-from-algotune-2026-08-26.md
+      - Probe results on one ruler (2026-08-27): 55-probe-results-2026-08-27.md
+      - Where the budget goes (2026-08-28): 56-where-the-budget-goes-2026-08-28.md
+      - Mega-review of the rnd branch (2026-08-30): 57-mega-review-2026-08-30.md
       - External-works synergy (2026-08-14): 41-external-works-synergy-2026-08-14.md
       - Pre-chewed evidence survey (2026-08-14): 42-pre-chewed-evidence-survey-2026-08-14.md
       - Mega-review of the 4-day window (2026-08-13): 40-mega-review-2026-08-13.md

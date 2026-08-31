@@ -771,6 +771,16 @@ def _kept_ratio(before: str, after: str) -> float:
     the opposite of what this measures. See `_ATTRIBUTION_DIFF_LINES` for the bound and for why the
     comparison is over lines.
     """
+    # OPEN[kept-ratio-overcredits-past-the-cap] truncating BOTH sides to the same head means a file
+    # rewritten entirely past the cap compares as identical, and the bound's own comment claims the
+    # error can only run the other way.
+    # proof:`line:toward 0&&under-crediting@looplab/engine/repair_verify.py`
+    # REVIEW 2026-08-30 (record-honesty): reproduced — a 2,000-line file whose repair rewrites
+    # lines 1,501-2,000 completely returns kept=1.0 against a true 0.75, so the durable
+    # `node_repaired.attribution.wrote` row says "nothing of this file changed" beside a `changed`
+    # entry saying it did, for exactly the whole-file-replacement case the field exists to make
+    # legible — against this module's own under-report-never-mis-report rule. When either side
+    # exceeds the cap, either stamp `truncated: true` on the entry or compare head+tail windows.
     a = (before or "").splitlines()[:_ATTRIBUTION_DIFF_LINES]
     b = (after or "").splitlines()[:_ATTRIBUTION_DIFF_LINES]
     if not a and not b:

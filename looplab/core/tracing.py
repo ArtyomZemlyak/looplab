@@ -361,6 +361,18 @@ def record_paid_call(cost, usage=None) -> bool:
     caller's own richer stamp still runs afterwards on the success path and wins. Deliberately
     silent when nothing is traced (or the innermost span is not a generation) — like every other
     entry point here, observability may not decide whether the paid work proceeds.
+
+    OPEN[span-cost-keeps-the-last-attempt-only] a generation billed MORE THAN ONCE — a keepalive
+    stall billed on attempt 1, a success billed on attempt 2, under ONE span — still leaves the
+    span carrying only the last attempt's cost against two ledger rows.
+    proof:`present:and "cost" not in attrs:@looplab/core/tracing.py`
+    REVIEW 2026-08-30 (money-accounting): `_account_keepalive_stall` appends an `llm_usage` row
+    and stamps here; the retry's success appends a second row and the caller's stamp overwrites
+    with attempt 2's figures alone, so `sum(llm_usage.cost) > sum(generation cost)` on any
+    stall-retry run — the exact inequality this function's own MEASURED paragraph was written to
+    close, and `tests/test_paid_calls_are_spanned.py`'s conservation check would fail on that
+    shape if a scenario produced it. Accumulate instead of write-once (and let the caller's stamp
+    add rather than replace), or narrow the headline claim to single-billing generations.
     """
     rec = next((r for r in reversed(_stack.get()) if r.get("kind") == "generation"), None)
     if rec is None:

@@ -1078,6 +1078,14 @@ class LLMRepoDeveloper:
         except Exception:  # noqa: BLE001 — an extra rung never breaks the build it is helping
             return ""
         text = str(getattr(result, "content", "") or "")
+        # OPEN[step-feedback-keeps-the-head-of-the-output] when the cap binds it keeps the START of
+        # a command's output and drops the END — the half this module everywhere else treats as the
+        # one a reader must not lose.
+        # proof:`present:text[:_STEP_FEEDBACK_CAP]@looplab/adapters/repo_developer.py`
+        # REVIEW 2026-08-30 (consistency): the measured corpus (median 782, max 2,614 chars) makes
+        # the 6,000 cap inert today; the day a runaway command hits it, the failure text at the
+        # tail is what vanishes. `_clip(keep="tail")` / `stream_tails` are the house rule and one
+        # import away.
         return text[:_STEP_FEEDBACK_CAP]
 
     def _budget_note(self) -> str:

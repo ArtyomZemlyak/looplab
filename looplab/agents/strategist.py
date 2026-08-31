@@ -855,6 +855,15 @@ class ToolUsingStrategist:
             self.tools.bind_state(state)        # let the run-aware tools read the current search
         messages = [
             # P8: hardware attention points, after the render() like the plain LLMStrategist above.
+            # OPEN[strategist-carries-the-rule-not-the-data] this role got the prompt-RULE spelling
+            # of answer-from-context, which the A/B measured inert, and not the inventory DATA
+            # block that measured 41.3 -> 17.7 calls.
+            # proof:absent:answered_by_context@looplab/agents/strategist.py+present:_CONTEXT_BEFORE_TOOLS_RULE@looplab/agents/strategist.py
+            # REVIEW 2026-08-30 (consistency): the inventory-block module's header and roles.py
+            # both record the measurement, and the same evidence took the rule OFF the repo
+            # Developer — so this pays the rule's tokens with none of the measured benefit. Wire
+            # the inventory block into `_strategist_brief`'s user turn (its providers implement
+            # `inventory()`), or drop the rule here too.
             {"role": "system",
              "content": render(self.prompts, "tool_strategist_system", _TOOL_STRATEGIST_SYSTEM)
                         + "\n\n" + _LLM_LANE_ALLOCATION_CONTRACT

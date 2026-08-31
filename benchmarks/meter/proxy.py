@@ -706,6 +706,19 @@ class Handler(BaseHTTPRequestHandler):
                 if "cost" in usage and usage.get("cost") is not None:
                     # The upstream priced it itself (a real OpenRouter, say). Never overwrite a
                     # provider's own invoice with an imputed one.
+                    # OPEN[meter-upstream-zero-cost-is-an-invoice] a body `usage.cost` of 0.0 is
+                    # accepted as an authoritative $0 while the header rule refuses the same zero.
+                    # proof:`present:if "cost" in usage and usage.get("cost") is not None:@benchmarks/meter/proxy.py`
+                    # REVIEW 2026-08-30 (money): `_header_cost` thirty lines up states the rule —
+                    # "Zero is NOT a price here: LiteLLM emits ... 0.0 for a model group it has no
+                    # price for, which is the unpriced case, not a free one" — and this branch (and
+                    # its streaming twin in `_proxy_stream`) skips it: `cost: 0.0` in the BODY lands
+                    # as `{metered: true, cost: 0.0, cost_basis: "upstream"}` and no imputation
+                    # runs. The corporate gateway IS LiteLLM and already emits the header form; the
+                    # day it stamps the same zero into the body, every call prices at $0 with a
+                    # green `metered: true` — the founding "budget never binds" defect back, now
+                    # asserted as an invoice. Treat a zero body cost like the zero header cost
+                    # (fall through to imputation), or label it so no reader mistakes it.
                     cost = float(usage["cost"])
                     basis = "upstream"
                 elif header_cost is not None:
@@ -739,6 +752,18 @@ class Handler(BaseHTTPRequestHandler):
                 row["note"] = "no usage object in response"
         else:
             row["metered"] = False
+            # OPEN[meter-error-body-shape-skips-the-ledger] a non-object JSON error body raises out
+            # of the handler BEFORE the row is recorded and before anything is sent to the client.
+            # proof:`line:upstream_error&&json.loads(raw)@benchmarks/meter/proxy.py`
+            # REVIEW 2026-08-30 (money): `json.loads(b'"internal error"')` (a JSON string, array or
+            # number — shapes a busy gateway's own edge really produces) succeeds and `.get` then
+            # raises AttributeError, which `except ValueError` does not catch. The exception
+            # escapes before `self.server.meter.record(row)` below, so the paid request VANISHES
+            # from the ledger — the one thing this file says it must never do — and the client gets
+            # a bare connection drop instead of the legible 500, which the arms' retry loops
+            # classify differently. Catch `(ValueError, AttributeError)` or guard with
+            # `isinstance(parsed, dict)`. Driven live: upstream 500 with body `"internal error"`
+            # -> client RemoteDisconnected, rows recorded: 0.
             try:
                 row["upstream_error"] = json.loads(raw).get("error")
             except ValueError:
@@ -914,6 +939,20 @@ class Handler(BaseHTTPRequestHandler):
         # reached `[DONE]` ended, whatever else it did or did not carry.
         done_seen = False
         swallow_blank = False
+        # OPEN[meter-swallows-the-done-sentinel] the held-back `[DONE]` is re-emitted on exactly one
+        # of the three exit paths, so every COMPLETE stream loses its terminator.
+        # proof:`absent:if done_seen@benchmarks/meter/proxy.py`
+        # REVIEW 2026-08-30 (protocol): the swallow below says "re-emitted at the very end, after
+        # the estimate", and that is true only of the `elif not basis and deltas:` estimate branch
+        # (whose `wire` carries the sentinel). On the dominant path — usage frame seen, stream ended
+        # tidily (8,830 of 9,235 recorded rows) — and on the empty-stream path, the sentinel is
+        # consumed and the chunked body just ends. Driven live: 2 content frames -> finish -> usage
+        # -> `[DONE]` reaches the client with no `[DONE]`. Both current arms end on body EOF, so
+        # nothing breaks TODAY; but the module header promises "unchanged except usage.cost", and by
+        # this file's own reading (a stream that never reached its terminator was CUT) any strict
+        # SSE observer downstream must classify every clean answer as cut. The one fixture that
+        # sends `[DONE]` (`_frame_done` in tests/test_meter_delta_ceiling_is_not_retryable.py)
+        # never asserts the client saw it, which is how this shipped. Re-emit on the other exits.
         try:
             for line in resp:
                 out = line
@@ -1136,7 +1175,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001 - the socket may already be gone; the row still lands
                 pass
 
+        # OPEN[meter-midstream-death-holds-the-keepalive-socket] a mid-stream failure returns with
+        # no terminating chunk and the connection left open, so pooled clients hang until their own
+        # read timeout.
+        # proof:absent:close_connection@benchmarks/meter/proxy.py
+        # REVIEW 2026-08-30 (robustness): the `emit(b"")` terminator lives inside the `try`; the
+        # exception path records the row and returns with the chunked body unfinished on a
+        # keep-alive connection. httpx/litellm pool every connection here (this file says so), so
+        # after an upstream death the arm sits on a half-finished body for its own stall timeout —
+        # minutes of dead wall clock per failure, times the retry that follows. urllib probes hide
+        # it (they send Connection: close). One line in the except path turns that into an
+        # immediate, salvageable EOF.
         latency_ms = round((time.time() - t0) * 1000, 1)
+        # OPEN[meter-stream-rows-are-anonymous] streaming rows carry neither the response `id` nor
+        # `model` the non-stream rows record, the estimate discards its own pricing-fallback basis,
+        # and nothing names the upstream when two meter instances share one default log path.
+        # proof:absent:upstream_host@benchmarks/meter/proxy.py
+        # REVIEW 2026-08-30 (auditability): `_proxy` records `model_reported` and `id` for exactly
+        # the correlate-with-the-gateway need `abort_is_not_retryable`'s comment states, and the cut
+        # streams — the rows that most need correlating — get neither, though every frame carries
+        # both. `est_basis` from `pricing.rate` is dropped, so an estimate priced off the `default`
+        # table is indistinguishable from one priced at the pinned model rate, precisely for the
+        # unknown-model rows where a wrong rate is likeliest. And `start_meter.sh` defaults every
+        # instance to one `meter.jsonl` with no per-row upstream identity, so a second instance
+        # started without METER_LOG interleaves unattributable spend. Three one-line row additions.
         row.update({"status": resp.status, "latency_ms": latency_ms, "prompt_tokens": pin,
                     "completion_tokens": pout, "cost": cost, "cost_basis": basis,
                     "metered": bool(basis)})
@@ -1170,6 +1232,19 @@ class Handler(BaseHTTPRequestHandler):
                                   f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
                                   f"(a FLOOR) and a prompt of {pin} tokens ({prompt_basis})")
         elif not basis and row.get("error"):
+            # OPEN[meter-exception-cut-is-served-unpriced] an upstream that dies by EXCEPTION (an
+            # RST, a socket timeout) can still deliver a usable 200 answer that costs the ledger $0.
+            # proof:absent:priced_exception_cut@benchmarks/meter/proxy.py
+            # REVIEW 2026-08-30 (money): the paragraph below deliberately declines to price the
+            # client-hung-up case, and that reasoning does not cover the other tenant of this same
+            # `except`: an UPSTREAM-side death. Driven live with an upstream sending 3 deltas then
+            # RST — the adapted client receives status 200, the full forwarded content and a
+            # truncation mark, and the row lands `{metered: false, cost: 0.0, deltas_seen: 3}`.
+            # A served answer priced at nothing is the exact silent-under-count shape the delta
+            # estimator was built to close, live whenever the ~1800 s gateway cut arrives as an
+            # exception instead of a clean EOF. The estimate has all its inputs in scope at the
+            # except site; at minimum an upstream-typed exception on the adapted path should price
+            # like a clean cut, with its own basis label.
             # THE ROW MUST NOT CONTRADICT ITSELF. The synthesis above lives inside the `try`, so any
             # exception while forwarding -- a client that hung up is the one that happens; five
             # `BrokenPipeError` rows are in `meter/meter.jsonl` -- skips it and lands here. Two of
@@ -1206,6 +1281,15 @@ class Server(ThreadingHTTPServer):
         # generation that has to be switched on is not a guard: the 62.9 h in this module's
         # docstring were spent by a proxy that had every other protection and no ceiling. `main()`
         # and tests may reassign it; `0` disables it.
+        # OPEN[meter-ceiling-comment-contradicts-its-default] the paragraph above and the constant
+        # it assigns state opposite decisions about a money guard.
+        # proof:`line:ON BY DEFAULT&&not an oversight@benchmarks/meter/proxy.py`
+        # REVIEW 2026-08-30 (stale-claim): `DELTA_CEILING_DEFAULT` is 0 — off — and its own comment
+        # says "OFF UNLESS ASKED, and this reverses the value it shipped with a few hours ago",
+        # with `test_the_ceiling_is_off_unless_someone_asks_for_it` pinning the zero. The reversal
+        # updated the constant and its test and left this site instructing the next editor in
+        # exactly the wrong direction. One of the two paragraphs is wrong; today it is this one.
+        # Rewrite it to state the shipped decision (and why), or flip the default back on purpose.
         self.delta_ceiling = DELTA_CEILING_DEFAULT
 
     # A CLIENT HANGING UP IS NOT AN INCIDENT. `http.server` prints a full traceback for every

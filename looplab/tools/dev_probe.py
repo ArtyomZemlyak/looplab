@@ -164,6 +164,15 @@ RESIDUALS, stated rather than papered over
   two rungs are complementary in BOTH directions, and neither is a superset.
 * A read is not policed by any of this. That is deliberate — the whole value of a probe is that it
   reads the real environment — and rule 1 is what bounds it.
+  OPEN[probe-residuals-docstring-predates-the-read-rung] the two residual claims here — this one
+  and the run-directory one below — are the pre-2026-08-21 world: under the shipped default reads
+  ARE policed by the kernel confinement, and the run directory is NOT in the confined grant list.
+  proof:`line:A read is not policed&&deliberate@looplab/tools/dev_probe.py`
+  REVIEW 2026-08-30 (stale-claim): this list is the module's stated map of what is and is not
+  covered, and a maintainer reading it mispredicts probe behaviour in both directions (a read of a
+  machine path outside the tiers is refused; `events.jsonl` is unreadable when the run dir is not
+  a mount). Update the residuals to describe both the confined default and the hook-only fallback;
+  do not delete them.
 * Network is not cut. An eval stage on the trusted tier has network today, so cutting it here would
   be a rule the surface it mirrors does not honour; the untrusted tiers get `--network none` from the
   Docker wrap as they always did.
@@ -790,6 +799,20 @@ class DevProbeTools:
             # the hook cannot), and the hook keeps its original deny-prefix job over the editable
             # tree plus every write refusal, where its non-OSError message is what makes the failure
             # actionable.
+            # OPEN[probe-confine-off-is-not-the-historical-probe] with the kernel rung OFF the hook
+            # is rendered as an ALLOW-LIST over the derived grants, while the legacy row promises
+            # the pre-2026-08-21 probe back: a deny-prefix hook over editable roots and nothing
+            # else.
+            # proof:`present:grants if confine else hook_allow@looplab/tools/dev_probe.py`
+            # REVIEW 2026-08-30 (legacy-contract): driven — with `confine_reads=False` a probe
+            # reading a file outside every root (this repo's own CLAUDE.md in the demo layout) is
+            # REFUSED where the historical probe read it. So a resumed pre-branch run gets a
+            # different probe than its first half ran under (the drift
+            # LEGACY_CONFIG_SNAPSHOT_DEFAULTS exists to prevent, per its own reasoning), the
+            # `_confined_allow` refusal ladder still runs in the escape hatch, and neither the
+            # child's exit-3 text nor the ProbeRefusal names `developer_probe_confine`, though both
+            # this ctor's comment and config.py claim the refusal names it. Render the off-branch
+            # as the historical deny-prefix fence and make the refusals name the knob.
             read_fence.render(roots, grants if confine else hook_allow, policy="deny", log="",
                               run="developer-probe", confine=confine),
             encoding="utf-8")
@@ -827,6 +850,20 @@ class DevProbeTools:
         interpreter — see `_shared_temp_root`. A venv under `/var/tmp` is granted; the `/var/tmp`
         that contains it is not.
         """
+        # OPEN[dropped-fence-roots-are-swallowed-by-the-probe] all three probe call sites discard
+        # `fence_inputs`' dropped-roots report, so a root the derivation refuses as too broad
+        # leaves the probe running with rule 1 absent for that tree and ZERO diagnostics.
+        # proof:`present:_dropped, _swallowed =@looplab/tools/dev_probe.py`
+        # REVIEW 2026-08-30 (trust-boundary): driven on a box whose editable root sits at a
+        # single-component prefix (`sys.prefix` = `/usr`): roots=[], dropped=['/usr/'], grants
+        # INCLUDING that prefix, no hook installed, empty read-deny — a probe silently unfenced
+        # for the declared root, against this module's own "may fail loudly, never run silently
+        # unfenced" bar, and `fence_inputs`' contract ("dropped roots are REPORTED ... so an
+        # operator whose whole fence evaporated can see why") ends at these three unpacks. It is
+        # also why `test_a_confinement_that_cannot_be_built_refuses_to_run_and_says_so` misfires
+        # where the prefix is single-component: its premise (the prefix survives as a root)
+        # evaporates and the probe launches instead of refusing. A non-empty drop here should
+        # refuse the run with the dropped paths named, like `refused` below.
         roots, allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
         tiers = tuple(path for path in self._interpreter_allow() if not _shared_temp_root(path))
         # The probe's own disposable replica, added AFTER the temp filter and never through it: it
@@ -866,6 +903,22 @@ class DevProbeTools:
     @staticmethod
     def _interpreter_allow() -> tuple:
         """The paths a confined probe must still reach: the interpreter, and the machine tiers.
+
+        OPEN[probe-reads-what-the-grader-fence-refuses] granting site-packages wholesale hands the
+        probe exactly the grader sources the EvalSpec package fence keeps out of `env_inspect`, in
+        the same composed toolset — and nothing hands this provider that declaration.
+        proof:absent:protect_packages@looplab/tools/dev_probe.py
+        REVIEW 2026-08-30 (trust-boundary): every Developer phase composes `EnvInspectTools`
+        (fenced) beside `DevProbeTools`, whose read confinement includes purelib and
+        `site.getsitepackages()` while the hook half denies editable roots only — so one
+        `run_probe(code="import inspect, <grader mod> as m; print(inspect.getsource(m))")` returns
+        what `read_installed` refuses, under full default confinement. The grader-fence test's own
+        docstring claims the probe route was already covered; that is true for a temp-root grader
+        and false for the pip-installed one the fence was measured on (213/216 calls hunting the
+        checker), and a route that opens under pressure is why that fence exists. The in-tree fix
+        shape: hand the grader packages' `find_spec(...).submodule_search_locations` to this
+        provider as extra deny roots (`read_fence.confine_grants` already knows how to punch the
+        other way).
 
         Denying the interpreter does not fence a probe, it stops python from starting -- which is the
         failure `read_fence._too_broad` exists to prevent one layer down. Everything here is derived

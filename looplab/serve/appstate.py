@@ -410,6 +410,14 @@ class AppState:
             # …and the SCORED node's own stderr tail beside it, for the identical reason: it is
             # captured program output on the same untoken-gated projection, and a node that
             # scored is exactly as able to have printed a secret as one that crashed.
+            # OPEN[stderr-tail-scrub-untested-at-the-boundary] the stdout drop one line up is
+            # regression-tested; this new sibling pop has no test, on a DENY-LIST projection where
+            # a dropped pop leaks captured output with nothing red.
+            # proof:absent:stderr_tail@tests/test_server.py
+            # REVIEW 2026-08-30 (security-guard): `tests/test_server.py` asserts the stdout tail is
+            # absent from /state and still behind the token-gated detail; per CLAUDE.md's contract
+            # rule, drive the same pair for this field (the reviews router is safe by construction
+            # — its allow-list excludes both tails; /state is the one deny-style surface).
             n.pop("stderr_tail", None)
             # Redact BEFORE truncating: a secret straddling byte 160 would otherwise lose its tail,
             # leaving a prefix too short for the pattern/entropy rules to catch (fragment leak).

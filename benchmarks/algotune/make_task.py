@@ -1318,6 +1318,21 @@ def main() -> int:
                     # arm does not -- the champion is scored on test once, after the run.
                     "--subset", "train",
                 ] + (["--enforce-rules"] if args.enforce_rules else []),
+                # OPEN[bridge-deadline-equals-stage-deadline] the stage timeout and the bridge's
+                # internal evaluator deadline are the same number, so the engine's SIGKILL always
+                # fires first and the bridge's `evaluator_timeout` scored-zero verdict is
+                # unreachable through the operator pipeline.
+                # proof:absent:bridge_timeout@benchmarks/algotune/make_task.py
+                # REVIEW 2026-08-30 (correctness): the command above passes no `--timeout`, so the
+                # bridge runs its default 7200 s evaluator clock — started AFTER copy plus up to
+                # 1800 s of build_ext — inside a stage whose own ceiling is the same `args.timeout`
+                # (default 7200). Whenever the evaluator would hit the bridge's deadline, the stage
+                # kill lands first: SIGKILL, no stdout, engine reason `timeout`, which is in
+                # `metric_salvage.NEVER_SALVAGED_REASONS` — exactly the no-metric discard the
+                # bridge's timeout branch was written to abolish ("a timed-out solver is a wrong
+                # solver, not a missing measurement"). Same shape for the pinned dev command's
+                # outer 450 s vs the inner default. Hand the bridge a deadline sized under the
+                # stage's (stage ceiling minus copy/build margin) so the verdict path can ever run.
                 "timeout": args.timeout,
             }],
             "metric": {"kind": "stdout_json", "key": "speedup"},

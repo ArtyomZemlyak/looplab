@@ -255,6 +255,18 @@ def _failure_reason(res) -> str:
     # from its own source. A second declarable reason therefore needs its own branch — and if one
     # is added to the registry without it, that same test goes red with "registry names X, which no
     # producer ever emits", which is the failure this shape exists to guarantee.
+    # OPEN[declared-reason-row-carries-no-source-tag] the first candidate-writable reason that is
+    # ENGINE-FINAL also SUPPRESSES the diagnostician's look, and nothing on the durable row says
+    # the fact was stated rather than measured.
+    # proof:absent:REASON_SOURCE_DECLARED@looplab/engine/failure_diagnosis.py
+    # REVIEW 2026-08-30 (trust-surface): the residual this renames (`crash`/`no_metric`) would get
+    # the tool-backed diagnostician, a `reason_summary` and possibly a repair; one printed JSON
+    # line converts it into a terminal nothing examines, NON_REPAIRABLE, travelling into every
+    # digest as an engine-authenticated "the arena refuses solvers built this way" — a
+    # proposal-steering claim the Researcher reads as fact. The containment above is real (residual
+    # only, below every authenticated flag); what is missing is the label: stamp the reason's
+    # source on the row (the `extra_metrics_provenance` distinction, one registry over) so a reader
+    # can tell a measured fact from a stated one.
     _declared = getattr(res, "declared_reason", None) or ""
     if _declared == "rules_violation" and _declared in DECLARABLE_REASONS:
         return "rules_violation"

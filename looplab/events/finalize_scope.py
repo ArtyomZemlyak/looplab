@@ -137,6 +137,21 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
 GUARDED_ABORT_REASONS = ("error", "budget_exhausted")
 
 
+# OPEN[guarded-abort-class-has-six-private-spellings] six OLDER decision sites still compare the
+# literal `"error"` over `stop_reason`, so for them a ceiling-ended run reads as a clean finish and
+# their recovery/abort answers go inert for the ORDINARY terminal of every budgeted campaign.
+# proof:`present:str(state.stop_reason or "").lower() == "error"@looplab/engine/orchestrator.py`
+# REVIEW 2026-08-30 (protocol-split-brain): the paragraph above converted the six checks in
+# `engine/finalize.py` and this file; the sites it did not reach: `orchestrator.py::_enter_run`'s
+# abort-scope republish ("a retryable failed wrap-up" never retried for `budget_exhausted`), the
+# `entry_finished` gate beside the re-run-wrap-up-once path, `cli/run_cmds.py::classify_prior_run`
+# (`pending_finalize` excludes the ceiling class), `serve/control_validation.py::_decide_run_abort`
+# (an operator's abort on a ceiling-ended run answers `noop` where an `error` finish got `append`)
+# and two spellings in `serve/run_commands.py`. Most are re-caught by the scoped `finalize_begun`
+# marker, so these are defense-in-depth layers going quietly inert — each of which exists for a
+# measured defect. Route them through `is_guarded_abort` (importable from all four files), and
+# widen `test_budget_exhausted_is_not_an_error.py`'s literal-ban scan from two files to the tree
+# (both the `reason` and `stop_reason` spellings), which is what would have caught this.
 def is_guarded_abort(reason) -> bool:
     """True when a `run_finished` reason was written by the guarded-abort path."""
     return str(reason or "").lower() in GUARDED_ABORT_REASONS

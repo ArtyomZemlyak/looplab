@@ -1043,6 +1043,19 @@ def _harden(target: Path) -> None:
     (`ctypes`, a C extension, a `cp`) that raise no audit event at all and that the whole module
     docstring lists as beyond an audit hook's reach.
 
+    OPEN[fence-kernel-rung-rests-on-ambient-caps] the sentence above is a fact about ONE deployment,
+    not a property this code establishes: only the Docker tier drops capabilities, the subprocess
+    tier inherits the engine's, and on a privileged runner the write bit refuses nothing.
+    proof:absent:geteuid@looplab/runtime/read_fence.py
+    REVIEW 2026-08-30 (trust-boundary): driven on a root container (CapEff carries the DAC-override
+    bit): the hook rung holds (chmod/unlink/rename refused) and the plain `open(fence, "w")` goes
+    THROUGH — the one vector this rung exists for, since that write raises no mutation audit event.
+    `sandbox.py` passes `--cap-drop ALL` on the Docker tier only. Production (unprivileged jovyan)
+    is fine; the gap is the UNSTATED precondition — the module promises a kernel refusal it cannot
+    give wherever the eval runs privileged, with nothing logged. Cheap close: detect the effective
+    uid/cap state here and log one line naming the reduced guarantee (the landlock launcher's own
+    pattern), so a privileged deployment reads as what it is.
+
     WHAT IT DOES NOT DO, and why `_SELF` exists beside it: the owner of a file may always chmod it
     back, and `CapEff` says nothing about that — ownership, not a capability, is what `chmod`
     checks. So the bit alone converts a one-call escape into `os.chmod` + write. `os.chmod`,

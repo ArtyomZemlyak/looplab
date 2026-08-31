@@ -74,6 +74,14 @@ def _meter(upstream_url: str, tmp_path: Path):
     srv.timeout = 30.0
     srv.max_retries = 0
     price = tmp_path / "pricing.json"
+    # OPEN[meter-adapter-test-prices-at-zero] this fixture's default entry uses key names the real
+    # pricing table does not have, so every price on the adapter path under test is $0 and a
+    # pricing regression there is invisible.
+    # proof:`present:{"in": 0.0, "out": 0.0}@tests/test_meter_stream_adapter.py`
+    # REVIEW 2026-08-30 (test-validity): `proxy.Pricing.rate` reads `input_per_token` /
+    # `output_per_token` (see `benchmarks/meter/pricing.json`); `.get(..., 0.0)` silently zeroes
+    # unknown keys, so even a fixture that later sets real values here would be ignored. Rename the
+    # keys and give them non-zero values so at least one adapter assertion can see a priced row.
     price.write_text(json.dumps({"source": "test", "fetched_at": "now", "cost_basis": "imputed",
                                  "default": {"in": 0.0, "out": 0.0}, "models": {}}), encoding="utf-8")
     srv.pricing = proxy.Pricing(str(price))

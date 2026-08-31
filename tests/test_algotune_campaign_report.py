@@ -825,6 +825,14 @@ def test_arm_b_status_shows_a_wall_cut_and_keeps_it_out_of_the_median(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "3.1223" in proc.stdout, proc.stdout                     # shown
     assert "[wall_cut]" in proc.stdout, proc.stdout                 # and labelled
+    # OPEN[report-test-pins-a-retired-phrase] this assertion is RED: the banner now says "STOPPED
+    # BY THE HARNESS (a wall cut or a stall cut)" and this pin still speaks the old spelling.
+    # proof:`present:assert "CUT AT THE WALL CLOCK"@tests/test_algotune_campaign_report.py`
+    # REVIEW 2026-08-30 (baseline-red): the behaviour under test HOLDS on the current output (the
+    # cut row is shown, labelled, and kept out of the median — the surrounding assertions prove
+    # it); only the phrase moved at the 2026-08-29 merge. CLAUDE.md's contract rule: a changed
+    # output contract moves its tests in the SAME change. Re-point the pin at the new phrase (or at
+    # the stable "shown and not averaged" clause).
     assert "CUT AT THE WALL CLOCK" in proc.stdout, proc.stdout
     assert "median 2.0000" in proc.stdout, proc.stdout              # not averaged in
     assert "over 1 at the budget" in proc.stdout, proc.stdout

@@ -607,6 +607,17 @@ def main() -> int:
         # A wall-cut row on EITHER side is PRINTED (above) and not PAIRED: the mean is the one number
         # a reader takes away, and it may only contain task-arms that ran to the ceiling they are
         # compared at. Which arm hit the clock does not change that.
+        # OPEN[skip-with-stale-final-still-pairs] an operator-skipped task-arm with values left by
+        # an EARLIER campaign is still averaged into the paired means while the footer says it
+        # never ran.
+        # proof:`present:and vb is not None and not cut:@benchmarks/algotune/compare_arms.py`
+        # REVIEW 2026-08-30 (correctness): `skipped` renames the row's state and drives the
+        # "SKIPPED ... never ran" footer, and does not exclude the pair — only `cut` does.
+        # `agent_summary.json` is a documented MERGE TARGET (rows from earlier campaigns survive a
+        # rerun) and `B-<task>.final.json` files persist across campaigns (only `.refused` is
+        # cleared), so a task skipped THIS campaign with a matching stale row is the
+        # mixed-population mean this module's docstring promises against — restored through the
+        # skip branch at the 2026-08-29 merge. Exclude `skipped` from pairing like `cut`.
         if va is not None and vb is not None and not cut:
             paired.append((va, vb))
 
@@ -641,6 +652,15 @@ def main() -> int:
               f"{mean_a:>13.4f}  {mean_b:>11.4f}")
         print(f"{'wins':<{width}}  {wins_a:>13}  {wins_b:>11}   "
               f"({len(paired) - wins_a - wins_b} tied)")
+    # OPEN[compare-arms-prints-its-tail-twice] the closing block — the still-OWED list, the
+    # speedup footer and the whole `--reference` table — is printed TWICE on every invocation.
+    # proof:`present:for task, _, _, _, _, _ in rows:@benchmarks/algotune/compare_arms.py`
+    # REVIEW 2026-08-30 (merge-integrity): this copy (through the reference table below) and the
+    # second one after the money block are both sides of a 2026-08-29 merge conflict kept at once;
+    # this copy lacks the `skipped` footer the second has, so the two have already diverged, which
+    # is how the next merge loses one. The operator's one end-of-campaign deliverable duplicates
+    # its own caveats and rankings. Fold into ONE tail after the money block (this copy's
+    # incomplete/unmeasured/harness-cut lines are the unique half to keep from here).
     incomplete = sum(1 for _, va, vb, _, _, _ in rows if va is None or vb is None)
     if incomplete:
         print(f"\n{incomplete} of {len(rows)} tasks are missing an arm and are EXCLUDED from the "

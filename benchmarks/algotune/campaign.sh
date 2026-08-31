@@ -130,6 +130,18 @@ run_bounded() {   # run_bounded <events-file-or-empty> <cmd…>
       # "endpoint down, lane hung for ever" case the stall guard was added for. Falling back to the
       # START of the run measures the silence that has actually elapsed. Arm A only escaped this by
       # pre-creating its log with `: >`.
+      # OPEN[stall-guard-reads-one-files-mtime] the stall clock watches events.jsonl alone, and an
+      # arm-B lane inside a long, healthy `score` stage appends nothing there for the whole
+      # evaluation — so a legitimately slow candidate can be killed as a stall and the task-arm
+      # filed as a terminal, never-retried harness cut.
+      # proof:`present:last=$(stat -c %Y "$watch"@benchmarks/algotune/campaign.sh`
+      # REVIEW 2026-08-30 (correctness): stage events land at stage END; per-instance timeout is
+      # max(10x baseline, floor) so a valid slow solver runs ~50 min over 100 instances against
+      # STALL_TIMEOUT=2400, and the README records an 87-minute evaluation. The champion pass was
+      # exempted for exactly this reason ("a scoring pass is legitimately silent for long
+      # stretches"); the in-run evaluations, which go through the same evaluator, were not. Watch
+      # something the eval actually grows (the node workdir's stage log, or the newest mtime under
+      # the run dir), or raise the bound for the eval window.
       local now last
       now=$(date +%s)
       last=$(stat -c %Y "$watch" 2>/dev/null || echo "$t0")

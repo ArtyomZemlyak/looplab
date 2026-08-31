@@ -710,6 +710,18 @@ These are no-ops unless `backend=llm`.
 | `developer_probe_confine` | `LOOPLAB_DEVELOPER_PROBE_CONFINE` | `true` | Confine what a probe may READ, in the kernel, to an allow-list: its own workdir, the interpreter and its site-packages, and the tiers Python needs to start. Landlock ABI 2 (`READ_CONFINE_HANDLED`), stacked under the write ruleset the probe already carries, so it survives `execve` and binds `ctypes` and child processes alike — the audit hook alone covers one interpreter's `open`. A grant that CONTAINS an editable root is neither kept nor dropped but **punched** (`read_fence.confine_grants`): `/opt` with a repo at `/opt/myrepo` becomes `/opt/conda`, `/opt/jdbc`, … and not the repo. Keeping it would switch the fence off — measured: a probe read a checkpoint out of an editable tree living under `~/.cache` — and dropping it whole would deny `sys.prefix`, i.e. stop python from starting. What cannot be punched is REFUSED loudly rather than run unfenced. It exists because on a BENCHMARK the file a probe must not read is the grader: measured, one `stages` phase made 119 probe calls of which 116 read the arena's reference solver. Off (`false`) restores the write-only fence for work where reading the surrounding tree is the point. |
 | `phase_handoff_summary` | `LOOPLAB_PHASE_HANDOFF_SUMMARY` | `true` | Per-node phase coordination: each exploration phase (Researcher·propose → Developer·stages → plan) ends with ONE call that distills its transcript into a brief injected into later phases — even across the role boundary — so they trust it instead of re-reading. Terminal phases (implement / repair) consume but don't summarize (no wasted call); the propose brief is produced only when the in-house repo Developer follows. There is no read cache — every read executes fresh (oversized results carry an explicit truncation marker) |
 
+<!--
+OPEN[budget-row-says-resume-reads-live-value] the `llm_budget_usd` row above ends with the exact
+claim the code retracted: a resume does NOT read the live env value.
+proof:`present:so a resume reads the live value@docs/guide/configuration.md`
+REVIEW 2026-08-30 (docs-drift): `core/config.py`'s field comment on the same branch says the
+opposite — "NOT IN run_started IS NOT THE SAME AS RE-READ ON RESUME … a run stopped at $0.15 stops
+again at $0.15" — and the `BudgetExceeded` message itself tells the operator "an env var will NOT
+do it, every resume adopts the snapshot". This row is the instruction an operator standing at the
+budget wall will follow, and following it re-hits the wall. Rewrite the row's last sentence to
+match the code (raise the ceiling via the snapshot/config, not the env).
+-->
+
 ### Per-role / per-stage models
 
 Run the Researcher and Developer on different models or endpoints (e.g. a coder model for the

@@ -665,6 +665,14 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             on_step(ev)
         except Exception:               # noqa: BLE001 - transparency must not change behaviour
             pass
+    # OPEN[turn-zero-duplicate-budget-reminder] seeding the ledger empty makes the first loop
+    # iteration inject a "Reminder — BUDGET: $0.0000 ..." user message that duplicates the budget
+    # line both wired callers already lead their opening turn with.
+    # proof:`present:_last_budget_note = [""]@looplab/agents/tool_loop.py`
+    # REVIEW 2026-08-30 (prompt-noise): reproduced with a stub client — nothing has been spent,
+    # `budget_note()` renders the same text as the opener, `"" != note`, and the reminder lands
+    # before the first model call, against the budget block's own "a turn that spent nothing adds
+    # nothing". Seed with one render before the loop (or let the caller pass the opening figure).
     _last_budget_note = [""]        # last note actually injected; see the budget block below
 
     def _text(content):                 # interstitial assistant prose (a message written BEFORE a tool

@@ -53,6 +53,24 @@ _NO_KEY_CLASS = """class _LooplabNoCacheKey(Exception):
 
 """
 
+# OPEN[baseline-cache-name-has-no-single-authority] this patch and the polices that read its files
+# spell the cache-file regime segment DIFFERENTLY, so the committed reproducer and the live guard
+# cannot coexist.
+# proof:absent:r3@benchmarks/algotune/patch_baseline_cache.py+present:r3@benchmarks/algotune/check_leaks.sh
+# REVIEW 2026-08-30 (measurement-validity): the template below names files `<task>__<subset>.json`
+# (serial) or `__w{W}x{C}` (parallel), while the fork's own baseline_manager — and everything here
+# that polices the naming — expects `__lane{N}<suffix>` / `__w{W}x{C}<suffix>` with a scheme
+# revision suffix this file never emits: `looplab_eval.py::_regime_mismatch` refuses any regime not
+# ending in it, `check_leaks.sh` section 3 counts every file WITHOUT it as a stale leak, and both
+# plot scripts glob for it. Consequences on a checkout built by `setup_algotune.sh` (which applies
+# THIS patch and not the parallel one): serial cache files are invisible to `_regime_mismatch`'s
+# two-underscore `__*` glob (guard inert — its 2026-08-25 glob fix reached `_baseline_fingerprint`
+# only); with ALGOTUNE_EVAL_WORKERS>1 the first eval writes `__wNxM.json` and every later eval is
+# refused `baseline_regime_mismatch` with a remedy no setting can satisfy. The naming is defined,
+# differently, in at least five places; the drift test hardcodes the fork's format on both sides
+# (`cores = 1`, workers below the lane width) so neither dimension can go red. Give the key ONE
+# authority: emitted by this patch, imported by the bridge's replica, asserted by the tests against
+# the patched file's actual output.
 MARKER = "# --- LOOPLAB PERSISTENT BASELINE CACHE (benchmarks/algotune/patch_baseline_cache.py) ---"
 
 ANCHOR = """        with self._lock:

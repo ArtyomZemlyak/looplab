@@ -186,6 +186,15 @@ class EnvInspectTools:
             # The grader fence runs BEFORE dispatch, on every tool that names a package or module.
             # Applying it inside each private method instead would need four correct copies, and the
             # one that got missed would be the whole hole (see the class docstring).
+            # OPEN[grader-fence-slot-set-is-shared-with-its-guard] the fence and the test that
+            # polices it hardcode the SAME four slot names, so a future tool naming a package in a
+            # fifth slot passes dispatch AND the guard silently.
+            # proof:absent:_named_slots@looplab/tools/env_inspect.py
+            # REVIEW 2026-08-30 (guard-coverage): `test_grader_package_fence.py`'s coverage test
+            # intersects each spec's properties with this same set and `continue`s on empty — the
+            # exact miss its docstring claims to catch. Derive the slot set once (a helper here the
+            # test re-derives), and make the guard fail on a spec property that plausibly names a
+            # package but is not in the checked set.
             for slot in ("name", "target", "module", "package"):
                 if slot in args:
                     refusal = self._fenced(args.get(slot))
