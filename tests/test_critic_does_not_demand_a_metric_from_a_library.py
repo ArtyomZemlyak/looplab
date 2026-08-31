@@ -71,6 +71,41 @@ def test_a_classic_repo_task_still_reads_as_self_scoring():
     assert scorer_is_in_tree(_Task(_Eval(command=["python", "-m", "pkg.score"]))) is True
 
 
+def test_a_staged_pipeline_whose_score_stage_is_in_the_tree_still_reads_as_self_scoring():
+    """The positive direction through `stages`, which nothing exercised.
+
+    `test_an_algotune_stage_command_resolves_to_no_in_tree_scorer` above LOOKS like it covers the
+    loop over `stages` and does not: its fixture leaves `command` empty, so `argvs` starts with
+    `[[]]`, `entrypoint_candidates([])` is `[]`, and `any(...)` is False whether the loop ran or
+    not. Driven 2026-08-31: deleting the whole `for st in ... stages` loop from
+    `critic.py::scorer_is_in_tree` left this file at 8 passed.
+
+    The loop is not decoration. `EvalSpec` documents that when `stages` is set they ARE the
+    canonical pipeline and the single `command` does not run -- so for every staged operator task
+    the stages are the ONLY place a scorer can be named, and without the loop `scorer_is_in_tree`
+    answers False for all of them. That is `critic:no_metric_output` suppressed for an entire task
+    shape, which is the failure this module's own docstring forbids: a detector reporting clean
+    because nothing looked.
+    """
+    assert scorer_is_in_tree(_Task(_Eval(stages=[
+        {"name": "score", "command": ["python", "score.py"]}]))) is True
+    assert scorer_is_in_tree(_Task(_Eval(stages=[
+        {"name": "score", "command": ["python", "-m", "pkg.score"]}]))) is True
+
+
+def test_one_in_tree_stage_is_enough_even_beside_an_out_of_tree_harness():
+    """`any`, not `all`: a pipeline that runs a harness AND a scorer of its own is self-scoring.
+
+    This is the discrimination the whole change rests on -- it is WHO IS RUN that separates the two
+    worlds -- and a loop that took the last stage, or the first, would answer differently here."""
+    assert scorer_is_in_tree(_Task(_Eval(stages=[
+        {"name": "bench", "command": ALGOTUNE_STAGE},
+        {"name": "score", "command": ["python", "score.py"]}]))) is True
+    assert scorer_is_in_tree(_Task(_Eval(stages=[
+        {"name": "score", "command": ["python", "score.py"]},
+        {"name": "bench", "command": ALGOTUNE_STAGE}]))) is True
+
+
 def test_a_task_that_cannot_be_asked_keeps_todays_answer():
     assert scorer_is_in_tree(None) is True
     assert scorer_is_in_tree(_Task(None)) is True
