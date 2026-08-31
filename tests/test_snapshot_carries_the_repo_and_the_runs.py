@@ -38,6 +38,14 @@ def _git(cwd, *args):
 
 def _bench_root(tmp_path):
     """A BENCH_ROOT shaped like the real one on the morning of the loss."""
+    # snapshot.sh refuses a destination whose store root carries no `.persistent-store-id`: an
+    # unmounted geesefs looks exactly like a writable empty directory, and a backup written there
+    # dies with the pod while exiting 0 (measured 2026-08-31 -- the 2026-08-29 loss in miniature).
+    # Every test here uses tmp_path as the store root, and these fixtures ARE a legitimate store,
+    # so they say so once, here. The refusal is covered by
+    # test_snapshot_refuses_a_store_that_is_not_there.py.
+    (tmp_path / ".persistent-store-id").write_text("test fixture store\n")
+
     src = tmp_path / "bench"
 
     # Both checkouts. The third-party one was always bundled; ours never was.

@@ -7,7 +7,9 @@
 # and cannot host a venv or an honest timing. Local disk does not survive a container restart, so
 # the split is: anything scripted is rebuilt, anything MEASURED is copied here.
 #
-# What is deliberately NOT copied: `.venv` (6.3 GB, rebuilt by two uv commands) and `.hf_datasets`
+# What is deliberately NOT copied: `.env` (live API key; this store is S3 -- see ENVIRONMENT.txt for
+# a redacted record of the settings a measurement ran under), `.venv` (6.3 GB, rebuilt by two uv
+# commands) and `.hf_datasets`
 # (872 MB and growing, re-downloaded on first use). Copying either onto an S3-backed FUSE mount
 # costs more than recreating it. Everything else here is either a bundle of a git checkout (both
 # of them, since 2026-08-30 -- see 1b for what it cost to learn that ours counted too) or a
@@ -47,8 +49,60 @@ SRC="${BENCH_ROOT:-/var/tmp/looplab-bench}"
 # box profile (`box-jhub-l40s.sh`) declares the machine's persistent path beside its other
 # machine-specific facts, and a bare invocation on this box still does what it always did.
 DEST="${1:-${SNAPSHOT_DEST:-/home/jovyan/data/looplab-bench/snapshots}}"
+
+# --- The destination must be the PERSISTENT store, not merely a writable path. ---------------
+# Measured 2026-08-31: /home/jovyan/data is a separate fuseblk (geesefs/S3) mounted over a tmpfs
+# parent. Unmount it and the path still exists as an ordinary tmpfs directory -- `mkdir -p`
+# succeeds, the snapshot writes its 111 MB, and it exits 0. That is a backup which evaporates on
+# the next pod reschedule while reporting success, i.e. exactly the 2026-08-29 failure that cost
+# 37 commits. Writability is not the property we need; being on the volume is.
+#
+# The test is a sentinel file that lives ON the volume. If the mount is gone, so is the sentinel --
+# no device numbers to hardcode, and it keeps working if DEST ever moves to another store.
+STORE_ROOT="$(dirname "$DEST")"
+SENTINEL="$STORE_ROOT/.persistent-store-id"
+if [ -n "${SNAPSHOT_SKIP_STORE_CHECK:-}" ]; then
+  :
+elif [ -f "$SENTINEL" ]; then
+  :
+elif [ -d "$STORE_ROOT" ] && [ -z "$(ls -A "$STORE_ROOT" 2>/dev/null)" ]; then
+  # First run against a fresh, genuinely empty store: adopt it and leave the sentinel behind.
+  printf 'looplab-bench persistent store\ncreated by snapshot.sh\n' > "$SENTINEL" 2>/dev/null \
+    || { echo "FATAL: $STORE_ROOT is not writable; refusing to snapshot" >&2; exit 1; }
+  echo "  adopted $STORE_ROOT as the persistent store (wrote .persistent-store-id)"
+else
+  echo "FATAL: $SENTINEL is missing but $STORE_ROOT is not empty." >&2
+  echo "       The persistent volume is probably NOT mounted. Writing here would produce a" >&2
+  echo "       backup that vanishes on the next reschedule. Refusing." >&2
+  echo "       If this store is legitimately new, create the sentinel by hand, or set" >&2
+  echo "       SNAPSHOT_SKIP_STORE_CHECK=1 to override." >&2
+  exit 1
+fi
+
+# --- One snapshot at a time. -----------------------------------------------------------------
+# Measured 2026-08-31: two snapshots started in the same second get the same $STAMP, so both
+# write into ONE directory. Observed rc=0 and rc=1 with a single 30-file tree interleaved from
+# both runs -- and the survivor reports success. The stamp is not an identity, so take a lock.
+mkdir -p "$DEST" 2>/dev/null || true
+exec 9>"$DEST/.snapshot.lock"
+if ! flock -w 60 9; then
+  echo "another snapshot is running (waited 60s); skipping" >&2
+  exit 0
+fi
+
+# The stamp has one-second resolution, so it is not an identity -- two snapshots a second apart
+# (or two under the lock, back to back) want the same name. Make it unique rather than fatal: the
+# rule being enforced is "no two snapshots share a directory", not "no two snapshots per second".
+# Safe under the flock above; the -N suffix still sorts after the bare stamp, so the prune order
+# is unchanged.
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$DEST/$STAMP"
+N=2
+while [ -e "$OUT" ]; do
+  OUT="$DEST/$STAMP-$N"
+  N=$((N + 1))
+  [ "$N" -gt 99 ] && { echo "FATAL: cannot find a free name under $DEST/$STAMP" >&2; exit 1; }
+done
 mkdir -p "$OUT" || { echo "cannot create $OUT"; exit 1; }
 
 echo "snapshot $SRC -> $OUT"
@@ -318,6 +372,44 @@ fi
   echo "nproc $(nproc) | cpu.max $(cat /sys/fs/cgroup/cpu.max 2>/dev/null) | free $(free -g | awk '/Mem:/{print $7}')G"
 } > "$OUT/PROVENANCE.txt"
 cat "$OUT/PROVENANCE.txt"
+
+# 3b. The CONFIGURATION the numbers were measured under -- redacted.
+# Until 2026-08-31 the snapshot recorded which commit produced a measurement but not which SETTINGS
+# did, and `.env` was neither copied nor named. That gap has already cost us once: `.env` line 77
+# carries LOOPLAB_LLM_STREAM=false, the bench profile sets it via ${VAR:-1} so an already-set value
+# wins silently, and without streaming nginx's 300 s window measures whole generations -- 28 % of
+# discrete_log's calls died at exactly 300 s. From the snapshot alone there was no way to tell
+# whether a given number was measured streaming or not.
+#
+# The file itself is NOT copied: it holds a live API key and this store is S3. Only names, and
+# values for the settings that change what gets measured. Everything else is length + sha, enough
+# to prove two runs shared a value without disclosing it.
+{
+  echo "# Redacted environment as seen by snapshot.sh. Values shown only for non-secret settings"
+  echo "# that change what is measured; everything else is length and a truncated sha256."
+  echo
+  for f in "$SRC/looplab/.env" /home/jovyan/data/looplab/.env; do
+    [ -f "$f" ] || continue
+    echo "## $f  ($(wc -l < "$f") lines, mtime $(date -r "$f" +%Y-%m-%dT%H:%M:%S))"
+    awk -F= '
+      /^[[:space:]]*#/ || !/=/ { next }
+      {
+        k=$1; sub(/^[[:space:]]*/,"",k); sub(/[[:space:]]*$/,"",k)
+        v=substr($0, index($0,"=")+1)
+        safe = (k ~ /STREAM|MODEL|TIMEOUT|WORKERS|BUDGET|MAX_|TEMPERATURE|TOP_P|RETRIES|CONCURREN/)
+        secret = (k ~ /KEY|TOKEN|SECRET|PASSWORD/)
+        if (safe && !secret) printf "%-40s = %s\n", k, v
+        else                 printf "%-40s = <%d chars>\n", k, length(v)
+      }' "$f"
+    echo
+  done
+  echo "## live process environment (bench-relevant names only)"
+  env | grep -E '^(LOOPLAB|ALGOTUNE|BENCH|METER)_' | sort | awk -F= '
+    { k=$1; v=substr($0, index($0,"=")+1)
+      if (k ~ /KEY|TOKEN|SECRET|PASSWORD/) printf "%-40s = <%d chars>\n", k, length(v)
+      else                                 printf "%-40s = %s\n", k, v }'
+} > "$OUT/ENVIRONMENT.txt" 2>/dev/null
+echo "  ENVIRONMENT.txt       $(grep -c . "$OUT/ENVIRONMENT.txt" 2>/dev/null || echo 0) lines (redacted; .env itself deliberately NOT copied)"
 
 # The EXIT CODE is the claim. Anything this snapshot could not copy -- absent, or attempted and
 # failed -- makes it a partial one, and the caller (`campaign.sh`, `snapshot_timer.sh`) is the only
