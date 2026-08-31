@@ -135,3 +135,45 @@ def test_a_missing_run_tree_makes_the_snapshot_report_itself_incomplete(tmp_path
     result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
     assert result.returncode == 1, result.stdout
     assert "NO per-run evidence archived" in result.stdout
+
+
+def _rmtree(path):
+    for child in sorted(path.rglob("*"), reverse=True):
+        child.rmdir() if child.is_dir() else child.unlink()
+    path.rmdir()
+
+
+def test_an_idle_box_is_not_reported_as_a_shortfall(tmp_path):
+    """A claim that fires unconditionally is not a claim, and this one had a running cost.
+
+    Measured 2026-08-31 on a freshly rebuilt box: with no campaign and no runs yet, every cycle
+    exited 1, `snapshot_timer.sh` refused to record the fingerprint -- correctly, by its own rule
+    that an incomplete archive is not done -- and so re-wrote a 110 MB snapshot every thirty
+    minutes and never pruned, because the prune sits downstream of the completeness check. Nine
+    snapshots and 3.0 GB before anyone looked. An alarm that is always on is one an operator learns
+    to scroll past, which is the same failure as no alarm at all.
+    """
+    src = _bench_root(tmp_path)
+    _rmtree(src / "campaign-final")
+    _rmtree(src / "model-probes")
+
+    result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
+    assert result.returncode == 0, result.stdout
+    assert "idle box" in result.stdout
+    assert "INCOMPLETE" not in result.stdout
+
+    # It is only the ALARM that is withheld. The checkouts still travel, which is the whole point.
+    out = next((tmp_path / "snapshots").glob("2*"))
+    assert (out / "looplab.bundle").exists()
+
+
+def test_a_campaign_without_its_runs_is_still_a_shortfall(tmp_path):
+    """The 2026-08-29 shape exactly: campaign-final/ survived the restart and the sixty-nine runs
+    behind its numbers did not. Silence here is what made the archive look sufficient."""
+    src = _bench_root(tmp_path)
+    _rmtree(src / "model-probes")
+
+    result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
+    assert result.returncode == 1, result.stdout
+    assert "NO per-run evidence archived" in result.stdout
+    assert "idle box" not in result.stdout
