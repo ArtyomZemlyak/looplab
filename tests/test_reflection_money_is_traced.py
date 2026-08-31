@@ -27,21 +27,43 @@ from looplab.engine.orchestrator import Engine  # noqa: E402
 
 
 class _RecordingTracer:
+    """Records BOTH ends of a span, because only the pair can tell an open one from a closed one.
+
+    The first version appended the name on entry and did nothing on exit, so `opened[-1]` read
+    exactly the same whether the span was still open or had been closed a line earlier. That made
+    the test below unable to fail for the reason its own docstring gives. Driven 2026-08-31 with
+    `_write_reflection_note` rewritten to
+
+        with self._op_span("reflection"):
+            pass
+        return self.lessons.write_reflection_note(final)
+
+    -- the provider called outside the span, which is the untraced-money shape itself, and the
+    precise counterexample the test names -- all three tests here stayed green.
+    """
+
     def __init__(self):
-        self.opened = []
+        self.opened = []                 # every span ever ENTERED, in order
+        self.live = []                   # the ones open RIGHT NOW, innermost last
 
     @contextlib.contextmanager
     def span(self, name, **attrs):
         self.opened.append(name)
-        yield
+        self.live.append(name)
+        try:
+            yield
+        finally:
+            self.live.pop()
 
 
 def _engine_with(tracer, calls):
     eng = Engine.__new__(Engine)
     eng.tracer = tracer
+    # What is open AT THE MOMENT the provider is called, which is the only thing that decides
+    # whether the call is billed inside a trace. `tracer.opened` cannot answer it: a span that has
+    # already exited is still in there.
     eng.lessons = types.SimpleNamespace(
-        write_reflection_note=lambda final: calls.append(tracer.opened[-1] if tracer.opened
-                                                         else None))
+        write_reflection_note=lambda final: calls.append(list(tracer.live)))
     return eng
 
 
@@ -54,11 +76,18 @@ def test_reflection_runs_inside_a_span():
 
 
 def test_the_span_is_open_while_the_provider_is_called():
-    """A span opened and closed BEFORE the call would still leave the money untraced."""
+    """A span opened and closed BEFORE the call would still leave the money untraced.
+
+    `attributes.phase` on a `generation` span is the surface every per-phase spend table is built
+    from, and a span that has already exited stamps nothing onto the call that follows it. So the
+    assertion is over the LIVE stack at call time, not over the names ever seen.
+    """
     tracer = _RecordingTracer()
     calls = []
     _engine_with(tracer, calls)._write_reflection_note(object())
-    assert calls == ["reflection"], f"reflection called outside its own span: {calls}"
+    assert calls == [["reflection"]], (
+        f"the reflection provider call was made with these spans open: {calls} -- a span opened "
+        "and closed before the call leaves the money exactly as untraced as no span at all")
 
 
 def test_no_tracer_still_reflects():
