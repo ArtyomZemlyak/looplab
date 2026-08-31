@@ -109,3 +109,96 @@ def test_a_box_with_nothing_says_so_instead_of_printing_an_empty_table(tmp_path)
         "an empty box printed a bare header -- indistinguishable from the instrument failing\n"
         + r.stdout
     )
+
+
+# ---------------------------------------------------------------- a zero is at least six facts
+#
+# `node_evaluated` carries `metric` and `eval_seconds` and nothing else, so a 0.0 in the event
+# stream is indistinguishable from any other 0.0. The diagnosis is in `nodes/<id>/score.log` -- the
+# harness's `no_speedup` block, with the evaluator's verdict and the actual `is_solution` errors --
+# and this report was not reading it. On 2026-08-31 answering "ruler or solver?" for one zero took
+# four hand-rolled commands, and that question is on the sweep list every single time.
+
+
+def _mk_score(root, rel, *, speedup, eval_seconds, reason=None, verdict=None, errors=None):
+    import json
+    d = root / rel
+    d.mkdir(parents=True, exist_ok=True)
+    body = {"speedup": speedup, "eval_seconds": eval_seconds, "subset": "train"}
+    if reason:
+        ns = {"reason": reason}
+        if verdict:
+            ns["evaluator_verdict"] = verdict
+        if errors:
+            ns["is_solution_errors"] = [{"message": m, "count": 1} for m in errors]
+        body["no_speedup"] = ns
+    (d / "score.log").write_text(json.dumps(body))
+
+
+def test_a_zero_is_reported_with_the_reason_not_just_the_number(tmp_path):
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/z/runs/t/run")
+    _mk_score(root, "model-probes/z/runs/t/run/nodes/node_0",
+              speedup=0.0, eval_seconds=60.7, reason="no_valid_speedups",
+              verdict="No valid speedup calculations from agent evaluation",
+              errors=["Solution verification failed: max rel err=1.37e+05"])
+    r = _run(root)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "no_valid_speedups" in r.stdout, (
+        "a zero was listed without the harness's own reason, which is the whole point:\n" + r.stdout
+    )
+    assert "max rel err" in r.stdout, "the is_solution error that explains the zero is not shown"
+
+
+def test_a_ruler_failure_is_called_one_and_a_solver_failure_is_not(tmp_path):
+    """The sweep list's rule: ~0.1 s means the evaluation never reached the solver."""
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/a/runs/t/run")
+    _mk_run(root, "model-probes/b/runs/t/run")
+    _mk_score(root, "model-probes/a/runs/t/run/nodes/node_0",
+              speedup=0.0, eval_seconds=0.1, reason="solver_unloadable")
+    _mk_score(root, "model-probes/b/runs/t/run/nodes/node_0",
+              speedup=0.0, eval_seconds=60.7, reason="no_valid_speedups")
+    r = _run(root)
+    lines = [l for l in r.stdout.splitlines() if "node_0" in l]
+    quick = [l for l in lines if "0.1s" in l]
+    slow = [l for l in lines if "60.7s" in l]
+    assert quick and "RULER" in quick[0], (
+        f"a 0.1 s evaluation was not called a ruler failure: {quick}"
+    )
+    assert slow and "RULER" not in slow[0], (
+        f"a 60.7 s evaluation was blamed on the ruler: {slow}"
+    )
+
+
+def test_a_real_score_is_not_dragged_into_the_zero_list(tmp_path):
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/ok/runs/t/run")
+    _mk_score(root, "model-probes/ok/runs/t/run/nodes/node_0", speedup=123.13, eval_seconds=54.0)
+    r = _run(root)
+    assert "no zero-scoring nodes" in r.stdout, (
+        "a healthy 123.13 was reported as a zero:\n" + r.stdout
+    )
+
+
+def test_a_null_speedup_counts_as_a_zero_and_says_so(tmp_path):
+    """`speedup: null` is the regime-mismatch/refusal shape and must not be silently skipped."""
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/n/runs/t/run")
+    _mk_score(root, "model-probes/n/runs/t/run/nodes/node_0",
+              speedup=None, eval_seconds=0.0, reason="baseline_regime_mismatch")
+    r = _run(root)
+    assert "baseline_regime_mismatch" in r.stdout, (
+        "a refused evaluation vanished from the report entirely:\n" + r.stdout
+    )
+
+
+def test_a_score_log_with_no_reason_still_appears(tmp_path):
+    """An unexplained zero is the most important one to see, not the easiest one to drop."""
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/u/runs/t/run")
+    _mk_score(root, "model-probes/u/runs/t/run/nodes/node_0", speedup=0.0, eval_seconds=44.0)
+    r = _run(root)
+    assert "node_0" in r.stdout and "unstated" in r.stdout, (
+        "a zero carrying no no_speedup block was dropped instead of flagged:\n" + r.stdout
+    )

@@ -65,3 +65,62 @@ done
 [ "$FOUND" -eq 0 ] && { echo "(no events.jsonl under any root -- this box holds no measurements)"; exit 0; }
 echo
 echo "$FOUND run(s). AGE_S is staleness of events.jsonl; STALL_TIMEOUT is ${STALL_TIMEOUT:-2400}s."
+
+# ZEROS, WITH THE REASON. A node scoring 0.0 is at least six different facts and the durable EVENT
+# carries only the number: `node_evaluated` has `metric` and `eval_seconds` and nothing else. The
+# diagnosis exists -- `nodes/<id>/score.log` holds the harness's `no_speedup` block, with the
+# evaluator's verdict and the actual `is_solution` errors -- and it is in a file this report was not
+# reading. On 2026-08-31 that cost four hand-rolled commands to answer the one question the sweep
+# list asks every time: is a zero the RULER failing or the SOLVER failing?
+#
+# The discriminator is stated in the sweep brief and is now applied here: an evaluation that
+# returned in about a tenth of a second never ran the solver at all.
+echo
+ZFOUND=0
+for R in "${ROOTS[@]}"; do
+  while IFS= read -r SL; do
+    [ -s "$SL" ] || continue
+    OUT=$(python3 - "$SL" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+try:
+    j = json.loads(open(p, errors="replace").read().strip())
+except Exception:
+    sys.exit(0)
+sp = j.get("speedup")
+if isinstance(sp, (int, float)) and sp > 0:
+    sys.exit(0)                       # a real score is not a zero
+secs = float(j.get("eval_seconds") or 0.0)
+ns = j.get("no_speedup") or {}
+reason = str(ns.get("reason") or ("speedup is null" if sp is None else "unstated"))
+verdict = str(ns.get("evaluator_verdict") or "")[:70]
+errs = ns.get("is_solution_errors") or []
+detail = ""
+if errs:
+    first = errs[0] if isinstance(errs[0], dict) else {"message": str(errs[0])}
+    detail = "  " + str(first.get("message") or "")[:90]
+# THE SWEEP LIST'S OWN RULE: ~0.1 s means the evaluation never reached the solver.
+flag = "RULER (never reached the solver)" if secs < 1.0 else "solver"
+node = os.path.basename(os.path.dirname(p))
+run = p.split("/runs/", 1)[0].rsplit("/", 1)[-1] if "/runs/" in p else "?"
+print(f"  {run:<10} {node:<8} {secs:>7.1f}s  {flag:<32} {reason}")
+if verdict:
+    print(f"             {verdict}")
+if detail:
+    print(f"           {detail}")
+PY
+)
+    if [ -n "$OUT" ]; then
+      [ "$ZFOUND" -eq 0 ] && echo "ZERO-SCORING NODES (reason read from nodes/<id>/score.log):"
+      ZFOUND=$((ZFOUND + 1))
+      echo "$OUT"
+    fi
+  done < <(find -L "$R" -name score.log 2>/dev/null | sort)
+done
+[ "$ZFOUND" -eq 0 ] && echo "no zero-scoring nodes on this box"
+
+# EXPLICIT, because the line above is the last statement and `[ ... ] && echo` returns 1 when the
+# test is false -- so FINDING a zero made this report exit non-zero, i.e. "the instrument failed"
+# whenever it had something to say. Caught by its own test within the hour; the same shape as
+# `cmd | tail` returning tail's status.
+exit 0
