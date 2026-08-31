@@ -218,10 +218,12 @@ done < <(bench_campaign_trees "$SRC")
 # the finished run it is supposed to be a copy of. So `-u` skips it for ever, and every later cycle
 # reports success over it.
 #
-# Driven end to end 2026-08-31 on a 200,000-line events.jsonl with `ulimit -f` standing in for the
-# ENOSPC: the cycle that failed left 33,390 lines in the archive; the next cycle, which exited 0 and
-# printed the file as an archived run, left 33,390 lines. The manifest counted it as a whole run,
-# because the manifest counts FILES BY NAME.
+# Driven end to end twice on 2026-08-31, on a 200,000-line events.jsonl with `ulimit -f` standing in
+# for the ENOSPC. The review's run: 33,390 lines in the archive after the failed cycle, 33,390 after
+# the SUCCESSFUL one that followed. Re-driven here from a scratch BENCH_ROOT: 30,118 and 30,118, the
+# second cycle exiting 0 and printing `runs -> archive camp-runs 2.0M (1 run records)`. Two runs, two
+# limits, one outcome. The manifest counted it as a whole run both times, because the manifest counts
+# FILES BY NAME.
 #
 # So the repair asks the only question `-u` cannot: is the archived file SHORTER than its source?
 # These are append-only logs, so shorter means unfinished, and `cp -ru` has already handled every
