@@ -13,6 +13,9 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# The SAME answer `snapshot.sh` archives from. Two copies of "which trees hold measurements" is
+# exactly how `camp-runs/` came to be archived by neither and watched by neither -- bench_trees.sh.
+. "$HERE/bench_trees.sh"
 ROOT="${BENCH_ROOT:-/var/tmp/looplab-bench}"
 PIDFILE="$ROOT/snapshot_timer.pid"
 LOGFILE="$ROOT/logs/snapshot_timer.log"
@@ -29,18 +32,24 @@ fingerprint() {
   # change -- i.e. the campaign's own progress was never one of the signals, and a quiet meter would
   # have stopped snapshotting the one thing worth snapshotting.
   # AND EVERY RUN TREE, added 2026-08-31 with the same argument one paragraph up, for a source that
-  # did not exist when that paragraph was written. `snapshot.sh` now archives `runs-*` and
-  # `model-probes/` -- each run's events.jsonl and spans.jsonl, the evidence docs/56 is written from
-  # and the thing the 2026-08-29 restart actually destroyed -- but archiving it is no use if this
-  # function cannot see it grow. Measured while two probes were live: the fingerprint moved only
-  # because `meter/` was moving, i.e. the probes were covered by accident. A run evaluating locally
-  # for twenty minutes makes no LLM calls, and a probe metered on another port makes none here at
-  # all; in both cases the timer would report "nothing new" while the one irreplaceable directory on
-  # the box filled up.
-  find "$ROOT"/campaign* "$ROOT"/runs-* "$ROOT/model-probes" "$ROOT/probes" \
-       "$ROOT/AlgoTune/reports" "$ROOT/meter" \
-       "$ROOT/looplab/benchmarks/algotune/.baseline_times" \
-       -type f -newermt '-1 day' -printf '%T@ %s\n' 2>/dev/null | sort | tail -20 | md5sum
+  # did not exist when that paragraph was written. `snapshot.sh` archives each run's events.jsonl
+  # and spans.jsonl -- the evidence docs/56 is written from and the thing the 2026-08-29 restart
+  # actually destroyed -- but archiving it is no use if this function cannot see it grow. Measured
+  # while two probes were live: the fingerprint moved only because `meter/` was moving, i.e. the
+  # probes were covered by accident. A run evaluating locally for twenty minutes makes no LLM calls,
+  # and a probe metered on another port makes none here at all; in both cases the timer would report
+  # "nothing new" while the one irreplaceable directory on the box filled up.
+  # AND THE LIST IS NOT WRITTEN HERE. It was, as `campaign* runs-* model-probes probes`, and
+  # `$CAMPAIGN_RUNS` -- `camp-runs/`, where a campaign puts every task-arm's run -- matched none of
+  # those four patterns: `grep -c camp-runs` over this file returned 0. A campaign could fill that
+  # tree for hours and this function would report "nothing new" throughout. `bench_trees.sh` answers
+  # it once, for the archiver and for this, so the two cannot drift again.
+  local -a P=()
+  while IFS= read -r d; do P+=("$d"); done < <(bench_campaign_trees "$ROOT"; bench_run_trees "$ROOT")
+  P+=("$ROOT/AlgoTune/reports" "$ROOT/meter" \
+      "$ROOT/looplab/benchmarks/algotune/.baseline_times")
+  find "${P[@]}" -type f -newermt '-1 day' -printf '%T@ %s\n' 2>/dev/null \
+    | sort | tail -20 | md5sum
 }
 
 case "${1:-status}" in

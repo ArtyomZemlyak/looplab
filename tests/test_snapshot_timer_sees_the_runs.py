@@ -20,12 +20,20 @@ import textwrap
 from pathlib import Path
 
 TIMER = Path(__file__).resolve().parents[1] / "benchmarks" / "snapshot_timer.sh"
+TREES = Path(__file__).resolve().parents[1] / "benchmarks" / "bench_trees.sh"
 
 
 def _fingerprint(root: Path) -> str:
-    """Run just the `fingerprint` function against a synthetic BENCH_ROOT."""
+    """Run just the `fingerprint` function against a synthetic BENCH_ROOT.
+
+    `bench_trees.sh` is sourced the same way the timer sources it: the fingerprint asks it which
+    trees hold measurements, and that answer is shared with `snapshot.sh` precisely so the two
+    cannot drift (they did, and `camp-runs/` fell through the gap in both).
+    """
     script = textwrap.dedent(f"""
+        set -u
         ROOT={root}
+        source {TREES}
         source <(sed -n '/^fingerprint()/,/^}}/p' {TIMER})
         fingerprint
     """)
@@ -98,6 +106,10 @@ def _loop_box(tmp_path):
     binroot = tmp_path / "bin"
     binroot.mkdir()
     (binroot / "snapshot_timer.sh").write_text(TIMER.read_text(encoding="utf-8"), encoding="utf-8")
+    # The sibling the timer sources for "which trees hold measurements" travels with it. Without
+    # it the fingerprint silently degrades to meter/ + reports/ + .baseline_times/ -- which is
+    # precisely the accidental coverage this file exists to remove.
+    (binroot / "bench_trees.sh").write_text(TREES.read_text(encoding="utf-8"), encoding="utf-8")
     stub = binroot / "snapshot.sh"
     stub.write_text(_STUB, encoding="utf-8")
     stub.chmod(0o755)

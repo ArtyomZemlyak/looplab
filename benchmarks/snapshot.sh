@@ -24,6 +24,11 @@
 # ours) instead of a directory of files nobody can date.
 set -u
 
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# WHICH TREES HOLD MEASUREMENTS is answered in one place, shared with `snapshot_timer.sh`. Two
+# copies of that question is how `camp-runs/` came to be archived by neither -- see bench_trees.sh.
+. "$HERE/bench_trees.sh"
+
 SRC="${BENCH_ROOT:-/var/tmp/looplab-bench}"
 DEST="${1:-/home/jovyan/data/looplab-bench/snapshots}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -117,13 +122,22 @@ copy "$SRC/logs"                                 "logs                 "
 # regenerated". The failure needs no bug: a campaign is pointed at a new CAMPAIGN_OUT and the
 # hardcoded name goes quietly out of date.
 FOUND_CAMPAIGN=0
-for D in "$SRC"/campaign*; do
-  [ -d "$D" ] || continue
+while IFS= read -r D; do
+  [ -n "$D" ] || continue
   FOUND_CAMPAIGN=$((FOUND_CAMPAIGN + 1))
   copy "$D" "$(printf '%-21s' "$(basename "$D")")"
-done
+done < <(bench_campaign_trees "$SRC")
 
-# EVERY tree of finished RUNS -- where a probe's `events.jsonl` and `spans.jsonl` actually live.
+# EVERY tree of RUNS -- where a run's `events.jsonl` and `spans.jsonl` actually live. DISCOVERED,
+# by what a directory holds and by the operator's own `$CAMPAIGN_RUNS`, never by a pattern over
+# names; see bench_trees.sh for the two times a pattern went stale and what each cost.
+#
+# The second of those is why this paragraph was rewritten. `campaign.sh:52` writes every task-arm's
+# run to `$CAMPAIGN_RUNS/<task>/run/events.jsonl` -- `camp-runs/` on this box -- and the glob here
+# was `runs-* model-probes probes`, which that name matches nowhere: `grep -c camp-runs` over this
+# file returned 0. The campaign path had the SAME hole the probe path had on 2026-08-29, still open,
+# and worse: `campaign.sh:1078` does `rm -rf "$TASK_ROOT"` at the head of every attempt, so a retry
+# destroys the previous attempt's evidence without any container restart being involved.
 #
 # This is the rawest measurement on the box: what the loop proposed, what each call cost, which node
 # became champion and why. docs/56 is written FROM these, and until 2026-08-30 not one byte of them
@@ -138,8 +152,8 @@ done
 # script is reading it.
 RUNS_ARCHIVE="${SNAPSHOT_RUNS_ARCHIVE:-$DEST/../runs-archive}"
 FOUND_RUNS=0
-for D in "$SRC"/runs-* "$SRC"/model-probes "$SRC"/probes; do
-  [ -d "$D" ] || continue
+while IFS= read -r D; do
+  [ -n "$D" ] || continue
   FOUND_RUNS=$((FOUND_RUNS + 1))
   B="$(basename "$D")"
   if mkdir -p "$RUNS_ARCHIVE" && cp -ru "$D" "$RUNS_ARCHIVE/"; then
@@ -150,7 +164,7 @@ for D in "$SRC"/runs-* "$SRC"/model-probes "$SRC"/probes; do
     echo "  COPY FAILED          $B -- the per-run events and spans are NOT archived"
     SHORT=$((SHORT + 1))
   fi
-done
+done < <(bench_run_trees "$SRC")
 # WHICH MODE THE BOX IS IN IS NOT A SHORTFALL. Campaigns and probe runs are two INDEPENDENT ways of
 # measuring here, and either can be absent because it is simply not in use.
 #
@@ -175,7 +189,7 @@ if [ "$FOUND_CAMPAIGN" = 0 ] && [ "$FOUND_RUNS" = 0 ]; then
 elif [ "$FOUND_CAMPAIGN" = 0 ]; then
   echo "  (no $SRC/campaign* -- this box is running probes, not a campaign. Not a shortfall.)"
 elif [ "$FOUND_RUNS" = 0 ]; then
-  echo "  (no $SRC/runs-*, model-probes or probes tree -- campaign only, no standalone probes.)"
+  echo "  (no run tree under $SRC holds an events.jsonl -- campaign markers only, no run logs yet.)"
 fi
 
 # 3. Which commit of OUR repo produced them, and what the box looked like.
