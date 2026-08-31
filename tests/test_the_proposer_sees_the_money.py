@@ -98,26 +98,27 @@ def test_a_broken_accountant_is_silence_not_a_crash():
 # then reach nothing at all, which is the state this whole change was built to end).
 import ast  # noqa: E402
 
+from _source_scan import PKG, iter_trees  # noqa: E402
 from looplab.agents.roles import RESEARCHER_PROMPT_CUES  # noqa: E402
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _cue_splice_sites():
-    """(module, enclosing function) for every `collect_hint_cues(...)` call under `looplab/`."""
+    """(module, enclosing function) for every `collect_hint_cues(...)` call under `looplab/`.
+
+    Through `_source_scan.iter_trees`, not a private walk: `test_source_scan_helper::
+    test_no_guard_test_re_derives_the_walk` refuses a guard test that rglobs the package itself,
+    because the copies had already diverged on decoding and a plain-`utf-8` read dies on the one
+    BOM'd source in the tree rather than reporting a finding.
+    """
     out = set()
-    for path in sorted((ROOT / "looplab").rglob("*.py")):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:                     # a file we cannot read is not a splice site
-            continue
+    for path, tree in iter_trees():
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for inner in ast.walk(node):
                 if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
                         and inner.func.id == "collect_hint_cues"):
-                    out.add((str(path.relative_to(ROOT)), node.name))
+                    out.add((str(path.relative_to(PKG.parent)), node.name))
     return out
 
 
