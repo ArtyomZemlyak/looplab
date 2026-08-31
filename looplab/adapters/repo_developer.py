@@ -478,6 +478,7 @@ def plan_step_attribution(steps, observed, shipped) -> dict:
     rows: list = []
     noop: list = []
     superseding: list = []
+    cut: list[int] = []
     for index, step in enumerate(steps, 1):
         obs = observed[index - 1] if index - 1 < len(observed) else {}
         wrote = list(obs.get("wrote") or [])
@@ -505,8 +506,20 @@ def plan_step_attribution(steps, observed, shipped) -> dict:
             noop.append(index)
         if obs.get("error"):
             row["error"] = str(obs["error"])[:300]
+        # WHICH BOUND ENDED THIS STEP'S SESSION, and until 2026-08-31 nothing durable said.
+        # `_note_session_budget` stores the kind on the developer, and the ONLY place it was ever
+        # snapshotted into a row is the node-REPAIR path in `engine/evaluate.py`. A plan step is not
+        # a repair, so a step cut by turns, wall clock or money left no trace at all: measured over
+        # all 22 run trees on this box, the field appears zero times.
+        #
+        # That became urgent the day a MONEY ceiling was added to these sessions (`_step_cost_ceiling`):
+        # a bound whose firing cannot be observed is a bound nobody can trust or tune.
+        if obs.get("cutoff"):
+            row["cutoff"] = str(obs["cutoff"])[:32]
+            cut.append(index)
         rows.append(row)
     return {"total": len(steps), "steps": rows, "noop_steps": noop,
+            "cut_steps": cut,
             "superseding_steps": superseding,
             "authors": {p: author[p] for p in sorted(author)},
             "unattributed": sorted(p for p in (shipped or {}) if p not in author)}
@@ -2165,11 +2178,15 @@ class LLMRepoDeveloper:
                     feedback = ""
                     for i, step in enumerate(steps, 1):
                         before, before_deleted = dict(write.files), set(write.deleted)
+                        # Cleared per step, not per plan: `last_budget_exhausted` is sticky on the
+                        # developer, so without this a single cut step would mark every later one.
+                        self.last_budget_exhausted = ""
                         with tracing.operation("plan_step", index=i, total=len(steps),
                                                title=str(step.get("title") or "")[:120]):
                             note = self._run_step(idea, step, i, len(steps), write,
                                                   system, stage_note=stage_note,
                                                   baseline_note=base_note, feedback=feedback)
+                        step_cutoff = str(getattr(self, "last_budget_exhausted", "") or "").strip()
                         # Compare CONTENT, not just presence: `edit_file` patches in place, and a
                         # step that rewrote a file byte-for-byte changed nothing and must not be
                         # credited with authoring it.
@@ -2177,6 +2194,7 @@ class LLMRepoDeveloper:
                             "wrote": sorted(p for p, body in write.files.items()
                                             if before.get(p) != body),
                             "deleted": sorted(set(write.deleted) - before_deleted),
+                            "cutoff": step_cutoff,
                             "error": note})
                         if note:
                             step_errors.append(note)
