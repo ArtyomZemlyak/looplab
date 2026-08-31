@@ -177,3 +177,66 @@ def test_a_campaign_without_its_runs_is_still_a_shortfall(tmp_path):
     assert result.returncode == 1, result.stdout
     assert "NO per-run evidence archived" in result.stdout
     assert "idle box" not in result.stdout
+
+
+def _fake_snapshot(dest, stamp, *, measured):
+    """A previous snapshot, of the two kinds this box actually produces."""
+    d = dest / stamp
+    d.mkdir(parents=True)
+    (d / "AlgoTune.bundle").write_text("x" * 64)
+    (d / "looplab.bundle").write_text("x" * 64)
+    if measured:
+        (d / "campaign-final").mkdir()
+        (d / "campaign-final" / "B-task.final.json").write_text('{"speedup": 2.45}')
+        (d / "runs-manifest.txt").write_text("model-probes 17 /archive/model-probes\n")
+    else:
+        (d / "runs-manifest.txt").write_text("model-probes 0 /archive/model-probes\n")
+    return d
+
+
+def test_the_prune_spends_empty_snapshots_before_it_touches_a_measured_one(tmp_path):
+    """Age is not worth, and this prune used to act as if it were.
+
+    `ls | head -n -KEEP` deletes the oldest directories, full stop. After the 2026-08-29 restart the
+    oldest on this box were the eight snapshots holding `campaign-final/` and the meter ledgers --
+    the finished paired campaign, twenty task-arms across both arms -- while every snapshot taken
+    since holds two git bundles and nothing measured, because nothing has been measured since. Nine
+    of those arrive within five hours at a thirty-minute cadence, and the prune would have spent the
+    irreplaceable to make room for the reproducible, silently, as ordinary successful operation.
+    """
+    src = _bench_root(tmp_path)
+    dest, archive = tmp_path / "snapshots", tmp_path / "runs-archive"
+    keep_a = _fake_snapshot(dest, "20260829-154101", measured=True)
+    keep_b = _fake_snapshot(dest, "20260829-191124", measured=True)
+    doomed_a = _fake_snapshot(dest, "20260831-010635", measured=False)
+    doomed_b = _fake_snapshot(dest, "20260831-010917", measured=False)
+
+    result = subprocess.run(
+        ["bash", str(SNAPSHOT), str(dest)],
+        env={"PATH": "/usr/bin:/bin", "HOME": str(src.parent), "BENCH_ROOT": str(src),
+             "SNAPSHOT_RUNS_ARCHIVE": str(archive), "SNAPSHOT_KEEP": "3"},
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert keep_a.exists() and keep_b.exists(), (
+        "the campaign was deleted to make room for a snapshot of an idle box\n" + result.stdout)
+    assert not doomed_a.exists() and not doomed_b.exists(), result.stdout
+    assert "carries no campaign and no runs" in result.stdout
+
+
+def test_when_only_measured_snapshots_are_left_the_prune_says_what_it_is_deleting(tmp_path):
+    """Deleting a measured snapshot is a real loss, not housekeeping, so it may not look like
+    housekeeping in the log."""
+    src = _bench_root(tmp_path)
+    dest, archive = tmp_path / "snapshots", tmp_path / "runs-archive"
+    oldest = _fake_snapshot(dest, "20260829-154101", measured=True)
+    _fake_snapshot(dest, "20260829-191124", measured=True)
+
+    result = subprocess.run(
+        ["bash", str(SNAPSHOT), str(dest)],
+        env={"PATH": "/usr/bin:/bin", "HOME": str(src.parent), "BENCH_ROOT": str(src),
+             "SNAPSHOT_RUNS_ARCHIVE": str(archive), "SNAPSHOT_KEEP": "2"},
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not oldest.exists(), result.stdout
+    assert "WITH MEASUREMENTS" in result.stdout, result.stdout

@@ -205,9 +205,50 @@ if [ "$SHORT" -gt 0 ]; then
   exit 1
 fi
 
-# Keep the last N snapshots; the measurements accumulate and the mount is shared.
+# Keep the last N snapshots; the measurements accumulate and the mount is shared. But AGE IS NOT
+# WORTH, and this prune used to act as if it were.
+#
+# Found 2026-08-31, one restart too late to be theoretical. `ls | head -n -KEEP` deletes the OLDEST
+# directories, full stop. On this box the oldest were the eight taken on 2026-08-29 -- the only ones
+# holding `campaign-final/` (twenty task-arms, both arms, the finished paired campaign) and the
+# meter ledgers. Every snapshot taken after the container restart holds two git bundles and nothing
+# measured, because nothing has been measured here since. Nine of those would have arrived within
+# five hours, and the prune would have traded the irreplaceable for the reproducible, silently, as
+# ordinary successful operation. The bundles regenerate from git in a minute; the campaign does not
+# regenerate at all.
+#
+# So worth is asked about, not assumed. A snapshot is MEASURED if it carries a campaign directory or
+# a non-empty runs manifest; unmeasured ones are spent first, oldest among them going first, and the
+# newest snapshot is never a candidate whatever it holds -- it is the current state of the box.
+# Only if that is not enough does the prune reach a measured snapshot, and then it says so out loud,
+# because deleting one is a real loss rather than housekeeping.
 KEEP="${SNAPSHOT_KEEP:-8}"
-ls -1d "$DEST"/2* 2>/dev/null | head -n -"$KEEP" | while read -r old; do
-  echo "  pruning $old"; rm -rf "$old"
-done
+_measured() {  # $1 = snapshot dir -- does it hold anything that cannot be recomputed?
+  compgen -G "$1/campaign*" > /dev/null && return 0
+  # runs-manifest.txt lines are "<tree> <count> <archive path>"; a count of 0 means the tree was
+  # there and empty, which is not evidence of anything.
+  [ -s "$1/runs-manifest.txt" ] \
+    && awk '{ if ($2 + 0 > 0) f = 1 } END { exit !f }' "$1/runs-manifest.txt" && return 0
+  return 1
+}
+ALL=$(ls -1d "$DEST"/2* 2>/dev/null | sort)
+TOTAL=$(printf '%s\n' "$ALL" | grep -c . )
+OVER=$((TOTAL - KEEP))
+if [ "$OVER" -gt 0 ]; then
+  NEWEST=$(printf '%s\n' "$ALL" | tail -1)
+  UNMEASURED=""; MEASURED=""
+  for D in $ALL; do
+    [ "$D" = "$NEWEST" ] && continue
+    if _measured "$D"; then MEASURED="$MEASURED $D"; else UNMEASURED="$UNMEASURED $D"; fi
+  done
+  for D in $UNMEASURED $MEASURED; do
+    [ "$OVER" -gt 0 ] || break
+    if _measured "$D"; then
+      echo "  pruning $D  -- WITH MEASUREMENTS: every unmeasured snapshot was already spent"
+    else
+      echo "  pruning $D  (carries no campaign and no runs; the checkouts in it regenerate from git)"
+    fi
+    rm -rf "$D"; OVER=$((OVER - 1))
+  done
+fi
 exit 0
