@@ -3050,3 +3050,61 @@ the spread is 4.0× over three points and the one explanation that works elsewhe
 Where this document compares two runs on one task, it is comparing draws from a distribution whose
 width is a factor of two to four. The pooled twenty-task arm comparison is untouched by this: it
 repeats tasks, not runs.
+
+## 74. Two probes launched 15 seconds apart scored 129.75 and 0.0
+
+`remPde3` and `remPde4` ran `pde_heat1d` on adjacent lanes, from the same 16,947-character goal card,
+with the same $1.00, started fifteen seconds apart. Both spent their dollar to the cent ($1.0077 and
+$1.0092). Both submitted a champion carrying a numba kernel.
+
+| | remPde3 | remPde4 |
+|---|---|---|
+| TEST | **129.75** | **0.0** |
+| evaluated nodes (train) | 123.1297, 50.0147 | 0.0 |
+| `eval_train` calls | **26** | **11** |
+| spend before the first node | 55 % | 85 % |
+| spend after the last node | 0 % | 15 % |
+| `plan_step` share | 48.8 % | 69.6 % |
+
+129.75 is the highest `pde_heat1d` score in this corpus and 0.0 is the only invalid one. §73 put a
+floor of about 1.8× under the noise on a single configuration from the `remEE`/`remEE2` pair; this
+pair says the floor is wherever a run happens to land, because one of the two never produced a valid
+solver at all. `remPde4`'s single node failed `is_solution` with max rel err 1.37e+05 — a build that
+worked and computed the wrong numbers, §50's failure mode, on its only draw.
+
+**The champion rule bit again.** `remPde3`'s second node scored 50.01 against its first at 123.13,
+and the run submitted the first. §72 recorded `remDL2` as the first empirical demonstration that the
+best EVALUATED node is kept rather than the last; this is the second, and a much more expensive one
+— submitting the last node here would have cost 61 % of the score.
+
+### 74.1 A direction, explicitly not a finding
+
+The sharpest difference between the two is how often they measured: 26 `eval_train` calls against
+11. Over all nine scored probes on this box:
+
+| probe | task | `eval_train` | nodes | TEST |
+|---|---|---|---|---|
+| remEE | edge_expansion | 29 | 2 | 179.6451 |
+| accEE | edge_expansion | 27 | 2 | 224.4432 |
+| remPde3 | pde_heat1d | 26 | 2 | 129.75 |
+| remDL2 | discrete_log | 25 | 2 | 14.0483 |
+| remPde | pde_heat1d | 22 | 1 | 54.1227 |
+| remPde2 | pde_heat1d | 21 | 1 | 30.3282 |
+| remEE2 | edge_expansion | 19 | 2 | 102.175 |
+| accPde | pde_heat1d | 18 | 1 | 120.7621 |
+| remPde4 | pde_heat1d | 11 | 1 | 0.0 |
+
+Pooled, `eval_train` against TEST gives r = +0.62 — and that number should be thrown away, because
+the three tasks have different score scales (edge_expansion 102-224, pde_heat1d 0-130, discrete_log
+14) and pooling them measures "which task is this" more than anything else. Within task it is
++0.64 on `pde_heat1d` (n = 5) and +0.85 on `edge_expansion` (n = 3), and **neither ordering is
+monotone**: `accPde` measured 18 times and scored 120.76, above two runs that measured 21 and 22.
+At n = 3 and n = 5, against a per-task spread of 4×, those coefficients carry no weight.
+
+What is not ambiguous is narrower and worth one sentence: the run that measured fewest is the only
+one of the nine that submitted an invalid solver. That is one run, and it is a reason to look, not a
+result.
+
+The cheap way to test it is not another correlation over the same nine — it is to make the number
+move on purpose and see whether the score follows. That changes the card, so it is a change between
+arms, and it needs several runs of each before it says anything at all (§73.3).
