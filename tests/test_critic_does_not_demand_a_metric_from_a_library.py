@@ -74,3 +74,46 @@ def test_a_classic_repo_task_still_reads_as_self_scoring():
 def test_a_task_that_cannot_be_asked_keeps_todays_answer():
     assert scorer_is_in_tree(None) is True
     assert scorer_is_in_tree(_Task(None)) is True
+
+
+# ---------------------------------------------------------------- the seam, not just the rule
+#
+# EVERYTHING ABOVE PASSES WITH THE ENGINE UNWIRED. `critique`/`scorer_is_in_tree` are pure and were
+# covered from the day they were written; the ONE line that decides whether a real run ever asks
+# them -- `evaluate.py::_trust_gate_signals` passing `scorer_in_tree=scorer_is_in_tree(self.task)`
+# -- was not. Driven 2026-08-31: delete that keyword argument, restoring the 34-of-34 false-positive
+# rate this whole change exists to remove, and the entire `-k "critic or trust or evaluate or
+# algotune"` selection (518 tests) stays exactly as green as it was. The rule was pinned and the
+# seam was not, which is the same shape as the 2026-08-05 mutation audit recorded in
+# `evaluate.py::_trust_gate_signals`' own docstring: a detector that reports clean because nothing
+# looked.
+import types  # noqa: E402
+
+import pytest  # noqa: E402
+
+from factories import make_engine  # noqa: E402
+
+
+def _critic_only_engine(run_dir, task_eval):
+    eng = make_engine(run_dir, n_seeds=1, max_nodes=1, critic_check=True,
+                      code_leakage_detect=False, reward_hack_detect=False, workdir_audit=False)
+    eng.task = types.SimpleNamespace(eval=task_eval, goal="", id="t", direction="max")
+    return eng
+
+
+def _signals(eng):
+    node = types.SimpleNamespace(idea=Idea(operator="draft", params={}))
+    return {row["signal"] for row in eng._trust_gate_signals(node, SOLVER)}
+
+
+def test_the_engine_asks_the_question_and_not_only_the_rule(tmp_path):
+    """dsIF6's six nodes in one assertion: an AlgoTune stage, a library, and no accusation."""
+    eng = _critic_only_engine(tmp_path / "harness", _Eval(stages=[{"command": ALGOTUNE_STAGE}]))
+    assert not any(s.endswith("no_metric_output") for s in _signals(eng)), (
+        "the engine still demands an in-code metric from a candidate nothing runs")
+
+
+def test_the_engine_still_accuses_a_self_scoring_candidate(tmp_path):
+    """And the other direction, or the seam would read as 'suppress always'."""
+    eng = _critic_only_engine(tmp_path / "self", _Eval(command=["python", "score.py"]))
+    assert any(s.endswith("no_metric_output") for s in _signals(eng))
