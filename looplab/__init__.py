@@ -45,6 +45,8 @@ _LAYOUT = {
     "appconfig": "core",
     "envsafe": "core",   # the secret screen + the DECLARED ENVIRONMENT rule all three levels share
     "appstate": "serve",
+    "node_activity": "serve",  # generation-scoped public building/queue/evaluation projection
+    "eval_occupancy": "events",  # durable eval-start/terminal occupancy analytics
     "question_board": "tools",   # the Developer/Researcher read of the open-question board
     "token_spend": "events",     # `looplab tokens`' per-phase split of the llm_usage ledger
     "attention": "serve",

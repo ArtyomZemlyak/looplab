@@ -139,3 +139,75 @@ def test_the_receipt_carries_the_reason_only_when_there_IS_one():
     assert guarded, (
         "the `skipped_reason` write must sit under a guard that tests `skipped_reason` itself — "
         "a row that minted a node must never carry a refusal nobody made")
+
+
+# ------------------------------------------------------- the OTHER emitter: a `skipped_reason=` kwarg
+
+def _kwarg_slugs() -> dict[str, set[str]]:
+    """Every `skipped_reason=<literal>` passed anywhere in the module, keyed by enclosing function.
+
+    THE SCAN ABOVE COULD NOT SEE THIS AND THAT IS WHY IT SHIPPED BARE. `_claim_path_slugs` walks
+    `_claim_requested_card_build`'s own `ast.Return` tuples, which is the right reading of the claim
+    path and a complete blind spot everywhere else: the crash-recovery close in `_serve_card_builds`
+    emits its refusal as a KEYWORD ARGUMENT to `_append_card_build_done`, so it carried a bare
+    `skipped="stale"` for as long as the registry existed and no guard could go red about it.
+
+    Keyed by function so a future site is attributable rather than just counted.
+    """
+    tree = ast.parse(_SRC)
+    out: dict[str, set[str]] = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if kw.arg != "skipped_reason":
+                    continue
+                for const in ast.walk(kw.value):
+                    if isinstance(const, ast.Constant) and isinstance(const.value, str):
+                        out.setdefault(fn.name, set()).add(const.value)
+    return out
+
+
+def test_every_slug_passed_as_a_kwarg_is_REGISTERED():
+    """Same rule as the claim path's, at the seam the claim path's scan cannot reach."""
+    passed = {slug for slugs in _kwarg_slugs().values() for slug in slugs}
+    assert passed, "no `skipped_reason=` call site found at all — the scan has stopped matching"
+    unregistered = passed - set(CARD_BUILD_SKIP_REASONS)
+    assert not unregistered, f"unregistered skip reasons: {sorted(unregistered)}"
+
+
+def test_the_crash_recovery_close_NAMES_its_refusal():
+    """The last bare `stale` in the module, and the one whose rows are read post-mortem.
+
+    A head recovered after a crash whose card is dropped or merged away closes the paid build. Until
+    2026-08-30 it wrote `skipped="stale"` and nothing else, so a discarded build on the one path an
+    operator reaches for after a crash was unattributable.
+
+    MUTATION: drop the `skipped_reason=` argument from that call and this goes red. The old
+    claim-path scan stays green either way — which is exactly the gap this test exists for.
+    """
+    slugs = _kwarg_slugs().get("_serve_card_builds", set())
+    # A CONTAINMENT and not an equality: this function ALREADY forwarded the outer gate's own
+    # refusals through the same keyword (`run_is_stopping`, `eval_budget_exhausted`,
+    # `commit_not_allowed`, `search_epoch_rotated`), which is itself the finding — the kwarg seam
+    # was carrying live slugs the claim-path scan had never been able to see. Pinning the exact set
+    # would make this test fail every time a NEW refusal is legitimately routed here.
+    assert {"card_gone", "card_dropped"} <= slugs, (
+        "the crash-recovery close must name BOTH dead shapes: a merged-away card is ABSENT "
+        f"(`card_gone`) and a dropped one is PRESENT and dead (`card_dropped`), got {sorted(slugs)}")
+
+
+def test_the_two_dead_shapes_are_not_ONE_word():
+    """They have different remedies — a merged card's work is under its canonical, a dropped card's
+    is over — so collapsing them re-creates the coarse `stale` one level down.
+
+    MUTATION: return `card_gone` for both and this goes red.
+    """
+    assert "card_dropped" in CARD_BUILD_SKIP_REASONS and "card_gone" in CARD_BUILD_SKIP_REASONS
+    src = _SRC[_SRC.index("def _serve_card_builds"):]
+    src = src[:src.index("\n    def ", 1)] if "\n    def " in src[1:] else src
+    assert "merged_away" in src, (
+        "the branch that chooses between them must read the merged-away proof, not guess")

@@ -80,7 +80,8 @@ CARD_BUILD_SKIP_REASONS = (
     "commit_not_allowed",        # the outer gate refused the commit
     "selection_limit_reached",   # card_budget_used hit the selection limit
     "not_selected_now",          # selection no longer picks this card — the build is INTACT
-    "card_gone",                 # the card left the board
+    "card_gone",                 # the card is ABSENT from the board (merged away, or never folded)
+    "card_dropped",              # the card is PRESENT and administratively dead (status=="dropped")
     "card_action_changed",       # the card's action is not the one this was built for
     "reservation_refused",       # the node reservation would not form
     "idea_changed",              # the reserved idea differs from the built one
@@ -1252,13 +1253,11 @@ class SpeculationMixin:
                        if result.footprint_finalized else {}),
                     speculative=True,
                     card_build_generation=result.generation,
-                    # This lifecycle is the ONE kind whose node-budget slot can later be refunded, so
-                    # it is the one kind that must be able to PROVE it never ran across a crash.
-                    # Stamping the promise here (rather than run-wide) keeps every non-speculative
-                    # run's `node_created` bytes untouched while making the refund's evidence
-                    # per-node: the admission below appends `node_eval_started` before any sandbox
-                    # work, and `is_unevaluated_speculative_discard` refuses to refund a node that
-                    # carries no promise at all. See `events/types.py::EV_NODE_EVAL_STARTED`.
+                    # Every new lifecycle carries this public activity boundary. This speculative
+                    # subset additionally relies on it for the stricter budget-refund proof: the
+                    # admission below appends `node_eval_started` before any sandbox work, and
+                    # `is_unevaluated_speculative_discard` refuses a refund without both receipts.
+                    # See `events/types.py::EV_NODE_EVAL_STARTED`.
                     eval_start_boundary=True,
                     expected_last_seq=tail,
                 )
@@ -1715,12 +1714,39 @@ class SpeculationMixin:
             max_eval_seconds is not None
             and state.total_eval_seconds >= max_eval_seconds
         )
-        if (
-            key[1] != state.search_epoch
-            or self._terminal_intent(state)
-            or budget_exhausted
-            or not allow_commit
-        ):
+        # A LIVE PRODUCER IS NEVER STRANDED BY `commit_not_allowed` (2026-08-29), and the asymmetry
+        # between the four reasons is the whole point. Three of them are facts about the WORLD and a
+        # build made for the old one is worth nothing: the epoch rotated, the run is stopping, there
+        # is no eval time left to run the node. `commit_not_allowed` is not that. It is
+        # `CardSession.open_for_production`, whose own docstring says it answers "may this turn still
+        # START PRODUCER work" and whose justification is that "a producer started after a terminal
+        # would hold the session open for the whole of its paid provider call" — and that argument is
+        # simply false about a producer ALREADY RUNNING. Committing it starts nothing, makes no
+        # provider call, and holds the session open for no latency at all.
+        #
+        # MEASURED on `e5small-dr-unified-v10` (2026-08-29), the first run whose `skipped_reason`
+        # could name this: node 2's terminal set `boundary_owed` at 10:25:29, this branch closed
+        # card-4's head as `stale`/`commit_not_allowed`, and the producer went on running and CLOSED
+        # ITS SPAN AT 10:27:59 — 38.4 min, 248 provider calls, 12,112,124 tokens, 3.2 % of the whole
+        # run — one second before `card_build_requested` asked for the identical card again at
+        # 10:28:00. All four of that run's committed builds closed their span at or before their
+        # `card_build_done`; card-4 is the only one closed out from under a live producer.
+        #
+        # So the head is LEFT OPEN while `_spec_build_inflight` owns it, which is this file's own
+        # rule twenty lines down ("Never strand a live producer: skip while one is in-flight") applied
+        # to the one close that did not consult it. Returning False services no head, which is exactly
+        # what the caller wants here — `boundary_owed` is asking the session to RETURN, and the next
+        # turn commits the finished build against a fresh authority snapshot.
+        #
+        # It cannot wedge finalization: `_terminal_intent` is tested BEFORE this and wins the reason
+        # ladder, so a stopping run still closes the head as `run_is_stopping` with a producer live.
+        commit_refused_this_turn = not allow_commit
+        world_moved = (key[1] != state.search_epoch
+                       or self._terminal_intent(state)
+                       or budget_exhausted)
+        if commit_refused_this_turn and not world_moved and key in self._spec_build_inflight:
+            return False
+        if world_moved or commit_refused_this_turn:
             self._discard_spec_result(self._spec_builds.pop(key, None))
             return self._append_card_build_done(
                 request, skipped="stale",
@@ -1775,7 +1801,20 @@ class SpeculationMixin:
                  and (card.status == "dropped" or card.merged_into is not None))
                 or merged_away
             ):
-                return self._append_card_build_done(request, skipped="stale")
+                # THE TWO DEAD SHAPES ARE TWO REASONS, because the comment above already treats
+                # them as two facts and a post-mortem reader needs the same split. A DROPPED card is
+                # PRESENT and administratively dead — somebody or something ended it, and the build
+                # was discarded for a decision made about the card. A MERGED-AWAY card is ABSENT: its
+                # work now belongs to a canonical, and the same request against that canonical is
+                # the thing to look for. `card_gone` keeps the meaning it already has one function
+                # up (`card is None`); `card_dropped` is the new registered word for the other.
+                #
+                # This close is the one crash-recovery rows land on, i.e. exactly the rows read
+                # after the fact — which is why it was the last bare `stale` left and why leaving it
+                # bare was worse here than anywhere else.
+                return self._append_card_build_done(
+                    request, skipped="stale",
+                    skipped_reason="card_gone" if merged_away else "card_dropped")
             return False
         if not result.success:
             self._discard_spec_result(self._spec_builds.pop(key, None))

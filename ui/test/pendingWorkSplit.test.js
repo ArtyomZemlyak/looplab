@@ -18,40 +18,48 @@ const withNarration = async (body) => {
 // three pending nodes, one training on a GPU, one announced and between stages with nothing
 // executing, one not begun — while the second card sat idle.
 const V9 = {
-  live: { nodes: { 4: { id: 4, status: 'pending' }, 5: { id: 5, status: 'pending' },
-                   6: { id: 6, status: 'pending' } } },
-  log: [{ type: 'node_eval_started', data: { node_id: 4 } },
-        { type: 'node_eval_started', data: { node_id: 5 } }],
+  live: { nodes: {
+    4: { id: 4, attempt: 2, status: 'pending',
+      activity: { schema: 1, status: 'evaluating', generation: 2, evidence: 'node_eval_started' } },
+    5: { id: 5, attempt: 0, status: 'pending',
+      activity: { schema: 1, status: 'evaluating', generation: 0, evidence: 'node_eval_started' } },
+    6: { id: 6, attempt: 0, status: 'pending',
+      activity: { schema: 1, status: 'queued', generation: 0, evidence: 'node_created_boundary' } },
+  } },
+  // Deliberately empty: the one-shot start rows have scrolled out of the bounded timeline window.
+  log: [],
 }
 
 test('the live shape is not called three-in-parallel', async () => {
   await withNarration(({ pendingWork, pendingWorkLabel }) => {
   const label = pendingWorkLabel(V9.live, V9.log)
   assert.ok(!/3 experiments in parallel/.test(label), label)
-  assert.match(label, /2 experiment\(s\) evaluating, 1 queued/)
+  assert.match(label, /2 evaluating, 1 waiting for a slot/)
   })
 })
 
-test('started and queued are split from the log, not from the node payload', async () => {
+test('started and queued survive after start rows leave the bounded timeline', async () => {
   await withNarration(({ pendingWork, pendingWorkLabel }) => {
-  const { started, queued } = pendingWork(V9.live, V9.log)
+  const { started, queued, unknown } = pendingWork(V9.live, V9.log)
   assert.deepEqual(started.map(n => n.id), [4, 5])
   assert.deepEqual(queued.map(n => n.id), [6])
+  assert.deepEqual(unknown, [])
   })
 })
 
 test('a node whose evaluation was never announced is queued, never running', async () => {
   await withNarration(({ pendingWork, pendingWorkLabel }) => {
-  const live = { nodes: { 9: { id: 9, status: 'pending' } } }
-  assert.match(pendingWorkLabel(live, []), /#9 queued/)
+  const live = { nodes: { 9: { id: 9, attempt: 0, status: 'pending',
+    activity: { schema: 1, status: 'queued', generation: 0 } } } }
+  assert.match(pendingWorkLabel(live, []), /#9 waiting for an evaluation slot/)
   })
 })
 
-test('one announced node still reads as running, byte for byte as before', async () => {
+test('one admitted node is explicitly training or evaluating', async () => {
   await withNarration(({ pendingWork, pendingWorkLabel }) => {
-  const live = { nodes: { 9: { id: 9, status: 'pending' } } }
-  const log = [{ type: 'node_eval_started', data: { node_id: 9 } }]
-  assert.equal(pendingWorkLabel(live, log), 'Running experiment #9… (training)')
+  const live = { nodes: { 9: { id: 9, attempt: 0, status: 'pending',
+    activity: { schema: 1, status: 'evaluating', generation: 0 } } } }
+  assert.equal(pendingWorkLabel(live, []), 'Experiment #9 training / evaluating…')
   })
 })
 
@@ -63,10 +71,29 @@ test('no pending node says nothing, so the caller falls through as it always did
 
 test('all-queued and all-started each get their own sentence', async () => {
   await withNarration(({ pendingWork, pendingWorkLabel }) => {
-  const nodes = { 1: { id: 1, status: 'pending' }, 2: { id: 2, status: 'pending' } }
-  assert.match(pendingWorkLabel({ nodes }, []), /2 experiments queued/)
-  const log = [{ type: 'node_eval_started', data: { node_id: 1 } },
-               { type: 'node_eval_started', data: { node_id: 2 } }]
-  assert.match(pendingWorkLabel({ nodes }, log), /2 experiments evaluating/)
+  const nodes = { 1: { id: 1, attempt: 0, status: 'pending', activity: { status: 'queued', generation: 0 } },
+    2: { id: 2, attempt: 0, status: 'pending', activity: { status: 'queued', generation: 0 } } }
+  assert.match(pendingWorkLabel({ nodes }, []), /2 waiting for a slot/)
+  nodes[1].activity.status = 'evaluating'
+  nodes[2].activity.status = 'evaluating'
+  assert.match(pendingWorkLabel({ nodes }, []), /2 evaluating/)
+  })
+})
+
+test('old-server log fallback is generation scoped after a reset', async () => {
+  await withNarration(({ pendingWork }) => {
+  const live = { nodes: { 9: { id: 9, attempt: 2, status: 'pending' } } }
+  const stale = [{ type: 'node_eval_started', data: { node_id: 9, generation: 1 } }]
+  assert.deepEqual(pendingWork(live, stale).started, [])
+  assert.deepEqual(pendingWork(live, stale).unknown.map(n => n.id), [9])
+  const current = [{ type: 'node_eval_started', data: { node_id: 9, generation: 2 } }]
+  assert.deepEqual(pendingWork(live, current).started.map(n => n.id), [9])
+  })
+})
+
+test('legacy pending without a receipt is called unknown, not guessed queued', async () => {
+  await withNarration(({ pendingWorkLabel }) => {
+  const live = { nodes: { 3: { id: 3, attempt: 0, status: 'pending' } } }
+  assert.match(pendingWorkLabel(live, []), /evaluation start unknown/)
   })
 })

@@ -578,6 +578,13 @@ DEFAULT_TRIAGE_ACTION = UNREADABLE_TRIAGE_ACTION
 # rebuilds the returned dict from exactly those three, so no model output can ever set this key.
 TRIAGE_TRANSPORT_FAILURE_KEY = "transport_failure"
 
+# WHICH BOUND ENDED THE INVESTIGATION, when one did. Stamped by `unified_agent.triage_crash`
+# from the loop's own `on_budget` observer, AFTER `_finalize` has rebuilt the verdict from the
+# schema properties — so, like the key above, a model cannot emit it and its ABSENCE means the
+# sweep ran to a conclusion rather than to a wall. Advisory: nothing gates on it, it exists so
+# a durable diagnosis cannot read as complete when it was truncated.
+TRIAGE_BUDGET_CUTOFF_KEY = "budget_cutoff"
+
 # THE INTAKE BOUND on the triage model's own free text, and it is an INTAKE bound only — every SINK
 # keeps its own, tighter cap for its own reason (`node_repaired.rationale` 300 after redaction,
 # `repair_log["fix"]` 200 for the judge's history, `node_failed.triage_rationale` 300,

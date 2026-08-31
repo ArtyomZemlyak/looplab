@@ -602,7 +602,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     auto_summary: bool = False, summary_client=None, on_step=None, on_text=None,
                     cancel_check=None, on_tool_result=None,
                     nudge_prompt: str = "", stuck_prompt: str = "", budget_note=None,
-                    validate=None, emit_retries: int = 2, emit_after: int = 0, emit_force: int = 0):
+                    validate=None, emit_retries: int = 2, emit_after: int = 0, emit_force: int = 0,
+                    terminal_salvage: bool = False):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -747,16 +748,17 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         rung promised was never actually delivered to the model."""
         if forced is None:
             return False, None, ""
-        # OPEN[terminal-forced-emit-skips-hard-validators] every validator is bypassed when a
-        # forced emit lands on an exit with no retry turn.
-        # proof:`line:validate is not None&&may_retry@looplab/agents/tool_loop.py`
-        # REVIEW 2026-08-27 (P1 correctness): `drive_tool_loop` is generic, but this terminal policy
-        # is repair-specific. The stages caller also uses `validate` to enforce the operator's wall
-        # budget, missing inputs and manifest collisions; a terminal forced emit skips all three and
-        # `_finalize` persists anything that is merely shape-valid. The Researcher likewise turns an
-        # empty rejected emit into an ordinary draft instead of its circuit-breaker fallback. Keep
-        # repair-summary salvage as a caller policy, rather than disabling every hard validator here.
-        if validate is not None and may_retry:
+        # THE SALVAGE IS THE CALLER'S POLICY, NOT THIS LOOP'S, since 2026-08-30. `drive_tool_loop` is
+        # generic and the reasoning above is repair-specific: bouncing a terminal emit there only
+        # drops the summary and falls to `lambda m: ""`, which is strictly worse. But the STAGES
+        # caller passes `validate` to enforce the operator's wall budget, missing `needs` inputs and
+        # manifest collisions, and the Researcher's rejects its own degraded draft — so a blanket
+        # `and may_retry` skipped all of those on any exit with no turn left, and `_finalize`
+        # persisted whatever was merely shape-valid.
+        #
+        # DEFAULT FALSE, so every caller keeps its validators on every exit unless it says otherwise;
+        # only `repo_developer`'s repair session opts in, where the trade was measured and argued.
+        if validate is not None and (may_retry or not terminal_salvage):
             try:
                 refusal = validate(forced)    # non-None err string == rejected
                 if refusal:

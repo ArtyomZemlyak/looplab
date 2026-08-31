@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 189
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 190
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -125,7 +125,28 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # `coverage_snapshot` and ZERO classifier `node_concepts` between them, because none of them ever
 # reached a moment with no pending node. It buys no extra passes per node count and its output is
 # fenced out of the graded-novelty evidence channel, so nothing it enables can reach selection.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "0558f9ead1c268847d3035a581df6ebcb21cd31e1e11371dbff87f4b22e9ce03"
+# (184 since `triage_time_budget_s`: the wall-clock ceiling on ONE crash/timeout triage call. A row
+# because it is the operator's only handle on a loop that BLOCKS the eval thread with the GPU idle
+# behind it, and because 0 (unlimited) is what the box ran until 2026-08-27 — `e5small-dr-unified-v8`
+# node 2 spent 88.3 min and 206 provider calls re-sweeping one 663-line file inside a perfectly
+# healthy TURN budget, which is the shape no turn count can see. It sits next to
+# `developer_session_time_budget_s` and carries the same 1200, because the two bound consecutive
+# phases of one blocked thread.)
+# (`single_command_divergence_watch` — 185 on master, the 190th row here — and it is a CORRECTION
+# rather than a feature. The field shipped in `7813032e` with no form row and no uncurated entry, so
+# `_reconcile_settings_fields` had been RED on master since that merge — a targeted suite that did
+# not include `tests/test_stage_environment.py` is what let it through, which is exactly the failure
+# mode "read the EXIT line" exists for. A row and not an uncurated entry: the honest reasons in that
+# registry are "open key set", "legacy alias", "not operator-typed" and "second-order tuning whose
+# PARENT FEATURE already has a row", and the deterministic divergence watchdog has no row of its own
+# — `train_monitor_*` is the LLM judge beside it, a different rung. So the parent clause is false
+# here and the field gets the row it should have had.)
+# (190 at the 2026-08-31 merge with master: this branch's 189 rows meeting master's one. Neither
+# side's digest is carried — each was pinned against a tree that did not contain the other's rows —
+# so it is RE-DERIVED over the merged keyset, the way the 2026-08-13 five-branch entry above says.
+# Verified by intersection rather than by bumping the number: 184 rows common to both files, +5 this
+# branch authored, +1 master's, 190 with no duplicate key.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "78a1c7a55beb0f3f6f46c0994e85fddbbd8d641f039c8fe8f80a698228f8fc48"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

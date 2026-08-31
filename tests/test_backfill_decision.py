@@ -133,3 +133,37 @@ def test_the_receipt_agrees_with_the_predicate_across_a_grid():
                 a = backfill_admits(cand * H, rem * H, lam=lam)
                 b = backfill_receipt(cand * H, rem * H, lam=lam)["admits"]
                 assert a is b, (cand, rem, lam)
+
+
+# ------------------------------------- why the ONE available stand-in for `candidate_s` is refused
+
+def test_a_declared_WALL_used_as_a_duration_refuses_the_very_candidate_it_should_admit():
+    """The arithmetic behind the `backfill-receipt-unwired` decline (docs/BACKLOG.md §0.23), driven.
+
+    The slug is deliberately written WITHOUT its marker brackets: the index scanner reads a bracketed
+    slug as a DECLARATION, and one item declared in two files is exactly what
+    `test_each_slug_is_declared_exactly_once` refuses. It caught this on the first run.
+
+    The rule needs `candidate_s` — how long the waiting node will TAKE — and nothing in `looplab/`
+    forecasts that. The stage `timeout` is always available and is the obvious substitute, which is
+    exactly why the decline has to say out loud that it is not one: a wall is an upper bound, so
+    substituting it does not merely add noise, it INVERTS the decision on the easy case.
+
+    Same candidate, same gap, two readings of "how long will it take":
+
+      * its real duration, 3,000 s inside a 3,600 s gap -> `cost == 0`, admitted, the free case;
+      * its declared wall, 36,000 s (this box's training stages) -> `cost == 32,400 s`, refused.
+
+    MUTATION: make `_backfill_terms` clamp `cand` to `rem` (a plausible "it cannot take longer than
+    the gap" tidy-up) and the wall stops inverting anything — at which point the decline's central
+    claim is false and this test says so.
+    """
+    gap = 3600.0
+    assert backfill_admits(3000.0, gap) is True, "the real duration fits: the free case"
+    assert backfill_admits(36000.0, gap) is False, (
+        "a WALL priced as a duration refuses a candidate that would have fitted — which is why "
+        "wiring the receipt with the only argument the engine actually holds is worse than not "
+        "wiring it")
+    assert backfill_receipt(36000.0, gap)["why"] == "delay_exceeds_the_gain", (
+        "and it is refused as a TRADE, not as an unknown — the receipt would read as a real "
+        "verdict about a number nobody measured")

@@ -917,6 +917,43 @@ class EvaluateMixin:
         introduces NO third spelling: it calls `SpeculationMixin._speculative_link_matches`, the
         engine's own one, already used by `_run_card_session`'s admission gate.
 
+        A MID-BUILD FRESHNESS RE-CHECK WOULD RECOVER NOTHING, measured 2026-08-29 so nobody builds
+        one on the intuition that checking earlier must help. The build is paid FIRST and freshness
+        is re-checked LAST, which reads like a lever: catch the staleness halfway through and refund
+        half the build. Over every event log preserved on this box there are 104 card builds, of
+        which 20 produced no evaluation — 11 closed with no node (3.37 h) and NINE minted a node the
+        run then passed over (7.75 h). For each of those nine, the first board-moving event inside
+        its own build window (`node_evaluated` / `node_failed` / `card_added` / `hypothesis_merged` /
+        `card_dropped`) is: NONE. Zero, on all nine. The board did not move DURING any discarded
+        build, so an earlier check had nothing to detect and the recoverable upper bound is
+        0.00 h of 7.75 h. Staleness arises at or after the build's end, which is exactly where the
+        check already runs.
+        THE REAL LEVER IS THE REBUILD DECISION, not the check's timing: `e5small-dr-unified-v9`
+        built card-3 twice (42.8 min -> node 3, 69.0 min -> node 6) and card-4 twice (51.2 min ->
+        node 4, 53.2 min -> node 7), and all four nodes were passed over — 3.6 h buying nothing on
+        two cards.
+        BUT A BLANKET BAR ON RE-ELECTING A DISCARDED CARD IS REFUSED, and the number is why. Over
+        the corpus EIGHT cards were built more than once, giving NINE rebuilds, and TWO produced an
+        evaluated node — `e5small-dr-unified-v9` card-2 -> node 2 -> **0.789466, which is that run's
+        CHAMPION**, and `e5small-dr-unified-v4` card-105 -> node 8 -> 0.792092, that run's
+        second-best number. A rule barring re-election after a discard would have destroyed v9's
+        best result outright. `producer_failed` bars a card for a reason that does not apply here:
+        it means the producer DIED, which is evidence about the card; a discard means the BOARD
+        MOVED, which is evidence about a moment.
+        WHAT THE SPLIT ACTUALLY SHOWS, and it is sharper than either rule: the outcome tracks WHAT
+        THE FIRST BUILD DID. Where the first build was SKIPPED with no node minted, 6 rebuilds gave
+        2 evaluated (one a champion), 2 failed nodes and 2 with no terminal in the log. Where the
+        first build MINTED a node that was then passed over, 3 rebuilds gave ZERO evaluated — v9
+        card-3 (three builds) and card-4 (two) between them. So the candidate rule is narrow: bar
+        re-election only after a MINTED-then-discarded node, never after a skipped build. n=3 in
+        that class, which is too few to ship on; this is recorded so the next reader starts from the
+        split rather than from the blanket bar the corpus refutes.
+        A COUNTING TRAP WORTH INHERITING: "minted a node that never started an eval" is NOT the
+        discard population. Nine further nodes match it and were merely QUEUED when their log ended
+        (8.69 h, including all six of `rubertlite-dr-unified-v7`'s), so the naive predicate reports
+        19.81 h of waste against a true 11.12 h. A discard needs proof the lane later freed and the
+        node was passed over anyway.
+
         The producer appends the link only after the consumer claims the build as the selection it
         actually wanted, and `_run_card_session` re-runs `speculative_card_is_fresh` immediately
         before dispatch — so the link is the durable, replay-visible half of a confirmation the
@@ -937,7 +974,7 @@ class EvaluateMixin:
             )
 
     def _record_eval_start_boundary(self, node) -> bool:
-        """Append the durable eval-START boundary for one lifecycle, at most once.
+        """Append the eval-START boundary once per engine-owner admission.
 
         THE ONE SPELLING, called from two places on purpose. The dispatch decision belongs to the
         MAIN task (`_run_card_session`'s admission), and writing it there is what keeps it out of the
@@ -951,10 +988,13 @@ class EvaluateMixin:
         library callers included. In a card session that call is already satisfied by the folded flag
         and appends nothing.
 
-        Unlocked, like `_record_card_build_attempt`. That is safe because it is ONE independent
-        per-node row the fold keys by (node_id, generation) and applies SET-ONLY, AND because both
-        writers are on the main task *after* that node's own `node_created` — not because its position
-        is immaterial. This row is NOT splice-neutral, and saying it "pairs with nothing, so its splice
+        The helper is unlocked, like `_record_card_build_attempt`; its callers own serialization.
+        Card-session admission invokes it from the main task, while the evaluation-funnel backstop
+        invokes it under `_write_lock`. The row is independent per (node_id, generation): its durable
+        budget receipt is set-only, while its live-activity receipt resets on a proven owner change.
+        Both paths run *after* that node's own `node_created` — not because its position is
+        immaterial. This row is
+        NOT splice-neutral, and saying it "pairs with nothing, so its splice
         position cannot change any other event's meaning" (as this docstring did until 2026-08-06) is
         false: `_on_node_eval_started` silently DROPS a row whose node does not exist yet, and
         `Node.eval_started` is one of the durable facts
@@ -977,7 +1017,7 @@ class EvaluateMixin:
         local disk.
         """
         if (getattr(node, "eval_start_boundary", False) is not True
-                or getattr(node, "eval_started", False) is True):
+                or getattr(node, "eval_activity_started", False) is True):
             return False
         self.store.append(EV_NODE_EVAL_STARTED, {
             "node_id": node.id, "generation": node.attempt})
@@ -1896,13 +1936,12 @@ class EvaluateMixin:
             # node without `eval_start_boundary` — this event is what lets a node that CAN prove it
             # keep the refund the calibration numbers depend on.
             #
-            # Scoped to the lifecycles that can ever be refunded (`eval_start_boundary`, stamped on a
-            # speculative attempt-zero `node_created`), so this is not a new per-eval append on the
-            # ordinary hot path: a run without speculation writes byte-identical logs. Normally
-            # already satisfied here — the card session's admission wrote it in the MAIN task, which
-            # is what keeps it out of the speculative election's CAS window (see
-            # `_record_eval_start_boundary`). This call is the funnel guarantee for every OTHER way
-            # into a sandbox: recovery, the legacy dispatcher, a direct library caller.
+            # Every current engine-created lifecycle carries `eval_start_boundary`. A speculative
+            # card session normally wrote the receipt at admission in the MAIN task (keeping it out
+            # of the election's CAS window); ordinary dispatch, recovery, the legacy dispatcher and
+            # direct library callers reach this funnel backstop. The one durable row therefore both
+            # protects speculative budget accounting and moves the public activity projection from
+            # "waiting for a slot" to "evaluating" before sandbox work begins.
             async with self._write_lock:
                 self._record_eval_start_boundary(node)
             workdir = self.run_dir / "nodes" / f"node_{node_id}"
@@ -2589,30 +2628,34 @@ class EvaluateMixin:
                 # objective can descend as written. Logs go FIRST in the composite so a name
                 # collision cannot shadow `read_log`, which is the only reader that knows this
                 # attempt's byte floor.
-                _repair_tools = await anyio.to_thread.run_sync(
-                    diagnosis_tools, self, workdir, _log_plan, _log_snapshot,
-                    abandon_on_cancel=True)
-                # READ FRESH, NOT FROM `events_at_start`. Every alert this reads was appended
-                # DURING the attempt that just died — a snapshot taken before the node started
-                # contains, by construction, none of them. This is the one place in the node loop
-                # where that distinction is the whole point of the read.
-                # OPEN[monitor-verdicts-read-on-event-loop] this fresh read runs ON the event loop
-                # while the line above it already pays for a worker hop.
-                # proof:present:_durable_monitor_verdicts(self.store.read_all(),@looplab/engine/evaluate.py
-                # REVIEW 2026-08-25 (efficiency): `read_all()` is incrementally cached, but the
-                # increment here is exactly one multi-hour attempt's appends (stage rows, cost rows,
-                # up to `_MAX_MONITOR_LLM_CALLS` alert rows — parsed on this thread), and the
-                # `_durable_monitor_verdicts` walk after it is O(whole log) pure Python per failed
-                # attempt. Both run between two awaits, so every concurrent eval's terminal and the
-                # whole serve/read side stall behind them — the same event-loop-callback shape that
-                # moved `card_reservation._stage_card_creates` off-thread on 2026-08-22, ONE DAY
-                # after this line landed on the loop. The fix is already half-paid: fold this read
-                # into the `to_thread.run_sync` immediately above (`EventStore` serializes via its
-                # own locks, so a worker-thread read is sanctioned — invariant #1's own note), or
-                # thread the rows out of the same lambda that builds `diagnosis_tools`. Delete this
-                # marker with the fix.
-                _monitor_verdicts = _durable_monitor_verdicts(self.store.read_all(), node_id,
-                                                              generation)
+                #
+                # THE MONITOR VERDICTS ARE READ IN THE SAME HOP, and the read is deliberately FRESH
+                # rather than from `events_at_start`. Every alert it wants was appended DURING the
+                # attempt that just died, so a snapshot taken before the node started contains, by
+                # construction, none of them — this is the one place in the node loop where that
+                # distinction is the whole point of the read.
+                #
+                # IT RODE HERE ON THE LOOP THREAD UNTIL 2026-08-30, and the honest number is small:
+                # `read_all()` warm plus the O(whole log) `_durable_monitor_verdicts` walk measured
+                # 1.0 + 0.51 ms on the largest healthy log on this box (e5small-dr-unified-v4, 10.3
+                # MB, 12,579 events) and 0.7 + 0.22 ms on rubertlite-dr-unified-v8 — once per FAILED
+                # attempt, i.e. tens of milliseconds across a whole run. The note that used to sit
+                # here said "every concurrent eval's terminal and the whole serve/read side stall
+                # behind them", which overstates it by three orders of magnitude against the paid
+                # propose call that motivated the comparison. It is folded in anyway because the
+                # hop is ALREADY PAID one line up and the term is O(log) in a run that only grows:
+                # what the loop thread is worth is not decided per call site.
+                #
+                # A worker-thread READ is sanctioned by invariant #1's own note — `EventStore`
+                # serializes `append`/`read_all` through its own locks — and nothing in this hop
+                # writes: `_durable_monitor_verdicts` is a pure filter over rows, which is what makes
+                # it safe to move where `_stage_card_creates`' proposal needed a capture sink first.
+                def _repair_inputs():
+                    return (diagnosis_tools(self, workdir, _log_plan, _log_snapshot),
+                            _durable_monitor_verdicts(self.store.read_all(), node_id, generation))
+
+                _repair_tools, _monitor_verdicts = await anyio.to_thread.run_sync(
+                    _repair_inputs, abandon_on_cancel=True)
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
                                             depth=_depth,

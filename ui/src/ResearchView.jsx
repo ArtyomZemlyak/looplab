@@ -10,10 +10,10 @@
 // tree keeps: a number is shown with what qualifies it or not at all.
 import React, { useMemo, useState } from 'react'
 
-import { cardIsDirection } from './cardLineageModel.js'
+import { cardIsDirection, childrenByParent, descendantsOf } from './cardLineageModel.js'
 import { isRecord } from './panelPrimitives.js'
 import { UNGROUPED_ID, latticeRollups, latticeRows, questionClosure,
-  unfiledExperiments } from './questionLattice.js'
+  offPageParentExperiments, unfiledExperiments } from './questionLattice.js'
 
 const _text = value => (typeof value === 'string' ? value.trim() : '')
 const _delta = value => `${value > 0 ? '+' : ''}${Number(value.toFixed(4))}`
@@ -45,32 +45,34 @@ export default function ResearchView({ cards, state, renderCard }) {
   // one-knob experiment a lattice position it has no business holding, since its concepts are a
   // fact about the work rather than a question anyone asked.
   const questions = useMemo(() => all.filter(cardIsDirection), [all])
-  // OPEN[nested-direction-counted-as-experiment] `all` holds both kinds and the fold permits a
-  // DIRECTION to carry `parent_card_id`, so with no kind filter a nested question is counted,
-  // labelled and rendered below as an experiment while also appearing in the lattice as a
-  // question — one card, two contradictory readings on one screen. Filter the children by KIND
-  // here, or render a nested direction explicitly as the question it is.
-  // The falsifier is the FIX's own symbol and not this loop's opening line: a kind filter is added
-  // INSIDE the body, so `present:` on the `useMemo` line survives its own fix and would leave the
-  // marker stuck open — the tier-3 misuse CLAUDE.md admits only where the marker IS the item.
-  // Either fix has to CALL the kind predicate, which today is imported and used point-free.
-  // proof:`absent:cardIsDirection(@ui/src/ResearchView.jsx`
-  const childrenByParent = useMemo(() => {
-    const out = new Map()
-    for (const card of all) {
-      const parent = _text(card.parent_card_id)
-      if (!parent) continue
-      if (!out.has(parent)) out.set(parent, [])
-      out.get(parent).push(card)
-    }
-    return out
-  }, [all])
+  // CHILDREN ARE EXPERIMENTS, and the kind is now asked rather than assumed (2026-08-29).
+  // `all` holds both kinds and the fold sets `parent_card_id` for ANY card without consulting its
+  // kind (`events/card_ledger.py`), so a nested QUESTION landed here: counted, labelled and drawn
+  // below its parent as an experiment, while the same card also stood in the lattice as a question.
+  // One card, two contradictory readings on one screen — and the experiment reading is the false
+  // one, since a direction owns no action and has no result to roll up.
+  // A nested question keeps its lattice position and loses nothing: `latticeRows` is what draws
+  // question-under-question, and it is the surface that can say what the nesting MEANS.
+  // THE STATE IS UNREACHED ON THIS BOX AND THAT IS STATED RATHER THAN GLOSSED: across every
+  // preserved log, 0 of 218 `card_added` rows carry a direction with a `parent_card_id`. The fold
+  // permits it with no guard, so nothing but the Researcher's own habit keeps it at zero — this is
+  // a cheap honesty guard on a reachable shape, not a recovery of anything that has happened.
+  // The rule lives in `cardLineageModel.js` beside the kind predicate it asks — see the comment
+  // there for why a nested question must not be grouped here, and why it was moved out of this
+  // file at all (a replica of an inline loop cannot catch that loop being inverted).
+  const childKids = useMemo(() => childrenByParent(all), [all])
 
   const rows = useMemo(() => latticeRows(questions), [questions])
   // The complement of the ladder. Without it a parentless experiment is drawn by NOTHING here, and
   // the Directions tab's "Not filed under any direction" group stays the only surface that has it —
   // which is exactly why that tab cannot be retired until this exists.
   const unfiled = useMemo(() => unfiledExperiments(all), [all])
+  // The third bucket that makes the ladder TOTAL. A card whose `parent_card_id` names a card this
+  // page does not hold — clipped by the 256-row wire cap — is not unfiled and is under no visible
+  // question, so before this it rendered nowhere at all. It gets its own counted section rather
+  // than being folded into unfiled, because "filed under something you cannot see here" and
+  // "nobody filed this" are different facts.
+  const offPage = useMemo(() => offPageParentExperiments(all), [all])
   // `state?.nodes`, not `state`: `latticeRollups` reads nothing else off the run state, while
   // `useRunState` replaces the whole snapshot object on every 2.5 s poll. Depending on `state` paid
   // the full rollup — now real work, since `cardEvidenceNodes` started returning evidence — for
@@ -141,7 +143,9 @@ export default function ResearchView({ cards, state, renderCard }) {
     <ol className="research-lattice">
       {shown.map((row) => {
         const roll = rollups.get(row.rowKey) || {}
-        const kids = childrenByParent.get(row.id) || []
+        // DESCENDANTS, not immediate children: a refinement of a refinement is still this
+        // question's work, and drawing only one level put it in no section at all.
+        const kids = descendantsOf(row.id, childKids)
         const isCollapsed = collapsed.has(row.rowKey)
         const branch = visible.some(r => r.rowKey.startsWith(`${row.rowKey}>`))
         const added = addedConcepts(row, byRowKey)
@@ -242,6 +246,20 @@ export default function ResearchView({ cards, state, renderCard }) {
         Researcher proposed {unfiled.length === 1 ? 'it' : 'them'} without naming a direction
       </div>
       <div className="research-experiments">{unfiled.map(card => renderCard(card))}</div>
+    </section>}
+    {/* Same rule as the unfiled block: rendered only when occupied, and hidden under a concept
+        filter — the parent this card names is off the page, so no concept here can speak for it. */}
+    {!concept && offPage.length > 0 && <section className="research-unfiled"
+      aria-labelledby="research-offpage-h">
+      <h3 id="research-offpage-h" className="research-unfiled-h">
+        Filed under a question not on this page <span className="muted">{offPage.length}</span>
+      </h3>
+      <div className="muted card-empty">
+        {offPage.length === 1 ? 'this experiment names' : 'these experiments name'} a parent the
+        board did not send — the run has a question for {offPage.length === 1 ? 'it' : 'them'},
+        beyond the row cap this view receives
+      </div>
+      <div className="research-experiments">{offPage.map(card => renderCard(card))}</div>
     </section>}
   </div>
 }

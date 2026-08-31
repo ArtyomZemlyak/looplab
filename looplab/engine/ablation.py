@@ -221,6 +221,7 @@ class AblationMixin:
             node_id=node_id, parent_ids=[parent_id], operator="refine_block",
             idea=durable_idea_payload(idea), code=code,
             files=getattr(self.developer, "last_files", {}) or {},
+            eval_start_boundary=True,
             parent_generations={str(parent_id): generation},
             **({"footprint_finalized": True} if footprint_finalized else {}))
         if node_id not in fold(self.store.read_all()).nodes:

@@ -228,7 +228,26 @@ class MemoryTools:
                 if not self._scope.allows(row):        # doc 25 TO-07 — the sibling's own predicate
                     continue
                 lrole = row.get("role")
-                if lrole is not None and lrole != self.role:
+                # THE ROLE SPLIT APPLIES TO THE TWO ROLES IT WAS WRITTEN FOR, and to nothing else.
+                # `cross_run_tools.py::_role_lessons` — the sibling this filter mirrors — has always
+                # carried this escape ("An unknown role sees every role"), and until 2026-08-30 this
+                # one did not, so the two readers of ONE `lessons.jsonl` inside ONE toolset
+                # disagreed about what a meta-decision role may know. That is the drift doc 25 TO-07
+                # exists to end.
+                #
+                # WHY AN ESCAPE RATHER THAN A WIDER MATCH. The split is a statement about two
+                # producers: a `researcher` lesson credits a technique, a `developer` lesson says
+                # what code change fixed a crash, and each is routed to the role that can act on it.
+                # A role that is NEITHER — the Strategist, which decides policy over both — is not a
+                # third audience to be filtered for; it is the reader that needs the whole record.
+                #
+                # AND THE ESCAPE MUST LAND WITH THE FACTORY FORWARD, never before it. Measured on
+                # the live shared store (50 lessons: 36 researcher, 4 developer, 10 untagged): the
+                # Strategist defaulting to "researcher" loses the 4 developer rows, and forwarding
+                # its real role WITHOUT this escape would lose 40 of 50, keeping only the untagged.
+                # The naive half of this fix is worse than the defect.
+                if (lrole is not None and lrole != self.role
+                        and self.role in (_ROLE_RESEARCHER, _ROLE_DEVELOPER)):
                     continue                           # §role-split: untagged is shared, tagged is not
                 overlap = len(query_tokens & _toks(statement))
                 if query_tokens and not overlap:

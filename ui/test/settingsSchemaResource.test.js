@@ -107,6 +107,11 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   than by bumping the number: the catalogue was 184 keys and removing exactly
   //   `triage_time_budget_s` gave back 183, so this is one real addition with nothing renamed
   //   away underneath it.
+  //   184 -> 185 on MASTER (2026-08-30): `single_command_divergence_watch`, a CORRECTION and
+  //   not a feature — the field shipped in `7813032e` with no catalogue row at all, so the
+  //   python-side reconciliation was red on master from that merge until now. It is the 190th
+  //   row here; the total is pinned ONCE, below, because the Python guard asserts that this
+  //   file states it exactly once.
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   //   183 -> 186 (2026-08-21, REBASE): this branch's three rows meeting master's additions —
@@ -121,9 +126,13 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   rather than by bumping the number: the catalogue was 187 keys and removing exactly
   //   `developer_step_feedback_command` gave back 186, so this is one real addition with nothing
   //   renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 189)
+  assert.equal(Object.keys(schema.fieldByKey).length, 190)
   //   184 -> 189 (2026-08-29, MERGE with master): master's 184 rows meeting this branch's
   //   five. Verified by intersection (183 common) rather than by bumping the number.
+  //   189 -> 190 (2026-08-31, MERGE with master): master's `single_command_divergence_watch`
+  //   meeting this branch's 189. Verified by intersection (184 common, +5 ours, +1 theirs)
+  //   rather than by bumping the number. FIFTEENTH occurrence of this drift, and the first
+  //   caught by neither guard alone: both sides moved the literal, so it arrived as a conflict.
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')
   assert.equal(schema.fieldByKey.gpu_footprint_cue.default, true)
   //   181 -> 183 (2026-08-19): `llm_budget_usd` (a HARD spend ceiling for a run's LLM calls, 0 =

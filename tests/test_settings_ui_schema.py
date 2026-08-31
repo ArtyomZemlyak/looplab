@@ -100,13 +100,25 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 189
-    # 184 + 5 -> 189 on 2026-08-29, at the MERGE with master: master's 184 catalogued rows
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 190
+    # 189 + 1 -> 190 on 2026-08-31, at the MERGE with master, and BOTH histories under it are real.
+    # Master's row is `single_command_divergence_watch`, and it is a CORRECTION rather than a
+    # feature: the field shipped in `7813032e` with neither a form row nor an uncurated entry, so
+    # `_reconcile_settings_fields` was RED on master from that merge until `9a07427f` — a targeted
+    # suite that did not include `tests/test_stage_environment.py` is what let it through. A ROW and
+    # not an uncurated entry because none of that registry's four honest reasons holds: it is not an
+    # open key set, not a legacy alias, not a load-time binding, and the "second-order tuning whose
+    # PARENT already has a row" clause is false — the deterministic divergence watchdog has no row
+    # of its own, and the `train_monitor_*` family beside it is the LLM judge, a different rung.
+    # Verified as the paragraph prescribes rather than by bumping the number: 184 rows are common to
+    # the two files, this branch adds five and master one, and removing exactly those six gives back
+    # 184 with no duplicate key.
+    # 184 + 5 -> 189 on 2026-08-29, at the previous MERGE with master: master's 184 catalogued rows
     # meeting the five this branch authored (`llm_budget_usd`, `hide_empty_tools`,
     # `developer_probe_confine`, `developer_step_feedback_command`, `developer_stage_guidance`).
     # Verified as the paragraph prescribes rather than by bumping the number: master's file
     # carried 184 keys, ours 188, the intersection 183, and re-adding exactly those five to
-    # master's catalogue gives 189 with no duplicate key. Both histories below are real.
+    # master's catalogue gives 189 with no duplicate key.
     # 216 -> 217 Settings and 183 -> 184 catalogued rows on 2026-08-27: `triage_time_budget_s`, the
     # wall-clock ceiling on ONE crash/timeout triage call. A row rather than an uncurated omission
     # because it is the operator's only handle on a loop that BLOCKS the eval thread with the GPU
@@ -187,7 +199,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # (there is no container filesystem to make read-only), so a form row would offer every operator
     # a knob that does nothing on their box, and the operators who DO run the container tiers set
     # them together in a config file.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 222
+    # 222 -> 223 Settings on 2026-08-31, at the MERGE: master's `single_command_divergence_watch`.
+    # It reached master in `7813032e` WITHOUT this pin or a catalogue row, which is why the
+    # reconciliation was red there from that merge until `9a07427f` — see the catalogue note above
+    # for why it gets a form row rather than an uncurated entry.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 223
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

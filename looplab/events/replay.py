@@ -1069,15 +1069,29 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _on_node_eval_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     """The durable eval-START boundary: this exact lifecycle entered the sandbox.
 
-    Set-only and generation-keyed, so it is order-tolerant by construction: a duplicate (a resumed
-    process re-dispatching the same still-pending node) is a no-op, a row for an abandoned attempt is
-    ignored by `_generation_matches`, and a `node_reset` clears the flag with the rest of the
-    lifecycle it abandons.  Carries no cost — `_charge_terminal_cost` still owns eval seconds; this
-    only answers "did anything run at all", which nothing else in the log could answer after a kill.
+    Generation-keyed and split into two receipts. ``eval_started`` is durable/set-only and answers
+    "did anything ever run in this lifecycle?" for budget recovery. ``eval_activity_started``
+    answers "did the current engine owner admit it?" for the live UI; a resume-owner boundary clears
+    only that half so a real re-dispatch can stamp it again. Carries no cost —
+    `_charge_terminal_cost` still owns eval seconds.
     """
     n = _node_for_event(st, d)
     if n is not None and _generation_matches(n, d):
         n.eval_started = True
+        # First receipt for THIS owner wins. A duplicate admission call in one invocation is a no-op,
+        # while a receipt after resume legitimately starts a fresh live clock.
+        if n.eval_activity_started is not True:
+            n.eval_activity_started = True
+            n.eval_started_at = e.ts if e.ts > 0 else None
+
+
+def _clear_eval_activity_for_new_owner(st: RunState) -> None:
+    """Forget only live ownership; preserve the durable proof that compute was already spent."""
+
+    for n in st.nodes.values():
+        if n.status is NodeStatus.pending:
+            n.eval_activity_started = False
+            n.eval_started_at = None
 
 # `engine/metric_salvage.py::SALVAGE_CAUSE_TRIAGE_ACTION`, spelled rather than imported: `events`
 # imports only `core` (see the log-role note in `engine/train_monitor.py` for the same rule in the
@@ -1222,6 +1236,8 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.eval_seconds = None
         n.never_evaluated = False          # the discard receipt described the prior attempt
         n.eval_started = False             # ...and so did the eval-start boundary
+        n.eval_activity_started = False
+        n.eval_started_at = None
         n.extra_metrics = {}
         # ...and so did the CHANNEL map describing where those extras came from.
         n.extra_metrics_provenance = {}
@@ -1525,6 +1541,8 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.eval_seconds = None
         n.never_evaluated = False   # the discard receipt described the NOW-abandoned lifecycle
         n.eval_started = False      # ...and so did the eval-start boundary
+        n.eval_activity_started = False
+        n.eval_started_at = None
         n.stdout_tail = ""
         # ...and the eval's own account of the number that attempt produced. Reset with its
         # sibling above: a re-evaluated node that keeps the PREVIOUS attempt's stderr shows the
@@ -3541,6 +3559,11 @@ def _on_resume_served(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # before this seq is fulfilled. Seq-gated so one serve satisfies several piled-up requests.
     if e.seq > st.last_resume_served_seq:
         st.last_resume_served_seq = e.seq
+        # A live loop may also acknowledge a redundant resume request (orchestrator.py) without
+        # changing process ownership. Only the CLI's strict marker proves that engine.lock moved to
+        # a replacement owner; then every older eval admission belongs to the former process.
+        if d.get("engine_owner_boundary") is True:
+            _clear_eval_activity_for_new_owner(st)
         if st.finished and st.last_resume_request_mode == "finalize":
             # A finalize hand-off that arrived after run_finished repairs/acknowledges the existing
             # wrap-up; it must not create a second finish. Consume its lingering stop intent once the

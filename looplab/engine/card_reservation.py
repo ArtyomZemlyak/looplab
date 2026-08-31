@@ -38,7 +38,9 @@ is what makes that falsifiable, and it is driven (a real run, watched intercepti
 """
 from __future__ import annotations
 
+import collections
 import functools
+import logging
 
 import anyio
 
@@ -59,10 +61,51 @@ from looplab.core.models import (CARD_IDEA_CONCEPT_FIELDS, CARD_STATEMENT_MAX_CH
                                  normalize_researcher_footprint)
 from looplab.engine.proposal_cues import normalize_steering_context
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
-from looplab.events.types import (EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED,
+from looplab.events.card_ledger import _drop_author
+from looplab.events.types import (EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED, EV_CARD_REOPENED,
                                   EV_CARD_MERGED, EV_HYPOTHESIS_MERGED, EV_NODE_BUILDING,
                                   PROGRESS_STAGE_BUILD,
                                   EV_NODE_CREATED, EV_NOVELTY_REJECTED)
+
+_LOG = logging.getLogger(__name__)
+
+# WHICH FENCE REFUSED A STAGED PROPOSAL, named rather than collapsed into one silent `None`.
+#
+# `_stage_prepared_card._plan` compares a FRESH fold against the snapshot the proposal was authored
+# against, and any of SIX conjuncts refuses. THE REFUSAL IS THE DESIGNED ANSWER to moved authority
+# — a proposal authored against an old search state must never be relabelled as current work — and
+# nothing here changes it. What changes is that the loss was invisible: every refusal returned a
+# bare `None` and the caller simply dropped it.
+#
+# SIX AND NOT EIGHT, and the difference is not a dropped comparison. The naming landed on master
+# (`6262f3a1`) over the OLD fence, which also compared a whole-log max-seq (`authority_seq_moved`),
+# the champion id (`best_moved`) and a steering-cue hash (`cues_moved`). This branch had already
+# deleted those three in `50eac526`, on a measurement: the isolated raw lane staged 0 Cards out of
+# 56 PAID proposals because all three of those inputs move on a timer inside any multi-minute
+# propose window, while epoch/parents/ceiling moved in 0 of the 56. `_proposal_receipt_fence`
+# replaced them with what the Card's own receipt ASSERTS, so this registry names the conjuncts the
+# fence in this tree actually has: the lifecycle stop, the node-slot ceiling, and the three fields
+# of the receipt plus its own "not scorable at all" answer.
+#
+# THE BATCH LANE IS WHY THE NAMING MATTERS. Since the paid batch propose moved off the event-loop
+# thread (`56764cbd`) there is a minutes-long SUSPENSION between the fold the proposal was authored
+# against and the staging loop, so anything the receipt asserts that moves in that window refuses
+# EVERY idea of the batch at once. Pre-offload the loop was frozen and no fence input could move
+# mid-propose, so this was unreachable; the occupancy-paced create the batch branch's own comment
+# advertises makes it routine. N paid ideas at once, where the per-action lane risks one.
+#
+# A typo'd slug does not fail: it lands on an in-process seam a caller reads and on a log line an
+# operator greps, so `tests/test_card_stage_refusals.py` re-derives this set from `_plan`'s own AST
+# in BOTH directions — the way `CARD_BUILD_SKIP_REASONS` is guarded one module over.
+CARD_STAGE_REFUSALS = (
+    "run_stopping",          # paused / finished / stop requested
+    "node_ceiling_moved",    # the future node-slot ceiling advanced
+    "receipt_unscorable",    # the parent or the score anchor stopped being scorable at all
+    "search_epoch_moved",    # the search epoch rotated under the proposal
+    "parent_moved",          # the parent snapshot (kind/parents/generations) changed
+    "score_moved",           # the score snapshot of the anchor the receipt names changed
+)
+
 from looplab.search.card_selection import (META_CARD_ID, SpeculativeSelectionContext,
                                            card_action as projected_card_action,
                                            card_budget_used, card_selection_set, eligible_cards,
@@ -1289,6 +1332,9 @@ class CardReservationMixin:
         so a caller reading it after this call is reading THIS call.
         """
         self._card_stage_attached_to = None
+        # Cleared here for the same reason `_card_stage_attached_to` is: a caller reading it after
+        # this call must be reading THIS call.
+        self._card_stage_refusal = None
         if not isinstance(idea, Idea):
             try:
                 idea = Idea.model_validate(idea)
@@ -1321,17 +1367,47 @@ class CardReservationMixin:
             "footprint": self._clamp_resource_footprint(idea.footprint),
         })
 
+        def _refuse(reason: str):
+            """Record WHICH fence moved, then refuse exactly as before (`None`).
+
+            The comparisons and their ORDER below are unchanged — this is the same fence, saying
+            which half of it moved."""
+            self._card_stage_refusal = reason
+            return None
+
         def _plan(events, tail):
             # The log scan, fold, lifecycle fences and duplicate/id plan are intentionally outside
             # `_id_lock`: they scale with run history and may invoke bounded hashing/validation.  The
             # append's tail CAS is the authority for the snapshot.  If another reservation or control
             # wins after this plan, the CAS loses and the next turn recomputes every derived value.
             state = _fold(events)
-            if (state.paused or state.finished or state.stop_requested
-                    or self._node_id_ceiling(events, state) != proposal_node_ceiling
-                    or self._proposal_receipt_fence(
-                        state, action, scored_against=score_anchor) != expected_receipt):
-                return None
+            if state.paused or state.finished or state.stop_requested:
+                return _refuse("run_stopping")
+            if self._node_id_ceiling(events, state) != proposal_node_ceiling:
+                return _refuse("node_ceiling_moved")
+            # ONE FENCE, EVALUATED ONCE, THEN ATTRIBUTED — the 2026-08-31 merge of two changes that
+            # met here. The COMPARISON is this branch's and is untouched: `_proposal_receipt_fence`
+            # against the value pinned at proposal time, i.e. exactly what the Card's own receipt
+            # asserts and nothing else (see that method for the 0-of-56 measurement that narrowed
+            # it). What master's `6262f3a1` brought is that a refusal must NAME which half of the
+            # fence moved instead of returning a bare `None` — three of its eight slugs described
+            # conjuncts this branch had already deleted on that measurement (`authority_seq_moved`,
+            # `best_moved`, `cues_moved`), so the naming is applied to the fence that is actually
+            # here. Nothing is re-derived to do it: the branch reads the tuple the one call already
+            # returned, so the ORDER and the RESULT are identical to the single `!=` it replaces.
+            fresh_receipt = self._proposal_receipt_fence(
+                state, action, scored_against=score_anchor)
+            if fresh_receipt != expected_receipt:
+                if fresh_receipt is None:
+                    # The parent or the score anchor stopped being SCORABLE at all (tombstoned /
+                    # aborted / re-attempted out of range), which is `_proposal_receipt_fence`'s
+                    # own refusal rather than a field that merely moved.
+                    return _refuse("receipt_unscorable")
+                if fresh_receipt[0] != expected_receipt[0]:
+                    return _refuse("search_epoch_moved")
+                if fresh_receipt[1] != expected_receipt[1]:
+                    return _refuse("parent_moved")
+                return _refuse("score_moved")
             kind, parents, parent_generations = expected_parent
             del kind
             plan = self._plan_native_card(
@@ -1444,7 +1520,30 @@ class CardReservationMixin:
         dropped_batch: list[dict] = []
         try:
             if len(raw) > 1 and all(action.get("kind") == "draft" for action in raw):
-                ideas, telemetry, dropped_batch = self._consume_batch_proposal(
+                # OFF THE EVENT-LOOP THREAD, through the SAME helper the other batch call site
+                # uses — see `orchestrator.py::_await_batch_proposal` for why the sink is not
+                # optional and why the beacon travels with it. This branch is reachable whenever a
+                # card run stages a multi-draft lane, e.g. an occupancy-paced create fired precisely
+                # BECAUSE an eval is in flight, and while it ran no eval terminal, watchdog tick or
+                # timer could land. On the shipped default width it is the path a run takes.
+                #
+                # THE FENCE CAN MOVE ACROSS THIS AWAIT, and since 2026-08-31 that is COUNTED. This
+                # is the batch branch's first suspension point between the fold the proposals were
+                # authored against and the staging loop, and `_stage_prepared_card._plan` compares a
+                # fresh fold against that snapshot — so anything the Card's own receipt asserts
+                # (`_proposal_receipt_fence`: the search epoch, the parent generations, the score
+                # anchor's identity) moving during the minutes-long paid propose refuses EVERY idea
+                # of the batch at staging. Pre-offload this was unreachable: the frozen loop meant no
+                # fence input could move mid-propose. The occupancy-paced create this very comment
+                # advertises makes it routine, and one moved fence discards N paid ideas where the
+                # per-action lane risks one. What it can NO LONGER discard them for is a concurrent
+                # `research_completed`/`hint`/strategy row or an unrelated champion change — those
+                # were measured to refuse 56 of 56 paid proposals and were deleted in `50eac526`.
+                #
+                # The refusal itself is the designed answer to moved authority and is unchanged;
+                # what was missing is that the loss was unattributable. Each conjunct now names
+                # itself (`CARD_STAGE_REFUSALS`) and the staging loop logs the count and the slug.
+                ideas, telemetry, dropped_batch = await self._await_batch_proposal(
                     proposal_state, len(raw))
                 for offset, (action, idea, record) in enumerate(
                         zip(raw, ideas, telemetry)):
@@ -1484,17 +1583,66 @@ class CardReservationMixin:
                         # NOTHING: an AST pass over it finds zero `store.append` calls, and its audit
                         # rows go through `_append_proposal_event`, whose `_PROPOSAL_EVENT_SINK`
                         # contextvar survives `to_thread.run_sync` (driven, not assumed).
-                        idea = await anyio.to_thread.run_sync(
-                            functools.partial(
-                                self._prepare_node_idea,
-                                action,
-                                proposal_state,
-                                researcher=self.researcher,
-                                prospective_node_id=proposal_node_ceiling + offset,
-                                source=source,
-                                proposal_events=proposal_events,
-                            )
-                        )
+                        # The "writes NOTHING" claim above was FALSE ONE CALL DEEP until 2026-08-29
+                        # (shipped by the sink below): `_prepare_node_idea._link` and
+                        # `_apply_novelty_gate` reach `_append_proposal_event`, which falls through
+                        # to `self.store.append` whenever no sink is installed — and the one
+                        # installer was `speculation.py::_prepare_raw_card_stage` (Layer 5), never
+                        # this lane. The guard `test_propose_does_not_freeze_the_loop::
+                        # test_the_offloaded_call_writes_no_events` walks only `_prepare_node_idea`'s
+                        # own AST and cannot see an append one helper down, which is why nothing was
+                        # red for it.
+                        #
+                        # THE SINK IS THE FIX, and it is Layer 5's own discipline rather than a second
+                        # one: `_capture_proposal_events` buffers every `_append_proposal_event` into
+                        # a list instead of writing, and the MAIN TASK publishes them below. Without
+                        # it `_prepare_node_idea._link` and `_apply_novelty_gate` reach
+                        # `self.store.append` from this worker with EV_NOVELTY_REJECTED /
+                        # EV_NOVELTY_GRADED / EV_CROSS_RUN_PRIOR — all FOLDED, and named by none of
+                        # `events/types.py`'s three thread-append registries, so invariant #1's
+                        # sole-writer rule was breached on a DEFAULT card lane, unregistered and
+                        # unproven. Verified by driving it: `novelty_rejected` is in neither
+                        # BACKGROUND_APPENDABLE, SETUP_THREAD_APPENDABLE,
+                        # NON_CARD_SELECTION_BACKGROUND_APPENDABLE nor DIAGNOSTIC_EVENTS.
+                        #
+                        # It is not only a registry violation. These rows are AUTHORITY-BEARING for
+                        # `speculation.py::_proposal_authority_seq`, the fence that discards a paid
+                        # proposal when any non-diagnostic row lands inside its max-seq equality
+                        # window — the same hazard invariant #1 records for `train_monitor_alert`. A
+                        # worker-thread append lands at instants the main-task ordering excluded, so
+                        # the loss it can cause is a proposal the run already paid for.
+                        captured: list = []
+                        try:
+                            with self._capture_proposal_events() as captured:
+                                idea = await anyio.to_thread.run_sync(
+                                    functools.partial(
+                                        self._prepare_node_idea,
+                                        action,
+                                        proposal_state,
+                                        researcher=self.researcher,
+                                        prospective_node_id=proposal_node_ceiling + offset,
+                                        source=source,
+                                        proposal_events=proposal_events,
+                                    )
+                                )
+                            # PUBLISHED FROM THE MAIN TASK, and published WHETHER OR NOT the idea formed.
+                            # A refused proposal is exactly when the receipt matters most: the discard
+                            # receipt (`bd182357`) exists because a paid propose that produced no card
+                            # left no trace at all, and dropping the intents on `idea is None` would
+                            # restore that silence for the case it was written for. Layer 5 drops them
+                            # only when it ABANDONS and re-makes the proposal, which this lane never does.
+                        # …AND PUBLISHED ON THE WAY OUT, since 2026-08-31, because a RAISE from the offloaded
+                        # call discarded every buffered row. `_reject_and_repropose` appends `budget_exceeded`
+                        # through this very sink and then RE-RAISES — its own docstring says "appended BEFORE
+                        # re-raising so the rejection is on the log even though the run is ending" — and both
+                        # shipped researchers propagate it. Pre-offload every row was durable at emit time;
+                        # buffering made the publish conditional on a clean return without anyone deciding that.
+                        # `store.append` is sync and legal during unwind, so the `finally` costs nothing and keeps
+                        # the promise the sink was introduced to keep.
+                        finally:
+                            for _event_type, _data, _trace_id, _span_id in captured:
+                                self.store.append(_event_type, _data,
+                                                  trace_id=_trace_id, span_id=_span_id)
                     if idea is None:
                         continue
                     prepared.append((
@@ -1508,6 +1656,7 @@ class CardReservationMixin:
                     ))
 
             staged: list[str] = []
+            refused: collections.Counter = collections.Counter()
             for action, idea, source, at_node, steering, advisory_receipt in prepared:
                 # The BATCH lane reaches here without passing `_prepare_node_idea`'s `_link` funnel
                 # (`_consume_batch_proposal` hands its Ideas straight to the stager), so the proposal
@@ -1529,6 +1678,26 @@ class CardReservationMixin:
                 )
                 if card_id is not None:
                     staged.append(card_id)
+                else:
+                    refused[getattr(self, "_card_stage_refusal", None) or "unnamed"] += 1
+
+            # THE LOSS IS COUNTED AND SAID, since 2026-08-31. Every refusal above returned a bare
+            # `None` and this loop dropped it, so a batch whose fence moved during the minutes-long
+            # paid propose discarded N ideas with NOTHING on the record — no receipt, no line, and
+            # then one more paid serial try plus a re-paid batch next turn.
+            #
+            # NOT AN EVENT, and that is a decision. A folded row here would move the
+            # `_proposal_authority_seq` max-seq that still fences `_reserve_node_build`'s CAS one
+            # method over, and a diagnostic row per refused idea is an append per staging turn for a
+            # fact that repeats. The refusal is
+            # already the DESIGNED answer to moved authority; what was missing was only that nobody
+            # could count it. `_admissible_beliefs`' "Not silent" logging is the precedent one
+            # cadence over.
+            if refused:
+                _LOG.warning(
+                    "card staging refused %d of %d prepared proposal(s) — the fence moved during "
+                    "the paid propose: %s", sum(refused.values()), len(prepared),
+                    ", ".join(f"{name}={count}" for name, count in sorted(refused.items())))
 
             # Preserve the existing audit treatment for batch proposals rejected before Node ownership.
             # Accepted staged Cards land first, so rejected receipts allocate fresh ids after them.
@@ -1884,10 +2053,39 @@ class CardReservationMixin:
         # unsafe. Use the EventStore's atomic tail CAS instead: concurrent callers either observe the
         # first drop or lose the CAS and retry against its prefix.
         def _plan(events, tail) -> None:
-            if any(
-                    event.type in {EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED}
-                    and self._canonical_card_id(event.data.get("id")) == card_id
-                    for event in events):
+            # IDEMPOTENCE IS "IS A DROP STANDING", NOT "WAS ONE EVER APPENDED", and keying it on the
+            # latter made an operator reopen permanently un-retirable by the engine. The fold has
+            # resolved drop/reopen LAST-RECEIPT-WINS since `dccad06f` (`events/card_ledger.py`), so
+            # after drop -> reopen the board shows the card LIVE while this scan still saw the
+            # historical drop and returned without appending. Every later engine retirement then
+            # silently no-opped while its caller believed the card retired: `_retire_unclaimable_
+            # cards` resets its counters and re-enters the same refuse/retire cycle, and the
+            # node-reset re-propose leaves the superseded twin live beside its replacement — the
+            # leak `_exhausted` below exists to refuse, made silent. The ledger's own comment names
+            # the state ("permanently un-droppable by its owner") and blocks only the laundering
+            # path; the legitimate operator reopen reached it too.
+            #
+            # THE RULE IS THE FOLD'S, REPLAYED OVER RAW EVENTS RATHER THAN RE-INVENTED, and the
+            # author test is why `_drop_author` is IMPORTED: its own docstring says "ONE spelling,
+            # because three readers ask it and they must not drift", and this is now a fourth. A
+            # reopen may only undo an OPERATOR's drop — an engine `card_auto_dropped` stands whatever
+            # follows it, which is what stops a reopen from laundering a rejected proposal back onto
+            # the selectable board (`_record_node_less_card` mints and auto-drops in one
+            # `append_many` precisely so the audit row is never live).
+            #
+            # Order is the log's own, so no `_event_index` is needed here: the CAS hands this plan
+            # the prefix in append order, and "later" is simply "further along `events`".
+            standing = False
+            standing_author = "engine"
+            for event in events:
+                if self._canonical_card_id(event.data.get("id")) != card_id:
+                    continue
+                if event.type in {EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED}:
+                    standing = True
+                    standing_author = _drop_author(event.data or {})
+                elif event.type == EV_CARD_REOPENED and standing and standing_author == "operator":
+                    standing = False
+            if standing:
                 return None
             self.store.append(EV_CARD_AUTO_DROPPED, {
                 "id": card_id,

@@ -167,7 +167,9 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
             consolidate_threshold=getattr(settings, "memora_consolidate_threshold", 0.86)))
     if getattr(settings, "memory_dir", None):              # agentic pull of lessons + meta-notes (else injection-only)
         from looplab.tools.memory_tools import MemoryTools
-        providers.append(MemoryTools(settings.memory_dir))
+        # THE ROLE TRAVELS, as it already does to `CrossRunTools` above (before 2026-08-30 a
+        # Strategist read the store as a Researcher). Safe only beside `memory_tools`' known-role escape.
+        providers.append(MemoryTools(settings.memory_dir, role=role))
     # Skills: hand-written (skills_dir) + promoted M4 auto-distilled (<memory_dir>/skills) in ONE
     # SkillTools over BOTH dirs. Candidate auto-skills remain on disk for later promotion but the
     # library's production default hides them. Two separate providers would each register

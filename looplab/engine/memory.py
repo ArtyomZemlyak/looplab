@@ -295,21 +295,19 @@ def select_comparison_pairs(state, k: int = 3, exclude=None) -> list[dict]:
         # mine stage, and each rediscovered the same fix because none of it became a lesson.
         # Self-paired on purpose: the two sides of this comparison are the SAME node before and
         # after its repair, which is what the reconciler's `a.id == b.id` branch words.
-        # OPEN[repair-self-pair-ignores-spent-ledger] the self-pair never consults `excl`, so an
-        # already-distilled repair is re-selected on every later firing.
-        # proof:`line:"a": n.id,&&"b": n.id,@looplab/engine/memory.py`
-        # REVIEW 2026-08-25 (correctness): this function's own contract says `exclude` is the
-        # "(child, parent) id tuples already distilled (later firings must not re-spend LLM budget
-        # on the same pair)", and the parent loop honours it — but this append has no membership
-        # test against `excl`, and `spent_pairs` DOES return self-pairs once one is distilled (the
-        # lesson's `pairs` row round-trips through `lessons_distilled`). Because `debug` sorts
-        # FIRST and k defaults to 3, every repaired node with a metric re-occupies a top slot on
-        # every distillation cadence AND at run-end reflection: the same pair is re-sent to the
-        # paid comparative-lesson call each firing, and once a run holds three such nodes (v4 held
-        # four) no NEW solution pair can ever reach the judge again. Fix direction: gate this
-        # append on the same spent-ledger membership the parent loop uses, self-keyed; then delete
-        # this marker.
-        if int(getattr(n, "repairs", 0) or 0) > 0:
+        # AND IT HONOURS THE SPENT LEDGER, self-keyed, since 2026-08-30. This function's contract
+        # says `exclude` is the "(child, parent) id tuples already distilled (later firings must not
+        # re-spend LLM budget on the same pair)", and the parent loop above tests it — this append
+        # did not, while `lessons_reconcile.spent_pairs` DOES return a self-pair once one is
+        # distilled (the lesson's `pairs` row round-trips through `lessons_distilled`).
+        #
+        # WHAT THAT COST, and it is not only wasted budget: `debug` sorts FIRST and `k` defaults to
+        # 3, so every repaired node with a metric re-occupied a top slot on every distillation
+        # cadence AND at run-end reflection — the same pair re-sent to the paid comparative-lesson
+        # call each firing — and once a run held three such nodes (`runs/e5small-dr-unified-v4` held
+        # four) NO NEW SOLUTION PAIR COULD EVER REACH THE JUDGE AGAIN. The starvation is the reason
+        # this is a correctness fix and not a cost one.
+        if int(getattr(n, "repairs", 0) or 0) > 0 and (n.id, n.id) not in excl:
             pairs.append({"kind": "debug", "a": n.id, "b": n.id, "delta": None})
     pairs.sort(key=lambda pr: (0 if pr["kind"] == "debug" else 1,
                                -abs(pr["delta"] or 0.0), pr["a"], pr["b"]))

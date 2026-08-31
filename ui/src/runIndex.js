@@ -91,6 +91,13 @@ export const CHAMPION_CAVEAT_SALVAGED = 'salvaged'
 export const CHAMPION_CAVEAT_TRUST_FLAGGED = 'trust_flagged'
 export const CHAMPION_CAVEAT_PARAMS_OVERRIDDEN = 'params_overridden'
 export const CHAMPION_CAVEAT_MIXED_COMPARABILITY = 'mixed_comparability'
+// A merged champion declares nothing: `merge_idea` returns `Idea(operator='merge')` with the
+// ARITHMETIC MEAN of its parents' params, and the node trains nothing of its own — it averages
+// two parents' weights and scores the average. So it is published at coordinates NO
+// configuration ever occupied, which is a sharper claim than `params_overridden` (whose premise,
+// a DECLARATION its own code contradicts, is simply absent) and is why the engine emits this
+// instead of that one rather than as well as it.
+export const CHAMPION_CAVEAT_MERGED_COORDINATES = 'merged_coordinates'
 
 // ABSENT is `[]`, deliberately, and for the same reason `sourceIncomplete` defaults to false: a
 // legacy server that does not send the field must not paint every run with a caveat. And an EMPTY
@@ -112,6 +119,7 @@ const CAVEAT_LABEL = {
   [CHAMPION_CAVEAT_TRUST_FLAGGED]: 'trust-flagged',
   [CHAMPION_CAVEAT_PARAMS_OVERRIDDEN]: 'params overridden',
   [CHAMPION_CAVEAT_MIXED_COMPARABILITY]: 'mixed comparability',
+  [CHAMPION_CAVEAT_MERGED_COORDINATES]: 'merged coordinates',
 }
 export const bestMetricCaveatLabel = slug => CAVEAT_LABEL[slug] || String(slug || '')
 
@@ -140,7 +148,13 @@ export function bestMetricCaveatNotice(run = {}) {
               + 'recorded comparability keys provably differ — so this number won a mixed field. '
               + 'The values are each true of their own measurement; the ordering between them is '
               + 'not.'
-            : `The server reports a caveat this view has no sentence for: “${slug}”.`))
+            : slug === CHAMPION_CAVEAT_MERGED_COORDINATES
+              ? 'This number comes from a MEAN-MERGE node: its parameters are the arithmetic '
+                + 'average of its two parents’ declarations, and it trained nothing of its own — it '
+                + 'averaged their weights and scored the average. Nobody chose the configuration '
+                + 'this result is filed under, so it sits at coordinates no run ever occupied. The '
+                + 'metric itself was measured normally, and the run selected on it.'
+              : `The server reports a caveat this view has no sentence for: “${slug}”.`))
   return sentences.join(' ')
 }
 
@@ -677,6 +691,55 @@ export function appliedParamsUnsettled(record) {
       ? Object.keys(unresolved).length : 0,
     conflicts: Array.isArray(conflicts) ? conflicts.length : 0,
   }
+}
+
+// The CONFLICTED coordinates themselves, normalized, in the engine's own order.
+//
+// A conflict is NOT a weaker divergence and must not be rendered as one. A divergence says "we know
+// what ran and it is not what you declared"; a conflict says "two of this node's own carriers give
+// different numbers and static bytes cannot order them", so the run cannot say what its number is
+// filed under at all. `runtime/applied_params.py` leaves the coordinate OUT of `applied` and OUT of
+// `diverged` for exactly that reason — which is why reading `diverged` alone answered "no caveat"
+// about `rubertlite-dr-unified-v8` node 3, the champion the whole rung was built for.
+//
+// Same two rules as `appliedParamsDivergences`: a row with no `param` is DROPPED, because an
+// anonymous "something conflicts" is the slug's failure again; every number is passed through
+// UNTOUCHED, no `||` default and no coercion, since `0` is a real declared value.
+//
+// A row is kept whatever its `readings` length. The engine only appends one at two or more readings
+// (`len(seen) == 1` takes the other branch), so a shorter row is a malformed record — and dropping
+// it would silently un-render a caveat the engine DID raise, which is this defect in miniature.
+export function appliedParamsConflicts(record) {
+  const raw = record?.conflicts
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter(row => row && typeof row === 'object' && !Array.isArray(row)
+      && typeof row.param === 'string' && row.param.trim())
+    .map(row => ({
+      param: row.param.trim(),
+      declared: row.declared,
+      readings: (Array.isArray(row.readings) ? row.readings : [])
+        .filter(r => r && typeof r === 'object' && !Array.isArray(r))
+        .map(r => ({
+          applied: r.applied,
+          file: typeof r.file === 'string' ? r.file : '',
+          line: Number.isInteger(r.line) ? r.line : null,
+        })),
+    }))
+}
+
+// The one sentence about conflicted coordinates. Deliberately NOT `appliedParamsNotice`'s wording:
+// that one ends "it is filed under parameters the configuration did not use", which presumes we know
+// what was used. Here we do not, and saying so IS the caveat.
+export function appliedParamsConflictNotice(record) {
+  const rows = appliedParamsConflicts(record)
+  if (!rows.length) return ''
+  const checked = appliedParamsChecked(record)
+  const scope = checked == null ? '' : ` of ${checked} checked`
+  return `${rows.length} declared coordinate${rows.length === 1 ? '' : 's'}${scope} `
+    + `${rows.length === 1 ? 'is' : 'are'} read differently by two of this node's own configuration `
+    + 'files, and nothing in the record can order them. The experiment ran and its number still '
+    + 'counts — but the run cannot say which value it was measured at.'
 }
 
 // The one sentence the browser prints about diverged coordinates, mirroring the vocabulary of

@@ -6627,6 +6627,96 @@ file exists to end. `tests/test_best_of_n.py` drives the broken selection AND th
   check-stage judge already names the cause in prose and the vocabulary flattens it. Whether
   `check_failed` should carry that judge's own attribution is the next question of this shape.]
 
+
+### §0.22 A "broken work item filed as a question" that cannot be told from a question (2026-08-30)
+
+`search/card_selection.py::unconsumed_card_inventory` skips every row `card_is_direction` answers
+True for. That predicate is action OWNERSHIP: `selection_provenance.action_source == "none"`, which
+the model holds equivalent to `action_owner_count == 0`. The review finding
+(`receiptless-work-reads-as-question`) said a card whose ownership receipt is MISSING **or
+AMBIGUOUS** earns the same answer as a genuine research question, so a broken WORK item is filed as
+a direction and counted by nothing.
+
+**Half of that is false by construction, and it is the half that would have mattered.**
+`events/card_ledger.py` computes `action_source` as `"none"` only when `owner_count == 0`; at
+`owner_count > 1` it is either the single source name or `"mixed"` — never `"none"`. So an
+AMBIGUOUS card is already an `experiment` to `card_kind_of`, already counted as inventory, and
+already carries `action_owner_ambiguous` on the board. Only the MISSING case can reach the clause
+at all.
+
+**And the MISSING case has never happened here.** Folding every event log on the box (9 runs):
+
+| | |
+|---|---|
+| cards | **245** |
+| rows `card_is_direction` skips | **45** |
+| of those, traceable to a registered `hypothesis_added` belief | **45 of 45** |
+| of those, a work item with a missing receipt | **0 of 45** |
+| identity kind of all 45 | `legacy_hash` (blockers `action_owner_missing` + `freshness_unknown` + `identity_not_native`) |
+
+**DIRECTION OF HARM, if it ever fires.** `unconsumed_card_inventory` is the ceiling on unconsumed
+PREFETCH, so a row it misses is UNDER-counted and the run buys MORE. That is wasted paid builds. It
+is not the failure this clause was written for: OVER-counting is what refused the raw producer lane
+on `runs/rubertlite-dr-unified-v6` for seven hours with GPU 1 at 0 %, six questions against a
+ceiling of one.
+
+**The obvious discriminator is unsound and that is why this is declined rather than fixed.**
+`identity.kind == "native"` beside `action_owner_missing` looks like exactly the missing signal —
+all 45 real directions are `legacy_hash` shadows, so the clause would be inert today. But native is
+the mint path, not the ROLE: a directions-as-first-class-rows board can author a native card that
+legitimately owns no action, and the conjunct would then count real questions as inventory and
+re-open the seven-hour starvation. A discriminator has to read what the row IS, and no field says
+that; the marker's own sentence — "closing it needs a signal that does not exist yet" — is the
+correct one.
+
+**What would reopen it:** a card in any run whose `selection_blockers` contain
+`action_owner_missing` and whose seed statement matches no `hypothesis_added` row. That query is one
+fold and is the thing to re-run, not this table.
+
+
+### §0.23 The backfill rule cannot start measuring, because neither of its two inputs exists (2026-08-30)
+
+`engine/cadence.py::backfill_admits` / `backfill_receipt` are a designed scheduling rule — given a
+candidate that needs `candidate_s` and a device whose current occupant has `remaining_s` left, is
+admitting the candidate now worth the delay it imposes? The docstring says the receipt is "recorded
+rather than acted on while the rule is being observed", i.e. a measure-first corpus accumulates
+before any admission changes. The review finding (`backfill-receipt-unwired`) is that nothing calls
+either function, so that corpus can never start.
+
+**The finding is TRUE.** Grepping `looplab/` finds exactly one call — `backfill_receipt`'s own call
+to `backfill_admits`, inside the same file. Every other importer is a test.
+
+**And it cannot be wired, because BOTH arguments are facts the engine does not hold.**
+
+| input | who could produce it | measured |
+|---|---|---|
+| `candidate_s` — how long the waiting node will take | nothing | **0** producers of a per-node duration estimate anywhere in `looplab/`. `search/proxy.py` and `search/surrogate.py` predict a METRIC; `effective_eval_time_budget` is a leash, not a forecast |
+| `remaining_s` — how long the running eval has left | `LossTrajectory.eta_s`, via the training watchdog | **21 of 272** `train_monitor_alert` rows across every preserved log carry one (7.7 %), because an ETA needs a progress bar with a total — and it counts training STEPS, so it excludes the score stage and the tail |
+
+**The one wiring that would "work" is the one the function refuses by design.** The declared stage
+`timeout` is always available and is the obvious stand-in for `candidate_s` — but it is a WALL, not
+a duration (36,000 s on this box's training stages), so every candidate would price as enormous and
+the rule would refuse everything. `backfill_admits`' own docstring already forbids it: *"REFUSES ON
+ANY UNKNOWN … admitting on a guess is how a scheduler turns one idle device into two late
+experiments."* Feeding it a wall is that guess.
+
+**The prescribed site has already recorded its refusal to take this.** The marker said to "stamp the
+receipt onto a diagnostic row where `_occupancy_paced_creates` already deliberates". That method's
+docstring answers it in advance under **"NO NEW EVENT, and that is a decision rather than an
+omission"**: a row there "would still be an append per poll turn for the whole of a multi-hour
+evaluation, i.e. an unbounded log written to record that nothing happened." It is also the wrong
+question — that site decides whether to BUILD inventory behind a busy device, and holds no candidate
+duration at all.
+
+**So: DECLINED, and the code STAYS.** What is missing is a MEASUREMENT the engine could acquire —
+a per-node duration forecast — not a flaw in the rule. The refusal half is already driven by
+`tests/test_backfill_decision.py::test_any_unknown_or_impossible_input_refuses`, so the thing that
+would make a careless future wiring dangerous is the thing already guarded.
+
+**What would reopen it:** a producer of a per-node duration estimate landing anywhere in `looplab/`.
+At that point the receipt has both arguments and the measure-first corpus can begin; until then
+wiring it writes `why: "unknown_duration"` forever.
+
 ### §0.21 The claim LADDER is designed, mostly already shipped, and its last rule cannot fire yet (2026-08-26)
 
 Two settled design records (operator tasks #57/#58) were taken off the queue to be BUILT and were

@@ -1100,3 +1100,91 @@ def test_the_arming_question_is_the_two_gates_with_the_streak_satisfied():
     assert _confirmation_would_act(bug, log_role=LOG_ROLE_TRAINING, enabled=True,
                                    threshold=0.95) is False
     assert _confirmation_would_act(None, log_role=LOG_ROLE_TRAINING, **ask) is False
+
+
+def test_a_HEALTHY_stage_that_cannot_MEET_ITS_WALL_still_records(tmp_path, monkeypatch):
+    """THE CLOCK IS NOT A HEALTH VERDICT — v11 node 2, 10.0 GPU-hours.
+
+    `stamp_projected_overrun` used to be called INSIDE the write branch, so a stage whose measured
+    ETA cannot fit its own declared wall recorded that only when the judge ALSO had a health concern.
+    A run training perfectly is exactly the case where it does not, and that is the case that costs:
+    `e5small-dr-unified-v11` node 2 was judged healthy on every tick that emitted (correctly — loss
+    41.46 -> 23.62, descending), so every row was suppressed, and its train stage was SIGKILLed by
+    its own 36000 s wall at step 1764/2109 (84 %, 9h56m21s), then charged a full retrain. Node 3 of
+    the same run drew a `watch` early, so its gate was open and all 12 of its rows carry
+    `projected_overrun_s` — the signal was never missing, it was conditional on an unrelated fact.
+
+    The projection is patched rather than provoked: what changed is the GATE, and building a real
+    trajectory whose ETA overruns a real wall would test the tracker instead. `trajectory_row` is
+    patched for the same reason — the gate's precondition must hold deterministically, not depend on
+    what a three-line log yields.
+
+    Mutation: drop `_wall_unreachable` from the gate (or move the stamp back inside the branch) and
+    this row disappears while every other monitor test stays green — which is exactly how it shipped.
+    """
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("step 1 loss: 0.5\nstep 2 loss: 0.4\nstep 3 loss: 0.3\n")
+
+    def _doomed(alert, trajectory, resolved, log_plan, *, grace_cap=None):
+        alert["projected_overrun_s"] = 4700.0
+        alert["stage_wall_s"] = 36000.0
+        alert["overrun_beyond_grace_s"] = 2900.0
+        alert["stage_grace_s"] = 1800.0
+
+    monkeypatch.setattr(_tm, "stamp_projected_overrun", _doomed)
+    monkeypatch.setattr(_tm, "trajectory_row", lambda _t: {"direction": "descending"})
+
+    client = _FakeClient({"status": "healthy", "reason": "loss steadily decreasing",
+                          "confidence": 0.8})
+    host, _spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client),
+        until=lambda h: any(t == EV_TRAIN_MONITOR_ALERT for t, _d in h.store.events))
+
+    alerts = [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
+    assert alerts, ("a stage that cannot finish inside its own declared wall must record that even "
+                    "when the training itself is healthy — this is the row whose absence let 10 "
+                    "GPU-hours run to a SIGKILL at 84 %")
+    assert alerts[0]["status"] == "healthy", (
+        "and it must say the training was HEALTHY: the row is about the CLOCK, and relabelling it "
+        "as a health concern would be a false claim about the loss")
+    assert alerts[0]["overrun_beyond_grace_s"] == 2900.0, (
+        "the projection must ride the row it opened — mutation: open the gate but write the alert "
+        "without absorbing the fields, and the operator gets a bare healthy row with no reason")
+
+
+def test_a_healthy_stage_that_FITS_its_wall_still_writes_nothing(tmp_path, monkeypatch):
+    """The complement, and the thing the fix must not break: only an overrun BEYOND THE GRACE opens
+    the gate. A 40-second overrun on a ten-hour stage is the noise the grace bar exists to swallow.
+
+    Mutation: gate on `projected_overrun_s` instead of `overrun_beyond_grace_s` and every healthy
+    tick of every long stage starts writing rows — a second, louder spelling of the noise the bar
+    was built to stop."""
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("step 1 loss: 0.5\nstep 2 loss: 0.4\nstep 3 loss: 0.3\n")
+
+    def _absorbed(alert, trajectory, resolved, log_plan, *, grace_cap=None):
+        alert["projected_overrun_s"] = 40.0        # real, and inside the grace
+        alert["stage_wall_s"] = 36000.0            # no `overrun_beyond_grace_s`
+
+    monkeypatch.setattr(_tm, "stamp_projected_overrun", _absorbed)
+    monkeypatch.setattr(_tm, "trajectory_row", lambda _t: {"direction": "descending"})
+
+    client = _FakeClient({"status": "healthy", "reason": "loss steadily decreasing",
+                          "confidence": 0.8})
+    # A FIXED WINDOW, and a PRECONDITION that a verdict really was processed. The first cut of this
+    # test used `until=spans.jsonl exists` and was VACUOUS: the file appears as soon as any span
+    # closes, so the loop could be cancelled before a single verdict was judged, and "no alert rows"
+    # was true because nothing had happened. The mutation run said so — gating on the raw
+    # `projected_overrun_s` instead of the beyond-grace key SURVIVED. An absence assertion has to
+    # wait the window out (see `_MONITOR_SETTLE_TIMEOUT_S`'s note) and prove the tick occurred.
+    host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.6)
+
+    judged = [s for s in spans
+              if s.get("name") == "train_monitor" and s.get("attributes", {}).get("status")]
+    assert judged, "precondition: the monitor actually produced a verdict to be gated"
+    assert judged[0]["attributes"]["status"] == "healthy"
+    assert [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT] == [], (
+        "an overrun the grace absorbs must stay trace-only, exactly as before")

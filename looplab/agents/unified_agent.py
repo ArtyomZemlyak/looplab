@@ -208,7 +208,8 @@ class UnifiedAgent(WrapsDeveloper):
 
     def _pilot_emit(self, messages: list, emit_spec: dict, finalize, fallback, *,
                     state=None, bind_state: bool = True, transport_fallback=None,
-                    extra_tools=None, extra_turns: int = 0, wall_when_unbounded: float = 0.0):
+                    extra_tools=None, extra_turns: int = 0, wall_when_unbounded: float = 0.0,
+                    on_budget=None):
         """Drive the pilot tool loop for one emit, containing everything but a budget stop.
 
         `choose_action` and `triage_crash` differ only in prompt, schema and coercion; this owns what
@@ -294,7 +295,12 @@ class UnifiedAgent(WrapsDeveloper):
         _transport = transport_fallback if transport_fallback is not None else fallback
         return resilient(
             lambda: drive_tool_loop(self._pilot_client, tools, messages, emit_spec,
-                                    finalize=finalize, fallback=fallback, **loop_opts),
+                                    finalize=finalize, fallback=fallback,
+                                    # EXPLICIT, never folded into `loop_opts`: `on_budget` is in
+                                    # `EXPLICIT_ONLY_LOOP_ARGS`, and a name reachable BOTH ways
+                                    # raises a duplicate-keyword TypeError the loop's containment
+                                    # `except` swallows — silently degrading an agentic phase.
+                                    on_budget=on_budget, **loop_opts),
             lambda: _transport(messages))
 
     def choose_action(self, state: RunState, legal: list[dict], recommended: Optional[dict] = None,
@@ -672,7 +678,7 @@ class UnifiedAgent(WrapsDeveloper):
                                            EVIDENCE_QUOTE_CAP, EVIDENCE_SOURCES,
                                            FINDINGS_CAP, FINDING_MEANS_CAP,
                                            TRIAGE_RATIONALE_CAP,
-                                           TRIAGE_TRANSPORT_FAILURE_KEY,
+                                           TRIAGE_BUDGET_CUTOFF_KEY, TRIAGE_TRANSPORT_FAILURE_KEY,
                                            UNANSWERABLE_TRIAGE_ACTION)
         code_tail = (getattr(node, "code", "") or "")[-1500:]
         budget = ("" if attempts_left is None else
@@ -927,11 +933,36 @@ class UnifiedAgent(WrapsDeveloper):
         # Binding only with a run state is what enables read_code / find_analogous on it; a loop that
         # ends without an emit degrades to `unreadable`, and only a raised transport failure to the
         # run-halting `unanswerable`.
-        return self._pilot_emit(messages, emit_spec, _finalize, _no_emit,
-                                state=state, bind_state=state is not None,
-                                transport_fallback=_transport_failed,
-                                extra_tools=tools, extra_turns=self._REPAIR_LOOK_TURNS,
-                                wall_when_unbounded=self._triage_time_budget_s)
+        # THE CUTOFF IS RECORDED SINCE 2026-08-30. `config.py`'s `triage_time_budget_s` comment and
+        # the settings-table row both said the loop's time exit tells the operator the investigation
+        # was cut short — and no observer was ever passed, so `_note_budget` returned immediately and
+        # a triage that hit the 1200 s wall force-emitted a verdict (failure kind, `reason_summary`,
+        # repair directive, NEVER_SALVAGED gating) whose durable rows carried no truncation mark.
+        # That is the "computed, named, documented, delivered to nobody" shape `ffdb34e3` closed for
+        # the repair session one day before this wall landed one phase over.
+        #
+        # STAMPED BY THE ENGINE, NOT BY THE WIRE. `_finalize` rebuilds its dict from the schema
+        # properties alone — the property that makes `TRIAGE_TRANSPORT_FAILURE_KEY` unforgeable — so
+        # this key is added AFTER it, from an observer only this module can install. A model cannot
+        # emit it, and its absence means the loop was not cut short.
+        _cutoff: dict = {}
+        verdict = self._pilot_emit(messages, emit_spec, _finalize, _no_emit,
+                                   state=state, bind_state=state is not None,
+                                   transport_fallback=_transport_failed,
+                                   extra_tools=tools, extra_turns=self._REPAIR_LOOK_TURNS,
+                                   wall_when_unbounded=self._triage_time_budget_s,
+                                   on_budget=lambda payload: _cutoff.update(
+                                       payload if isinstance(payload, dict) else {}))
+        if _cutoff and isinstance(verdict, dict):
+            # Best-effort exactly like `_note_budget`'s own contract: this rides a rescued answer,
+            # so it may never turn one into a crash.
+            verdict[TRIAGE_BUDGET_CUTOFF_KEY] = {
+                "kind": str(_cutoff.get("kind") or "")[:32],
+                "turns": _cutoff.get("turns"),
+                "seconds": _cutoff.get("seconds"),
+                "detail": str(_cutoff.get("detail") or "")[:300],
+            }
+        return verdict
 
     # --------------------------------------------------- Repair critic (F8: the stop, not the fix)
     _REPAIR_CRITIC_SYSTEM = (

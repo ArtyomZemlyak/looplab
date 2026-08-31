@@ -237,7 +237,8 @@ def _resolved_carrier(workdir, pattern, *, since, confine=None):
 
 
 def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=None,
-                        since: Optional[float] = None, confine=None) -> Optional[dict]:
+                        since: Optional[float] = None, confine=None,
+                        pipeline_stages=()) -> Optional[dict]:
     """The `metric_provenance.applied_params` record for one eval, or `None`.
 
     `None` — not an empty record — when the node declares no comparable coordinate or no carrier
@@ -256,7 +257,14 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
          "declared": int,                      # declared coordinates that were comparable at all
          "applied": {key: float},              # what the carrier says each answered coordinate is
          "diverged": [{param, declared, applied, line, match}],
+         "stages": [str],                      # THE PIPELINE THESE COORDINATES ARE CLAIMED ABOUT
          "unresolved": {key: "absent" | "ambiguous" | "conflict"},
+                                               # A KEY MAY APPEAR IN BOTH `applied` AND HERE, since
+                                               # 2026-08-31, and only as `ambiguous`: one carrier
+                                               # answered the coordinate and ANOTHER was unreadably
+                                               # plural about it. `absent` and `conflict` stay
+                                               # mutually exclusive with `applied` — nothing was
+                                               # said, and two carriers disagreed, respectively.
                                                # `absent`/`ambiguous` are `param_carriers`' two words
                                                # for one document's answer; `conflict` is THIS
                                                # function's own third (UNRESOLVED_CONFLICT below) and
@@ -354,29 +362,40 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
     #
     # So a conflicted coordinate is NOT in `applied`; it rides in `conflicts` with EVERY reading and
     # the file each came from, and `unresolved` names it `conflict`. Surfaced, never settled.
-    # OPEN[applied-ambiguous-popped-by-python-settle] a document's `ambiguous` refusal is silently
-    # popped here when a `.py` carrier answers the same key.
-    # proof:line:where[key]&&(rel,@looplab/runtime/applied_params.py
-    # REVIEW 2026-08-25 (correctness): the document branch above is careful that an `ambiguous`
-    # refusal "OUTRANKS a later `absent`" — it is a fact about the DECLARATION — but the Python
-    # branch offers its reading without touching `unresolved`, and this pop then erases the marker
-    # whenever the `.py` side settles to one value. The record that results says K = 4096, clean,
-    # about a node whose own config document defines K at two or more leaves (possibly two OTHER
-    # numbers): a three-way disagreement rendered as a single answered coordinate, which is the
-    # settling this block's own heading forbids — the ambiguous document's readings never reach
-    # `readings`, so the conflict rule cannot see them either. Reachable on this corpus: the
-    # measured bare-suffix shapes (a `batch_size`-family declaration matching sibling `train.*` and
-    # `test.*` leaves) plus the same key assigned once in `train.py`, i.e. the 51-of-54
-    # both-families population. Fix direction: only pop an `absent` marker here — keep `ambiguous`
-    # beside the applied value (or demote the coordinate to `conflicts` with the document named as
-    # unreadably plural), then delete this marker.
+    # AN `ambiguous` REFUSAL SURVIVES A SETTLED READING, and only `absent` is popped. The document
+    # branch above is already careful that `ambiguous` "OUTRANKS a later `absent`" because it is a
+    # fact about the DECLARATION rather than about one file — and until 2026-08-31 this pop erased it
+    # anyway, whenever any other carrier settled the same key to one value. The `.py` branch is the
+    # reachable route: it offers its reading without touching `unresolved`.
+    #
+    # WHAT THAT RECORD SAID. `K = 4096`, clean, about a node whose own config document defines K at
+    # two or more leaves — possibly at two OTHER numbers — i.e. a three-way disagreement rendered as
+    # a single answered coordinate, which is exactly the settling this block's heading forbids. The
+    # ambiguous document's readings never reach `readings`, so the conflict rule cannot see them
+    # either; the marker was the only trace, and the pop removed it.
+    #
+    # KEPT BESIDE THE APPLIED VALUE, not demoted to `conflicts`, and the distinction is the point:
+    # `conflict` means two carriers each ANSWERED once and disagreed. An ambiguous document answered
+    # ZERO times. Reusing the word would make it mean two things, which is the coarse-vocabulary
+    # defect this file exists to end. A key may now appear in `applied` AND in `unresolved`, and that
+    # pair is the honest reading — one carrier answered, another was unreadably plural.
+    #
+    # NOT SEEN ON THIS CORPUS, and the number is NOT reconciled: re-deriving over all 61 preserved
+    # workdirs (743 declared coordinates) finds ZERO document-`ambiguous` answers, while
+    # `core/param_carriers.py`'s own recorded corpus figure is "5 refused as ambiguous" over 529
+    # comparable declarations. The two do not agree and this comment does not pretend they do — the
+    # re-derivation walks the whole workdir rather than the carriers the ENGINE staged, and it
+    # silently skips a document that fails to parse. So this ships on CONSTRUCTION: the pop is
+    # provably wrong for `ambiguous` by the document branch's own stated rule, and narrowing it
+    # cannot lose information the record already holds.
     for key, seen in readings.items():
         if len(seen) == 1:
             value = next(iter(seen))
             rel, line, how = seen[value]
             applied[key] = value
             where[key] = (rel, line, how)
-            unresolved.pop(key, None)
+            if unresolved.get(key) != param_carriers.UNRESOLVED_AMBIGUOUS:
+                unresolved.pop(key, None)
         else:
             unresolved[key] = UNRESOLVED_CONFLICT
             conflicts.append({"param": key, "declared": declared[key],
@@ -397,6 +416,40 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
                     "checked": len(applied),
                     "applied": dict(sorted(applied.items())),
                     "diverged": diverged}
+    # THE PIPELINE THESE COORDINATES ARE CLAIMED ABOUT (2026-08-29), because without it the record
+    # is unreadable in the one case where it is most confidently wrong.
+    #
+    # This function answers "what did the configuration say your declared coordinates were worth",
+    # and every reader — the champion caveat, the Metrics tab, the operator — takes the answer to
+    # mean the number was PRODUCED at those coordinates. That inference needs a pipeline that could
+    # have consumed them, and nothing on the record said what the pipeline was.
+    #
+    # MEASURED over every `events.jsonl` on this box: of the TWELVE `node_evaluated` rows carrying an
+    # `applied_params` record, FOUR ran no training stage at all — three `e5small-dr-unified-v4`
+    # merge nodes and one `e5small-dr-unified-v10` merge node, each a `merge` + `score` pipeline that
+    # averages two parents' weights and scores the average. Their declared params are `merge_idea`'s
+    # ARITHMETIC MEAN of the parents' declarations, and their workdir still carries the committed
+    # `config.yaml` the Developer wrote, so the rung dutifully compares the two and reports
+    # divergences on `batch_size`, `learning_rate` and `n_epochs`. NOT ONE of those coordinates
+    # governed anything: the node ran zero epochs at no batch size and no learning rate.
+    #
+    # AND IT REACHES A CHAMPION. `e5small-dr-unified-v4` node 13 — 0.793411, the second-best number
+    # on this box — is one of the four, and `champion_metric_caveats` raises `params_overridden` on
+    # it, citing `config.yaml:265`'s 2048 against a declared 4096 for a node that batched nothing.
+    # The caveat's CONCLUSION is arguably right for a merge node (an averaged model occupies no
+    # training coordinates at all) and its EVIDENCE is spurious, which is worse than either.
+    #
+    # THIS RECORDS AND DOES NOT DECIDE. It is a fact the engine already holds at the bind site and
+    # threw away, it mints nothing, gates nothing, and changes no caveat — whether
+    # `params_overridden` should fire for a pipeline that could not apply its coordinates is a
+    # SELECTION question and needs its own measurement. What it buys is that the question is now
+    # answerable FROM THE RECORD instead of by re-deriving `stage_finished` rows from the log, which
+    # is how the four above had to be found. Absent on every log written before today, and every
+    # reader defaults it to silence (invariant #5).
+    stage_names = [name for name in (
+        str(s).strip() for s in (pipeline_stages or ()) if s is not None) if name]
+    if stage_names:
+        record["stages"] = stage_names
     if conflicts:
         record["conflicts"] = sorted(conflicts, key=lambda row: row["param"])
     if unresolved:

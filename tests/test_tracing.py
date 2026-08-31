@@ -1570,8 +1570,15 @@ def test_a_non_numeric_provider_token_count_cannot_take_down_the_traced_call():
     assert _token_int(12.7) == 12 and _token_int(-5) == 0      # no negative token counts
     assert _norm_usage({"prompt_tokens": "n/a", "completion_tokens": 3}) == {
         "prompt": 0, "completion": 3, "total": 3}
+    # A JUNK TOTAL FALLS BACK TO THE PARTS, and this line asserted `total: 0` until 2026-08-30.
+    # The property this test is named for — a non-numeric count must not raise out of the tracer —
+    # is unchanged and still driven above. What the old expectation pinned was the DEFECT beside it:
+    # `_token_int("?")` is 0, so a span was written claiming the provider had stated a total of
+    # ZERO, and `events/token_spend.py::_tokens_of` honours a stated zero on purpose (a cache-served
+    # turn really does bill 0) — so 4 real tokens were reported as 0 against a ledger that records
+    # the sum. `_stated_total` now refuses a value it cannot read instead of coercing it.
     assert _norm_usage({"prompt": 2, "completion": 2, "total": "?"}) == {
-        "prompt": 2, "completion": 2, "total": 0}
+        "prompt": 2, "completion": 2, "total": 4}
 
 
 def test_a_pathologically_deep_span_chain_still_renders_a_tree(tmp_path):

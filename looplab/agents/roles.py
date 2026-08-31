@@ -1270,7 +1270,21 @@ class LLMResearcher:
                                         "story. Keep it to ~1-3 sentences. " + _IDEA_SPACE_PLAIN
                                         + (" The `hypothesis` is the one-line belief this experiment "
                                            "tests (reuse wording across experiments that test the same "
-                                           "belief)." if self.track_hypotheses else "")},
+                                           "belief)." if self.track_hypotheses else "")
+                                        # THE PROSE ASK, and the only untested lever left on this
+                                        # field. `open_questions` has been in the emitted schema
+                                        # since it landed — `IdeaEmission` derives from `Idea`, so
+                                        # its description reaches the model on every proposal — and
+                                        # across 155 `node_created` rows on this box NOT ONE was
+                                        # filled. Schema presence is not an ask: this repo already
+                                        # measured that prose outranks a computed cue, and the user
+                                        # turn enumerated params/rationale/space/hypothesis and
+                                        # never questions. Deliberately LAST and one sentence: it
+                                        # costs nothing to leave empty, and a Researcher that had to
+                                        # spend its proposal to record a question would record none.
+                                        + " Optionally list `open_questions`: broad questions you "
+                                          "noticed and are NOT pursuing here, each worth its own "
+                                          "investigation later — leave it empty if you have none."},
         ]
         # Small models occasionally emit unparseable output (the common case: a non-numeric `params`
         # value, which `Idea.params: dict[str, float]` rejects). Retry — but fold the parse error back

@@ -699,8 +699,38 @@ class Idea(BaseModel):
     # that had to spend its proposal to record a question would record none.
     #
     # OPEN[researcher-questions-not-appended] the CARRIER ships here and no engine path reads it yet,
-    # so a registered question rides `node_created` and becomes no board row.
+    # so a registered question would ride `node_created` and become no board row.
     # proof:absent:idea_registered_questions@looplab/engine/research_cadence.py
+    #
+    # RE-MEASURED 2026-08-30 AND THE 2026-08-29 PREMISE WAS WRONG. That note said "the Researcher is
+    # never ASKED for one", inferred from `open_questions` occurring ZERO times in `agents/roles.py`,
+    # `agents/unified_agent.py` and `search/panel.py`. Grepping those files is the wrong instrument:
+    # the ask travels through the MODEL, not through a literal. `IdeaEmission` derives from `Idea`
+    # and the producer emits `IdeaEmission.model_json_schema()`, so this field's own description has
+    # reached the model on every proposal since it landed — verified by dumping the schema.
+    #
+    # SO THE PRESCRIBED FIRST STEP ("ask in the emit schema, look at what comes back") WAS ALREADY
+    # DONE, AND THE ANSWER IS ZERO: over every `node_created` row on this box — 155, not the 12 that
+    # note counted — **0 carry a filled `open_questions`**. The carrier itself is sound end to end
+    # (`IdeaEmission.to_idea` -> `durable_idea_payload` -> `Idea(**payload)` all preserve it, driven
+    # in `tests/test_open_questions_ask.py`), so nothing is being dropped; the Researcher simply
+    # never volunteers one.
+    #
+    # WHAT CHANGED, and it is the only untested lever: the user turn now ASKS IN PROSE. This repo has
+    # already measured that prose outranks a schema-level cue, and that turn enumerated
+    # params/rationale/space/hypothesis and never questions. The append half stays open and stays
+    # gated on what comes back — a fresh run under this prompt is the measurement, and if it is zero
+    # again the honest close is `DECLINED` with that number, not a second question channel.
+    # `Idea.open_questions` still has no consumer outside this model and the memo path's own
+    # same-named field.
+    #
+    # THE PRIOR QUESTION IS THEREFORE WHETHER IT SHOULD BE WIRED AT ALL, not how. The deep-research
+    # channel already delivers questions end to end and was seen doing it on v10: 4 `open_questions`
+    # -> 4 `hypothesis_added` -> 4 `direction` cards, and 2 of them gained `experiment` children whose
+    # `parent_card_id` survived the fold. A second question channel earns its keep only if a
+    # Researcher mid-PROPOSAL has questions the deep-research pass does not, and nobody has measured
+    # that. Ask for it in the emit schema first, look at what comes back, and only then build the
+    # append — the reverse order ships another field nothing fills.
     #
     # WHY IT IS STAGED rather than inlined: `EV_HYPOTHESIS_ADDED` is FOLDED, so appending it from the
     # main task inside a reservation's window moves `speculation._proposal_authority_seq`'s max-seq
@@ -1429,9 +1459,11 @@ class Node(BaseModel):
     # build from any other failed node. It rides the terminal itself, so "first terminal wins" already
     # makes it order-tolerant — no second event has to be correlated with this one.
     never_evaluated: bool = Field(default=False, exclude=True)
-    # The two halves of the DURABLE eval-start boundary (events/types.py::EV_NODE_EVAL_STARTED).
-    # `eval_start_boundary` is stamped on `node_created` and says the writer of THIS node promises to
-    # append a `node_eval_started` row before any sandbox work — so for such a node the ABSENCE of one
+    # The durable promise/receipt plus its live-owner projection
+    # (events/types.py::EV_NODE_EVAL_STARTED).
+    # `eval_start_boundary` is stamped on every current engine-written `node_created` and says the
+    # writer of THIS node promises to append a `node_eval_started` row before any sandbox work — so
+    # for such a node the ABSENCE of one
     # is evidence, not an assumption. `eval_started` is that row, folded. Together they are what makes
     # "this build never ran" survive a crash: the log used to charge evaluation cost only at the
     # terminal, and `stage_finished` rows used to be appended inside the terminal's own write-lock block
@@ -1442,7 +1474,18 @@ class Node(BaseModel):
     # fold-internal (`exclude=True`) and reader-defaulted, so an old log folds byte-identically — and,
     # carrying no boundary promise, is refused a refund rather than granted one on no evidence.
     eval_start_boundary: bool = Field(default=False, exclude=True)
+    # Durable budget receipt: at least one sandbox admission happened in this lifecycle. It stays
+    # true across an engine crash/resume so already-spent compute can never be refunded as "unused".
     eval_started: bool = Field(default=False, exclude=True)
+    # Live-owner receipt: the CURRENT engine invocation admitted this lifecycle. A new owner clears
+    # it while preserving ``eval_started``; re-admission appends another generation-matched
+    # ``node_eval_started`` row and sets it again. This separation keeps the UI's "training now"
+    # claim from reusing a historical budget fact after a process crash.
+    eval_activity_started: bool = Field(default=False, exclude=True)
+    # Timestamp of the first generation-matched eval-start row for the CURRENT owner. Duplicates in
+    # one invocation do not refresh it; a genuine re-admission after resume does. Fold-internal like
+    # the receipts above and ``None`` when no usable event timestamp was recorded.
+    eval_started_at: Optional[float] = Field(default=None, exclude=True)
 
     @property
     def robust_metric(self) -> Optional[float]:

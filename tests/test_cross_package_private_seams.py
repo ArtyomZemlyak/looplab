@@ -79,6 +79,15 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         # private on purpose, and this registry is what turns a future rename into a red test
         # instead of a silent break.
         "looplab.events.finalize_scope": ("_adjacent_claim", "_finalize_begun", "_scope_has_step"),
+        # ADDED at the 2026-08-31 merge, and it is master's `6262f3a1` paying a debt it opened
+        # without declaring: `engine/card_reservation.py` imports `_drop_author` so the engine's
+        # retire idempotence replays the FOLD's own drop/reopen rule instead of re-inventing it —
+        # that function's docstring is explicit that there must be "ONE spelling, because three
+        # readers ask it and they must not drift", and the retire scan is now a fourth. Declared
+        # rather than promoted for exactly the reason the docstring above gives: the name is
+        # private because the ledger owns the rule, and this row is what makes a rename a red test
+        # instead of an engine that silently re-retires a card the operator reopened.
+        "looplab.events.card_ledger": ("_drop_author",),
         "looplab.runtime.command_eval": ("_LABEL_KEYS", "_PRED_KEYS", "_as_list"),
         "looplab.runtime.sandbox": ("_run_argv", "_to_float"),
         # `looplab.search.concept_graph._experiment_nodes` left this list on 2026-08-05: doc 25 SE-09

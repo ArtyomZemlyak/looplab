@@ -54,17 +54,20 @@ EV_NODE_BUILDING = "node_building"
 EV_NODE_CREATED = "node_created"
 # The DURABLE eval-START boundary for one exact node lifecycle, appended at the dispatch decision by
 # the MAIN task (`engine/speculation.py::_run_card_session`'s admission, with `_evaluate` as the
-# funnel backstop for recovery/direct callers) and only for the lifecycles whose budget slot can
-# later be REFUNDED (a speculative attempt-zero prefetch — see `search/card_selection.py`) — every
-# other run's log bytes are unchanged. It exists because the log
+# funnel backstop for recovery/direct callers). Every engine-created lifecycle promises this row so
+# the public read model can prove the difference between waiting for an evaluation slot and owning
+# the evaluator. The speculative attempt-zero subset additionally uses it to decide whether a budget
+# slot can be REFUNDED (see `search/card_selection.py`). It exists because the log
 # otherwise records evaluation cost only at the TERMINAL (`events/replay.py::_charge_terminal_cost`)
 # and stage rows are appended inside the terminal's own write-lock block: a process killed 40 minutes
 # into a training run therefore left a node byte-indistinguishable from one that was never dispatched,
 # and the resumed process — whose in-memory `eval_inflight` set is empty — refunded its slot. Presence
-# of this row is proof the sandbox was entered; ABSENCE is only evidence for a lifecycle whose
+# of this row is proof evaluation was admitted; ABSENCE is only evidence for a lifecycle whose
 # node_created carries `eval_start_boundary`, which is the writer's own promise that it would have
-# appended one. Data: {"node_id", "generation"}. Folded to `Node.eval_started`; a duplicate is a
-# no-op and a node_reset clears it with the rest of the abandoned lifecycle.
+# appended one. Data: {"node_id", "generation"}. Folded durably to `Node.eval_started` and, for the
+# current engine owner, to `Node.eval_activity_started`. Same-owner duplicates are no-ops; a strict
+# owner handoff clears only the live half so re-admission can append again, while node_reset clears
+# both with the abandoned lifecycle.
 EV_NODE_EVAL_STARTED = "node_eval_started"
 EV_NODE_EVALUATED = "node_evaluated"
 EV_NODE_FAILED = "node_failed"
@@ -237,6 +240,8 @@ EV_CONFIRM_DONE = "confirm_done"         # fulfillment gate for `force_confirm` 
 # and is about to drive the loop. The pair is a seq-gated fulfillment (like fork/inject): a request
 # whose seq is newer than the last serve is an UNFULFILLED (zombie) resume that the on-load reconciler
 # re-spawns — idempotent because a second engine no-ops on the lock. resume_served is engine-written.
+# A replacement CLI additionally stamps ``engine_owner_boundary: true``; a live loop can acknowledge
+# a redundant request without that marker, so only the strict form resets current eval activity.
 EV_RESUME_SERVED = "resume_served"
 
 # --- CONTROL events (live operator/UI intents appended to the same log; the engine reads

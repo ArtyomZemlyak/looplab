@@ -432,6 +432,23 @@ _REPO_DEV_REPAIR_BLOCK = (
     "--- eval error (stderr/stdout tail) ---\n")
 
 
+# THE FENCE IS INHERITED, NEVER RE-DECLARED — spliced into every Developer prompt by
+# `_gpu_devices_note`, with or without a declared footprint. See that method's docstring for the
+# `e5small-dr-unified-v11` node 3 measurement this sentence exists for.
+_FENCE_INHERITANCE_NOTE = (
+    "\n\nYOUR GPU FENCE ARRIVES IN THE ENVIRONMENT AND YOU MUST INHERIT IT, NEVER SET IT. The "
+    "engine pins this node's devices by setting `CUDA_VISIBLE_DEVICES` before your stages run, and "
+    "a child process that assigns that variable itself REPLACES the fence instead of composing "
+    "with it: the ordinals it names are then PHYSICAL, so the child can land on a device another "
+    "experiment is already training on. That failure is silent — it looks like an out-of-memory in "
+    "YOUR run, caused by a process you did not start — and it destroys the sibling's work as well "
+    "as your own. To fan out across the devices you were given, let every child INHERIT the "
+    "environment and index logically from 0 (`cuda:0`, `cuda:1`, … up to the count you were "
+    "granted); never write `CUDA_VISIBLE_DEVICES` into a subprocess env, and never assume a device "
+    "ordinal you did not derive from `torch.cuda.device_count()`."
+)
+
+
 def plan_step_attribution(steps, observed, shipped) -> dict:
     """Reconcile the PLAN against the ARTEFACT and return the record of the difference.
 
@@ -1428,6 +1445,39 @@ class LLMRepoDeveloper:
         DECLARED footprint, not the grant — the grant clamps it to the detected pool and applies any
         operator resource pin.
         decided:`line:def _resource_request_for_node&&resource_pin@looplab/engine/resources.py`
+
+        THE SECOND FAILURE MODE, added 2026-08-30, and it is the one everything above could not have
+        prevented. That text is about asking for MORE devices than the fence holds, which fails
+        loudly (`invalid device ordinal`) on the node's own process. The other way out of the fence
+        is to OVERWRITE it, and that fails SILENTLY on somebody else's node.
+
+        Measured on the live `e5small-dr-unified-v11`, node 3. It declared NO footprint, and at the
+        settled `eval_parallel` 2 (`strategy_decision at_node=3`) the undeclared branch of
+        `_resource_request_for_node` grants exactly ONE device and pins it, so
+        `CUDA_VISIBLE_DEVICES` was fenced. Its own `run_train.py` then spawned two seed sub-runs
+        with `env["CUDA_VISIBLE_DEVICES"] = "0"` and `"1"` — ABSOLUTE physical ordinals that REPLACE
+        the inherited fence rather than composing with it — while its own comment asserted the
+        opposite ("the mining encoder hardcodes cuda:0, which maps to the fenced device inside each
+        subprocess"), which is true only for an INHERITED fence. Three attempts, three
+        `torch.OutOfMemoryError`s, each naming two processes resident on GPU 0: 113.44 + 19.85 GiB,
+        113.45 + 19.85 GiB, then 57.23 + 81.98 GiB. A 113 GiB process is a full SIBLING training
+        (node 2, then node 4, ran across the same window), not node 3's own. The stage ended
+        `timeout` exit -9 at 5,079 s and the node terminalised `not_learning` 40 minutes later.
+
+        THE RULE ALREADY EXISTS AND COVERS THE WRONG CHANNEL. `core/envsafe.py::ENGINE_OWNED_ENV`
+        refuses a DECLARED `CUDA_VISIBLE_DEVICES` at all three declarer levels, and its own comment
+        gives exactly this reason — "a declared one would hand a node its siblings' devices while
+        the host pool lease still says otherwise". What the operator may DECLARE is fenced; what the
+        agent's own code ASSIGNS at runtime is not, and cannot be by any rung inside the
+        interpreter: a process cannot stop its own children from setting an environment variable.
+        So the rung is a SENTENCE, matching `75332e97`'s inform-not-refuse precedent above.
+
+        `_FENCE_INHERITANCE_NOTE` IS SPLICED UNCONDITIONALLY, unlike the count sentence below,
+        because it carries NO NUMBER: "inherit the fence, never set it" is true at one device, at
+        four, and — the case that matters — when the footprint declares nothing at all, which is
+        exactly the state the count sentence stays silent for and exactly the state node 3 was in.
+        Stating it only for a declared footprint would leave the measured incident uncovered by the
+        note written for it.
         """
         gpus = None
         try:
@@ -1442,8 +1492,9 @@ class LLMRepoDeveloper:
         except Exception:  # noqa: BLE001 — a bare/unit-test dev carrying no idea states no footprint
             return ""
         if gpus is None:
-            return ""
-        return (f"\n\nTHIS NODE IS DECLARED {gpus} GPU{'' if gpus == 1 else 's'} AND WILL GET AT MOST "
+            return _FENCE_INHERITANCE_NOTE
+        return _FENCE_INHERITANCE_NOTE + (
+                f"\n\nTHIS NODE IS DECLARED {gpus} GPU{'' if gpus == 1 else 's'} AND WILL GET AT MOST "
                 f"THAT MANY. `CUDA_VISIBLE_DEVICES` is fenced to the granted "
                 f"{'device' if gpus == 1 else 'devices'} before your stages run, so a launcher that "
                 "starts more processes than that dies on the first one that asks for a device "
@@ -2151,6 +2202,14 @@ class LLMRepoDeveloper:
                           self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
                           finalize=_finish, validate=_validate_repair,
+                          # THE ONE CALLER THAT OPTS IN. On an exit with no turn left, bouncing this
+                          # summary only drops it and falls to the `lambda m: ""` below — which
+                          # discards `rollback_stage` and leaves `repair_verdict` empty, so
+                          # `is_developer_stuck` can never fire. Accepting an unverified summary is
+                          # strictly better, and the durable `inert`/`unmet` verdicts grade it on
+                          # BYTES downstream. No other caller may have this: the stages session's
+                          # `validate` is the operator's wall budget and manifest-collision fence.
+                          terminal_salvage=True,
                           fallback=lambda m: "", on_budget=self._note_session_budget,
                       **self._session_opts())
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup

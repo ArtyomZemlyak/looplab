@@ -179,7 +179,20 @@ FIVE are shapes left deliberately unpatched. Three of those five are the crash-c
 above. `rubertlite-dr-unified-v6` node 1 attempt 1 is the fourth, a NEGATED claim — "drop those
 unsupported args" — satisfied by deleting the `"%params%"` placeholder that passed them, so the args
 it named appear nowhere in the diff precisely BECAUSE the promise was kept; a rule for that would
-have to understand the indirection, not the text. The fifth is `sim-nosignal` node 5, which names
+have to understand the indirection, not the text.
+HOW OFTEN THAT UNDERLYING COLLISION ACTUALLY FIRES, measured 2026-08-29 so the next reader does not
+have to: over all 139 `node_repaired` rows preserved on this box, **32 carry a `reason_summary`**
+(the field only exists since 2026-08-21, so the other 107 predate it and cannot be classified) and
+**TWO of those 32 are the params-substitution shape** — `e5small-dr-unified-v11` node 0 and
+`e5small-dr-unified-v8` node 4. Both are ATTEMPT 1, both died in argparse before training started,
+and both cost SEVEN SECONDS of stage time (6.561 s and 7.136 s); the inline repair caught each one.
+So the collision is real, recurs across runs and prompt generations, and is NOISE the repair loop
+absorbs — about 14 seconds across the whole corpus. An ENGINE rule validating that substituted
+params match the target's accepted flags is DECLINED on that number: it would put the engine in the
+business of parsing a candidate's own CLI, which docs/36 keeps it out of, to save an amount of time
+the loop already recovers. The measurement is stated here rather than in the Developer prompt that
+documents `%params%` (`adapters/repo_developer.py`), because prompt strings are contracts and this
+is a fact about outcomes, not an instruction. The fifth is `sim-nosignal` node 5, which names
 `IndentationError`, an exception class read as a claim — the `_NOT_A_CLAIM` frontier, not a new
 mechanism. Four of the seven genuine ones are also arguable — `rubertlite-dense-retrieval` node 11's family names the
 BROKEN component ("the bug is in NegLogLikelihoodCos_S") and then edits a different file, which is a

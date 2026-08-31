@@ -502,13 +502,51 @@ def _token_int(value) -> int:
         return 0
 
 
+def _stated_total(t) -> "int | None":
+    """The provider's OWN total when it stated a usable one, else None. PRESENCE, not truthiness.
+
+    THE `or` CHAIN THIS REPLACES WAS WRONG IN BOTH DIRECTIONS, and `events/token_spend.py::_tokens_of`
+    is the reader that made it visible: that function deliberately preserves a stated ZERO, because a
+    fully cache-served turn legitimately bills 0 against a 12,000-token prompt and re-deriving the
+    sum would overwrite the billed number. Under the old chain that case was UNWRITABLE — a stated 0
+    is falsy, so it fell through to `p + c` before any span existed — while a JUNK or negative total
+    ("n/a", -1) is TRUTHY and `_token_int` maps it to 0, so the one zero the reader could ever see
+    was manufactured. It then honoured that zero and dropped prompt+completion from `attributed`,
+    under-reporting the call against a ledger whose own `_normalize_usage` records the sum.
+
+    NEVER REACHED ON THIS BOX: scanned 2026-08-30 across every `spans.jsonl` in `runs/` — 1.9 GB over
+    12 runs — and ZERO spans carry a total of 0. So this is a latent write-side defect fixed on the
+    reader's terms, not a repair of numbers already recorded; every existing span normalizes
+    identically.
+
+    The rule matches `_tokens_of`'s own `_states_zero`: a real, non-negative number is a figure
+    (including 0); absent, boolean, negative, NaN, inf or unparseable is NOT a figure and the caller
+    falls back to the sum. It cannot import that function — `core` may not import `events` — so the
+    agreement is stated here and driven from both sides in `tests/test_stated_token_total.py`.
+    """
+    for key in ("total_tokens", "total"):
+        if key not in t:
+            continue
+        raw = t[key]
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            continue                      # "n/a", NaN, inf — not a figure
+        if value >= 0:
+            return value
+    return None
+
+
 def _norm_usage(tokens) -> dict:
     """Accept either OpenAI usage ({prompt_tokens,…}) or our short form ({prompt,…})."""
     t = tokens or {}
     p = _token_int(t.get("prompt_tokens") or t.get("prompt"))
     c = _token_int(t.get("completion_tokens") or t.get("completion"))
+    stated = _stated_total(t)
     return {"prompt": p, "completion": c,
-            "total": _token_int(t.get("total_tokens") or t.get("total") or (p + c))}
+            "total": stated if stated is not None else (p + c)}
 
 
 def _redacted_error(value) -> str:

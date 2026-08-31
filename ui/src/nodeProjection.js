@@ -90,6 +90,25 @@ export function runConstantConcepts(state = null, canonicalize = ids => ids) {
   return constant || new Set()
 }
 
+// The chip ORDER that split buys, hoisted out of the DAG card so the rule can be STATED and driven.
+// It lived inline in `ExpNode` as two spread filters, guarded by a source pin over that exact
+// expression — a pin one comment away from vacuous, and one that goes red for a MOVE rather than for a
+// behaviour change. What it must guarantee is that pin's own sentence: the reorder is a REORDER, so
+// every id the card was given survives it, run-wide ones last. `ownCount` rides along because it is
+// the same split counted the other way, and two derivations of one split in two places is how they
+// come to disagree — the note under the strip reads `length - ownCount` as "carried by every
+// experiment", which is a sentence about the operator's own tags being outnumbered.
+//
+// An empty (or absent) constant set is the fail-closed answer of `runConstantConcepts` and means NO
+// CLAIM: the order is left exactly as it arrived and every tag is the node's own.
+export function orderConceptTags(tags = [], runConstant = null) {
+  const all = Array.isArray(tags) ? tags : []
+  const constant = runConstant instanceof Set ? runConstant : new Set(runConstant || [])
+  if (!constant.size) return { tags: all, ownCount: all.length }
+  const own = all.filter(c => !constant.has(c))
+  return { tags: [...own, ...all.filter(c => constant.has(c))], ownCount: own.length }
+}
+
 // A retained concept row is authoritative only when replay emitted no
 // materialization receipt for it. The trust boundary is receipt presence (never the reason text);
 // malformed envelopes fail unavailable while future partial reasons remain safely display-only.

@@ -265,6 +265,12 @@ export function objectiveMetricSource(node) {
       // from the rows rather than from `feasible` is what stops a node excluded for a DIFFERENT
       // reason from being told it competes for champion.
       admitted: violations.length === 0,
+      // DID THE SALVAGE RUNG ITSELF EXCLUDE THIS NODE? Only a salvage-PROPER row proves that. When
+      // the salvage is known from `metric_provenance` ALONE, `metric_salvage` is already `select`
+      // — that rung is precisely the one that mints no row — so any exclusion this node carries
+      // belongs to a DIFFERENT violation, and the tooltip must not prescribe a setting that is
+      // already applied. See `objectiveSourceHelp`.
+      salvageRow: properRows.length > 0,
     }
   }
   if (unboundRows.length) {
@@ -293,23 +299,26 @@ export function objectiveMetricSource(node) {
 export function objectiveSourceHelp(source) {
   const base = OBJECTIVE_SOURCE_HELP[source?.channel] || OBJECTIVE_SOURCE_HELP[OBJECTIVE_MEASURED]
   if (source?.channel === OBJECTIVE_SALVAGED) {
-    // OPEN[salvage-sentence-overclaims-exclusion] the real exclusion goes unnamed.
-    // proof:present:(correctness):@ui/src/trustSemantics.js
-    // REVIEW 2026-08-18 (correctness): `admitted` is `violations.length === 0`, i.e. "SOME row
-    // exists", not "the salvage rung excluded it" — and the non-admitted sentence below attributes
-    // the exclusion to the salvage rung regardless. A node salvaged-and-ADMITTED under
-    // `metric_salvage: "select"` (which mints no salvage row; the salvage branch is entered via
-    // `metric_provenance` alone) that carries any OTHER violation — e.g. a breached constraint
-    // bound, a state `nodeFeasibilityStatus` above handles explicitly — reads "It is excluded …
-    // until metric_salvage is set to “select”": a prescription already applied, while the real
-    // exclusion (the bound) goes unnamed. Fix direction: reserve this sentence for the case where a
-    // salvage-PROPER row exists; when the salvage came from provenance alone, say the exclusion is
-    // for a different recorded violation.
+    // THREE STATES, NOT TWO (fixed 2026-08-29). `admitted` is `violations.length === 0` — "the
+    // record minted NO row" — which is the right derivation and was carrying a claim it cannot
+    // support: the not-admitted branch attributed the exclusion to the salvage rung whatever the
+    // row actually was. A node salvaged-and-ADMITTED under `metric_salvage: "select"` (which mints
+    // no salvage row, so the branch above is entered through `metric_provenance` alone) that also
+    // carries some OTHER violation — a breached constraint bound, say — read "It is excluded from
+    // winner selection until metric_salvage is set to `select`": a prescription ALREADY APPLIED,
+    // while the real exclusion went unnamed and the operator was sent to change a setting that
+    // would do nothing.
+    // `salvageRow` is what tells the two apart, and it is the only thing that can: a salvage-proper
+    // row is the salvage rung's own exclusion receipt, and its absence beside a live `provenance`
+    // means the rung already let this node through.
     return base
       + `${source.stage ? ` after stage “${source.stage}” failed its contract` : ''}`
       + (source.admitted
         ? '. metric_salvage is set to “select”, so it competes for champion like a measured result.'
-        : '. It is excluded from winner selection until metric_salvage is set to “select”.')
+        : source.salvageRow
+          ? '. It is excluded from winner selection until metric_salvage is set to “select”.'
+          : '. metric_salvage already admits it — this node is excluded from winner selection for a'
+            + ' DIFFERENT recorded violation, which the Trust tab names.')
   }
   if (source?.channel === OBJECTIVE_SUBJECT_UNBOUND) {
     return base + unboundBecause(source.unboundReason)

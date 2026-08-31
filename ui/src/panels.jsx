@@ -2,7 +2,8 @@ import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } f
 import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
   operatorMeta, runApiPath, runNodeApiPath, createIdempotencyKey,
   getAuthoringOperation, putAuthoringOperation, validAuthoringName, validAuthoringTargetRootId,
-  getRunArtifactContent, getRunArtifactInventory, submitCommand,
+  getRunArtifactContent, getRunArtifactInventory, submitCommand, nodeActivityView,
+  partitionNodeWork,
 } from './util.js'
 import { usePoll, useScopedResource } from './hooks.js'
 import {
@@ -667,9 +668,8 @@ export function FailuresPanel({ state, onClose, onSelect }) {
 // the operator can see what's coming. Order is policy-driven (the engine picks next), so this is
 // "see + cancel + add", not manual reordering (which no engine event supports).
 export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
-  const nodes = Object.values(state.nodes || {})
-  const pending = nodes.filter(n => n.status === 'pending').sort((a, b) => a.id - b.id)
-  const working = nodes.filter(n => n.status === 'running')   // (if the fold ever exposes it)
+  const work = partitionNodeWork(state)
+  const workNodes = [...work.building, ...work.evaluating, ...work.queued, ...work.unknown]
   const injects = (state.inject_requests || []).slice(state.injects_done || 0)
   const forks = (state.fork_requests || []).slice(state.forks_done || 0)
   const { confirms: confirmReq, ablates: ablateReq } = queuedGenerationControls(state)
@@ -679,7 +679,7 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
       executing: `Cancellation of #${id} requested — waiting for the run`, failure: `Could not cancel #${id}`,
     }, onToast)
   }
-  const queuedCount = pending.length + injects.length + forks.length + confirmReq.length + ablateReq.length
+  const queuedCount = workNodes.length + injects.length + forks.length + confirmReq.length + ablateReq.length
   return (
     <Panel title="Queue" sub={`${queuedCount} planned / in-flight`} onClose={onClose}>
       <div className="muted" style={{ marginBottom: 10 }}>
@@ -690,19 +690,26 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
         pending experiment, or add one from a node’s “Explore from here” / “Merge with…” menu on the
         graph.
       </div>
-      <div className="section-h">Pending experiments {pending.length > 0 && <span className="pill">{pending.length}</span>}</div>
-      {pending.length
-        ? <DataTable caption="Pending experiment queue" card={false}><table className="tbl"><thead><tr><th>node</th><th>op</th><th>parents</th><th>hypothesis / rationale</th><th>action</th></tr></thead><tbody>
-          {pending.map(n => <tr key={n.id}>
+      <div className="cardgrid" style={{ marginBottom: 12 }}>
+        <Stat n={work.building.length} l="building" />
+        <Stat n={work.evaluating.length} l="training / evaluating" />
+        <Stat n={work.queued.length} l="waiting for a slot" />
+        {work.unknown.length > 0 && <Stat n={work.unknown.length} l="start unknown" />}
+      </div>
+      <div className="section-h">Node execution {workNodes.length > 0 && <span className="pill">{workNodes.length}</span>}</div>
+      {workNodes.length
+        ? <DataTable caption="Node build and evaluation queue" card={false}><table className="tbl"><thead><tr><th>node</th><th>activity</th><th>op</th><th>parents</th><th>hypothesis / rationale</th><th>action</th></tr></thead><tbody>
+          {workNodes.map(n => { const activity = nodeActivityView(n, state); return <tr key={n.id}>
             <td><button className="btn xs ghost" onClick={() => { onSelect && onSelect(n.id); onClose() }}>#{n.id}</button></td>
+            <td><span className={`activity-chip ${activity.tone}`} title={activity.label}>{activity.label}</span></td>
             <td><span className="op-icon"><OpIcon name={operatorMeta(n.operator).icon} size={12} /></span> {n.operator}</td>
             <td className="muted">{(n.parent_ids || []).map(p => '#' + p).join(', ') || '—'}</td>
             <td className="muted">{stripMd(n.idea?.hypothesis || n.idea?.rationale || '').slice(0, 70)}</td>
-            <td><button className="btn xs ghost" aria-label={`Cancel experiment ${n.id}`}
-              title="cancel this experiment (node_abort)" onClick={() => cancel(n.id)}><OpIcon name="cross" size={11} /></button></td>
-          </tr>)}
+            <td>{n.status === 'pending' ? <button className="btn xs ghost" aria-label={`Cancel experiment ${n.id}`}
+              title="cancel this experiment (node_abort)" onClick={() => cancel(n.id)}><OpIcon name="cross" size={11} /></button> : '—'}</td>
+          </tr> })}
         </tbody></table></DataTable>
-        : <div className="muted">No experiment is queued right now — the loop is idle or between picks.</div>}
+        : <div className="muted">No node is building, evaluating, or waiting for a slot right now.</div>}
       {(injects.length + forks.length + confirmReq.length + ablateReq.length) > 0 && <>
         <div className="section-h">Queued control requests</div>
         <div className="chips">

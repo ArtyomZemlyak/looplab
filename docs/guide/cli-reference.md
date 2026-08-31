@@ -825,12 +825,38 @@ the skipped builds are priced from the durable log's own `card_build_requested` 
 `card_build_done` windows (`events/token_spend.py::token_spend_by_build`), charging a generation to
 a window only when its card matches *and* its start lies inside it.
 
+**One of those four refusals no longer fires at all when a producer is still running (2026-08-29),
+and the asymmetry is the point.** `_serve_card_builds` closes a head `stale` on four conditions.
+Three are facts about the WORLD — the search epoch rotated, the run is stopping, the eval budget is
+gone — so a build made for the old world is worth nothing and discarding it is right. The fourth,
+`commit_not_allowed`, is `CardSession.open_for_production`, whose own docstring says it answers
+*"may this turn still START PRODUCER work"* and justifies itself with "a producer started after a
+terminal would hold the session open for the whole of its paid provider call". That argument is
+false about a producer already running: committing one starts nothing, makes no provider call, and
+holds the session open for no latency at all.
+
+Measured on `e5small-dr-unified-v10`, the first run whose `skipped_reason` could name it — node 2's
+terminal set `boundary_owed` at 10:25:29, card-4's head closed as `commit_not_allowed`, and the
+producer went on running and **closed its span at 10:27:59**: 38.4 minutes, 248 provider calls,
+**12,112,124 tokens, 3.2 % of the whole run**, finishing one second before `card_build_requested`
+asked for the identical card again at 10:28:00. All four of that run's committed builds closed their
+span at or before their `card_build_done`; card-4 is the only one closed out from under a live
+producer. The head is now left open while `_spec_build_inflight` owns it — the same rule the two
+crash-recovery closes twenty lines below already follow ("Never strand a live producer") — and the
+next turn commits the finished build against a fresh authority snapshot. Finalization cannot wedge
+on it: `_terminal_intent` is tested first and wins the reason ladder, so a stopping run still closes
+the head as `run_is_stopping` with a producer live.
+
 **How a card is attributed.** A generation span carries no `card_id` — the `card_build` span above it
 does — so each generation is charged to the nearest ancestor that names one (4,478 of that run's
-4,511 build generations, 97 % of its generation tokens). Everything else lands in `(no card)`, which
-is where every `propose` generation belongs by construction: a proposal is made before the card it
-may become exists. The section is suppressed entirely on a run where no card resolves, i.e. every
-serial-path run.
+4,511 build generations, 97 % of its generation tokens). A `propose` generation resolves to a card
+too, and not to `(no card)`: `stamp_proposal_span` puts the card id on the open `propose` span the
+moment the card is minted, and spans are written on close. So **a card's row prices the whole
+experiment — the proposal that minted it and the build that followed** — which is why it can exceed
+the phase table's plan+stages+card_build for that card. Measured on `rubertlite-dr-unified-v9`, all
+27,436,262 propose tokens land under a real card and the propose share of a card's row runs
+18.2 %-62.0 %. `(no card)` holds what genuinely resolves to none. The section is suppressed entirely
+on a run where no card resolves, i.e. every serial-path run.
 
 **Why the phase is not simply stamped on `llm_usage` instead.** That was the obvious fix and it is
 the wrong one: `engine/costs.py` appends the row from an outbox drain and a reconcile retry loop as
@@ -876,6 +902,36 @@ recorded for it. `elapsed_s` deliberately *includes* the idle gap of a stopped r
 of how long the run took, and `timings` names the untraced share of it.
 
 ---
+
+**Was the run STARVED?** Since 2026-08-29 the command closes with an eval-occupancy block folded
+from `events.jsonl` — not from spans, so it answers on a run whose trace was cleared or never
+written:
+
+```
+eval occupancy (from events.jsonl, not spans):
+  bootstrap    89.7 min  before the first evaluation could start — not starvation
+  dead          0.0 min  (0% of the 202.3 min since) with NO evaluation running
+  concurrent evaluations — 0: 89.7 min, 1: 144.5 min, 2: 57.8 min
+  2 evaluation(s) still open at the last event — counted busy to there
+```
+
+**The bootstrap is separated and that is the whole point.** No run can evaluate before its first
+build finishes, so that stretch is not a starved lane — and folding it into one percentage is how
+the same question got two wrong answers on this box before this block existed. `dead` is a share of
+the span **since the first evaluation began**, never of the whole run.
+
+Measured across the two runs here, same engine and the same `eval_parallel: 2`:
+
+| run | bootstrap | span after it | dead | windows |
+|---|---|---|---|---|
+| `e5small-dr-unified-v9` | 1.09 h | 23.66 h | **6.61 h (28%)** | 1.41 h, then 5.20 h |
+| `e5small-dr-unified-v10` | 1.50 h | 2.82 h | 0.00 h (0%) | — |
+
+Opposite outcomes that a single all-run percentage could not tell apart. The **windows are named**
+rather than only totalled, because `12.28h → 13.69h` is what makes a starvation window findable — a
+total only says one happened. Overlapping evaluations merge into one busy stretch, so a two-lane run
+cannot report the same idle time twice, and an evaluation still open at the last event is counted
+busy to there: true of a live run, and the most a killed one can prove.
 
 ## `parser-stats`
 

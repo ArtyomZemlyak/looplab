@@ -113,7 +113,16 @@ def test_the_verdict_tier_is_untouched():
 # `rollback_stage` the emit carried.
 
 def _loop(monkeypatch, *, forced_summary, exit_kind, validate):
-    """Drive the REAL `drive_tool_loop` to one of its forced-emit exits."""
+    """Drive the REAL `drive_tool_loop` to one of its forced-emit exits.
+
+    `terminal_salvage=True` since 2026-08-31, and it is the whole point of this harness rather than
+    a knob to make a red test green. The blanket `and may_retry` this file was written against
+    became a CALLER's policy on master (`08525b97`), defaulting FALSE so the stages session keeps
+    the operator's wall-budget and manifest fences on every exit — and `repo_developer`'s repair
+    session, the one caller that opts in, is exactly what this harness stands in for. Driving it
+    without the flag would be driving the STAGES caller and asserting the repair caller's contract
+    about it.
+    """
     from looplab.agents import tool_loop
 
     monkeypatch.setattr(tool_loop, "_force_emit",
@@ -131,7 +140,7 @@ def _loop(monkeypatch, *, forced_summary, exit_kind, validate):
         _Client(), None, [{"role": "user", "content": "go"}], spec,
         max_turns=(1 if exit_kind == "exhausted" else 4),
         finalize=lambda a: (a or {}).get("summary", ""),
-        fallback=lambda m: "", validate=validate)
+        fallback=lambda m: "", validate=validate, terminal_salvage=True)
     return out, seen
 
 

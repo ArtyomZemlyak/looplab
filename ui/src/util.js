@@ -6,6 +6,9 @@
 export * from './api.js'
 export * from './format.js'
 export * from './layout.js'
+export * from './nodeActivity.js'
+
+import { nodeActivityStatus, workingNodeIds, NODE_ACTIVITY } from './nodeActivity.js'
 
 // Browser storage is optional infrastructure, not a render prerequisite. SecurityError is common in
 // locked-down/private contexts; every preference read/write therefore degrades to an in-memory
@@ -32,24 +35,21 @@ export const ASSISTANT_MODES = [
 // string — one reader so both assistant surfaces decode identically.
 export const tokText = (tok) => (tok && tok.text != null) ? tok.text : (typeof tok === 'string' ? tok : '')
 
-// Is this node the one currently being evaluated? (pending + the highest-id pending, and the run
-// isn't paused/finished) — a good-enough "working" heuristic for the live pulse.
+// The primary live node retained for compatibility with one-subject consumers (auto-collapse).
+// Visual surfaces use `workingNodeIds` directly so parallel builds/evaluations all remain visible.
 export function workingId(state) {
-  // A stalled run (engine_running===false, not finished) has no live work — no "working" pulse on a
-  // node whose dev session already died.
-  if (!state || state.finished || state.paused || state.phase === 'finalizing' || state.stop_requested || state.engine_running === false) return null
-  // A node mid-BUILD (dev session running) is the true "working" node — it precedes any pending eval.
-  if (state.building && state.building.node_id != null) return state.building.node_id
-  const pend = Object.values(state.nodes || {}).filter(n => n.status === 'pending')
-  if (!pend.length) return null
-  return Math.max(...pend.map(n => n.id))
+  const ids = workingNodeIds(state)
+  if (!ids.size) return null
+  const building = [...ids].filter(id => nodeActivityStatus(state?.nodes?.[id], state) === NODE_ACTIVITY.BUILDING)
+  return Math.max(...(building.length ? building : [...ids]))
 }
 
-export function nodeClass(node, state, workId) {
+export function nodeClass(node, state, workIds) {
   const cls = ['node-card', `s-${node.status}`]
   if (node.id === state.best_node_id) cls.push('best')
   if (node.feasible === false) cls.push('infeasible')
-  if (node.id === workId) cls.push('working')
+  const working = workIds instanceof Set ? workIds.has(Number(node.id)) : node.id === workIds
+  if (working) cls.push('working')
   return cls.join(' ')
 }
 

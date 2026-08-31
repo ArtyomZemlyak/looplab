@@ -37,6 +37,7 @@ from looplab.serve.deletion_transaction import (
 from looplab.serve.engine_proc import _engine_liveness
 from looplab.serve.jobs import JobRegistry
 from looplab.serve.llm_context import global_settings, llm_settings
+from looplab.serve.node_activity import public_node_activity
 from looplab.serve.projects import ProjectStore
 from looplab.serve.protocol import (
     PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED,
@@ -399,7 +400,16 @@ class AppState:
             }
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
         from looplab.core.redact import redact_secrets
-        for n in d.get("nodes", {}).values():
+        for node_id, n in d.get("nodes", {}).items():
+            # ``pending`` is not an execution phase. Publish the generation-scoped build/admission
+            # evidence the fold already holds so every browser surface can distinguish building,
+            # evaluating, and waiting without scanning a bounded timeline or guessing by node id.
+            try:
+                n["activity"] = public_node_activity(st, int(node_id))
+            except (TypeError, ValueError, OverflowError):
+                # Pydantic's JSON dump produces integer/string integer keys, but keep this light
+                # public projection robust to a hand-built RunState with an exotic mapping key.
+                pass
             n.pop("code", None)
             n.pop("files", None)
             # SECURITY (arch-review §4 P1-3): /state is a LIGHT projection served WITHOUT the UI token,

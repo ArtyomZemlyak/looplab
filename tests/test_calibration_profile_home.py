@@ -93,7 +93,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
-_EXPECTED_DIGEST = "sha256:e4d60d6c712b4e9a7fae7d501f922e927f90735b49789a53fd527616ebc8f143"
+_EXPECTED_DIGEST = "sha256:0bf504d16e279cea185408d77ebe093fecadfecfab73dfdcbd44357fd3c5e33e"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -410,7 +410,17 @@ _EXPECTED_DIGEST = "sha256:e4d60d6c712b4e9a7fae7d501f922e927f90735b49789a53fd527
 #               branch (`llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`,
 #               `developer_step_feedback_command`, `developer_stage_guidance`), so 220 + 5 = 225.
 #               Old receipts SHOULD stop verifying: the merged envelope is neither parent's.
-_EXPECTED_FIELD_COUNT = 219
+#   2026-08-31  MERGE with master (219 -> 220 profile rows, 222 -> 223 Settings). The "field set
+#               changed too" branch again, and verified the prescribed way rather than by adding
+#               the integers: an AST scan of `Settings` against BOTH parents reports nothing lost
+#               from either and nothing invented -- exactly one field carried in from master
+#               (`single_command_divergence_watch`, the deterministic divergence watchdog over a
+#               single-command eval) and this branch's five unchanged. It is a non-variant field,
+#               so it joins the profile. Both pins are RECOMPUTED from the merged module, because
+#               neither parent's digest describes it. Old receipts SHOULD stop verifying: whether
+#               a single-command eval is health-checked at all is part of the envelope a
+#               speculation receipt was measured in.
+_EXPECTED_FIELD_COUNT = 220
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

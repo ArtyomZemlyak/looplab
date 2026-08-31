@@ -2582,7 +2582,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned
                 # 1:1 with _ideas), so each build emits ITS OWN
                 # hypothesis_ranked/foresight_selected.
-                _ideas, _telem, _dropped_batch = self._consume_batch_proposal(
+                _ideas, _telem, _dropped_batch = await self._await_batch_proposal(
                     state, len(_chunk))
                 if not _ideas:
                     self._record_dropped_batch_cards(_dropped_batch)
@@ -2613,6 +2613,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # `retry_attach` stays off (default): these Ideas came from the shared batch
                     # proposal and never crossed `_prepare_node_idea._link`, so no earlier pass
                     # planned an attach for this pass to agree with.
+                    #
+                    # OPEN[chunk-scored-against-stale-across-offload] `state` here was folded BEFORE
+                    # the minutes-long awaited batch propose above, and `_reserve_node_build`'s plan
+                    # re-folds everything else fresh but records this anchor VERBATIM into the
+                    # immutable Card receipt — so a best-improving terminal landing mid-propose
+                    # (impossible pre-offload: the loop was frozen) mints a durable receipt scored
+                    # against a superseded node, silently. The card lane REFUSES on exactly this
+                    # drift (`_stage_prepared_card`'s best fence); this lane records it.
+                    # proof:`line:_a, _idea,&&scored_against=state.best_node_id@looplab/engine/orchestrator.py`
+                    # REVIEW 2026-08-30 (P2 record integrity): either re-fold for the anchor at
+                    # reservation time, or record both anchors (proposed-against vs committed-at) —
+                    # the receipt is read by the freshness ladder, card_selection and
+                    # speculation_quality's replicate invariants, which assume it names the best at
+                    # reservation.
                     self._reserve_node_build(
                         _a, _idea, scored_against=state.best_node_id,
                         source="researcher",
@@ -4556,17 +4570,31 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # research_completed/hint/hypothesis_added AFTER _dispatch_evals returns — possibly
                 # past finalize. Waiting for the append (bounded, far shorter than the compute path)
                 # is safer.
-                # OPEN[failed-initial-research-tick-receipted-again] the initial trigger is consumed
-                # only after the entire receipt -> compute -> multi-append record path succeeds.
-                # proof:absent:initial_trigger_consumed@looplab/engine/orchestrator.py
-                # REVIEW 2026-08-27 (P2 durability/cost): if `_record_deep_research` appends
-                # `research_completed` and a later hint/card append raises, this catch retries with
-                # the original cadence/strategist label. The next tick buys the same think again,
-                # writes a second durable receipt and can duplicate the completed memo because
-                # `last_sig` is still empty. Consume the one-shot trigger once its receipt/paid pass
-                # starts, while retaining an explicit status if a pre-receipt failure may retry it.
+                # THE ONE-SHOT TRIGGER IS CONSUMED HERE, at the same instant its DURABLE receipt is
+                # taken, and not at the bottom of the try. `_research_attempt_step` opens with
+                # `_record_research_attempt`, which spends the cadence/strategist gate BEFORE the
+                # provider call precisely so an interrupted think is not re-paid; leaving the
+                # in-process label set until every later statement succeeded made this loop
+                # disagree with that receipt on all three non-completing exits — the `except` below,
+                # `sig is None`, and the converged `continue` — each of which resumed the next tick
+                # still wearing the initial trigger and therefore wrote a SECOND `research_attempted`
+                # and bought the same think again.
+                #
+                # The captured `this_trig` still rides THIS pass, so the receipt, the memo's own
+                # `trigger` column and the span label are byte-identical to what they were; only the
+                # NEXT tick degrades to `repeat`, which is a real pass that still thinks and still
+                # records — it simply writes no second receipt for a gate already spent.
+                #
+                # A PRE-RECEIPT failure (the thread pool refusing the hop; the receipt append itself
+                # cannot raise — `_record_research_attempt` degrades to `attempt_id=None`) therefore
+                # spends the in-process label with nothing durable behind it. That is deliberate and
+                # costs nothing: the next tick's `repeat` pass records a memo, and the durable gate
+                # counts recorded memos as well as attempts (`_cadence_research_marks`), so the
+                # cadence advances either way. An explicit retry status for that window would be a
+                # second gate answering a question the receipt already answers.
+                this_trig, trig = trig, "repeat"
                 sig, recorded = await anyio.to_thread.run_sync(
-                    functools.partial(self._research_attempt_step, snap, trig,
+                    functools.partial(self._research_attempt_step, snap, this_trig,
                                       manual=False, last_sig=last_sig),
                     abandon_on_cancel=False)
                 if sig is None:
@@ -4585,7 +4613,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 last_sig = sig
                 converged = 0
                 next_sleep = base
-                trig = "repeat"              # subsequent passes are repeats, not the initial due trigger
+                # `trig` was already consumed above, before the paid hop — see that comment.
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation (evals joined) — must propagate
             except BudgetExceeded:
@@ -5178,6 +5206,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `_triage_crash` / `_repair_error_context` / `_prepare_env` live in
     # looplab/engine/crash_repair.py (CrashRepairMixin — inherited, zero call-site churn).
 
+    # OPEN[consume-batch-docstring-names-retired-callers] the docstring below still says the two
+    # call sites "each read that protocol by hand" and names one of them `run`'s chunk — since
+    # 2026-08-30 neither calls this directly (both await `_await_batch_proposal`, whose own
+    # docstring names the chunk's real home `_handle_create_actions`), so a caller-hunting reader
+    # is sent to methods that no longer contain the call.
+    # proof:`line:Two call sites&&concurrent-build chunk@looplab/engine/orchestrator.py`
+    # REVIEW 2026-08-30 (P3 doc drift): one sentence — both call sites now reach this through the
+    # awaited wrapper (worker thread + main-task publish) — and one name fix.
     def _consume_batch_proposal(self, state, width: int):
         """Run one batched proposal and READ its three-attribute result. Returns
         ``(ideas, telemetry, dropped)``.
@@ -5215,6 +5251,83 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             telemetry.extend([None] * (len(ideas) - len(telemetry)))
         dropped = list(getattr(self, "_pending_batch_dropped", None) or [])
         return ideas, telemetry, dropped
+
+    async def _await_batch_proposal(self, state, width: int):
+        """`_consume_batch_proposal`, OFF the event-loop thread, with its folded audit rows published
+        by the MAIN TASK. Returns exactly what that funnel returns.
+
+        THE PER-ACTION LANE WAS MOVED OFF THE LOOP AND THIS SIBLING WAS NOT. `_propose_batch` is the
+        same minutes-long paid provider wait with no `await` in it, so as one event-loop callback it
+        stopped everything: no eval terminal, no watchdog tick, no timer could land. Measured on the
+        live engine with py-spy for the per-action twin — asyncio's `_run_once` sat below a
+        `threading.join` with no coroutine frame between, and a node whose training had already died
+        waited 62 MINUTES for its terminal while both H200s idled. On the shipped default width the
+        BATCH path is the one a run actually takes, so this was the larger half of that defect.
+
+        ONE HELPER, BOTH CALL SITES, for the reason `_consume_batch_proposal` itself is one funnel:
+        `_handle_create_actions`' concurrent-build chunk and `_stage_card_creates`' multi-draft branch
+        are both on the main task and both blocked identically. Two hand-written offloads would be two
+        chances to forget the sink.
+
+        THE SINK IS NOT OPTIONAL AND IS THE WHOLE REASON THIS IS NOT A ONE-LINE `to_thread`.
+        `_propose_batch` reaches `_append_proposal_event` (novelty.py), which falls through to
+        `self.store.append` whenever no sink is installed — writing EV_NOVELTY_REJECTED and friends.
+        Those are FOLDED and named by NONE of `events/types.py`'s three thread-append registries, so
+        appending them from a worker breaches invariant #1's sole-writer rule; worse, they are
+        AUTHORITY-BEARING for `speculation.py::_proposal_authority_seq`, the fence that discards a
+        paid proposal when a non-diagnostic row lands inside its equality window. Buffer, then
+        publish from here. This is Layer 5's own discipline, not a second one.
+
+        PUBLISHED WHETHER OR NOT ANY IDEA FORMED, exactly as the per-action lane publishes: a refused
+        proposal is when the receipt matters most, and gating the publish on a non-empty result would
+        restore the silence `bd182357` exists to end.
+
+        The `_progress` beacon INSIDE `_consume_batch_proposal` deliberately travels to the worker
+        with it. It is a direct `store.append` of a DIAGNOSTIC type, which invariant #1 permits a
+        concurrent task by name — and a beacon that stayed behind would announce the phase from a
+        thread that is no longer in it.
+        """
+        # OPEN[batch-offload-shares-default-thread-limiter] the offload below rides anyio's shared
+        # 40-token default thread pool — the pool each in-flight `_run_eval` worker holds a token of
+        # for its eval's whole multi-hour duration — so at operator-raised `eval_parallel` near or
+        # above 40 (the schema admits 1024) the paid proposal QUEUES BEHIND the evals before it even
+        # starts: board starvation through the pool instead of the loop.
+        # proof:absent:limiter=@looplab/engine/orchestrator.py
+        # REVIEW 2026-08-30 (P2 capacity): `evaluate.py::_watch_limiter` names this exact hazard and
+        # gave the watchdog tick its own pool for it; the proposal lanes (this one and the
+        # per-action offload in card_reservation.py) got none. Give them a small dedicated
+        # CapacityLimiter the way the watchdog has one.
+        captured: list = []
+        try:
+            with self._capture_proposal_events() as captured:
+                result = await anyio.to_thread.run_sync(
+                    functools.partial(self._consume_batch_proposal, state, width))
+        # OPEN[batch-offload-drops-buffered-receipts-on-raise] the publish below runs only on a
+        # clean return: a raise from the offloaded funnel (BudgetExceeded included — whose
+        # `budget_exceeded` novelty_rejected is appended by `_reject_and_repropose` BEFORE the
+        # re-raise precisely so "the rejection is on the log even though the run is ending", and
+        # which both shipped researchers propagate) exits the capture and discards every buffered
+        # folded receipt from the batch's completed rolls. Pre-offload each row was durable at emit
+        # time; driven at HEAD both ways. Cancellation at the await is NOT the trigger — the
+        # non-abandoned wait is shielded and this sync loop runs before the next checkpoint.
+        # proof:`present:for _event_type, _data, _trace_id, _span_id in captured:@looplab/engine/orchestrator.py`
+        # REVIEW 2026-08-30 (P1 durability): publish `captured` in a try/finally (append is sync and
+        # legal during unwind) or ferry it out through the result the way Layer 5's
+        # `SpecRawStageResult.audit_events` does; the per-action lane in card_reservation.py shares
+        # the shape. (A raise also skips the chunk caller's `_record_dropped_batch_cards`, but it
+        # did pre-offload too — the buffered sink rows are the regression, not that half.)
+        # PUBLISHED ON THE WAY OUT, since 2026-08-31, and the `finally` is the whole of the fix.
+        # A RAISE from the offloaded funnel discarded every buffered row: `_reject_and_repropose`
+        # appends `budget_exceeded` through this sink and then RE-RAISES — its docstring says
+        # "appended BEFORE re-raising so the rejection is on the log even though the run is ending"
+        # — and both shipped researchers propagate it. Pre-offload each row was durable at emit
+        # time; buffering silently made the publish conditional on a clean return. `store.append`
+        # is sync and legal during unwind. Cancellation was never the trigger (the non-abandoned
+        # wait is shielded, so this ran before the next checkpoint) and is unaffected.
+        finally:
+            for _event_type, _data, _trace_id, _span_id in captured:
+                self.store.append(_event_type, _data, trace_id=_trace_id, span_id=_span_id)
+        return result
 
     def _fail_reserved_build(self, *, node_id: int, card_id: Optional[str], generation: int,
                              reason: str, error: str, drop_card: bool = True,
@@ -5875,6 +5988,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # the shared attr only when a path never refreshed it (attr genuinely absent).
                 cross_run_receipt=(_rcpt if (_rcpt := getattr(researcher, "_cross_run_advisory_receipt", None))
                                    is not None else getattr(self, "_cross_run_advisory_receipt", {})),
+                # Every engine-created lifecycle promises the same generation-scoped admission
+                # receipt. Besides crash-safe speculative accounting, this is what lets the public
+                # activity projection prove "waiting for a slot" versus "evaluating".
+                eval_start_boundary=True,
                 **({"parent_generations": parent_generations} if parent_generations else {}),
                 **({"footprint_finalized": True} if footprint_finalized else {}),
                 # A legacy generation-less abort may intentionally reserve a not-yet-created slot.
@@ -6180,6 +6297,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 files=getattr(self.developer, "last_files", {}) or {},
                 deleted=getattr(self.developer, "last_deleted", []) or [],
                 generation=generation,
+                eval_start_boundary=True,
                 **({"parent_generations": parent_generations} if parent_generations else {}),
                 **({"footprint_finalized": True} if footprint_finalized else {}))
             landed = fold(self.store.read_all()).nodes.get(node.id)
@@ -6398,6 +6516,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                            or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
                     deleted=req.get("deleted") or [],
                     source="manual",
+                    eval_start_boundary=True,
                     **({"parent_generations": parent_generations} if parent_generations else {}),
                     **({"footprint_finalized": True} if footprint_finalized else {}),
                     # Cross-run provenance: a DICT when this inject seeded from a sibling run's
@@ -6515,7 +6634,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         from looplab.search.speculation_quality import speculation_environment_fingerprint
         return speculation_environment_fingerprint()
 
-    def _dirty_inputs(self, sources: "Iterable[str] | None") -> list:
+    def _dirty_inputs(self, sources: "Iterable[str] | None") -> "list | None":
         """P0-5 dirty-input enumeration: for each git-repo workspace source, the uncommitted-file LIST
         (`git status --porcelain`) plus a bounded DIGEST of the actual diff vs HEAD (`git diff HEAD`) —
         the EXPLICIT record of which inputs differ from a clean checkout AND a content fingerprint of
@@ -6590,6 +6709,28 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         out: list = []
         digests: dict = {}                                          # resolved-root -> digest (once)
+        # A SOURCE WE COULD NOT READ MAKES THE WHOLE ENUMERATION UNKNOWN, and until 2026-08-30 it
+        # made it CLEAN. `workspace.py::substrate_fingerprint` guards this call with
+        # `except Exception: dirty = None` and records `"dirty": "unknown"`, naming an index.lock, a
+        # mid-rebase tree, an EIO and a timeout — and not one of them could reach that branch,
+        # because this loop swallowed every per-source exception with a bare `pass` and returned the
+        # same `[]` a genuinely clean tree returns. A wedged geesefs mount (a 10 s wall against this
+        # box's 105-950 ms lstats) therefore recorded the bare-HEAD fingerprint, byte-equal to a
+        # clean checkout, and `comparability` could certify SAME across a substrate change — exactly
+        # the confidently-wrong record that branch exists to refuse. Driven by monkeypatching
+        # `subprocess.run` to raise TimeoutExpired.
+        #
+        # ONLY AN EXCEPTION COUNTS AS UNREADABLE — a NONZERO exit deliberately does not. `git status`
+        # answers 128 for "not a git repository", which is the ordinary condition of a plain data
+        # mount; treating that as unknown would put nearly every run into the unknown branch and say
+        # nothing. So the residue is stated rather than hidden: a source whose git exits nonzero for
+        # a reason OTHER than not-being-a-repo still folds into the clean reading, and separating
+        # those needs git's own stderr text, which is a weaker signal than the exception this raises.
+        #
+        # `None` REACHES BOTH CALLERS CORRECTLY: the fingerprint takes its documented `unknown`
+        # branch, and `run_started.dirty_inputs` records null instead of an empty list that would
+        # claim nothing was dirty.
+        unreadable = False
         for src in sorted(sources or ()):
             try:
                 p = Path(src)
@@ -6605,9 +6746,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     if digests[root] is not None:
                         entry["diff_digest"] = digests[root]
                     out.append(entry)
-            except Exception:  # noqa: BLE001 — git missing / not a repo / timeout: no enumeration
-                pass
-        return out
+            except Exception:  # noqa: BLE001 — git missing / timeout / EIO: this source is UNREADABLE
+                unreadable = True
+        return None if unreadable else out
 
     def _seed_workspace(self, workdir) -> None:
         return self.workspace.seed_workspace(workdir)

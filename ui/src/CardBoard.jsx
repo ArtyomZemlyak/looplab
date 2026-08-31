@@ -6,7 +6,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { fmt, fmtInt, CONTROL, commandFeedback, createIdempotencyKey, deadlineGet, getRunCommand,
   isTransientCommandReadError, retryRunCommand, runApiPath, runCommand,
-  submitCommand, traceDeadlineGet, traceGenerationMatches } from './util.js'
+  submitCommand, traceDeadlineGet, traceGenerationMatches, nodeActivityStatus,
+  NODE_ACTIVITY } from './util.js'
 import { OpIcon } from './icons.jsx'
 import Panel, { PanelPresentationContext } from './PanelShell.jsx'
 import { cardControlRecovery, cardControlSubmission, cardEditReflected }
@@ -622,20 +623,6 @@ function _CardKanbanCard({
           Abandon this Card
         </button>
       </div>
-      {/* SHOWN ONLY ON A STOPPED CARD, and not behind a danger disclosure: dropping ends a line of
-          work and reopening resumes one, so presenting them with the same weight would be wrong in
-          both directions. Until this shipped a drop was TERMINAL — the card stayed visible in the
-          `dropped` lane, unactionable, with no event in the vocabulary that could return it. */}
-      {_cardStatus(card) === 'dropped' && _cardReopenable(card) && <form className="card-control-form"
-        onSubmit={event => { event.preventDefault(); reopen() }}>
-        <label><span>Reopen reason (optional)</span><input className="text" value={reopenReason}
-          maxLength={400} aria-label={`Reopen reason for ${card.id}`} disabled={busy}
-          onChange={event => setReopenReason(event.target.value)} /></label>
-        <button type="submit" className="btn xs" disabled={busy}
-          title="Put this stopped Card back on the board; the drop receipt stays in the log">
-          Reopen this Card
-        </button>
-      </form>}
       <details className="card-control-danger">
         <summary>Drop Card…</summary>
         <form className="card-control-form" onSubmit={event => { event.preventDefault(); drop() }}>
@@ -648,6 +635,35 @@ function _CardKanbanCard({
       {controlsLocked && !ownPending && <div className="card-control-feedback" role="status">
         Another Card command is still being submitted for this run.</div>}
     </details>}
+    {/* A SIBLING OF THE CONTROLS DISCLOSURE, NOT A CHILD, and that placement is the whole fix.
+        This form lived inside `{onControl && !terminal && <details>}` while requiring
+        `status === 'dropped'` — and `terminal` is `status === 'dropped' || merged_into`, so the two
+        gates were mutually exclusive and the button could render for NO card. That made the entire
+        reopen stack — the event type, five control-validation rows, the fold handler,
+        `CONTROL.reopenCard` and the `reopenable` authority gate — unreachable from the browser, the
+        THIRD unreachability in this one feature. The first two were caught and fixed while this one
+        survived because every guard tests the MODEL and the dispatch text, and nothing rendered a
+        dropped card and looked for the button.
+
+        The other controls deliberately STAY hidden on a terminal card: edit / priority / resources /
+        drop are all about work in flight. Reopening is the one action a stopped card still has, so
+        it is the one control that must outlive `!terminal`.
+
+        SHOWN ON A STOPPED CARD AND NOT BEHIND A DANGER DISCLOSURE: dropping ends a line of work and
+        reopening resumes one, so presenting them with the same weight would be wrong in both
+        directions. Until `dccad06f` a drop was TERMINAL — the card sat visible in the `dropped`
+        lane, unactionable, with no event in the vocabulary that could return it. */}
+    {onControl && _cardStatus(card) === 'dropped' && _cardReopenable(card)
+      && <form className="card-control-form card-control-reopen"
+        onSubmit={event => { event.preventDefault(); reopen() }}>
+        <label><span>Reopen reason (optional)</span><input className="text" value={reopenReason}
+          maxLength={400} aria-label={`Reopen reason for ${card.id}`} disabled={busy}
+          onChange={event => setReopenReason(event.target.value)} /></label>
+        <button type="submit" className="btn xs" disabled={busy}
+          title="Put this stopped Card back on the board; the drop receipt stays in the log">
+          Reopen this Card
+        </button>
+      </form>}
     {isRecord(controlState?.notice) && <div
       className={'card-control-feedback ' + (controlState.notice.tone || '')}
       role={controlState.notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
@@ -797,11 +813,10 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
     const attempt = entryOf(nodeId)?.node?.attempt
     return Number.isSafeInteger(attempt) && attempt >= 0 ? attempt : null
   }
-  // Live-refresh only while the node is genuinely in flight, by an ALLOW-list of in-flight statuses
-  // rather than "not terminal": an absent or unrecognized status would otherwise put a 4 s poll on a
-  // node that will never move again.
-  const workingOn = nodeId => ['pending', 'running', 'building']
-    .includes(_cardText(entryOf(nodeId)?.node?.status))
+  // Live-refresh only while generation-scoped activity says the node owns build/evaluation work.
+  // Raw `pending` also includes the queue and cannot be used as an ownership test.
+  const workingOn = nodeId => [NODE_ACTIVITY.BUILDING, NODE_ACTIVITY.EVALUATING]
+    .includes(nodeActivityStatus(entryOf(nodeId)?.node))
   const fallback = <div className="muted" role="status">loading trace…</div>
   return <div className="card-trace">
     {notice && <div className="muted" role="status">{notice}</div>}

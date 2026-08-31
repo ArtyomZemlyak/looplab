@@ -1113,6 +1113,31 @@ def test_a_built_but_unstarted_node_reads_coded_and_a_started_one_reads_running(
     assert coded.selection_blockers == running.selection_blockers
 
 
+def test_a_resumed_owner_does_not_call_an_old_eval_receipt_running():
+    """The durable start receipt survives for budget, while the display waits for re-admission."""
+
+    rows = [
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft", "eval_start_boundary": True,
+                          "idea": {"operator": "draft", "hypothesis": "resumed"}}),
+        ("node_eval_started", {"node_id": 1, "generation": 0}),
+        ("resume_served", {"engine_owner_boundary": True}),
+    ]
+    waiting = fold([Event(seq=seq, type=event_type, data=data)
+                    for seq, (event_type, data) in enumerate(rows)])
+    node = waiting.nodes[1]
+    card = waiting.cards[hypothesis_id("resumed")]
+    assert node.eval_started is True and node.eval_activity_started is False
+    assert (card.status, card.status_nodes) == ("coded", [1])
+
+    resumed_rows = rows + [("node_eval_started", {"node_id": 1, "generation": 0})]
+    running = fold([Event(seq=seq, type=event_type, data=data)
+                    for seq, (event_type, data) in enumerate(resumed_rows)])
+    assert running.nodes[1].eval_activity_started is True
+    assert (running.cards[hypothesis_id("resumed")].status,
+            running.cards[hypothesis_id("resumed")].status_nodes) == ("running", [1])
+
+
 def test_a_pending_node_that_promised_no_boundary_still_reads_running():
     """FAIL CLOSED, and this is which way closed points.
 

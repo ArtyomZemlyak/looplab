@@ -43,6 +43,61 @@ export function cardKind(card) {
 
 export const cardIsDirection = card => cardKind(card) === CARD_KIND_DIRECTION
 
+// THE EXPERIMENTS EACH QUESTION OWNS, keyed by the parent's id. Hoisted out of `ResearchView` in
+// 2026-08-29 so the rule is reachable by a test: while it lived inline, a test could only replicate
+// the loop, and a replica keeps passing when the original is inverted — which is exactly what a
+// mutation run showed before this move.
+//
+// A DIRECTION IS NEVER SOMEBODY'S EXPERIMENT. `parent_card_id` is set by the fold for any card
+// without consulting its kind (`events/card_ledger.py`), so a nested QUESTION arrived here and was
+// counted, labelled and drawn below its parent as an experiment — while the same card also stood in
+// the lattice as a question. One card, two contradictory readings, and the experiment one is false:
+// a direction owns no action and has no result to roll up. A nested question keeps its lattice
+// position, which is the surface that can say what the nesting MEANS.
+//
+// UNREACHED ON THIS BOX AND SAID PLAINLY: 0 of 218 preserved `card_added` rows carry a direction
+// with a parent. The fold permits it with no guard, so this is a cheap honesty rule on a reachable
+// shape, not a recovery of anything that has happened.
+export function childrenByParent(cards) {
+  const out = new Map()
+  for (const card of Array.isArray(cards) ? cards : []) {
+    if (cardIsDirection(card)) continue
+    const parent = cardParentId(card)
+    if (!parent) continue
+    if (!out.has(parent)) out.set(parent, [])
+    out.get(parent).push(card)
+  }
+  return out
+}
+// EVERY experiment under a question, not only its immediate ones. `ResearchView` draws children for
+// LATTICE rows, which are questions — so a refinement-of-a-refinement (question -> exp -> exp) was
+// grouped under its experiment parent and then never asked for, rendering in no section at all.
+// `54dd4c9e` fixed the identical depth>=2 loss in `directionGroups` one day before `9440cff5`
+// retired the only total view, which is how the ladder inherited it.
+//
+// Breadth-first from the question's own children, with a VISITED set: `parent_card_id` is a
+// free-form edge the fold does not check for cycles, and a self- or mutual-parent pair would
+// otherwise hang the render. Depth is not capped — a cap would silently drop the deepest card,
+// which is the defect this walk exists to end — and the visited set already bounds the work to the
+// card count.
+export function descendantsOf(parentId, byParent) {
+  const out = []
+  if (!parentId || !(byParent instanceof Map)) return out
+  const seen = new Set([String(parentId)])
+  const queue = [String(parentId)]
+  while (queue.length) {
+    for (const child of byParent.get(queue.shift()) || []) {
+      const id = String(child?.id ?? '')
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      out.push(child)
+      queue.push(id)
+    }
+  }
+  return out
+}
+
+
 // The parent id as the wire actually carries it. `Card.child_card_ids` is deliberately NOT on the
 // wire (`serve/public_cards.py` says why), so the inverse edge is rebuilt HERE from the same card
 // map the board already holds — exactly as `cardBoardModel.js::nodeCardId` rebuilds the node join.

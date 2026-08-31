@@ -2,7 +2,7 @@ import React, { useEffect, useId, useMemo, useState, useRef } from 'react'
 import { conditionalGet, costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CONTROL,
   commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runApiPath, runNodeApiPath, submitCommand, traceDeadlineGet, traceGenerationMatches,
-  traceReadQuery } from './util.js'
+  traceReadQuery, nodeActivityStatus, nodeActivityView, NODE_ACTIVITY } from './util.js'
 import { useNodeSpanWindow, usePoll, useScopedResource, useTraceRetry, useTraceScroll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
@@ -18,7 +18,8 @@ import { EXTRA_METRIC_CHANNEL_HELP, EXTRA_METRIC_CHANNEL_LABEL,
   extraMetricChannel } from './extraMetrics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { nodeAppliedParams, appliedParamsDivergences, appliedParamsChecked,
-  appliedParamsNotice } from './runIndex.js'
+  appliedParamsNotice, appliedParamsConflicts,
+  appliedParamsConflictNotice } from './runIndex.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
   NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, attemptReadRequired, conversationWindow,
@@ -277,30 +278,22 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     })
     return () => cancelAnimationFrame(frame)
   }, [detailScope, detailStatus, detailPending])
-  // Live-refresh the node detail (it carries n.trace spans + the agent report) while the run is ACTIVELY
-  // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Two windows, both
-  // engine-alive & not-finished (stops at terminal / engine death):
+  // Live-refresh the node detail (it carries n.trace spans + the agent report) only while the public,
+  // generation-scoped activity receipt says this exact node owns build/evaluation work. Two windows,
+  // both engine-alive & not-finished (stops at terminal / engine death):
   //   • building  — an LLM is authoring the node (propose + implement, or a repair).
-  //   • pending   — the sandbox is EVALUATING it (data_prep → train → score). Training used to show
+  //   • evaluating — the sandbox owns it (data_prep → train → score). Training used to show
   //     nothing live (no child LLM spans, and the stage op flushes only on close); command_eval now
   //     emits a `stage_started` anchor per stage so the Train/Evaluate band fills in DURING the run.
   //     A pending node's status doesn't change until it's scored, so without polling here the Trace
   //     tab froze after "Developer implement" for the whole training run.
-  const nodeStatus = state?.nodes?.[nodeId]?.status
-  const engineActive = !readOnly && !!live && live.engine_running !== false && !live.finished && nodeId != null
-  // Poll ANY pending node the user is inspecting while the engine is active (peer review). "Latest
-  // pending" was not an evaluation-ownership test: under eval_parallel>1 several nodes are evaluated
-  // concurrently, so inspecting an active OLDER pending node used to disable detail polling and freeze
-  // its live Trace/metrics. There is no client-visible eval-ownership marker, so poll the selected
-  // pending lifecycle conservatively (the poll is per-inspected-node — it never spins more than the one
-  // open node, and a pending node in an active run is genuinely in the eval pipeline).
-  const evaluatingThis = nodeStatus === 'pending' && !live?.paused
-  // Building = a RAW build marker for this node (buildingMarkers), NOT the spliced `building` flag:
-  // withBuilding skips ids already in state.nodes, so a node_reset re-build (which emits node_building
-  // for an EXISTING pending node) never sets the spliced flag — the poll then stopped and the Trace tab
-  // never showed writing/repairing during the rebuild.
-  const buildingThis = buildingMarkers(live).some(m => Number(m?.node_id) === Number(nodeId))
-  const nodeWorking = engineActive && (buildingThis || evaluatingThis)
+  const engineActive = !readOnly && !!live && live.engine_running !== false
+    && live.engine_running !== null && !live.finished && !live.paused && !live.stop_requested
+    && live.phase !== 'finalizing' && nodeId != null
+  const liveNode = live?.nodes?.[nodeId] || state?.nodes?.[nodeId]
+  const liveActivity = nodeActivityStatus(liveNode, live)
+  const nodeWorking = engineActive && [NODE_ACTIVITY.BUILDING, NODE_ACTIVITY.EVALUATING]
+    .includes(liveActivity)
   // Initial load, polling, and manual retries share one scope-owned request. A rejected or invalid
   // refresh therefore keeps last-good detail visible but explicitly stale instead of silently
   // presenting it as current. Returning the owned request lets usePoll abort it during cleanup.
@@ -529,7 +522,8 @@ export function GroupSummary({
             <tbody>{members.map(n => <tr key={n.id}>
               <td><button type="button" className="btn xs ghost" data-group-member-id={n.id}
                 aria-label={`Open experiment #${n.id}`} onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
-              <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td><td>{n.status}</td></tr>)}</tbody></table></DataTable>
+              <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
+              <td>{nodeActivityView(n, state).shortLabel}</td></tr>)}</tbody></table></DataTable>
         </>}
     </div>
   </>
@@ -1011,6 +1005,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
   // the whole point: an inherited rationale under a bare "Rationale" reads as this experiment's own
   // justification, which is the misreading the fork receipt was stamped to prevent.
   const forkProv = forkProvenance(n)
+  const activity = nodeActivityView(n, state)
   const ideaNote = field => {
     const note = forkFieldNote(forkProv, field)
     return note ? <span className="muted idea-attribution"> — {note}</span> : ''
@@ -1020,7 +1015,8 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
       <KV k="node" v={`#${n.id}`} />
       <KV k="operator" v={n.operator} />
       <KV k="parents" v={(n.parent_ids || []).join(', ') || '—'} />
-      <KV k="status" v={n.status + (n.id === state.best_node_id ? ' — champion' : '')} />
+      <KV k="activity" v={activity.label} />
+      <KV k="lifecycle" v={n.status + (n.id === state.best_node_id ? ' — champion' : '')} />
       <KV k="metric" v={fmt(n.metric)} />
       {n.confirmed_mean != null && <KV k="robust mean" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} (${n.confirmed_seeds}×)`} />}
       <KV k="feasible" v={String(n.feasible)} />
@@ -2460,15 +2456,17 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   })
   const agent = n.agent_report
   // Live status: what the node is doing RIGHT NOW. Two live states: an LLM authoring the code
-  // (building → writing / repairing / merging), or the sandbox running its eval pipeline (pending →
-  // training / scoring). `_op` is only set in the building case (the eval has no operator), so it
+  // (building → writing / repairing / merging), or the generation-scoped activity receipt saying
+  // the sandbox owns its eval pipeline (evaluating → training / scoring). `_op` is only set in the
+  // building case (the eval has no operator), so it
   // cleanly disambiguates the two.
   // Read this node's OWN raw build marker (buildingMarkers covers EVERY concurrent build AND a
   // node_reset re-build of an existing node, which the spliced `building` flag misses because
   // withBuilding never overwrites an id already in state.nodes), not the singular `live.building`.
   const _bmarker = buildingMarkers(live).find(m => Number(m?.node_id) === Number(n.id))
-  const building = working && !!_bmarker
-  const _op = building ? (_bmarker.operator || '') : ''
+  const activity = nodeActivityView(n, live)
+  const building = working && activity.status === NODE_ACTIVITY.BUILDING
+  const _op = building ? (_bmarker?.operator || n.operator || '') : ''
   const statusLabel = !working ? null
     : building
       ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
@@ -2757,25 +2755,36 @@ export function Metrics({ n, detail, state, runId }) {
   // row reading `salvaged | 0.74 | 0.81` must not leave the second number looking like the measured
   // one by contrast.
   const champObjective = champ ? objectiveMetricSource(champ) : null
-  // OPEN[extras-channel-union-mislabel] a provenance caveat is rendered beside an empty cell.
-  // proof:present:(correctness):@ui/src/Inspector.jsx
-  // REVIEW 2026-08-18 (correctness): `extraKeys` is the UNION over ALL nodes, but each extras row's
-  // `channel` is read from THIS node only — a key this node never reported still gets
-  // `extraMetricChannel(n, k)` = 'unknown', rendering a warn "provenance unknown" label beside an
-  // empty cell (a caveat about a value that does not exist, the invented-caveat shape
-  // `objectiveMetricSource` forbids). And the champion's extras value in the `best #N` column
-  // carries no channel read of its own — only the ★ row reads `champObjective` — so a self-reported
-  // champ value sits unlabeled beside this node's labeled one, the exact by-contrast misread the ★
-  // cell's comment above warns about. Fix direction: label only cells that hold a value, each from
-  // its own node's record (`extraMetricChannel(champ, k)` for the best column).
+  // A CHANNEL IS READ FROM THE NODE THAT HOLDS THE VALUE, and only where a value exists (fixed
+  // 2026-08-29). `extraKeys` is the UNION over every node in the run, so this node legitimately has
+  // no value for most of it — and `extraMetricChannel(n, k)` answers `unknown` for a key `n` never
+  // reported exactly as it does for one recorded before the channel was written down. The row then
+  // printed a warn "provenance unknown" beside an EMPTY cell: a caveat about a value that does not
+  // exist, which is the invented-caveat shape `objectiveMetricSource` forbids two lines up, and it
+  // also fed `anyUnverified`, so a phantom row could summon the whole self-reported footnote.
+  //
+  // `channel` is therefore `null` when this node holds no value, and the source cell renders
+  // nothing at all rather than a word about nothing. `bestChannel` is the same read against the
+  // CHAMPION's own record: the `best #N` column is a different node's number, and until now only
+  // the ★ row consulted `champObjective`, so a self-reported champion extra sat unlabelled beside
+  // this node's labelled one — the by-contrast misread the ★ cell's own comment warns about.
   const rows = [
     { k: 'objective', mine: n.confirmed_mean ?? n.metric, best: champ ? (champ.confirmed_mean ?? champ.metric) : null, star: true },
-    ...extraKeys.map(k => ({
-      k, mine: n.extra_metrics?.[k], best: champ?.extra_metrics?.[k],
-      channel: extraMetricChannel(n, k),
-    })),
+    ...extraKeys.map(k => {
+      const mine = n.extra_metrics?.[k]
+      const best = champ?.extra_metrics?.[k]
+      return {
+        k, mine, best,
+        channel: mine == null ? null : extraMetricChannel(n, k),
+        bestChannel: (champ && best != null) ? extraMetricChannel(champ, k) : null,
+      }
+    }),
   ]
-  const anyUnverified = rows.some(r => r.channel && r.channel !== 'declared')
+  // A row with no value on EITHER side can no longer summon this footnote: `channel` and
+  // `bestChannel` are both null there, so the sentence is printed only when some cell it describes
+  // is actually on screen.
+  const anyUnverified = rows.some(r => (r.channel && r.channel !== 'declared')
+    || (r.bestChannel && r.bestChannel !== 'declared'))
   return <>
     <div className="section-h">Reported metrics{champ ? ` · best = #${champ.id}` : ''}</div>
     <DataTable caption="Node metric comparison" card={false}><table className="tbl"><thead><tr><th>metric</th><th>source</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
@@ -2784,13 +2793,18 @@ export function Metrics({ n, detail, state, runId }) {
         <td className="muted">{r.star
           ? <span className={objectiveCaveated ? 'warn' : ''}
             title={objectiveSourceHelp(objective)}>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>
-          : <span className={r.channel === 'declared' ? '' : 'warn'}
-            title={EXTRA_METRIC_CHANNEL_HELP[r.channel]}>{EXTRA_METRIC_CHANNEL_LABEL[r.channel]}</span>}</td>
+          : r.channel
+            ? <span className={r.channel === 'declared' ? '' : 'warn'}
+              title={EXTRA_METRIC_CHANNEL_HELP[r.channel]}>{EXTRA_METRIC_CHANNEL_LABEL[r.channel]}</span>
+            : null}</td>
         <td>{fmt(r.mine)}</td>
         {showChamp && <td>{r.star && objectiveSourceCaveated(champObjective)
           ? <span className="warn" title={objectiveSourceHelp(champObjective)}>
             {fmt(r.best)} · {OBJECTIVE_SOURCE_LABEL[champObjective.channel]}</span>
-          : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
+          : r.bestChannel && r.bestChannel !== 'declared'
+            ? <span className="warn" title={EXTRA_METRIC_CHANNEL_HELP[r.bestChannel]}>
+              {fmt(r.best)} · {EXTRA_METRIC_CHANNEL_LABEL[r.bestChannel]}</span>
+            : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
     {/* The extras' footnote below exists because a tooltip is not discoverable — an operator
         scanning a table does not hover every cell. That argument is STRONGER for the ★ row, which
         is the number that drives selection, so the caveat is printed rather than only hovered. It
@@ -2808,6 +2822,18 @@ export function Metrics({ n, detail, state, runId }) {
         model owns, so the wording cannot drift from the count. It SURFACES and does not accuse: the
         Developer deviating from a proposal is legitimate and documented; what would be the defect is
         the record claiming the declared value. */}
+    {/* CONFLICTS RENDER TOO, and they are the SHARPER case (2026-08-29). This footnote gated on
+        `diverged` rows alone, and `engine/champion_caveats.py::applied_params_diverged` raises
+        `params_overridden` on diverged OR conflicts — its own docstring says "A CONFLICT COUNTS,
+        and that is the half worth stating". So a conflicts-only champion showed the slug on the run
+        row, the operator opened the tab bd022b3c built as the answer to that slug, and NOTHING
+        rendered: the slug-with-no-detail defect that commit fixed for divergences, still open for
+        the case it names as its own motivating champion (v8 node 3, 0.762048, whose two carriers
+        disagree on `batch_size` and `gradient_accumulation_steps`).
+        The two stay SEPARATE blocks rather than one merged list, because they are different claims
+        and the model already counts them apart: a divergence knows what ran, a conflict is the run
+        admitting it cannot say. Merging them under one heading would publish the second as the
+        first, which is the vacuous green one layer up. */}
     {appliedParamsDivergences(nodeAppliedParams(n)).length > 0 && <div className="muted">
       <b>Declared coordinates that did not run.</b> {appliedParamsNotice(nodeAppliedParams(n))}
       <ul className="applied-param-divergences">
@@ -2822,6 +2848,21 @@ export function Metrics({ n, detail, state, runId }) {
         This record does not say how many coordinates were checked, so it cannot tell you that the
         rest agreed — only that these did not.
       </span>}
+    </div>}
+    {appliedParamsConflicts(nodeAppliedParams(n)).length > 0 && <div className="muted">
+      <b>Declared coordinates the record cannot settle.</b>{' '}
+      {appliedParamsConflictNotice(nodeAppliedParams(n))}
+      <ul className="applied-param-conflicts">
+        {appliedParamsConflicts(nodeAppliedParams(n)).map(c => <li key={c.param}>
+          <code>{c.param}</code>: declared <b>{fmt(c.declared)}</b> · read as{' '}
+          {c.readings.length
+            ? c.readings.map((r, idx) => <span key={`${r.file}:${r.line}:${idx}`}>
+              {idx > 0 ? ' · ' : ''}<b className="warn">{fmt(r.applied)}</b>
+              {r.file ? <span className="muted"> in {r.file}{r.line == null ? '' : `:${r.line}`}</span> : null}
+            </span>)
+            : <span className="muted">two different values this record does not name</span>}
+        </li>)}
+      </ul>
     </div>}
     {anyUnverified && <div className="muted">
       Rows marked <b>self-reported</b> were taken from the experiment's own stdout with nothing

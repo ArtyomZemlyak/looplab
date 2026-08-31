@@ -47,6 +47,10 @@ export function withBuilding(state) {
     changed = true
     nodes[b.node_id] = {
       id: b.node_id, operator, parent_ids: b.parent_ids || [], status: 'building', building: true,
+      activity: {
+        schema: 1, status: 'building', generation: b.generation ?? 0,
+        evidence: 'node_building', ...(Number(b.started) > 0 ? { started_at: Number(b.started) } : {}),
+      },
       idea: { operator, rationale: 'building…' },
     }
   }

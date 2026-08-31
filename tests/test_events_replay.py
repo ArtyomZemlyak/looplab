@@ -296,17 +296,55 @@ def test_eval_start_boundary_folds_set_only_and_generation_keyed():
     """
 
     started = fold(_spec_prefix() + [
-        Event(type="node_eval_started", data={"node_id": 0, "generation": 0}),
-        Event(type="node_eval_started", data={"node_id": 0, "generation": 0}),   # duplicate: no-op
+        Event(ts=123.5, type="node_eval_started", data={"node_id": 0, "generation": 0}),
+        Event(ts=999.0, type="node_eval_started", data={"node_id": 0, "generation": 0}), # duplicate: no-op
     ])
     assert started.nodes[0].eval_start_boundary is True
     assert started.nodes[0].eval_started is True
+    assert started.nodes[0].eval_activity_started is True
+    assert started.nodes[0].eval_started_at == 123.5
+
+    # The already-live loop can acknowledge a redundant request too. Without the explicit
+    # lock-owner marker this is not a process handoff and must not hide work that is still running.
+    same_owner = fold(_spec_prefix() + [
+        Event(seq=2, ts=123.5, type="node_eval_started",
+              data={"node_id": 0, "generation": 0}),
+        Event(seq=3, ts=200.0, type="resume_served", data={}),
+    ])
+    assert same_owner.nodes[0].eval_started is True
+    assert same_owner.nodes[0].eval_activity_started is True
+    assert same_owner.nodes[0].eval_started_at == 123.5
+
+    # A replacement owner clears only the live claim. The budget receipt survives the crash, and a
+    # genuine re-admission in that new owner starts a fresh live clock for the same lifecycle.
+    between_owners = fold(_spec_prefix() + [
+        Event(seq=2, ts=123.5, type="node_eval_started",
+              data={"node_id": 0, "generation": 0}),
+        Event(seq=3, ts=200.0, type="resume_served",
+              data={"engine_owner_boundary": True}),
+    ])
+    assert between_owners.nodes[0].eval_started is True
+    assert between_owners.nodes[0].eval_activity_started is False
+    assert between_owners.nodes[0].eval_started_at is None
+    readmitted = fold(_spec_prefix() + [
+        Event(seq=2, ts=123.5, type="node_eval_started",
+              data={"node_id": 0, "generation": 0}),
+        Event(seq=3, ts=200.0, type="resume_served",
+              data={"engine_owner_boundary": True}),
+        Event(seq=4, ts=456.0, type="node_eval_started",
+              data={"node_id": 0, "generation": 0}),
+    ])
+    assert readmitted.nodes[0].eval_started is True
+    assert readmitted.nodes[0].eval_activity_started is True
+    assert readmitted.nodes[0].eval_started_at == 456.0
 
     # A row for an abandoned attempt is ignored, and a reset clears the flag with its lifecycle.
     wrong_generation = fold(_spec_prefix() + [
         Event(type="node_eval_started", data={"node_id": 0, "generation": 7}),
     ])
     assert wrong_generation.nodes[0].eval_started is False
+    assert wrong_generation.nodes[0].eval_activity_started is False
+    assert wrong_generation.nodes[0].eval_started_at is None
 
     after_reset = fold(_spec_prefix() + [
         Event(type="node_eval_started", data={"node_id": 0, "generation": 0}),
@@ -314,6 +352,8 @@ def test_eval_start_boundary_folds_set_only_and_generation_keyed():
     ])
     assert after_reset.nodes[0].attempt == 1
     assert after_reset.nodes[0].eval_started is False
+    assert after_reset.nodes[0].eval_activity_started is False
+    assert after_reset.nodes[0].eval_started_at is None
     assert after_reset.nodes[0].eval_start_boundary is True   # a creation fact, not a lifecycle one
 
 
@@ -337,10 +377,10 @@ def test_eval_start_boundary_promise_is_strict_and_absent_on_old_logs(recorded, 
         Event(type="node_created", data=created),
     ])
     assert state.nodes[0].eval_start_boundary is expected
-    # Fold-internal on both halves: neither reaches a serialized payload, so an old log's snapshots
-    # and digests are byte-identical.
+    # Every receipt stays fold-internal, so an old log's snapshots and digests are byte-identical.
     dumped = state.nodes[0].model_dump()
-    assert "eval_start_boundary" not in dumped and "eval_started" not in dumped
+    assert not ({"eval_start_boundary", "eval_started", "eval_activity_started",
+                 "eval_started_at"} & dumped.keys())
 
 
 def test_torn_final_line_is_ignored(tmp_path):
@@ -922,6 +962,7 @@ def test_the_epoch_requeue_clears_the_eval_start_boundary_too(tmp_path):
     assert st.search_epoch == 1 and st.nodes[0].attempt == 1, "precondition: the requeue ran"
     assert st.nodes[0].eval_started is False, (
         "the requeued lifecycle still claims the abandoned attempt's eval-start boundary")
+    assert st.nodes[0].eval_started_at is None
 
     # And the boundary lands again for the NEW generation, exactly as for a `node_reset` lifecycle.
     s.append("node_eval_started", {"node_id": 0, "generation": 1})

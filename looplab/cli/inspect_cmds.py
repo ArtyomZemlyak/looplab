@@ -210,6 +210,11 @@ def tokens(run_dir: Path = typer.Argument(...),
     # The DENOMINATOR: the durable ledger's own sum. Read first so a run with tracing off still
     # learns what it spent, even though it can never learn where.
     ledger_total = None
+    # WHY there is no denominator, because the two reasons have different remedies and the existing
+    # message named only one of them: a missing/unreadable events.jsonl is a different fact from a
+    # readable log that simply records no spend, and telling an operator "no readable events.jsonl"
+    # about a log the command just folded would be its own false claim.
+    ledger_absent = "no readable events.jsonl"
     state = None
     if ev_path.exists():
         store = EventStore(ev_path)
@@ -223,10 +228,29 @@ def tokens(run_dir: Path = typer.Argument(...),
         # here does not merely misprint the denominator: `residual` is the whole point of the
         # command, and this is its subtrahend.
         state = fold(store.read_all())
-        ledger_total = int((state.llm_cost or {}).get("total_tokens") or 0)
+        # ABSENT IS NOT ZERO. `RunState.llm_cost` stays None when the log carries no
+        # `llm_usage`/`llm_cost` row at all — usage rows lost, or an externally-billed backend — and
+        # an `or {}` here collapsed that None onto the very 0 whose confusion `test_token_spend.py`
+        # already names as a mutation of the pure function ("'no ledger' becomes 'the ledger says
+        # zero'"). The function was right and its CALLER threw the distinction away one line before
+        # the call. Reproduced before the fix: a run dir with one 400-token generation span and no
+        # cost rows printed "ledger : 0 tokens" and "residual : -400 tokens (spans
+        # over-attribute)" at exit 0 — a claim that the run was billed nothing AND that its spans
+        # over-attribute, neither of which the log says.
+        if state.llm_cost is None:
+            ledger_absent = "the log carries no llm_usage or llm_cost row"
+        else:
+            ledger_total = int(state.llm_cost.get("total_tokens") or 0)
+
+    def _ledger_total_line() -> str:
+        # ONE spelling, three call sites. Two of them printed `{ledger_total or 0:,}`, which is the
+        # same absent-reads-as-zero claim in a shorter sentence.
+        if ledger_total is None:
+            return f"ledger total: n/a ({ledger_absent})"
+        return f"ledger total: {ledger_total:,} tokens"
 
     if not sp_path.exists():
-        typer.echo(f"ledger total: {ledger_total or 0:,} tokens")
+        typer.echo(_ledger_total_line())
         typer.echo("no spans.jsonl — the ledger records totals only, so the split is unavailable.")
         raise typer.Exit(2)
 
@@ -246,7 +270,7 @@ def tokens(run_dir: Path = typer.Argument(...),
         # total nor the damage count, so the one message the operator got ("no generation spans
         # found") named the record rather than the reader and read identically to a run that simply
         # never traced. Both facts are already in hand at this point.
-        typer.echo(f"ledger total: {ledger_total or 0:,} tokens")
+        typer.echo(_ledger_total_line())
         if unreadable or out["damaged"]:
             typer.echo(f"no generation spans could be read; {unreadable + out['damaged']} damaged "
                        f"span row(s) stepped over — the split is unavailable because spans.jsonl is "
@@ -270,7 +294,7 @@ def tokens(run_dir: Path = typer.Argument(...),
     typer.echo("")
     typer.echo(f"attributed : {out['attributed']:>14,} tokens over {out['calls']:,} generation spans")
     if out["ledger_total"] is None:
-        typer.echo("ledger     :            n/a  (no readable events.jsonl — no denominator)")
+        typer.echo(f"ledger     :            n/a  ({ledger_absent} — no denominator)")
     else:
         typer.echo(f"ledger     : {out['ledger_total']:>14,} tokens (llm_usage, the durable record)")
         # SIGNED and never clamped: a retried provider call opens two spans against one billed row,
@@ -398,6 +422,7 @@ def timings(run_dir: Path = typer.Argument(...),
     # `spans.jsonl` is a high-volume sidecar (the reason `events/span_index.py` exists). It is read
     # WHOLE, so peak memory tracks the file: the accelerated index is deliberately not used here
     # because building it WRITES `spans.index.jsonl`, and this command is read-only.
+    from looplab.events.eval_occupancy import eval_occupancy
     import json as _json
     from collections import defaultdict
 
@@ -418,6 +443,7 @@ def timings(run_dir: Path = typer.Argument(...),
     # last timestamp. Read before the spans so a run with tracing off still learns how long it took.
     wall = None
     budget_elapsed = None
+    durable_events = None          # kept for the occupancy section at the tail, which folds the LOG
     if ev_path.exists():
         store = EventStore(ev_path)
         # The event log is this command's DENOMINATOR (first->last ts). A truncated prefix makes every
@@ -426,6 +452,7 @@ def timings(run_dir: Path = typer.Argument(...),
         # the receipt is stated before any number derived from it.
         _echo_log_integrity(store, run_dir)
         events = store.read_all()
+        durable_events = events
         wall = run_wall_clock_seconds(events)
         for e in events:                      # the durable receipt, for cross-check (last one wins)
             if e.type == EV_BUDGET:
@@ -534,6 +561,41 @@ def timings(run_dir: Path = typer.Argument(...),
                f"wall clock with at least one span open")
     typer.echo(f"  untraced   {_minutes(untraced):>6} min  ({round(100*untraced/wall)}%)  "
                f"no span open — not attributable from spans.jsonl")
+
+    # WAS THIS RUN STARVED? The rows above charge wall clock to WORK; this asks the complementary
+    # question — how much of the run had no evaluation running at all — and it is folded from the
+    # DURABLE log rather than from spans, so it answers on a run whose trace was cleared or never
+    # written. Printed here because an operator reading "where did the time go" is one line away
+    # from "and how much of it bought nothing".
+    #
+    # THE BOOTSTRAP IS SEPARATED AND THAT IS THE WHOLE POINT: answering this by hand three times in
+    # one day produced two wrong numbers the same way, by counting the stretch before the first
+    # build could possibly have finished as starvation. Measured across this box's two runs — v9
+    # 6.61 h dead of a 23.66 h span (28 %) in two windows, v10 0.00 h of 2.82 h — same engine, same
+    # eval_parallel=2, opposite outcomes, and the single all-run percentage could not tell them
+    # apart. `dead_share` is over the SPAN, never over the run.
+    if durable_events is not None:
+        # No `width` is passed: capping concurrency needs the run's SETTLED eval width, and this
+        # command deliberately does not fold state — the raw count is the honest answer, and a run
+        # showing more concurrent evals than it declared is itself worth seeing.
+        occ = eval_occupancy(durable_events)
+        if occ["span_seconds"] > 0:
+            typer.echo(f"\neval occupancy (from events.jsonl, not spans):")
+            typer.echo(f"  bootstrap  {_minutes(occ['bootstrap_seconds']):>6} min  "
+                       f"before the first evaluation could start — not starvation")
+            typer.echo(f"  dead       {_minutes(occ['dead_seconds']):>6} min  "
+                       f"({round(100*occ['dead_share'])}% of the {_minutes(occ['span_seconds'])} min "
+                       f"since) with NO evaluation running")
+            for start, end in occ["dead_windows"]:
+                typer.echo(f"    idle {_minutes(start):>6}-{_minutes(end):<6} min "
+                           f"({_minutes(end - start)} min)")
+            busy = ", ".join(f"{k}: {_minutes(v)} min"
+                             for k, v in sorted(occ["concurrency"].items()))
+            typer.echo(f"  concurrent evaluations — {busy}")
+            if occ["open_intervals"]:
+                typer.echo(f"  {occ['open_intervals']} evaluation(s) still open at the last event — "
+                           f"counted busy to there, which is true of a live run and is the most a "
+                           f"killed one can prove")
 
 
 @app.command()

@@ -482,6 +482,13 @@
      "help": "ON by default: let the training-monitor and ASHA judges READ the live stage logs themselves — tail or search them like a file, and query the loss/grad_norm/lr series over any window at any granularity — instead of only being handed a fixed slice. It exists because the slice was measured insufficient: the digest a judge received on a five-hour run was about ten loss values, roughly thirty seconds of it, and consecutive ten-minute checks did not even overlap, so it called a node that had descended 27.7 to 22.9 \"pinned with no learning trend\". Scoped to the stage logs the eval plan names — a log is chosen by NAME, never by path. It also hands the TRAINING judge (not ASHA) the same read-only scouts every other agent has — read_file / grep / find_files / list_dir — rooted at the NODE WORKDIR, never at your editable source tree: a loss frozen because the objective cannot descend as written looks exactly like one frozen because the idea does not work, and only the program says which. Everything either half reads is the candidate's own text, and nothing outside that node's workdir is reachable. What a judge reads here is text the candidate's own training script wrote, so it can only inform the verdict; the deterministic loss-trajectory veto over a kill is unchanged and stays engine-side. Costs up to nine extra model round trips per check; a default log read is a 256 KiB seek. OFF restores the single one-shot call exactly."
     },
     {
+     "key": "single_command_divergence_watch",
+     "label": "Watch a single-command eval for divergence",
+     "type": "bool",
+     "default": true,
+     "help": "ON by default: run the DETERMINISTIC stage-health watchdog over a classic single-command evaluation, the same one a multi-stage pipeline has always had. It reads the eval's own log for a non-finite or exploding loss and fails the attempt with `diverged` — a REPAIRABLE reason, so the node gets a Developer repair rather than a terminal. Nothing about it is a model call: no judge, no tokens, no kill authority beyond the reason it writes. Measured over every log on this box before it shipped: 0 false positives in 110 `score.log` and 1 `eval.log`, and 2 of 133 `train.log` — both of those the true positives. OFF restores the historical behaviour in which a single-command eval was never health-checked at all, and a run RESUMED from a snapshot written before this field existed keeps OFF, because re-entry must not add a check the run's first half never had."
+    },
+    {
      "key": "train_monitor_contract",
      "label": "Show the watchdog the stage's own contract",
      "type": "bool",

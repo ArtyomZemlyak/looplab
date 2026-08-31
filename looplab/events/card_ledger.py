@@ -2265,11 +2265,11 @@ def _apply_card_status(st: RunState, ledger: _CardLedger, dropped: dict[str, dic
         # `runs/rubertlite-dr-unified-v7` read `running` while node 2 had been BUILT and never
         # dispatched: `speculation_depth: 2` builds ahead ON PURPOSE, so admitted-but-not-started is a
         # state the design produces deliberately and the board had no word for. A pending node is only
-        # PROVABLY not-started when its creator PROMISED the durable eval-start boundary
-        # (`Node.eval_start_boundary`, stamped on `node_created`) and no `node_eval_started` row was
-        # ever appended — exactly the pair `core/models.py::is_unevaluated_speculative_discard` proves
-        # the Layer-5 refund from, and for exactly the same reason: without the promise the absence of
-        # a boundary is not evidence, merely silence, and a log written before the boundary existed
+        # PROVABLY not active when its creator PROMISED the durable eval-start boundary
+        # (`Node.eval_start_boundary`, stamped on `node_created`) and the CURRENT engine owner has not
+        # admitted it. The durable `eval_started` sibling deliberately remains true across owners for
+        # Layer-5 budget accounting; `eval_activity_started` is the live claim this display needs.
+        # Without the promise, silence is not evidence: an old log written before the boundary existed
         # says the same nothing about a node whose sandbox has been training for forty minutes.
         # FAIL CLOSED, and note which way closed points here — an unproven pending node keeps the
         # `running` lane it has always had (3 of the 4 pending cards in the 45-run corpus), because
@@ -2281,7 +2281,7 @@ def _apply_card_status(st: RunState, ledger: _CardLedger, dropped: dict[str, dic
             if n.status is not NodeStatus.pending:
                 continue
             if (getattr(n, "eval_start_boundary", False) is True
-                    and getattr(n, "eval_started", False) is not True):
+                    and getattr(n, "eval_activity_started", False) is not True):
                 built_ids.append(n.id)
             else:
                 started_ids.append(n.id)

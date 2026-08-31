@@ -695,6 +695,69 @@ def test_runs_list_state_and_node_detail(tmp_path):
     assert node["id"] == nid and "code" in node and "trace" in node
 
 
+def test_public_node_activity_is_generation_scoped_and_evidence_backed(tmp_path):
+    """The wire contract distinguishes build/eval/queue without a bounded timeline scan.
+
+    It also keeps legacy silence honest and refuses to let an abandoned generation's eval-start row
+    make the reset lifecycle look like it is training.
+    """
+    rd = tmp_path / "activity"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "activity", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("node_building", {
+        "node_id": 0, "generation": 0, "operator": "draft", "parent_ids": []})
+    client = TestClient(make_app(tmp_path))
+
+    building = client.get("/api/runs/activity/nodes/0").json()
+    assert building["activity"] == {
+        "schema": 1, "status": "building", "generation": 0,
+        "evidence": "node_building", "started_at": building["activity"]["started_at"],
+    }
+    assert building["activity"]["started_at"] > 0
+
+    store.append("node_created", {
+        "node_id": 0, "generation": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": ""},
+        "eval_start_boundary": True,
+    })
+    queued = client.get("/api/runs/activity/state").json()["state"]["nodes"]["0"]["activity"]
+    assert queued == {"schema": 1, "status": "queued", "generation": 0,
+                      "evidence": "node_created_boundary"}
+
+    store.append("node_eval_started", {"node_id": 0, "generation": 0})
+    evaluating = client.get("/api/runs/activity/state").json()["state"]["nodes"]["0"]["activity"]
+    assert evaluating["status"] == "evaluating"
+    assert evaluating["generation"] == 0 and evaluating["started_at"] > 0
+    assert client.get("/api/runs/activity/nodes/0").json()["activity"] == evaluating
+
+    # A process-ownership handoff must not reuse the old admission as "training now". The durable
+    # budget receipt remains internal; only a new exact-generation admission restores evaluating.
+    store.append("resume_served", {"engine_owner_boundary": True})
+    handed_off = client.get("/api/runs/activity/state").json()["state"]["nodes"]["0"]["activity"]
+    assert handed_off == {"schema": 1, "status": "queued", "generation": 0,
+                          "evidence": "node_created_boundary"}
+    store.append("node_eval_started", {"node_id": 0, "generation": 0})
+    readmitted = client.get("/api/runs/activity/state").json()["state"]["nodes"]["0"]["activity"]
+    assert readmitted["status"] == "evaluating"
+    assert readmitted["started_at"] >= evaluating["started_at"]
+
+    store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    store.append("node_eval_started", {"node_id": 0, "generation": 0})  # abandoned lifecycle
+    reset = client.get("/api/runs/activity/state").json()["state"]["nodes"]["0"]["activity"]
+    assert reset == {"schema": 1, "status": "queued", "generation": 1,
+                     "evidence": "node_created_boundary"}
+
+    store.append("node_created", {
+        "node_id": 1, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "legacy"},
+    })
+    legacy = client.get("/api/runs/activity/state").json()["state"]["nodes"]["1"]["activity"]
+    assert legacy == {"schema": 1, "status": "pending", "generation": 0,
+                      "evidence": "legacy_untracked"}
+
+
 def test_add_and_abandon_hypothesis_via_control(tmp_path):
     """P1 (1 card = 1 hypothesis): a human posts a hypothesis to the board through /control (it's in
     CONTROL_EVENTS); it folds into the single Card board as a card with verdict `open`, and an abandon

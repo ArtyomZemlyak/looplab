@@ -230,17 +230,35 @@ def research_memo_sig(memo) -> str:
             return memo.get(key)
         return getattr(memo, key, None)
 
-    summary = str(_get("summary") or "").strip()
-    directions = [str(d).strip() for d in (_get("recommended_directions") or []) if str(d).strip()]
-    # OPEN[research-memo-signature-omits-split-output] the convergence key still covers only the
-    # legacy compatibility projection, not the two new memo outputs.
-    # proof:`line:blob = summary&&join(directions)@looplab/engine/research_cadence.py`
-    # REVIEW 2026-08-27 (P1 delivery): two valid memos with the same summary and an empty legacy
-    # union hash identically even when their open questions and concrete experiments differ. The
-    # repeated-research loop then treats the later paid answer as converged and never records it.
-    # Include both split lists in a canonical, field-delimited signature; the existing whitespace
-    # normalization can otherwise stay unchanged.
-    blob = summary + "\n" + "\n".join(directions)
+    def _list(key):
+        return [str(v).strip() for v in (_get(key) or []) if str(v).strip()]
+
+    # EVERY OUTPUT THE MEMO CARRIES, not just the legacy union. `recommended_directions` was the
+    # whole content of a memo when this was written; the prompt now asks for `open_questions` and
+    # `next_experiments` beside it, and two memos differing ONLY in those hashed identically — so
+    # the repeat loop treated the later PAID answer as converged and never recorded it.
+    #
+    # NOT YET SEEN, and the corpus is small enough to say why rather than to reassure: across every
+    # preserved log there are 178 memos, and only 8 carry the split fields at all (v11, the only run
+    # on code that asks for them) — `open_questions` filled on 5, `next_experiments` on 6. Zero have
+    # an empty `recommended_directions` beside a filled split list, and zero collide under either
+    # signature. So this is a latent hole in a population that is about to grow, fixed while it is
+    # still cheap, and not a rescue.
+    #
+    # FIELD-DELIMITED with `\x1e` (ASCII record separator) rather than concatenated: a newline join
+    # over three lists lets content MOVE between them without changing the hash — a question that
+    # becomes a direction is a different memo and must read as one. The character cannot appear in a
+    # model's text field, so no value can forge a boundary.
+    #
+    # IN-PROCESS ONLY and therefore free to change: the signature is `_research_attempt_step`'s
+    # return and the overlap loop's `last_sig`, and it is written to no event, no snapshot and no
+    # sidecar (grep `research_memo_sig`). Widening it cannot move a fold, a replay or a receipt.
+    blob = "\x1e".join([
+        str(_get("summary") or "").strip(),
+        "\n".join(_list("recommended_directions")),
+        "\n".join(_list("open_questions")),
+        "\n".join(_list("next_experiments")),
+    ])
     return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()[:16]
 
 
@@ -676,7 +694,48 @@ class ResearchCadenceMixin:
         # proposed as real work, but this writer reads only the legacy union and open questions. A
         # schema-valid memo that omits the optional compatibility field therefore appends its paid
         # `research_completed` row yet emits no hint, card or executable proposal for its concrete
-        # list. Route that list through the real proposal intake (or a dedicated bounded hint).
+        # list.
+        # AMENDED 2026-08-29 — THIS REVIEW'S OWN PARENTHETICAL REMEDY IS SPENT, and re-deriving it
+        # is what the next reader must not repeat. It said "route that list through the real
+        # proposal intake (or a dedicated bounded hint)"; the second half cannot work.
+        # `agents/hints.py::render_hint_directives` is the ONLY renderer of `state.hints`, and it
+        # FILTERS deep-research rows out on BOTH keys — `source == "deep_research"` and the
+        # `DEEP_RESEARCH_HINT_PREFIX` text, the second catching rows folded from logs older than the
+        # stamp — deliberately, because model output must not be relabelled as operator authority.
+        # So a second hint appended here would be a second channel with no reader, which is the
+        # defect one field over (`RunTools._research_memo` keyed on a `summary` no writer produced,
+        # dead from the commit that added it) reintroduced by its own fix. That is also why the
+        # EXISTING directions hint is not the delivery path it reads as: what actually reaches the
+        # proposal prompt is the `EV_HYPOTHESIS_ADDED` board (`agents/roles.py::board_prompt_lines`)
+        # plus the memo summary pushed by `_state_brief`, and the pull tool `read_research_memo`.
+        # A BOARD ROW IS ALSO THE WRONG DESTINATION and that is the whole point of the split: a
+        # concrete one-change experiment registered as an open belief is a row owning no action,
+        # unbuildable by construction, which is the defect the paragraph below records for
+        # `recommended_directions`. So the remaining route is the PROPOSAL INTAKE and nothing else,
+        # and it cannot be taken from here: this is the background research task, which invariant #1
+        # bounds to `BACKGROUND_APPENDABLE`, and minting a card is the main task's own append.
+        # WHAT IS ALREADY DELIVERED, so the gap is narrower than "no reader": `tools/run_tools.py`
+        # renders `open_questions + next_experiments` as the memo's directions when
+        # `recommended_directions` is empty, so an AGENTIC Researcher that reads the memo sees them
+        # (measured there: 71 of 78 concrete experiments, 91 %, already appear in the union). The
+        # genuine hole is the NON-agentic proposal path, which pulls nothing.
+        # MEASURED 2026-08-29, over every run directory on this box, and it decides the disposition.
+        # All NINE runs record `unified_agent: true` in `config.snapshot.json` and every one PULLS
+        # the memo — `read_research_memo` appears 138 / 139 / 216 / 229 / 252 / 342 / 362 / 698 /
+        # 2,091 times in their `spans.jsonl`. So the non-agentic proposal path, the only route this
+        # marker still describes, is UNREACHABLE here.
+        # AND THE REACHABLE PATH IS ALREADY FIXED BUT HAS NEVER RUN. `git merge-base --is-ancestor`
+        # says `899f6244` — the `run_tools.py` fallback that renders `open_questions +
+        # next_experiments` as the memo's directions — is an ancestor of NEITHER `e6d7d680` (v9's
+        # launch) NOR `1280de6d` (v10's), and IS on master. A running engine pins its own code, so
+        # every memo on disk was written by a process that could not deliver these entries, and
+        # every FUTURE run can. That is what the v9 evidence actually shows: 18 memos, 11 with a
+        # filled `next_experiments`, and memo 4 is `(next 7, directions 0, questions 0)` — a
+        # schema-valid memo whose ONLY content is the concrete list, which steered nothing in that
+        # run because the reader did not exist yet, not because the design lacks one.
+        # SO THIS IS NOT CODE WORK. It is unexercised delivery: the next run launched from master
+        # is what turns 11-of-18 memos from unreadable into read, and the marker stays only until a
+        # run carrying `899f6244` shows a `next_experiments` entry reaching a proposal.
         # WHAT BECOMES A BOARD ROW is now what the memo itself called a QUESTION, not everything it
         # would try next. `recommended_directions` was described to the model as "specific next
         # experiments to try", so it correctly returned experiments and every one of them landed as
@@ -701,6 +760,39 @@ class ResearchCadenceMixin:
         # signal travels on the memo/open-hypothesis channels. Widening it would put new text into
         # old logs' channel for no reader. Where a memo drew no distinction `questions` falls back
         # to `directions`, so every log already on disk folds byte-identically.
+        # EVERYTHING BELOW IS A PROJECTION OF A MEMO THAT IS ALREADY DURABLE, so it may not fail the
+        # PASS. Until 2026-08-30 these appends were unguarded and a raise in any of them travelled
+        # out of `_research_attempt_step` into the overlap loop's `except Exception`, which retried
+        # with the ORIGINAL cadence/strategist trigger and an unset `last_sig` — buying the same
+        # think again, writing a second `research_attempted` receipt and appending a SECOND
+        # `research_completed` for a memo already on disk. The paid artifact is the memo; the hint
+        # and the board rows are steering derived FROM it, and the memo body carries every
+        # direction either way, so re-paying a provider because a projection append was refused is
+        # strictly the worse trade.
+        #
+        # NOT SILENT, and that is the whole of the difference from swallowing: the loss is logged at
+        # WARNING naming which channel and how many rows, because a board that quietly did not grow
+        # is the "the run paid for a think-hard review and the board stayed empty" failure this
+        # method has now been fixed for three times.
+        #
+        # DELIBERATELY NOT WIDENED TO THE MEMO APPEND ITSELF. If `EV_RESEARCH_COMPLETED` is refused
+        # nothing durable exists, the trigger gate is still spent by the receipt, and the raise is
+        # exactly the signal the caller needs; swallowing there would discard a paid think in
+        # silence. The boundary is "is the memo on disk", not "is this an append".
+        try:
+            self._record_research_steering(memo, memo_d, directions, questions)
+        except BudgetExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001 — see above: a durable memo is not undone by this
+            _LOG.warning("deep research: memo recorded but its steering projections failed "
+                         "(%d direction hint row(s), %d question row(s)): %s",
+                         1 if directions else 0, len(questions or []), exc)
+
+    def _record_research_steering(self, memo, memo_d: dict, directions: list,
+                                  questions: list) -> None:
+        """The hint + open-belief projections of an ALREADY-DURABLE memo. Split out of
+        `_record_deep_research` so the boundary "the memo is on disk" is a place in the code and not
+        a comment — the caller's one `try` covers exactly this and nothing above it."""
         if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
             # The prefix comes from `agents/hints.py`, which FILTERS on it — a deep-research row

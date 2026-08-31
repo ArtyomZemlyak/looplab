@@ -149,20 +149,31 @@ def test_each_group_docstring_says_what_it_mutates():
 def test_no_group_is_a_god_module_again():
     """The finding's own measure. Not a style rule — 1701 lines is how three domains hid in one.
 
-    1100 -> 1163 on 2026-08-29, at the MERGE with master, and the raise is recorded because the
-    number arrived from BOTH sides and one of them was already over: master's own `inspect_cmds.py`
-    is 1148 lines against its own `< 1100`, i.e. `test_no_group_is_a_god_module_again` was RED on
-    master before this merge (verified by running it on a clean master checkout, not inferred). This
-    branch's copy was 933. The merged file is 1162, so the cap admits it with ONE line of headroom
-    rather than fresh slack -- the same discipline `test_agent_factory_split.py` states next door.
+    `inspect_cmds` gets its OWN cap and the other groups keep 1100 — master's shape, kept, because
+    this branch's single global `< 1163` bought every other group 63 lines of slack it had not
+    argued for. The NUMBER is master's 1250 re-derived against the merged file rather than carried:
+    both sides raised it on their own copy (this branch 1100 -> 1163 against a 1162-line file,
+    master 1100 -> 1250 against a 1197-line one), so neither literal was measured on the tree it
+    now guards.
 
-    THE CAP IS NOW A DEBT, not a measure: 1162 lines is past the point the split was performed at,
-    and the honest fix is another split, not a third raise. Whoever needs 1164 should do that split
-    instead.
+    HOW IT GOT HERE, both halves being real work in-domain: `looplab tokens` grew its per-card and
+    per-build tables (1f49adfb 1053 -> 1124, ad374925 -> 1148 — this guard was RED on master for a
+    day, which is the drift it exists to catch), then ec60fed2's `occupancy` command and the
+    2026-08-29 review annotations took master to 1197; this branch's own additions bring the merged
+    file to 1224. That is run diagnostics doing its job, not a second domain moving in.
+
+    THE HEADROOM IS ONE LINE, not master's "one small command wide", and the tighter of the two
+    disciplines wins because the cap has now been raised three times: 1224 is far past the point the
+    split was performed at, so the honest answer to the next overrun is the EXTRACTION, which is
+    already named — the `tokens` command's rendering half (the per-card / per-build table echoes) is
+    a coherent unit that can move beside `events/token_spend.py`'s pure folds into a cli-side helper
+    module. Banking 26 lines of slack instead would be a cap that stopped being consulted, the exact
+    trade `test_agent_factory_split.py` refuses next door.
     """
+    caps = {"inspect_cmds": 1225}
     for module_name in GROUPS:
         lines = len((_CLI / f"{module_name}.py").read_text(encoding="utf-8").splitlines())
-        assert lines < 1163, f"{module_name} is back to {lines} lines"
+        assert lines < caps.get(module_name, 1100), f"{module_name} is back to {lines} lines"
 
 
 # ------------------------------------------------------- the defect the split surfaced

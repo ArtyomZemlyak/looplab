@@ -188,7 +188,14 @@ bought the same think, the same build, or the same install a second time. With t
   lost rather than re-paid (ask again explicitly if you still want it). The ordinary case — the
   evaluation the think overlaps finishing first — is not a loss: the receipt, the provider call and
   the memo are one indivisible step, so a think that reached the provider always lands its memo
-  before the eval window closes;
+  before the eval window closes. The receipt is what "spent" MEANS, so the repeat loop marks its
+  one-shot trigger used at the same instant the receipt goes down and not when the whole pass
+  finishes — otherwise a failure after the memo was already durable made the next tick wear the
+  same trigger, write a second receipt and buy the same think again. For the same reason the
+  steering a memo produces (the legacy `hint` row, the open-question board rows) is best-effort
+  ONCE `research_completed` is on disk: it is derived from an artifact already paid for, its
+  loss is logged, and the memo body still carries every direction. A refused `research_completed`
+  is not swallowed — with nothing durable, the raise is the only signal there is;
 - a Card-build request that carries an attempt from a dead process is **quarantined** — closed and
   moved to the serial path — instead of silently re-issued to a provider;
 - `run_setup` is exactly-once for a command that reported an outcome and at-least-once across a kill

@@ -494,13 +494,32 @@ def unconsumed_card_inventory(state: RunState, *, exclude: "Collection[str]" = (
             # misuse: a fix ADDS a condition beside it and the clause survives, so the marker would
             # stay open after it shipped — while any real fix has to read the blocker BY NAME.
             #
-            # OPEN[receiptless-work-reads-as-question] a card whose ownership receipt is MISSING or
-            # AMBIGUOUS earns the same `action_source: "none"` as a genuine question, so this clause
-            # files a BROKEN WORK ITEM as a direction, with neither the supply count nor the
-            # buildable board reporting it. The card's own blockers name both cases; nothing here
-            # reads either. Closing it needs a signal that does not exist yet, not a looser reading
-            # of this one — the skip is what closed a measured seven-hour starvation.
-            # proof:`absent:action_owner_missing@looplab/search/card_selection.py`
+            # DECLINED[receiptless-work-reads-as-question] measured: 245 cards over 9 runs, 45
+            # skipped here and 45 of 45 traceable to a registered `hypothesis_added` belief, so 0
+            # are broken work items — and the AMBIGUOUS half was false by construction, since
+            # `owner_count > 1` yields a source name or `"mixed"` and never `"none"`
+            # — docs/BACKLOG.md §0.22
+            #
+            # The finding was that a card whose ownership receipt is MISSING or AMBIGUOUS earns the
+            # same `action_source: "none"` as a genuine question, so this clause files a BROKEN WORK
+            # ITEM as a direction. Only the MISSING half can reach here at all: `card_ledger` writes
+            # `"none"` exactly when `owner_count == 0`, so an ambiguous card is already an
+            # `experiment` to `card_kind_of`, already counted below, and already wears
+            # `action_owner_ambiguous` on the board.
+            #
+            # DIRECTION OF HARM if the missing half ever fires: this function is the ceiling on
+            # unconsumed PREFETCH, so a row it misses is UNDER-counted and the run buys MORE —
+            # wasted builds, not an idle GPU. Over-counting is the expensive direction and is what
+            # the skip closed (v6: six questions against a ceiling of one, seven hours, GPU 1 at 0%).
+            #
+            # AND THE OBVIOUS DISCRIMINATOR IS UNSOUND, which is what decides this. `identity.kind
+            # == "native"` beside `action_owner_missing` is inert today (all 45 real directions are
+            # `legacy_hash` shadows) and would stay correct only while directions are minted as
+            # shadows: native is the MINT PATH, not the ROLE, so a natively-authored direction would
+            # be counted as inventory and re-open the starvation. No field says which of the two a
+            # receiptless row IS. Re-open on evidence, not on inspection — a card whose blockers
+            # carry `action_owner_missing` and whose seed statement matches no `hypothesis_added`
+            # row is one fold away, and finding one is what makes this real.
             continue
         if getattr(card, "status", None) != "proposed":
             continue                       # built, running, dropped: no longer waiting

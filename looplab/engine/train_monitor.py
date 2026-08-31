@@ -527,34 +527,58 @@ def _eta_of(rows) -> Optional[float]:
     """
     if not rows:
         return None
-    first, last = rows[0], rows[-1]
-    # OPEN[eta-pairs-progress-across-lanes] the two ends of this rate can come from DIFFERENT
-    # progress bars, and nothing checks that they share one.
-    # proof:line:first.progress_done,&&last.progress_total@looplab/engine/train_monitor.py
-    # REVIEW 2026-08-25 (correctness): each window's `progress_done`/`progress_total` is
-    # `_latest_progress` over that tick's tail — the LAST counter in the window, whichever lane
-    # rendered it — and this pairs `first`'s done with `last`'s done/total with no same-lane check.
-    # That is the exact defect `schedule_reading` below refuses by its ONE-RECORD rule, quoting the
-    # same measurement (109 of the 109 stage logs above 200 KB carry more than one bar lane), so on
-    # the corpus this runs over the mixed pairing is the ROUTINE case, not the corner: a tick that
-    # lands during an in-epoch validation ends with the val bar (total ~361) while its neighbours
-    # end with the train bar (total ~10,590), and `advanced` is then a difference between two
-    # unrelated counters. Most mixes only DEFLATE the ETA (the conservative direction
-    # `projected_overrun_s` leans on), but the claim there — "it will under-report an overrun and
-    # never invent one" — is not safe against the mix that INFLATES it: a first window ending on a
-    # near-complete eval-on-start/sanity-val bar (HF `eval_on_start`, Lightning's sanity check) and
-    # a last window on the young train bar gives a small positive `advanced` over a real span, so
-    # the per-step time is overstated and `projected_overrun_s`/`stage_wall_s` can be stamped on the
-    # durable alert for a stage that fits. Fix direction: key the pair by lane the way the clock
-    # derivation already does ("tqdm elapsed tracked PER BAR TOTAL") — take `done_a` from the latest
-    # window whose total equals the last window's total, and answer None when no earlier
-    # window shares that lane. Delete this marker with the fix.
-    done_a, done_b, total = first.progress_done, last.progress_done, last.progress_total
-    if not (type(done_a) is int and type(done_b) is int and type(total) is int and total > 0):
+    last = rows[-1]
+    # THE TWO ENDS OF THIS RATE MUST COME FROM ONE PROGRESS BAR, and until 2026-08-30 nothing
+    # checked it: `done_a` was taken from `rows[0]` and `total` from `rows[-1]`, so a tick that
+    # landed during an in-epoch validation ended on the val bar (total ~361) while its neighbours
+    # ended on the train bar (total ~10,590), and `advanced` was a difference between two unrelated
+    # counters. `_latest_progress` reports the LAST counter in a tick's tail, whichever lane
+    # rendered it, and 109 of the 109 stage logs above 200 KB on this box carry more than one lane —
+    # so the mixed pairing was the ROUTINE case, not a corner. `schedule_reading` below already
+    # refuses exactly this by its ONE-RECORD rule and quotes the same measurement.
+    #
+    # MOST MIXES ONLY DEFLATE the ETA, which is the conservative direction, but the dangerous one is
+    # real: a first window ending on a near-complete eval-on-start / sanity-check bar and a last
+    # window on a young train bar yields a small positive `advanced` over a real span, overstating
+    # the per-step time. That now matters more than when the note was written — since `ac189252` a
+    # beyond-grace `projected_overrun_s` OPENS the durable write gate on its own, so an inflated ETA
+    # no longer merely decorates an existing row, it can mint one about a stage that fits.
+    #
+    # THE ANCHOR IS THE LATEST EARLIER WINDOW ON THE SAME LANE, and windows on OTHER lanes in
+    # between are SKIPPED rather than treated as a wall. A first cut walked back only through the
+    # contiguous same-lane run and stopped at the first foreign total, which is same-lane but
+    # measurably too strict: an in-epoch validation interlude is the ordinary shape here, so that
+    # rule answers None for most real runs and would withdraw the very coverage `projected_overrun_s`
+    # now leans on. Skipping the interlude keeps the pair on one bar AND keeps the span long; the
+    # train bar merely pauses while the val bar renders, so the wall time between two train-bar
+    # windows includes the validation and the rate comes out DEFLATED — the conservative direction
+    # this function already prefers.
+    #
+    # A COUNTER THAT MOVED BACKWARD IS A RESTART, not a rate. An epoch bar re-rendering from 0
+    # shares its total with the bar before it, so equal totals alone do not prove one continuous
+    # count; when the nearest same-lane window is AHEAD of the last one, everything older belongs to
+    # a previous cycle and the honest answer is None rather than a scan further back.
+    #
+    # ANSWERS None WHEN NO EARLIER WINDOW SHARES THE LANE, rather than falling back to a mixed pair:
+    # a wrong ETA is worse than none for anything that schedules on it, which is this function's
+    # stated rule and, since `ac189252`, its gate's too.
+    total, done_b = last.progress_total, last.progress_done
+    if not (type(done_b) is int and type(total) is int and total > 0):
         return None
-    if first.at is None or last.at is None:
+    anchor = None
+    for window in reversed(rows[:-1]):
+        if type(window.progress_total) is not int or window.progress_total != total:
+            continue                   # a different bar rendered this tick's tail — skip it
+        if type(window.progress_done) is not int or window.progress_done > done_b:
+            return None                # the counter restarted: this is not one continuous count
+        anchor = window
+        break
+    if anchor is None:
         return None
-    span, advanced = last.at - first.at, done_b - done_a
+    done_a = anchor.progress_done
+    if anchor.at is None or last.at is None:
+        return None
+    span, advanced = last.at - anchor.at, done_b - done_a
     if span <= 0 or advanced <= 0:
         return None
     remaining = total - done_b
@@ -1121,10 +1145,57 @@ def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan,
     # OPEN[overrun-grace-bar] the alert bar subtracts a grace CEILING that may never be granted, so a
     # projected overrun inside it is silently suppressed. The noise it exists to stop is real (a
     # 40-second overrun on a ten-hour stage is not worth an interrupt), so the fix is a bar keyed on
-    # the PROJECTION's own precision rather than on a discretionary rescue — and nobody has measured
-    # that precision, so the number is not inventable here. `projected_overrun_s` is stamped
-    # unfiltered above either way, so the durable record already holds what the engine knew.
+    # the PROJECTION's own precision rather than on a discretionary rescue — see the measurement
+    # BELOW the proof line for what the corpus can and cannot say about that precision.
+    # `projected_overrun_s` is stamped unfiltered above either way, so the durable record already
+    # holds what the engine knew.
     # proof:`present:beyond = over - max(0.0, grace)@looplab/engine/train_monitor.py`
+    #
+    # WHAT THE CORPUS CAN AND CANNOT SAY, measured 2026-08-29 so the next reader starts here.
+    # Across every preserved log on this box there are 179 `train_monitor_alert` rows and exactly
+    # SIX carry a projection — all six on `e5small-dr-unified-v8` node 4's `train` stage, over 3.5
+    # hours (17:57:11 -> 21:31:22). That scarcity is the first finding: a projection needs an ETA,
+    # which needs a progress bar with a total, and 173 of 179 alerts had none.
+    #
+    # STABILITY, which IS measurable: 2870.0 / 3586.1 / 3336.0 / 3491.7 / 3427.5 / 3602.7 s — mean
+    # 3385.7, stdev 271.5, spread +/-10.8 % of the mean; dropping only the FIRST reading gives mean
+    # 3488.8, stdev 111.3, spread +/-3.8 % over three hours. The projection does not wander.
+    #
+    # ACCURACY, which is NOT measurable and this is the honest limit: node 4 has NO terminal at all
+    # — no `stage_finished`, no `node_failed`, no `node_evaluated` after 21:31:22, because the run
+    # was retired while it was still training. So the six warnings were never confronted with an
+    # outcome, and nothing here says whether ~3400 s was RIGHT. A bar keyed on precision still needs
+    # a projection that a finished stage later falsified or confirmed, and this box has none.
+    #
+    # THE SUPPRESSION THIS MARKER FEARS HAS NEVER FIRED, and that is checkable rather than assumed:
+    # a suppressed case is exactly an alert carrying `projected_overrun_s` and NOT
+    # `overrun_beyond_grace_s`, and there are ZERO. All six cleared the 1800 s grace outright
+    # (beyond 1070.0-1802.7 s). So the bar has cost this box nothing so far — which lowers the
+    # urgency without answering the question, since one node at one grace is not a rate.
+    #
+    # BOTH PARAGRAPHS ABOVE ARE NOW FALSIFIED, by `e5small-dr-unified-v11` node 3 (2026-08-30). They
+    # were true when written and the population moved under them, which is the drift CLAUDE.md warns
+    # about — so read them as history and this as the state.
+    #
+    # ACCURACY IS NOW MEASURABLE, because for the first time a projection was CONFRONTED WITH AN
+    # OUTCOME. That node's first `train` attempt drew TWELVE consecutive projections (977.2 / 1013.4
+    # / 1056.8 / 1092.3 / 1095.2 / 1098.6 / 1108.3 / 1111.5 / 1118.5 / 1118.6 / 1120.3 / 1120.6 s
+    # over 9h51m, i.e. even steadier than node 4's) and then ENDED: `stage_finished train
+    # status=timeout exit=-9 seconds=36008.207` against the manifest's declared 36000 s, at
+    # 2948/3150 steps. The projection was RIGHT — the stage did not fit — and 10.0 GPU-hours were
+    # spent finding out. Its MAGNITUDE under-reported, in exactly the direction `projected_overrun_s`
+    # promises: at the last tick (08:34:00) the stage had 506 s of wall left and an `eta_s` of
+    # 2390.3, so the true remaining overrun was ~1884 s against a stamped 1120.6 — 59 % of it. A bar
+    # keyed on precision must therefore be keyed on the projection being an UNDER-estimate, never on
+    # it being centred.
+    #
+    # AND THE SUPPRESSION HAS NOW FIRED, twelve times, on that node. Every one of those twelve rows
+    # carries `projected_overrun_s` and NOT `overrun_beyond_grace_s`: the wall is 36000 s, so the
+    # AUTO grace ceiling is min(10 %, 30 min) = 1800 s, and every projection sat under it. The
+    # engine knew from 23:30 on 08-29 — 9h12m before the kill — that the stage would not fit, wrote
+    # that down twelve times, and opened nothing, because a real overrun smaller than a rescue that
+    # was never granted is indistinguishable here from no overrun at all. That is the exact failure
+    # this marker describes, it is no longer hypothetical, and its price on this box is one node.
     try:
         from looplab.runtime.sandbox import resolve_deadline_grace
         grace = float(resolve_deadline_grace(grace_cap, wall))
@@ -3025,8 +3096,42 @@ class TrainingMonitorMixin:
                             armed_at, arm_looks = anyio.current_time(), 0
                             sp.set("kill_armed", True)
                         sp.set("next_check_s", round(next_sleep, 2))
+                        # The same precondition the alert body uses for the projection, hoisted so
+                        # the gate and the body agree about when a projection is even possible.
+                        measured_for_gate = trajectory_row(trajectory)
+                        # THE CLOCK IS NOT A HEALTH VERDICT, and until 2026-08-30 it could only
+                        # be heard through one. `stamp_projected_overrun` was called INSIDE the
+                        # branch below, so a stage whose measured ETA cannot fit its own declared
+                        # wall recorded that fact only if the judge ALSO had a health concern —
+                        # and a run that is training perfectly is exactly the case where it does
+                        # not. MEASURED on `e5small-dr-unified-v11` node 2: judged healthy on every
+                        # tick that emitted (correctly — loss 41.46 -> 23.62, descending), so every
+                        # row was suppressed by the rule below, and its train stage was SIGKILLed by
+                        # its own 36000 s wall at step 1764/2109 — 84 %, 9h56m21s, 10.0 GPU-hours,
+                        # then charged a full retrain. 2109 steps x 19.35 s/it = 11.3 h against a
+                        # 10 h wall, decidable hours earlier by the projection this line discarded.
+                        #
+                        # Node 3 of the same run shows the asymmetry that hid it: it happened to
+                        # draw a `watch` early, so `last_event_status` opened the gate and all 12 of
+                        # its rows carry `projected_overrun_s`. The signal was never missing — it
+                        # was conditional on an unrelated fact.
+                        #
+                        # DERIVED ONCE, HERE, and read twice. `stamp_projected_overrun` stays a
+                        # stamp and not a decision (its own docstring's rule), so it fills a scratch
+                        # dict that the gate consults and the alert then absorbs — one derivation,
+                        # so the row's numbers and the reason it was written cannot disagree.
+                        # Only `overrun_beyond_grace_s` opens the gate, never the raw projection: a
+                        # 40-second overrun on a ten-hour stage is the noise the grace bar exists to
+                        # swallow, and this must not become a second, louder spelling of it.
+                        _overrun_fields: dict = {}
+                        if measured_for_gate is not None:
+                            stamp_projected_overrun(
+                                _overrun_fields, trajectory, resolved, log_plan,
+                                grace_cap=getattr(self, "eval_deadline_grace_s", None))
+                        _wall_unreachable = "overrun_beyond_grace_s" in _overrun_fields
                         if (verdict.status != "healthy"
-                                or last_event_status in ("watch", "broken")):
+                                or last_event_status in ("watch", "broken")
+                                or _wall_unreachable):
                             # healthy is normally trace-only, but the transition from an alert
                             # is a durable recovery edge. Without it, projections can only ever discover the
                             # old bad verdict and keep warning after the live curve has recovered.
@@ -3051,7 +3156,7 @@ class TrainingMonitorMixin:
                             # run that had gone 24.28 -> 22.90. Additive and fold-ignored; an
                             # absent `trajectory` means the engine measured nothing (an old row, or
                             # a log printing no parseable loss), NEVER that the loss was flat.
-                            measured = trajectory_row(trajectory)
+                            measured = measured_for_gate
                             if measured is not None:
                                 alert["trajectory"] = measured
                                 # THE PROJECTION AGAINST THE WALL, while it is still cheap to act
@@ -3061,9 +3166,10 @@ class TrainingMonitorMixin:
                                 # discarded 7.78 GPU-hours. The deadline judge is the LAST line and
                                 # is right to refuse a run two hours short; this is the first one.
                                 # Additive and fold-ignored — it records that the engine knew.
-                                stamp_projected_overrun(
-                                    alert, trajectory, resolved, log_plan,
-                                    grace_cap=getattr(self, "eval_deadline_grace_s", None))
+                                # Computed above the write gate (see the note there) so that a
+                                # HEALTHY stage which cannot finish in time still gets a row; this
+                                # absorbs that one derivation rather than repeating it.
+                                alert.update(_overrun_fields)
                             if trajectory_veto:
                                 alert["trajectory_veto"] = True
                             if role_withheld:

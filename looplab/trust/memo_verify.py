@@ -351,6 +351,60 @@ def _evidence_text(claim: dict, state: RunState,
     )
 
 
+# "DOES NOT EXIST" WAS SAID ABOUT NODES THAT EXIST, and measured over every event log preserved on
+# this box that was 169 of 397 cited ids — 42.6 %, across ALL ELEVEN runs that produced a memo
+# (2 to 43 each). The remaining 228 are genuinely absent and keep the original sentence.
+#
+# `_evidence_snapshot` admits a cited node only at a TERMINAL lifecycle (`evaluated` / `failed`,
+# non-tombstoned, non-aborted), which is right: a claim cannot be evidenced by an experiment that has
+# produced no number. But when NO cited id clears that bar, `_check_claims` wrote one sentence —
+# "cited experiments do not exist" — for two facts with OPPOSITE remedies. Absent means the model
+# invented an id and must stop; still-running means the citation was ACCURATE and merely premature.
+#
+# Live on `e5small-dr-unified-v11`: memo0 at 14:29:27 cited [1, 13] when the run had zero nodes, and
+# memo2 at 16:55:43 cited [0, 1] — created 15:23:37 and 16:47:07, both real, both mid-eval, and the
+# memo's own summary says so ("both still pending drafts"). One note called both fabrications.
+#
+# It is not cosmetic: `core/advisory_payloads.py::memo_verification_view` renders these notes,
+# `_verifier_lead` puts the refusal at the LEAD of every rendered memo section, and
+# `Settings.memo_verdict_cue` pushes the tally into the proposal prompt — so the Researcher is told
+# in the strongest available words that a correct citation was a fabrication.
+#
+# THE VERDICT DOES NOT MOVE and neither does what counts as evidence. `unsupported` is still
+# `unsupported`, `_evidence_snapshot` is untouched, and `finalize_verified_evidence` and every
+# durable claim gate read the VERDICT, never this string — which is also why changing it is safe:
+# the note has no reader that branches on it, only renderers that print it.
+def _cited_node_partition(nids, state) -> tuple[list, list]:
+    """Split cited ids into (ABSENT, PRESENT-BUT-NOT-TERMINAL), mirroring `_evidence_snapshot`.
+
+    The mirror is the whole point: a partition that disagreed with the snapshot's own admission rule
+    would produce a note as false as the one it replaces. A tombstoned or aborted id is reported as
+    ABSENT deliberately — that lifecycle is gone, and telling the model to wait for it would be the
+    inverse error.
+    """
+    aborted = set(getattr(state, "aborted_nodes", ()) or ())
+    nodes = getattr(state, "nodes", {})
+    absent, pending = [], []
+    for nid in nids:
+        n = nodes.get(nid) if isinstance(nodes, dict) else None
+        if n is None or getattr(n, "tombstoned", False) or nid in aborted:
+            absent.append(nid)
+        else:
+            pending.append(nid)
+    return absent, pending
+
+
+def _cited_nodes_note(nids, state) -> str:
+    """The sentence for cited ids none of which reached a terminal lifecycle."""
+    absent, pending = _cited_node_partition(nids, state)
+    parts = []
+    if absent:
+        parts.append(f"cited experiments do not exist: {absent}")
+    if pending:
+        parts.append(f"cited experiments have no result yet: {pending}")
+    return " and ".join(parts) or f"cited experiments do not exist: {list(nids)}"
+
+
 def _check_claims(claims: list[dict], state: RunState,
                   consulted: dict[str, dict[str, str]]) -> list[dict]:
     """Implementation shared by the public raw-source path and ``verify_memo``'s frozen map."""
@@ -373,11 +427,11 @@ def _check_claims(claims: list[dict], state: RunState,
             continue
         if not known and not matched:
             if nids and not urls:
-                note = f"cited experiments do not exist: {nids}"
+                note = _cited_nodes_note(nids, state)
             elif urls and not nids:
                 note = "cited source URL was not consulted"
             else:
-                note = "cited experiments do not exist and source URLs were not consulted"
+                note = _cited_nodes_note(nids, state) + " and source URLs were not consulted"
             out.append({"statement": stmt, "verdict": "unsupported",
                         "note": note, "evidence": identity_receipt})
             continue

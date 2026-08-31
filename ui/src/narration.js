@@ -1,4 +1,4 @@
-import { durationLabel, fmt, fmtCost } from './util.js'
+import { durationLabel, fmt, fmtCost, NODE_ACTIVITY, nodeActivityStatus } from './util.js'
 import { stripMd } from './markdown.jsx'
 import { crossRunPriorNarration } from './crossRunPrior.js'
 import { livePhase } from './buildingModel.js'
@@ -566,8 +566,8 @@ export function eventNarration(event) {
 // hangs for a very long time with no logs (or they are not visible)": the logs existed, the *clock*
 // did not, so there was nothing on screen to distinguish work from a stall.
 //
-// No new backend data is needed. `_on_node_building` already stamps `started: e.ts` on every marker,
-// and every event carries `ts`; this only reads them.
+// Build ages reuse `_on_node_building`'s existing `started: e.ts` marker. Evaluation ages use the
+// generation-scoped activity projection because their one-shot start event can leave the UI window.
 // Bookkeeping events that must not move the live status. They are excluded from the
 // between-experiments label, else the strip flickers to "Thinking…" every time one lands right after
 // a node (coverage/cost/lessons/reflection all fire post-eval) — and from the CLOCK below, so the
@@ -601,54 +601,56 @@ export function pendingWork(live, log = []) {
   // parallel…" is false about two of the three, and it is false in the direction that hides a stall:
   // an operator reading it sees a busy box.
   //
-  // The split is derived from the LOG, not from the node payload, because the payload carries no
-  // eval-start field — `node_eval_started` exists only as an event. That is also the honest bound of
-  // this function: it answers "has this node's evaluation been announced", never "is a process
-  // alive". A node between stages, waiting on the GPU lease, or being repaired all read as STARTED,
-  // which is right — the evaluation owns them — and none of them is proof of a running process.
-  const pending = Object.values(live?.nodes || {}).filter(n => n?.status === 'pending')
-  // OPEN[narration-announce-scan-bounded] a node hours into training renders as queued.
-  // proof:present:(correctness):@ui/src/narration.js
-  // REVIEW 2026-08-18 (correctness): two defects in the announcement scan. (1) The one call site
-  // (`Dock.jsx::agentStatus`) passes `timeline.rows` — a BOUNDED tail window (200-row initial page,
-  // 5,000 retained, `timelineModel.js`), while `node_eval_started` fires ONCE per node at dispatch
-  // and a live run appends rows continuously (163 `llm_usage` in one 40-minute stage, per the
-  // STATUS_NOISE comment above). The announcement scrolls out of the window within minutes and
-  // `Node.eval_started` is exclude=True on the wire, so a node hours into training renders
-  // "Experiment #N queued…" on page load — the inverse of the misstatement this split was built to
-  // fix. (2) The match is by node id ONLY: after an eval-type `node_reset` the stale generation's
-  // row still counts as announced (`data.generation` vs `n.attempt` is never compared), so a
-  // re-queued node narrates as "evaluating" while nothing runs — the fold-side readers key on
-  // (node_id, generation) precisely to avoid this. Fix direction: serve the eval-start boundary on
-  // the live node payload (or scan an unbounded source), and count a row only when its generation
-  // matches the node's current attempt.
+  // The API projection is authoritative and survives the Dock's bounded timeline window. The scan
+  // remains only as compatibility for an older server; unlike the old implementation it is keyed by
+  // BOTH node id and generation, so a reset can never inherit the abandoned lifecycle's start row.
+  const pending = Object.values(live?.nodes || {}).filter(n => n?.status === 'pending'
+    && nodeActivityStatus(n, live) !== NODE_ACTIVITY.BUILDING)
   const announced = new Set()
   for (const event of log) {
     if (event?.type !== 'node_eval_started') continue
     const id = event?.data?.node_id ?? event?.node_id
-    if (id != null) announced.add(String(id))
+    const generation = event?.data?.generation ?? event?.generation
+    if (id != null && Number.isInteger(Number(generation)) && typeof generation !== 'boolean') {
+      announced.add(`${Number(id)}:${Number(generation)}`)
+    }
   }
-  const started = pending.filter(n => announced.has(String(n?.id)))
-  return { pending, started, queued: pending.filter(n => !announced.has(String(n?.id))) }
+  const started = []
+  const queued = []
+  const unknown = []
+  for (const node of pending) {
+    const status = nodeActivityStatus(node, live)
+    const generation = Number.isInteger(Number(node.attempt)) ? Number(node.attempt) : 0
+    if (status === NODE_ACTIVITY.EVALUATING
+        || announced.has(`${Number(node.id)}:${generation}`)) started.push(node)
+    else if (status === NODE_ACTIVITY.QUEUED) queued.push(node)
+    else unknown.push(node)
+  }
+  return { pending, started, queued, unknown }
 }
 
 export function pendingWorkLabel(live, log = []) {
   // One sentence for the strip, and it never claims more than `pendingWork` established.
-  const { pending, started, queued } = pendingWork(live, log)
+  const { pending, started, queued, unknown } = pendingWork(live, log)
   if (!pending.length) return ''
   if (pending.length === 1) {
-    return started.length
-      ? `Running experiment #${pending[0].id}… (training)`
-      : `Experiment #${pending[0].id} queued…`
+    if (started.length) return `Experiment #${pending[0].id} training / evaluating…`
+    if (queued.length) return `Experiment #${pending[0].id} waiting for an evaluation slot…`
+    return `Experiment #${pending[0].id} pending — evaluation start unknown…`
   }
-  if (started.length && queued.length) {
-    return `${started.length} experiment(s) evaluating, ${queued.length} queued…`
-  }
-  if (!started.length) return `${queued.length} experiments queued…`
-  return `${started.length} experiments evaluating…`
+  const parts = []
+  if (started.length) parts.push(`${started.length} evaluating`)
+  if (queued.length) parts.push(`${queued.length} waiting for a slot`)
+  if (unknown.length) parts.push(`${unknown.length} start unknown`)
+  return `${parts.join(', ')}…`
 }
 
 export function liveStatusStartedAt(live, log = []) {
+  // An explicitly non-live state has no clock that can keep advancing. In particular, a durable
+  // eval-start row survives a process crash; it explains "interrupted" but is not proof of work that
+  // is still running now. An omitted liveness field remains the older-server compatibility shape.
+  if (live?.finished || live?.paused || live?.stop_requested || live?.phase === 'finalizing'
+      || live?.engine_running === false || live?.engine_running === null) return null
   // The CURRENT PHASE's own start wins over everything below. The two answer different questions and
   // the phase's is the one an operator is asking: with beacons, "40m" against "Writing code for
   // experiment #7…" means the Developer has been going 40 minutes, whereas the build-marker clock
@@ -664,6 +666,14 @@ export function liveStatusStartedAt(live, log = []) {
     .map(marker => Number(marker?.started))
     .filter(value => Number.isFinite(value) && value > 0)
   if (started.length) return Math.min(...started)
+  // Evaluation starts are one-shot rows and routinely scroll out of the bounded Dock timeline. The
+  // API carries their first timestamp on the generation-scoped activity projection, so a long silent
+  // training run keeps its real age instead of restarting at whichever later event remains visible.
+  const evalStarted = Object.values(live?.nodes || {})
+    .filter(node => nodeActivityStatus(node, live) === NODE_ACTIVITY.EVALUATING)
+    .map(node => Number(node?.activity?.started_at))
+    .filter(value => Number.isFinite(value) && value > 0)
+  if (evalStarted.length) return Math.min(...evalStarted)
   // Otherwise the phase began at the last event that MEANT something — the same noise filter the
   // label itself uses, so the clock and the label can never describe different moments.
   for (let i = log.length - 1; i >= 0; i--) {

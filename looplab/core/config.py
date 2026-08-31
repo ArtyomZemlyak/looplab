@@ -566,6 +566,26 @@ class Settings(BaseSettings):
     # nothing it did not consent to. (`train_monitor_tools` has a row because it DOES add paid
     # round trips; that is the distinction, not symmetry.)
     train_monitor_contract: bool = True
+    # THE DETERMINISTIC DIVERGENCE WATCHDOG ON THE SINGLE-COMMAND EVAL PATH. A declared stage gets it
+    # (`command_eval.py` passes `health_check=True`); the ONE eval path that had no deterministic
+    # early stop at all was the single command — even though that branch's own comment says the
+    # command IS the training, and `train_monitor.eval_log_plan` grants it LOG_ROLE_TRAINING for
+    # exactly that reason. The stated worry was a SCORER inside such a run legitimately printing
+    # `loss: nan`, and nobody had counted it.
+    #
+    # MEASURED 2026-08-30 by replaying the shipped `_StageHealthMonitor` over every preserved log on
+    # this box: it fires on 0 of 110 `score.log` scoring phases (30 MB) and 0 of 1 `eval.log`, while
+    # firing on 2 of 133 `train.log` — and those two are the TRUE positives this rung exists for
+    # (`e5small-dr-unified-v2` node 7 and `rubertlite-dense-retrieval` node 15). So the false-positive
+    # population on this deployment is EMPTY.
+    #
+    # A SWITCH RATHER THAN A CONSTANT, because that population is a property of the deployment's
+    # SCORERS and not of the engine: another box's scorer may print a non-finite loss by design.
+    # A false fire costs a repairable `diverged` stage — `FAILURE_REASONS` admits it, so the node
+    # gets a Developer repair rather than a terminal — which is what makes ON the defensible default
+    # at 0 of 110. It takes a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row on the same ground
+    # `train_monitor_kill` has one: a resumed run must not gain kill authority it never consented to.
+    single_command_divergence_watch: bool = True
     # The same permission for the CRASH/TIMEOUT TRIAGE judge — the role whose whole job is "why did
     # this stage die", and the only one still deciding it from a slice. What it is handed is
     # `_eval_failure_text`'s `res.stderr[-500:]`: five hundred CHARACTERS, not the watchdog's 128 KiB.
@@ -2535,6 +2555,9 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "train_monitor": False,
     "train_monitor_interval_s": 600.0,
     "train_monitor_kill": False,
+    # A resumed pre-2026-08-30 run keeps the single-command path it had: no deterministic
+    # divergence stop. New authority is never added to a run already in flight.
+    "single_command_divergence_watch": False,
     "train_monitor_kill_confidence": 0.8,
     # An old run resumes WITHOUT the log tools: this table exists so a resume cannot silently add
     # paid calls, and an agentic tick costs up to `_MONITOR_LOOK_TURNS` extra round trips.

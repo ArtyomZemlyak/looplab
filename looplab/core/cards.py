@@ -1396,9 +1396,19 @@ class Card(BaseModel):
     # `direction` — owns no executable action, so it is a research question children answer;
     # `experiment` — owns one action, the minimal-change hypothesis the engine can actually run.
     # Identity, never readiness: a native work item that is merely stale/in-flight/terminal is still
-    # an `experiment`. This is the SAME predicate `engine/research_cadence.py::is_pure_belief` applies
-    # at the append site, published here so the board, the prompts, the tools and that gate read ONE
-    # spelling. Frozen vocabulary for the UI contract: kinds may be added, never re-spelled.
+    # an `experiment`. `engine/research_cadence.py::is_pure_belief` applies the SAME TEST — action
+    # ownership via `selection_provenance.action_source` — at the append site, but THEY ARE NOT ONE
+    # CALL and this comment asserted they were until 2026-08-30. `card_kind_of`'s own docstring had
+    # already retracted that equivalence and named the two apart: with `selection_provenance` MISSING
+    # the append-site gate reads `action_source` off a None and gets `"none"`, i.e. a direction, while
+    # this side answers `experiment` — the conservative label, because mislabelling work as a
+    # direction HIDES it from the work accounting while the reverse only renders a question in the
+    # wrong column. The divergence is driven in `tests/test_card_kind_divergence.py`.
+    #
+    # This field comment is the wire contract readers actually open, so it is the copy most likely to
+    # be trusted — which is exactly why the retraction had to reach it and not only the docstring.
+    # Unifying the two is worth doing; asserting it had been done was worse than leaving them apart.
+    # Frozen vocabulary for the UI contract: kinds may be added, never re-spelled.
     card_kind: str = CARD_KIND_EXPERIMENT
     # Identity / lineage.
     merged_into: Optional[str] = None                   # canonical id if this card was merged away

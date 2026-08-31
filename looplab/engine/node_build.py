@@ -273,9 +273,11 @@ class NodeBuildMixin:
         """The single `node_created` emitter for all four creation sites (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`). Optional keys default to the
         `_OMIT` sentinel and are LEFT OUT of the payload when not passed — never None-filled —
-        so every site emits EXACTLY its historical payload shape (key set AND key order),
-        byte-identical event data. Known quirk kept for replay compatibility: the two ablate
-        sites emit NO `deleted` key at all (`_create_node` always emits it, `_create_injected_node`
+        so omitted compatibility fields retain their historical shape (key set AND key order).
+        All current creation sites intentionally opt into the additive ``eval_start_boundary``
+        contract; old logs remain reader-defaulted. Known quirk kept for replay compatibility: the
+        two ablate sites emit NO `deleted` key at all (`_create_node` always emits it,
+        `_create_injected_node`
         emits `deleted` + `source` + `origin` but no `research_origin`) — the fold reads every
         optional key with a default, so do not "normalize" the shapes here."""
         data = {"node_id": node_id, "parent_ids": parent_ids, "operator": operator,

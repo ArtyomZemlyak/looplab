@@ -3,8 +3,8 @@
 // The logs existed; the CLOCK did not. The live status strip named the phase ("Writing experiment
 // #3…") and never how long it had been in it, so a build that had been silent for forty minutes read
 // exactly like one that started two seconds ago — there was nothing on screen to distinguish work
-// from a stall. No new backend data was needed: `_on_node_building` already stamps `started` on every
-// marker and every event carries `ts`.
+// from a stall. Build ages reuse `_on_node_building`'s marker; evaluation ages now use the
+// generation-scoped activity receipt because their one-shot event may leave the retained log window.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -33,6 +33,22 @@ test('the clock follows the OLDEST in-flight build, not the newest', () => {
 
 test('a serial-build run falls back to the singular marker', () => {
   assert.equal(liveStatusStartedAt({ building: { node_id: 1, started: 500 } }, []), 500)
+})
+
+test('a long evaluation keeps its activity timestamp after the start event leaves the timeline', () => {
+  const live = { engine_running: true, nodes: {
+    2: { id: 2, attempt: 1, status: 'pending',
+      activity: { status: 'evaluating', generation: 1, started_at: 700 } },
+  } }
+  assert.equal(liveStatusStartedAt(live, [{ type: 'llm_usage', ts: 1900 }]), 700)
+  assert.equal(liveStatusAgeLabel(live, [], 1900), '20m')
+})
+
+test('interrupted or historical activity never keeps a live clock ticking', () => {
+  const node = { id: 2, attempt: 0, status: 'pending',
+    activity: { status: 'evaluating', generation: 0, started_at: 700 } }
+  assert.equal(liveStatusStartedAt({ engine_running: false, nodes: { 2: node } }, []), null)
+  assert.equal(liveStatusStartedAt({ engine_running: null, nodes: { 2: node } }, []), null)
 })
 
 test('between experiments the clock starts at the last MEANINGFUL event', () => {
