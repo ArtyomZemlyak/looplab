@@ -319,7 +319,12 @@ def _fake_snapshot(dest, stamp, *, measured):
         (d / "campaign-final" / "B-task.final.json").write_text('{"speedup": 2.45}')
         (d / "runs-manifest.txt").write_text("model-probes 17 /archive/model-probes\n")
     else:
-        (d / "runs-manifest.txt").write_text("model-probes 0 /archive/model-probes\n")
+        # THE REAL SHAPE, and the reason the first version of this fixture hid a live defect. The
+        # producer writes this count as `find "$RUNS_ARCHIVE/…" -name events.jsonl | wc -l` over the
+        # EXTERNAL archive, which is cumulative -- so once any probe run exists, an unmeasured
+        # snapshot still carries a NON-ZERO count. Writing 0 here described a snapshot the script
+        # cannot emit, and the prune's collapse into oldest-first went unseen for a day.
+        (d / "runs-manifest.txt").write_text("model-probes 17 /archive/model-probes\n")
     return d
 
 
@@ -475,3 +480,36 @@ def test_a_source_that_exists_and_cannot_be_read_is_still_a_shortfall(tmp_path):
         "a source that is present and unreadable was archived silently\n" + result.stdout)
     assert "MISSING" not in result.stdout, "it is not absent; it is unreadable\n" + result.stdout
     assert "INCOMPLETE SNAPSHOT: 1 source(s)" in result.stdout
+
+
+def test_a_runs_manifest_is_a_receipt_about_another_store_and_may_not_vote(tmp_path):
+    """The archive is cumulative and never pruned, so its size says nothing about THIS snapshot.
+
+    Observed live on 2026-08-31: every snapshot in the rotation carried `model-probes 2`, the count
+    of the external archive, so `_measured` answered yes for all of them and the worth ordering
+    became plain oldest-first -- the behaviour the worth ordering had just been written to replace.
+    The timer log printed "WITH MEASUREMENTS: every unmeasured snapshot was already spent" on three
+    consecutive routine cycles, which is the always-on alarm this file objects to elsewhere.
+
+    Losing a snapshot loses none of those runs. They are in the archive, which the prune does not
+    touch. So the manifest may not vote on whether the snapshot is worth keeping.
+    """
+    src = _bench_root(tmp_path)
+    dest, archive = tmp_path / "snapshots", tmp_path / "runs-archive"
+    keep = _fake_snapshot(dest, "20260829-154101", measured=True)
+    spend_a = _fake_snapshot(dest, "20260831-010635", measured=False)
+    spend_b = _fake_snapshot(dest, "20260831-010917", measured=False)
+
+    result = subprocess.run(
+        ["bash", str(SNAPSHOT), str(dest)],
+        env={"PATH": "/usr/bin:/bin", "HOME": str(src.parent), "BENCH_ROOT": str(src),
+             "SNAPSHOT_RUNS_ARCHIVE": str(archive), "SNAPSHOT_KEEP": "2"},
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert keep.exists(), (
+        "the only snapshot carrying a campaign was spent while two that carry nothing but "
+        "regenerable bundles survived — the manifest voted\n" + result.stdout)
+    assert not (spend_a.exists() and spend_b.exists()), result.stdout
+    assert "WITH MEASUREMENTS" not in result.stdout, (
+        "the sentence reserved for real loss printed on a routine cycle\n" + result.stdout)

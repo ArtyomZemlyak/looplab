@@ -222,11 +222,15 @@ fi
 # because deleting one is a real loss rather than housekeeping.
 KEEP="${SNAPSHOT_KEEP:-8}"
 _measured() {  # $1 = snapshot dir -- does it hold anything that cannot be recomputed?
+  # ONLY what the snapshot itself carries counts, and the runs manifest is not that. The first
+  # version also accepted a manifest line with a count above zero, which read as "this snapshot has
+  # runs behind it". It does not: that count is `find "$RUNS_ARCHIVE/$B" -name events.jsonl | wc -l`
+  # over the EXTERNAL archive, which is cumulative and which the prune never touches. So the moment
+  # one probe run existed anywhere, every later snapshot answered "measured", the worth ordering
+  # collapsed back into plain oldest-first, and the sentence reserved for real loss printed on every
+  # routine cycle -- observed in this box's own timer log on 2026-08-31, three cycles running.
+  # The manifest is a RECEIPT ABOUT ANOTHER STORE; losing this snapshot loses none of those runs.
   compgen -G "$1/campaign*" > /dev/null && return 0
-  # runs-manifest.txt lines are "<tree> <count> <archive path>"; a count of 0 means the tree was
-  # there and empty, which is not evidence of anything.
-  [ -s "$1/runs-manifest.txt" ] \
-    && awk '{ if ($2 + 0 > 0) f = 1 } END { exit !f }' "$1/runs-manifest.txt" && return 0
   return 1
 }
 ALL=$(ls -1d "$DEST"/2* 2>/dev/null | sort)
