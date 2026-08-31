@@ -484,6 +484,19 @@ def _bench_root(tmp_path: Path, campaigns, *, with_reports: bool = True) -> Path
     for name in ("meter", "logs", "looplab/benchmarks/algotune/.baseline_times"):
         (root / name).mkdir(parents=True, exist_ok=True)
     (root / "meter" / "meter.jsonl").write_text("{}\n", encoding="utf-8")
+    # Our own checkout and the per-run evidence became snapshot sources on 2026-08-30, after a
+    # container restart proved that recording our HEAD in PROVENANCE.txt was not the same as keeping
+    # it. They are built here so that `with_reports=False` still leaves EXACTLY ONE source absent --
+    # these tests are about a missing source being named and counted, and that reading only survives
+    # if the fixture is otherwise complete.
+    subprocess.run(["git", "init", "-q"], cwd=root / "looplab", check=True)
+    (root / "looplab" / "kept.py").write_text("# tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root / "looplab", check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
+                   cwd=root / "looplab", check=True)
+    run = root / "model-probes" / "dsX" / "runs" / "r1" / "run"
+    run.mkdir(parents=True)
+    (run / "events.jsonl").write_text('{"type": "node_evaluated"}\n', encoding="utf-8")
     if with_reports:
         (root / "AlgoTune" / "reports").mkdir(parents=True)
         (root / "AlgoTune" / "reports" / "agent_summary.json").write_text("{}", encoding="utf-8")
