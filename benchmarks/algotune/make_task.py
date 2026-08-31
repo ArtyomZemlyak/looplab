@@ -501,6 +501,42 @@ def cleared_cache_attrs(root: Path) -> list[str]:
     return [name for name in re.findall(r"[\"\']([^\"\']+)[\"\']", m.group(1)) if name]
 
 
+def per_instance_cap(root: Path) -> tuple[float, float, float] | None:
+    """The per-instance timeout, from the arena's own source rather than from memory.
+
+    Derived, for the reason `session_budget_s` is derived: the card's whole claim here is a RATIO
+    against the reference, and a hand-typed 10 keeps being quoted after the constant moves. Returns
+    (TARGET_TIME_MULTIPLIER, WARMUP_MULTIPLIER, MIN_TIMEOUT_S), or None where this root holds no
+    arena -- and then the card says nothing rather than inventing a ceiling.
+
+    READ FROM THE FILES UNDER `root`, not imported. The first cut imported `AlgoTuner.…` and its own
+    "no arena means no claim" test caught it: once any arena is in `sys.modules` the import succeeds
+    for EVERY root, so a process that had loaded a different checkout would have quoted that other
+    checkout's constants into this card. An import cannot answer a question about a path.
+
+    Read 2026-08-31 from `AlgoTuner/utils/evaluator/runner.py`: in isolated mode (the mode this
+    bench runs in) the subprocess budget is `(1 + WARMUP_MULTIPLIER) * oracle_s *
+    TARGET_TIME_MULTIPLIER`, i.e. 60x the reference's single-run time for 6 runs -- 10x per run.
+    """
+    import re
+
+    def const(rel: str, name: str) -> float | None:
+        f = root / rel
+        if not f.is_file():
+            return None
+        m = re.search(rf"^{name}\s*(?::\s*float\s*)?=\s*([0-9.]+)", f.read_text(errors="replace"),
+                      re.MULTILINE)
+        return float(m.group(1)) if m else None
+
+    mult = const("AlgoTuner/utils/evaluator/runner.py", "TARGET_TIME_MULTIPLIER")
+    warm = const("AlgoTuner/utils/timing_config.py", "WARMUP_MULTIPLIER")
+    if mult is None or warm is None:
+        return None
+    # MIN_TIMEOUT_S is a function-local in runner.py, so it is stated, not read; it only ever RAISES
+    # the ceiling for very fast references and cannot make the 10x claim wrong.
+    return (mult, warm, 10.0)
+
+
 def timing_clause(root: Path) -> str:
     """HOW the number is taken, derived from the arena's config and its benchmark module."""
     runs = benchmark_runs(root)
@@ -524,6 +560,19 @@ def timing_clause(root: Path) -> str:
         "210 ms. Setup belongs at module level or behind a first-call guard, where the warm-up "
         "absorbs it -- not in a constructor that runs again with the clock running. "
     )
+    cap = per_instance_cap(root)
+    if cap:
+        mult, warm, floor = cap
+        clause += (
+            "AND THERE IS A CEILING ON HOW SLOW YOUR SOLVER MAY BE, PER INSTANCE. The harness gives "
+            f"each instance's subprocess `(1 + {warm:.0f}) * reference_time * {mult:.0f}` seconds -- "
+            f"{warm:.0f} warm-up runs plus one timed run, each allowed {mult:.0f}x the reference -- "
+            f"floored at {floor:.0f} s. Cross it and the instance is KILLED, and a killed instance is "
+            "not a slow score, it is an INVALID one. So a solver that is correct but more than about "
+            f"{mult:.0f}x slower than the reference on any single instance does not score badly; it "
+            "fails. This is the one number in this card that experience cannot teach you: your own "
+            "`eval_train` reports the run that survived, never the ceiling it survived under. "
+        )
     attrs = cleared_cache_attrs(root)
     if attrs:
         named = ", ".join(f"`{a}`" for a in attrs)
@@ -733,6 +782,33 @@ MEASURE = (
 # widely" or "investigate the environment": the read fence and the grader fence exist because an
 # earlier run made 119 probe calls, 116 of them reading the grader. The last sentence closes that
 # door in the same breath as opening this one -- two files, and the harness is not one of them.
+# WHICH NODE IS SUBMITTED, and it is not the last one. The other rule experience cannot teach.
+#
+# The champion is chosen among nodes that are `evaluated`, `feasible` and carry a metric -- an
+# unevaluated node cannot be it, however promising the summary. Nothing in a run tells the model
+# this: it sees its own nodes in order and has every reason to assume the newest is the answer.
+#
+# Measured 2026-08-30 (`remDL2`, discrete_log): node_0 scored 14.29 and node_1 scored 13.98, and
+# the run submitted node_0. The first direct evidence that the rule bites rather than merely
+# holding -- until that run every probe's last node also happened to be its best, so the rule was
+# invisible in the corpus. `remPde` the same day spent 74 % of its dollar before ANY node existed,
+# which is the same rule seen from the other end: nodes that are never evaluated cannot be kept.
+#
+# The consequence for the model is what the clause states: a risky rewrite late in the run cannot
+# LOSE anything already measured, so the timid move -- leaving a good solver alone and running out
+# the clock -- buys nothing it did not already have.
+KEEP_BEST = (
+    " THE BEST EVALUATED SOLVER IS WHAT GETS SUBMITTED, NOT YOUR LAST ONE. Every version you "
+    "evaluate is kept and scored; at the end this run submits the highest-scoring one, and a "
+    "version you never evaluated cannot be submitted at all. Two things follow, and they point the "
+    "same way. A change that turns out WORSE costs you nothing -- the better version is still "
+    "there, still the one that counts -- so there is no reason to protect a working solver by "
+    "leaving it alone. And a change you never got around to EVALUATING is worth exactly zero, "
+    "however good the reasoning behind it. Measure early, measure often, and spend late time on "
+    "attempts rather than on caution. "
+)
+
+
 ONE_CARD = (
     " HOW THIS RUN IS ORGANISED, and it is not negotiable:\n"
     "(0) READING THE TWO FILES YOU WERE GIVEN IS A PRECONDITION, NOT AN EXPERIMENT, AND IT COSTS "
@@ -1136,6 +1212,10 @@ def main() -> int:
                  + ((_DELIVER_WRITE if args.full_context else DELIVER) if args.deliver else "")
                  + (MEASURE.format(cost=eval_cost_sentence()) if args.full_context else "")
                  + (ONE_CARD.format(task=args.task) if args.one_card else "")
+                 # Under the same flag as ONE_CARD: both are statements about how THIS loop scores
+                 # what you produce, and both are rules the run itself never demonstrates. See
+                 # KEEP_BEST -- it is the reason "commit to one card" is not a reason to be timid.
+                 + (KEEP_BEST if args.one_card else "")
                  # BANS then PERMISSIONS, in that order and both under the same flag: they are one
                  # statement of what this arena allows, and the half that was missing is the half
                  # that costs score. See `solution_space_clause`.
