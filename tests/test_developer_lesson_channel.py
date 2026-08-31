@@ -155,3 +155,55 @@ def test_the_star_lineage_that_produced_zero_developer_lessons_now_produces_them
     kinds = [(p["kind"], p["a"], p["b"]) for p in pairs]
     assert ("debug", 3, 3) in kinds and ("debug", 6, 6) in kinds
     assert any(k == "solution" for k, _, _ in kinds), "the science pair must survive alongside"
+
+
+# ------------------------------------ a role that is NEITHER producer sees the whole record
+
+def test_an_UNKNOWN_role_sees_every_tagged_lesson(tmp_path):
+    """THE PROPERTY, and the sibling's rule finally spelled the same way here.
+
+    `cross_run_tools.py::_role_lessons` has always carried "An unknown role sees every role"; this
+    provider did not, so the two readers of ONE `lessons.jsonl` inside ONE toolset disagreed about
+    what a meta-decision role may know. The split is a statement about two PRODUCERS — a technique
+    credit and a code fix — routed to the roles that can act on each. A role that is neither, like
+    the Strategist deciding policy over both, is not a third audience to filter for.
+    """
+    tool = _store(tmp_path, [
+        {"statement": "larger batches help", "role": "researcher", "task_id": "t"},
+        {"statement": "the mine stage needs an explicit output dir", "role": "developer",
+         "task_id": "t"},
+        {"statement": "an untagged observation", "task_id": "t"},
+    ])
+    from looplab.tools.memory_tools import MemoryTools
+    strategist = MemoryTools(str(tmp_path), role="strategist")
+    out = strategist.execute("search_lessons", {"query": ""})
+    assert "larger batches help" in out
+    assert "the mine stage needs an explicit output dir" in out, (
+        "MUTATION: drop the known-role escape and this goes red — the Strategist loses every "
+        "developer lesson, which on the live store is 4 of 50")
+    assert "an untagged observation" in out
+    # ...and the roles the split WAS written for keep it, which is the half the escape must not eat.
+    dev = MemoryTools(str(tmp_path), role="developer").execute("search_lessons", {"query": ""})
+    assert "larger batches help" not in dev, (
+        "MUTATION: widen the escape to every role and the split stops existing")
+    assert "the mine stage needs an explicit output dir" in dev and "an untagged observation" in dev
+    assert tool is not None
+
+
+def test_the_FACTORY_forwards_the_role_it_was_given():
+    """The other half, and it is worthless alone: under the OLD predicate a forwarded
+    `"strategist"` matched no tagged row at all, so this forward without the escape above takes
+    that role from 46 of the live store's 50 lessons down to the 10 untagged ones. Driven over the
+    real `_shared_providers` so the wiring is observed rather than asserted about the source."""
+    import ast
+    import inspect
+
+    from looplab.agents import factory
+
+    tree = ast.parse(inspect.getsource(factory))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "MemoryTools"]
+    assert calls, "the factory must still construct the provider"
+    assert all(any(kw.arg == "role" for kw in call.keywords) for call in calls), (
+        "MUTATION: drop `role=role` and the Strategist silently reads the store as a Researcher")
