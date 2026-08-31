@@ -24,27 +24,93 @@
 # ours) instead of a directory of files nobody can date.
 set -u
 
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# WHICH TREES HOLD MEASUREMENTS is answered in one place, shared with `snapshot_timer.sh`. Two
+# copies of that question is how `camp-runs/` came to be archived by neither -- see bench_trees.sh.
+. "$HERE/bench_trees.sh"
+
 SRC="${BENCH_ROOT:-/var/tmp/looplab-bench}"
-DEST="${1:-/home/jovyan/data/looplab-bench/snapshots}"
+# THE DESTINATION IS A VARIABLE, like the source. `$BENCH_ROOT` has always moved this script's
+# SOURCE; nothing moved its DESTINATION, which fell back to the hardcoded persistent path whatever
+# `$BENCH_ROOT` said. Both callers invoke this script with no argument (`snapshot_timer.sh` in its
+# `_loop`, `campaign.sh` after an arm), so on both paths the fallback was the only destination
+# reachable, and `grep -rn SNAPSHOT_DEST` over the tree returned nothing at all.
+#
+# COST, 2026-08-31: an agent started `snapshot_timer.sh` against a synthetic `BENCH_ROOT` to test
+# it. The timer honoured `BENCH_ROOT` for what it read and ignored it for where it wrote, so the
+# cycle deposited a snapshot of a fake box into the LIVE rotation on the persistent mount, beside
+# the real ones, and it had to be identified and deleted by hand. Nothing in the snapshot said
+# where it came from -- see PROVENANCE.txt below, which now records the root it was taken from for
+# exactly that reason.
+#
+# Precedence is argument, then environment, then the box default: a caller that knows says so, a
+# box profile (`box-jhub-l40s.sh`) declares the machine's persistent path beside its other
+# machine-specific facts, and a bare invocation on this box still does what it always did.
+DEST="${1:-${SNAPSHOT_DEST:-/home/jovyan/data/looplab-bench/snapshots}}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$DEST/$STAMP"
 mkdir -p "$OUT" || { echo "cannot create $OUT"; exit 1; }
 
-echo "snapshot -> $OUT"
+echo "snapshot $SRC -> $OUT"
 
 SHORT=0
 
 # 1. The patched third-party checkout, as a bundle with history.
+#
+# THE EXIT CODE COVERS THIS HALF TOO, and until 2026-08-31 it did not. Section 1b below holds two
+# `SHORT=$((SHORT + 1))` for our own repo; this section held NONE. Driven on a synthetic BENCH_ROOT
+# with `AlgoTune/.git` deleted and every other source in place: rc=0, not one MISSING line, and a
+# PROVENANCE.txt whose `AlgoTune:` line is empty after the colon. A snapshot carrying no copy
+# whatever of the checkout every speedup on this box was MEASURED AGAINST reported complete success
+# -- so `snapshot_timer.sh` recorded the fingerprint as archived and `campaign.sh`'s
+# `|| echo "(snapshot failed...)"` arm could not fire. That is the same defect fixed for our own
+# repo on 2026-08-30, in the half that was left behind; the symmetry was there to see.
+#
+# AND THE FALLBACK IS GATED ON THE COMMAND'S STATUS, NOT ON THE FILE'S SIZE. It was
+# `if [ ! -s "$OUT/AlgoTune.bundle" ]`, so the tar ran only when the bundle file was EMPTY -- and
+# any failure that leaves a PREFIX behind (an ENOSPC part-way through a write to the geesefs mount
+# is the ordinary one here, per the copy section below) suppressed the fallback AND counted as
+# nothing. What the archive then held was a file called `AlgoTune.bundle` that no `git clone` can
+# read, under a header promising everything that cannot be regenerated.
+#
+# WHAT IS NOT USED HERE IS `git bundle verify`, which was tried on 2026-08-31 and does not answer
+# this question: it returned 0 for a bundle truncated to its first 200 bytes AND for one made from
+# a `--depth 1` clone -- the very case the header warns about below. It reads the bundle header and
+# its prerequisites, not the pack. So the status of the command that wrote the file is the strongest
+# signal available cheaply, and the honest check remains a restore by hand.
+#
+# A SUCCESSFUL TAR IS NOT A SHORTFALL, deliberately. It is a real, restorable degradation (tracked
+# files, no history), and making it exit 1 would put a permanently-shallow checkout into the
+# unbounded re-snapshot loop that cost 3.0 GB twice -- see the mode block further down. Only losing
+# BOTH is a shortfall.
 if [ -d "$SRC/AlgoTune/.git" ]; then
-  ( cd "$SRC/AlgoTune" && git bundle create "$OUT/AlgoTune.bundle" --all 2>/dev/null ) \
-    && echo "  AlgoTune.bundle       $(du -h "$OUT/AlgoTune.bundle" | cut -f1)  ($(cd "$SRC/AlgoTune" && git log --oneline -1))" \
-    || echo "  AlgoTune.bundle       FAILED (shallow clone?); falling back to a tar of tracked files"
-  if [ ! -s "$OUT/AlgoTune.bundle" ]; then
-    ( cd "$SRC/AlgoTune" && git ls-files -z | tar --null -T - -czf "$OUT/AlgoTune-tracked.tar.gz" ) \
-      && echo "  AlgoTune-tracked.tar.gz  $(du -h "$OUT/AlgoTune-tracked.tar.gz" | cut -f1)"
+  if ( cd "$SRC/AlgoTune" && git bundle create "$OUT/AlgoTune.bundle" --all 2>/dev/null ) \
+     && [ -s "$OUT/AlgoTune.bundle" ]; then
+    echo "  AlgoTune.bundle       $(du -h "$OUT/AlgoTune.bundle" | cut -f1)  ($(cd "$SRC/AlgoTune" && git log --oneline -1))"
+  else
+    echo "  AlgoTune.bundle       FAILED (shallow clone? partial write?); falling back to a tar of"
+    echo "                        tracked files, which carries NO history"
+    # Whatever the failed attempt left behind is not a backup, and leaving it is how a failure comes
+    # to look like one -- it is exactly what the old `[ ! -s ]` gate read as a finished bundle.
+    rm -f "$OUT/AlgoTune.bundle"
+    if ( cd "$SRC/AlgoTune" && git ls-files -z | tar --null -T - -czf "$OUT/AlgoTune-tracked.tar.gz" ) \
+       && [ -s "$OUT/AlgoTune-tracked.tar.gz" ]; then
+      echo "  AlgoTune-tracked.tar.gz  $(du -h "$OUT/AlgoTune-tracked.tar.gz" | cut -f1)  (tracked"
+      echo "                        files only; the upstream sha a published number cites is named"
+      echo "                        in AlgoTune-HEAD.txt and is NOT carried by this snapshot)"
+    else
+      echo "  BOTH FAILED          AlgoTune -- neither a bundle nor a tar of the ruler this box's"
+      echo "                       speedups were measured against is in this snapshot"
+      SHORT=$((SHORT + 1))
+    fi
   fi
   ( cd "$SRC/AlgoTune" && git log --oneline -3 > "$OUT/AlgoTune-HEAD.txt"; git status --porcelain \
       > "$OUT/AlgoTune-dirty.txt" )
+else
+  echo "  MISSING              AlgoTune.bundle -- $SRC/AlgoTune/.git absent, so the checkout every"
+  echo "                       speedup on this box was measured against is NOT archived, and the"
+  echo "                       PROVENANCE line naming its sha is a receipt for nothing"
+  SHORT=$((SHORT + 1))
 fi
 
 # 1b. OUR OWN repo, as a bundle, for exactly the same reason.
@@ -117,13 +183,22 @@ copy "$SRC/logs"                                 "logs                 "
 # regenerated". The failure needs no bug: a campaign is pointed at a new CAMPAIGN_OUT and the
 # hardcoded name goes quietly out of date.
 FOUND_CAMPAIGN=0
-for D in "$SRC"/campaign*; do
-  [ -d "$D" ] || continue
+while IFS= read -r D; do
+  [ -n "$D" ] || continue
   FOUND_CAMPAIGN=$((FOUND_CAMPAIGN + 1))
   copy "$D" "$(printf '%-21s' "$(basename "$D")")"
-done
+done < <(bench_campaign_trees "$SRC")
 
-# EVERY tree of finished RUNS -- where a probe's `events.jsonl` and `spans.jsonl` actually live.
+# EVERY tree of RUNS -- where a run's `events.jsonl` and `spans.jsonl` actually live. DISCOVERED,
+# by what a directory holds and by the operator's own `$CAMPAIGN_RUNS`, never by a pattern over
+# names; see bench_trees.sh for the two times a pattern went stale and what each cost.
+#
+# The second of those is why this paragraph was rewritten. `campaign.sh:52` writes every task-arm's
+# run to `$CAMPAIGN_RUNS/<task>/run/events.jsonl` -- `camp-runs/` on this box -- and the glob here
+# was `runs-* model-probes probes`, which that name matches nowhere: `grep -c camp-runs` over this
+# file returned 0. The campaign path had the SAME hole the probe path had on 2026-08-29, still open,
+# and worse: `campaign.sh:1078` does `rm -rf "$TASK_ROOT"` at the head of every attempt, so a retry
+# destroys the previous attempt's evidence without any container restart being involved.
 #
 # This is the rawest measurement on the box: what the loop proposed, what each call cost, which node
 # became champion and why. docs/56 is written FROM these, and until 2026-08-30 not one byte of them
@@ -136,21 +211,70 @@ done
 # the prune below never touches, and each snapshot records what the archive held at its moment.
 # `cp -ru` keeps the sync incremental, which matters because a LIVE run's directory grows while this
 # script is reading it.
+#
+# BUT `-u` CANNOT REPAIR WHAT IT ONCE COPIED SHORT, and on this mount copying short is the ordinary
+# failure. `-u` copies when the SOURCE is newer than the destination, and a destination truncated by
+# an ENOSPC part-way through today's cycle carries TODAY's mtime -- newer than the frozen mtime of
+# the finished run it is supposed to be a copy of. So `-u` skips it for ever, and every later cycle
+# reports success over it.
+#
+# Driven end to end twice on 2026-08-31, on a 200,000-line events.jsonl with `ulimit -f` standing in
+# for the ENOSPC. The review's run: 33,390 lines in the archive after the failed cycle, 33,390 after
+# the SUCCESSFUL one that followed. Re-driven here from a scratch BENCH_ROOT: 30,118 and 30,118, the
+# second cycle exiting 0 and printing `runs -> archive camp-runs 2.0M (1 run records)`. Two runs, two
+# limits, one outcome. The manifest counted it as a whole run both times, because the manifest counts
+# FILES BY NAME.
+#
+# So the repair asks the only question `-u` cannot: is the archived file SHORTER than its source?
+# These are append-only logs, so shorter means unfinished, and `cp -ru` has already handled every
+# case where the source is merely newer. The incrementality the comment above defends is untouched:
+# a finished run whose archived copy is the same length (or longer -- see below) is not re-read.
+#
+# The verify is separate from the repair on purpose. `cp` exiting 0 is not the claim the archive
+# needs; "the bytes are there" is, and until now nothing checked it, which is how a truncated run
+# spent a day being reported as archived.
 RUNS_ARCHIVE="${SNAPSHOT_RUNS_ARCHIVE:-$DEST/../runs-archive}"
+archive_tree() {  # $1 = source tree, $2 = archive root. Sets ARCH_REPAIRED / ARCH_STILL_SHORT.
+  local S="$1" A="$2" B rel ssz dsz rc=0
+  B="$(basename "$S")"
+  ARCH_REPAIRED=0; ARCH_STILL_SHORT=0
+  mkdir -p "$A" || return 1
+  cp -ru "$S" "$A/" || rc=1
+  while IFS= read -r -d '' rel; do
+    # The source can vanish mid-walk -- `campaign.sh` rm -rf's a task root to start an attempt --
+    # and a file that is no longer there is not a shortfall in the archive.
+    ssz=$(stat -c %s "$S/$rel" 2>/dev/null) || continue
+    dsz=$(stat -c %s "$A/$B/$rel" 2>/dev/null || echo -1)
+    [ "$dsz" -lt "$ssz" ] || continue
+    # LONGER than the source is left alone: the box's writable layer is where a run gets deleted or
+    # restarted, and the archive is the durable half. Only SHORT is a defect.
+    if cp -p "$S/$rel" "$A/$B/$rel"; then ARCH_REPAIRED=$((ARCH_REPAIRED + 1)); else rc=1; fi
+    dsz=$(stat -c %s "$A/$B/$rel" 2>/dev/null || echo -1)
+    if [ "$dsz" -lt "$ssz" ]; then ARCH_STILL_SHORT=$((ARCH_STILL_SHORT + 1)); rc=1; fi
+  done < <(find "$S" -type f -printf '%P\0' 2>/dev/null)
+  return $rc
+}
 FOUND_RUNS=0
-for D in "$SRC"/runs-* "$SRC"/model-probes "$SRC"/probes; do
-  [ -d "$D" ] || continue
+while IFS= read -r D; do
+  [ -n "$D" ] || continue
   FOUND_RUNS=$((FOUND_RUNS + 1))
   B="$(basename "$D")"
-  if mkdir -p "$RUNS_ARCHIVE" && cp -ru "$D" "$RUNS_ARCHIVE/"; then
+  if archive_tree "$D" "$RUNS_ARCHIVE"; then
     N=$(find "$RUNS_ARCHIVE/$B" -name events.jsonl 2>/dev/null | wc -l)
-    echo "  runs -> archive       $B $(du -sh "$RUNS_ARCHIVE/$B" 2>/dev/null | cut -f1) ($N run records)"
+    R=""
+    [ "$ARCH_REPAIRED" -gt 0 ] && R=", $ARCH_REPAIRED re-copied SHORT of its source"
+    echo "  runs -> archive       $B $(du -sh "$RUNS_ARCHIVE/$B" 2>/dev/null | cut -f1) ($N run records$R)"
     echo "$B $N $RUNS_ARCHIVE/$B" >> "$OUT/runs-manifest.txt"
   else
     echo "  COPY FAILED          $B -- the per-run events and spans are NOT archived"
+    if [ "$ARCH_STILL_SHORT" -gt 0 ]; then
+      echo "                       $ARCH_STILL_SHORT file(s) in the archive are SHORTER than the"
+      echo "                       source they claim to copy -- that is a TRUNCATED run, and the"
+      echo "                       manifest above counts files by name and cannot see it"
+    fi
     SHORT=$((SHORT + 1))
   fi
-done
+done < <(bench_run_trees "$SRC")
 # WHICH MODE THE BOX IS IN IS NOT A SHORTFALL. Campaigns and probe runs are two INDEPENDENT ways of
 # measuring here, and either can be absent because it is simply not in use.
 #
@@ -175,12 +299,19 @@ if [ "$FOUND_CAMPAIGN" = 0 ] && [ "$FOUND_RUNS" = 0 ]; then
 elif [ "$FOUND_CAMPAIGN" = 0 ]; then
   echo "  (no $SRC/campaign* -- this box is running probes, not a campaign. Not a shortfall.)"
 elif [ "$FOUND_RUNS" = 0 ]; then
-  echo "  (no $SRC/runs-*, model-probes or probes tree -- campaign only, no standalone probes.)"
+  echo "  (no run tree under $SRC holds an events.jsonl -- campaign markers only, no run logs yet.)"
 fi
 
 # 3. Which commit of OUR repo produced them, and what the box looked like.
 {
   echo "snapshot $STAMP"
+  # WHICH BOX, AND WHICH ROOT ON IT. A snapshot that does not name its source cannot be told apart
+  # from somebody else's, and on 2026-08-31 that was not hypothetical: a snapshot of a synthetic
+  # BENCH_ROOT landed in this box's live rotation and the only way to identify it was to read what
+  # was inside. The restorer's first question is "is this mine?", and until now the archive had no
+  # answer to it.
+  echo "bench root: $SRC   (on $(hostname 2>/dev/null || echo '?'))"
+  echo "destination: $OUT"
   echo "looplab:  $(cd "$SRC/looplab" && git log --oneline -1) ($(cd "$SRC/looplab" && git status --porcelain | wc -l) dirty files)"
   echo "AlgoTune: $(cd "$SRC/AlgoTune" && git log --oneline -1)"
   echo "runs archive: $RUNS_ARCHIVE (not pruned; see runs-manifest.txt for what it held)"

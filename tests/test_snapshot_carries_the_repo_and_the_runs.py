@@ -513,3 +513,101 @@ def test_a_runs_manifest_is_a_receipt_about_another_store_and_may_not_vote(tmp_p
     assert not (spend_a.exists() and spend_b.exists()), result.stdout
     assert "WITH MEASUREMENTS" not in result.stdout, (
         "the sentence reserved for real loss printed on a routine cycle\n" + result.stdout)
+
+
+# ------------------------------------------------------------------ what `-u` can never repair
+#
+# `cp -ru` copies when the SOURCE is newer than the destination. A destination truncated part-way
+# through today's cycle carries TODAY's mtime, which is newer than the frozen mtime of the finished
+# run it is meant to be a copy of -- so `-u` skips it FOR EVER and every later cycle reports success
+# over it. On a geesefs S3 mount an ENOSPC part-way through a recursive copy is the ordinary error,
+# not an exotic one, so this is the shape the archive actually fails in.
+#
+# Driven end to end 2026-08-31 in a scratch BENCH_ROOT: a 200,000-line `events.jsonl` (14 MB) with
+# its mtime frozen at 2026-08-30 19:11, one cycle under `ulimit -f 2048`. The failed cycle left
+# 30,118 lines in the archive, dated today. Under `cp -ru` alone the NEXT cycle -- the one that
+# exits 0, prints `runs -> archive camp-runs (1 run records)` and lets `snapshot_timer.sh` record
+# the fingerprint as archived -- left 30,118 lines. The manifest counted it as a whole run, because
+# the manifest counts files by NAME.
+#
+# The incrementality `-u` is there for is real and is not given up: these two tests sit beside
+# `test_a_finished_run_is_copied_once_not_once_per_snapshot`, which asserts the opposite half.
+
+
+def _truncate_as_an_interrupted_copy(archived, keep=0.25):
+    """Exactly what an ENOSPC leaves behind: a prefix, with today's mtime.
+
+    Not a hand-made shape -- the mtime is what `cp` itself sets by writing, and it is NEWER than the
+    frozen source, which is the whole reason `-u` can never come back for it.
+    """
+    import os
+    import time
+    text = archived.read_text()
+    archived.write_text(text[:int(len(text) * keep)])
+    os.utime(archived, (time.time(), time.time()))
+    return archived
+
+
+def test_a_truncated_archive_file_is_repaired_by_the_next_cycle(tmp_path):
+    src = _bench_root(tmp_path)
+    dest, archive = tmp_path / "snapshots", tmp_path / "runs-archive"
+
+    # A finished run: its log stops growing, so its mtime is frozen in the past.
+    source = _run_log(src, "model-probes", "dsPde3", "r1") / "events.jsonl"
+    source.write_text("".join('{"type": "node_evaluated", "data": {"node_id": %d}}\n' % i
+                              for i in range(2000)))
+    import os
+    os.utime(source, (source.stat().st_mtime - 86400,) * 2)
+
+    assert _snapshot(src, dest, archive).returncode == 0
+    archived = archive / "model-probes" / "dsPde3" / "runs" / "r1" / "run" / "events.jsonl"
+    _truncate_as_an_interrupted_copy(archived)
+    assert archived.stat().st_mtime > source.stat().st_mtime, "the setup is not the -u trap"
+    short_lines = len(archived.read_text().splitlines())
+
+    result = _snapshot(src, dest, archive)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert archived.read_text() == source.read_text(), (
+        f"the archive still holds {len(archived.read_text().splitlines())} of "
+        f"{len(source.read_text().splitlines())} lines (it held {short_lines} before this cycle) "
+        "and the cycle exited 0 -- a permanently truncated run reported as archived\n"
+        + result.stdout)
+    assert "re-copied SHORT of its source" in result.stdout, (
+        "the repair happened silently; an operator reading the log cannot tell that a previous "
+        "cycle left a partial run behind\n" + result.stdout)
+
+
+def test_an_archive_that_is_still_short_after_the_repair_is_not_reported_as_archived(tmp_path):
+    """The verify, which is separate from the repair on purpose.
+
+    `cp` exiting 0 is not the claim the archive needs -- "the bytes are there" is, and until
+    2026-08-31 nothing asked. The manifest cannot ask it either: it counts `events.jsonl` files by
+    name, so a 33,390-line prefix of a 200,000-line run counts as one whole run record.
+    """
+    src = _bench_root(tmp_path)
+    dest, archive = tmp_path / "snapshots", tmp_path / "runs-archive"
+    source = _run_log(src, "model-probes", "dsPde3", "r1") / "events.jsonl"
+    source.write_text('{"type": "llm_usage", "data": {"cost": 0.0717}}\n' * 200)
+    import os
+    os.utime(source, (source.stat().st_mtime - 86400,) * 2)
+    assert _snapshot(src, dest, archive).returncode == 0
+
+    archived = archive / "model-probes" / "dsPde3" / "runs" / "r1" / "run" / "events.jsonl"
+    _truncate_as_an_interrupted_copy(archived)
+    # ...and the mount refuses the repair too, which is the case where the alarm has to fire.
+    # The FILE is made unwritable rather than its directory: `cp` opens an existing destination
+    # O_WRONLY|O_TRUNC and never unlinks it, so a read-only parent does not stop the repair --
+    # measured, the first version of this test made the parent 0o500 and the repair landed anyway.
+    archived.chmod(0o444)
+    try:
+        result = _snapshot(src, dest, archive)
+    finally:
+        archived.chmod(0o644)
+
+    assert result.returncode == 1, (
+        "the archive holds a truncated run, the repair could not land, and the snapshot claims to "
+        "be complete -- so snapshot_timer.sh records this fingerprint and never retries\n"
+        + result.stdout)
+    assert "SHORTER than the" in result.stdout, result.stdout
+    assert "INCOMPLETE SNAPSHOT" in result.stdout, result.stdout

@@ -38,6 +38,13 @@ export CAMPAIGN_OUT="${CAMPAIGN_OUT:-$BENCH_ROOT/campaign}"
 export CAMPAIGN_WS="${CAMPAIGN_WS:-$BENCH_ROOT/looplab_ws}"
 export CAMPAIGN_RUNS="${CAMPAIGN_RUNS:-$BENCH_ROOT/camp-runs}"
 
+# WHERE SNAPSHOTS LAND. A property of this machine -- /home/jovyan/data is the pod's persistent
+# mount and /var/tmp is not -- so it is declared here with the other machine facts rather than
+# hardcoded in `snapshot.sh`. It used to be hardcoded there and reachable no other way, so a
+# `BENCH_ROOT` pointed at a scratch tree still wrote into this rotation; on 2026-08-31 that put a
+# snapshot of a synthetic box among the real ones.
+export SNAPSHOT_DEST="${SNAPSHOT_DEST:-/home/jovyan/data/looplab-bench/snapshots}"
+
 # The meter. Start it with benchmarks/meter/start_meter.sh; campaign.sh gives each task-arm its own
 # path under it, so cost lands per task without either framework knowing.
 export METER_BASE="${METER_BASE:-http://127.0.0.1:8801}"

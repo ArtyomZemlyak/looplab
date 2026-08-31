@@ -1194,6 +1194,9 @@ CAMPAIGN_RC=$?
 
 # The runtime disk does not survive a container restart and an arm is hours of measurement that
 # cannot be recomputed. Snapshot at the one moment we know the data just changed. SNAPSHOT=0 skips.
+# No argument: the destination is `$SNAPSHOT_DEST` (set by the box profile), which this process
+# inherits and passes on. A campaign driven against a scratch `BENCH_ROOT` must set it too, or the
+# snapshot lands in the box's real rotation -- `BENCH_ROOT` alone moves only what is read.
 if [ "${SNAPSHOT:-1}" = "1" ] && [ -x "$REPO/benchmarks/snapshot.sh" ]; then
   "$REPO/benchmarks/snapshot.sh" || echo "  (snapshot failed; the measurements are still on disk)"
 fi
