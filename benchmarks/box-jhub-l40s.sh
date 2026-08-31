@@ -43,6 +43,18 @@ export CAMPAIGN_RUNS="${CAMPAIGN_RUNS:-$BENCH_ROOT/camp-runs}"
 export METER_BASE="${METER_BASE:-http://127.0.0.1:8801}"
 export METER_PORT="${METER_PORT:-8801}"
 export METER_RPM="${METER_RPM:-45}"          # under the endpoint's published 50/min for this key
+# WHICH CORES THE METER MAY USE. Not a lane: the meter is infrastructure every lane talks to, so a
+# lane it shares is a lane whose timings include somebody else's proxy. The lanes here are
+# 0-10+48-58, 11-21+59-69, 22-32+70-80 and 33-43+81-91; 44-47 and 92-95 are deliberately free, and
+# this is what they are free FOR.
+#
+# It lives here rather than in start_meter.sh because it is a fact about this box's core layout, and
+# it lives in a FILE rather than in a driver because that is how it was lost: on 2026-08-29 the
+# pinning was done by run_final.sh, which was never committed and went with /var/tmp when the
+# container restarted. The meter then came back on 0-95 -- measured at 0.0 % CPU, so nothing was
+# actually spoiled, but it was one busy proxy away from contaminating a lane and nothing would have
+# said so.
+export METER_CPUS="${METER_CPUS:-44-47,92-95}"
 export METER_LOG="${METER_LOG:-$BENCH_ROOT/meter/meter.jsonl}"
 
 export LOOPLAB_LLM_MODEL="${LOOPLAB_LLM_MODEL:-deepseek-v4-flash}"
