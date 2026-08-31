@@ -12,10 +12,47 @@
 set -u
 ROOT=${ROOT:-/var/tmp/looplab-bench}
 HOURS=${1:-3}
-python3 - "$ROOT" "$HOURS" <<'PY'
+RC=0
+python3 - "$ROOT" "$HOURS" <<'PY' || RC=1
 import json, re, sys, time, collections, os
 root, hours = sys.argv[1], float(sys.argv[2])
 T = time.time() - hours * 3600
+
+
+def rows_of(path):
+    """Строки леджера и число НЕРАЗОБРАННЫХ, потому что леджер пишут ПРЯМО СЕЙЧАС.
+
+    Здесь стояло `[json.loads(l) for l in open(p) if l.strip()]` — без `try`, в отличие от
+    `check_probes.sh`, который свои разборы оборачивает. Леджер — append-only файл живого прокси,
+    так что его последняя строка регулярно бывает дописана наполовину; одной такой строки хватало,
+    чтобы `json.JSONDecodeError` снёс ВЕСЬ денежный раздел. Скрипт при этом не под `set -e`, второй
+    блок печатался как ни в чём не бывало, и код возврата оставался 0 — то есть сводка молча
+    теряла ровно ту часть, ради которой её зовут. Проверено 2026-08-30 на синтетическом леджере:
+    до починки раздела нет, rc=0.
+
+    Пропуск не молчаливый. Битая строка — это ДЕНЬГИ, которых нет в сумме, и «$0.00 за 3 ч» с
+    непрочитанным хвостом читается как тишина на шлюзе. Сколько строк пропущено — печатается.
+    """
+    good, bad = [], 0
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                bad += 1
+                continue
+            if not isinstance(row, dict) or "ts" not in row:
+                bad += 1
+                continue
+            try:
+                float(row["ts"])
+            except (TypeError, ValueError):
+                bad += 1
+                continue
+            good.append(row)
+    return good, bad
 # THREE LEDGERS, NOT TWO, since 2026-08-28 08:04. The 8801 process has been alive since 2026-08-24
 # 10:11 and is FIVE commits behind the file it was started from -- 2afb287c (the synthetic usage
 # frame in the shape a client actually reads), 5f253594 (an aborted stream is not an error),
@@ -30,7 +67,7 @@ for name, path in (("8801 шлюз", "meter/meter.jsonl"),
     p = os.path.join(root, path)
     if not os.path.exists(p):
         continue
-    rows = [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()]
+    rows, unreadable = rows_of(p)
     new = [x for x in rows if float(x["ts"]) >= T]
     # ПРАВИЛО ПРОКСИ, дословно: proxy.py:416
     def cause(x):
@@ -64,6 +101,10 @@ for name, path in (("8801 шлюз", "meter/meter.jsonl"),
         time.strftime("%H:%M:%S", time.localtime(last)), (time.time() - last) / 60)) if new else "тишина"
     print("  %-16s за %.0f ч: вызовов %d, $%.4f, НЕУДАЧ %d | %s" % (
         name, hours, len(new), spent, len(bad), when))
+    if unreadable:
+        print("      НЕРАЗОБРАННЫХ СТРОК %d — это деньги, которых нет в сумме выше. Одна такая"
+              " строка в хвосте — обычное дело у живого прокси; много — повод смотреть файл: %s"
+              % (unreadable, p))
     if bad:
         # КОГДА БЫЛА ПОСЛЕДНЯЯ НЕУДАЧА — вторая половина того же урока. Окно в час держит и то, что
         # кончилось сорок минут назад: 27.08 в 09:56 эта сводка показала 12 отказов 403 у glm53f, и
@@ -93,7 +134,7 @@ PY
 # это 26.08 и оно осталось верным, потому что НИКТО НЕ СВЕРЯЛ. Теперь сверяет.
 #
 # По /proc, а не через pkill: шаблон pkill матчит собственную командную строку.
-python3 - "$ROOT" <<'PY'
+python3 - "$ROOT" <<'PY' || RC=1
 import os, sys, time
 root = sys.argv[1]
 src = os.environ.get("PROXY_SRC_OVERRIDE") or os.path.join(root, "looplab", "benchmarks", "meter", "proxy.py")
@@ -135,3 +176,9 @@ if os.path.exists(src):
     if not stale:
         print("  прокси: все процессы новее своего кода")
 PY
+
+# КОД ВОЗВРАТА ГОВОРИТ, ЧТО РАЗДЕЛ НЕ НАПЕЧАТАН. Скрипт не под `set -e` — и это правильно, второй
+# блок стоит показать, даже если первый упал, — но тогда упавший блок обязан отдать код. До этого
+# `check_money.sh` возвращал статус ПОСЛЕДНЕЙ команды, то есть 0 после любого падения первой:
+# отсутствие денежного раздела выглядело точно так же, как его пустота.
+exit "$RC"

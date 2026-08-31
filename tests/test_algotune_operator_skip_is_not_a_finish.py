@@ -81,3 +81,79 @@ def test_a_wall_cut_is_still_a_wall_cut(tmp_path):
                          a_score=True))
     assert "WALL CLOCK" in out
     assert "SKIPPED by the operator" not in out
+
+
+# ------------------------------------------------------------------------------------------------
+# and the OTHER end of the same fact: the driver's own banner
+# ------------------------------------------------------------------------------------------------
+# `compare_arms.py` above learned the word on 2026-08-26. `campaign.sh` did not: it knew
+# `wall_cut`, `stall_cut` and the legacy `rc=124`, and every other marker was a finish. So an arm
+# whose task-arms were skipped counted them into its own success banner. Reproduced 2026-08-30 over
+# a five-task marker directory holding two skips: `===== arm B COMPLETE (5/5 markers) =====`,
+# exit 0, three measurements. At the campaign's twenty tasks and the eight skips of that session it
+# reads `COMPLETE (20/20 markers)`.
+#
+# The functions are EXTRACTED and RUN rather than pattern-matched: the property is what the banner
+# says over a directory that holds a skip, and the rest of the script cannot execute here.
+CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign.sh"
+_BANNER_FUNCTIONS = ("marker_is_harness_cut", "marker_is_operator_skip", "already_measured",
+                     "final_banner")
+
+
+def _campaign_bash(script: str) -> subprocess.CompletedProcess:
+    import re
+
+    src = CAMPAIGN.read_text(encoding="utf-8")
+    parts = ["set -u", "LANE_COUNT=1", "CORES_PER_LANE=2"]
+    for name in _BANNER_FUNCTIONS:
+        found = re.search(rf"^{name}\(\) \{{.*?^\}}$", src, re.M | re.S)
+        assert found, f"campaign.sh no longer defines {name}()"
+        assert len(found.group(0).splitlines()) > 2, f"{name}() extracted as an empty body"
+        parts.append(found.group(0))
+    return subprocess.run(["bash", "-c", "\n".join(parts) + "\n" + script],
+                          capture_output=True, text=True, timeout=60)
+
+
+def _markers(tmp: Path, **markers: str) -> Path:
+    out = tmp / "camp"
+    out.mkdir(exist_ok=True)
+    for task, text in markers.items():
+        (out / f"B-{task}.done").write_text(text, encoding="utf-8")
+    return out
+
+
+def test_the_banner_does_not_count_a_skip_among_the_measured(tmp_path):
+    """The falsifier for `COMPLETE (20/20 markers)` over twelve measurements."""
+    out = _markers(tmp_path, alpha=DONE, beta=DONE, gamma=SKIP, delta=SKIP)
+    got = _campaign_bash(f'final_banner "{out}" B 4 "alpha beta gamma delta"')
+    assert got.returncode == 0, got.stdout + got.stderr
+    assert "SKIPPED BY THE OPERATOR" in got.stdout, got.stdout
+    assert "B-gamma" in got.stdout and "B-delta" in got.stdout, got.stdout
+    assert "2 MEASURED" in got.stdout, "the banner still claims every marker is a measurement"
+    assert "COMPLETE (4/4 markers)" not in got.stdout, got.stdout
+    # The measured ones are not dragged into the skip list with them.
+    assert "B-alpha" not in got.stdout.split("SKIPPED BY THE OPERATOR", 1)[1].split("=====")[0]
+
+
+def test_the_banner_says_nothing_about_skips_when_there_are_none(tmp_path):
+    """The control: a line that always prints is a line nobody reads, and the exact wording of the
+    clean banner is what a watcher greps for."""
+    out = _markers(tmp_path, alpha=DONE, beta=DONE)
+    got = _campaign_bash(f'final_banner "{out}" B 2 "alpha beta"')
+    assert got.returncode == 0, got.stdout + got.stderr
+    assert "SKIPPED" not in got.stdout, got.stdout
+    assert "arm B COMPLETE (2/2 markers)" in got.stdout, got.stdout
+
+
+def test_a_skip_is_still_terminal_and_retry_wall_cut_does_not_reopen_it(tmp_path):
+    """Writing the marker IS the mechanism, so a resume must keep skipping it — and `RETRY_WALL_CUT`
+    reopens CLOCK kills, not decisions. Folding `operator_skip` into `marker_is_harness_cut` would
+    have undone the operator's own instruction on the next resume."""
+    out = _markers(tmp_path, gamma=SKIP)
+    assert _campaign_bash(f'already_measured "{out}/B-gamma.done"').returncode == 0
+    assert _campaign_bash(
+        f'RETRY_WALL_CUT=1; already_measured "{out}/B-gamma.done"').returncode == 0
+    # ...while a real wall cut still reopens, so the flag has not been broken in the process.
+    wall = _markers(tmp_path, omega="wall=14400 rc=124 state=wall_cut\n")
+    assert _campaign_bash(
+        f'RETRY_WALL_CUT=1; already_measured "{wall}/B-omega.done"').returncode == 1

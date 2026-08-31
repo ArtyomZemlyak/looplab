@@ -52,7 +52,13 @@ CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "ca
 # gets NO MARKER" rung was never once executed by this file — while every marker assertion below
 # still passed. A guard whose subject is missing from the extraction list is a guard that cannot
 # go red when the subject is deleted, which is the whole reason the extraction asserts by NAME.
-_FUNCTIONS = ("run_started_evidence", "successful_calls", "next_attempt", "already_measured",
+# `marker_is_harness_cut` and `marker_is_operator_skip` are here because `already_measured` and
+# `final_banner` CALL them. Without the first, the extracted bash died with "command not found",
+# `final_banner` printed COMPLETE with no WALL-CUT line and four tests here were red against a
+# production script that was fine (the 2026-08-29 merge introduced the helper; this list lagged it,
+# the way it lagged LANE_LAYOUT at 41d111a). Both are top-level `name() {` blocks like the rest.
+_FUNCTIONS = ("run_started_evidence", "successful_calls", "next_attempt",
+              "marker_is_harness_cut", "marker_is_operator_skip", "already_measured",
               "record_done", "refuse_to_start", "final_banner")
 
 
@@ -74,15 +80,6 @@ def _harness() -> str:
     # before `record_done` reads it, so `set -u` is satisfied there; what was incomplete was this
     # harness, which extracts the function away from its assignment. The value mirrors the script's
     # own default rather than inventing one.
-    # OPEN[campaign-test-stubs-lag-the-marker-rename] four tests here are RED because the extracted
-    # functions now call a harness-cut classifier helper the extraction does not carry.
-    # proof:absent:marker_is_harness_cut@tests/test_campaign_marker_evidence.py
-    # REVIEW 2026-08-30 (baseline-red): the 2026-08-29 merge replaced the single `wall_cut` with
-    # the HARNESS_CUT_STATES family, and `final_banner`/`record_done` now call a helper function
-    # that `_FUNCTIONS` does not list — so the extracted bash dies with "command not found" and the
-    # banner assertions fail (`final_banner` prints COMPLETE with no WALL-CUT line). Production is
-    # fine; the harness lags the rename, the same way 41d111a's LANE_LAYOUT did. Add the helper to
-    # `_FUNCTIONS` (it is a top-level `name() {` block like the others).
     parts = ["set -u", "LANE_COUNT=4", "CORES_PER_LANE=22", 'LANE_LAYOUT="whole_cores"',
              'ARM="${ARM:-B}"', 'T="${T:-svm}"']
     for name in _FUNCTIONS:

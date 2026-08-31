@@ -95,3 +95,75 @@ def test_a_non_git_root_is_refused_rather_than_silently_fencing_nothing(tmp_path
     out = _run(["close"], at, tmp_path / "s", tmp_path / "h")
     assert out.returncode != 0, out.stdout + out.stderr
     assert (at / "results" / "Foreign Model 9").is_dir(), "it fenced despite not knowing what is what"
+
+
+# ------------------------------------------------------------------------------------------------
+# A GIT TREE IS NOT THE SAME THING AS A TRACKED `results/`
+# ------------------------------------------------------------------------------------------------
+# `require_git` asked `rev-parse --git-dir` and stopped there. But the classifier is "tracked =
+# foreign", so if git knows NO file under `results/`, `ls-files` says "untracked" about everything,
+# `is_foreign` never fires, and the fence is exactly the silent no-op the git check exists to
+# prevent -- one level deeper, and past it, because the tree really is a git tree.
+#
+# This is not hypothetical on this box. `benchmarks/box-jhub-l40s.sh` records that `/var/tmp` does
+# not survive a container restart, so the stand is restored BY COPY from a snapshot; a copy whose
+# `git init` was re-run, or whose snapshot did not carry `results/`, is precisely this shape.
+# Reproduced 2026-08-30: `check` printed "all foreign result directories are closed" and exited 0
+# while `results/Foreign Model 9/convex_hull/solver.py` sat in place, and `close` said "closed 0"
+# and also exited 0.
+def _copy_restored(tmp_path):
+    """A git tree whose `results/` holds a foreign champion that git has never heard of."""
+    at = tmp_path / "AlgoTune"
+    (at / "results" / "Foreign Model 9" / "convex_hull").mkdir(parents=True)
+    (at / "results" / "Foreign Model 9" / "convex_hull" / "solver.py").write_text("# theirs\n")
+    (at / "AlgoTuner").mkdir()
+    (at / "AlgoTuner" / "x.py").write_text("x = 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=at, check=True)
+    subprocess.run(["git", "add", "AlgoTuner"], cwd=at, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "everything but results"], cwd=at, check=True)
+    return at, tmp_path / "state", tmp_path / "hold"
+
+
+def test_check_refuses_a_tree_whose_results_git_has_never_seen(tmp_path):
+    """The falsifier for "closed" over a visible champion."""
+    at, state, hold = _copy_restored(tmp_path)
+    out = _run(["check"], at, state, hold)
+    assert out.returncode != 0, out.stdout + out.stderr
+    assert "closed" not in out.stdout, (
+        "it reported the fence closed over a champion it could not classify", out.stdout)
+    assert (at / "results" / "Foreign Model 9" / "convex_hull" / "solver.py").is_file()
+
+
+def test_close_refuses_the_same_tree_rather_than_fencing_nothing(tmp_path):
+    """`closed 0 foreign result directories` with exit 0 is the same lie in the other command."""
+    at, state, hold = _copy_restored(tmp_path)
+    out = _run(["close"], at, state, hold)
+    assert out.returncode != 0, out.stdout + out.stderr
+    assert "closed 0" not in out.stdout, out.stdout
+
+
+def test_an_empty_results_directory_is_not_refused(tmp_path):
+    """The control. There is nothing to classify and nothing to leak, so demanding tracked files
+    there would break a clean tree over a danger that does not exist."""
+    at = tmp_path / "AlgoTune"
+    (at / "results").mkdir(parents=True)
+    (at / "f").write_text("x\n")
+    subprocess.run(["git", "init", "-q"], cwd=at, check=True)
+    subprocess.run(["git", "add", "f"], cwd=at, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "init"], cwd=at, check=True)
+    out = _run(["check"], at, tmp_path / "s", tmp_path / "h")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "all foreign result directories are closed" in out.stdout
+
+
+def test_a_real_fork_checkout_is_still_fenced(checkout):
+    """And the rung must not refuse the tree it was written to protect: the fixture's champion IS
+    tracked, so `close` still moves it and `check` still passes afterwards."""
+    at, state, hold = checkout
+    assert _run(["check"], at, state, hold).returncode == 1, "the exposed champion was not seen"
+    assert _run(["close"], at, state, hold).returncode == 0
+    out = _run(["check"], at, state, hold)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "all foreign result directories are closed" in out.stdout

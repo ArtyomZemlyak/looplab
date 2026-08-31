@@ -441,6 +441,107 @@ PYMETER
   fi
 fi
 export PYTHONPATH="$REPO"
+
+# THE TWO COLD-BASELINE FUSES, DECLARED HERE INSTEAD OF LEFT AMBIENT.
+#
+# Every speedup this campaign reports is a RATIO, and this driver said nothing at all about the
+# denominator. `looplab_eval.py` carries two guards over that half and BOTH were disarmed by the
+# silence:
+#
+#   * `_regime_mismatch` opens with `if not (ALGOTUNE_BASELINE_CACHE_DIR or "--baseline-times-dir"
+#     in sys.argv): return None` -- deliberately, so a unit test cannot be refused because of a
+#     data directory it never asked for. The campaign set neither, so on every campaign run to date
+#     that guard returned None on its FIRST LINE and no regime was ever checked.
+#   * `_baseline_fingerprint`, which backs the `baseline_measured_in_pass` refusal, watches
+#     `--baseline-times-dir`, whose default resolves beside `looplab_eval.py` in whatever clone the
+#     bridge is executed from -- not necessarily the directory the patched `BaselineManager`
+#     writes. Its own comment says so and names this file as the proof (`proof:absent:
+#     --baseline-times-dir@benchmarks/algotune/campaign.sh`).
+#
+# WHAT THE SILENCE COST, measured. A cold cache is not a slow measurement, it is a different one:
+# when AlgoTune has no per-instance reference for this (task, subset, regime) it measures one in
+# the same pass and the CANDIDATE IS NEVER TIMED -- the evaluator reports the reference against
+# itself at ~1.0 whatever was submitted. That is eight of this campaign's twenty final numbers.
+#
+# And the WIDTH is what decides whether the cache is cold. With nothing set, `resolve_workers`
+# answers 1 worker and the arena keys `__lane<N>r3`; `run_probe.sh` declares `auto` and keys
+# `__w<N>x1r3`. The reference cache on the live box holds `__w22x1r3` entries, so the campaign
+# missed every one of them and re-timed -- while the probes hit. The two references sum to 3898 ms
+# and 2976 ms over the same hundred instances, a 24 % difference in the denominator of every
+# speedup, and the campaign and the probes were reporting numbers off two different instruments
+# with nothing in either record saying which.
+#
+# So the ruler is DECLARED, in the same words `run_probe.sh` declares it, and both halves stay
+# overridable for a side experiment that means to use another one.
+
+# WHICH DIRECTORY, ASKED OF THE PATCH RATHER THAN GUESSED.
+#
+# `patch_baseline_cache.py` bakes the cache path into `BaselineManager` AT PATCH TIME, out of the
+# clone that ran it, and this driver may be a different clone (docs/51 SS7 runs the campaign from
+# the pinned `looplab-armb`). Pointing the guard at `$REPO`'s own `.baseline_times` would
+# reproduce the exact defect it is being armed against -- fingerprinting a directory nothing
+# writes -- so the value is READ OUT of the patched file, and $REPO's is only the fallback for a
+# checkout that carries no patch at all.
+baseline_cache_dir() {   # $1 = AlgoTune root. Echoes the directory the patch really writes.
+  python3 - "$1" "$REPO" <<'PYEOF'
+import re, sys
+from pathlib import Path
+patched = Path(sys.argv[1]) / "AlgoTuner" / "utils" / "evaluator" / "baseline_manager.py"
+try:
+    src = patched.read_text(encoding="utf-8", errors="replace")
+except OSError:
+    src = ""
+# The assignment in either shape the patch has worn: a bare literal, or an
+# `os.environ.get('ALGOTUNE_BASELINE_CACHE_DIR', '<default>')`. The first ABSOLUTE path in it is
+# the answer -- the env-var NAME is quoted too and does not start with a slash.
+m = re.search(r"_ll_cache_dir\s*=\s*(.{0,400}?)\n\s*_ll_key", src, re.S)
+found = re.findall(r"['\"](/[^'\"]*)['\"]", m.group(1)) if m else []
+print(found[0] if found else str(Path(sys.argv[2]) / "benchmarks" / "algotune" / ".baseline_times"))
+PYEOF
+}
+
+declare_baseline_ruler() {
+  # BOTH FUSES, and the width that decides which reference file they name.
+  #
+  # `auto` is one worker per core of the lane (`__w<N>x1r3`), which is what `run_probe.sh`
+  # declares and what the live reference cache is keyed for. `1` is not a quieter setting of the
+  # same instrument, it is a DIFFERENT one: at workers <= 1 the pool is bypassed and both halves
+  # run in the lane's whole cpuset, keyed `__lane<N>r3`.
+  ALGOTUNE_BASELINE_CACHE_DIR="${ALGOTUNE_BASELINE_CACHE_DIR:-$(baseline_cache_dir "$AT")}"
+  export ALGOTUNE_BASELINE_CACHE_DIR
+  export ALGOTUNE_EVAL_WORKERS="${ALGOTUNE_EVAL_WORKERS:-auto}"
+  # Pinned at the arena's own default rather than inherited: a box profile that set this would
+  # move the regime key under a campaign that never mentioned it.
+  export ALGOTUNE_EVAL_CORES_PER_WORKER="${ALGOTUNE_EVAL_CORES_PER_WORKER:-1}"
+  # The guard globs this directory; a missing one makes `_baseline_fingerprint` answer `{}` both
+  # times and compare equal, which is the silence again by another route.
+  mkdir -p "$ALGOTUNE_BASELINE_CACHE_DIR" 2>/dev/null || true
+}
+declare_baseline_ruler
+
+# THE GOAL CARD IS PART OF THE ARM, not something an operator has to remember to export.
+#
+# `run_probe.sh` builds its card with `--deliver --one-card --enforce-rules`. This driver passed
+# NOTHING but `${MAKE_TASK_ARGS:-}`, and the default of that is empty -- measured on af13b4dd,
+# `--enforce-rules` appears once in `run_probe.sh` and zero times here. Two consequences, both
+# measured 2026-08-30 by building both cards over one synthetic checkout:
+#
+#   * the goal was 5,010 characters against the probe's 10,111 -- no YOUR OUTPUT IS THE FILE, no
+#     ONE HYPOTHESIS, no rules and no solution space -- so a campaign number and a probe number are
+#     answers to two different questions;
+#   * `--enforce-rules` also rides into the `eval_train` and `score` commands, and without it
+#     nothing runs AlgoTune's OWN validator over the candidate. Arm A cannot even WRITE a solver
+#     that violates those rules -- `editor_functions.py` refuses the edit -- so arm B could submit
+#     one, score it, and win on a primitive the other arm is physically unable to use. That is not
+#     a comparison, and it is invisible in the result.
+#
+# It is a SEPARATE variable from `MAKE_TASK_ARGS` on purpose. That one is documented as carrying
+# goal VARIANTS and is appended after this; folding the base card into its default would mean an
+# operator who exports `MAKE_TASK_ARGS=--role-split` silently loses all three flags -- the same
+# class of defect, arriving through the fix for it.
+CARD_ARGS="${CARD_ARGS:---deliver --one-card --enforce-rules}"
+
+
 mkdir -p "$OUT" "$WS"
 # `.refused` is THIS invocation's tally of task-arms that never started, so a fixed-and-re-run
 # arm must not inherit the last one's. Only the tally is cleared -- never a `.done` marker, which
@@ -485,7 +586,7 @@ reap_orphan_workers() {
 # The event log is the discriminator, NOT the wall clock (a threshold between 2 s and 136 s is a
 # guess that a slow endpoint invalidates) and NOT the exit code (which cannot separate them, by
 # construction -- that is the defect).
-ended_on_failure() {   # $1 = arm, $2 = task, $3 = attempt. "yes" | "no" | "" when unknowable.
+ended_on_failure() {   # $1 = arm, $2 = task, $3 = attempt, $4 = start epoch (0 = no window).
   # DID THE RUN END ON ITS OWN TERMS? `successful_calls` below asks only whether the run ever paid
   # for anything, and that catches a total outage (attempt 1 of arm A: sixteen task-arms, zero calls
   # each). It does NOT catch the other half, measured 2026-08-25 when the gateway fell a second
@@ -498,12 +599,31 @@ ended_on_failure() {   # $1 = arm, $2 = task, $3 = attempt. "yes" | "no" | "" wh
   # after a call that worked; a run the endpoint killed ends after one that did not. Checked against
   # the live log: the one task-arm that reached its ceiling (`edge_expansion`, 107 % spent) has a
   # 200 last, and all four cut ones have a 503.
+  #
+  # AND THE WINDOW IS PART OF THE QUESTION, because `(arm, task, attempt)` is not enough to name
+  # ONE RUN. Two ways it fails, and they compose:
+  #   * a row whose `attempt` key is absent or empty matches EVERY attempt -- deliberately, since
+  #     rows written before 2026-08-23 carry no such key and `/m/<arm>/<task>/v1` is still accepted;
+  #   * the attempt LEDGER lives in `$OUT` while the meter log does not, so a fresh `CAMPAIGN_OUT`
+  #     restarts numbering at `a1` over a log that already holds an `a1`.
+  # Reproduced 2026-08-30 by driving these functions over a meter log holding two three-day-old
+  # untagged 200s: a run that made NO calls at all was told `ok_calls=2`, `ended_on_failure=no`,
+  # and earned `state=ran_to_completion`. The rung written to catch a total endpoint outage failed
+  # OPEN on exactly the evidence it exists to weigh.
+  #
+  # `record_done` already knows when this attempt STARTED, and `meter/proxy.py` stamps `ts` when it
+  # WRITES the row -- after the call returned -- so every row belonging to this attempt has
+  # `ts >= start`. That is a fact about the two clocks, not a heuristic about sessions, and it
+  # closes both holes at once. A log whose rows carry no `ts` AT ALL cannot be windowed, so it
+  # answers "" (unknowable) rather than 0: "" and "0" are different answers here and only "0"
+  # refuses a marker.
   [ -n "${METER_LOG:-}" ] && [ -s "${METER_LOG:-/nonexistent}" ] || { echo ""; return 0; }
   grep -q "\"arm\": \"$1\"" "$METER_LOG" 2>/dev/null || { echo ""; return 0; }
-  python3 - "$METER_LOG" "$1" "$2" "${3:-}" <<'PYEOF'
+  python3 - "$METER_LOG" "$1" "$2" "${3:-}" "${4:-0}" <<'PYEOF'
 import json, sys
 log, arm, task, attempt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-last = None
+since = float(sys.argv[5] or 0)
+last, seen, timestamped = None, 0, 0
 with open(log, "r", encoding="utf-8", errors="replace") as fh:
     for line in fh:
         try:
@@ -512,10 +632,21 @@ with open(log, "r", encoding="utf-8", errors="replace") as fh:
             continue
         if d.get("arm") != arm or d.get("task") != task:
             continue
+        seen += 1
         if attempt and d.get("attempt") not in ("", None, attempt):
             continue
+        if since:
+            try:
+                ts = float(d["ts"])
+            except (KeyError, TypeError, ValueError):
+                continue            # no clock on the row: it cannot be shown to be this attempt's
+            timestamped += 1
+            if ts < since:
+                continue
         last = d
-if last is None:
+if since and seen and not timestamped:
+    print("")                       # a log with no clock at all: unwindowable, so unknowable
+elif last is None:
     print("")                       # no rows for this attempt: unknowable, not a verdict
 else:
     ok = str(last.get("status")) == "200" and not last.get("error")
@@ -523,16 +654,17 @@ else:
 PYEOF
 }
 
-successful_calls() {   # $1 = arm, $2 = task, $3 = attempt. Echoes the count, or "" when unknowable.
+successful_calls() {   # $1 = arm, $2 = task, $3 = attempt, $4 = start epoch (0 = no window).
   # "" and "0" are DIFFERENT ANSWERS and the caller only acts on "0": "" means the meter log is
   # missing, unreadable, or carries no rows for this arm, and refusing a marker on that would punish
   # a run for a bookkeeping gap it did not cause.
   [ -n "${METER_LOG:-}" ] && [ -s "${METER_LOG:-/nonexistent}" ] || { echo ""; return 0; }
   grep -q "\"arm\": \"$1\"" "$METER_LOG" 2>/dev/null || { echo ""; return 0; }
-  python3 - "$METER_LOG" "$1" "$2" "${3:-}" <<'PYEOF'
+  python3 - "$METER_LOG" "$1" "$2" "${3:-}" "${4:-0}" <<'PYEOF'
 import json, sys
 log, arm, task, attempt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-n = 0
+since = float(sys.argv[5] or 0)
+n, seen, timestamped = 0, 0, 0
 with open(log, "r", encoding="utf-8", errors="replace") as fh:
     for line in fh:
         try:
@@ -541,11 +673,23 @@ with open(log, "r", encoding="utf-8", errors="replace") as fh:
             continue
         if d.get("arm") != arm or d.get("task") != task:
             continue
+        seen += 1
         if attempt and d.get("attempt") not in ("", None, attempt):
             continue
+        if since:
+            try:
+                ts = float(d["ts"])
+            except (KeyError, TypeError, ValueError):
+                continue            # no clock on the row: it cannot be shown to be this attempt's
+            timestamped += 1
+            if ts < since:
+                continue
         if str(d.get("status")) == "200" and not d.get("error"):
             n += 1
-print(n)
+if since and seen and not timestamped:
+    print("")                       # a log with no clock at all: unwindowable, so unknowable
+else:
+    print(n)
 PYEOF
 }
 
@@ -638,6 +782,28 @@ marker_is_harness_cut() {   # $1 = marker text
   return 1
 }
 
+# THE ONE SHELL SPELLING of "this marker was written rather than earned", mirroring
+# `compare_arms.py::marker_state`'s `state=operator_skip` branch.
+#
+# `already_measured` skips on ANY non-empty marker that is not a harness cut, and that is how a
+# running campaign is told to stop taking new work without editing a file a live bash is reading
+# incrementally. The mechanism is right; what it leaves behind is a marker indistinguishable from a
+# completed run to every later reader. `compare_arms.py` learned that on 2026-08-26, when five
+# CP-SAT task-arms were skipped by decision. This driver did not, and `final_banner` counted them
+# among the finished: reproduced 2026-08-30 over a five-task directory holding two skips, the
+# banner printed `===== arm B COMPLETE (5/5 markers) =====` and returned 0 over three measurements.
+#
+# DELIBERATELY NOT FOLDED INTO `marker_is_harness_cut`. That predicate also decides what
+# `RETRY_WALL_CUT=1` reopens, and a skip is a DECISION rather than a clock -- reopening it would
+# undo the operator's own instruction on the next resume, which is the opposite of the wall-cut
+# argument. Two states, two predicates, one reader each.
+marker_is_operator_skip() {   # $1 = marker text
+  case "$1" in
+    *state=operator_skip*) return 0 ;;
+  esac
+  return 1
+}
+
 already_measured() {   # $1 = marker path. Success = do NOT run this task-arm again.
   [ -s "$1" ] || return 1
   if marker_is_harness_cut "$(cat "$1")"; then
@@ -709,8 +875,8 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
       # The check is positive-evidence only: it needs the meter log to be readable AND to hold rows
       # for this arm, so a missing or untagged log leaves the old behaviour rather than refusing
       # markers for runs that were fine.
-      OK_CALLS="$(successful_calls "$ARM" "$T" "${ATTEMPT:-}")"
-      if [ "$(ended_on_failure "$ARM" "$T" "${ATTEMPT:-}")" = "yes" ]; then
+      OK_CALLS="$(successful_calls "$ARM" "$T" "${ATTEMPT:-}" "$3")"
+      if [ "$(ended_on_failure "$ARM" "$T" "${ATTEMPT:-}" "$3")" = "yes" ]; then
         echo "  [$(date +%H:%M:%S)][$4] ENDED ON A FAILED CALL after ${WALL}s (rc=0, ok_calls=${OK_CALLS:-?})" \
              "-- the endpoint cut this run, it did not finish. No marker written, task still owed"
         return 0
@@ -838,6 +1004,29 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
     echo "  Do NOT summarise this arm -- the numbers below it would be a table of nothing."
     return 3
   fi
+  # A SKIPPED TASK-ARM IS TERMINAL AND IS NOT A MEASUREMENT. Same shape as the wall-cut block
+  # above and for the same reason: it really is terminal, `already_measured` will not re-run it,
+  # and a banner that only prints a marker count hides that nothing measured it. See
+  # `marker_is_operator_skip` for the measurement that forced this.
+  SKIPPED=""
+  SKIPPED_N=0
+  for M in "$1/$2"-*.done; do
+    [ -s "$M" ] || continue
+    if marker_is_operator_skip "$(cat "$M")"; then
+      SKIPPED="$SKIPPED $(basename "${M%.done}")"
+      SKIPPED_N=$((SKIPPED_N + 1))
+    fi
+  done
+  if [ "$SKIPPED_N" -gt 0 ]; then
+    echo "[$(date +%H:%M:%S)] SKIPPED BY THE OPERATOR --$SKIPPED"
+    echo "  These carry a .done marker that was WRITTEN rather than earned, so a resume will not"
+    echo "  run them and nothing measured them. compare_arms.py reads these same markers, prints"
+    echo "  them as SKIPPED and leaves those pairs out of the means. Delete a marker to queue that"
+    echo "  task-arm again; RETRY_WALL_CUT does NOT reopen a skip, because a skip is a decision."
+    echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers;" \
+         "$((DONE_N - SKIPPED_N)) MEASURED, $SKIPPED_N SKIPPED) ====="
+    return 0
+  fi
   echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers) ====="
   return 0
 }
@@ -892,7 +1081,7 @@ run_one() {                       # $1 = task, $2 = cpu list
     # to be readable off the `task.snapshot.json` the run preserves for itself.
     # shellcheck disable=SC2086
     python "$REPO/benchmarks/algotune/make_task.py" --algotune-root "$AT" --task "$T" \
-        --out-dir "$WS" ${MAKE_TASK_ARGS:-} >/dev/null 2>&1
+        --out-dir "$WS" $CARD_ARGS ${MAKE_TASK_ARGS:-} >/dev/null 2>&1
     S=$(date +%s)
     # Per-task memory and knowledge dirs: LoopLab can mine its own past runs and a shared store,
     # and AlgoTuner has no equivalent -- left shared, arm B would reach task 12 with eleven prior
@@ -942,7 +1131,29 @@ PROTEOF
           ${CHAMPION_PROTECT:+--protect "$CHAMPION_PROTECT"}) \
           > "$OUT/B-$T.final.json" 2>>"$OUT/B-$T.log"
     else
-      echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"
+      # EXIT 1 AND EXIT 2 ARE DIFFERENT ANSWERS, and this used to be one `else`. The extractor was
+      # rewritten to separate them and BOTH its callers threw the distinction away: `if cmd; then`
+      # cannot tell them apart, so a broken bridge was recorded as a run that found nothing.
+      #   1 - the FOLD says there is no champion: no event log, no best node, no `solver.py` in the
+      #       committed set. That is a fact about the RUN and a legitimate null.
+      #   2 - the log could not be READ or `looplab` could not be IMPORTED. That is a fact about
+      #       THIS HARNESS and says nothing whatever about the run -- the scores are still in
+      #       `events.jsonl` and the champion can be re-extracted without spending the budget
+      #       again. Measured 2026-08-31 on the `accEE` probe, whose summary read "champion: NONE"
+      #       while its own log held 27.466 and 221.5387.
+      CHRC=$?
+      if [ "$CHRC" = 2 ]; then
+        echo '{"speedup": null, "harness_failure": "extract_champion_rc2",' \
+             '"error": "champion extraction FAILED (exit 2): a broken bridge, NOT a run without a' \
+             'champion. The scores are in the run event log and can be re-extracted."} ' \
+          > "$OUT/B-$T.final.json"
+        echo "  [$(date +%H:%M:%S)][$CPUS] $T: BROKEN BRIDGE -- extract_champion exited 2, so this" \
+             "row is a harness failure and NOT a null result. Re-extract and re-score without"
+        echo "      re-running the task:  python $REPO/benchmarks/algotune/extract_champion.py" \
+             "--run-dir $TASK_ROOT/run --all-files --out $TASK_ROOT/champion/solver.py"
+      else
+        echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"
+      fi
     fi
     record_done "$MARKER" "$RC" "$S" "$CPUS" "$TASK_ROOT/run"
     [ -s "$MARKER" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm B done ($(cat "$MARKER"))"
@@ -951,6 +1162,11 @@ PROTEOF
 
 echo "arm $ARM | $NTASKS tasks | $LANE_COUNT lanes x $CORES_PER_LANE cores from core $CORE_OFFSET (of $NPROC) | budget \$$BUDGET_USD"
 echo "model $ALGOTUNE_MODEL_KEY | llm ${METER_BASE:-$LOOPLAB_LLM_BASE_URL}${METER_BASE:+ (metered, per-attempt paths)}"
+# The RULER, in the log, beside the model. A speedup is a ratio and this names the instrument
+# that measured its denominator; every number below is only comparable to numbers from the
+# same two values.
+echo "baseline cache $ALGOTUNE_BASELINE_CACHE_DIR | eval workers $ALGOTUNE_EVAL_WORKERS x $ALGOTUNE_EVAL_CORES_PER_WORKER core(s)"
+echo "card $CARD_ARGS ${MAKE_TASK_ARGS:-}"
 reap_orphan_workers
 
 # One PID slot per lane, assigned by ACTUAL freeness. Round-robin by index would hand task N+k the

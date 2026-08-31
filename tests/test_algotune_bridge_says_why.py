@@ -451,8 +451,20 @@ def test_an_unregistered_reason_degrades_rather_than_crashes(capsys):
 
 
 def test_a_positive_speedup_is_printed_untouched(capsys):
+    """UNTOUCHED means the explanation never moves the number -- not that nothing may ride beside
+    it. Since 2026-08-30 `_emit` also stamps `eval_regime`, the instrument the denominator was
+    measured on, on every line: it is the one exit, so stamping it here is the only way no path can
+    leave without it. It is NESTED for `json_line_extras`' reason (a top-level numeric would enter
+    the node's `extra_metrics` as an undeclared `auto` measurement), which the two assertions below
+    the shape check pin."""
     LE._emit({"speedup": 1.5, "subset": "train"})
-    assert json.loads(capsys.readouterr().out.strip()) == {"speedup": 1.5, "subset": "train"}
+    printed = json.loads(capsys.readouterr().out.strip())
+    assert printed["speedup"] == 1.5
+    assert printed["subset"] == "train"
+    assert "no_speedup" not in printed
+    assert set(printed) == {"speedup", "subset", "eval_regime"}, printed
+    assert isinstance(printed["eval_regime"], dict), (
+        "the ruler must be nested; a top-level numeric key is swept into extra_metrics")
 
 
 def test_the_bridge_has_exactly_one_printer():

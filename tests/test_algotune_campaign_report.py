@@ -363,6 +363,15 @@ def _final_banner(out_dir: Path, arm: str, ntasks: int, tasks: str) -> subproces
     start = source.index("final_banner() {")
     end = source.index("\n}\n", start) + 3
     body = source[start:end]
+    # The classifiers it CALLS come with it, asserted by name: without them the extracted bash hits
+    # "command not found", every marker reads as an ordinary finish, and the banner assertions pass
+    # over a function whose interesting branches never ran.
+    helpers = []
+    for name in ("marker_is_harness_cut", "marker_is_operator_skip"):
+        found = re.search(rf"^{name}\(\) \{{.*?^\}}$", source, re.M | re.S)
+        assert found, f"campaign.sh no longer defines {name}()"
+        helpers.append(found.group(0))
+    body = "\n".join(helpers) + "\n" + body
     script = f'set -u\nLANE_COUNT=1\nCORES_PER_LANE=2\n{body}\nfinal_banner "$1" "$2" "$3" "$4"\n'
     return subprocess.run(["bash", "-c", script, "bash", str(out_dir), arm, str(ntasks), tasks],
                           capture_output=True, text=True, timeout=60)

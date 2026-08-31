@@ -176,6 +176,54 @@ DEFAULT_TIMES_DIR = Path(
 )
 
 
+# THE INSTRUMENT EVERY NUMBER BELOW WAS MEASURED ON, computed in ONE place.
+#
+# A speedup is a ratio and its denominator is a per-instance REFERENCE measured under a REGIME. At
+# `ALGOTUNE_EVAL_WORKERS <= 1` the evaluation pool is bypassed and both halves run in the lane's
+# whole cpuset, keyed `__lane<N>r3`; above it, `__w<W>x<C>r3`. Measured on this box the two
+# references sum to 3898 ms and 2976 ms over the same hundred instances -- a 24 % swing in the
+# denominator of every number this file prints.
+#
+# Until 2026-08-30 NO emitted line named any of it: `_emit` wrote speedup, eval_seconds, subset and
+# baseline_source, and the width was nowhere. So a campaign number and a probe number could be off
+# two different instruments and nothing in either record said so -- which is exactly what happened,
+# because `campaign.sh` set neither `ALGOTUNE_EVAL_WORKERS` nor `ALGOTUNE_BASELINE_CACHE_DIR` while
+# `run_probe.sh` set both.
+#
+# The RULE was already replicated here (see `_regime_mismatch`, and its docstring for why it is a
+# replica rather than an import); it was replicated INSIDE a closure, so nothing else could ask.
+# Now the guard and the record read the same function, and a drift between what is refused and what
+# is reported is not expressible.
+#
+# The open item declared at `_regime_mismatch` -- `regime-replica-reads-the-wrong-env-var`, and it
+# is DECLARED there, not here, because a slug names exactly one item -- applies to this function
+# too: it reads `ALGOTUNE_CORES_PER_WORKER` where the arena's `resolve_workers` reads
+# `ALGOTUNE_EVAL_CORES_PER_WORKER`, and omits that helper's clamp. Behaviour is preserved here
+# deliberately -- moving the guard's answer is a different finding from recording it -- and both
+# spellings default to 1, which is what the campaign now pins.
+def eval_regime() -> dict[str, Any]:
+    """What this invocation would key its baseline as, and the environment that decides it."""
+    raw = (os.environ.get("ALGOTUNE_EVAL_WORKERS") or "").strip().lower()
+    declared = os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR")
+    try:
+        cores = max(1, int(os.environ.get("ALGOTUNE_CORES_PER_WORKER") or 1))
+        width = len(os.sched_getaffinity(0))
+    except Exception:                           # noqa: BLE001 - no affinity, no claim
+        return {"key": None, "eval_workers": raw or None, "cores_per_worker": None,
+                "lane_width": None, "baseline_cache_dir": declared,
+                "detail": "no CPU affinity available, so no regime key can be derived"}
+    if raw in ("auto", "max"):
+        workers = max(1, width // cores)
+    else:
+        try:
+            workers = int(raw)
+        except ValueError:
+            workers = 1
+    key = f"__lane{width}r3" if workers <= 1 else f"__w{workers}x{cores}r3"
+    return {"key": key, "eval_workers": raw or "(unset -> 1)", "cores_per_worker": cores,
+            "lane_width": width, "baseline_cache_dir": declared}
+
+
 def _load_cache(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -661,6 +709,12 @@ def _emit(out: dict[str, Any]) -> None:
     with no metric, which `metric_salvage` DISCARDS — strictly worse than a scored zero with a
     slightly wrong label, and the failure mode the timeout branch below was already fixed for once.
     """
+    # THE RULER RIDES ON EVERY LINE, and it is stamped HERE for the same reason the reason-check
+    # below is: this is the ONE exit, so no path can leave without it. NESTED, for
+    # `runtime/sandbox.py::json_line_extras`' reason -- it sweeps every top-level NUMERIC key into
+    # the node's `extra_metrics` as an undeclared `auto` measurement, so `eval_workers` at the top
+    # level would enter the operator's metrics table as a score.
+    out.setdefault("eval_regime", eval_regime())
     speedup = out.get("speedup")
     if not isinstance(speedup, (int, float)) or speedup <= 0:
         block = out.get("no_speedup")
@@ -1034,19 +1088,28 @@ def main() -> int:
     # or changes during the run means the reference was measured here, which means the number below
     # is not about the candidate. `_emit` is told to refuse it rather than print it.
     #
-    # OPEN[baseline-guard-watches-the-wrong-clone] in the documented two-clone workflow this
-    # fingerprints a `.baseline_times` the arena never writes.
-    # proof:absent:--baseline-times-dir@benchmarks/algotune/campaign.sh
-    # REVIEW 2026-08-25 (correctness): `patch_baseline_cache.py` bakes its cache dir at PATCH time
-    # (default: beside the patch script that ran, docs/52 SS6 runs it from the working clone) while
-    # `DEFAULT_TIMES_DIR` here resolves beside THIS file at RUN time (docs/51 SS7 runs the campaign
-    # from the pinned `looplab-armb` clone). Nothing passes `--baseline-times-dir` and nothing checks
-    # the pairing, so the guard can fingerprint a directory nothing writes and stay silent. The glob
-    # and the reassigned-`subset` closure were fixed 2026-08-25; this half needs the cache dir read
-    # out of the patched `baseline_manager.py` (or a refusal when the watched dir does not match the
-    # patch's embedded one). Its companion: `campaign.sh` has no re-score path for a refused
-    # champion pass -- `record_done` writes the marker regardless and `already_measured` never
-    # re-runs it -- and the refusal BRANCH itself is executed by no test (see the annotation in
+    # WHICH DIRECTORY THIS WATCHES SHIPPED 2026-08-30, so the marker that stood here is deleted.
+    # `patch_baseline_cache.py` bakes its cache dir at PATCH time (docs/52 SS6 runs it from the
+    # working clone) while `DEFAULT_TIMES_DIR` resolves beside THIS file at RUN time (docs/51 SS7
+    # runs the campaign from the pinned `looplab-armb` clone), so this fingerprint could watch a
+    # directory nothing writes and stay silent -- and did, on every campaign run to date. What
+    # landed is exactly the remedy that item prescribed: `campaign.sh::baseline_cache_dir` READS
+    # the path out of the patched `baseline_manager.py` and exports it as the environment name
+    # `DEFAULT_TIMES_DIR` above resolves from, so the watched directory is the written one by
+    # construction rather than by coincidence of clones. The glob and the reassigned-`subset`
+    # closure were fixed 2026-08-25.
+    #
+    # ITS COMPANION DID NOT SHIP, and it is its own item now because it was never about which
+    # directory is watched:
+    # OPEN[campaign-cannot-re-score-a-refused-champion-pass] a champion pass this block REFUSES is
+    # recorded as terminal and is never scored again.
+    # proof:absent:RETRY_REFUSED@benchmarks/algotune/campaign.sh
+    # REVIEW 2026-08-30 (correctness): this refusal is the right verdict and costs almost nothing to
+    # repeat -- the champion is already extracted and the reference cache is warm the second time --
+    # but `record_done` writes the marker whatever the scoring pass said, and `already_measured`
+    # re-runs nothing that carries one. `RETRY_WALL_CUT=1` is the shape the answer takes: one flag
+    # that reopens exactly one class of marker, and the environment name in the predicate above is
+    # the one a fix would add. The refusal BRANCH is also executed by no test (see the annotation in
     # tests/test_algotune_refuses_baseline_measured_in_pass.py).
     # ONE KEY, FIXED BEFORE THE RUN, and a glob that matches what the patch really writes.
     #
@@ -1118,7 +1181,6 @@ def main() -> int:
         if not (os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR")
                 or "--baseline-times-dir" in sys.argv):
             return None
-        raw = (os.environ.get("ALGOTUNE_EVAL_WORKERS") or "").strip().lower()
         # OPEN[regime-replica-reads-the-wrong-env-var] the replica reads a cores-per-worker
         # variable the arena does not, and omits `resolve_workers`' clamp, so it can compute a key
         # the arena will never write and refuse a correctly-matched cache.
@@ -1133,19 +1195,11 @@ def main() -> int:
         # pins `cores = 1` and workers below the affinity width, so neither drift dimension can go
         # red. Read both spellings (theirs first) and carry the clamp — or import the rule when the
         # arena is importable and keep the replica only as the fallback.
-        try:
-            cores = max(1, int(os.environ.get("ALGOTUNE_CORES_PER_WORKER") or 1))
-            width = len(os.sched_getaffinity(0))
-        except Exception:                       # noqa: BLE001 - no affinity, no claim
+        # ONE AUTHORITY: the same `eval_regime()` every emitted line now carries, so what is
+        # REFUSED and what is REPORTED cannot come apart.
+        mine = eval_regime()["key"]
+        if mine is None:
             return None
-        if raw in ("auto", "max"):
-            workers = max(1, width // cores)
-        else:
-            try:
-                workers = int(raw)
-            except ValueError:
-                workers = 1
-        mine = f"__lane{width}r3" if workers <= 1 else f"__w{workers}x{cores}r3"
         try:
             present = sorted(f.name for f in
                              args.baseline_times_dir.glob(f"{args.task}__{args.subset}__*.json"))

@@ -1,6 +1,9 @@
 #!/bin/bash
 # ОДНА модель OpenRouter на `edge_expansion`, бюджет $1.00. Вызывается по одной на полосу.
-#   run_model_probe.sh <модель> <короткая-метка> <полоса> [задача] [база-счётчика]
+#   run_probe.sh <модель> <короткая-метка> <полоса> [задача] [база-счётчика] [бюджет]
+# (`run_model_probe.sh` — старое имя, оно теперь `exec`-ает этот файл. Строка использования
+#  звала ЕГО, пока он был отдельной непочиненной копией: оператор, читающий починенный
+#  скрипт, запускал сломанный.)
 #
 # Задача по умолчанию `edge_expansion`, счётчик по умолчанию 8802 (OpenRouter). Для контрольных
 # прогонов на корпоративном шлюзе: ... <задача> http://127.0.0.1:8801
@@ -147,6 +150,13 @@ fi
 export ALGOTUNE_BASELINE_CACHE_DIR="$ROOT/looplab/benchmarks/algotune/.baseline_times"
 export ALGOTUNE_EVAL_WORKERS=auto
 export ALGOTUNE_MIN_TIMEOUT_S=120
+# И ТОТ ЖЕ КОРЕНЬ РЕПОЗИТОРИЯ, что у кампании. `make_task.py` запускается по пути, поэтому
+# `sys.path[0]` — это `benchmarks/algotune`, а не рабочий каталог: `cd "$ROOT/looplab"` выше
+# движок импортируемым НЕ делает. `session_budget_s()` при этом возвращает None, и карточка теряет
+# долю сессии — измерено 2026-08-30 на синтетическом чекауте: кампания (PYTHONPATH выставлен)
+# печатает «bounded at <N> s ... about 3 % of your session», проба — «bounded by a wall clock
+# nobody shows you». Одна и та же карточка, разные предложения, и число сравнивается как одно.
+export PYTHONPATH="$ROOT/looplab${PYTHONPATH:+:$PYTHONPATH}"
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET"
 
 python3 "$ROOT/looplab/benchmarks/algotune/make_task.py" --algotune-root "$ROOT/AlgoTune" \
@@ -172,14 +182,30 @@ say "прогон rc=$? за $(( $(date +%s) - S ))с"
 # train-оценку 3.7777, узел 1 — 2.7342, а `ls -t` вернул узел 1, потому что он записан позже
 # (06:00:53 против 04:30:53). На тесте померили его: 2.7829. Настоящий чемпион на тесте не
 # измерялся вообще, и весь день это число докладывалось как результат пробы.
-# Кампания так не делает: `campaign.sh:768` зовёт `extract_champion.py --run-dir`, который читает
+# Кампания так не делает: `campaign.sh::run_one` зовёт `extract_champion.py --run-dir --all-files`, который читает
 # свёртку и знает `state.best()`. Проба обязана выбирать так же, иначе она меряет не то, что цикл
 # счёл лучшим, — то есть меряет не цикл.
 if python "$ROOT/looplab/benchmarks/algotune/extract_champion.py" \
      --run-dir "$OUT/runs/$TASK/run" --all-files --out "$OUT/champion_solver.py" >> "$LOG" 2>&1; then
   CH="$OUT/champion_solver.py"
 else
+  # ВЫХОД 1 И ВЫХОД 2 — РАЗНЫЕ ОТВЕТЫ, а `if ...; then` их не различает. Извлекатель специально
+  # разделил их, и оба вызывающих различие выбрасывали:
+  #   1 — свёртка говорит, что чемпиона нет (нет лога, нет лучшего узла, в наборе нет solver.py).
+  #       Это факт О ПРОГОНЕ и законный «НЕТ».
+  #   2 — лог не удалось ПРОЧИТАТЬ или `looplab` не удалось ИМПОРТИРОВАТЬ. Это факт О МОСТЕ, и о
+  #       прогоне он не говорит ничего: оценки лежат в events.jsonl, чемпион извлекается заново,
+  #       без повторной траты бюджета. Измерено 31.08 на пробе `accEE`: её сводка сказала
+  #       «чемпион: НЕТ», пока её же лог держал 27.466 и 221.5387.
+  CHRC=$?
   CH=""
+  if [ "$CHRC" = 2 ]; then
+    say "ОТКАЗ: СЛОМАН МОСТ — extract_champion вышел с 2. Это НЕ «прогон без чемпиона»."
+    say "       оценки целы: $OUT/runs/$TASK/run/events.jsonl"
+    say "       повтори без нового прогона: python $ROOT/looplab/benchmarks/algotune/extract_champion.py \\"
+    say "         --run-dir $OUT/runs/$TASK/run --all-files --out $OUT/champion_solver.py"
+    exit 2
+  fi
 fi
 say "чемпион: ${CH:-НЕТ}"
 [ -n "$CH" ] && (
