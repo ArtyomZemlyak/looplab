@@ -4,6 +4,11 @@
 #   source benchmarks/box-jhub-l40s.sh && benchmarks/snapshot_timer.sh start [interval_seconds]
 #   benchmarks/snapshot_timer.sh status | stop
 #
+# TESTING IT AGAINST A SCRATCH TREE: set BOTH `BENCH_ROOT` and `SNAPSHOT_DEST`. The first moves
+# what is read, the second moves where it is written, and until 2026-08-31 only the first existed --
+# so a timer started against a synthetic root wrote a snapshot of that fake box straight into the
+# live rotation on the persistent mount.
+#
 # The campaign already snapshots when an arm finishes -- that is the snapshot that matters, because
 # it happens exactly when the data changed. This one is insurance against the other case: the
 # container restarting in the MIDDLE of a multi-hour arm, where the arm's own hook never runs.
@@ -77,6 +82,10 @@ case "${1:-status}" in
         # a source, and remembering the fingerprint of a run it could not archive means the timer
         # sits quiet until something ELSE changes -- so the one measurement that failed to be
         # archived is the one nobody retries.
+        # NO ARGUMENT, and the destination is still not the hardcoded one: `snapshot.sh` reads
+        # `$SNAPSHOT_DEST`, which this loop inherits. That indirection is the whole of the fix for
+        # a timer that honoured `BENCH_ROOT` for what it READ and ignored it for where it WROTE --
+        # which on 2026-08-31 put a snapshot of a synthetic root into the live rotation.
         "$HERE/snapshot.sh" 2>&1 | sed 's/^/    /'
         snap_rc=${PIPESTATUS[0]}
         if [ "$snap_rc" = "0" ]; then

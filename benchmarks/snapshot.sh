@@ -30,12 +30,28 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/bench_trees.sh"
 
 SRC="${BENCH_ROOT:-/var/tmp/looplab-bench}"
-DEST="${1:-/home/jovyan/data/looplab-bench/snapshots}"
+# THE DESTINATION IS A VARIABLE, like the source. `$BENCH_ROOT` has always moved this script's
+# SOURCE; nothing moved its DESTINATION, which fell back to the hardcoded persistent path whatever
+# `$BENCH_ROOT` said. Both callers invoke this script with no argument (`snapshot_timer.sh` in its
+# `_loop`, `campaign.sh` after an arm), so on both paths the fallback was the only destination
+# reachable, and `grep -rn SNAPSHOT_DEST` over the tree returned nothing at all.
+#
+# COST, 2026-08-31: an agent started `snapshot_timer.sh` against a synthetic `BENCH_ROOT` to test
+# it. The timer honoured `BENCH_ROOT` for what it read and ignored it for where it wrote, so the
+# cycle deposited a snapshot of a fake box into the LIVE rotation on the persistent mount, beside
+# the real ones, and it had to be identified and deleted by hand. Nothing in the snapshot said
+# where it came from -- see PROVENANCE.txt below, which now records the root it was taken from for
+# exactly that reason.
+#
+# Precedence is argument, then environment, then the box default: a caller that knows says so, a
+# box profile (`box-jhub-l40s.sh`) declares the machine's persistent path beside its other
+# machine-specific facts, and a bare invocation on this box still does what it always did.
+DEST="${1:-${SNAPSHOT_DEST:-/home/jovyan/data/looplab-bench/snapshots}}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$DEST/$STAMP"
 mkdir -p "$OUT" || { echo "cannot create $OUT"; exit 1; }
 
-echo "snapshot -> $OUT"
+echo "snapshot $SRC -> $OUT"
 
 SHORT=0
 
@@ -242,6 +258,13 @@ fi
 # 3. Which commit of OUR repo produced them, and what the box looked like.
 {
   echo "snapshot $STAMP"
+  # WHICH BOX, AND WHICH ROOT ON IT. A snapshot that does not name its source cannot be told apart
+  # from somebody else's, and on 2026-08-31 that was not hypothetical: a snapshot of a synthetic
+  # BENCH_ROOT landed in this box's live rotation and the only way to identify it was to read what
+  # was inside. The restorer's first question is "is this mine?", and until now the archive had no
+  # answer to it.
+  echo "bench root: $SRC   (on $(hostname 2>/dev/null || echo '?'))"
+  echo "destination: $OUT"
   echo "looplab:  $(cd "$SRC/looplab" && git log --oneline -1) ($(cd "$SRC/looplab" && git status --porcelain | wc -l) dirty files)"
   echo "AlgoTune: $(cd "$SRC/AlgoTune" && git log --oneline -1)"
   echo "runs archive: $RUNS_ARCHIVE (not pruned; see runs-manifest.txt for what it held)"
