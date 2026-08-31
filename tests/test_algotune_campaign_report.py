@@ -520,9 +520,22 @@ def _bench_root(tmp_path: Path, campaigns, *, with_reports: bool = True) -> Path
     return root
 
 
+def _declare_store(dest: Path) -> None:
+    """snapshot.sh refuses a store root with no `.persistent-store-id`.
+
+    An unmounted geesefs looks exactly like a writable empty directory, and a backup written there
+    exits 0 and then dies with the pod (measured 2026-08-31 -- the 2026-08-29 loss in miniature).
+    These fixtures ARE a legitimate store, so they say so. The refusal itself is covered by
+    tests/test_snapshot_refuses_a_store_that_is_not_there.py.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    (dest.parent / ".persistent-store-id").write_text("test fixture store\n")
+
+
 def _snapshot(tmp_path: Path, campaigns, **kw) -> tuple[subprocess.CompletedProcess, Path]:
     root = _bench_root(tmp_path, campaigns, **kw)
     dest = tmp_path / "snapshots"
+    _declare_store(dest)
     proc = subprocess.run(["bash", str(SNAPSHOT), str(dest)], capture_output=True, text=True,
                           timeout=180, env=dict(os.environ, BENCH_ROOT=str(root)))
     return proc, dest
@@ -563,6 +576,7 @@ def test_a_snapshot_that_could_not_copy_something_says_so_and_exits_nonzero(tmp_
     events.chmod(0o000)                     # present, owed, and unreadable
     dest = tmp_path / "snapshots"
     try:
+        _declare_store(dest)
         proc = subprocess.run(["bash", str(SNAPSHOT), str(dest)], capture_output=True, text=True,
                               timeout=180, env=dict(os.environ, BENCH_ROOT=str(root)))
     finally:

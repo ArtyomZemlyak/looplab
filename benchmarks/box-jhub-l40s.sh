@@ -78,7 +78,37 @@ export METER_LOG="${METER_LOG:-$BENCH_ROOT/meter/meter.jsonl}"
 export LOOPLAB_LLM_MODEL="${LOOPLAB_LLM_MODEL:-deepseek-v4-flash}"
 export ALGOTUNE_MODEL_KEY="${ALGOTUNE_MODEL_KEY:-gateway/deepseek-v4-flash}"
 export LOOPLAB_LLM_REASONING_EXTRA='{}'
-export LOOPLAB_LLM_STREAM="${LOOPLAB_LLM_STREAM:-1}"   # metered either way; see proxy.py
+# STREAMING IS NOT A PREFERENCE ON THIS BOX, IT IS A PROPERTY OF THE RULER.
+#
+# The gateway sits behind an nginx with `proxy_read_timeout 300s`, which measures the gap BETWEEN
+# BYTES. A streamed generation resets that clock with every token and survives any length -- the
+# longest on record here is 673 s. A non-streamed one holds the socket silent for the whole
+# generation and is cut at exactly 300 s.
+#
+# Measured on `meter/meter.jsonl`, 1,578 calls: ALL 21 gateway 504s in the corpus are non-streaming
+# requests with a latency of 295-305 s. Zero streamed calls have ever hit it. On `discrete_log` that
+# was 28 % of the run's calls, five minutes each, dying silently.
+#
+# `${VAR:-1}` was the wrong spelling for something with those stakes: it means an already-set value
+# WINS, and `/home/jovyan/data/looplab/.env` line 77 sets `LOOPLAB_LLM_STREAM=false`. Sourcing that
+# file for two credential lines -- which is the obvious thing to do -- silently changed the ruler,
+# and nothing said so. That is how it happened, and reading `${VAR:-1}` afterwards does not reveal
+# it either: the default is right there in the file, looking like the answer.
+#
+# So: the profile SETS it, and an override has to be deliberate and is announced.
+if [ -n "${LOOPLAB_LLM_STREAM:-}" ] && [ "${LOOPLAB_LLM_STREAM}" != "1" ] && [ "${LOOPLAB_LLM_STREAM}" != "true" ]; then
+  if [ "${LOOPLAB_ALLOW_UNSTREAMED:-}" = "1" ]; then
+    echo "WARNING: LOOPLAB_LLM_STREAM=${LOOPLAB_LLM_STREAM} kept by LOOPLAB_ALLOW_UNSTREAMED=1." >&2
+    echo "         Every call now dies at the gateway's 300 s ceiling. This is NOT the ruler the" >&2
+    echo "         corpus was measured on -- do not compare these numbers with it." >&2
+  else
+    echo "NOTE: LOOPLAB_LLM_STREAM=${LOOPLAB_LLM_STREAM} in the environment; overriding to 1." >&2
+    echo "      (probably a sourced .env -- set LOOPLAB_ALLOW_UNSTREAMED=1 if you meant it)" >&2
+    export LOOPLAB_LLM_STREAM=1
+  fi
+else
+  export LOOPLAB_LLM_STREAM=1                          # metered either way; see proxy.py
+fi
 
 # The key (and the upstream URL) live in the AlgoTune checkout's .env, which campaign.sh sources.
 if [ -f "$ALGOTUNE_ROOT/.env" ]; then
