@@ -716,6 +716,28 @@ marker_is_harness_cut() {   # $1 = marker text
   return 1
 }
 
+# THE ONE SHELL SPELLING of "this marker was written rather than earned", mirroring
+# `compare_arms.py::marker_state`'s `state=operator_skip` branch.
+#
+# `already_measured` skips on ANY non-empty marker that is not a harness cut, and that is how a
+# running campaign is told to stop taking new work without editing a file a live bash is reading
+# incrementally. The mechanism is right; what it leaves behind is a marker indistinguishable from a
+# completed run to every later reader. `compare_arms.py` learned that on 2026-08-26, when five
+# CP-SAT task-arms were skipped by decision. This driver did not, and `final_banner` counted them
+# among the finished: reproduced 2026-08-30 over a five-task directory holding two skips, the
+# banner printed `===== arm B COMPLETE (5/5 markers) =====` and returned 0 over three measurements.
+#
+# DELIBERATELY NOT FOLDED INTO `marker_is_harness_cut`. That predicate also decides what
+# `RETRY_WALL_CUT=1` reopens, and a skip is a DECISION rather than a clock -- reopening it would
+# undo the operator's own instruction on the next resume, which is the opposite of the wall-cut
+# argument. Two states, two predicates, one reader each.
+marker_is_operator_skip() {   # $1 = marker text
+  case "$1" in
+    *state=operator_skip*) return 0 ;;
+  esac
+  return 1
+}
+
 already_measured() {   # $1 = marker path. Success = do NOT run this task-arm again.
   [ -s "$1" ] || return 1
   if marker_is_harness_cut "$(cat "$1")"; then
@@ -915,6 +937,29 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
     echo "  Fix the cause and re-run this arm: no marker was written, so exactly these are retried."
     echo "  Do NOT summarise this arm -- the numbers below it would be a table of nothing."
     return 3
+  fi
+  # A SKIPPED TASK-ARM IS TERMINAL AND IS NOT A MEASUREMENT. Same shape as the wall-cut block
+  # above and for the same reason: it really is terminal, `already_measured` will not re-run it,
+  # and a banner that only prints a marker count hides that nothing measured it. See
+  # `marker_is_operator_skip` for the measurement that forced this.
+  SKIPPED=""
+  SKIPPED_N=0
+  for M in "$1/$2"-*.done; do
+    [ -s "$M" ] || continue
+    if marker_is_operator_skip "$(cat "$M")"; then
+      SKIPPED="$SKIPPED $(basename "${M%.done}")"
+      SKIPPED_N=$((SKIPPED_N + 1))
+    fi
+  done
+  if [ "$SKIPPED_N" -gt 0 ]; then
+    echo "[$(date +%H:%M:%S)] SKIPPED BY THE OPERATOR --$SKIPPED"
+    echo "  These carry a .done marker that was WRITTEN rather than earned, so a resume will not"
+    echo "  run them and nothing measured them. compare_arms.py reads these same markers, prints"
+    echo "  them as SKIPPED and leaves those pairs out of the means. Delete a marker to queue that"
+    echo "  task-arm again; RETRY_WALL_CUT does NOT reopen a skip, because a skip is a decision."
+    echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers;" \
+         "$((DONE_N - SKIPPED_N)) MEASURED, $SKIPPED_N SKIPPED) ====="
+    return 0
   fi
   echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers) ====="
   return 0
