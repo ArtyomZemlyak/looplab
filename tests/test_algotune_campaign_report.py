@@ -498,11 +498,19 @@ def _bench_root(tmp_path: Path, campaigns, *, with_reports: bool = True) -> Path
     # it. They are built here so that `with_reports=False` still leaves EXACTLY ONE source absent --
     # these tests are about a missing source being named and counted, and that reading only survives
     # if the fixture is otherwise complete.
-    subprocess.run(["git", "init", "-q"], cwd=root / "looplab", check=True)
-    (root / "looplab" / "kept.py").write_text("# tracked\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=root / "looplab", check=True)
-    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
-                   cwd=root / "looplab", check=True)
+    # THE ALGOTUNE CHECKOUT IS BUILT FOR THE SAME REASON, from 2026-08-31: until then section 1 of
+    # `snapshot.sh` could not move the exit code at all, so a fixture with no `AlgoTune/.git` left
+    # exactly one countable absence by accident. Now that the ruler counts too, the fixture has to
+    # carry it or every test below reads "2 source(s)". A checkout with no `reports/` is also the
+    # honest shape of `with_reports=False`: `setup_algotune.sh` clones the repo and AlgoTuner
+    # creates `reports/` when arm A first runs, so a cloned-but-never-run box is exactly this.
+    for repo in ("looplab", "AlgoTune"):
+        (root / repo).mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q"], cwd=root / repo, check=True)
+        (root / repo / "kept.py").write_text("# tracked\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=root / repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
+                       cwd=root / repo, check=True)
     run = root / "model-probes" / "dsX" / "runs" / "r1" / "run"
     run.mkdir(parents=True)
     (run / "events.jsonl").write_text('{"type": "node_evaluated"}\n', encoding="utf-8")
