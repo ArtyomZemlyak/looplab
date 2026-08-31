@@ -171,7 +171,8 @@ class _LoopStub(ResearchCadenceMixin):
         self.attempts.append(trigger)
         return f"attempt-{len(self.attempts)}"
 
-    def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None):
+    def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None,
+                              **extra):
         self.recorded.append((research_memo_sig(memo), trigger))
         self.recorded_attempts.append(attempt_id)
 
@@ -719,3 +720,94 @@ def test_serial_cadence_needs_a_wired_researcher_but_a_request_does_not():
         _host(researcher=None),
         _state(strategy_history=[{"at_node": 1, "strategy": {"request_research": True}}]))
     assert ran == ["strategist"]
+
+
+# ------------------------------------------- the convergence gate is OBSERVABLE, not just effective
+
+class _ConvergeStub(ResearchCadenceMixin):
+    """Serves the SAME memo until `switch`, then a different one — so the gate really converges."""
+
+    def __init__(self, *, cap=6, cadence=0.001, switch=3):
+        self._concurrent_research_max_calls = cap
+        self._cadence = cadence
+        self._switch = switch
+        self.computes = 0
+        self.recorded: list[dict] = []
+        self.store = types.SimpleNamespace(read_all=lambda: [])
+
+    def _research_repeat_cadence(self):
+        return self._cadence
+
+    def _record_research_attempt(self, state, *, trigger, manual):
+        return None if trigger == "repeat" else "a1"
+
+    def _compute_deep_research(self, state, trigger, *, trace=True):
+        self.computes += 1
+        tag = "same" if self.computes <= self._switch else f"new-{self.computes}"
+        return types.SimpleNamespace(summary=tag, recommended_directions=["d"])
+
+    def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None, converged_skips=0):
+        self.recorded.append({"summary": memo.summary, "converged_skips": converged_skips})
+
+
+def test_a_recorded_memo_carries_how_many_PAID_passes_were_skipped_before_it():
+    """THE PROPERTY. The loop pays a provider on every tick and discards the answer when the
+    signature matches; before 2026-08-31 that skip wrote NOTHING, so the corpus could not tell
+    "the gate fired forty times" from "it has never fired" — and the gate is an EXACT hash while
+    `e5small-dr-unified-v4` shows 17 % repeated directions across 75 memos.
+
+    MUTATION: stop passing `converged_skips` from the loop (or drop the payload key) and the count
+    is unobservable again.
+    """
+    stub = _ConvergeStub(cap=5, switch=3)
+    anyio.run(Engine._research_overlap_loop, stub, "cadence")
+    assert stub.computes == 5, "the loop must keep paying while converged — that is the cost"
+    first, second = stub.recorded[0], stub.recorded[1]
+    assert first["summary"] == "same" and first["converged_skips"] == 0
+    assert second["converged_skips"] == 2, (
+        "computes 2 and 3 returned the same memo and were skipped; the next recorded memo must say "
+        f"so, got {second}")
+
+
+def test_the_count_RESETS_after_a_record_so_it_is_since_the_last_one():
+    """It is a per-window rate, not a run total. Mutation: make the loop accumulate without the
+    reset and the second recorded memo claims every skip the run ever made."""
+    stub = _ConvergeStub(cap=6, switch=2)
+    anyio.run(Engine._research_overlap_loop, stub, "cadence")
+    counts = [row["converged_skips"] for row in stub.recorded]
+    assert counts[0] == 0, "the first memo of a window skipped nothing before it"
+    assert all(c < stub.computes for c in counts), "a count may never exceed the passes made"
+
+
+def test_the_key_is_OMITTED_when_nothing_was_skipped(tmp_path):
+    """An absent key on an old row means "nobody counted", not "none were skipped" — the same
+    additive rule every other column on this row follows (invariant #5).
+
+    MUTATION: write the key unconditionally and every historical row silently gains a claim.
+    """
+    from looplab.engine.orchestrator import Engine as _Engine
+    from looplab.events.eventstore import EventStore
+
+    class _Store:
+        def __init__(self):
+            self.rows = []
+
+        def append(self, type, data, **kw):
+            self.rows.append((type, data))
+
+        def read_all(self):
+            return []
+
+    from looplab.core.models import ResearchMemo
+    eng = _Engine.__new__(_Engine)
+    eng.store = _Store()
+    eng._research_verify = False
+    eng._track_hypotheses = False
+    memo = ResearchMemo(at_node=1, trigger="cadence", summary="s", recommended_directions=[])
+    eng._record_deep_research(memo, trigger="cadence", manual=False, converged_skips=0)
+    completed = [d for t, d in eng.store.rows if t == "research_completed"]
+    assert completed and "converged_skips" not in completed[0]
+    eng.store.rows.clear()
+    eng._record_deep_research(memo, trigger="cadence", manual=False, converged_skips=3)
+    completed = [d for t, d in eng.store.rows if t == "research_completed"]
+    assert completed and completed[0]["converged_skips"] == 3

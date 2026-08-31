@@ -141,7 +141,8 @@ class _LoopStub(ResearchCadenceMixin):
         return types.SimpleNamespace(summary=f"memo-{self.computes}",
                                      recommended_directions=["d"])
 
-    def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None):
+    def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None,
+                              **extra):
         if self._fail_records > 0:
             self._fail_records -= 1
             raise OSError("store refused a projection after the memo landed")

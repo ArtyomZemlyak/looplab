@@ -4414,7 +4414,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 this_trig, trig = trig, "repeat"
                 sig, recorded = await anyio.to_thread.run_sync(
                     functools.partial(self._research_attempt_step, snap, this_trig,
-                                      manual=False, last_sig=last_sig),
+                                      manual=False, last_sig=last_sig,
+                                      converged_skips=converged),
                     abandon_on_cancel=False)
                 if sig is None:
                     next_sleep = base

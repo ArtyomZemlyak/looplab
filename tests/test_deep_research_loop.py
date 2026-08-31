@@ -678,8 +678,12 @@ def test_spawn_research_records_immediately_via_its_own_task():
     # RECORD path and needs no event store.
     eng._record_research_attempt = lambda snap, *, trigger, manual: (
         attempts.append((trigger, manual)) or "attempt-1")
+    # `**extra` on purpose: this is a STUB of a production signature that grows. `converged_skips`
+    # was added on 2026-08-31 and a fixed-arity lambda made the real call raise `TypeError`, which
+    # the loop's containment `except Exception` swallows into "nothing was recorded" — the failure
+    # reads as a product regression and is a stub-contract break.
     eng._record_deep_research = (
-        lambda memo, *, trigger, manual, attempt_id=None:
+        lambda memo, *, trigger, manual, attempt_id=None, **extra:
         recorded.append((memo, trigger, manual, attempt_id)))
 
     async def run():

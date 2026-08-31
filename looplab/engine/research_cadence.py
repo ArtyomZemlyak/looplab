@@ -455,7 +455,8 @@ class ResearchCadenceMixin:
         return fold(self.store.read_all())
 
     def _research_attempt_step(self, state: RunState, trigger: str, *, manual: bool = False,
-                               last_sig: Optional[str] = None) -> tuple[Optional[str], bool]:
+                               last_sig: Optional[str] = None,
+                               converged_skips: int = 0) -> tuple[Optional[str], bool]:
         """ONE paid Deep-Research think — receipt, provider call, record — as a single INDIVISIBLE
         step. The one spelling shared by the serial cadence (`_run_deep_research`) and BOTH concurrent
         seams (`orchestrator._spawn_research`, `orchestrator._research_overlap_loop`).
@@ -495,7 +496,8 @@ class ResearchCadenceMixin:
         sig = research_memo_sig(memo)
         if last_sig is not None and sig == last_sig:
             return sig, False
-        self._record_deep_research(memo, trigger=trigger, manual=manual, attempt_id=attempt_id)
+        self._record_deep_research(memo, trigger=trigger, manual=manual, attempt_id=attempt_id,
+                                   converged_skips=converged_skips)
         return sig, True
 
     def _record_research_attempt(self, state: RunState, *, trigger: str,
@@ -553,14 +555,34 @@ class ResearchCadenceMixin:
     # future selection-affecting append here fail fast instead of racing the event order.
     @in_llm_lane("deep_research")
     def _record_deep_research(self, memo, *, trigger: str, manual: bool,
-                              attempt_id: Optional[str] = None) -> None:
+                              attempt_id: Optional[str] = None,
+                              converged_skips: int = 0) -> None:
         """Append the memo to the event log. Called from BOTH the main-task cadence AND the
         concurrent research task — see the note above; every append here must stay in
         BACKGROUND_APPENDABLE.
 
         `attempt_id` closes this think's paid-attempt receipt (`_record_research_attempt`). Absent
         for `repeat` passes and for any caller that predates the receipt, in which case the trigger
-        gates fall back to counting recorded memos alone — exactly the old behavior."""
+        gates fall back to counting recorded memos alone — exactly the old behavior.
+
+        `converged_skips` MAKES THE CONVERGENCE GATE OBSERVABLE, and until 2026-08-31 it was not.
+        The repeat loop pays a provider for every tick and, when `research_memo_sig` matches the
+        previous one, discards the answer as "same conclusions" and backs off — incrementing an
+        in-process counter and writing NOTHING. Repeat passes are deliberately unreceipted (they
+        ride a timer, not a durable gate), so a skipped pass left no trace at all and the corpus
+        could not tell "the gate fired forty times" from "it has never fired".
+        THAT MATTERS BECAUSE THE GATE IS AN EXACT HASH. Measured over every preserved log: ZERO of
+        178 recorded memos collide under it — but that counts only what was RECORDED, which is
+        precisely the population a skip is absent from. Meanwhile `e5small-dr-unified-v4` produced
+        75 memos whose directions are 17 % exactly repeated with 168 near-duplicate pairs and a
+        consecutive-summary similarity reaching 0.98, i.e. the thing the gate exists to suppress is
+        demonstrably present while the gate's own firing rate is unknown. `64e788ed` then widened
+        the signature, which makes it fire LESS by construction — a change nobody could measure.
+        NO NEW EVENT TYPE, and the count is the loop's own: it resets to 0 on every recorded memo,
+        so at this moment it is exactly the number of paid passes skipped SINCE THE LAST RECORD.
+        Additive and fold-ignored (invariant #5), omitted when zero so an absent key on an old row
+        means "nobody counted" rather than "none were skipped". A window that ENDS while converged
+        loses only its own tail; every earlier row still carries the rate."""
         from looplab.core.advisory_payloads import (
             research_claim_ref,
             research_memo_ref,
@@ -612,7 +634,9 @@ class ResearchCadenceMixin:
             "memo": memo_d,
             **({"memo_id": memo_id} if memo_id is not None else {}),
             "at_node": memo.at_node, "trigger": trigger, "served_manual": manual,
-            **({"attempt_id": attempt_id} if attempt_id else {})})
+            **({"attempt_id": attempt_id} if attempt_id else {}),
+            **({"converged_skips": int(converged_skips)}
+               if isinstance(converged_skips, int) and converged_skips > 0 else {})})
         # Steer the next proposals: retain the legacy hint projection for replay compatibility.
         # It is explicitly model-generated advisory data, not operator authority; prompt rendering
         # filters this source while the research memo/open-hypothesis channels carry the signal.
