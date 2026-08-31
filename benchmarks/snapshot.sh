@@ -56,16 +56,61 @@ echo "snapshot $SRC -> $OUT"
 SHORT=0
 
 # 1. The patched third-party checkout, as a bundle with history.
+#
+# THE EXIT CODE COVERS THIS HALF TOO, and until 2026-08-31 it did not. Section 1b below holds two
+# `SHORT=$((SHORT + 1))` for our own repo; this section held NONE. Driven on a synthetic BENCH_ROOT
+# with `AlgoTune/.git` deleted and every other source in place: rc=0, not one MISSING line, and a
+# PROVENANCE.txt whose `AlgoTune:` line is empty after the colon. A snapshot carrying no copy
+# whatever of the checkout every speedup on this box was MEASURED AGAINST reported complete success
+# -- so `snapshot_timer.sh` recorded the fingerprint as archived and `campaign.sh`'s
+# `|| echo "(snapshot failed...)"` arm could not fire. That is the same defect fixed for our own
+# repo on 2026-08-30, in the half that was left behind; the symmetry was there to see.
+#
+# AND THE FALLBACK IS GATED ON THE COMMAND'S STATUS, NOT ON THE FILE'S SIZE. It was
+# `if [ ! -s "$OUT/AlgoTune.bundle" ]`, so the tar ran only when the bundle file was EMPTY -- and
+# any failure that leaves a PREFIX behind (an ENOSPC part-way through a write to the geesefs mount
+# is the ordinary one here, per the copy section below) suppressed the fallback AND counted as
+# nothing. What the archive then held was a file called `AlgoTune.bundle` that no `git clone` can
+# read, under a header promising everything that cannot be regenerated.
+#
+# WHAT IS NOT USED HERE IS `git bundle verify`, which was tried on 2026-08-31 and does not answer
+# this question: it returned 0 for a bundle truncated to its first 200 bytes AND for one made from
+# a `--depth 1` clone -- the very case the header warns about below. It reads the bundle header and
+# its prerequisites, not the pack. So the status of the command that wrote the file is the strongest
+# signal available cheaply, and the honest check remains a restore by hand.
+#
+# A SUCCESSFUL TAR IS NOT A SHORTFALL, deliberately. It is a real, restorable degradation (tracked
+# files, no history), and making it exit 1 would put a permanently-shallow checkout into the
+# unbounded re-snapshot loop that cost 3.0 GB twice -- see the mode block further down. Only losing
+# BOTH is a shortfall.
 if [ -d "$SRC/AlgoTune/.git" ]; then
-  ( cd "$SRC/AlgoTune" && git bundle create "$OUT/AlgoTune.bundle" --all 2>/dev/null ) \
-    && echo "  AlgoTune.bundle       $(du -h "$OUT/AlgoTune.bundle" | cut -f1)  ($(cd "$SRC/AlgoTune" && git log --oneline -1))" \
-    || echo "  AlgoTune.bundle       FAILED (shallow clone?); falling back to a tar of tracked files"
-  if [ ! -s "$OUT/AlgoTune.bundle" ]; then
-    ( cd "$SRC/AlgoTune" && git ls-files -z | tar --null -T - -czf "$OUT/AlgoTune-tracked.tar.gz" ) \
-      && echo "  AlgoTune-tracked.tar.gz  $(du -h "$OUT/AlgoTune-tracked.tar.gz" | cut -f1)"
+  if ( cd "$SRC/AlgoTune" && git bundle create "$OUT/AlgoTune.bundle" --all 2>/dev/null ) \
+     && [ -s "$OUT/AlgoTune.bundle" ]; then
+    echo "  AlgoTune.bundle       $(du -h "$OUT/AlgoTune.bundle" | cut -f1)  ($(cd "$SRC/AlgoTune" && git log --oneline -1))"
+  else
+    echo "  AlgoTune.bundle       FAILED (shallow clone? partial write?); falling back to a tar of"
+    echo "                        tracked files, which carries NO history"
+    # Whatever the failed attempt left behind is not a backup, and leaving it is how a failure comes
+    # to look like one -- it is exactly what the old `[ ! -s ]` gate read as a finished bundle.
+    rm -f "$OUT/AlgoTune.bundle"
+    if ( cd "$SRC/AlgoTune" && git ls-files -z | tar --null -T - -czf "$OUT/AlgoTune-tracked.tar.gz" ) \
+       && [ -s "$OUT/AlgoTune-tracked.tar.gz" ]; then
+      echo "  AlgoTune-tracked.tar.gz  $(du -h "$OUT/AlgoTune-tracked.tar.gz" | cut -f1)  (tracked"
+      echo "                        files only; the upstream sha a published number cites is named"
+      echo "                        in AlgoTune-HEAD.txt and is NOT carried by this snapshot)"
+    else
+      echo "  BOTH FAILED          AlgoTune -- neither a bundle nor a tar of the ruler this box's"
+      echo "                       speedups were measured against is in this snapshot"
+      SHORT=$((SHORT + 1))
+    fi
   fi
   ( cd "$SRC/AlgoTune" && git log --oneline -3 > "$OUT/AlgoTune-HEAD.txt"; git status --porcelain \
       > "$OUT/AlgoTune-dirty.txt" )
+else
+  echo "  MISSING              AlgoTune.bundle -- $SRC/AlgoTune/.git absent, so the checkout every"
+  echo "                       speedup on this box was measured against is NOT archived, and the"
+  echo "                       PROVENANCE line naming its sha is a receipt for nothing"
+  SHORT=$((SHORT + 1))
 fi
 
 # 1b. OUR OWN repo, as a bundle, for exactly the same reason.
