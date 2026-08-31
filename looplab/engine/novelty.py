@@ -225,18 +225,6 @@ class NoveltyGateMixin:
     """The engine's novelty/dedup gate cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
 
-    # OPEN[proposal-sink-offload-publish-hand-rolled-thrice] the capture->offload->publish triple
-    # and the 4-tuple unpack-and-append loop this sink feeds are now hand-written at three/four
-    # sites (card_reservation.py's per-action lane, orchestrator.py's batch wrapper, and
-    # speculation.py's two audit_events loops) — the batch wrapper's own docstring states the rule
-    # it then violates one lane over: two hand-written offloads are two chances to forget the sink.
-    # proof:absent:_publish_proposal_events@looplab/engine/novelty.py
-    # REVIEW 2026-08-30 (P2 reuse/altitude): hoist ONE offload-with-sink helper and ONE publish
-    # helper beside this sink (which owns the contextvar and the tuple shape), leaving Layer 5's
-    # conditional-publish POLICY at its call sites; that helper is also the natural carrier of the
-    # publish-in-finally durability fix and the one place a 5th tuple field or a tail-fenced
-    # append_many could land without the four copies drifting. A fourth paid lane that forgets the
-    # wrapper re-breaches invariant #1 exactly as aaef33d3 did.
     @contextmanager
     def _capture_proposal_events(self):
         """Buffer proposal audit events so a worker never writes the folded log.
@@ -245,6 +233,11 @@ class NoveltyGateMixin:
         (`speculation.py::_prepare_raw_card_stage`) installs this context in its isolated Researcher
         worker, then publishes the bounded intents from the main task only if the prepared Card
         still passes its lifecycle/cue fence.
+
+        FOUR INSTALLERS, and one of them is THIS MODULE. `_offload_under_proposal_sink` above
+        opens the sink for the two offloaded lanes, so `novelty.py` is itself an installer as of
+        2026-08-31 — the guard that derives installers from the tree counts it, and a docstring that
+        omitted it would be describing a lane that no longer exists where it says.
 
         THREE INSTALLERS SINCE 2026-08-30, not one, and this sentence named only Layer 5 until
         2026-08-31. The two offloaded proposal lanes install it for the reason Layer 5 does and then
@@ -263,6 +256,54 @@ class NoveltyGateMixin:
             yield intents
         finally:
             _PROPOSAL_EVENT_SINK.reset(token)
+
+    def _publish_proposal_events(self, rows) -> int:
+        """Append a buffered proposal audit prefix from the MAIN TASK. Returns how many landed.
+
+        THE ONE PLACE THE 4-TUPLE IS UNPACKED. It was hand-written at four sites — the two offloaded
+        lanes' `finally` blocks and `speculation.py`'s two `result.audit_events` loops — and the
+        batch wrapper's own docstring stated the sole-writer rule it then re-implemented one lane
+        over. Four copies are four chances to forget a field: a fifth tuple member, or a
+        tail-fenced `append_many`, would have to land in all of them or silently diverge.
+
+        POLICY STAYS AT THE CALL SITES, deliberately. Layer 5 publishes a raw stage's prefix only on
+        the branches where the work was really handed on (an attach refusal COMMITS it — the paid
+        call happened; a stale-fence refusal DROPS it — the proposal is being abandoned and remade),
+        while the two offload lanes publish unconditionally because a refused proposal is exactly
+        when the receipt matters most (`bd182357`). This helper carries the mechanics, not the
+        election: `if` lives one level up, in both directions.
+        """
+        landed = 0
+        for event_type, data, trace_id, span_id in (rows or ()):
+            self.store.append(event_type, data, trace_id=trace_id, span_id=span_id)
+            landed += 1
+        return landed
+
+    async def _offload_under_proposal_sink(self, fn, **run_sync_kwargs):
+        """Run a paid proposal on the proposal pool, under the sink, and publish on the way OUT.
+
+        The capture->offload->publish triple, once. `captured` is bound BEFORE the `try` so a raise
+        inside `_capture_proposal_events` itself leaves the `finally` something to read rather than
+        an `AttributeError` on the failure path, and the publish is in a `finally` because a raise
+        from the offloaded funnel (`BudgetExceeded` included, which `_reject_and_repropose` appends
+        through this very sink before re-raising) would otherwise discard every buffered row that
+        was durable at emit time before the offload existed. `store.append` is sync and legal during
+        unwind; cancellation is not the trigger, since the non-abandoned wait is shielded.
+
+        The pool is `proposal_limiter()`, not anyio's shared default — an in-flight `_run_eval`
+        holds a default token for its whole multi-hour duration. Callers may override it, and pass
+        `abandon_on_cancel` through, but they get the right pool by DEFAULT so a new lane cannot
+        starve by omission.
+        """
+        import anyio
+
+        run_sync_kwargs.setdefault("limiter", proposal_limiter())
+        captured: list = []
+        try:
+            with self._capture_proposal_events() as captured:
+                return await anyio.to_thread.run_sync(fn, **run_sync_kwargs)
+        finally:
+            self._publish_proposal_events(captured)
 
     def _append_proposal_event(self, event_type: str, data: dict):
         sink = _PROPOSAL_EVENT_SINK.get()

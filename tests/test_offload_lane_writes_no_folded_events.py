@@ -23,6 +23,7 @@ Every assertion below has an input that makes it FAIL; the mutations are named i
 from __future__ import annotations
 
 import ast
+import functools
 import inspect
 import pathlib
 
@@ -73,16 +74,68 @@ def _lane_function(label: str) -> ast.AST:
     raise AssertionError(f"{name} is gone from the {label} lane's module — re-point this guard")
 
 
+def _publishing_function(label: str) -> ast.AST:
+    """Where this lane's capture->offload->publish triple LIVES.
+
+    Since 2026-08-31 it lives one call deeper, in `novelty.py::_offload_under_proposal_sink`: the
+    triple and the 4-tuple publish loop had been hand-written at four sites, and
+    `test_proposal_publish_is_hoisted_once.py` now forbids a lane re-inlining either. Following the
+    delegation keeps every property below DRIVEN rather than deleted — a lane that stopped
+    delegating fails `test_each_lane_DELEGATES_to_the_offload_helper`, and a helper that stopped
+    publishing from a `finally` fails the guards that follow.
+    """
+    if _delegates(label):
+        for node in ast.walk(_helper_tree()):
+            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == "_offload_under_proposal_sink"):
+                return node
+        raise AssertionError("the offload helper is gone — re-point these guards")
+    return _lane_function(label)
+
+
+@functools.lru_cache(maxsize=1)
+def _helper_tree() -> ast.AST:
+    """Parsed ONCE. Two of the guards below compare AST nodes by IDENTITY (`n is offload`), and a
+    per-call re-parse hands them nodes from two different trees — the comparison then silently
+    answers False and the guard reports a missing sink that is right there. Found exactly that way.
+    """
+    return ast.parse(pathlib.Path(novelty.__file__).read_text())
+
+
+def _delegates(label: str) -> bool:
+    return any(isinstance(node, ast.Call)
+               and getattr(node.func, "attr", None) == "_offload_under_proposal_sink"
+               for node in ast.walk(_lane_function(label)))
+
+
+@pytest.mark.parametrize("label", [lane[0] for lane in _LANES])
+def test_each_lane_DELEGATES_to_the_offload_helper(label):
+    """The hop the guards below follow. Without this assertion a lane could hand-roll the triple
+    again and every property would silently be checked against the helper it no longer uses."""
+    assert _delegates(label), (
+        f"the {label} lane must reach its paid proposal through `_offload_under_proposal_sink` — "
+        "that helper carries the sink, the proposal thread pool and the publish-in-`finally` rule")
+
+
 def _offload_region(label: str) -> ast.AST:
-    """The `to_thread.run_sync(partial(...))` call this lane offloads through, by AST."""
-    for node in ast.walk(_lane_function(label)):
+    """The `to_thread.run_sync(partial(...))` call this lane offloads through, by AST.
+
+    Follows the delegation since 2026-08-31: the two lanes hand their paid call to
+    `_offload_under_proposal_sink`, so the offload itself lives there. `test_each_lane_DELEGATES_
+    to_the_offload_helper` is what makes that hop safe to follow.
+    """
+    for node in ast.walk(_publishing_function(label)):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         name = getattr(func, "attr", None)
-        if name == "run_sync" and any(
-                isinstance(a, ast.Call) and getattr(a.func, "attr", None) == "partial"
-                for a in node.args):
+        if name != "run_sync":
+            continue
+        # `partial(...)` inline OR a callable handed in. The hoisted helper takes `fn` as a
+        # parameter and its CALLERS build the partial, so requiring the literal `partial(` here
+        # would only be asserting where the closure happens to be constructed — not that the paid
+        # call left the loop thread, which is the property this module exists for.
+        if node.args:
             return node
     raise AssertionError(
         f"the {label} lane's offloaded `to_thread.run_sync(partial(...))` call is gone — a paid "
@@ -93,7 +146,7 @@ def _offload_region(label: str) -> ast.AST:
 def test_the_offloaded_call_runs_UNDER_the_capture_sink(label):
     """Mutation: drop the `with self._capture_proposal_events()` wrapper, and every folded
     novelty/graded/prior row appends straight from the worker again — the defect itself."""
-    tree = _lane_function(label)
+    tree = _publishing_function(label)
     offload = _offload_region(label)
     wrapped = []
     for node in ast.walk(tree):
@@ -114,65 +167,54 @@ def test_the_captured_intents_are_PUBLISHED_and_not_dropped(label):
     """A sink that buffers and never publishes turns an invariant breach into silent data loss —
     strictly worse, because the discard receipt (bd182357) exists precisely so a refused paid
     proposal leaves a trace. Mutation: delete the publish loop."""
-    tree = _lane_function(label)
-    publishes = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.For):
-            continue
-        iterates_captured = isinstance(node.iter, ast.Name) and node.iter.id == "captured"
-        appends = any(isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "append"
-                      for c in ast.walk(node))
-        if iterates_captured and appends:
-            publishes.append(node)
+    tree = _publishing_function(label)
+    publishes = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and getattr(n.func, "attr", None) == "_publish_proposal_events"]
     assert publishes, (
-        f"the {label} lane must append its captured intents from the main task after the await")
+        f"the {label} lane must publish its captured intents from the main task after the await; "
+        "since 2026-08-31 that is one call to `_publish_proposal_events`, which is the only place "
+        "the 4-tuple is unpacked (see test_proposal_publish_is_hoisted_once.py)")
 
 
 @pytest.mark.parametrize("label", [lane[0] for lane in _LANES])
 def test_the_publish_is_NOT_gated_on_the_idea_forming(label):
-    """`idea is None` is a REFUSED proposal — exactly the case the discard receipt was written for.
-    Mutation: move the publish loop under `if idea is not None`, and a paid propose that produced no
-    card goes back to leaving no trace, which is the loss bd182357 measured at 24.1 min / 81 calls /
-    4.27M tokens on v8."""
-    tree = _lane_function(label)
-    publish = next(n for n in ast.walk(tree)
-                   if isinstance(n, ast.For) and isinstance(n.iter, ast.Name)
-                   and n.iter.id == "captured")
-    # THE PROPERTY IS "NOT GATED ON THE OFFLOAD'S OUTCOME", and the first spelling of this test
-    # asserted something weaker: that no enclosing `if` mentioned the word "idea". That is the
-    # per-action lane's own local name, and extending the guard to the batch lane made it VACUOUS
-    # there — a mutant gating the publish on `if result and result[0]:` survived it, because the
-    # batch wrapper's local is called `result`. The mutation harness is what said so.
-    #
-    # So the names are DERIVED from the lane instead of assumed: whatever the offloaded call's
-    # result is bound to, no `if` around the publish may read it. An enclosing branch that owns the
-    # lane at all is legitimate and stays — `_stage_card_creates` publishes inside its multi-draft
-    # selector (`len(raw) > 1 and all(... == "draft")`), which is a fact about the ACTIONS and not
-    # about what the paid call came back with.
-    outcome_names = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        value = node.value
-        if isinstance(value, ast.Await):
-            value = value.value
-        calls = [c for c in ast.walk(value) if isinstance(c, ast.Call)]
-        if not any(getattr(c.func, "attr", None) in ("run_sync", "_await_batch_proposal")
-                   for c in calls):
-            continue
-        for target in node.targets:
-            outcome_names |= {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
-    assert outcome_names, (
-        f"the {label} lane's offloaded call binds nothing — this guard has lost its subject")
-    guards = [n for n in ast.walk(tree) if isinstance(n, ast.If)
-              and any(x is publish for x in ast.walk(n))]
-    for guard in guards:
-        read = {n.id for n in ast.walk(guard.test) if isinstance(n, ast.Name)}
-        leaked = read & outcome_names
-        test_src = ast.get_source_segment(_SOURCES[label], guard.test) or ""
-        assert not leaked, (
-            f"the {label} lane's publish must not be conditioned on what the paid call returned "
-            f"({sorted(leaked)}), got `if {test_src}`")
+    """`idea is None` is a REFUSED proposal — exactly the case the discard receipt was written for:
+    a paid propose that produced no card used to leave no trace at all, which `bd182357` measured at
+    24.1 min / 81 calls / 4.27M tokens on v8.
+
+    THE PROPERTY IS "NOT GATED ON THE OFFLOAD'S OUTCOME", and its first spelling asserted something
+    weaker — that no enclosing `if` mentioned the word "idea". That is the per-action lane's own
+    local name, so extending the guard to the batch lane made it VACUOUS there: a mutant gating the
+    publish on `if result and result[0]:` survived, because the batch wrapper's local is `result`.
+    The mutation harness is what said so, and the names have been DERIVED from the lane ever since.
+
+    Since the hoist (2026-08-31) the publish lives in `_offload_under_proposal_sink`'s `finally`,
+    where the property holds by CONSTRUCTION — a `finally` cannot be conditioned on a return value
+    that may not exist. So the assertion moves with it and gets stronger: the publish must sit in a
+    `finally`, and no `if` inside the helper may stand between the offload and it.
+
+    Mutation: turn the `finally` into a plain post-`try` publish, or wrap it in `if result:`.
+    """
+    tree = _publishing_function(label)
+    publish = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "_publish_proposal_events"),
+        None)
+    assert publish is not None, (
+        f"the {label} lane's publish is gone — this guard has lost its subject")
+
+    unconditional = [t for t in ast.walk(tree) if isinstance(t, ast.Try)
+                     and any(x is publish for n in t.finalbody for x in ast.walk(n))]
+    assert unconditional, (
+        f"the {label} lane's publish must run from a `finally`, which is what makes it independent "
+        "of whether the paid call returned an idea, returned nothing, or raised")
+
+    gates = [n for n in ast.walk(tree) if isinstance(n, ast.If)
+             and any(x is publish for x in ast.walk(n))]
+    assert not gates, (
+        f"the {label} lane's publish is under {len(gates)} `if` — a refused proposal is exactly "
+        "when the receipt matters most, and any condition here restores the silence bd182357 ended")
 
 
 def test_the_events_this_lane_can_emit_are_FOLDED_and_registered_nowhere():
@@ -233,10 +275,19 @@ def test_the_publish_SURVIVES_a_raise_from_the_offloaded_call(label):
     MUTATION: turn the `finally` back into a plain post-`with` loop and this goes red — the publish
     then sits outside the handler that a raise unwinds through.
     """
-    publish = next(n for n in ast.walk(_lane_function(label))
-                   if isinstance(n, ast.For) and isinstance(n.iter, ast.Name)
-                   and n.iter.id == "captured")
-    protected = [n for n in ast.walk(_lane_function(label))
+    owner = _publishing_function(label)
+    # `next(..., None)` and an assertion, NOT a bare `next`: a missing publish must read as a
+    # FAILURE with this file's own message, not as a StopIteration error whose traceback says
+    # nothing about the property. Caught by the mutation pass that hand-rolled the lane again.
+    publish = next(
+        (n for n in ast.walk(owner)
+         if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "_publish_proposal_events"),
+        None)
+    assert publish is not None, (
+        f"the {label} lane no longer publishes through `_publish_proposal_events` — either it "
+        "hand-rolled the loop again (see test_proposal_publish_is_hoisted_once.py) or the publish "
+        "is gone entirely")
+    protected = [n for n in ast.walk(owner)
                  if isinstance(n, ast.Try)
                  and any(x is publish for handler in n.finalbody for x in ast.walk(handler))]
     assert protected, (
@@ -252,7 +303,7 @@ def test_the_buffer_is_BOUND_before_the_try_so_the_finally_can_read_it(label):
 
     MUTATION: delete the `captured = []` line above the `try`.
     """
-    fn = _lane_function(label)
+    fn = _publishing_function(label)
     tries = [n for n in ast.walk(fn) if isinstance(n, ast.Try)
              and any(isinstance(x, ast.Name) and x.id == "captured"
                      for h in n.finalbody for x in ast.walk(h))]

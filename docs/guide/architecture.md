@@ -153,6 +153,37 @@ flowchart TB
   P -->|"cannot be starved by an eval"| OK["board keeps producing"]
 ```
 
+### The proposal sink: one helper, policy at the call sites
+
+A paid proposal runs on a worker thread, and invariant #1 makes the engine the sole writer of folded
+domain events — so `novelty.py::_capture_proposal_events` buffers a lane's audit rows into a
+contextvar and the MAIN TASK appends them. Those rows are authority-bearing for
+`speculation.py::_proposal_authority_seq`, so a worker-thread append can cost a proposal the run
+already paid for.
+
+The **mechanics** are hoisted (`_offload_under_proposal_sink`, `_publish_proposal_events`); the
+**election** is not. Publishing a prefix is a different decision in each lane, and both answers are
+deliberate:
+
+| Lane | Publishes | Why |
+|---|---|---|
+| batch (`orchestrator`) | always | a refused proposal is when the receipt matters most (`bd182357`) |
+| per-action (`card_reservation`) | always | same rule; this lane never abandons and re-makes |
+| speculative raw stage | on the branch that hands the work on | an attach refusal COMMITS the prefix (the paid call happened); a stale-fence refusal DROPS it (the proposal is being remade) |
+
+```mermaid
+flowchart LR
+  C["_offload_under_proposal_sink"] --> S["_capture_proposal_events<br/>(contextvar buffer)"]
+  S --> T["worker thread<br/>proposal pool, 4 tokens"]
+  T -->|"returns"| F["finally"]
+  T -->|"RAISES (BudgetExceeded…)"| F
+  F --> P["_publish_proposal_events<br/>THE ONLY 4-tuple unpack"]
+  P --> L[("folded log — main task")]
+  R["speculative raw stage<br/>captures WORKER-side"] -->|"ferries via<br/>SpecRawStageResult.audit_events"| POL{"branch decides"}
+  POL -->|"work handed on"| P
+  POL -->|"proposal remade"| X["dropped, deliberately"]
+```
+
 ## Where each piece lives in the code
 
 | Concept | Module |

@@ -19,12 +19,15 @@ from looplab.engine.novelty import _PROPOSAL_THREADS, proposal_limiter
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-# The offloaded proposal entry points, by the name that reaches `functools.partial`. Bounded on
-# purpose: `test_the_lane_set_still_matches_the_sink_installers` below fails if a fourth module
-# starts installing the proposal sink, so this set cannot quietly fall behind the tree.
+# Where a paid proposal actually crosses onto a thread. Since the capture->offload->publish triple
+# was hoisted (2026-08-31) the batch and per-action lanes BOTH cross inside
+# `novelty.py::_offload_under_proposal_sink`, which offloads whatever `fn` its caller handed it —
+# so there is one shared crossing for the two, plus the speculative raw stage's own.
+#
+# Bounded on purpose: `test_the_lane_set_still_matches_the_sink_installers` fails if the set of
+# sink-installing modules stops matching, so this cannot quietly fall behind the tree.
 PROPOSAL_TARGETS = {
-    "_consume_batch_proposal": "looplab/engine/orchestrator.py",
-    "_prepare_node_idea": "looplab/engine/card_reservation.py",
+    "fn": "looplab/engine/novelty.py",                       # the shared helper, both offload lanes
     "_prepare_raw_card_stage": "looplab/engine/speculation.py",
 }
 
@@ -37,6 +40,31 @@ def _offload_calls(tree):
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr == "run_sync":
             yield node
+
+
+def _binds_the_limiter(call, tree) -> bool:
+    """`limiter=` on the call, or a `**kwargs` spread that a `setdefault("limiter", …)` filled.
+
+    The second form is not a loophole — it is how the hoisted helper gives EVERY lane the right
+    pool by default while still letting one override it. Requiring the literal keyword at the call
+    would have forced the helper to stop accepting an override, which is a worse contract than the
+    one this rule protects. What is still refused is an offload that neither names the limiter nor
+    routes through a function that defaults it.
+    """
+    if any(kw.arg == "limiter" for kw in call.keywords):
+        return True
+    spread = [kw for kw in call.keywords if kw.arg is None]
+    if not spread:
+        return False
+    spread_names = {getattr(kw.value, "id", None) for kw in spread}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "setdefault"):
+            continue
+        if getattr(node.func.value, "id", None) not in spread_names:
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "limiter":
+            return True
+    return False
 
 
 def _partial_target(call):
@@ -88,8 +116,9 @@ def test_every_offloaded_proposal_passes_the_limiter():
             if _partial_target(call) != target:
                 continue
             found = True
-            if not any(kw.arg == "limiter" for kw in call.keywords):
-                offenders.append(f"{rel}:{call.lineno} offloads {target} onto the DEFAULT pool")
+            if _binds_the_limiter(call, tree):
+                continue
+            offenders.append(f"{rel}:{call.lineno} offloads {target} onto the DEFAULT pool")
         if not found:
             offenders.append(f"{rel}: no offload of {target} found — re-point this rule")
     assert not offenders, "\n  " + "\n  ".join(offenders)
@@ -98,14 +127,14 @@ def test_every_offloaded_proposal_passes_the_limiter():
 def test_the_lane_set_still_matches_the_sink_installers():
     """A fourth proposal lane must not be able to appear without this file noticing.
 
-    Derived from the tree the same way the sink-installer doc guard derives it: a module that opens
-    `_capture_proposal_events` is a proposal lane. `novelty.py` itself DEFINES the sink and is not a
-    lane, so it is excluded by name rather than by a substring that would also hide a real lane.
+    Derived from the tree the same way the sink-installer doc guard derives it: a module that OPENS
+    `_capture_proposal_events` is a proposal lane. `novelty.py` both defines the sink and — since
+    the hoist — opens it inside `_offload_under_proposal_sink` on behalf of the two offload lanes,
+    so it is a lane here as well as the owner. Nothing is excluded by name: an exclusion is how a
+    real lane hides.
     """
     installers = set()
     for path in (ROOT / "looplab/engine").glob("*.py"):
-        if path.name == "novelty.py":
-            continue
         for node in ast.walk(ast.parse(path.read_text())):
             if (isinstance(node, ast.Call)
                     and getattr(node.func, "attr", None) == "_capture_proposal_events"):
@@ -113,6 +142,20 @@ def test_the_lane_set_still_matches_the_sink_installers():
     assert installers == set(PROPOSAL_TARGETS.values()), (
         f"the proposal lanes moved: sink installers are {sorted(installers)} but this file guards "
         f"{sorted(set(PROPOSAL_TARGETS.values()))} — add the new lane's offload target above")
+
+
+def test_the_limiter_predicate_refuses_a_bare_spread():
+    """NON-VACUITY for the `**kwargs` form: a spread with NO `setdefault` behind it must still be
+    reported, or the rule is satisfied by any lane that happens to forward keyword arguments."""
+    bare = ast.parse("anyio.to_thread.run_sync(fn, **kw)")
+    call = next(_offload_calls(bare))
+    assert not _binds_the_limiter(call, bare), "a spread alone proves nothing about the pool"
+
+    filled = ast.parse('def f(fn, **kw):\n'
+                       '    kw.setdefault("limiter", proposal_limiter())\n'
+                       '    anyio.to_thread.run_sync(fn, **kw)')
+    call = next(_offload_calls(filled))
+    assert _binds_the_limiter(call, filled), "a defaulted spread DOES bind the pool"
 
 
 def test_the_offload_walk_can_actually_fail():

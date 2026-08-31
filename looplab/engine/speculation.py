@@ -2052,21 +2052,14 @@ class SpeculationMixin:
                 # the whole proposal is being abandoned and re-made, so dropping them keeps the log
                 # honest, but here the work is being handed to the serial spine and the receipts are
                 # the only record that this lane paid for it at all.
-                for event_type, data, trace_id, span_id in result.audit_events:
-                    self.store.append(event_type, data, trace_id=trace_id, span_id=span_id)
+                self._publish_proposal_events(result.audit_events)
             return True, False
         # the Card commit above and these proposal-audit events are separate appends. A crash
         # or append failure after EV_CARD_ADDED leaves an executable durable Card whose novelty/governance
         # audit prefix was silently lost; `_spec_raw_stage_result` was already cleared, so resume cannot
         # repair it. Commit the Card and its bounded audit intents in one tail-fenced append_many, or add a
         # durable proposal receipt plus recovery gate that keeps the Card non-selectable until it is closed.
-        for event_type, data, trace_id, span_id in result.audit_events:
-            self.store.append(
-                event_type,
-                data,
-                trace_id=trace_id,
-                span_id=span_id,
-            )
+        self._publish_proposal_events(result.audit_events)
         return True, True
 
     async def _close_developer_sentinel_once(self) -> bool:

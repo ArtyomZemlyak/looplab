@@ -237,17 +237,27 @@ def test_the_wrapper_really_OFFLOADS_and_publishes_from_the_main_task():
     """
     import ast
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(Engine._await_batch_proposal)))
-    called = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Attribute):
-                called.add(func.attr)
-            elif isinstance(func, ast.Name):
-                called.add(func.id)
-    assert "run_sync" in called, "the paid batch proposal must leave the event-loop thread"
-    assert "_capture_proposal_events" in called, (
+    def _calls(fn):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                names.add(getattr(func, "attr", None) or getattr(func, "id", None))
+        return names
+
+    # BOTH PROPERTIES STILL HOLD; since 2026-08-31 they hold one call deeper. The wrapper delegates
+    # to `_offload_under_proposal_sink`, which is where the triple lives now — see
+    # `test_proposal_publish_is_hoisted_once.py` for why it was hoisted (it was hand-written at four
+    # sites) and for the guard that stops a lane re-inlining it. Following the delegation here rather
+    # than deleting the assertion keeps the ORIGINAL property driven: a wrapper that stopped
+    # offloading, or offloaded without the sink, still fails on this line.
+    called = _calls(Engine._await_batch_proposal)
+    assert "_offload_under_proposal_sink" in called, (
+        "the batch wrapper must reach the paid proposal through the offload helper")
+    inner = _calls(Engine._offload_under_proposal_sink)
+    assert "run_sync" in inner, "the paid batch proposal must leave the event-loop thread"
+    assert "_capture_proposal_events" in inner, (
         "the folded proposal events must be BUFFERED — an uncaptured offload appends them from a "
         "worker, which invariant #1 forbids and `_proposal_authority_seq` is fenced on")
 

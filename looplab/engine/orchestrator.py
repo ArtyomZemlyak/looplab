@@ -5056,24 +5056,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # `eval_parallel` is admitted to 1024, so at a raised width the paid proposal queued behind
         # the evals before it even started. See `novelty.proposal_limiter` for the derivation of the
         # size and for the two sibling lanes that share it.
-        captured: list = []
-        try:
-            with self._capture_proposal_events() as captured:
-                result = await anyio.to_thread.run_sync(
-                    functools.partial(self._consume_batch_proposal, state, width),
-                    limiter=proposal_limiter())
-        # PUBLISHED ON THE WAY OUT, since 2026-08-31, and the `finally` is the whole of the fix.
-        # A RAISE from the offloaded funnel discarded every buffered row: `_reject_and_repropose`
-        # appends `budget_exceeded` through this sink and then RE-RAISES — its docstring says
-        # "appended BEFORE re-raising so the rejection is on the log even though the run is ending"
-        # — and both shipped researchers propagate it. Pre-offload each row was durable at emit
-        # time; buffering silently made the publish conditional on a clean return. `store.append`
-        # is sync and legal during unwind. Cancellation was never the trigger (the non-abandoned
-        # wait is shielded, so this ran before the next checkpoint) and is unaffected.
-        finally:
-            for _event_type, _data, _trace_id, _span_id in captured:
-                self.store.append(_event_type, _data, trace_id=_trace_id, span_id=_span_id)
-        return result
+        return await self._offload_under_proposal_sink(
+            functools.partial(self._consume_batch_proposal, state, width))
 
     def _fail_reserved_build(self, *, node_id: int, card_id: Optional[str], generation: int,
                              reason: str, error: str, drop_card: bool = True,
