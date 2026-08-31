@@ -80,6 +80,7 @@ class LoopOptions(Mapping):
 
     max_turns: int | _Unset = UNSET
     time_budget_s: float | _Unset = UNSET
+    cost_budget_usd: float | _Unset = UNSET
     context_budget_chars: int | None | _Unset = UNSET
     stuck_detection: bool | _Unset = UNSET
     stuck_repeat: int | _Unset = UNSET

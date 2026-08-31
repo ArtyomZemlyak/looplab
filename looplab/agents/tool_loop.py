@@ -570,7 +570,35 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
 # file.") presented as the answer, with nothing anywhere saying the investigation had been cut off.
 # That is the operator's "the assistant hangs around 40 tool uses and then a bare tool use arrives as
 # the reply", reproduced exactly.
-LOOP_CUTOFF_KINDS = ("time", "turns", "stuck", "stalled", "emit_force")
+LOOP_CUTOFF_KINDS = ("time", "cost", "turns", "stuck", "stalled", "emit_force")
+
+
+def _accountant_spend(client) -> float | None:
+    """The run's spend so far, or None when this client has no accountant.
+
+    None rather than 0.0 on purpose: 0.0 is a real reading (a run that has not spent yet) and would
+    make a missing accountant look like a fresh one, which is how a money ceiling would silently
+    become a ceiling on nothing. Every accountant-derived rung in this codebase is opt-out-by-absence
+    and none may ever raise — a bookkeeping error must not end a session that is working.
+    """
+    acct = getattr(client, "accountant", None)
+    if acct is None:
+        return None
+    try:
+        spent = float(getattr(acct, "spent", None))
+    except (TypeError, ValueError):
+        return None
+    return spent if spent >= 0 else None
+
+
+def _session_spend(client, at_start: float | None) -> float | None:
+    """What THIS session has spent, or None when it cannot be known."""
+    if at_start is None:
+        return None
+    now = _accountant_spend(client)
+    if now is None:
+        return None
+    return max(0.0, now - at_start)
 
 
 def _note_budget(on_budget, kind: str, *, turns, seconds, detail: str = "") -> None:
@@ -595,7 +623,8 @@ def _note_budget(on_budget, kind: str, *, turns, seconds, detail: str = "") -> N
 
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     max_turns: int = 0, context_budget_chars: int | None = None,
-                    time_budget_s: float = 0.0, finalize=None, fallback=None, on_budget=None,
+                    time_budget_s: float = 0.0, cost_budget_usd: float = 0.0,
+                    finalize=None, fallback=None, on_budget=None,
                     stuck_detection: bool = True,
                     stuck_repeat: int = 4, stuck_alternate: int = 4,
                     self_plan: bool = False, plan_reinject_every: int = 5,
@@ -615,6 +644,18 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
       - `time_budget_s` (0 = off): WALL-CLOCK ceiling across turns — a new turn is not started once
         exceeded (a turn already in flight isn't interrupted — that's the LLM client's per-call
         timeout's job). Set it to bound an interactive request behind a proxy gateway timeout.
+      - `cost_budget_usd` (0 = off): MONEY ceiling for THIS session, measured as spend since the
+        session started (not the run's total), on the same "do not start another turn" rule as the
+        wall clock. Needs `client.accountant`; without one it is silently off, like every other
+        accountant-derived rung in this codebase.
+
+        WHY A THIRD CURRENCY. Measured 2026-08-31 over 7 AlgoTune probes: the two ceilings above are
+        denominated in turns and seconds, and what actually ends a run is money. On `pde_heat1d` a
+        SINGLE plan step took 48 % of a $1.00 run (72 generations) and was cut by the 1200 s wall at
+        1212 s — the wall worked, and half the budget was already gone when it fired. `accPde` the
+        same: 1212 s, 28 %. The same ceiling on `edge_expansion` never bit at all (worst step 8-9 %),
+        so seconds and dollars are not proxies for each other across tasks, and bounding one does not
+        bound the other.
 
     Safe-by-default unlimited operation (the point of "the agents may loop forever in their own
     loop"): `max_turns`/`time_budget_s` are only BACKSTOPS. What actually stops a stuck loop is the
@@ -781,6 +822,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         another turn, so only it can honour a bounce; see `_accept_forced`."""
         return _accept_forced(_force_emit(client, messages, emit_spec), may_retry=may_retry)
 
+    # Read once, before the first turn: the ceiling is for THIS session, and the accountant it
+    # reads is the RUN's, already carrying whatever earlier phases spent.
+    _spend_at_start = _accountant_spend(client)
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly
@@ -793,6 +837,17 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # operator who was never told the turn ran out of wall clock.
             _note_budget(on_budget, "time", turns=turn_idx, seconds=time.monotonic() - started)
             break                       # out of wall-clock budget -> salvage an emit below
+        if cost_budget_usd:
+            _sp = _session_spend(client, _spend_at_start)
+            if _sp is not None and _sp > cost_budget_usd:
+                exhausted = True
+                # Same reason the wall clock tells someone: a session cut for money that reports
+                # nothing looks exactly like one that finished, and the operator reads the short
+                # answer as the model's considered one.
+                _note_budget(on_budget, "cost", turns=turn_idx,
+                             seconds=time.monotonic() - started,
+                             detail=f"${_sp:.4f} of ${cost_budget_usd:.4f} for this session")
+                break                   # out of money for THIS session -> salvage an emit below
         _compact_in_place(messages, context_budget_chars, auto_summary, summarize)
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A
         # `user`-role reminder, not `system`: the plan is verbatim MODEL output (from update_plan

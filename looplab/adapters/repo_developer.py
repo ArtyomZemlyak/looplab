@@ -973,7 +973,7 @@ class LLMRepoDeveloper:
         if kind:
             self.last_budget_exhausted = kind[:32]
 
-    def _session_opts(self, *, max_turns=None, time_budget=None):
+    def _session_opts(self, *, max_turns=None, time_budget=None, cost_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
         a model that keeps writing/exploring without ever emitting `done` fails cleanly with the code
         it has written, instead of the 10k-call / multi-hour runaway a big task produced.
@@ -986,7 +986,46 @@ class LLMRepoDeveloper:
             max_turns=int(max_turns if max_turns is not None
                           else getattr(self, "_session_max_turns", 500)),
             time_budget_s=float(time_budget if time_budget is not None
-                                else getattr(self, "_session_time_budget_s", 1200.0)))
+                                else getattr(self, "_session_time_budget_s", 1200.0)),
+            # 0.0 = off, and that is the default: only the plan-step caller passes one, because it
+            # is the only session measured eating a run. See `_step_cost_ceiling`.
+            cost_budget_usd=float(cost_budget or 0.0))
+
+    def _step_cost_ceiling(self) -> float:
+        """The most ONE plan step may spend, or 0.0 (= off) when there is no budget to divide.
+
+        The other two ceilings on a step session are turns (500) and wall clock (1200 s), and what
+        actually ends a run is money. Measured 2026-08-31 across 7 AlgoTune probes, the most
+        expensive single step as a share of what remained when it started:
+
+            remPde   66 %   remPde2  49 %   accPde  32 %   remDL2  72 %
+            remEE    18 %   remEE2    8 %   accEE    7 %
+
+        remPde's step ran 72 generations and was cut by the 1200 s wall at 1212 s -- the wall did
+        its job, and 48 % of the dollar was already gone. On edge_expansion the same wall never bit
+        (worst step 8-9 %), so seconds do not stand in for dollars across tasks.
+
+        HALF OF WHAT REMAINS, but never less than a FIFTH OF THE WHOLE RUN. The second clause is
+        what keeps this from punishing a legitimate late step: remDL2's 72 % was its LAST step
+        spending $0.1679 of a $0.2322 remainder, which is a run finishing properly, and half-of-
+        remaining alone would have cut it. Against the seven measured steps this bites exactly one --
+        remPde's runaway -- and leaves every other one untouched, which is the whole of what it is
+        for. Seven runs is a thin basis for a constant and that is why it is a ratio of two numbers
+        the run already knows rather than a dollar figure typed in.
+
+        A cut step is not a lost step: the loop salvages an emit from whatever the session wrote.
+        """
+        acct = getattr(getattr(self, "client", None), "accountant", None)
+        if acct is None:
+            return 0.0
+        try:
+            limit = float(getattr(acct, "limit", None) or 0.0)
+            spent = float(getattr(acct, "spent", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if limit <= 0 or not _math.isfinite(limit) or not _math.isfinite(spent) or spent < 0:
+            return 0.0
+        return max(0.5 * max(0.0, limit - spent), 0.2 * limit)
 
     def _plan_emit_spec(self) -> dict:
         from looplab.tools._base import fn_spec
@@ -1199,7 +1238,7 @@ class LLMRepoDeveloper:
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
                       fallback=lambda m: "", on_budget=self._note_session_budget,
-                      **self._session_opts())
+                      **self._session_opts(cost_budget=self._step_cost_ceiling()))
         except Exception as e:  # noqa: BLE001
             return f"(step {idx} error: {e})"
         return ""
