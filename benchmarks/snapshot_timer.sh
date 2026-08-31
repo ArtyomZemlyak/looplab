@@ -28,7 +28,17 @@ fingerprint() {
   # wrote into `campaign-paired/`. It kept firing only because `meter/` and `.baseline_times/` also
   # change -- i.e. the campaign's own progress was never one of the signals, and a quiet meter would
   # have stopped snapshotting the one thing worth snapshotting.
-  find "$ROOT"/campaign* "$ROOT/AlgoTune/reports" "$ROOT/meter" \
+  # AND EVERY RUN TREE, added 2026-08-31 with the same argument one paragraph up, for a source that
+  # did not exist when that paragraph was written. `snapshot.sh` now archives `runs-*` and
+  # `model-probes/` -- each run's events.jsonl and spans.jsonl, the evidence docs/56 is written from
+  # and the thing the 2026-08-29 restart actually destroyed -- but archiving it is no use if this
+  # function cannot see it grow. Measured while two probes were live: the fingerprint moved only
+  # because `meter/` was moving, i.e. the probes were covered by accident. A run evaluating locally
+  # for twenty minutes makes no LLM calls, and a probe metered on another port makes none here at
+  # all; in both cases the timer would report "nothing new" while the one irreplaceable directory on
+  # the box filled up.
+  find "$ROOT"/campaign* "$ROOT"/runs-* "$ROOT/model-probes" "$ROOT/probes" \
+       "$ROOT/AlgoTune/reports" "$ROOT/meter" \
        "$ROOT/looplab/benchmarks/algotune/.baseline_times" \
        -type f -newermt '-1 day' -printf '%T@ %s\n' 2>/dev/null | sort | tail -20 | md5sum
 }
