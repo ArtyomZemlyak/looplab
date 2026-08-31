@@ -1010,7 +1010,26 @@ class LLMRepoDeveloper:
         from looplab.agents.agent import run_phase, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
+        # THE PHASE THAT DECIDES HOW MANY STEPS TO BUY COULD NOT SEE THE PRICE.
+        #
+        # `_run_step` has carried `_budget_note()` since it was written, so every INDIVIDUAL step is
+        # told what is left -- 72.8 % of `plan_step` generations in the corpus carry a money figure.
+        # The phase that chooses how many of those steps to write carried none: `plan` is 0 of 2,236.
+        # That is the wrong way round. A step told "little remains, make this step small" can only
+        # shrink the step it is already in; the plan is where the COUNT is decided, and the count is
+        # what the money actually buys.
+        #
+        # Measured over the 8 probes on this box (3,071 generations, $11.7552): `plan` is 16.2 % of
+        # spend, second only to `plan_step` (34.8 %) and `propose` (19.2 %). And the failure it
+        # feeds is on record -- `remPde` spent 74 % of its dollar before a single node existed, on
+        # 103 `plan_step` generations against 34 proposals, then produced one plain-Python node
+        # where every other probe on that task carried a numba kernel. A planner that knew it had
+        # 26 cents left would not have planned that.
+        #
+        # The same note, deliberately, not a second wording: two roles told one budget in two
+        # formats is a defect this file already names one layer down.
         plan_user = (
+            f"{self._budget_note()}"
             f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters: {params}.\n"
             "This is the PLANNING stage. You can READ and inspect the repo (read_file — it paginates, so "
             "read a file ONCE, don't re-read; grep, find_files, list_dir, pkg_info, py_api, gpu_info) but "

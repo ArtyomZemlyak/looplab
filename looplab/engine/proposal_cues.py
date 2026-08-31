@@ -156,13 +156,36 @@ class ProposalCuesMixin:
         (`search/foresight.py::_rank` picks the span name off `kind`).
 
         MEASURED on the first live probe carrying this cue: `propose` 46/52, `repropose` 9/9,
-        `plan` 0/49, `foresight_rank` 0/7, `hyp_prioritize` 0/4. Reaching the other three is a
-        SEPARATE change -- three prompt builders, three sets of tokens, and three roles whose
-        answer to "you are nearly out of money" is not obviously the same sentence -- and it should
-        be argued on its own rather than assumed to have already happened here.
+        `plan` 0/49, `foresight_rank` 0/7, `hyp_prioritize` 0/4.
+
+        UPDATE 2026-08-31 -- `plan` was closed, by the OTHER route, and the other two were argued
+        and declined. Spend by phase over the 8 probes on this box (3,071 generations, $11.7552):
+
+            plan_step      34.8 %   already sees money (72.8 %, via `_run_step`'s own note)
+            propose        19.2 %   this cue
+            deep_research  16.8 %   its own `_budget_note`
+            plan           16.2 %   BLIND -- closed today
+            card_build      6.3 %
+            repropose       3.8 %   this cue
+            foresight_rank  1.5 %   still blind, and left that way
+            hyp_prioritize  0.9 %   still blind, and left that way
+
+        `plan` was the whole of the remaining gap that costs anything, and it is the wrong one to
+        leave open: `_run_step` tells each INDIVIDUAL step what is left, so a step can only shrink
+        itself, while `plan` -- which chooses HOW MANY steps to buy -- saw nothing. It is closed in
+        `adapters/repo_developer.py::_propose_plan` with that file's OWN `_budget_note()`, not with
+        this cue: this cue rides `collect_hint_cues`, which the Developer does not call, and two
+        roles told one budget in two wordings is the defect one layer down.
+
+        `foresight_rank` and `hyp_prioritize` are 2.4 % of spend between them and stay blind. That
+        is a decision, not an oversight: a ranker choosing between candidates it did not generate
+        has no cheaper option to switch to, so the sentence would cost tokens on every call and
+        change nothing. Revisit if either grows past a few per cent.
+
         CLAIM[llm-budget-cue-reaches-propose-only] the money cue reaches `propose` and `repropose`
         and NOT `plan`, `foresight_rank` or `hyp_prioritize`, because those three build their
-        prompts without `collect_hint_cues`.
+        prompts without `collect_hint_cues`. Still true OF THIS CUE -- `plan` now gets the figure
+        from the Developer's own note, not from here.
         decided:`absent:collect_hint_cues@looplab/adapters/repo_developer.py+absent:collect_hint_cues@looplab/search/foresight.py`
 
         Returns "" for every reason the note in `deep_research.py::_budget_note` returns "" -- no
