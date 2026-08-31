@@ -44,9 +44,20 @@ export METER_BASE="${METER_BASE:-http://127.0.0.1:8801}"
 export METER_PORT="${METER_PORT:-8801}"
 export METER_RPM="${METER_RPM:-45}"          # under the endpoint's published 50/min for this key
 # WHICH CORES THE METER MAY USE. Not a lane: the meter is infrastructure every lane talks to, so a
-# lane it shares is a lane whose timings include somebody else's proxy. The lanes here are
-# 0-10+48-58, 11-21+59-69, 22-32+70-80 and 33-43+81-91; 44-47 and 92-95 are deliberately free, and
-# this is what they are free FOR.
+# lane it shares is a lane whose timings include somebody else's proxy.
+#
+# Under the regime the finished campaign actually ran -- `lanes=4 cores_per_lane=22`, which every
+# `campaign-final/*.done` marker records beside its own cpu list -- the lanes are 0-10+48-58,
+# 11-21+59-69, 22-32+70-80 and 33-43+81-91, i.e. 44 of this box's 48 physical cores, and the four
+# left over are 44-47 with their siblings 92-95. That is what they are free FOR. Note that this is
+# NOT the shipped default the header above describes (20 lanes x 2 cpus, which occupies physical
+# cores 0-19 and their siblings); the lane count and width are the operator's `LANES` /
+# `CORES_PER_LANE`, so the profile has to name which regime a core range is stated against.
+#
+# 44-47+92-95 is off the lanes in BOTH, and that is not asserted here in prose:
+# `tests/test_the_meter_is_pinned_off_the_lanes.py` runs `campaign.sh`'s own lane planner against
+# this box's real `thread_siblings_list` for each regime and asserts the pin is disjoint from every
+# lane it produces.
 #
 # It lives here rather than in start_meter.sh because it is a fact about this box's core layout, and
 # it lives in a FILE rather than in a driver because that is how it was lost: on 2026-08-29 the
