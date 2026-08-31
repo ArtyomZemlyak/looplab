@@ -141,11 +141,66 @@ def test_the_pinned_cores_are_not_in_any_lane_the_campaign_would_hand_out(lanes,
             "the meter would sit inside a lane whose timings are the measurement")
 
 
+def _profile_prose() -> str:
+    """The profile's comments as one string, so a claim that spans two lines is still one claim."""
+    return " ".join(line.lstrip("#").strip()
+                    for line in PROFILE.read_text(encoding="utf-8").splitlines()
+                    if line.lstrip().startswith("#"))
+
+
+def _lanes_the_profile_names() -> list:
+    """The four ranges READ OUT OF the profile, not copied into this file.
+
+    The point of the test below is that the sentence beside METER_CPUS is true. A hand-typed copy
+    of it here checks that the PLANNER has not moved and says nothing at all about the sentence --
+    which is the artefact an operator reads before deciding what the spare cores are for, and the
+    only reason METER_CPUS has the value it has.
+    """
+    m = re.search(r"the lanes are (.+?), i\.e\.", _profile_prose())
+    assert m, ("the box profile no longer names the lanes that justify METER_CPUS; if the sentence "
+               "moved, this test must follow it rather than keep its own copy")
+    return [sorted(_cpus(part.strip().replace("+", ",")))
+            for part in re.split(r",| and ", m.group(1)) if part.strip()]
+
+
+def _leftover_the_profile_names() -> list:
+    m = re.search(r"the four left over are ([\d,\-]+) with their siblings ([\d,\-]+)",
+                  _profile_prose())
+    assert m, "the box profile no longer says which cores the lanes leave free"
+    return sorted(_cpus(m.group(1)) | _cpus(m.group(2)))
+
+
 def test_the_lanes_the_profile_names_are_the_ones_the_planner_produces():
     """The sentence beside METER_CPUS, re-derived rather than believed. Its four ranges are the
-    campaign's own `lanes=4 cores_per_lane=22` allocation, cpu-for-cpu."""
+    campaign's own `lanes=4 cores_per_lane=22` allocation, cpu-for-cpu.
+
+    Driven 2026-08-31: this used to compare the planner against `named = [...]`, a hand-copy of the
+    sentence kept HERE. Rewriting the profile's ranges to a false set (`0-9+48-57, 10-20+58-68,
+    21-31+69-79 and 32-42+80-90`) left the whole file green -- the copy was what was being checked,
+    and the sentence an operator actually reads was free to say anything.
+    """
     plan = _lane_plan(4, 22)
     if plan and plan[0] == "FALLBACK":
         pytest.skip("not enough physical cores here for the campaign's regime")
-    named = ["0-10,48-58", "11-21,59-69", "22-32,70-80", "33-43,81-91"]
-    assert [sorted(_cpus(lane)) for lane in plan] == [sorted(_cpus(n)) for n in named]
+    named = _lanes_the_profile_names()
+    assert len(named) == 4, f"the profile names {len(named)} lanes for a lanes=4 regime: {named}"
+    assert [sorted(_cpus(lane)) for lane in plan] == named, (
+        "the profile's sentence describes a lane allocation campaign.sh does not produce, and it "
+        "is that sentence -- not this test -- that says what the spare cores are free FOR")
+
+
+def test_the_cores_the_profile_calls_left_over_are_the_ones_it_pins_the_meter_to():
+    """The other half of the same sentence, and the one that decides METER_CPUS.
+
+    "the four left over are 44-47 with their siblings 92-95. That is what they are free FOR" is the
+    entire argument for the value exported thirty lines down. Neither end was derived from the
+    other, so the sentence and the export could drift apart with nothing to notice.
+    """
+    plan = _lane_plan(4, 22)
+    if plan and plan[0] == "FALLBACK":
+        pytest.skip("not enough physical cores here for the campaign's regime")
+    leftover = _leftover_the_profile_names()
+    assert leftover == sorted(_cpus(_meter_cpus_default())), (
+        "METER_CPUS is not the set of cores the profile's own sentence calls left over")
+    lanes = set().union(*(set(lane) for lane in _lanes_the_profile_names()))
+    assert not (set(leftover) & lanes), "the profile calls a core both a lane and a spare"
