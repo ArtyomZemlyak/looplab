@@ -31,6 +31,7 @@ import contextvars
 import hashlib
 import io
 import math
+import logging
 import os
 import sys
 import threading
@@ -102,6 +103,12 @@ _OTEL_ENV_TRUE = frozenset({"1", "on", "t", "true", "y", "yes"})
 # permit ``capacity * 8 MiB`` resident memory.  The worker stores the already-serialized physical row:
 # exact byte accounting and no unbounded deepcopy, at the deliberate cost of keeping JSON encoding on
 # the span-closing caller.  File open/heal/lock/flush/receipt I/O is what moves off that caller.
+# The exporter's own alarm channel, and it must NOT be `self._writer`. See the loss-receipt
+# block in the worker: the durable receipt is written through the very file that may have
+# stopped, so an exporter that dies takes its own alarm with it. Measured on v12 — three hours
+# of frozen spans with not one console line.
+_LOG = logging.getLogger(__name__)
+
 TRACE_EXPORT_QUEUE_MAX_SPANS = 256
 TRACE_EXPORT_QUEUE_MAX_BYTES = 16 * 1024 * 1024
 TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS = 30_000
@@ -1613,6 +1620,26 @@ class AsyncJsonlSpanExporter:
 
             if loss is not None:
                 drops, export_failures = loss
+                # SAY IT WHERE THE BROKEN COMPONENT CANNOT SWALLOW IT. Every path below writes the
+                # receipt through `self._writer`, i.e. through the exporter itself — so the alarm for
+                # "the exporter is losing spans" was delivered by the exporter. When it stops, so
+                # does its own alarm, and the silence is guaranteed rather than unlucky.
+                #
+                # MEASURED on `runs/e5small-dr-unified-v12` (2026-08-31): `spans.jsonl` and
+                # `.spans-append.jsonl` both froze at 18:20 while `events.jsonl`, the llm-usage
+                # outbox and every node directory kept writing past 21:25 — three hours and ~1760
+                # events with no span record, and NOT ONE console line. A `py-spy dump` of the live
+                # pid showed seven threads and no exporter among them.
+                #
+                # `_LOG` is independent of `self._writer`, so this line survives whatever stopped it.
+                # It is emitted BEFORE the durable attempt on purpose: the attempt is what may fail.
+                _LOG.warning(
+                    "trace export lost spans: %s (export failures: %d) — this is the exporter "
+                    "reporting its own loss through the logger, because the durable receipt below "
+                    "rides the writer that may be the thing that broke",
+                    ", ".join(f"{reason}={count}" for reason, count in sorted(drops.items())
+                              if count) or "none",
+                    export_failures)
                 succeeded = False
                 try:
                     # Direct delegate call: a loss receipt cannot be evicted by the queue it reports.

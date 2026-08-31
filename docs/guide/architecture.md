@@ -298,6 +298,48 @@ flowchart TB
   W --> P
 ```
 
+### An exporter that dies must not take its own alarm with it
+
+MEASURED on `runs/e5small-dr-unified-v12` (2026-08-31):
+
+| file | mtime |
+|---|---|
+| `events.jsonl` | 21:25 — live |
+| `.llm-usage-outbox/` | 21:25 — live |
+| `nodes/` | 21:24 — live |
+| `.spans-append.jsonl` | **18:20 — frozen** |
+| `spans.jsonl` | **18:20 — frozen** |
+
+Three hours and ~1760 events — a whole node's training, a build, three deep-research passes —
+with no span record and **not one console line**. A `py-spy dump` of the live pid showed seven
+threads and no exporter among them.
+
+`core/tracing.py` already had the vocabulary to explain it: six drop reasons, per-reason counters,
+and a loss receipt whose comment promises "First loss is reported promptly". But
+`_record_drop_locked` only increments counters, and the receipt is written by the worker **through
+`self._writer._export_line`, into the file that stopped**. `_LOG` was never involved:
+
+> the exporter stops → the receipt that would say so is written by the exporter → silence
+
+So the loss now goes to `_LOG.warning` **before** the durable attempt — the attempt is what may
+fail — naming the per-reason counts. The logger is independent of the writer, so the line survives
+whatever stopped it.
+
+Two hypotheses were refuted on the way, both by reading rather than guessing: the 60-second idle
+worker is self-healing (`export()` calls `_start_worker_locked()` on every enqueue, including the
+`queue_full` and `queue_bytes` branches), and nothing in the tree calls `close()`/`shutdown()` on
+the exporter outside `Engine.run`'s `finally`. The trigger is still open.
+
+```mermaid
+flowchart LR
+  D["_record_drop_locked<br/>counters only"] --> W{"worker alive?"}
+  W -->|yes| L["_LOG.warning — reasons + counts<br/>(independent of the writer)"]
+  L --> R["durable receipt via self._writer"]
+  R -->|"writes"| F[("spans.jsonl")]
+  W -->|"no — the case v12 hit"| X["nothing, for three hours"]
+  L -.->|"this is the line that<br/>now breaks that silence"| X
+```
+
 ## Where each piece lives in the code
 
 | Concept | Module |
