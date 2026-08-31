@@ -267,13 +267,17 @@ def test_a_source_that_exists_and_cannot_be_read_is_still_a_shortfall(tmp_path):
     ORDINARY error rather than an exotic one.
     """
     src = _bench_root(tmp_path)
-    reports = src / "AlgoTune" / "reports"
-    (reports / "agent_summary.json").write_text('{"score": 1.0}\n')
-    reports.chmod(0o000)                    # there, named, and unreadable -- the geesefs case
+    summary = src / "AlgoTune" / "reports" / "agent_summary.json"
+    summary.write_text('{"score": 1.0}\n')
+    # The unreadable thing is the FILE, not the directory holding it. `cp -r` over an unreadable
+    # DIRECTORY creates the destination with the source's own 0o000 mode before it fails to read
+    # it, and pytest's tmp-dir cleanup then cannot remove what it made -- the test would pass and
+    # leave `d---------` behind for every later session. Same arm of `copy()`, no litter.
+    summary.chmod(0o000)                    # there, named, and unreadable -- the geesefs case
     try:
         result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
     finally:
-        reports.chmod(0o755)                # or pytest cannot clean its own tmp tree up
+        summary.chmod(0o644)
 
     assert result.returncode == 1, result.stdout
     assert "COPY FAILED" in result.stdout, (

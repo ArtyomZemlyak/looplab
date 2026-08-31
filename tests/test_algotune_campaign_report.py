@@ -539,14 +539,17 @@ def test_a_snapshot_that_could_not_copy_something_says_so_and_exits_nonzero(tmp_
     every number is read from, and until now nothing exercised their failure arm at all.
     """
     root = _bench_root(tmp_path, ())
-    run = root / "model-probes" / "dsX" / "runs" / "r1"
-    run.chmod(0o000)                        # present, owed, and unreadable
+    # The unreadable thing is the run's own `events.jsonl`, not a directory: `cp -r` over an
+    # unreadable DIRECTORY creates the destination with the source's 0o000 mode before it fails to
+    # read it, and pytest's tmp cleanup then cannot remove what it made. Same failure arm, no litter.
+    events = root / "model-probes" / "dsX" / "runs" / "r1" / "run" / "events.jsonl"
+    events.chmod(0o000)                     # present, owed, and unreadable
     dest = tmp_path / "snapshots"
     try:
         proc = subprocess.run(["bash", str(SNAPSHOT), str(dest)], capture_output=True, text=True,
                               timeout=180, env=dict(os.environ, BENCH_ROOT=str(root)))
     finally:
-        run.chmod(0o755)                    # or pytest cannot clean its own tmp tree up
+        events.chmod(0o644)
 
     assert proc.returncode == 1, proc.stdout
     assert "the per-run events and spans are NOT archived" in proc.stdout, proc.stdout
