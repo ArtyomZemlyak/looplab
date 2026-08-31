@@ -71,6 +71,17 @@ def main() -> int:
         # must not be reported as one. Only a fold-level failure below is "no champion".
         print(f"cannot read the event log at {log}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
+    except ImportError as exc:
+        # THE SAME RULE AS `OSError` ABOVE, for the failure that actually happened. `c32ebeb0` put
+        # the repo root on `sys.path` and removed the CAUSE; it left the CLASSIFICATION, so the day
+        # this script is moved, vendored or run against a tree without `looplab/__init__.py` it
+        # reports "could not fold" and `run_probe.sh` writes "champion: NONE" -- the exact sentence
+        # accEE's summary carried while its own events.jsonl held 27.466 and 221.5387. An import
+        # that fails says nothing whatever about the run; only a fold that fails does.
+        print(f"cannot import looplab to fold {args.run_dir}: {type(exc).__name__}: {exc}\n"
+              f"  (this is a BROKEN BRIDGE, not a run without a champion -- the scores are in "
+              f"{log} and can still be read)", file=sys.stderr)
+        return 2
     except Exception as exc:  # noqa: BLE001 - a broken run is "no champion", not a crash
         print(f"could not fold {args.run_dir}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
