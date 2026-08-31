@@ -3075,7 +3075,7 @@ worked and computed the wrong numbers, §50's failure mode, on its only draw.
 **The champion rule bit again.** `remPde3`'s second node scored 50.01 against its first at 123.13,
 and the run submitted the first. §72 recorded `remDL2` as the first empirical demonstration that the
 best EVALUATED node is kept rather than the last; this is the second, and a much more expensive one
-— submitting the last node here would have cost 61 % of the score.
+— submitting the last node here would have cost 59 % of the train score (123.1297 -> 50.0147).
 
 ### 74.1 A direction, explicitly not a finding
 
