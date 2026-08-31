@@ -2981,3 +2981,72 @@ Relaunched with the flag set explicitly: **0 aborts in 93 streamed calls**.
 Anything measured in LLM-time under that regime — nodes per dollar, share of wall on the LLM,
 `eval_train` per run — is not comparable across it. Solver speedups are unaffected: the evaluator
 runs no model.
+
+## 73. The test split adds no noise, and on `pde_heat1d` the kernel bit does not separate
+
+Six probes have now finished on this box. Their evaluated nodes' train speedups, and the test score
+the champion earned afterwards:
+
+| probe | task | evaluated nodes (train) | TEST |
+|---|---|---|---|
+| accEE | edge_expansion | 27.466, **221.539** | 224.4432 |
+| remEE | edge_expansion | 132.695, **183.603** | 179.6451 |
+| remEE2 | edge_expansion | 27.833, **101.153** | 102.175 |
+| accPde | pde_heat1d | **119.795** | 120.7621 |
+| remPde | pde_heat1d | **54.259** | 54.1227 |
+| remPde2 | pde_heat1d | **29.562** | 30.3282 |
+| remDL2 | discrete_log | **14.295**, 13.982 | 14.0483 |
+
+**Train and test agree on every run**: 221.5→224.4, 183.6→179.6, 101.2→102.2, 119.8→120.8,
+54.3→54.1, 29.6→30.3, 14.0→14.0. Seven for seven, worst disagreement 2.6 % (`remPde2`, 29.562 -> 30.3282). Whatever spread this
+corpus carries is present BEFORE the champion is scored, and the held-out split contributes none of
+it. That is worth having written down: it means a train number can be quoted as a run's result
+without waiting for the test pass, and it means no explanation of the spread may appeal to the split.
+
+**The ruler still reads 1.0, today, under load.** Re-verified while three probes were live, against
+the same cached `__w22x1r3` baselines the probes used: a solver that IS the reference scored
+**0.9795** on `edge_expansion` and **1.0363** on `pde_heat1d`. The reference has to be INLINED for
+this — a submitted solver that imports `reference_<task>.py` fails in the graded sandbox with
+`solver_unloadable`, which is the mechanical reason behind the card's "do not import from it".
+
+### 73.1 What these three EE points are NOT
+
+They are not a decline through the day, and they are not new evidence about `edge_expansion`'s
+spread. §50 measured all 27 `edge_expansion` runs at $1 — range 18.5-344.4, ratio 19×, CV 87 % — and
+found the variable that splits them: whether the champion ships a compiled kernel (median 217.3 with,
+27.8 without). All three points here ship one (`accEE`, `remEE`, and `remEE2`'s `count_cross.pyx`),
+so 221.5 / 183.6 / 101.2 sit unremarkably inside that population's 27.8-344.4. Read in time order
+they look monotone, and that reading is available and worthless: three points fall in a monotone
+order one time in six.
+
+The pair is still worth keeping for one reason §50's 27 runs cannot supply. `remEE` and `remEE2` ran
+a BYTE-IDENTICAL 15,553-character goal card, same task, same $1.00, same verified ruler, four hours
+apart, and returned 183.6 and 101.2. That is a controlled pair, and it puts a floor of about 1.8×
+under the noise on a single configuration.
+
+### 73.2 On `pde_heat1d` the kernel bit does not separate, and that is new
+
+§50's one-bit explanation is specific to `edge_expansion`. It does not carry:
+
+| probe | champion | TEST |
+|---|---|---|
+| accPde | 209 lines WITH a numba kernel | 120.7621 |
+| remPde | plain Python, no kernel | 54.1227 |
+| remPde2 | 242 lines WITH a numba kernel | 30.3282 |
+
+The bit does not order these at all: the HIGHEST of the three carries a kernel and so does the
+LOWEST, and the kernel-less run sits between them, 1.8× above one kernel run and 2.2× below the
+other. On `edge_expansion` the same bit moved the median by a factor of eight. Whatever separates a good `pde_heat1d` run from a bad one, it is not the bit
+that separates `edge_expansion` runs. §72 read `remPde`'s missing kernel as the mechanism behind its
+54.12; `remPde2` has the kernel and scored 30.33, so that reading does not survive. What replaces it
+is not yet measured, and n = 3 will not settle it — the honest next step is more points on this task
+before any mechanism is proposed for it.
+
+### 73.3 The consequence for reading this document
+
+§50 already said no switch comparison on `edge_expansion` is decidable at n ≤ 4, and withdrew a
+p-value on its own next measurement. §73 adds that the same caution is owed on `pde_heat1d`, where
+the spread is 4.0× over three points and the one explanation that works elsewhere does not work here.
+Where this document compares two runs on one task, it is comparing draws from a distribution whose
+width is a factor of two to four. The pooled twenty-task arm comparison is untouched by this: it
+repeats tasks, not runs.
