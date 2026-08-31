@@ -1881,9 +1881,16 @@ _CUTOFF_SENTENCES = {
     "stuck": "was stopped because it had started repeating itself",
     "stalled": "could not get a final answer out of the model",
     "emit_force": "was forced to answer at its convergence ceiling",
+    # Added with the loop's money ceiling (2026-08-31). Deliberately NOT in _CUTOFF_BUDGET_KINDS
+    # below: that branch tells the operator to raise `assistant_time_budget_s`, and a session cut
+    # for MONEY is not helped by more seconds. The knob that helps is the run's `llm_budget_usd`,
+    # which is not the assistant's to raise -- so this kind gets the "narrow the question" advice,
+    # which is the honest one, and the `detail` carries the two figures.
+    "cost": "reached the spend ceiling for this session",
 }
 # Only the two clock/counter kinds are raised by raising the budget; telling an operator to raise
-# `assistant_time_budget_s` after a STUCK exit would send them to a knob that cannot help.
+# `assistant_time_budget_s` after a STUCK exit would send them to a knob that cannot help. The same
+# argument keeps "cost" out: seconds do not buy dollars.
 _CUTOFF_BUDGET_KINDS = frozenset({"time", "turns"})
 
 
