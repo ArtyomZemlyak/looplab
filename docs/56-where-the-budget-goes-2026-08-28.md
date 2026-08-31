@@ -3108,3 +3108,33 @@ result.
 The cheap way to test it is not another correlation over the same nine — it is to make the number
 move on purpose and see whether the score follows. That changes the card, so it is a change between
 arms, and it needs several runs of each before it says anything at all (§73.3).
+
+### 74.2 The next measurement did not support it — `remDL3`, the same night
+
+§74.1 flagged measurement frequency as "a direction, explicitly not a finding", and said the way to
+test it was to make the number move rather than to correlate the same nine runs again. The tenth run
+arrived first and points the other way.
+
+`remDL3` (discrete_log, $1.0122, TEST **7.5787**) made **27** `eval_train` calls — more than any
+other probe in the corpus, including `remPde3`'s 26 — and scored the second-lowest `discrete_log`
+number on record. Against `remDL2`'s 25 calls and 14.0483, the task's two points now run *backwards*:
+more measuring, half the score.
+
+| | pooled | edge_expansion | pde_heat1d | discrete_log |
+|---|---|---|---|---|
+| r (9 runs, §74.1) | +0.62 | +0.85 (n=3) | +0.64 (n=5) | — |
+| r (10 runs, with remDL3) | **+0.45** | +0.85 (n=3) | +0.64 (n=5) | 2 points, reversed |
+
+One new observation moved the pooled coefficient by 0.17. A statistic that swings that far on its
+tenth sample was never carrying an argument, and §74.1's own sentence — that at this n those numbers
+carry no weight — is the part that survived.
+
+The one clause that has not yet been contradicted is still the narrow one: `remPde4`, the run with
+the fewest calls, remains the only probe of ten to submit an invalid solver.
+
+`remDL3` also fits §72's other reading of this task better than frequency does. It produced ONE
+evaluated node (7.5215 train, 7.5787 test); `remDL2` produced two (14.295, 13.982) and scored 14.05.
+Across the whole corpus, the runs that reached a second evaluated node are `accEE`, `remEE`,
+`remEE2`, `remPde3` and `remDL2` — the top score of every task they belong to, except that `accPde`
+reached 120.76 on one node. Five points and one exception is not a rule either; it is written here so
+the next `discrete_log` probe has something specific to refute.
