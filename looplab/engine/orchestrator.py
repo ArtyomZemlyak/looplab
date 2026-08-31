@@ -27,7 +27,7 @@ import anyio
 from looplab.core.llm import BudgetExceeded
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
-from looplab.events.types import (
+from looplab.events.types import (EV_RUN_LOOP_EXITED, run_exit_reason,
     EV_ABLATE,
     EV_APPROVAL_REQUESTED,
     EV_COMMAND_ACK,
@@ -1960,6 +1960,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # diversity archive, case store. Draining here — not at the task group's join, which happens
         # after `finalize_run` has already returned — is what keeps that read complete.
         await self._drain_adopted_evals()
+        # WHY THE LOOP STOPPED, exactly once, DERIVED FROM THE FINAL FOLD rather than from thirteen
+        # hand-set locals. Deriving is the whole point: it cannot disagree with the state a reader
+        # reconstructs, it adds no control flow to the hottest loop in the engine, and it is
+        # complete by construction — every exit passes through here.
+        #
+        # `unattributed` is a legal answer and the reason this exists. Measured on 2026-08-31,
+        # three runs of eight (v6, v9, v11) ended with NO pause and NO run_finished row; v11's last
+        # event is a `trust_scan`, so anyone folding its log sees a run still in flight, forever.
+        # Chasing it ruled out a crash, a budget stop, max_nodes, an operator stop, a pause and the
+        # approval exit — and then ran out of record. A row saying the engine could not name its own
+        # exit is infinitely more than that silence, and it is the input a second rung would need to
+        # turn `unattributed` into a specific reason per exit.
+        self.store.append(EV_RUN_LOOP_EXITED, {"reason": run_exit_reason(fold(self.store.read_all()))})
         # Finalize (extracted to looplab/engine/finalize.py, a pure move): budget summary,
         # diversity archive, LLM cost roll-up, case store + reflection note, read-model,
         # trace.json + tree.html. Event emission order is preserved exactly.

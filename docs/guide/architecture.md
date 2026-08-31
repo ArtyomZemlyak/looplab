@@ -216,6 +216,50 @@ flowchart LR
   F -->|"non-empty"| W["operator warning:<br/>TRUNCATED, not converged"]
 ```
 
+### A run that stops says why
+
+`_run_with_llm_broker` has **thirteen** `break`/`return` statements. Several route through
+`_settle_terminal_gate` or `_finish_run`, which write a reason; nothing required the others to.
+Measured over every run on this box on 2026-08-31: five carry a `pause` or a `run_finished` row and
+**three do not** — and `e5small-dr-unified-v11`, the one that died on provider 503s, has neither.
+Its last durable event is a `trust_scan`, so anyone folding its log sees a run still in flight.
+
+Trying to answer "why did it stop" from that record ruled out a crash, a budget stop, `max_nodes`,
+an operator stop, a pause and the approval exit — and then ran out of evidence.
+
+So the loop appends one `run_loop_exited` row on its way out, and the reason is **derived from the
+final fold** rather than set at thirteen call sites:
+
+| fold says | reason |
+|---|---|
+| `finished` | `finished` — the report was written; a pause latching on the way out does not un-end it |
+| `stop_requested` | `aborted` — more specific than the pause an abort also latches |
+| `paused` | `paused` |
+| `awaiting_approval` | `awaiting_approval` — resumable, and neither a pause nor a stop |
+| none of them | **`unattributed`** — the case this exists for |
+
+Deriving keeps the receipt complete by construction (every exit passes the same point), adds no
+control flow to the hottest loop, and cannot disagree with the state a reader reconstructs. Finer
+per-exit reasons are a second rung: name them at the exits, then extend `RUN_EXIT_REASONS` in the
+same change — the guard refuses a word the deriver cannot produce.
+
+```mermaid
+flowchart TB
+  L["_run_with_llm_broker<br/>13 break / return"] --> D["_drain_adopted_evals"]
+  D --> R["fold(store.read_all())"]
+  R --> Q{"which flag?"}
+  Q -->|finished| F["run_loop_exited: finished"]
+  Q -->|stop_requested| A2["run_loop_exited: aborted"]
+  Q -->|paused| P["run_loop_exited: paused"]
+  Q -->|awaiting_approval| W["run_loop_exited: awaiting_approval"]
+  Q -->|"none — v11's shape"| U["run_loop_exited: unattributed"]
+  F --> FIN["finalize_run"]
+  A2 --> FIN
+  P --> FIN
+  W --> FIN
+  U --> FIN
+```
+
 ## Where each piece lives in the code
 
 | Concept | Module |

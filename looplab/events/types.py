@@ -408,6 +408,66 @@ EV_SETUP_STEP = "setup_step"
 # DIAGNOSTIC_EVENTS wholesale, so a beacon landing inside the paid-proposal CAS window cannot discard
 # the proposal. That exclusion is the load-bearing property, NOT "the fold ignores it".
 EV_PHASE_PROGRESS = "phase_progress"
+
+# WHY THE RUN LOOP STOPPED. Diagnostic, appended exactly once as the loop unwinds, and it exists
+# because the durable record could not answer that question at all.
+#
+# MEASURED over every run on this box on 2026-08-31: five carry a `pause` or a `run_finished` row
+# and THREE (`rubertlite-dr-unified-v6`, `rubertlite-dr-unified-v9`, `e5small-dr-unified-v11`)
+# carry neither. v11's last event is a `trust_scan`; anyone folding its log today sees a run that is
+# still in flight, forever. Chasing it through the record ruled out a crash (`_run_engine_guarded`
+# re-raises, and v11 PRINTED its summary), a budget stop (0 rows, no budget configured), max_nodes
+# (12 of 24), an operator stop, a pause, and the approval exit (`require_approval=False`) — and then
+# ran out of record. The loop has thirteen `break`/`return` statements and no invariant that any of
+# them writes a reason.
+#
+# This is the same defect `card_build_done.skipped_reason` (8c7af6a7, "the nine bare `stale` exits
+# are gone") and `node_repaired`'s bound (ffdb34e3) fixed one and two levels down: a bare exit reads
+# as nothing happened. `unattributed` is deliberately a legal value — a row saying the engine could
+# not name its own exit is still infinitely more than the silence it replaces.
+EV_RUN_LOOP_EXITED = "run_loop_exited"
+
+# The closed vocabulary of run-loop exits, in the registry shape this repo uses for every duck-typed
+# word (`CARD_BUILD_SKIP_REASONS`, `CARD_STAGE_REFUSALS`, `REPAIR_VERDICTS`, `TRIAGE_ACTIONS`): a
+# two-way AST guard keeps the loop's exits and this tuple in step, so a FOURTEENTH exit cannot be
+# added without naming itself.
+# EVERY MEMBER IS PRODUCIBLE, and the guard asserts it. A vocabulary carrying words the deriver
+# cannot return is the "word no reader can branch on" defect in reverse: it reads as coverage that
+# does not exist. The loop's finer exits — the leakage gate, the systemic gate, a forced-request
+# drain, `_handle_create_actions` signalling break — all collapse into one of these five today,
+# because the derivation reads the FOLD and the fold does not record which `break` was taken. Adding
+# them is the second rung: name them at the exits, then extend this tuple in the SAME change.
+RUN_EXIT_REASONS: tuple[str, ...] = (
+    "finished",              # the report was written — `state.finished`
+    "aborted",               # an operator abort/stop landed — `state.stop_requested`
+    "paused",                # a pause latched: an operator stop or one of the three breakers
+    "awaiting_approval",     # HITL: EV_APPROVAL_REQUESTED is on the log, the run is resumable
+    "unattributed",          # the loop exited and the engine could not name why — see above
+)
+
+
+def run_exit_reason(state) -> str:
+    """Name the run loop's exit from the FINAL FOLD, in `RUN_EXIT_REASONS`.
+
+    Derived, not passed. Thirteen hand-set locals would be thirteen chances to forget one and would
+    add control flow to the hottest loop in the engine; a derivation is complete by construction and
+    cannot disagree with the state a reader reconstructs from the same log.
+
+    ORDER IS THE SEMANTICS. `finished` wins over everything: a run that wrote its report ended, and
+    a pause latched on the way out does not un-end it. `aborted` precedes `paused` because
+    `replay._on_pause` latches a pause for an abort too, and "the operator stopped it" is the more
+    specific answer. `awaiting_approval` is last of the named ones because it is the only resumable
+    state that is neither a pause nor a stop.
+    """
+    if getattr(state, "finished", False):
+        return "finished"
+    if getattr(state, "stop_requested", False):
+        return "aborted"
+    if getattr(state, "paused", False):
+        return "paused"
+    if getattr(state, "awaiting_approval", False):
+        return "awaiting_approval"
+    return "unattributed"
 # WHICH long operation is reporting. Closed so that a stage name can be rendered as a label without
 # every reader re-deriving the vocabulary.
 PROGRESS_STAGE_BUILD = "build"      # idea -> code: one node's whole build, `_create_node_scoped`
@@ -725,7 +785,7 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # new event type FORCES a conscious "does the fold read this?" decision (arch-review §5 P2: the old
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
-    EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS,
+    EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
     EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
     EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN,
