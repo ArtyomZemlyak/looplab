@@ -586,7 +586,7 @@ reap_orphan_workers() {
 # The event log is the discriminator, NOT the wall clock (a threshold between 2 s and 136 s is a
 # guess that a slow endpoint invalidates) and NOT the exit code (which cannot separate them, by
 # construction -- that is the defect).
-ended_on_failure() {   # $1 = arm, $2 = task, $3 = attempt. "yes" | "no" | "" when unknowable.
+ended_on_failure() {   # $1 = arm, $2 = task, $3 = attempt, $4 = start epoch (0 = no window).
   # DID THE RUN END ON ITS OWN TERMS? `successful_calls` below asks only whether the run ever paid
   # for anything, and that catches a total outage (attempt 1 of arm A: sixteen task-arms, zero calls
   # each). It does NOT catch the other half, measured 2026-08-25 when the gateway fell a second
@@ -599,12 +599,31 @@ ended_on_failure() {   # $1 = arm, $2 = task, $3 = attempt. "yes" | "no" | "" wh
   # after a call that worked; a run the endpoint killed ends after one that did not. Checked against
   # the live log: the one task-arm that reached its ceiling (`edge_expansion`, 107 % spent) has a
   # 200 last, and all four cut ones have a 503.
+  #
+  # AND THE WINDOW IS PART OF THE QUESTION, because `(arm, task, attempt)` is not enough to name
+  # ONE RUN. Two ways it fails, and they compose:
+  #   * a row whose `attempt` key is absent or empty matches EVERY attempt -- deliberately, since
+  #     rows written before 2026-08-23 carry no such key and `/m/<arm>/<task>/v1` is still accepted;
+  #   * the attempt LEDGER lives in `$OUT` while the meter log does not, so a fresh `CAMPAIGN_OUT`
+  #     restarts numbering at `a1` over a log that already holds an `a1`.
+  # Reproduced 2026-08-30 by driving these functions over a meter log holding two three-day-old
+  # untagged 200s: a run that made NO calls at all was told `ok_calls=2`, `ended_on_failure=no`,
+  # and earned `state=ran_to_completion`. The rung written to catch a total endpoint outage failed
+  # OPEN on exactly the evidence it exists to weigh.
+  #
+  # `record_done` already knows when this attempt STARTED, and `meter/proxy.py` stamps `ts` when it
+  # WRITES the row -- after the call returned -- so every row belonging to this attempt has
+  # `ts >= start`. That is a fact about the two clocks, not a heuristic about sessions, and it
+  # closes both holes at once. A log whose rows carry no `ts` AT ALL cannot be windowed, so it
+  # answers "" (unknowable) rather than 0: "" and "0" are different answers here and only "0"
+  # refuses a marker.
   [ -n "${METER_LOG:-}" ] && [ -s "${METER_LOG:-/nonexistent}" ] || { echo ""; return 0; }
   grep -q "\"arm\": \"$1\"" "$METER_LOG" 2>/dev/null || { echo ""; return 0; }
-  python3 - "$METER_LOG" "$1" "$2" "${3:-}" <<'PYEOF'
+  python3 - "$METER_LOG" "$1" "$2" "${3:-}" "${4:-0}" <<'PYEOF'
 import json, sys
 log, arm, task, attempt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-last = None
+since = float(sys.argv[5] or 0)
+last, seen, timestamped = None, 0, 0
 with open(log, "r", encoding="utf-8", errors="replace") as fh:
     for line in fh:
         try:
@@ -613,10 +632,21 @@ with open(log, "r", encoding="utf-8", errors="replace") as fh:
             continue
         if d.get("arm") != arm or d.get("task") != task:
             continue
+        seen += 1
         if attempt and d.get("attempt") not in ("", None, attempt):
             continue
+        if since:
+            try:
+                ts = float(d["ts"])
+            except (KeyError, TypeError, ValueError):
+                continue            # no clock on the row: it cannot be shown to be this attempt's
+            timestamped += 1
+            if ts < since:
+                continue
         last = d
-if last is None:
+if since and seen and not timestamped:
+    print("")                       # a log with no clock at all: unwindowable, so unknowable
+elif last is None:
     print("")                       # no rows for this attempt: unknowable, not a verdict
 else:
     ok = str(last.get("status")) == "200" and not last.get("error")
@@ -624,16 +654,17 @@ else:
 PYEOF
 }
 
-successful_calls() {   # $1 = arm, $2 = task, $3 = attempt. Echoes the count, or "" when unknowable.
+successful_calls() {   # $1 = arm, $2 = task, $3 = attempt, $4 = start epoch (0 = no window).
   # "" and "0" are DIFFERENT ANSWERS and the caller only acts on "0": "" means the meter log is
   # missing, unreadable, or carries no rows for this arm, and refusing a marker on that would punish
   # a run for a bookkeeping gap it did not cause.
   [ -n "${METER_LOG:-}" ] && [ -s "${METER_LOG:-/nonexistent}" ] || { echo ""; return 0; }
   grep -q "\"arm\": \"$1\"" "$METER_LOG" 2>/dev/null || { echo ""; return 0; }
-  python3 - "$METER_LOG" "$1" "$2" "${3:-}" <<'PYEOF'
+  python3 - "$METER_LOG" "$1" "$2" "${3:-}" "${4:-0}" <<'PYEOF'
 import json, sys
 log, arm, task, attempt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-n = 0
+since = float(sys.argv[5] or 0)
+n, seen, timestamped = 0, 0, 0
 with open(log, "r", encoding="utf-8", errors="replace") as fh:
     for line in fh:
         try:
@@ -642,11 +673,23 @@ with open(log, "r", encoding="utf-8", errors="replace") as fh:
             continue
         if d.get("arm") != arm or d.get("task") != task:
             continue
+        seen += 1
         if attempt and d.get("attempt") not in ("", None, attempt):
             continue
+        if since:
+            try:
+                ts = float(d["ts"])
+            except (KeyError, TypeError, ValueError):
+                continue            # no clock on the row: it cannot be shown to be this attempt's
+            timestamped += 1
+            if ts < since:
+                continue
         if str(d.get("status")) == "200" and not d.get("error"):
             n += 1
-print(n)
+if since and seen and not timestamped:
+    print("")                       # a log with no clock at all: unwindowable, so unknowable
+else:
+    print(n)
 PYEOF
 }
 
@@ -832,8 +875,8 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
       # The check is positive-evidence only: it needs the meter log to be readable AND to hold rows
       # for this arm, so a missing or untagged log leaves the old behaviour rather than refusing
       # markers for runs that were fine.
-      OK_CALLS="$(successful_calls "$ARM" "$T" "${ATTEMPT:-}")"
-      if [ "$(ended_on_failure "$ARM" "$T" "${ATTEMPT:-}")" = "yes" ]; then
+      OK_CALLS="$(successful_calls "$ARM" "$T" "${ATTEMPT:-}" "$3")"
+      if [ "$(ended_on_failure "$ARM" "$T" "${ATTEMPT:-}" "$3")" = "yes" ]; then
         echo "  [$(date +%H:%M:%S)][$4] ENDED ON A FAILED CALL after ${WALL}s (rc=0, ok_calls=${OK_CALLS:-?})" \
              "-- the endpoint cut this run, it did not finish. No marker written, task still owed"
         return 0
