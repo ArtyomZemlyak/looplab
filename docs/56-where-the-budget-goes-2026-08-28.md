@@ -2897,3 +2897,87 @@ and the §68 money cue — are both still awaiting probe acceptance, and dsPde3/
 runs carrying either. Landing a third unverified change on top of them would make all three
 unattributable, which is the same mistake as measuring a card fix with a pattern that matches the
 card fix. The next thing to ship is whichever of those two the probes say worked.
+
+## 72. Three probes on a verified ruler, and the one metric that was looking the wrong way
+
+The first numbers this programme has produced whose ruler was checked the same day, on this box,
+by the standing rule: a solver delegating to the reference must score ~1.0. Measured before the
+probes ran — `pagerank` 1.0024 / 1.0022 / 0.9997, `pde_heat1d` 0.9958, `edge_expansion` 0.9847,
+`discrete_log` 1.0162 — against baselines re-measured here, because the cache restored from the
+2026-08-29 snapshot proved to be from a machine that timed the reference 6.4 % faster.
+
+| probe | task | nodes (train) | TEST | champion carries |
+|---|---|---|---|---|
+| `remEE` | `edge_expansion` | 132.69 → 183.60 | **179.6451** | `.pyx` + `setup.py` |
+| `remDL2` | `discrete_log` | **14.29** → 13.98 | **14.0483** | `.pyx` + `setup.py` |
+| `remPde` | `pde_heat1d` | 54.26 | **54.1227** | plain Python, no kernel |
+
+### 72.1 `discrete_log` was not a 5.1× spread; it was one low run
+
+§68 read dsDL 14.5186 against dsDL2 2.8369 and called the difference 5.1×, the widest in the
+corpus, and §63.1 had already flagged 9.4× as "the weakest load-bearing number in the document".
+The third point is **14.0483**, four percent from the first. Two of three cluster at 14; the 2.84 is
+the outlier, and the mechanism §68 named for it stands — dsDL2's second node was created with an
+empty file map when the money ran out, so it never got the second evaluated draw the other two had.
+
+This does not restore 9.4×. It says the task is reproducible when the run reaches a second draw,
+and that a single low run had been carrying an interval nobody could re-derive.
+
+### 72.2 The champion is the best EVALUATED node, demonstrated rather than read
+
+`remDL2` produced node_0 at 14.2947 and node_1 at **13.9819** — the later draw was worse — and
+`extract_champion` returned node_0. Until now this guarantee was established only by reading
+`state.best()`; no surviving run had a later-worse node to show it. It also sharpens why the card
+should say so: the engine already protects a late risky attempt from costing what was earned, and
+the model is never told.
+
+### 72.3 The waste metric was pointed at the wrong end of the run
+
+Three sections have tracked money spent AFTER the last evaluated node — 25–39 % across dsDL2,
+dsPde2 and dsRBF2, "the draw the run cannot finish". Measured on these three: `remEE` 36 %,
+`remPde` **11 %**, `remDL2` **1 %**. By that metric `remPde` is the healthiest of the three.
+
+It is the worst. `remPde` spent **$0.74 of $1.0050 before its first node existed** — 103 `plan_step`
+generations, 61 % of the budget, against 34 for `propose` — and the single node it did build was the
+only one it could afford. Its 54.12 is the lowest `pde_heat1d` has scored across four probes
+(124.63, 99.00, 121.85, 54.12), and the difference is visible in the artefact: the three high runs
+all shipped a numba kernel, this one shipped plain Python. It never got as far as compiling.
+
+So "spend after the last node" measures a tail that a run reaching its ceiling mid-draw will always
+have, and misses entirely a run that spends its budget before the first draw. The pair to watch is
+**spend before the first evaluated node** beside it. On these three: 74 %, and two runs under 20 %.
+
+### 72.4 What the money cue reaches, on three runs in a row
+
+`propose` and `repropose` carry the Spend guidance line; `plan`, `plan_step`, `deep_research`,
+`foresight_rank` and `hyp_prioritize` do not — the reach is pinned in
+`proposal_cues.py`'s `CLAIM[llm-budget-cue-reaches-propose-only]`. The cost of the gap now has a
+number twice over: `plan_step` + `plan` took **73.7 %** of `remPde`'s dollar and **61.1 %** of
+`remDL2`'s, and neither role can see what is left. The role that spends is the role without the
+receipt.
+
+### 72.5 The reference module: still zero, now on nine files
+
+Across the three probes, **0 of 9** loop-written files import `reference_<task>` or call
+`is_solution` / `generate_problem`, against the corpus base §69.1 corrected to 4.9–8.3 %. One probe
+proved nothing; three in a row are worth stating: the card names the module and the model does not
+open it. Whether the clause is unread, disbelieved or simply not worth the probe is not established
+here.
+
+### 72.6 A measurement that was mine, not the loop's
+
+The first `discrete_log` attempt of the day (`remDL`, abandoned at $0.1292) lost **28 % of its calls**
+to 504s at exactly 300 007–300 011 ms. That is nginx's `proxy_read_timeout`, which
+`benchmarks/meter/proxy.py` already documents, and it measures the gap BETWEEN BYTES — so it fires
+only without streaming. The campaign's ledger shows `stream=True` on 2385 of 2534 `discrete_log`
+calls and successful latencies up to 1824 s; today's abandoned run shows `stream=False` on all 40.
+
+The cause was the operator's, not the loop's: `/home/jovyan/data/looplab/.env` line 77 sets
+`LOOPLAB_LLM_STREAM=false`, and the box profile publishes the flag as `${LOOPLAB_LLM_STREAM:-1}` —
+a default-if-unset, which an already-set value beats silently. Sourcing that file for two
+credential lines turned streaming off for every probe launched today until it was noticed.
+Relaunched with the flag set explicitly: **0 aborts in 93 streamed calls**.
+
+Anything measured in LLM-time under that regime — nodes per dollar, share of wall on the LLM,
+`eval_train` per run — is not comparable across it. Solver speedups are unaffected: the evaluator
+runs no model.
