@@ -2957,7 +2957,8 @@ def _apply_card_selection_readiness(st: RunState, ledger: _CardLedger, aliases: 
         c.selection_ready = not blockers
 
 
-def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases) -> None:
+def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases, *,
+                        nodes: Mapping | None = None, direction: str = "max") -> None:
     """Publish the DIRECTION -> EXPERIMENT forest: `card_kind`, `parent_card_id`, `child_card_ids`,
     `child_rollup`.
 
@@ -2999,6 +3000,18 @@ def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases) -> None:
     hundred experiments under it is training. `card_child_rollup` returns COUNTS instead, exact even
     where `child_card_ids` clips at `CARD_CHILD_LIMIT`.
     """
+    # `nodes`/`direction` ride in because the anchor verdict (#136) needs a METRIC and this
+    # phase's own scope is cards-only. Optional so every caller and test that builds a ledger by
+    # hand keeps working — an absent map yields no anchor number, the same answer a direction
+    # with no anchor already gets.
+    node_map = nodes if isinstance(nodes, Mapping) else {}
+    _champ = [n.metric for n in node_map.values()
+              if getattr(n, "metric", None) is not None and getattr(n, "feasible", False)
+              and not getattr(n, "tombstoned", False)]
+    champion_metric = ((max(_champ) if direction == "max" else min(_champ))
+                       if _champ else None)
+    if not (isinstance(champion_metric, float) and not isinstance(champion_metric, bool)):
+        champion_metric = None
     cards = ledger.cards
     _canon = aliases.canon
 
@@ -3072,7 +3085,38 @@ def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases) -> None:
         kids.sort()
         parent = cards[parent_id]
         parent.child_card_ids = kids[:CARD_CHILD_LIMIT]
-        parent.child_rollup = card_child_rollup([cards[k] for k in kids])
+        # The anchor half (#136): a direction answered by a first-generation DRAFT has no
+        # `best_delta`, because that number's baseline is the child's own PARENT NODE and a draft
+        # has none. Three of v11's four answered directions read `null` for exactly that reason
+        # while their children had measured 0.773951 / 0.759164 / 0.718923. Compare against the
+        # question's OWN anchor instead — the champion it was asked against — which is what "does X
+        # help?" means. Computed HERE because `nodes` is in this scope and not in `core/cards.py`.
+        # THE BASELINE IS THE RUN CHAMPION, and it is the second baseline I tried. The first was
+        # the direction's own `scored_against`, which is the semantically ideal answer to "does X
+        # help?" — and MEASURED on v11 it is `None` on every one of the nine directions, because a
+        # direction is derived from a belief row and never carries a score fence. A fallback that is
+        # null exactly where it is needed is not a fallback. The champion metric is on every run
+        # that has evaluated anything, needs no per-card field, and answers the question an operator
+        # actually reads this board for: did anything under this question beat the best we have.
+        _anchor_metric = champion_metric
+        if not (isinstance(_anchor_metric, float) and not isinstance(_anchor_metric, bool)):
+            _anchor_metric = None
+        _child_metrics: dict[str, float] = {}
+        for k in kids:
+            _best = None
+            for _nid in (getattr(cards[k], "evidence", None) or []):
+                _n = node_map.get(_nid)
+                if _n is None or _n.tombstoned or _n.metric is None or not _n.feasible:
+                    continue
+                if _n.status is not NodeStatus.evaluated:
+                    continue
+                _best = _n.metric if _best is None else (
+                    max(_best, _n.metric) if direction == "max" else min(_best, _n.metric))
+            if _best is not None:
+                _child_metrics[k] = float(_best)
+        parent.child_rollup = card_child_rollup(
+            [cards[k] for k in kids],
+            champion_metric=_anchor_metric, child_metrics=_child_metrics, direction=direction)
         # The concept union over EVERY child, not only the published ids — same reason the rollup
         # counts every child. Written to `child_concept_tags` and never to `concept_tags`, whose
         # `concept_source` provenance says who AUTHORED a membership and may not be handed a
@@ -3152,5 +3196,5 @@ def derive_cards(
     _apply_card_belief_lineage(st, ledger, aliases)
     _apply_card_actionable(ledger)
     _apply_card_selection_readiness(st, ledger, aliases, building_card_nodes)
-    _apply_card_lineage(ledger, aliases)
+    _apply_card_lineage(ledger, aliases, nodes=st.nodes, direction=str(getattr(st, "direction", "max") or "max"))
     _publish_visible_cards(st, ledger, control_ids)

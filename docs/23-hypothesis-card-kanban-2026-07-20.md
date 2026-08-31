@@ -947,6 +947,50 @@ flowchart LR
   V -->|"(1, 1) two folds"| C["current — WRONG:<br/>the metric it was scored on is gone"]
   V -->|"(1, 0) one fold"| S["stale — correct"]
 ```
+- A direction's rollup carries TWO numbers with DIFFERENT baselines, and they routinely disagree in
+  sign. `best_delta` is the best improvement over a child's own PARENT NODE; `best_vs_champion` is
+  the best child metric against the RUN CHAMPION (added 2026-08-31).
+
+  Why the second exists, measured on `runs/e5small-dr-unified-v11`: of the four directions with an
+  evaluated child, THREE reported `best_delta: null` — their children are first-generation drafts
+  with no parent carrying a metric — while those children had measured 0.773951, 0.759164 and
+  0.718923. An answered question read as unmeasured. With the champion baseline all four are
+  answered, and all four are refuted:
+
+  | direction | best_delta | best vs champion |
+  |---|---|---|
+  | longer training | — | **−0.003272** by card-0 |
+  | InfoNCE family | **+0.01724** by card-7 | **−0.013805** by card-7 |
+  | hard negatives | — | **−0.018059** by card-1 |
+  | LoRA | — | **−0.0583** by card-2 |
+
+  The InfoNCE row is why they must stay two numbers: its child beat its own parent and is still
+  below the run's best. Collapsing them would let a direction that lost to the champion read as a
+  win.
+
+  The direction's own `scored_against` was tried FIRST and rejected on measurement: it is `None` on
+  all nine of v11's directions, because a direction is derived from a belief row and never carries a
+  score fence. A fallback that is null exactly where it is needed is not a fallback.
+
+  `best_delta` and the `supported`/`tested` ladder are deliberately untouched — see
+  `events/card_ledger.py`'s own record of what loosening them cost on v5.
+
+```mermaid
+flowchart LR
+  Q["direction / question"] --> C1["child card"]
+  Q --> C2["child card"]
+  C1 --> N1["node — metric"]
+  C2 --> N2["node — metric"]
+  N1 --> B1{"has a parent<br/>node with a metric?"}
+  B1 -->|yes| D["best_delta<br/>(vs its own parent)"]
+  B1 -->|"no — a DRAFT"| X["no best_delta<br/>3 of 4 on v11"]
+  N1 --> CH["best_vs_champion<br/>(vs the run's best)"]
+  N2 --> CH
+  D --> R["rollup on the direction"]
+  X --> R
+  CH --> R
+```
+
 - `RunState.cards: dict[str,Card]=default_factory(dict)`, assigned only inside `_derive_cards`.
 - **Reserve now** the operator-override maps + the final-overlay phase:
   `RunState.card_priority_pins`/`card_operator_edits`/`card_resource_pins` (`default_factory=dict`), even
