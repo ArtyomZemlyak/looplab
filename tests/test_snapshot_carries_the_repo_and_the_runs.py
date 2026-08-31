@@ -131,6 +131,73 @@ def _rmtree(path):
     path.rmdir()
 
 
+# --------------------------------------------------------------------------- the two alarms in 1b
+#
+# Section 1b exists because of the loss above, and it has exactly two ways of saying that the loss
+# is happening again: the bundle was attempted and failed, or there was no checkout to bundle. Both
+# were unreachable from this suite. Driven 2026-08-31: with the `|| { echo "BUNDLE FAILED ..."; }`
+# arm replaced by `|| true` AND the whole `else ... MISSING looplab.bundle` branch deleted, the four
+# snapshot/timer files stayed at 48 passed -- a snapshot that carries no commit of ours exits 0 and
+# tells `snapshot_timer.sh` to record the fingerprint as archived, which is the 2026-08-29 shape
+# reproduced by the very script written to prevent it.
+#
+# The alarm is the ONLY thing between an operator and that outcome, because there is no fallback
+# here: section 1 above degrades to a tar of tracked files when its bundle fails, 1b does not.
+
+
+def test_a_bundle_that_could_not_be_made_is_not_a_silent_success(tmp_path):
+    """`.git` is there, HEAD names objects nothing contains -- the wreck, exactly.
+
+    That is not a hypothetical corruption: it is what `af0e4772` became at 19:15 on 2026-08-29,
+    a name with no object behind it. The `if [ -d .git ]` test above passes on it, `git bundle
+    create` cannot, and what lands in the destination is `PROVENANCE.txt` naming a HEAD and no
+    bundle -- a receipt for a backup that was not taken, printed by the script that exists to take
+    it.
+    """
+    src = _bench_root(tmp_path)
+    for obj in sorted((src / "looplab" / ".git" / "objects").rglob("*"), reverse=True):
+        obj.unlink() if obj.is_file() else None
+
+    result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
+
+    assert result.returncode == 1, (
+        "the bundle could not be made and the snapshot still claims to be complete, so "
+        "snapshot_timer.sh records this fingerprint as archived and never retries\n" + result.stdout)
+    assert "BUNDLE FAILED" in result.stdout, result.stdout
+    assert "OUR COMMITS ARE NOT IN THIS SNAPSHOT" in result.stdout, result.stdout
+    assert "INCOMPLETE SNAPSHOT: 1 source(s)" in result.stdout, result.stdout
+
+    # And the shape the alarm is describing is real: a receipt, and nothing behind it.
+    out = next((tmp_path / "snapshots").glob("2*"))
+    assert (out / "PROVENANCE.txt").exists()
+    assert not (out / "looplab.bundle").exists() or not (out / "looplab.bundle").stat().st_size
+
+
+def test_a_looplab_checkout_that_is_not_there_at_all_is_not_a_silent_success(tmp_path):
+    """The other arm: nothing to bundle, so NO commit of ours is archived.
+
+    This is the ordinary morning-after state of `BENCH_ROOT` -- `/var/tmp` is the container's own
+    writable layer, so after a restart the checkout is simply absent until someone re-clones it.
+    A snapshot taken in that window carries the AlgoTune bundle, the meter and the logs, looks
+    entirely healthy, and holds not one line of our work.
+    """
+    src = _bench_root(tmp_path)
+    _rmtree(src / "looplab" / ".git")
+
+    result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
+
+    assert result.returncode == 1, (
+        "there is no repository of ours on this box and the snapshot exits 0\n" + result.stdout)
+    assert "MISSING" in result.stdout and "looplab.bundle" in result.stdout, result.stdout
+    assert "NO commit of ours is archived" in result.stdout, result.stdout
+    assert "INCOMPLETE SNAPSHOT: 1 source(s)" in result.stdout, result.stdout
+
+    out = next((tmp_path / "snapshots").glob("2*"))
+    assert not (out / "looplab.bundle").exists(), result.stdout
+    # The rest of the archive is unaffected -- it is the CLAIM that is being corrected, not the copy.
+    assert (out / "AlgoTune.bundle").exists(), result.stdout
+
+
 def test_an_idle_box_is_not_reported_as_a_shortfall(tmp_path):
     """A claim that fires unconditionally is not a claim, and this one had a running cost.
 
