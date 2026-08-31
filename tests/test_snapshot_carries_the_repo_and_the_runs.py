@@ -286,6 +286,45 @@ def test_when_only_measured_snapshots_are_left_the_prune_says_what_it_is_deletin
     assert "WITH MEASUREMENTS" in result.stdout, result.stdout
 
 
+def test_the_prune_never_spends_the_snapshot_this_run_just_wrote(tmp_path):
+    """"The newest snapshot is never a candidate whatever it holds" -- deletable with no red test.
+
+    Driven 2026-08-31: with `[ "$D" = "$NEWEST" ] && continue` removed from the prune loop, the
+    whole file stayed at 10 passed. The rule reads like belt-and-braces beside the measured/
+    unmeasured sort, and it is not: the two interact exactly backwards. On an idle box the snapshot
+    THIS run just wrote is by definition unmeasured -- no campaign, no runs manifest -- so it sorts
+    to the front of the spend order, ahead of every older measured snapshot the sort exists to
+    protect. The run then archives the box, deletes its own archive, and exits 0.
+
+    The rule is what makes "unmeasured is cheap" safe to say: a snapshot is only cheap because a
+    newer one describes the box, and for the newest one nothing does. It is the current state of
+    the box.
+    """
+    src = _bench_root(tmp_path)
+    _rmtree(src / "campaign-final")
+    _rmtree(src / "model-probes")                    # idle: what this run writes is unmeasured
+    dest, archive = tmp_path / "snapshots", tmp_path / "runs-archive"
+    old_a = _fake_snapshot(dest, "20260829-154101", measured=True)
+    old_b = _fake_snapshot(dest, "20260829-191124", measured=True)
+
+    result = subprocess.run(
+        ["bash", str(SNAPSHOT), str(dest)],
+        env={"PATH": "/usr/bin:/bin", "HOME": str(src.parent), "BENCH_ROOT": str(src),
+             "SNAPSHOT_RUNS_ARCHIVE": str(archive), "SNAPSHOT_KEEP": "2"},
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    written = [d for d in sorted(dest.glob("2*")) if d not in (old_a, old_b)]
+    assert written, ("the run pruned the snapshot it had just written -- it archived the box and "
+                     "then deleted the archive, and exited 0\n" + result.stdout)
+    assert (written[0] / "looplab.bundle").exists(), result.stdout
+
+    # Having refused the cheap one, it had to reach a measured snapshot -- and to say so.
+    assert "WITH MEASUREMENTS" in result.stdout, result.stdout
+    assert not old_a.exists() and old_b.exists(), result.stdout
+    assert written[0].name not in result.stdout.split("pruning")[-1], result.stdout
+
+
 def test_a_box_running_probes_without_a_campaign_is_complete(tmp_path):
     """The live case that broke the previous version of this rule within the hour.
 
