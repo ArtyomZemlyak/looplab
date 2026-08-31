@@ -8,8 +8,11 @@ loop shipped them into the scored directory beside the solver.
 MEASURED over the 69-probe corpus on 2026-08-29: the loop has ever written exactly two kinds of
 file (301 `.py`, 86 `.pyx`) and never once a `.log` or a `.json`, while the probe roots held 136
 `.log` and 65 `.json` files. So the filter below is not a guess about what a candidate might
-submit; it is the arena's own editing surface, which `editor_functions.py` dispatches on at line
-2109 (`.py`, `.pyx`, `.pxd`) with `setup.py`/`pyproject.toml` as the build recipe.
+submit; it is the arena's own editing surface, which `AlgoTuner/editor/editor_functions.py`
+dispatches on by suffix (`.py`, `.pyx`, `.pxd`) with `setup.py`/`pyproject.toml` as the build
+recipe. The line number this docstring used to carry is gone for the reason `48953f00` gave for the
+one beside `SUBMITTABLE_SUFFIXES`: a line number silently re-points at whatever moves above it, and
+this one points into a THIRD-PARTY checkout that no guard in this repo can re-derive at all.
 """
 import sys
 from pathlib import Path

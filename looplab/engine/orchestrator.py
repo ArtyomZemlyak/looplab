@@ -5082,9 +5082,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # sits past the last stage span, so without this its generations land with no span open at
         # all -- billed, and absent from every trace surface. Measured 2026-08-29 over 68 probe
         # runs: 105 of 25,430 billed calls ($0.19 of $100.27) had no `span_id`, all of them in this
-        # window; `run.log` names the site as `tool_loop.py::drive_tool_loop`. One span here also covers what
-        # reflection calls in turn (`_reflect_lessons`, `_comparative_lessons`), which is why those
-        # two need none of their own.
+        # window, and `core/tracing.py::_note_untraced_generation` names the site in `run.log` as
+        # `<file>:<line> in <function>` -- which is `tool_loop.py::drive_tool_loop`. Spelling it as
+        # the symbol is this repo's rule (`test_claim_pins::test_no_source_citation_is_dead`); the
+        # log's own line number is NOT what the log says, so it is reported as a translation rather
+        # than as a quotation. One span here also covers what reflection calls in turn
+        # (`_reflect_lessons`, `_comparative_lessons`), which is why those two need none of their own.
         with self._op_span("reflection"):
             return self.lessons.write_reflection_note(final)
 
