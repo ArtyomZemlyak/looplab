@@ -2910,7 +2910,7 @@ probes ran — `pagerank` 1.0024 / 1.0022 / 0.9997, `pde_heat1d` 0.9958, `edge_e
 |---|---|---|---|---|
 | `remEE` | `edge_expansion` | 132.69 → 183.60 | **179.6451** | `.pyx` + `setup.py` |
 | `remDL2` | `discrete_log` | **14.29** → 13.98 | **14.0483** | `.pyx` + `setup.py` |
-| `remPde` | `pde_heat1d` | 54.26 | **54.1227** | plain Python, no kernel |
+| `remPde` | `pde_heat1d` | 54.26 | **54.1227** | 4 `@njit` kernels (*corrected 2026-09-01; this row said "plain Python, no kernel"* — see §73.2) |
 
 ### 72.1 `discrete_log` was not a 5.1× spread; it was one low run
 
@@ -2939,9 +2939,17 @@ dsPde2 and dsRBF2, "the draw the run cannot finish". Measured on these three: `r
 
 It is the worst. `remPde` spent **$0.74 of $1.0050 before its first node existed** — 103 `plan_step`
 generations, 61 % of the budget, against 34 for `propose` — and the single node it did build was the
-only one it could afford. Its 54.12 is the lowest `pde_heat1d` has scored across four probes
-(124.63, 99.00, 121.85, 54.12), and the difference is visible in the artefact: the three high runs
-all shipped a numba kernel, this one shipped plain Python. It never got as far as compiling.
+only one it could afford. Its 54.12 was the lowest `pde_heat1d` had scored across four probes
+(124.63, 99.00, 121.85, 54.12).
+
+*Corrected 2026-09-01.* The sentence that stood here — that the three high runs shipped a numba
+kernel and this one shipped plain Python, never getting as far as compiling — is false. `remPde`'s
+champion carries four `@njit` kernels; its `from numba import njit` sits indented inside a `try:` at
+line 80 behind a `_HAVE_NUMBA` flag, and the grep that produced the claim never saw it. numba 0.67.0
+is installed in the venv these are scored in, so the kernel ran. Every `pde_heat1d` champion on this
+box carries one, across a 0.0-to-129.75 spread (§73.2), so the artefact difference this sentence
+appealed to does not exist. The spend figures below are unaffected — they were computed, not read
+off the file.
 
 So "spend after the last node" measures a tail that a run reaching its ceiling mid-draw will always
 have, and misses entirely a run that spends its budget before the first draw. The pair to watch is
@@ -3028,15 +3036,26 @@ under the noise on a single configuration.
 
 §50's one-bit explanation is specific to `edge_expansion`. It does not carry:
 
-| probe | champion | TEST |
-|---|---|---|
-| accPde | 209 lines WITH a numba kernel | 120.7621 |
-| remPde | plain Python, no kernel | 54.1227 |
-| remPde2 | 242 lines WITH a numba kernel | 30.3282 |
+*Corrected 2026-09-01, and the correction makes the section simpler.* Every `pde_heat1d` champion
+on this box carries a numba kernel — including `remPde`, which this section and §72 before it both
+called plain Python:
 
-The bit does not order these at all: the HIGHEST of the three carries a kernel and so does the
-LOWEST, and the kernel-less run sits between them, 1.8× above one kernel run and 2.2× below the
-other. On `edge_expansion` the same bit moved the median by a factor of eight. Whatever separates a good `pde_heat1d` run from a bad one, it is not the bit
+| probe | champion | kernel | TEST |
+|---|---|---|---|
+| remPde3 | 237 lines | 2 `@njit` | 129.75 |
+| accPde | 209 lines | 7 `@njit` | 120.7621 |
+| remPde | 428 lines | 4 `@njit`, numpy fallback | 54.1227 |
+| remPde2 | 242 lines | 4 `@njit` | 30.3282 |
+| remPde4 | 196 lines | 3 `@njit` | 0.0 |
+
+`remPde`'s import sits inside a `try:` at line 80 with `_HAVE_NUMBA` and a pure-numpy branch "used
+only if numba is unavailable" — and numba 0.67.0 is installed in the very venv these are scored in,
+so the kernel ran. The earlier reading came from a grep that never saw an indented import, and it
+was repeated in §72 as the mechanism behind the 54.12. It is withdrawn.
+
+So the bit is not merely a poor separator here — it is CONSTANT. All five runs ship a kernel and
+they span 0.0 to 129.75. On `edge_expansion` the same bit moves the median by a factor of eight
+(§50); on `pde_heat1d` it explains nothing at all, because there is nothing for it to vary with. Whatever separates a good `pde_heat1d` run from a bad one, it is not the bit
 that separates `edge_expansion` runs. §72 read `remPde`'s missing kernel as the mechanism behind its
 54.12; `remPde2` has the kernel and scored 30.33, so that reading does not survive. What replaces it
 is not yet measured, and n = 3 will not settle it — the honest next step is more points on this task

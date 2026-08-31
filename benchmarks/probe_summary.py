@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""The standing per-probe checklist, computed instead of hand-rolled.
+
+Sweep item 9 asks the same seven questions of every finished probe -- champion, test against train,
+money by phase, spend AFTER the last evaluated node, `eval_train` count, whether the model used the
+reference module -- and for three sweeps running I answered them by writing the same throwaway
+script each time. Each rewrite is a chance to compute a slightly different thing and call it the
+same number, which is the failure this whole document keeps recording.
+
+So it lives here, once. Two of the columns are not on the checklist and are here because the corpus
+put them there:
+
+  * SPEND BEFORE THE FIRST EVALUATED NODE. §72 found the waste metric pointed at the wrong end of
+    the run: `remPde` read 11 % by "spend after the last node" while being the worst run on its
+    task, having spent 91 % before its first. The pair is only legible together.
+  * NODES. Across the ten scored probes on this box, the five that reached a second evaluated node
+    hold the top score of every task they belong to, with one exception (`accPde`, 120.76 on one
+    node). That is five points and an exception, not a rule -- printed so the next probe can
+    refute it rather than so it can be believed.
+
+Usage:  probe_summary.py [ROOT ...]        (default: BENCH_ROOT and the runs-archive)
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+
+def _roots(argv: list[str]) -> list[Path]:
+    if argv:
+        return [Path(a) for a in argv if Path(a).is_dir()]
+    cands = [os.environ.get("BENCH_ROOT") or "/var/tmp/looplab-bench",
+             os.environ.get("SNAPSHOT_RUNS_ARCHIVE")
+             or "/home/jovyan/data/looplab-bench/runs-archive"]
+    return [Path(c) for c in cands if Path(c).is_dir()]
+
+
+def _load(path: Path) -> list[dict]:
+    rows = []
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:       # noqa: BLE001 - a torn last line is normal on a LIVE run
+                    continue
+    except OSError:
+        return []
+    return rows
+
+
+def _test_score(probe_dir: Path) -> float | None:
+    """The champion's TEST speedup, from the probe's own final.json."""
+    for name in ("final.json",):
+        f = probe_dir / name
+        if not f.is_file():
+            continue
+        try:
+            j = json.loads(f.read_text(errors="replace"))
+        except Exception:               # noqa: BLE001
+            continue
+        sp = j.get("speedup")
+        return float(sp) if isinstance(sp, (int, float)) else None
+    return None
+
+
+def summarise(run_dir: Path) -> dict | None:
+    events = _load(run_dir / "events.jsonl")
+    spans = _load(run_dir / "spans.jsonl")
+    if not events:
+        return None
+    gens = [r for r in spans if r.get("name") == "generation"]
+    total = sum(float((r.get("attributes") or {}).get("cost") or 0) for r in gens)
+    nodes = [r for r in events if r.get("type") == "node_evaluated"]
+    stamps = [float(r.get("ts") or 0) for r in nodes]
+    first, last = (min(stamps), max(stamps)) if stamps else (None, None)
+
+    def spend(pred) -> float:
+        return sum(float((r.get("attributes") or {}).get("cost") or 0)
+                   for r in gens if pred(float(r.get("start") or 0)))
+
+    before = spend(lambda t: first is not None and t < first)
+    after = spend(lambda t: last is not None and t > last)
+
+    by_phase: dict[str, float] = defaultdict(float)
+    calls: Counter = Counter()
+    for r in gens:
+        a = r.get("attributes") or {}
+        ph = a.get("phase") or "?"
+        by_phase[ph] += float(a.get("cost") or 0)
+        calls[ph] += 1
+
+    tools = [r for r in spans if r.get("name") == "tool"]
+    dev = [r for r in tools
+           if str((r.get("attributes") or {}).get("tool") or "") == "run_dev_command"]
+    eval_train = sum(1 for r in dev if "eval_train" in json.dumps(r.get("attributes") or {}))
+
+    blob = json.dumps(spans)
+    ref_imports = len(re.findall(r"(?:from|import)\s+reference_\w+", blob))
+    ref_calls = len(re.findall(r"\b(?:is_solution|generate_problem)\s*\(", blob))
+
+    probe_dir = Path(str(run_dir).split("/runs/", 1)[0]) if "/runs/" in str(run_dir) else run_dir
+    champ = probe_dir / "champion_solver.py"
+    kernel = False
+    champ_lines = 0
+    if champ.is_file():
+        body = champ.read_text(errors="replace")
+        champ_lines = body.count("\n")
+        kernel = bool(re.search(r"import numba|@njit|cimport|import cython", body))
+    if not kernel and probe_dir.is_dir():
+        kernel = kernel or any(p.suffix == ".pyx" for p in probe_dir.glob("*"))
+
+    return {
+        "probe": probe_dir.name,
+        "task": run_dir.parent.name,
+        "spent": total,
+        "test": _test_score(probe_dir),
+        "nodes": [round(float((r.get("data") or {}).get("metric") or 0), 4) for r in nodes],
+        "before_pct": (100 * before / total) if total else 0.0,
+        "after_pct": (100 * after / total) if total else 0.0,
+        "eval_train": eval_train,
+        "dev_commands": len(dev),
+        "ref_imports": ref_imports,
+        "ref_calls": ref_calls,
+        "champion_lines": champ_lines,
+        "kernel": kernel,
+        "phases": sorted(by_phase.items(), key=lambda kv: -kv[1])[:4],
+        "calls": calls,
+    }
+
+
+def main(argv: list[str]) -> int:
+    roots = _roots(argv)
+    if not roots:
+        print("no bench roots on this box", file=sys.stderr)
+        return 1
+    seen: dict[str, dict] = {}
+    for root in roots:
+        for ev in sorted(root.rglob("events.jsonl")):
+            s = summarise(ev.parent)
+            # The live tree and the archive hold the SAME run; keep whichever has more spend, which
+            # is the fresher copy. Reporting one probe twice is how the zeros section went wrong.
+            if s and (s["probe"] not in seen or s["spent"] > seen[s["probe"]]["spent"]):
+                seen[s["probe"]] = s
+    if not seen:
+        print("no probes on this box")
+        return 0
+
+    print(f"{'probe':10s}{'task':16s}{'$':>8}{'TEST':>10}{'nodes':>7}"
+          f"{'before%':>9}{'after%':>8}{'eval_tr':>8}  champion")
+    for s in sorted(seen.values(), key=lambda x: (x["task"], -(x["test"] or -1))):
+        test = f"{s['test']:.4f}" if s["test"] is not None else "-"
+        champ = (f"{s['champion_lines']}L {'kernel' if s['kernel'] else 'plain python'}"
+                 if s["champion_lines"] else "(none)")
+        print(f"{s['probe']:10s}{s['task']:16s}{s['spent']:>8.4f}{test:>10}"
+              f"{len(s['nodes']):>7}{s['before_pct']:>8.0f}%{s['after_pct']:>7.0f}%"
+              f"{s['eval_train']:>8}  {champ}")
+
+    print("\nper-probe detail:")
+    for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):
+        print(f"  {s['probe']} ({s['task']}) nodes(train)={s['nodes']}  "
+              f"reference: {s['ref_imports']} imports / {s['ref_calls']} is_solution+generate calls")
+        for ph, cost in s["phases"]:
+            share = 100 * cost / s["spent"] if s["spent"] else 0
+            print(f"      {ph:16s}{s['calls'][ph]:>5} calls  ${cost:.4f}  {share:4.1f}%")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
