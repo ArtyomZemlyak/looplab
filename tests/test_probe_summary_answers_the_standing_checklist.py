@@ -152,3 +152,66 @@ def test_eval_train_is_counted_and_other_dev_commands_are_not(tmp_path):
 def test_an_empty_box_says_so(tmp_path):
     out = _run(tmp_path)
     assert "no probes" in out
+
+
+# ------------------------------------------------------- a missing score is not one fact either
+
+
+def test_a_missing_score_comes_with_the_probe_s_own_explanation(tmp_path):
+    """`accEE` had no TEST because champion extraction died on an import, on top of an auto-pause.
+
+    Both sentences were in the probe's own two log files, and finding them took six commands. The
+    same shape as the zeros section: the diagnosis exists, in a file nothing read.
+    """
+    p = _mk_probe(tmp_path, "acc", "t", nodes=[221.539], costs_before=[0.3], costs_after=[0.7])
+    (p / "probe.log").write_text(
+        "[02:17:33] ===== start =====\n"
+        "[04:02:54] прогон rc=0 за 6321с\n"
+        "could not fold /x/runs/t/run: ModuleNotFoundError: No module named 'looplab'\n"
+        "[04:02:54] чемпион: НЕТ\n")
+    out = _run(tmp_path)
+    assert "ModuleNotFoundError" in out, (
+        "a probe with no test score gave no reason, and the reason was in its own log:\n" + out
+    )
+    # The HEADER too, not just the line: mutation showed that deleting it left the detail floating
+    # unlabelled among the per-probe output, where a reader has no idea what it is asserting.
+    assert "probes with NO test score" in out, (
+        "the reason line is printed with nothing saying what it is:\n" + out
+    )
+
+
+def test_a_pause_is_reported_when_that_is_the_reason(tmp_path):
+    p = _mk_probe(tmp_path, "pz", "t", nodes=[5.0], costs_before=[0.5], costs_after=[0.5])
+    (p / "run.log").write_text(
+        "run=run task=t finished=False\n"
+        "stop: PAUSED (node 2) — resumable, NOT finished\n"
+        "  pause reason: auto-paused: a Developer session crashed\n")
+    out = _run(tmp_path)
+    assert "PAUSED" in out, "a paused run's own stop line is not surfaced:\n" + out
+
+
+def test_a_scored_probe_gets_no_excuse_line(tmp_path):
+    """The section is for probes with NO score; a scored one must not appear in it."""
+    p = _mk_probe(tmp_path, "ok2", "t", nodes=[5.0], costs_before=[0.5], costs_after=[0.5], test=5.0)
+    (p / "probe.log").write_text("could not fold something irrelevant\n")
+    out = _run(tmp_path)
+    tail = out.split("probes with NO test score", 1)
+    assert len(tail) == 1 or "ok2" not in tail[1].split("per-probe detail")[0], (
+        "a probe that HAS a test score was listed among those that do not:\n" + out
+    )
+
+
+def test_run_finished_is_not_used_as_the_discriminator(tmp_path):
+    """It is absent from four probes on this box that all scored a test perfectly well.
+
+    Reading its absence as "unfinished" would mark accPde, remDL3, remEE and remEE2 as failures.
+    """
+    import inspect
+    src = (REPO / "benchmarks" / "probe_summary.py").read_text()
+    i = src.index("def _why_no_test")
+    body = src[i:src.index("def summarise")]
+    assert "run_finished" not in body.split('"""')[2:] or True  # docstring may mention it
+    code = body.split('"""')[-1]
+    assert "run_finished" not in code, (
+        "run_finished crept into the discriminator; its absence means nothing on its own"
+    )

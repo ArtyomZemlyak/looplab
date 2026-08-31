@@ -71,6 +71,32 @@ def _test_score(probe_dir: Path) -> float | None:
     return None
 
 
+def _why_no_test(probe_dir: Path) -> str:
+    """Why this probe has no TEST score, in its own words, or "".
+
+    A missing score is not one fact. `accEE` had none because its champion extraction died on
+    `ModuleNotFoundError: No module named 'looplab'` (fixed 2.5 hours after that run, in d3d41531)
+    on top of a run that had AUTO-PAUSED on a crashed Developer session -- and finding that out took
+    six commands, when both sentences were sitting in the probe's own two log files. Same shape as
+    the zeros section in `bench_runs_report.sh`: the diagnosis exists, in a file nothing read.
+
+    `run_finished` is deliberately NOT the discriminator. It is absent from accPde, remDL3, remEE
+    and remEE2, all of which scored a test perfectly well, so its absence means nothing on its own --
+    which is the sort of thing that reads as a signal until you count it.
+    """
+    for name, hunt in (("probe.log", ("could not fold", "чемпион: НЕТ", "champion: NONE")),
+                       ("run.log", ("PAUSED", "pause reason", "finished=False"))):
+        f = probe_dir / name
+        if not f.is_file():
+            continue
+        lines = f.read_text(errors="replace").splitlines()
+        for needle in hunt:
+            for line in lines:
+                if needle in line:
+                    return line.strip()[:120]
+    return ""
+
+
 def summarise(run_dir: Path) -> dict | None:
     events = _load(run_dir / "events.jsonl")
     spans = _load(run_dir / "spans.jsonl")
@@ -131,6 +157,7 @@ def summarise(run_dir: Path) -> dict | None:
         "ref_calls": ref_calls,
         "champion_lines": champ_lines,
         "kernel": kernel,
+        "why_no_test": "" if _test_score(probe_dir) is not None else _why_no_test(probe_dir),
         "phases": sorted(by_phase.items(), key=lambda kv: -kv[1])[:4],
         "calls": calls,
     }
@@ -162,6 +189,12 @@ def main(argv: list[str]) -> int:
         print(f"{s['probe']:10s}{s['task']:16s}{s['spent']:>8.4f}{test:>10}"
               f"{len(s['nodes']):>7}{s['before_pct']:>8.0f}%{s['after_pct']:>7.0f}%"
               f"{s['eval_train']:>8}  {champ}")
+
+    unscored = [s for s in seen.values() if s["test"] is None and s["why_no_test"]]
+    if unscored:
+        print("\nprobes with NO test score, and why (from the probe's own logs):")
+        for s in sorted(unscored, key=lambda x: x["probe"]):
+            print(f"  {s['probe']:10s} {s['why_no_test']}")
 
     print("\nper-probe detail:")
     for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):
