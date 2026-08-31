@@ -82,3 +82,65 @@ def test_a_broken_accountant_is_silence_not_a_crash():
         spent = 0.0
     assert _Engine(_Bad())._cue_llm_budget(None, None, None) == ("", [])
     assert _hint(float("inf"), 0.0) == ("", [])
+
+
+# ------------------------------------------------------------------ how far the money actually goes
+#
+# THE DIAGNOSIS IS FIVE ROLES; THE REPAIR IS TWO, and `557e1c20` says the first without saying the
+# second. Every entry in `PROPOSAL_CUES` is concatenated into ONE `_complexity_hint` string, and
+# that string reaches a prompt only through `collect_hint_cues(self, RESEARCHER_PROMPT_CUES)`.
+# MEASURED on the first live probe that carried the cue: `propose` 46/52 and `repropose` 9/9 see a
+# money figure; `plan` 0/49, `foresight_rank` 0/7 and `hyp_prioritize` 0/4 still do not.
+#
+# These tests exist so the sentence in `_cue_llm_budget`'s docstring cannot go quietly out of date
+# in EITHER direction: adding a third splice site reddens the first test (the docstring must then
+# say so), and removing `_complexity_hint` from the splice set reddens the second (the cue would
+# then reach nothing at all, which is the state this whole change was built to end).
+import ast  # noqa: E402
+
+from looplab.agents.roles import RESEARCHER_PROMPT_CUES  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _cue_splice_sites():
+    """(module, enclosing function) for every `collect_hint_cues(...)` call under `looplab/`."""
+    out = set()
+    for path in sorted((ROOT / "looplab").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:                     # a file we cannot read is not a splice site
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                        and inner.func.id == "collect_hint_cues"):
+                    out.add((str(path.relative_to(ROOT)), node.name))
+    return out
+
+
+def test_the_money_reaches_propose_and_repropose_and_nothing_else():
+    """`repropose` is `propose` called a second time (`novelty.py::_repropose_with_feedback`), so
+    the two splice sites below ARE the whole reach. `plan` is the Developer's own sub-phase and
+    `foresight_rank`/`hyp_prioritize` are the foresight panel's own client; none of the three
+    builds its prompt from a Researcher hint attribute."""
+    assert _cue_splice_sites() == {
+        ("looplab/agents/roles.py", "propose"),          # LLMResearcher
+        ("looplab/agents/agent.py", "propose"),          # ToolUsingResearcher
+    }, ("the set of prompts that splice the engine's cues changed — `_cue_llm_budget`'s docstring "
+        "states which roles see the money and must move with it")
+
+
+def test_the_carrier_is_still_in_the_splice_set():
+    """A cue in `PROPOSAL_CUES` that is not carried by `_complexity_hint` reaches nobody at all."""
+    assert "_complexity_hint" in RESEARCHER_PROMPT_CUES
+
+
+def test_the_docstring_does_not_claim_the_three_it_does_not_reach():
+    """The correction is part of the record, not a comment somebody may tidy away."""
+    doc = ProposalCuesMixin._cue_llm_budget.__doc__
+    assert "TWO of those five" in doc
+    for role in ("plan", "foresight_rank", "hyp_prioritize"):
+        assert role in doc, f"the docstring never says {role} is out of reach"

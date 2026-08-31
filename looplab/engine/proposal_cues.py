@@ -138,6 +138,32 @@ class ProposalCuesMixin:
         empty `files` map, on a task where the difference between its 2.8369 and dsDL's 14.5186 is
         that dsDL got a SECOND draw and dsDL2 did not.
 
+        WHAT THIS CUE ACTUALLY REACHES: TWO of those five, not five. The table above is a
+        DIAGNOSIS and it is correct; the repair is narrower than the diagnosis, and the commit that
+        introduced this cue (`557e1c20`) does not say so. Every cue in `PROPOSAL_CUES` is
+        concatenated into one `_complexity_hint` string, and `_complexity_hint` is spliced into a
+        prompt at exactly two places -- `agents/roles.py::LLMResearcher.propose` and
+        `agents/agent.py::ToolUsingResearcher.propose`, both through
+        `collect_hint_cues(self, RESEARCHER_PROMPT_CUES)`. `repropose` is the second of those two
+        called again with `_novelty_feedback` set (`engine/novelty.py::_repropose_with_feedback`),
+        so it is reached for free and for the same reason.
+
+        The other three are different prompts built by different code and none of them reads a
+        Researcher hint attribute: `plan` is the DEVELOPER's sub-phase
+        (`adapters/repo_developer.py`, under `tracing.operation("plan")`), and `foresight_rank` /
+        `hyp_prioritize` are the foresight panel's own client
+        (`search/foresight.py::_rank` picks the span name off `kind`).
+
+        MEASURED on the first live probe carrying this cue: `propose` 46/52, `repropose` 9/9,
+        `plan` 0/49, `foresight_rank` 0/7, `hyp_prioritize` 0/4. Reaching the other three is a
+        SEPARATE change -- three prompt builders, three sets of tokens, and three roles whose
+        answer to "you are nearly out of money" is not obviously the same sentence -- and it should
+        be argued on its own rather than assumed to have already happened here.
+        CLAIM[llm-budget-cue-reaches-propose-only] the money cue reaches `propose` and `repropose`
+        and NOT `plan`, `foresight_rank` or `hyp_prioritize`, because those three build their
+        prompts without `collect_hint_cues`.
+        decided:`absent:collect_hint_cues@looplab/adapters/repo_developer.py+absent:collect_hint_cues@looplab/search/foresight.py`
+
         Returns "" for every reason the note in `deep_research.py::_budget_note` returns "" -- no
         accountant, no limit, a non-finite figure -- so a run with no `llm_budget_usd` gets a
         byte-identical prompt to before.
