@@ -529,3 +529,19 @@ def test_a_node_that_predates_the_first_build_step_is_not_a_negative_build(tmp_p
     out = _run(tmp_path)
     assert _cell(out, "bd3", "build") == "-", (
         "a node before the first build step produced a duration:\n" + out)
+
+
+def test_the_build_duration_comment_claims_no_gap_it_does_not_have():
+    """It claimed one for thirty minutes, and the next run landed in it.
+
+    On 19 runs the comment read "nothing between 14 and 23"; remPde8 then built in 14.0 minutes on
+    pde_heat1d. A guide that names a gap invites the next reader to treat a point inside it as a
+    fault, which is precisely the investigation this column exists to prevent.
+    """
+    src = (REPO / "benchmarks" / "probe_summary.py").read_text()
+    i = src.index("first `plan_step` to first `node_evaluated`")
+    block = src[i:i + 2000]
+    assert "No point falls between" not in block, "the gap claim is back"
+    assert "ROUGH, NOT A BAND" in block, (
+        "the comment no longer warns that these are observed ranges rather than bounds"
+    )

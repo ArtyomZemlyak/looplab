@@ -178,14 +178,26 @@ def summarise(run_dir: Path) -> dict | None:
 
     # AND HOW LONG THE BUILD ITSELF TAKES. The pair answers the question a sweep actually asks of a
     # quiet probe — "is this run stuck, or is this task slow?" — and neither half answers it alone.
-    # Measured 2026-09-01 over 19 runs, first `plan_step` to first `node_evaluated`:
-    # edge_expansion 5-14 min, pde_heat1d 25-44, discrete_log 23-54. No point falls between 14 and
-    # 23. A discrete_log probe 42 minutes into a build with no node is inside its task's band; the
-    # same reading on edge_expansion would be three times the worst ever seen.
+    # Measured 2026-09-01 over 21 runs, first `plan_step` to first `node_evaluated`:
     #
-    # It does NOT predict the score, and that is stated here so nobody has to rediscover it: within
-    # task, r = -0.01 (EE, n=6), -0.12 (pde, n=8), -0.59 (DL, n=4). Fifth summary statistic in five
-    # sweeps to separate cleanly by task and order nothing inside one (§74.3, §76.1).
+    #     edge_expansion  5, 6, 7, 9, 11, 13, 14 min
+    #     pde_heat1d      14, 25, 27, 33, 34, 35, 38, 38, 44 min
+    #     discrete_log    23, 26, 27, 53, 54 min
+    #
+    # ROUGH, NOT A BAND. On 19 runs this read "edge_expansion 5-14, pde 25-44, DL 23-54, nothing
+    # between 14 and 23", and that sentence stood in this comment for thirty minutes before
+    # `remPde8` built in 14.0 and landed exactly in the gap. Verified at the source, and its plan was
+    # 3 steps with 2 and 3 both no-ops — but that explains nothing: across all 21 runs the count of
+    # steps that actually wrote correlates +0.02 with duration, and `remDL3` wrote in ZERO of its
+    # three steps and took the longest build on record.
+    #
+    # Sixth summary statistic in six sweeps to look clean and then not be (§74.3, §76.1). The others
+    # died on a larger sample; this one died on the next run, half an hour after being written down.
+    # It does not predict the score either — within task r = -0.01 (EE), -0.12 (pde), -0.59 (DL).
+    #
+    # What it is still good for is the only thing it was added for: a probe 42 minutes into a build
+    # on discrete_log has company, and one 42 minutes in on edge_expansion has none. Read it as
+    # "has anything ever taken this long here", not as a bound.
     build_min = None
     if build_ts and stamps:
         first_node = min(stamps)
