@@ -3595,3 +3595,49 @@ It does not queue more probes on the CURRENT configuration. That arm has 8 `edge
 a ninth changes nothing anyone is asking. Idle-lane probes have been filling it by default; from here
 a free lane should take an arm from the queue above or stay idle, because an unpaired run costs a
 dollar and answers nothing.
+
+## 84. The champion rule is worth 11 runs out of 17, and the corpus already knew
+
+§72.2 demonstrated that the best EVALUATED node is submitted rather than the last, and cited
+`remDL2` -- node_0 at 14.29 against node_1 at 13.98 -- as the first direct evidence that the rule
+bites rather than merely holds. The comment above `KEEP_BEST` in `make_task.py` still says so. On a
+2 % gap that reads like a technicality. It is not one, and no new probe was needed to show it: every
+run has recorded every node all along.
+
+Over the 17 probes with more than one evaluated node:
+
+| probe | nodes | best | last | best/last |
+|---|---|---|---|---|
+| remEE6 | 4 | 234.8928 | **0.0000** | ∞ |
+| remPde7 | 2 | 130.8104 | 0.0749 | 1746× |
+| remPde9 | 3 | 116.7281 | 3.3451 | 34.9× |
+| remEE4 | 3 | 265.7918 | 12.9883 | 20.5× |
+| remEE3 | 3 | 194.6503 | 20.5173 | 9.5× |
+| remEE7 | 3 | 144.3164 | 18.3794 | 7.9× |
+| remDL5 | 2 | 11.5564 | 1.9865 | 5.8× |
+| remPde3 | 2 | 123.1297 | 50.0147 | 2.5× |
+| remPde8 | 2 | 114.2576 | 70.3424 | 1.6× |
+| remDL4 | 2 | 7.0413 | 5.5644 | 1.3× |
+| remDL2 | 2 | 14.2947 | 13.9819 | 1.02× |
+| *(six more)* | | | | 1.00× (last **was** best) |
+
+**Eleven of seventeen runs ended on a node that was not their best, and not one ended on a node
+better than its best-so-far by definition — so the paired sign test over the 11 non-ties gives
+p = 1/2048 = 0.00049.** Median submitted TRAIN score is 130.81 under the rule and 18.38 without it,
+a factor of 7.1; per task, 2.2× on `edge_expansion` (n=9), 4.5× on `pde_heat1d` (n=4), 1.3× on
+`discrete_log` (n=4). `remEE6`'s final act was to score 0.0 — the rule is the only reason that run
+has a number at all.
+
+So the loop's last move is worse than its best move about two times in three, and often by an order
+of magnitude. `remDL2`'s 2 % was not a typical case, it was the mildest case in the corpus.
+
+**What this does NOT show, and the distinction is the whole of §83's queue.** This measures the
+rule's PROTECTIVE value: given the nodes these runs produced, keeping the best is worth 7×. It says
+nothing about whether TELLING the model the rule exists changes which nodes it produces — that is a
+different claim, it needs the control arm, and `remEEctl1` (launched today on lane 11-21+59-69,
+card `--no-unteachable-rules`) is the first run of it. A reader who collapses the two would conclude
+from p = 0.00049 that the card clause is proven, when the clause has one run of evidence and it
+started this afternoon.
+
+The honest reading of the two together: the rule is demonstrably load-bearing, which raises the
+prior that stating it matters, and lowers nothing about the cost of finding out.

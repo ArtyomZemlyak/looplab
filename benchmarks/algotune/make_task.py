@@ -795,7 +795,14 @@ MEASURE = (
 # Measured 2026-08-30 (`remDL2`, discrete_log): node_0 scored 14.29 and node_1 scored 13.98, and
 # the run submitted node_0. The first direct evidence that the rule bites rather than merely
 # holding -- until that run every probe's last node also happened to be its best, so the rule was
-# invisible in the corpus. `remPde` the same day spent 74 % of its dollar before ANY node existed,
+# invisible in the corpus.
+#
+# That 2 % gap read like a technicality, and it was the MILDEST case in the corpus. Re-measured
+# 2026-09-01 over all 17 multi-node probes (docs/56 §84): ELEVEN ended on a node that was not their
+# best, none on a node better, paired sign test p = 1/2048. Median submitted TRAIN score 130.81 with
+# the rule against 18.38 without it. `remEE6` scored 234.89 and then finished by scoring 0.0; the
+# rule is the only reason that run has a number. The loop's last move is worse than its best move
+# about two times in three. `remPde` the same day spent 74 % of its dollar before ANY node existed,
 # which is the same rule seen from the other end: nodes that are never evaluated cannot be kept.
 #
 # The consequence for the model is what the clause states: a risky rewrite late in the run cannot
