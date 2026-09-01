@@ -57,6 +57,15 @@ def _bench_root(tmp_path):
         _git(repo, "init", "-q")
         _git(repo, "add", "-A")
         _git(repo, "commit", "-qm", subject)
+        # A SECOND BRANCH THE CHECKOUT IS NOT ON. `snapshot.sh` bundles with `--all`, and which
+        # branch `git clone <bundle>` lands on is then a question -- the very question the known
+        # failure is about ("the clone yields the wrong tree"). With one branch that question cannot
+        # be asked: every clone lands right by having nowhere else to go, so the restore test below
+        # passed for a reason unrelated to what it guards. The live repo carries four local branches.
+        _git(repo, "checkout", "-q", "-b", "not-the-one")
+        (repo / "kept.txt").write_text(f"{name} content from the WRONG branch\n")
+        _git(repo, "commit", "-qam", "a branch the restore must not land on")
+        _git(repo, "checkout", "-q", "-")
 
     # An uncommitted edit, so "(0 dirty files)" is a claim the archive can be checked against.
     (src / "looplab" / "kept.txt").write_text("looplab tracked content\nan edit nobody committed\n")
@@ -103,11 +112,36 @@ def test_our_own_commits_are_restorable_from_the_archive_alone(tmp_path):
     # The claim is restorability, so restore. `git clone <bundle>` is the operation a person
     # actually performs at 03:00 after a container has eaten the working tree.
     restored = tmp_path / "restored"
-    subprocess.run(["git", "clone", "-q", str(bundle), str(restored)], check=True,
-                   capture_output=True)
+    # NOT `check=True`. A bundle that cannot be cloned is the failure this test is FOR, and raising
+    # CalledProcessError reports it as a crash in the test rather than as the defect it is: measured
+    # while mutating `--all` to a single wrong branch, where the red arrived as a traceback with the
+    # git message swallowed.
+    cl = subprocess.run(["git", "clone", "-q", str(bundle), str(restored)], capture_output=True,
+                        text=True)
+    assert cl.returncode == 0, (
+        "the archived bundle cannot be cloned -- there is no restore, whatever else is in the "
+        "snapshot:\n" + cl.stdout + cl.stderr)
     log = subprocess.run(["git", "log", "--oneline", "-1"], cwd=restored,
                          capture_output=True, text=True, check=True).stdout
     assert "the commit the restart was about to eat" in log
+
+    # ON THE RIGHT BRANCH, WITH THE RIGHT BYTES. The log line alone cannot tell the two branches
+    # apart once the fixture has two, and neither can a SHA that was never compared. Both halves
+    # are checked because a bundle can be complete and still restore to the wrong place: verified by
+    # hand on the live snapshot 2026-09-01 -- 1,649 tracked files byte-identical after a clone --
+    # and that hand check is what this makes repeatable.
+    head_src = subprocess.run(["git", "rev-parse", "HEAD"], cwd=src / "looplab",
+                              capture_output=True, text=True, check=True).stdout.strip()
+    head_dst = subprocess.run(["git", "rev-parse", "HEAD"], cwd=restored,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    assert head_dst == head_src, (
+        f"the clone landed on {head_dst[:12]}, the checkout was on {head_src[:12]}"
+    )
+    body = (restored / "kept.txt").read_text()
+    assert "WRONG branch" not in body, "the restore checked out the branch the source was NOT on"
+    assert body == "looplab tracked content\n", (
+        "restored content differs from the committed tree: " + repr(body)
+    )
 
     # "(0 dirty files)" must be checkable, and a dirty tree must survive too.
     assert (out / "looplab-dirty.txt").read_text().strip(), "the dirty file is not even listed"
