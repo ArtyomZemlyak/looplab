@@ -3259,12 +3259,11 @@ So the rule stays as shipped. This section exists because the alternative was to
 intuition that 7 % of steps hitting a wall sounds like a lot; the corpus says the wall is rare, its
 cost is what varies, and the one step worth cutting is already the one being cut.
 
-**Still unverified:** whether the ceiling has ever actually fired in a live run. The trace that would
-show it (`cut_steps` on the `plan_steps` span) shipped after every probe that has finished, and the
-four running now are 25 minutes in and have not closed a plan yet. The `plan_steps` span itself is
-real — 12 of the 13 finished runs wrote one — so the wiring has somewhere to land. Next sweep can
-answer it; this one cannot, and the table above is a retrospective on what the rule WOULD have done,
-not a report of what it did.
+**Verified 2026-09-01, one sweep later.** Four probes carrying the trace have now closed plans, and
+their `plan_steps` spans carry `cut_steps: []` with `cutoff: None` on every step. So the field lands
+where it was wired to land, and the answer it gives is that nothing has been cut yet — a measurement
+rather than an absence of evidence, which is the whole difference this trace exists to make. The
+table above remains a retrospective; the ceiling has still never fired, and now that can be said.
 
 ## 76. Time to the first build step: useful for triage, useless as a predictor, and I nearly said otherwise
 
@@ -3308,3 +3307,35 @@ the runs themselves.
 
 What survives is narrow and operational: build time is a property worth SEEING, so a slow task is not
 mistaken for a broken run. It orders nothing.
+
+## 77. A third of plan steps write nothing, and it costs 4 %
+
+`plan_step` is 41.7 % of everything this corpus has spent ($5.31 of $12.71), so its waste is worth
+counting rather than estimating. Across the 14 runs that closed a plan — 55 steps in all — **20 steps
+(36 %) wrote no file at all**, and the second step of the plan is one of them in **10 of the 14
+runs**.
+
+That sounds like a third of the budget. It is not:
+
+| | $ |
+|---|---|
+| all plan steps | 5.7624 |
+| steps that wrote nothing | **0.4950** |
+| share of step spend | 9 % |
+| share of everything the corpus has spent | **4 %** |
+
+A step that writes nothing is a step that ended early, so it is cheap by construction: 36 % of the
+count is 9 % of the money. Two runs are exceptions — `remPde3` lost 15 % of its dollar to empty steps
+and `remEE` 12 % — and the median run loses 1-3 %.
+
+So the honest conclusion is that this is not the lever. §72 measured the same phenomenon from the
+other side (26 % of steps were a measurement and nothing else) and the card gained a clause telling
+the planner not to spend a step on a measurement the engine runs for free. Whether that clause
+lowered the count cannot be read off these numbers: 26 % and 36 % are different questions —
+"planned only a measurement" and "changed no file" — and comparing them would be the same mistake as
+§76.1's hand-listed subsets, one denominator further out.
+
+What is worth keeping is the shape: the second step is usually empty, the third usually rewrites what
+an earlier one wrote (`superseding_steps` names step 3 in 9 of 14 runs). A plan of three to five steps
+is, in practice, one or two steps that write and a tail that mostly does not. That is a fact about
+how the plan is used, at a cost of 4 %, and it is recorded rather than acted on.
