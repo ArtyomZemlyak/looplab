@@ -105,11 +105,23 @@ rm -f /tmp/fence.$$
 say "забор закрыт"
 
 # Полоса должна быть свободна СЕЙЧАС.
-BUSY=$(python3 - "$LANE" <<'PYEOF'
+# A BENCH PROBE, NOT ANY PROCESS THAT SAYS `looplab.cli`. The guard used to match the module name
+# alone, and pytest's own children carry it: caught 2026-09-01 by sampling the guard through a full
+# suite, which found `python -m looplab.cli ui --help` and
+# `python -m looplab.cli resume /tmp/pytest-of-jovyan/…/run`. Both inherit pytest's affinity
+# (44-47,92-95, the service lanes), neither occupies a bench lane for a second, and either was
+# enough to make every concurrent dry run refuse with "на полосе уже 1 процесс(ов)" -- three tests
+# in `test_a_probe_records_its_own_instrument.py` failing on and off for two days, reported as a
+# missing INSTRUMENT.txt until ac7335c7 made the refusal say its own name.
+#
+# What occupies a lane here is a run or a resume WHOSE RUN DIRECTORY IS UNDER THE BENCH ROOT.
+# AlgoTuner's own entry points keep their bare match: they are only ever started by this bench.
+BUSY=$(python3 - "$LANE" "$ROOT" <<'PYEOF'
 import os, sys
 want = set()
 for part in sys.argv[1].split(","):
     a, b = part.split("-"); want.update(range(int(a), int(b) + 1))
+root = sys.argv[2]
 n = 0
 for pid in os.listdir("/proc"):
     if not pid.isdigit():
@@ -119,7 +131,12 @@ for pid in os.listdir("/proc"):
                 for x in open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[:-1] if x]
         if not argv or "-c" in argv:
             continue
-        if not any(k in " ".join(argv) for k in ("AlgoTuner", "algotune.sh", "looplab.cli")):
+        line = " ".join(argv)
+        theirs = any(k in line for k in ("AlgoTuner", "algotune.sh"))
+        ours = ("looplab.cli" in line
+                and any(f" {verb} " in f" {line} " for verb in ("run", "resume"))
+                and root in line)
+        if not (theirs or ours):
             continue
         if os.sched_getaffinity(int(pid)) & want:
             n += 1

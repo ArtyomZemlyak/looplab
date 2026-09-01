@@ -234,3 +234,45 @@ def test_a_refusal_is_reported_as_a_refusal_and_not_as_a_missing_file(tmp_path):
     assert "FileNotFoundError" not in text, text
     # …and the script's own words, whichever guard fired, are carried through.
     assert "ОТКАЗ" in text or "refus" in text.lower(), text
+
+
+# --- the lane guard must see PROBES, not every process that says looplab.cli --------------------
+
+def test_the_lane_guard_ignores_a_looplab_cli_that_is_not_a_bench_probe():
+    """Caught by sampling the guard through a full suite on 2026-09-01.
+
+    `python -m looplab.cli ui --help` and `python -m looplab.cli resume /tmp/pytest-of-…/run` both
+    ran as pytest children, inheriting its affinity on the SERVICE lanes, and the guard matched them
+    on the module name alone. Either was enough to make a concurrent dry run refuse with "на полосе
+    уже 1 процесс(ов)" -- which is how three tests in this file failed on and off for two days.
+    Neither occupies a bench lane.
+    """
+    src = SCRIPT.read_text()
+    i = src.index('BUSY=$(python3 - "$LANE" "$ROOT"')
+    guard = src[i:i + 1600]
+    assert 'root in line' in guard, "the guard no longer requires the bench root"
+    assert '"run", "resume"' in guard, "the guard no longer distinguishes the occupying verbs"
+    # The two real offenders, and a real probe, checked against those two conditions directly.
+    root = "/var/tmp/looplab-bench"
+    def occupies(line):
+        return ("looplab.cli" in line
+                and any(f" {v} " in f" {line} " for v in ("run", "resume"))
+                and root in line)
+    assert not occupies("/opt/conda/bin/python -m looplab.cli ui --help")
+    assert not occupies("/opt/conda/bin/python -m looplab.cli resume "
+                        "/tmp/pytest-of-jovyan/pytest-805/test_crash0/run --task-id x")
+    assert occupies("python -m looplab.cli run "
+                    "/var/tmp/looplab-bench/model-probes/remEEref6/ws/algotune_edge_expansion.json")
+    assert occupies("python -m looplab.cli resume /var/tmp/looplab-bench/model-probes/x/runs/t/run")
+
+
+def test_the_guard_still_refuses_when_a_real_probe_holds_the_lane(tmp_path):
+    """Narrowing it must not disarm it: the guard exists because two probes on one lane make both
+    measurements worthless, and that is the failure it was written for."""
+    src = SCRIPT.read_text()
+    i = src.index('BUSY=$(python3 - "$LANE" "$ROOT"')
+    guard = src[i:i + 1600]
+    assert '"AlgoTuner"' in guard and '"algotune.sh"' in guard, (
+        "arm A's entry points lost their match; they are only ever started by this bench")
+    assert 'os.sched_getaffinity' in guard, "the guard no longer looks at affinity at all"
+    assert 'BUSY" != "0"' in src, "the refusal on a busy lane is gone"
