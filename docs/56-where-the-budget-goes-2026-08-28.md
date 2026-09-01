@@ -3029,8 +3029,10 @@ order one time in six.
 
 The pair is still worth keeping for one reason §50's 27 runs cannot supply. `remEE` and `remEE2` ran
 a BYTE-IDENTICAL 15,553-character goal card, same task, same $1.00, same verified ruler, four hours
-apart, and returned 183.6 and 101.2. That is a controlled pair, and it puts a floor of about 1.8×
-under the noise on a single configuration.
+apart, and returned 183.6 and 101.2. *Withdrawn 2026-09-01 (§80): the card was identical and the
+INSTRUMENT was not — `remEE` ran unstreamed and lost nine calls to the gateway's 300 s ceiling,
+`remEE2` ran streamed and lost none. The pair is not one configuration observed twice, and no floor
+follows from it.*
 
 ### 73.2 On `pde_heat1d` the kernel bit does not separate, and that is new
 
@@ -3120,8 +3122,8 @@ $1.0092). Both submitted a champion carrying a numba kernel.
 | `plan_step` share | 48.8 % | 69.6 % |
 
 129.75 is the highest `pde_heat1d` score in this corpus and 0.0 is the only invalid one. §73 put a
-floor of about 1.8× under the noise on a single configuration from the `remEE`/`remEE2` pair; this
-pair says the floor is wherever a run happens to land, because one of the two never produced a valid
+floor of about 1.8× under the noise from the `remEE`/`remEE2` pair — since withdrawn, §80, those two
+ran on different instruments; this pair, both streamed, says the floor is wherever a run happens to land, because one of the two never produced a valid
 solver at all. `remPde4`'s single node failed `is_solution` with max rel err 1.37e+05 — a build that
 worked and computed the wrong numbers, §50's failure mode, on its only draw.
 
@@ -3403,3 +3405,38 @@ needs the arm §78 says this corpus cannot supply.
 
 The money ceiling still has not fired: `remEE4` and `remPde6` both closed plans with `cut_steps: []`,
 the third and fourth runs to report it (§75).
+
+## 80. Three probes ran on the other instrument, and one of them is §73's controlled pair
+
+The meter records `stream` per call. Across 4,260 metered calls over 1,000 tokens:
+
+| probe | unstreamed | streamed | 504 at the ceiling | wall clock lost |
+|---|---|---|---|---|
+| remEE | 309 | 0 | **9** (2.8 %) | **45 min** |
+| accEE | 291 | 0 | 0 | — |
+| accPde | 240 | 0 | 1 (0.4 %) | 5 min |
+| remDL (abandoned) | 27 | 0 | 11 | 55 min |
+| every other probe | 0–5 | 95–327 | **0** | — |
+
+`accEE`, `accPde` and `remEE` ran before the bench profile was made to SET `LOOPLAB_LLM_STREAM`
+rather than default it (2026-08-31, §fix `${VAR:-1}` loses arguments). Without streaming the
+gateway's nginx measures the whole generation against a 300 s window, and `remEE` lost nine calls to
+it — five minutes each, forty-five minutes of wall clock that returned nothing, on a run whose budget
+is a dollar.
+
+**This breaks §73's controlled pair.** That section set `remEE` (179.6451) beside `remEE2` (102.175)
+— byte-identical 15,553-character card, same task, same $1.00, four hours apart — and concluded a
+floor of about 1.8× under the noise of a single configuration. The card was identical; the
+instrument was not. `remEE` ran unstreamed and lost 2.8 % of its calls; `remEE2` ran streamed and
+lost none. Whatever that pair measures, it is not one configuration observed twice, and the 1.8×
+floor does not follow from it.
+
+What survives §73 is the part that never depended on that pair: `accEE` 224.8846, `remEE3` 193.6729,
+`remEE4` 262.0356 and `remEE2` 102.175 span 2.6× on `edge_expansion`, and §50 had already measured
+19× across 27 runs of that task. The floor was never the load-bearing claim; it was the tidy one.
+
+**And it is one more reason §78's control arm cannot be reconstructed.** Three of the seventeen
+probes here are on a different instrument from the other fourteen, which is not visible in any
+score, any card, or any run log — only in a `stream` field on the meter rows. Nothing in the probe's
+own evidence records which instrument it ran on, and that is worth fixing before the next comparison
+is drawn: `ENVIRONMENT.txt` in each snapshot records the setting, but a probe tree does not.
