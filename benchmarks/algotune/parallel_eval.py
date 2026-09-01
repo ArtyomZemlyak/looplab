@@ -1,3 +1,16 @@
+# SOURCE OF TRUTH, AND IT HAD DRIFTED. `patch_parallel_eval.py` copies this file into the arena as
+# `AlgoTuner/utils/evaluator/looplab_parallel.py`, so this is what a rebuilt stand installs. On
+# 2026-09-01 the two had diverged by 49 lines: `apply_thread_budget` existed ONLY in the deployed
+# copy, and `_pool_init`, `prefetch_oracle` and `prefetch_results` differed. `resolve_workers` --
+# which decides the baseline cache key -- was identical, so the ruler's NAME was never at risk; what
+# was at risk is its VALUE. The missing function holds BLAS/OpenMP threads down to a worker's core
+# count, and its own docstring measures what happens without it: 893.5 ms serial, 5708.6 ms through
+# the pinned pool, 872.2 ms with the budget applied. Rebuilding a stand from the stale copy would
+# have restored a 6.5x oversubscription distortion under the same regime key, and nothing checked.
+#
+# The deployed file is the authority here for the same reason it was for `baseline_manager.py`: it
+# is what every number in this corpus was measured with. `tests/test_parallel_eval_matches_the_arena
+# .py` pins the two together so the next drift is a red test rather than a silent instrument change.
 """Evaluate a task's instances CONCURRENTLY, each on its own core.
 
 Copied into the AlgoTune checkout by `patch_parallel_eval.py` as
@@ -89,6 +102,35 @@ def resolve_workers(env: dict | None = None) -> tuple[int, int]:
 _CTX: dict = {}
 
 
+def apply_thread_budget(n_cores):
+    """Hold the BLAS/OpenMP thread count down to the number of cores this process may use.
+
+    Pinning a worker to one core does NOT reduce the thread count the runtime chose: libgomp fixed
+    it from the CPU count it saw when numpy was imported, in the unpinned parent. Every timed child
+    then runs that many threads on one core and spin-waits. Measured on this box, 24 rbf instances:
+    893.5 ms of measured time serial, 5708.6 ms through the pinned pool, 872.2 ms through the pinned
+    pool with this budget applied -- the serial number, at the pool's speed.
+
+    `os.environ` alone cannot do it, which is why upstream's own
+    `os.environ.setdefault("OMP_NUM_THREADS", "1")` in run_isolated_benchmark has no effect: the
+    variable was read at import. threadpoolctl sets it through each runtime's API, and the setting
+    survives the fork into the timed child. The env vars are set too, for any child that initialises
+    a runtime from scratch rather than inheriting ours.
+    """
+    n = str(max(1, int(n_cores)))
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ[var] = n
+    try:
+        import threadpoolctl
+
+        threadpoolctl.threadpool_limits(int(n))
+    except Exception as exc:  # noqa: BLE001 - a missing limiter must not fail the run
+        logging.getLogger(__name__).warning(
+            "looplab_parallel: thread budget not enforced in-process (%r); timings will be "
+            "inflated by oversubscription", exc)
+
+
 def _pool_init():
     """Claim one core set per worker, once. Every timed child forked later inherits the pin."""
     counter = _CTX["counter"]
@@ -100,6 +142,9 @@ def _pool_init():
         os.sched_setaffinity(0, set(plan[slot]))
     except OSError as exc:
         logging.getLogger(__name__).warning("looplab_parallel: cannot pin worker: %s", exc)
+    # The pin decides how many cores this worker has; the thread budget has to agree with it, or
+    # the worker spends its one core arbitrating between threads that cannot run.
+    apply_thread_budget(len(plan[slot]))
 
 
 def _pool_run(item):
@@ -170,8 +215,13 @@ def prefetch_results(orchestrator, dataset, task_instance, solver_func, baseline
     trace = os.environ.get("ALGOTUNE_PARALLEL_TRACE")
     t0 = _time.time()
     out = {}
-    with ctx.Pool(processes=workers, initializer=_pool_init) as pool:
-        for i, result in pool.imap_unordered(_pool_run, items, chunksize=1):
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx,
+                             initializer=_pool_init) as pool:
+        futures = [pool.submit(_pool_run, it) for it in items]
+        for fut in as_completed(futures):
+            i, result = fut.result()
             if result is not None:
                 out[i] = result
     if trace:
@@ -226,8 +276,12 @@ def prefetch_oracle(jobs, workers, cores_per_worker):
     t0 = _time.time()
     out = {}
     errors = []
-    with ctx.Pool(processes=workers, initializer=_pool_init) as pool:
-        for problem_id, result in pool.imap_unordered(_oracle_run, jobs, chunksize=1):
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx,
+                             initializer=_pool_init) as pool:
+        for _fut in as_completed([pool.submit(_oracle_run, j) for j in jobs]):
+            problem_id, result = _fut.result()
             if isinstance(result, dict) and "__looplab_error__" in result:
                 errors.append(result["__looplab_error__"])
             elif result is not None:
