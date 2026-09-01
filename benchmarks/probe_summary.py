@@ -540,8 +540,18 @@ def main(argv: list[str]) -> int:
                 print(f"  {'':16s} {'':34s} + {len(silent)} run(s) with NO run_probe call, so no "
                       f"rate: {', '.join(sorted(silent))}")
 
+    # FINISHED RUNS ONLY. "Ended on a node that was not their best" is a sentence about a run that
+    # ENDED, and a probe still working has a `last` that is only the last SO FAR -- one more node
+    # can turn a move into a tie or a tie into a move. Measured 2026-09-01: exactly one of the 33
+    # rows was live and it was a tie, so the headline p was untouched (it counts non-ties, all of
+    # them finished) -- but the denominator said "runs" about a run that had not ended, and the
+    # direction of that error is not fixed. Held-out rows are counted below rather than dropped
+    # silently.
+    multi = [s for s in seen.values() if len(s["nodes"]) >= 2]
+    live_multi = [s for s in multi
+                  if not (Path(s["probe_dir"]) / "champion_solver.py").is_file()]
     pairs = [(s["probe"], s["task"], max(s["nodes"]), s["nodes"][-1])
-             for s in seen.values() if len(s["nodes"]) >= 2]
+             for s in multi if s not in live_multi]
     if pairs:
         moved = [r for r in pairs if r[2] > r[3] * 1.001]
         zeros = [r for r in pairs if r[3] == 0]
@@ -555,6 +565,9 @@ def main(argv: list[str]) -> int:
         p_val = 0.5 ** len(moved) if moved else 1.0
         print(f"  {len(moved)} of {len(pairs)} runs ended on a node that was NOT their best "
               f"({len(pairs) - len(moved)} ties, {len(zeros)} ended on a ZERO)")
+        if live_multi:
+            print(f"  + {len(live_multi)} multi-node run(s) STILL RUNNING, held out because their "
+                  f"last node is not final: {', '.join(sorted(s['probe'] for s in live_multi))}")
         print(f"  paired sign test over the {len(moved)} non-ties: one-sided p = {p_val:.6g}"
               f" = 1/{2 ** len(moved)}")
         print("  NOTE: this is the rule's PROTECTIVE value given the nodes these runs produced.")

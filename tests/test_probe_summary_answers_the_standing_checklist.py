@@ -629,6 +629,9 @@ def test_the_champion_ledger_counts_ties_out_of_the_sign_test(tmp_path):
     _mk_probe(tmp_path, "moved2", "t1", nodes=[8.0, 4.0], costs_before=[0.1], costs_after=[0.01])
     _mk_probe(tmp_path, "tied1", "t1", nodes=[5.0, 5.0], costs_before=[0.1], costs_after=[0.01])
     _mk_probe(tmp_path, "tied2", "t1", nodes=[3.0, 3.0], costs_before=[0.1], costs_after=[0.01])
+    # FINISHED: the ledger is about runs that ENDED, so a fixture without a champion is held out.
+    for name in ("moved1", "moved2", "tied1", "tied2"):
+        (tmp_path / "model-probes" / name / "champion_solver.py").write_text("# done\n")
     out = _run(tmp_path)
     assert "2 of 4 runs ended on a node that was NOT their best" in out, out
     assert "(2 ties, 0 ended on a ZERO)" in out, out
@@ -640,6 +643,8 @@ def test_a_single_node_run_is_not_in_the_ledger_at_all(tmp_path):
     quietly pad the denominator with runs that had no second node to lose."""
     _mk_probe(tmp_path, "moved1", "t1", nodes=[10.0, 2.0], costs_before=[0.1], costs_after=[0.01])
     _mk_probe(tmp_path, "single", "t1", nodes=[7.0], costs_before=[0.1], costs_after=[0.01])
+    for name in ("moved1", "single"):
+        (tmp_path / "model-probes" / name / "champion_solver.py").write_text("# done\n")
     out = _run(tmp_path)
     assert "1 of 1 runs ended on a node that was NOT their best" in out, out
     assert "single" not in out.split("the champion rule, over")[1].split("per-probe detail")[0]
@@ -649,6 +654,7 @@ def test_a_last_node_of_zero_does_not_divide_by_zero(tmp_path):
     """Two of eighteen real runs finished by scoring 0.0, which is the largest possible gap and the
     one arithmetic that most naturally crashes a ratio column."""
     _mk_probe(tmp_path, "zeroed", "t1", nodes=[9.0, 0.0], costs_before=[0.1], costs_after=[0.01])
+    (tmp_path / "model-probes" / "zeroed" / "champion_solver.py").write_text("# done\n")
     out = _run(tmp_path)
     assert "infx" in out, out
     assert "last node scored ZERO" in out, out
@@ -659,6 +665,7 @@ def test_the_ledger_says_what_it_does_not_measure(tmp_path):
     """The protective value of the rule and the value of STATING it are different claims, and the
     p is small enough that a reader who merges them would take the card clause as proven."""
     _mk_probe(tmp_path, "moved1", "t1", nodes=[10.0, 2.0], costs_before=[0.1], costs_after=[0.01])
+    (tmp_path / "model-probes" / "moved1" / "champion_solver.py").write_text("# done\n")
     out = _run(tmp_path)
     assert "PROTECTIVE value" in out
     assert "--no-unteachable-rules" in out
@@ -996,3 +1003,39 @@ def test_a_group_of_only_running_probes_reports_no_median_at_all(tmp_path):
     block = out.split("--no-reference-affordance")[1].split("edge_expansion")[0]
     assert "reference use: n=" not in block, block
     assert "STILL RUNNING, rate so far 50.0%" in block, block
+
+
+def test_a_running_multi_node_probe_is_held_out_of_the_champion_ledger(tmp_path):
+    """"Ended on a node that was not their best" is a sentence about a run that ENDED.
+
+    A probe still working has a `last` that is only the last so far: one more node can turn a move
+    into a tie or a tie into a move. Measured 2026-09-01, exactly one of 33 ledger rows was live and
+    it happened to be a tie, so the p was untouched -- but the direction of that error is not fixed,
+    and the denominator said "runs" about a run that had not ended.
+    """
+    done = _mk_probe(tmp_path, "done", "t", nodes=[10.0, 2.0], costs_before=[0.1], costs_after=[0.01])
+    (done / "champion_solver.py").write_text("# done\n")
+    _mk_probe(tmp_path, "live", "t", nodes=[9.0, 3.0], costs_before=[0.1], costs_after=[0.01])
+    out = _run(tmp_path)
+    assert "1 of 1 runs ended on a node that was NOT their best" in out, out
+    assert "1 multi-node run(s) STILL RUNNING, held out" in out and "live" in out, out
+    assert "one-sided p = 0.5 " in out, out          # 1 non-tie, not 2
+
+
+def test_the_held_out_runs_are_NAMED_and_not_merely_counted(tmp_path):
+    """A count alone cannot be checked against the corpus; a name can. Same reason the censored
+    spend rows name their excluded probes."""
+    done = _mk_probe(tmp_path, "done", "t", nodes=[10.0, 2.0], costs_before=[0.1], costs_after=[0.01])
+    (done / "champion_solver.py").write_text("# done\n")
+    _mk_probe(tmp_path, "zzliveone", "t", nodes=[9.0, 3.0], costs_before=[0.1], costs_after=[0.01])
+    _mk_probe(tmp_path, "zzlivetwo", "t", nodes=[8.0, 4.0], costs_before=[0.1], costs_after=[0.01])
+    out = _run(tmp_path)
+    assert "zzliveone, zzlivetwo" in out, out
+
+
+def test_no_running_multi_node_probe_means_no_held_out_line(tmp_path):
+    """A line for a hold-out that did not happen teaches a reader to skim the ledger."""
+    done = _mk_probe(tmp_path, "done", "t", nodes=[10.0, 2.0], costs_before=[0.1], costs_after=[0.01])
+    (done / "champion_solver.py").write_text("# done\n")
+    out = _run(tmp_path)
+    assert "held out" not in out, out
