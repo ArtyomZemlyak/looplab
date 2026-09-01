@@ -813,3 +813,36 @@ def test_a_zero_byte_final_json_with_no_champion_says_so(tmp_path):
     (probe / "final.json").write_text("")
     out = _run(tmp_path)
     assert "champion is gone too" in out, out
+
+
+def test_a_probe_with_a_champion_is_not_called_STILL_RUNNING(tmp_path):
+    """`remEEctl2` finished at 15:56 and the summary said "STILL RUNNING final.json is ZERO BYTES".
+
+    The two halves contradict each other in one sentence: a destroyed score is a thing that already
+    happened. The label was keyed on the age of events.jsonl, which says only that something
+    happened recently -- and a probe that has extracted a champion has by definition stopped
+    producing nodes. Reading it as running is what sends an operator to wait instead of to recover.
+    """
+    probe = _mk_probe(tmp_path, "done", "edge_expansion", nodes=[10.0],
+                      costs_before=[0.5], costs_after=[0.01])
+    (probe / "final.json").write_text("")
+    (probe / "champion_solver.py").write_text("# preserved\n")
+    out = _run(tmp_path)
+    # From the UNSCORED section, not the main table: the table's first column is the probe name too,
+    # and matching there picked up a row that carries neither label. Selecting the wrong block is
+    # how a test asserts something true about a line nobody was arguing over.
+    block = out.split("probes with NO test score")[1].split("\n\n")[0]
+    line = [l for l in block.splitlines() if l.strip().startswith("done")]
+    assert line, block
+    assert "STILL RUNNING" not in line[0], line[0]
+    assert "ZERO BYTES" in line[0], line[0]
+
+
+def test_a_probe_with_no_champion_and_a_fresh_log_still_reads_as_running(tmp_path):
+    """The label must not become useless in the other direction: a live probe has no champion yet
+    and its freshness is the only signal there is."""
+    _mk_probe(tmp_path, "live", "edge_expansion", nodes=[], costs_before=[0.2], costs_after=[])
+    out = _run(tmp_path)
+    block = out.split("probes with NO test score")[1].split("\n\n")[0]
+    line = [l for l in block.splitlines() if l.strip().startswith("live")]
+    assert line and "STILL RUNNING" in line[0], block

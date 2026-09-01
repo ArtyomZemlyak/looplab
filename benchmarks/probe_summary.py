@@ -392,7 +392,15 @@ def main(argv: list[str]) -> int:
         print("\nprobes with NO test score, and why (from the probe's own logs):")
         for s in sorted(unscored, key=lambda x: x["probe"]):
             why = s["why_no_test"] or "(no stated reason in probe.log or run.log)"
-            live = " -- STILL RUNNING" if s["age_s"] is not None and s["age_s"] < 2400 else ""
+            # A FRESH EVENT LOG IS NOT A RUNNING PROBE. `remEEctl2` finished at 15:56 with its
+            # score destroyed, and this line called it "STILL RUNNING final.json is ZERO BYTES" --
+            # the two halves contradicting each other in one sentence, six minutes after the run
+            # ended. The age of events.jsonl says only that something happened recently, and a
+            # probe that has produced a champion has by definition stopped producing nodes.
+            finished = (Path(s["probe_dir"]) / "champion_solver.py").is_file()
+            live = ("" if finished
+                    else " -- STILL RUNNING" if s["age_s"] is not None and s["age_s"] < 2400
+                    else "")
             print(f"  {s['probe']:10s}{live} {why}")
             # RECOVERABLE FOR FREE, and say so with the command. A run that spent its budget and
             # reached an evaluated node has already paid for everything expensive; extraction and
