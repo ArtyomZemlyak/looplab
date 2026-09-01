@@ -516,6 +516,14 @@ def plan_step_attribution(steps, observed, shipped) -> dict:
         # a bound whose firing cannot be observed is a bound nobody can trust or tune.
         if obs.get("cutoff"):
             row["cutoff"] = str(obs["cutoff"])[:32]
+            # The two numbers that make the cut readable. Omitted when absent rather than written
+            # as null: this row is what lands in the durable span, and an always-present
+            # "cutoff_spend": null makes a step whose spend was UNKNOWABLE (no accountant) look
+            # identical to one that spent nothing.
+            if obs.get("cutoff_seconds") is not None:
+                row["cutoff_seconds"] = round(float(obs["cutoff_seconds"]), 1)
+            if obs.get("cutoff_detail"):
+                row["cutoff_spend"] = str(obs["cutoff_detail"])[:120]
             cut.append(index)
         rows.append(row)
     return {"total": len(steps), "steps": rows, "noop_steps": noop,
@@ -981,10 +989,20 @@ class LLMRepoDeveloper:
         """
         try:
             kind = str((payload or {}).get("kind") or "").strip()
+            detail = str((payload or {}).get("detail") or "").strip()
+            seconds = (payload or {}).get("seconds")
         except Exception:  # noqa: BLE001 — an observer may not break the salvage path
             return
         if kind:
             self.last_budget_exhausted = kind[:32]
+            # THE NUMBERS TOO, not only the word. Twelve cut sessions across 30 probes recorded
+            # nothing but "time", so how close the money ceiling came could not be read off the
+            # corpus at all -- and a bound whose distance from firing is unobservable can only be
+            # argued about. Kept on a SECOND attribute rather than folded into the first: the
+            # `budget_exhausted` column is a durable vocabulary other code branches on
+            # (see CLAIM[budget-exhausted-vocabulary] above), and widening it to carry prose would
+            # break every reader that compares it to a kind.
+            self.last_budget_facts = {"kind": kind[:32], "seconds": seconds, "detail": detail[:200]}
 
     def _session_opts(self, *, max_turns=None, time_budget=None, cost_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
@@ -2181,6 +2199,7 @@ class LLMRepoDeveloper:
                         # Cleared per step, not per plan: `last_budget_exhausted` is sticky on the
                         # developer, so without this a single cut step would mark every later one.
                         self.last_budget_exhausted = ""
+                        self.last_budget_facts = {}
                         with tracing.operation("plan_step", index=i, total=len(steps),
                                                title=str(step.get("title") or "")[:120]):
                             note = self._run_step(idea, step, i, len(steps), write,
@@ -2195,6 +2214,10 @@ class LLMRepoDeveloper:
                                             if before.get(p) != body),
                             "deleted": sorted(set(write.deleted) - before_deleted),
                             "cutoff": step_cutoff,
+                            # What the cut step had spent and how long it ran. Empty for a step
+                            # that finished on its own terms, which is most of them.
+                            "cutoff_seconds": (getattr(self, "last_budget_facts", {}) or {}).get("seconds"),
+                            "cutoff_detail": (getattr(self, "last_budget_facts", {}) or {}).get("detail") or "",
                             "error": note})
                         if note:
                             step_errors.append(note)

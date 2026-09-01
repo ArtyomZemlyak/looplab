@@ -601,6 +601,21 @@ def _session_spend(client, at_start: float | None) -> float | None:
     return max(0.0, now - at_start)
 
 
+def _spend_detail(client, at_start, ceiling: float) -> str:
+    """"$X of $Y for this session", or "" when the spend cannot be known.
+
+    Shared by the wall-clock and money branches so a cut session reports the SAME pair either way:
+    what it had spent and what it was allowed. The money branch always had this sentence; the wall
+    branch is the one that actually fires, and it did not.
+    """
+    sp = _session_spend(client, at_start)
+    if sp is None:
+        return ""
+    if ceiling:
+        return f"${sp:.4f} of ${ceiling:.4f} for this session"
+    return f"${sp:.4f} for this session, no money ceiling set"
+
+
 def _note_budget(on_budget, kind: str, *, turns, seconds, detail: str = "") -> None:
     """Report that the loop stopped WITHOUT a model-chosen emit, and which of the five ways it was.
 
@@ -835,7 +850,14 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # right — but presenting a cut-short investigation as a finished one is how "the
             # assistant hangs around 40 tool uses and then something odd comes back" reads to an
             # operator who was never told the turn ran out of wall clock.
-            _note_budget(on_budget, "time", turns=turn_idx, seconds=time.monotonic() - started)
+            # AND HOW MUCH MONEY IT HAD SPENT BY THEN. Measured 2026-09-01 over 30 probes: twelve
+            # sessions were cut, ALL of them by this wall and none by the money ceiling below --
+            # and how far the money ceiling was from firing could not be recovered from the corpus,
+            # because the only thing recorded was the word "time". A ceiling whose distance from
+            # firing is unobservable cannot be tuned, defended or removed; it can only be asserted
+            # about, which is what happened for several weeks.
+            _note_budget(on_budget, "time", turns=turn_idx, seconds=time.monotonic() - started,
+                         detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
             break                       # out of wall-clock budget -> salvage an emit below
         if cost_budget_usd:
             _sp = _session_spend(client, _spend_at_start)
@@ -846,7 +868,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # answer as the model's considered one.
                 _note_budget(on_budget, "cost", turns=turn_idx,
                              seconds=time.monotonic() - started,
-                             detail=f"${_sp:.4f} of ${cost_budget_usd:.4f} for this session")
+                             detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
                 break                   # out of money for THIS session -> salvage an emit below
         _compact_in_place(messages, context_budget_chars, auto_summary, summarize)
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A

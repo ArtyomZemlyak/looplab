@@ -3655,3 +3655,46 @@ started this afternoon.
 
 The honest reading of the two together: the rule is demonstrably load-bearing, which raises the
 prior that stating it matters, and lowers nothing about the cost of finding out.
+
+## 85. Twelve cut sessions, all by the clock, and no way to tell how close the money came
+
+`_step_cost_ceiling` installs a money bound on every plan-step session: at least
+`max(0.5 * (limit - spent), 0.2 * limit)`, so at least $0.20 of a $1.00 probe. §75 and §82 record
+that it has never fired and that the 1200 s wall fires instead. That is now measured rather than
+believed — and so is the reason the claim could not be checked.
+
+Across all 30 probes, `"cutoff"` appears **12 times, every one of them `"time"`**, in six runs
+(`remPde10` four, `remDL4` two, `remDL6` two, `remDL8` two, `remEE7` one, `remPde5` one). Not one
+`"cost"`. Every finished run additionally ends on the RUN-level `budget_exhausted`, which is a
+different bound from the per-session one and fires 20 times out of 20.
+
+The obvious next question is how close the money ceiling came, and the corpus cannot answer it. The
+recorded row is:
+
+    {"step": 4, "cutoff": "time"}
+
+No seconds, no spend, and no session window from which the spend could be reconstructed — I tried,
+and every candidate reconstruction matched generation spans rather than tool-loop sessions, which is
+how `remDL4` appeared to have a 1820 s "step" that spent $0.07 (it was one long generation, not a
+step). So "the wall wins the race" was compatible with two opposite repairs — a ceiling set so high
+it is decorative, or one about to bite that merely lost — and nothing in eleven days of probes could
+distinguish them.
+
+**Fixed at the source.** `tool_loop.py`'s wall branch now reports the same `"$X of $Y for this
+session"` pair the money branch always carried; the money branch is the one that never runs, so the
+sentence lived only where it could not be read. `_spend_detail` is shared by both, returns `""`
+when there is no accountant (never `$0.0000`, which is a real reading), and says "no money ceiling
+set" for the sessions that have none — which is every session except the plan step, and those hit
+the wall too. `LLMRepoDeveloper` keeps `seconds` and the spend on a second attribute rather than
+widening `last_budget_exhausted`, which other code compares against a KIND
+(CLAIM[budget-exhausted-vocabulary]), and the plan-step row carries both.
+
+**The test hole, found by mutation and worth more than the fix.** The first version of
+`test_the_wall_says_what_it_spent.py` exercised `_spend_detail` and `_note_budget` directly and
+stayed GREEN under the exact defect: replacing the wall branch's `detail=` argument with `""` broke
+nothing, because nothing asserted the wall branch calls the helper at all. Unit tests on both ends
+of a wire do not test the wire. The file now drives `drive_tool_loop` with a 0.05 s budget and an
+accountant that ticks, and the mutation reddens two tests.
+
+The number this buys is not available yet — it arrives with the next cut session — but from then on
+"the money ceiling never fires" stops being a sentence and becomes a column.
