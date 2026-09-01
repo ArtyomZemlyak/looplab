@@ -1,0 +1,121 @@
+"""The sweep reconciles money every time, by hand, and the hand agreed for the wrong reason.
+
+On 2026-09-01 23:32, with every probe stopped, spans summed to $43.587947 against a counter of
+$43.588034 -- sixty-nine calls apart. Earlier sweeps had "matched to the microcent"; they matched
+because probes were mid-flight and their unrecorded spend was larger than $0.000086 in the other
+direction. The agreement was real and the precision was luck.
+
+The gap is entirely nameable: one preflight call per probe (10 prompt tokens, 2 completion, about
+$0.000002, never a `generation` span) plus the calls the gateway killed during the unstreamed era,
+which were billed nothing because they returned nothing. What matters to an operator is the RESIDUE
+after those are removed, and that is what the exit code is about.
+"""
+from __future__ import annotations
+
+import json
+import socket
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+TOOL = REPO / "benchmarks" / "check_money.py"
+
+
+def _serve(payload: dict) -> tuple[int, threading.Thread, socket.socket]:
+    """A one-shot /healthz that answers in TWO writes, so a single recv() cannot see the body."""
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def run():
+        try:
+            conn, _ = srv.accept()
+            conn.recv(4096)
+            body = json.dumps(payload).encode()
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body))
+            import time
+            time.sleep(0.05)                      # the split that broke `recv(600)` in the sweep
+            conn.sendall(body)
+            conn.close()
+        except OSError:
+            pass
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return port, t, srv
+
+
+def _bench(tmp_path: Path, *, probes: dict, meter_rows: list) -> Path:
+    root = tmp_path / "bench"
+    for probe, gens in probes.items():
+        run = root / "model-probes" / probe / "runs" / "t" / "run"
+        run.mkdir(parents=True)
+        rows = [{"name": "generation", "start": 2000.0 + i, "duration_s": 1.0,
+                 "attributes": {"cost": c}} for i, c in enumerate(gens)]
+        (run / "spans.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    md = root / "meter"
+    md.mkdir(parents=True, exist_ok=True)
+    (md / "meter.jsonl").write_text("".join(json.dumps(r) + "\n" for r in meter_rows))
+    return root
+
+
+def _run(root: Path, port: int, *extra) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(TOOL), "--bench-root", str(root), "--port", str(port),
+         "--since", "0", *extra],
+        capture_output=True, text=True, timeout=300)
+
+
+def test_it_names_the_preflight_and_leaves_no_residue(tmp_path):
+    """One extra metered call per probe, costing almost nothing, is the whole ordinary gap."""
+    probes = {"p1": [0.5, 0.5], "p2": [1.0]}
+    rows = ([{"ts": "3000", "arm": "p1", "cost": 0.5, "status": "200"} for _ in range(2)]
+            + [{"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200"}]
+            + [{"ts": "3000", "arm": "p2", "cost": 1.0, "status": "200"},
+               {"ts": "3000", "arm": "p2", "cost": 0.00000196, "status": "200"}])
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 2.00000392, "calls": 5})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "2 preflight call(s)" in r.stdout, r.stdout + r.stderr
+    assert "RESIDUE $+0.000000" in r.stdout, r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_an_unexplained_residue_fails(tmp_path):
+    """A leak is the only thing here worth waking someone for, so it is the only thing that exits
+    non-zero. Everything else is named and tolerated."""
+    probes = {"p1": [1.0]}
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200"}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.75, "calls": 1})       # $0.75 nobody can account for
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNEXPLAINED" in r.stdout, r.stdout
+
+
+def test_it_reads_a_body_that_arrives_after_the_headers(tmp_path):
+    """The prescribed `recv(600)` returned headers with no body under load on 2026-09-01 and
+    `json.loads` died on the empty string. The stub above splits the response on purpose."""
+    root = _bench(tmp_path, probes={"p1": [1.0]},
+                  meter_rows=[{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200"}])
+    port, _, srv = _serve({"cost_usd": 1.0, "calls": 1})
+    r = _run(root, port)
+    srv.close()
+    assert "meter   $1.000000" in r.stdout, r.stdout + r.stderr
+
+
+def test_no_meter_is_an_error_and_not_a_clean_zero(tmp_path):
+    """"Nothing to reconcile" and "reconciled" must not share an exit code -- the same rule the
+    runs report and the pytest reader already follow."""
+    root = _bench(tmp_path, probes={}, meter_rows=[])
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--bench-root", str(root), "--port", "9"],
+        capture_output=True, text=True, timeout=300)        # no --since, nothing on :9
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "no meter" in r.stderr, r.stderr
