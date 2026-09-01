@@ -506,6 +506,22 @@ def main(argv: list[str]) -> int:
             if built:
                 print(f"  {'':16s} {'':34s} to first build: n={len(built):2d} "
                       f"median {statistics.median(built):5.1f}m  range {built[0]:.0f}-{built[-1]:.0f}m")
+            # REFERENCE USE, by card, with §69.1's band beside it. This is the PRE-REGISTERED
+            # outcome of the `--no-reference-affordance` arm launched 2026-09-01, and it is printed
+            # BEFORE that arm has any data on purpose: §84's lesson was that a figure typed by hand
+            # after the fact is quoted stale, and the cheapest moment to make it a command is while
+            # it is still empty. Runs with no `run_probe` call at all are excluded and counted --
+            # a probe that never probed has no rate, and averaging it in as 0 % would push any arm
+            # toward the floor for a reason unrelated to the clause.
+            rates = sorted(g["ref_pct"] for g in group if g.get("ref_pct") is not None)
+            silent = [g["probe"] for g in group if g.get("ref_pct") is None]
+            if rates:
+                print(f"  {'':16s} {'':34s} reference use: n={len(rates):2d} "
+                      f"median {statistics.median(rates):5.1f}%  range {rates[0]:.1f}-{rates[-1]:.1f}%"
+                      f"   (§69.1 pre-clause band 4.9-8.3 %)")
+            if silent:
+                print(f"  {'':16s} {'':34s} + {len(silent)} run(s) with NO run_probe call, so no "
+                      f"rate: {', '.join(sorted(silent))}")
 
     pairs = [(s["probe"], s["task"], max(s["nodes"]), s["nodes"][-1])
              for s in seen.values() if len(s["nodes"]) >= 2]

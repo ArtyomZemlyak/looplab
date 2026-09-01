@@ -874,3 +874,77 @@ def test_the_legend_is_absent_when_every_probe_has_finished(tmp_path):
     (tmp_path / "model-probes" / "done" / "champion_solver.py").write_text("# ok\n")
     out = _run(tmp_path)
     assert "STILL ACCUMULATING" not in out, out
+
+
+def _probe_span(root, name, task, *, run_probes):
+    """Append `run_probe` tool spans to an existing probe; each entry says whether it imports."""
+    run = root / "model-probes" / name / "runs" / task / "run"
+    rows = [json.loads(l) for l in open(run / "spans.jsonl")]
+    t = max(float(r.get("start") or 0) for r in rows) + 1
+    for i, imports in enumerate(run_probes):
+        attrs = {"tool": "run_probe",
+                 "args": {"code": "from reference_%s import solve" % task if imports else "print(1)"}}
+        rows.append({"name": "tool", "start": t + i, "duration_s": 0.1, "attributes": attrs})
+    (run / "spans.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+def test_reference_use_is_reported_by_card_with_the_band(tmp_path):
+    """§78's pre-registered outcome, made a command BEFORE its arm has data.
+
+    The `--no-reference-affordance` arm launched 2026-09-01 and its acceptance is the share of
+    `run_probe` calls importing the reference, against §69.1's 4.9-8.3 % band. §84's lesson was that
+    a figure typed by hand after the fact gets quoted stale; the cheapest moment to make it a command
+    is while it is still empty.
+    """
+    _mk_probe(tmp_path, "a", "edge_expansion", nodes=[5.0], costs_before=[0.2], costs_after=[0.1])
+    _instrument(tmp_path, "a", args="--no-reference-affordance")
+    _probe_span(tmp_path, "a", "edge_expansion", run_probes=[True, False, False, False])  # 25 %
+    _mk_probe(tmp_path, "b", "edge_expansion", nodes=[5.0], costs_before=[0.2], costs_after=[0.1])
+    _instrument(tmp_path, "b")
+    _probe_span(tmp_path, "b", "edge_expansion", run_probes=[True, True, True, True])     # 100 %
+    out = _run(tmp_path)
+    # ON THE reference-use LINES THEMSELVES, not "somewhere in the block". The block was extracted
+    # as `split("spend before the FIRST")[1].split("the champion rule")[0]`, and these fixtures have
+    # one node each so the champion ledger never prints -- which made the second split a no-op and
+    # handed the assertion the WHOLE remaining output, per-probe details included. Those carry the
+    # same band string, so deleting the band from the by-card line left this green. Found by
+    # mutation, and it is the second time today a block was selected by a terminator that was not
+    # there.
+    lines = [l for l in out.splitlines() if "reference use:" in l]
+    assert len(lines) == 2, out
+    assert any("median  25.0%" in l for l in lines), lines
+    assert any("median 100.0%" in l for l in lines), lines
+    for l in lines:
+        assert "4.9-8.3 %" in l, ("the by-card rate is printed without the band it is judged "
+                                  "against:\n" + l)
+
+
+def test_a_run_that_never_probed_is_named_and_kept_OUT_of_the_rate(tmp_path):
+    """A probe with no `run_probe` call has no rate. Averaging it in as 0 % would drag whichever arm
+    contains it toward the floor for a reason that has nothing to do with the clause -- and the
+    control arm is precisely where a run that never probes is most likely."""
+    _mk_probe(tmp_path, "used", "edge_expansion", nodes=[5.0], costs_before=[0.2], costs_after=[0.1])
+    _instrument(tmp_path, "used", args="--no-reference-affordance")
+    _probe_span(tmp_path, "used", "edge_expansion", run_probes=[True, False])             # 50 %
+    _mk_probe(tmp_path, "quiet", "edge_expansion", nodes=[5.0], costs_before=[0.2], costs_after=[0.1])
+    _instrument(tmp_path, "quiet", args="--no-reference-affordance")                      # no spans
+    _mk_probe(tmp_path, "other", "edge_expansion", nodes=[5.0], costs_before=[0.2], costs_after=[0.1])
+    _instrument(tmp_path, "other")
+    out = _run(tmp_path)
+    block = out.split("spend before the FIRST")[1].split("the champion rule")[0]
+    assert "median  50.0%" in block, block          # not 25 %, which is what averaging a 0 % gives
+    assert "NO run_probe call" in block and "quiet" in block, block
+
+
+def test_a_card_group_with_no_rates_at_all_prints_no_rate_line(tmp_path):
+    """An arm that has not probed yet must show nothing rather than a 0 % that reads as a result --
+    which is the state the --no-reference-affordance row was in on the day this was written."""
+    _mk_probe(tmp_path, "fresh", "edge_expansion", nodes=[], costs_before=[0.05], costs_after=[])
+    _instrument(tmp_path, "fresh", args="--no-reference-affordance")
+    _mk_probe(tmp_path, "other", "edge_expansion", nodes=[5.0], costs_before=[0.2], costs_after=[0.1])
+    _instrument(tmp_path, "other")
+    _probe_span(tmp_path, "other", "edge_expansion", run_probes=[True])
+    out = _run(tmp_path)
+    fresh_rows = out.split("--no-reference-affordance")[1].split("edge_expansion")[0]
+    assert "reference use:" not in fresh_rows, fresh_rows
+    assert "NO run_probe call" in fresh_rows and "fresh" in fresh_rows, fresh_rows
