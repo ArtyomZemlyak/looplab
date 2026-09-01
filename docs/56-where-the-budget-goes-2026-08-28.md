@@ -4244,3 +4244,32 @@ The score remains untouched: control n = 4 median 184.41 against shipped 209.28,
 
 Four of six. `remEEref5`, `remEEref6`, `remEEref7` are in flight and `remEEref8` launched on the lane
 remEEref4 freed.
+
+### 93.4 Five finished runs, median 0.0 %, and this p is walking the other way
+
+`remEEref5` finished at 153.8874 (38-line kernel, 4 nodes, 33 `eval_train`, 0 % spent after its last
+node). Finished-only, the arm's pre-registered outcome:
+
+| run | reference use | `run_probe` calls |
+|---|---|---|
+| remEEref1 | 10.0 % | 20 |
+| remEEref2 | 3.3 % | 30 |
+| remEEref3 | 0.0 % | 10 |
+| remEEref4 | 0.0 % | 18 |
+| remEEref5 | 0.0 % | 20 |
+
+Median **0.0 %** against the shipped card's 8.4 %. Exact one-sided **p = 0.0140**, floor 0.00033.
+**Three of the five imported the reference in none of their probes.**
+
+The sequence over completed runs: 0.1119 (n = 3), 0.0430 (n = 4), 0.0140 (n = 5). **That is
+monotone, and it is the first thing in this document that has been.** §87's dollars walked
+0.0303 → 0.0070 → 0.0276, its minutes 0.0040 → 0.0492; §92's score walked
+0.0804 → 0.0529 → 0.0589 → 0.1349 → 0.1185. Two arms wandered and died; this one is tightening in
+one direction with each completed run, which is what a real effect does and what neither of the
+others did.
+
+It is still n = 5 against §83's floor of six, and `remEEref6`–`remEEref9` are in flight, so the floor
+arrives on its own. The claim to make at six, if it holds, is narrow: the clause changes whether the
+model treats the reference as something to QUERY, and nothing else visible. The score says so —
+control n = 5 median 163.24 against shipped 209.28, p = 0.2970, no effect, exactly as this arm
+predicts.
