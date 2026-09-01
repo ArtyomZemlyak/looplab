@@ -20,6 +20,7 @@ had produced in `AlgoTune/AlgoTuner/utils/evaluator/baseline_manager.py`.
      same hundred instances, waiting for the next run at workers <= 1 to pick up.
 """
 import ast
+import subprocess
 import sys
 import pathlib
 import textwrap
@@ -129,3 +130,96 @@ def test_a_pointed_at_cache_is_still_written(tmp_path, monkeypatch, caplog):
     )
     import json
     assert json.loads(written.read_text()) == {"1": 2.0, "2": 3.0}
+
+
+# ------------------------------------------- a marker is not currency: stale patches must be seen
+#
+# Measured 2026-09-01: the write gate added on 2026-08-31 -- "a run without
+# ALGOTUNE_BASELINE_CACHE_DIR may not mint a ruler" -- lives in this generator and NOT in the
+# deployed arena. The deployed file already carried the marker, so every re-run since printed
+# "already patched (idempotent no-op)" and delivered nothing. The repair never reached the machine
+# it was written for and nothing said so. There is no `.orig` backup on this box either, so
+# re-deriving from pristine was not available.
+
+
+def _patched_copy(tmp_path, *, drop_gate=False):
+    """A copy of the arena's deployed file, optionally with the write gate removed."""
+    import shutil
+    root = tmp_path / "AlgoTune"
+    (root / "AlgoTuner" / "utils" / "evaluator").mkdir(parents=True)
+    src = DEPLOYED
+    dst = root / "AlgoTuner" / "utils" / "evaluator" / "baseline_manager.py"
+    shutil.copy2(src, dst)
+    if drop_gate:
+        body = dst.read_text()
+        i = body.find("if _ll_key and not os.environ.get('ALGOTUNE_BASELINE_CACHE_DIR')")
+        if i >= 0:
+            j = body.index("if _ll_key:", i)
+            dst.write_text(body[:i] + body[j:])
+    return root, dst
+
+
+def _run_patcher(root, cache):
+    r = subprocess.run(
+        [sys.executable, str(REPO / "benchmarks" / "algotune" / "patch_baseline_cache.py"),
+         "--algotune-root", str(root), "--cache-dir", str(cache)],
+        capture_output=True, text=True, timeout=600)
+    return r
+
+
+def test_a_patched_but_stale_file_is_reported_and_repaired(tmp_path):
+    root, dst = _patched_copy(tmp_path, drop_gate=True)
+    assert "LOOPLAB baseline cache NOT WRITTEN" not in dst.read_text(), "premise: gate absent"
+
+    r = _run_patcher(root, tmp_path / "cache")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "STALE" in r.stdout, (
+        "a patched-but-out-of-date file was reported as fine:\n" + r.stdout + r.stderr
+    )
+    assert "LOOPLAB baseline cache NOT WRITTEN" in dst.read_text(), (
+        "it noticed the staleness and still delivered nothing"
+    )
+    import ast
+    ast.parse(dst.read_text())
+
+
+def test_a_current_file_is_left_alone(tmp_path):
+    """Brought current FIRST, deliberately: the file deployed on this box is itself stale.
+
+    Copying it and asserting "current" was the first version of this test, and it failed for the
+    right reason -- the arena is missing the write gate, which is the whole defect. A premise has to
+    be established, not assumed.
+    """
+    root, dst = _patched_copy(tmp_path)
+    first = _run_patcher(root, tmp_path / "cache")
+    assert first.returncode == 0, first.stdout + first.stderr
+
+    before = dst.read_text()
+    r = _run_patcher(root, tmp_path / "cache")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "already patched and current" in r.stdout, r.stdout
+    assert dst.read_text() == before, "a current file was rewritten"
+
+
+def test_the_currency_check_names_every_fragment_it_requires(tmp_path):
+    """A check that only looks for one fragment goes stale the same way the marker did."""
+    sys.path.insert(0, str(REPO / "benchmarks" / "algotune"))
+    try:
+        import patch_baseline_cache as pbc
+    finally:
+        sys.path.pop(0)
+    names = [n for n, _ in pbc._REQUIRED_FRAGMENTS]
+    for expected in ("env-driven cache dir", "lane regime key", "worker regime key", "write gate"):
+        assert expected in names, f"{expected!r} is not among the fragments checked: {names}"
+
+
+def test_the_upgrade_is_written_atomically(tmp_path):
+    """An eval subprocess may import this module at any moment; a half-written file is a crash."""
+    sys.path.insert(0, str(REPO / "benchmarks" / "algotune"))
+    try:
+        import patch_baseline_cache as pbc
+    finally:
+        sys.path.pop(0)
+    import inspect
+    src = inspect.getsource(pbc._atomic_write)
+    assert "os.replace" in src, "the upgrade writes in place rather than renaming into position"

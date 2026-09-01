@@ -44,6 +44,7 @@ Idempotent: re-running is a no-op, and ``--revert`` restores the ``.orig`` backu
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 from pathlib import Path
 
@@ -196,6 +197,47 @@ WRITE_PATCH = '''                    self._cache[subset] = baseline_times
                     logging.info(f"Successfully generated all {actual_count} baseline times")'''
 
 
+# What a CURRENT deployment must contain. Each is a fragment of the emitted patch, chosen to be
+# unique and stable; a deployed file missing any of them is patched but stale.
+_REQUIRED_FRAGMENTS = [
+    ("env-driven cache dir", "os.environ.get(\n            'ALGOTUNE_BASELINE_CACHE_DIR'"),
+    ("lane regime key", 'f"__lane{_ll_lane}r3"'),
+    ("worker regime key", 'f"__w{_ll_w}x{_ll_c}r3"'),
+    ("write gate", "LOOPLAB baseline cache NOT WRITTEN"),
+]
+
+# The write gate, anchored on the PATCHED text rather than on upstream's, because upstream's anchor
+# is consumed once the file is patched and no pristine copy survives on this box.
+_GATE_ANCHOR = """                    if _ll_key:
+                        try:
+                            import json as _ll_json2, os as _ll_os2"""
+_GATE = """                    if _ll_key and not os.environ.get('ALGOTUNE_BASELINE_CACHE_DIR'):
+                        logging.warning(
+                            "LOOPLAB baseline cache NOT WRITTEN: no ALGOTUNE_BASELINE_CACHE_DIR, "
+                            "so this run may not mint a ruler in %s", _ll_cache_dir)
+                        _ll_key = None
+                    if _ll_key:
+                        try:
+                            import json as _ll_json2, os as _ll_os2"""
+
+
+def _upgrade_in_place(source: str):
+    """Deliver missing fragments to an already-patched file. Returns (text, list-of-applied)."""
+    applied = []
+    out = source
+    if "LOOPLAB baseline cache NOT WRITTEN" not in out and _GATE_ANCHOR in out:
+        out = out.replace(_GATE_ANCHOR, _GATE, 1)
+        applied.append("write gate")
+    return out, applied
+
+
+def _atomic_write(target: Path, text: str) -> None:
+    """Rename into place: an eval subprocess may import this module at any moment."""
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, target)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -222,7 +264,28 @@ def main() -> int:
 
     source = target.read_text(encoding="utf-8")
     if MARKER in source:
-        print("already patched (idempotent no-op)")
+        # IDEMPOTENCE BY MARKER MEANS "ANY PATCHED FILE IS UP TO DATE", WHICH STOPS BEING TRUE THE
+        # MOMENT THIS FILE CHANGES. Measured 2026-09-01: the write gate added on 2026-08-31 -- the
+        # rule that a run without ALGOTUNE_BASELINE_CACHE_DIR may not mint a ruler -- lives in this
+        # generator and NOT in the deployed arena, because the deployed file already carried the
+        # marker and every re-run since has printed "already patched" and done nothing. The repair
+        # never reached the machine it was written for, and nothing said so. There is also no `.orig`
+        # backup on this box, so re-deriving from pristine is not available either.
+        #
+        # So: check what is actually deployed against what this generator would emit, fragment by
+        # fragment, and deliver whatever is missing rather than assuming presence means currency.
+        missing = [name for name, frag in _REQUIRED_FRAGMENTS if frag not in source]
+        if not missing:
+            print("already patched and current")
+            return 0
+        print(f"patched but STALE -- missing: {', '.join(missing)}")
+        upgraded, applied = _upgrade_in_place(source)
+        if not applied:
+            print("  could not upgrade in place; the deployed shape does not carry the anchors this")
+            print("  generator knows. Revert from a pristine copy and re-run, or re-derive.")
+            return 2
+        _atomic_write(target, upgraded)
+        print(f"  delivered: {', '.join(applied)}")
         return 0
     if ANCHOR not in source or WRITE_ANCHOR not in source:
         raise SystemExit("upstream baseline_manager.py has changed shape; re-derive the anchors "
