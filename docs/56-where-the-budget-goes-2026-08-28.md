@@ -3835,3 +3835,28 @@ when a run starts building and leave the score untouched; the control arm has pr
 at all yet. What can be said today is narrow and worth saying plainly: removing those two clauses
 delays the first build, from a median of 21.5 minutes to 50. Whether that costs anything is the
 question the arm is still running to answer.
+
+### 87.2 The censoring resolved, and it did not bite
+
+§87 reported the dollars figure at n = 2 and named the reason it might be worthless: the statistic
+can only be computed for a run that reached a first node, so an arm that evaluates LATE OR NEVER
+loses its worst members to the exclusion rather than to the far end of the range. `remEEctl3` and
+`remEEctl4` were the two excluded runs.
+
+Both have now evaluated, and the reading got stronger rather than weaker:
+
+| arm | n | median | sorted |
+|---|---|---|---|
+| shipped card | 10 | $0.3119 | .2440 .2442 .2621 .2764 .3055 .3184 .3273 .3291 .3655 .4771 |
+| `--no-unteachable-rules` | 4 | $0.4127 | .3659 .3730 .4524 .5421 |
+
+Exact one-sided p = **0.00699**, from 0.0303 at n = 2. The two arrivals landed at $0.3659 and
+$0.4524 — one below the shipped maximum, both above the shipped median. The ranges overlap; the
+separation is not clean and never was.
+
+The caveat was worth writing and it did not come true. That is the outcome to record precisely,
+because the opposite outcome is the one that would have been quietly skipped: had those two runs
+come in low and killed the finding, a reader of §87 alone would have had no way to know the number
+had been provisional. Both metrics now stand at n = 4 on the same construct — $0.4127 against
+$0.3119 (p = 0.00699) and 50.0 m against 21.5 m (p = 0.0040) — and neither is a score. The control
+arm has still produced no TEST number at all.
