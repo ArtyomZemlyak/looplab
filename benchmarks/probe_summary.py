@@ -458,6 +458,16 @@ def main(argv: list[str]) -> int:
                 # identical here, and both would otherwise leave the arm looking thriftier.
                 print(f"  {'':16s} {'':34s} + {len(never)} run(s) with NO node yet, excluded "
                       f"and censoring this row: {', '.join(sorted(never))}")
+            # AND THE SAME QUANTITY IN MINUTES. Time to the first BUILD step is the other unit
+            # "measure early" comes in, and it is less censored than the dollars: a run that has
+            # started building has a number even before it evaluates anything. NOT an independent
+            # confirmation of the row above — one construct, two units — so it is printed beside
+            # it rather than under a second heading.
+            built = sorted(g["to_build_min"] for g in group
+                           if isinstance(g.get("to_build_min"), (int, float)))
+            if built:
+                print(f"  {'':16s} {'':34s} to first build: n={len(built):2d} "
+                      f"median {statistics.median(built):5.1f}m  range {built[0]:.0f}-{built[-1]:.0f}m")
 
     pairs = [(s["probe"], s["task"], max(s["nodes"]), s["nodes"][-1])
              for s in seen.values() if len(s["nodes"]) >= 2]

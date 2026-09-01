@@ -3808,3 +3808,30 @@ produce runs that evaluate late *or never* — and "never" leaves this table rat
 the far end of it. `remEEctl3` and `remEEctl4` have no first node yet; whichever way they resolve,
 the censoring has to be handled before this number means what it appears to mean. The fix is to
 report time-to-first-node with the non-evaluators kept in at their run's total, not to add runs.
+
+### 87.1 The same quantity in minutes, at n = 4, and stronger
+
+All four control probes have now reached a build step, so the other unit of "measure early" is
+readable and — unlike the dollars — barely censored: a run that has started building has a number
+before it evaluates anything.
+
+Time from run start to the first `plan_step`, `edge_expansion`:
+
+| arm | n | median | sorted |
+|---|---|---|---|
+| shipped card | 10 | 21.5 m | 14, 18, 20, 21, 21, 22, 24, 29, 30, 49 |
+| `--no-unteachable-rules` | 4 | 50.0 m | 38, 46, 54, 66 |
+
+Exact one-sided rank-sum p = **0.0040**, floor 0.0010 at n = 4 against n = 10. Not clean separation:
+`remEE9` took 49 m on the shipped card, inside the control range.
+
+**This is not a second confirmation of §87.** One construct, two units, measured on overlapping runs
+— reading p = 0.0303 and p = 0.0040 as independent evidence would be wrong arithmetic about the same
+observation. It is the better-measured of the two, because it covers 4 of 4 control runs rather than
+2 of 4, and both are printed on the same row of `probe_summary.py` for exactly that reason.
+
+**And it is a PROCESS metric, not the outcome.** §83 sized n = 6 for the SCORE. A clause can move
+when a run starts building and leave the score untouched; the control arm has produced no TEST score
+at all yet. What can be said today is narrow and worth saying plainly: removing those two clauses
+delays the first build, from a median of 21.5 minutes to 50. Whether that costs anything is the
+question the arm is still running to answer.

@@ -746,3 +746,41 @@ def test_before_usd_is_absolute_and_does_not_move_as_the_run_continues(tmp_path)
         "the same $0.20 before the first node must read the same for a finished run and a young "
         "one; it does not:\n" + block
     )
+
+
+def test_time_to_first_build_is_reported_beside_the_dollars(tmp_path):
+    """The same "measure early" quantity in minutes, and LESS censored than the dollars.
+
+    A run that has started building has a build time even if it never evaluates anything, so the
+    arm that fails to evaluate still appears here instead of vanishing. Printed under the same row,
+    not as a second heading: one construct in two units is not two confirmations, and separating
+    them invites reading two p-values as independent.
+    """
+    def _with_build(name, args, minutes):
+        probe = _mk_probe(tmp_path, name, "edge_expansion", nodes=[10.0],
+                          costs_before=[0.5], costs_after=[0.01])
+        _instrument(tmp_path, name, args=args)
+        run = probe / "runs" / "edge_expansion" / "run"
+        spans = [json.loads(l) for l in open(run / "spans.jsonl")]
+        t0 = min(float(x["start"]) for x in spans)
+        spans.append({"name": "generation", "start": t0 + minutes * 60, "duration_s": 1.0,
+                      "attributes": {"cost": 0.01, "phase": "plan_step"}})
+        (run / "spans.jsonl").write_text("".join(json.dumps(x) + "\n" for x in spans))
+
+    _with_build("ctl1", "--no-unteachable-rules", 50)
+    _with_build("shipped1", "", 20)
+    out = _run(tmp_path)
+    block = out.split("spend before the FIRST")[1].split("the champion rule")[0]
+    assert block.count("to first build:") == 2, block
+    assert "median  50.0m" in block and "median  20.0m" in block, block
+    # minutes, rounded — an unrounded float here is how "range 47.02592163880666m" shipped once
+    # Only the BUILD rows: the dollar rows above carry four decimals on purpose, and a regex loose
+    # enough to catch them reported an unrounded-minutes failure against money.
+    import re
+    for line in block.splitlines():
+        if "to first build:" not in line:
+            continue
+        m = re.search(r"range (\S+?)-(\S+?)m", line)
+        assert m, line
+        for v in m.groups():
+            assert "." not in v, f"unrounded minutes in the range: {v!r} — {line}"
