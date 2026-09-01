@@ -54,6 +54,16 @@ def _dry_run(label, *, stream="1", lane="44-47,92-95", task="discrete_log", out_
          "http://127.0.0.1:8801", "1.00"],
         capture_output=True, text=True, timeout=600, env=env,
     )
+    # THE SCRIPT'S OWN REASON, HERE, WHERE NO CALLER CAN FORGET IT. Three tests in this file failed
+    # during the full suite of 2026-09-01 with `FileNotFoundError: .../INSTRUMENT.txt` -- the record
+    # was never written -- and `run_probe.sh` prints exactly why it refuses on every path that can
+    # refuse: a foreign result directory left open, a busy lane, a task with no dataset, a run
+    # directory already carrying `run_finished`. Two of the three callers read the record without
+    # checking the status first, so the diagnosis was captured, returned, and thrown away. I could
+    # not name the cause afterwards because my own harness had eaten it.
+    assert r.returncode == 0, (
+        "run_probe.sh refused (rc=%d) and wrote no record; its own reason:\n%s%s"
+        % (r.returncode, r.stdout, r.stderr))
     return r, out / "INSTRUMENT.txt"
 
 
@@ -205,3 +215,22 @@ def test_a_dry_run_writes_nothing_into_the_live_corpus(tmp_path):
     assert (tmp_path / "t_instr_hermetic" / "INSTRUMENT.txt").exists(), (
         "the run wrote nowhere at all, so the census above proves nothing"
     )
+
+
+def test_a_refusal_is_reported_as_a_refusal_and_not_as_a_missing_file(tmp_path):
+    """The failure mode that cost an hour: three tests reported `FileNotFoundError: INSTRUMENT.txt`.
+
+    That is the symptom of every refusal `run_probe.sh` has -- a foreign result directory left open,
+    a busy lane, a task with no dataset, a run directory already carrying `run_finished` -- and it
+    names none of them. The script prints its reason on each of those paths; the harness captured it
+    and dropped it. Driven here with a refusal the guard is guaranteed to take (a task with no
+    dataset), asserting the message reaches the failure rather than the exception from reading a
+    file that was never written.
+    """
+    with pytest.raises(AssertionError) as e:
+        _dry_run("t_instr_refusal", out_root=tmp_path, task="definitely_not_a_task_zzz")
+    text = str(e.value)
+    assert "run_probe.sh refused" in text, text
+    assert "FileNotFoundError" not in text, text
+    # …and the script's own words, whichever guard fired, are carried through.
+    assert "ОТКАЗ" in text or "refus" in text.lower(), text
