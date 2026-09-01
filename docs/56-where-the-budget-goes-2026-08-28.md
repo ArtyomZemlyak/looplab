@@ -3387,9 +3387,9 @@ three cases together are the first measurement of what the clause is worth:
 | remEE4 | 178.9456, **265.7918**, 12.9883 | 265.7918 | 12.9883 | **95 %** |
 
 §72 recorded `remDL2` as the first empirical demonstration and called it thin — a 2 % difference on
-one run. Three runs later the same rule is standing between a corpus-best 262 and a 13. Ten of the
-seventeen probes here reached only one node and could not exercise it at all; of the seven that
-reached two or more, three ended on a node worse than their best.
+one run. Three runs later the same rule is standing between a corpus-best 262 and a 13. Nine of the
+seventeen probes here reached exactly one node and one reached none, so ten could not exercise the
+rule at all; of the seven that reached two or more, three ended on a node worse than their best.
 
 The clause telling the model this (`KEEP_BEST`, shipped 2026-08-31) is aimed at the other side of it:
 a model that does not know the rule has every reason to protect a working solver rather than attack
