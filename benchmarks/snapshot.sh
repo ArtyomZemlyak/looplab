@@ -611,6 +611,21 @@ if [ "$SHORT" -gt 0 ]; then
   exit 1
 fi
 
+# THE ONLY THING THAT SAYS THIS SNAPSHOT IS FINISHED, and it is written last on purpose.
+#
+# Until now nothing distinguished a snapshot being WRITTEN from one that was done. Measured
+# 2026-09-01 22:04:30: the newest directory held `looplab.bundle` and not yet `ENVIRONMENT.txt`,
+# because the snapshot was still running -- I read it as an incomplete snapshot and it was a
+# complete one thirty seconds later. The reverse mistake is the expensive one: `git bundle create`
+# writes straight to the final path, so a bundle read mid-write is TRUNCATED and a restore from it
+# fails, while the directory looks exactly like every other. "Newest snapshot" is what a person
+# picks at 03:00.
+#
+# Placed AFTER the shortfall check, so a partial snapshot never gets the mark: the file means
+# "every source was copied and this run finished", not merely "the script reached the end".
+date -u +%Y-%m-%dT%H:%M:%SZ > "$OUT/.complete"
+echo "  .complete             written last; a snapshot without it is unfinished or partial"
+
 # Keep the last N snapshots; the measurements accumulate and the mount is shared. But AGE IS NOT
 # WORTH, and this prune used to act as if it were.
 #

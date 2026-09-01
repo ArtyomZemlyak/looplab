@@ -23,6 +23,7 @@ So both halves are asserted here, and both are asserted the only way that means 
 RESTORING from the archive and finding the work, rather than by finding a file with a promising
 name. Run against the script as it stood on 2026-08-29, both fail.
 """
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -690,3 +691,49 @@ def test_an_archive_that_is_still_short_after_the_repair_is_not_reported_as_arch
         + result.stdout)
     assert "SHORTER than the" in result.stdout, result.stdout
     assert "INCOMPLETE SNAPSHOT" in result.stdout, result.stdout
+
+
+def test_a_finished_snapshot_says_so_and_a_partial_one_does_not(tmp_path):
+    """Nothing distinguished a snapshot being WRITTEN from one that was done.
+
+    Measured 2026-09-01 at 22:04:30: the newest directory held `looplab.bundle` and not yet
+    `ENVIRONMENT.txt`, because the snapshot was still running. I read that as an incomplete snapshot
+    and it was a complete one thirty seconds later. The reverse mistake is the costly one --
+    `git bundle create` writes straight to the final path, so a bundle read mid-write is TRUNCATED
+    and a restore from it fails, while the directory looks like every other one. "The newest
+    snapshot" is what a person picks at 03:00.
+
+    The marker is written LAST and only past the shortfall check, so it means "every source was
+    copied and this run finished", not "the script reached the end".
+    """
+    src = _bench_root(tmp_path)
+    dest, archive = tmp_path / "snapshots", tmp_path / "runs-archive"
+    result = _snapshot(src, dest, archive)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    out = next(dest.glob("2*"))
+    mark = out / ".complete"
+    assert mark.is_file(), (
+        "a finished snapshot carries nothing that says so:\n" + result.stdout)
+    assert mark.read_text().strip().endswith("Z"), mark.read_text()
+
+    # …and it is the LAST thing written, so a reader that waits for it cannot catch a partial tree.
+    others = [p for p in out.iterdir() if p.name != ".complete" and p.is_file()]
+    assert others, "nothing else in the snapshot to compare against"
+    assert mark.stat().st_mtime >= max(p.stat().st_mtime for p in others) - 1, (
+        "the marker predates some content, so it does not mean the snapshot is finished")
+
+
+def test_a_PARTIAL_snapshot_is_left_unmarked(tmp_path):
+    """The mark must not be reachable by a run that could not copy everything. A partial snapshot
+    that says "complete" is worse than one that says nothing: the whole point is the 03:00 pick."""
+    src = _bench_root(tmp_path)
+    shutil.rmtree(src / "AlgoTune")               # one source gone -> SHORT > 0 -> exit 1
+    dest, archive = tmp_path / "snapshots", tmp_path / "runs-archive"
+    result = _snapshot(src, dest, archive)
+    assert result.returncode != 0, result.stdout
+
+    out = next(dest.glob("2*"), None)
+    if out is not None:
+        assert not (out / ".complete").exists(), (
+            "a snapshot that exited non-zero still marked itself complete:\n" + result.stdout)
