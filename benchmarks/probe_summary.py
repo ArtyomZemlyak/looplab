@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -34,10 +35,13 @@ def _meter_by_arm(path: str | None = None) -> dict:
     """Which INSTRUMENT each probe ran on, from the meter ledger — the only place it is recorded.
 
     A probe tree says what the run did and nothing about the gateway it did it through. Measured
-    2026-09-01: `accEE`, `accPde` and `remEE` ran entirely UNSTREAMED, before the bench profile was
-    made to set `LOOPLAB_LLM_STREAM` rather than default it. Without streaming the gateway's nginx
-    times the whole generation against a 300 s window, and `remEE` lost 9 calls to it — 45 minutes
-    of wall clock returning nothing, on a $1.00 budget.
+    2026-09-01: `accEE`, `accPde`, `remEE` and the abandoned `remDL` ran entirely UNSTREAMED,
+    before the bench profile was made to set `LOOPLAB_LLM_STREAM` rather than default it.
+    Without streaming the gateway's nginx times the whole generation against a 300 s window.
+    `remEE` lost 9 calls to it (45 minutes returning nothing on a $1.00 budget) and `remDL`
+    lost ELEVEN -- more than any other run, and it is the one that produced no evaluated node
+    at all. An earlier version of this paragraph named only the first three, which is how the
+    worst-hit run stayed out of the sections that cite it.
 
     That is invisible in every score, card and run log, and §73 had built a "controlled pair" on
     `remEE` against a streamed run before anyone looked (§80). So it belongs in the summary that
@@ -59,13 +63,26 @@ def _meter_by_arm(path: str | None = None) -> dict:
             arm = r.get("arm")
             if not arm:
                 continue
-            d = out.setdefault(arm, {"streamed": 0, "unstreamed": 0, "ceiling": 0})
+            d = out.setdefault(arm, {"streamed": 0, "unstreamed": 0, "ceiling": 0, "unknown": 0})
             # PREFLIGHTS ARE EXCLUDED. `agents/preflight.py` sets stream=False by design and sends
             # ten tokens; counting them would put every probe on "mostly streamed, some not" and
             # hide the three that are genuinely on the other instrument.
-            if (r.get("prompt_tokens") or 0) > 1000:
-                d["streamed" if r.get("stream") else "unstreamed"] += 1
-            if r.get("status") == 504:
+            # A KILLED CALL IS STILL A CALL. All 21 status-504 rows in the ledger carry
+            # `prompt_tokens: null` -- the usage frame never arrived -- so the >1000 filter dropped
+            # them from BOTH counters while the ceiling counter, outside it, still fired. A probe
+            # whose real calls ALL died read "0 unstreamed / 0 streamed ... streamed, but hit the
+            # gateway ceiling": the verdict backwards. It understated the damage elsewhere too --
+            # remEE's "309 unstreamed" excluded the 9 that died.
+            big = (r.get("prompt_tokens") or 0) > 1000
+            killed = r.get("status") == 504
+            if big or killed:
+                # `stream` ABSENT is unknown, not false: reading a missing key as "unstreamed"
+                # manufactures a verdict out of a gap in the data.
+                if "stream" not in r:
+                    d["unknown"] += 1
+                else:
+                    d["streamed" if r.get("stream") else "unstreamed"] += 1
+            if killed:
                 d["ceiling"] += 1
     return out
 
@@ -124,8 +141,14 @@ def _why_no_test(probe_dir: Path) -> str:
     and remEE2, all of which scored a test perfectly well, so its absence means nothing on its own --
     which is the sort of thing that reads as a signal until you count it.
     """
-    for name, hunt in (("probe.log", ("could not fold", "чемпион: НЕТ", "champion: NONE")),
-                       ("run.log", ("PAUSED", "pause reason", "finished=False"))):
+    # The needle list is a convenience, not the gate -- every unscored probe is listed whether or
+    # not one matches (see the caller). These are the phrasings seen on this box, and `remDL`'s is
+    # here because it was the one the first six needles missed: nine attempts of exponential
+    # backoff against a gateway returning 504, which is a diagnosis in as many words.
+    for name, hunt in (("probe.log", ("could not fold", "чемпион: НЕТ", "champion: NONE",
+                                      "ОТКАЗ", "Traceback")),
+                       ("run.log", ("PAUSED", "pause reason", "finished=False",
+                                    "answered HTTP", "attempt 9 of 9", "Traceback"))):
         f = probe_dir / name
         if not f.is_file():
             continue
@@ -139,6 +162,10 @@ def _why_no_test(probe_dir: Path) -> str:
 
 def summarise(run_dir: Path) -> dict | None:
     events = _load(run_dir / "events.jsonl")
+    try:
+        age_s = time.time() - (run_dir / "events.jsonl").stat().st_mtime
+    except OSError:
+        age_s = None
     spans = _load(run_dir / "spans.jsonl")
     if not events:
         return None
@@ -261,6 +288,7 @@ def summarise(run_dir: Path) -> dict | None:
         "kernel": kernel,
         "to_build_min": to_build,
         "build_min": build_min,
+        "age_s": age_s,
         "probe_dir": str(probe_dir),
         "why_no_test": "" if _test_score(probe_dir) is not None else _why_no_test(probe_dir),
         "phases": sorted(by_phase.items(), key=lambda kv: -kv[1])[:4],
@@ -298,11 +326,18 @@ def main(argv: list[str]) -> int:
               f"{len(s['nodes']):>7}{s['before_pct']:>8.0f}%{s['after_pct']:>7.0f}%"
               f"{s['eval_train']:>8}{tb:>9}{bm:>7}  {champ}")
 
-    unscored = [s for s in seen.values() if s["test"] is None and s["why_no_test"]]
+    # EVERY unscored probe, not only those whose logs match one of six phrases. The needle list
+    # matched NONE of the five probes carrying no TEST on 2026-09-01 -- including `remDL`, dead
+    # since 13:46, whose run.log says `answered HTTP 504 (overloaded) -- waiting 30s before attempt
+    # 7 of 9`. A section written because "the diagnosis is in a file nobody reads" was silent
+    # because the diagnosis was phrased differently.
+    unscored = [s for s in seen.values() if s["test"] is None]
     if unscored:
         print("\nprobes with NO test score, and why (from the probe's own logs):")
         for s in sorted(unscored, key=lambda x: x["probe"]):
-            print(f"  {s['probe']:10s} {s['why_no_test']}")
+            why = s["why_no_test"] or "(no stated reason in probe.log or run.log)"
+            live = " -- STILL RUNNING" if s["age_s"] is not None and s["age_s"] < 2400 else ""
+            print(f"  {s['probe']:10s}{live} {why}")
             # RECOVERABLE FOR FREE, and say so with the command. A run that spent its budget and
             # reached an evaluated node has already paid for everything expensive; extraction and
             # the test pass cost CPU and nothing else. `accEE` sat unscored for twenty hours after
@@ -313,7 +348,10 @@ def main(argv: list[str]) -> int:
             # NOT `looplab resume`: that continues the RUN and spends more money, and accEE had
             # already spent $1.0042 of its $1.00, so resuming would break the budget contract that
             # makes it comparable. The cheap half is the only half that is missing.
-            if s["nodes"]:
+            # NOT for a run still writing: "its budget is already spent" was printed
+            # unconditionally, and extracting a champion from a live run hands back an intermediate
+            # result dressed as a final one.
+            if s["nodes"] and not (s["age_s"] is not None and s["age_s"] < 2400):
                 print(f"             recoverable for $0 -- it has {len(s['nodes'])} evaluated "
                       f"node(s) and its budget is already spent:")
                 print(f"               cd {s['probe_dir']} && python "

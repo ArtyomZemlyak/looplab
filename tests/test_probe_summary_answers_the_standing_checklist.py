@@ -246,6 +246,14 @@ def test_an_unscored_run_with_nodes_is_told_it_is_recoverable_for_free(tmp_path)
     """
     p = _mk_probe(tmp_path, "acc2", "t", nodes=[221.539], costs_before=[0.3], costs_after=[0.7])
     (p / "probe.log").write_text("could not fold /x: ModuleNotFoundError: No module named 'looplab'\n")
+    # AGED deliberately. A recovery is only offered for a run that has STOPPED -- extracting a
+    # champion from a live one hands back an intermediate dressed as final -- and a fixture written
+    # milliseconds ago is the liveliest run on the box.
+    import os
+    import time
+    ev = p / "runs" / "t" / "run" / "events.jsonl"
+    old_t = time.time() - 7200
+    os.utime(ev, (old_t, old_t))
     out = _run(tmp_path)
     assert "recoverable for $0" in out, (
         "an unscored run holding an evaluated node was not told it can be re-scored for nothing:\n"
@@ -544,4 +552,66 @@ def test_the_build_duration_comment_claims_no_gap_it_does_not_have():
     assert "No point falls between" not in block, "the gap claim is back"
     assert "ROUGH, NOT A BAND" in block, (
         "the comment no longer warns that these are observed ranges rather than bounds"
+    )
+
+
+def test_every_unscored_probe_is_listed_even_with_no_quotable_reason(tmp_path):
+    """The section was gated on six hardcoded phrases and matched none of five real probes.
+
+    `remDL` -- dead, $0.1292, zero nodes -- got no line at all, though its run.log says
+    `answered HTTP 504 (overloaded) -- waiting 30s before attempt 7 of 9`. A section written
+    because "the diagnosis is in a file nobody reads" was silent because the diagnosis was phrased
+    differently from the phrases it knew.
+    """
+    p = _mk_probe(tmp_path, "quiet", "t", nodes=[5.0], costs_before=[0.5], costs_after=[0.5])
+    (p / "probe.log").write_text("[12:00:00] started\n[13:00:00] done\n")
+    out = _run(tmp_path)
+    block = out.split("probes with NO test score", 1)[-1].split("per-probe detail")[0]
+    assert "quiet" in block, (
+        "an unscored probe with no matching phrase was dropped from the section entirely:\n" + out
+    )
+    assert "no stated reason" in block, "it is listed but nothing says why it has no reason"
+
+
+def test_a_live_run_is_marked_and_not_told_its_budget_is_spent(tmp_path):
+    """Extracting a champion from a running probe hands back an intermediate dressed as final."""
+    p = _mk_probe(tmp_path, "live1", "t", nodes=[5.0], costs_before=[0.5], costs_after=[0.5])
+    import os
+    import time
+    ev = p / "runs" / "t" / "run" / "events.jsonl"
+    os.utime(ev, (time.time(), time.time()))
+    out = _run(tmp_path)
+    block = out.split("probes with NO test score", 1)[-1].split("per-probe detail")[0]
+    line = next(l for l in block.splitlines() if l.strip().startswith("live1"))
+    assert "STILL RUNNING" in line, f"a probe writing right now was not marked as live: {line}"
+    assert "recoverable for $0" not in block, (
+        "a live run was told its budget is already spent and offered a recovery:\n" + block
+    )
+
+
+def test_a_killed_call_still_counts_as_a_call(tmp_path):
+    """All 21 status-504 rows carry `prompt_tokens: null`; the >1000 filter dropped them.
+
+    A probe whose real calls ALL died read "0 unstreamed / 0 streamed ... streamed, but hit the
+    gateway ceiling" -- the verdict backwards.
+    """
+    _mk_probe(tmp_path, "dead", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0)
+    meter = _mk_meter(tmp_path, [{"arm": "dead", "prompt_tokens": None, "stream": False,
+                                  "status": 504}] * 6
+                      + [{"arm": "dead", "prompt_tokens": 10, "stream": False, "status": 200}] * 2)
+    out = _run_with_meter(tmp_path, meter)
+    line = next(l for l in _instrument_block(out).splitlines() if l.strip().startswith("dead "))
+    assert "6 unstreamed" in line, f"the killed calls were not counted at all: {line}"
+    assert "UNSTREAMED" in line, (
+        f"a probe whose every real call died was called streamed: {line}"
+    )
+
+
+def test_a_row_with_no_stream_field_is_unknown_not_unstreamed(tmp_path):
+    _mk_probe(tmp_path, "nokey", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0)
+    meter = _mk_meter(tmp_path, [{"arm": "nokey", "prompt_tokens": 9000, "status": 200}] * 40)
+    out = _run_with_meter(tmp_path, meter)
+    assert "NOT on the current instrument" not in out, (
+        "rows with no `stream` field were read as unstreamed, inventing a verdict from a gap in "
+        "the data:\n" + out
     )
