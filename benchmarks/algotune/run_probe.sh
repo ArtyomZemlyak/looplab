@@ -140,11 +140,6 @@ fi
 # Первая версия опровергателя к этому охраннику прошла проверку и поехала настоящим прогоном на
 # 18 вызовов и $0.0070, прежде чем я её снял. `PROBE_DRY_RUN=1` останавливает скрипт сразу после
 # всех отказов — до make_task, до модели, до денег.
-if [ "${PROBE_DRY_RUN:-0}" = "1" ]; then
-  say "сухой прогон: все проверки пройдены, ничего не запущено"
-  exit 0
-fi
-
 # ТА ЖЕ ЛИНЕЙКА, что у двадцати измеренных чисел: общий кэш эталона и `auto` (= 22 воркера по
 # одному ядру, ключ `__w22x1r3`). `1` дал бы `__lane22r3` — другой эталон, расходящийся на 24%.
 export ALGOTUNE_BASELINE_CACHE_DIR="$ROOT/looplab/benchmarks/algotune/.baseline_times"
@@ -158,6 +153,46 @@ export ALGOTUNE_MIN_TIMEOUT_S=120
 # nobody shows you». Одна и та же карточка, разные предложения, и число сравнивается как одно.
 export PYTHONPATH="$ROOT/looplab${PYTHONPATH:+:$PYTHONPATH}"
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET"
+
+# WHICH INSTRUMENT THIS PROBE RAN ON, written into its own tree.
+#
+# A probe records what the run DID and nothing about the gateway it did it through. Measured
+# 2026-09-01: `accEE`, `accPde` and `remEE` ran entirely UNSTREAMED, and `remEE` lost 9 calls to the
+# gateway's 300 s ceiling -- 45 minutes returning nothing on a $1.00 budget. That is invisible in
+# every score, card and run log; it survives only as a `stream` field on the meter's rows, and every
+# comparison in `docs/56` is drawn from probe trees. §73 built a "controlled pair" on `remEE` against
+# a streamed run before anyone looked, and the conclusion had to be withdrawn (§80).
+#
+# The meter is one file for the whole box and is not copied into a snapshot; a probe tree is. So the
+# settings that decide what the ruler measures go in beside the run, at launch, before a token is
+# spent. The API key is NOT among them -- only what changes the measurement.
+mkdir -p "$OUT"
+{
+  echo "probe:          $LABEL"
+  echo "task:           $TASK"
+  echo "lane:           $LANE"
+  echo "budget_usd:     $BUDGET"
+  echo "model:          $MODEL"
+  echo "started:        $(date -Iseconds)"
+  echo "LOOPLAB_LLM_STREAM=${LOOPLAB_LLM_STREAM:-(unset -> engine default)}"
+  echo "ALGOTUNE_EVAL_WORKERS=${ALGOTUNE_EVAL_WORKERS}"
+  echo "ALGOTUNE_BASELINE_CACHE_DIR=${ALGOTUNE_BASELINE_CACHE_DIR}"
+  echo "ALGOTUNE_MIN_TIMEOUT_S=${ALGOTUNE_MIN_TIMEOUT_S}"
+  echo "looplab:        $(cd "$ROOT/looplab" && git log --oneline -1 2>/dev/null)"
+  echo "looplab_dirty:  $(cd "$ROOT/looplab" && git status --porcelain 2>/dev/null | wc -l) file(s)"
+  echo "AlgoTune:       $(cd "$ROOT/AlgoTune" && git log --oneline -1 2>/dev/null)"
+} > "$OUT/INSTRUMENT.txt"
+say "прибор записан: $OUT/INSTRUMENT.txt (stream=${LOOPLAB_LLM_STREAM:-unset})"
+
+# THE DRY-RUN GATE SITS HERE, below the environment and the instrument record and above everything
+# that costs. It used to sit above both, which made the instrument record unreachable without
+# spending a dollar -- a fix whose falsifier cannot run is a fix nobody can check. Everything
+# between the old position and this one is exports and one file write: no `make_task`, no model, no
+# money, so the gate's promise is unchanged and the record is now testable.
+if [ "${PROBE_DRY_RUN:-0}" = "1" ]; then
+  say "сухой прогон: все проверки пройдены, прибор записан, ничего не запущено"
+  exit 0
+fi
 
 python3 "$ROOT/looplab/benchmarks/algotune/make_task.py" --algotune-root "$ROOT/AlgoTune" \
     --task "$TASK" --out-dir "$OUT/ws" --deliver --one-card --enforce-rules >> "$LOG" 2>&1 \
