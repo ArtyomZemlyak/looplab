@@ -3628,6 +3628,20 @@ a factor of 7.1; per task, 2.2× on `edge_expansion` (n=9), 4.5× on `pde_heat1d
 `discrete_log` (n=4). `remEE6`'s final act was to score 0.0 — the rule is the only reason that run
 has a number at all.
 
+**That table was stale within half an hour, and this is the part worth keeping.** `remPde10`
+finished at 12:19 the same day: nodes `[37.4701, 0.0]`, a SECOND run whose last act was to score
+zero. Twelve of eighteen, p = 1/4096. Six statistics in this document have died on their next run
+(§74.3, §76.1, the build-duration gap); this one survived and got stronger, which is luck, not
+method. The method is that the figure is no longer typed here at all —
+
+    python benchmarks/probe_summary.py
+
+prints the whole ledger, the tie count, and the p from the corpus as it stands. Ties are printed
+because the sign test's denominator is the non-ties, and a reader who cannot see the ties cannot
+check the p; a mutation that counts ties among them reddens `test_the_champion_ledger_counts_ties_
+out_of_the_sign_test`. The numbers in the table above are what the tool printed on 2026-09-01 and
+are not maintained by hand.
+
 So the loop's last move is worse than its best move about two times in three, and often by an order
 of magnitude. `remDL2`'s 2 % was not a typical case, it was the mildest case in the corpus.
 

@@ -377,6 +377,32 @@ def main(argv: list[str]) -> int:
             print(f"  {probe:10s} {m['unstreamed']} unstreamed / {m['streamed']} streamed"
                   f"{lost} — {why}")
 
+    # THE CHAMPION LEDGER. docs/56 §84 measured this by hand and `remPde10` finished thirty
+    # minutes later and moved every figure in it. A statistic that has to be re-typed after each
+    # run is a statistic that will be quoted stale; this prints it from the corpus every time.
+    # Ties (last node WAS the best) are counted and shown, because the sign test's denominator is
+    # the non-ties and a reader who cannot see the ties cannot check the p.
+    pairs = [(s["probe"], s["task"], max(s["nodes"]), s["nodes"][-1])
+             for s in seen.values() if len(s["nodes"]) >= 2]
+    if pairs:
+        moved = [r for r in pairs if r[2] > r[3] * 1.001]
+        zeros = [r for r in pairs if r[3] == 0]
+        print("\nthe champion rule, over every run with more than one evaluated node:")
+        for probe, task, best, last in sorted(pairs, key=lambda r: -(r[2] / r[3] if r[3] else 1e18)):
+            ratio = "     inf" if not last else f"{best / last:8.2f}"
+            flag = "  <- last node scored ZERO" if last == 0 else ""
+            print(f"  {probe:10s} {task:16s} best {best:9.4f}  last {last:9.4f}  {ratio}x{flag}")
+        # 0.5 ** n, spelled out: every non-tie moves the same way, so the one-sided sign test is
+        # exactly the chance of n coin flips agreeing. No run can end above its own best.
+        p_val = 0.5 ** len(moved) if moved else 1.0
+        print(f"  {len(moved)} of {len(pairs)} runs ended on a node that was NOT their best "
+              f"({len(pairs) - len(moved)} ties, {len(zeros)} ended on a ZERO)")
+        print(f"  paired sign test over the {len(moved)} non-ties: one-sided p = {p_val:.6g}"
+              f" = 1/{2 ** len(moved)}")
+        print("  NOTE: this is the rule's PROTECTIVE value given the nodes these runs produced.")
+        print("        Whether STATING the rule changes which nodes appear is a different question")
+        print("        and needs the --no-unteachable-rules control arm; see docs/56 §83, §84.")
+
     print("\nper-probe detail:")
     for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):
         pct = ("—" if s["ref_pct"] is None

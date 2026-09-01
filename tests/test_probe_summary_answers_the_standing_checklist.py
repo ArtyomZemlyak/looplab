@@ -615,3 +615,50 @@ def test_a_row_with_no_stream_field_is_unknown_not_unstreamed(tmp_path):
         "rows with no `stream` field were read as unstreamed, inventing a verdict from a gap in "
         "the data:\n" + out
     )
+
+
+def test_the_champion_ledger_counts_ties_out_of_the_sign_test(tmp_path):
+    """docs/56 §84 was hand-computed and `remPde10` finished thirty minutes later and moved it.
+
+    The ledger exists so the figure is never hand-carried again, and the one thing it must not get
+    wrong is the DENOMINATOR: a tie -- last node WAS the best -- is not evidence for the rule, and
+    counting ties among the non-ties halves the p for free. Four runs, two of which moved and two of
+    which tied, must report 2 of 4 and p = 1/4, not 1/16.
+    """
+    _mk_probe(tmp_path, "moved1", "t1", nodes=[10.0, 2.0], costs_before=[0.1], costs_after=[0.01])
+    _mk_probe(tmp_path, "moved2", "t1", nodes=[8.0, 4.0], costs_before=[0.1], costs_after=[0.01])
+    _mk_probe(tmp_path, "tied1", "t1", nodes=[5.0, 5.0], costs_before=[0.1], costs_after=[0.01])
+    _mk_probe(tmp_path, "tied2", "t1", nodes=[3.0, 3.0], costs_before=[0.1], costs_after=[0.01])
+    out = _run(tmp_path)
+    assert "2 of 4 runs ended on a node that was NOT their best" in out, out
+    assert "(2 ties, 0 ended on a ZERO)" in out, out
+    assert "one-sided p = 0.25 = 1/4" in out, out
+
+
+def test_a_single_node_run_is_not_in_the_ledger_at_all(tmp_path):
+    """A run with one node cannot demonstrate the rule either way, and counting it as a tie would
+    quietly pad the denominator with runs that had no second node to lose."""
+    _mk_probe(tmp_path, "moved1", "t1", nodes=[10.0, 2.0], costs_before=[0.1], costs_after=[0.01])
+    _mk_probe(tmp_path, "single", "t1", nodes=[7.0], costs_before=[0.1], costs_after=[0.01])
+    out = _run(tmp_path)
+    assert "1 of 1 runs ended on a node that was NOT their best" in out, out
+    assert "single" not in out.split("the champion rule, over")[1].split("per-probe detail")[0]
+
+
+def test_a_last_node_of_zero_does_not_divide_by_zero(tmp_path):
+    """Two of eighteen real runs finished by scoring 0.0, which is the largest possible gap and the
+    one arithmetic that most naturally crashes a ratio column."""
+    _mk_probe(tmp_path, "zeroed", "t1", nodes=[9.0, 0.0], costs_before=[0.1], costs_after=[0.01])
+    out = _run(tmp_path)
+    assert "infx" in out, out
+    assert "last node scored ZERO" in out, out
+    assert "(0 ties, 1 ended on a ZERO)" in out, out
+
+
+def test_the_ledger_says_what_it_does_not_measure(tmp_path):
+    """The protective value of the rule and the value of STATING it are different claims, and the
+    p is small enough that a reader who merges them would take the card clause as proven."""
+    _mk_probe(tmp_path, "moved1", "t1", nodes=[10.0, 2.0], costs_before=[0.1], costs_after=[0.01])
+    out = _run(tmp_path)
+    assert "PROTECTIVE value" in out
+    assert "--no-unteachable-rules" in out
