@@ -4125,3 +4125,37 @@ The arm removed the sentence, not the rule.
 That is what the plan was for: it named the sample size in advance, the arm ran to it, and the result
 is reportable either way. The lanes have moved to §83's queue item 2 (`--no-reference-affordance`,
 §78's lost control), where three runs are in flight.
+
+## 93. The reference arm at n = 4: p = 0.043, and the two arms before it looked like this too
+
+§83's queue item 2 is running. Four `--no-reference-affordance` probes have made `run_probe` calls,
+so the pre-registered outcome — the share of those calls importing the reference — has its first
+reading.
+
+| card | n | median | sorted |
+|---|---|---|---|
+| shipped (pre-INSTRUMENT.txt) | 10 | 8.4 % | 2.7 6.2 6.7 7.1 7.4 9.5 10.0 10.7 10.8 20.0 |
+| `--no-unteachable-rules` | 8 | 7.9 % | 2.8 6.9 7.0 7.7 8.1 9.7 11.1 12.5 |
+| **`--no-reference-affordance`** | **4** | **2.1 %** | **0.0 0.0 4.2 10.0** |
+
+Exact one-sided rank-sum against the shipped card, **p = 0.0430**. The unrelated control arm sits at
+7.9 %, on top of the shipped 8.4 %, which is what a card change that should not move this dial looks
+like — so the comparison has a negative control and it behaves.
+
+**Two of the four never imported the reference at all.** That is not a lower rate, it is a different
+behaviour, and it is what the removed clause literally offers. The CONTRACT sentence stays in the
+card either way, so those runs knew the file existed and did not treat it as something to query.
+
+**This is below the floor and I have watched this exact shape dissolve twice today.** §83 set n = 6;
+this is n = 4. §87 read p = 0.0303 at n = 2, strengthened to 0.0070 at n = 4, and was back at 0.0276
+by n = 5 with the minutes metric walking 0.0040 → 0.0492 (§90). §91 read the card-batch score at
+n = 6 and the seventh run moved it from 0.0589 to 0.1349 (§91.2), closing at 0.1185 (§92). Three
+arms, two of them already dead, and both looked at least this good at n = 4.
+
+So this is recorded as a reading with its expiry stated: it means something at n = 6 with the same
+sign, and nothing at all if it drifts the way the other two did. `remEEref4` is running and two more
+lanes will free as the others finish.
+
+The number is printed by `probe_summary.py` on every run, beside §69.1's band, and was made a
+command BEFORE this arm had any data (67f774d7) — precisely so the reading could not be typed by
+hand into a section written after the fact.
