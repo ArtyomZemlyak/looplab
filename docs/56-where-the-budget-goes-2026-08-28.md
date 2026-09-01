@@ -4273,3 +4273,49 @@ arrives on its own. The claim to make at six, if it holds, is narrow: the clause
 model treats the reference as something to QUERY, and nothing else visible. The score says so —
 control n = 5 median 163.24 against shipped 209.28, p = 0.2970, no effect, exactly as this arm
 predicts.
+
+## 94. The reference arm crosses §83's floor with a result: p = 0.0021, and the score is untouched
+
+`remEEref6` (220.4225, 36-line kernel) and `remEEref7` (272.1191, 46-line kernel) finished, taking
+`--no-reference-affordance` to **seven completed runs** — past the floor §83 set in advance.
+
+**The pre-registered outcome.** Share of `run_probe` calls importing the reference:
+
+| run | rate | calls |
+|---|---|---|
+| remEEref1 | 10.0 % | 20 |
+| remEEref2 | 3.3 % | 30 |
+| remEEref3 | 0.0 % | 10 |
+| remEEref4 | 0.0 % | 18 |
+| remEEref5 | 0.0 % | 20 |
+| remEEref6 | 0.0 % | 34 |
+| remEEref7 | 0.0 % | 20 |
+
+Median **0.0 %** against the shipped card's 8.4 % over ten. Exact one-sided **p = 0.00211**, floor
+0.000051. **Five of the seven imported the reference in none of their probes** — `remEEref6` made
+thirty-four `run_probe` calls and used it in none.
+
+The sequence over completed runs: 0.1119 (n = 3), 0.0430 (n = 4), 0.0140 (n = 5), **0.00211**
+(n = 7). Monotone the whole way, which neither of the two arms before it managed — §87's readings
+walked 0.0303 → 0.0070 → 0.0276 and 0.0040 → 0.0492; §92's score walked
+0.0804 → 0.0529 → 0.0589 → 0.1349 → 0.1185.
+
+**The score is untouched, and that is the second half of the claim.** Control n = 7 median 205.58
+against shipped 209.28, p = 0.4811, and **all seven land inside the shipped range** (102.2 – 276.7).
+`remEEref7`'s 272.12 is the second-highest score in the whole `edge_expansion` corpus. Every one of
+the seven shipped a compiled Cython kernel.
+
+So the clause does exactly what it says and only that: telling the model `reference_<task>.py` is a
+module it may QUERY changes whether it queries it, and changes nothing measurable about what it
+ships. §78 said the acceptance test had lost its control group to the 2026-08-29 wipe and could not
+be run "however many probes accumulate". It could, once something was built to remove the clause;
+that took a flag, a byte-identity test and seven dollars.
+
+**This is the first arm in the programme to answer its own question at its own planned n.** §92
+closed with a clean negative; this closes with a positive on the outcome it named in advance and a
+null on the outcome it predicted would not move. Both are results, and the difference between them
+is the reason §83 insisted the outcome be named before the runs.
+
+`remEEref8` and `remEEref9` are still running; they will make it nine, and they answer nothing new.
+Under §83's own rule — a free lane takes a queued arm or stays idle — the two lanes those runs free
+should NOT go to a tenth reference probe.
