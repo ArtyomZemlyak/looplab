@@ -6,7 +6,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { fmt, fmtInt, CONTROL, commandFeedback, createIdempotencyKey, deadlineGet, getRunCommand,
   isTransientCommandReadError, retryRunCommand, runApiPath, runCommand,
-  submitCommand, traceDeadlineGet, traceGenerationMatches, nodeActivityStatus,
+  submitCommand, traceDeadlineGet, traceGenerationMatches, nodeActivityStatus, nodeActivityView,
   NODE_ACTIVITY } from './util.js'
 import { OpIcon } from './icons.jsx'
 import Panel, { PanelPresentationContext } from './PanelShell.jsx'
@@ -712,7 +712,21 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }
     {attempts.length > 0 && <ul className="card-attempt-list">
       {attempts.map(entry => {
         const node = entry.node
+        // The LIFECYCLE word is what this chip has always shown, and for a settled attempt it is
+        // exactly right. For an unsettled one it was the bare word `pending` — so a node three hours
+        // into training read "pending" here while the Inspector, one click away, read "Training /
+        // evaluating" about the same node at the same instant. Two surfaces, one node, contradictory
+        // sentences. The activity projection is the same one every other surface uses, and it falls
+        // back to the lifecycle word whenever it cannot place the node.
         const status = _cardText(node?.status) || 'unknown'
+        const lifecycleUnsettled = status !== 'evaluated' && status !== 'failed'
+        // No run state here, exactly as `workingOn` below already accepts: this pane is handed
+        // attempts, not the fold. The projection then reads the server's generation-scoped
+        // `node.activity` and simply cannot see a build MARKER, which is the one case it degrades
+        // on — and it degrades to the lifecycle word this chip printed anyway.
+        const activityLabel = node && lifecycleUnsettled
+          ? nodeActivityView(node).shortLabel : null
+        const statusText = activityLabel || status
         const metric = _cardNumber(node?.metric)
         const attempt = _cardInt(node?.attempt)
         // `evidence` and `owned` are kept apart on purpose (see `cardAttempts`): "this node produced
@@ -732,8 +746,9 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }
             <span className="card-attempt-id">#{entry.nodeId}</span>
             <span className="card-attempt-op">{_cardText(node?.idea?.operator)
               || _cardText(node?.operator) || (entry.present ? 'operator unknown' : 'unavailable')}</span>
-            <span className={'chip xs' + (status === 'evaluated' ? ' ok' : status === 'failed' ? ' warn' : '')}>
-              {entry.present ? status : 'not in snapshot'}</span>
+            <span className={'chip xs' + (status === 'evaluated' ? ' ok' : status === 'failed' ? ' warn' : '')}
+              title={activityLabel ? `experiment #${entry.nodeId} — ${nodeActivityView(node).label}` : undefined}>
+              {entry.present ? statusText : 'not in snapshot'}</span>
             {attempt != null && <span className="muted">attempt {attempt}</span>}
             {metric != null && <span className="card-attempt-metric">{fmt(metric)}</span>}
             <span className={'chip xs' + (lane === 'reserved' ? ' warn' : '')}

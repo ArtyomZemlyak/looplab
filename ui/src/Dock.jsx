@@ -226,7 +226,7 @@ export function LiveTrace({ runId, generation, active }) {
 // because the status CLOCK reads the same filter: the label and its age must never be able to
 // describe different moments.
 
-function agentStatus(live, log) {
+export function agentStatus(live, log) {
   if (!live) return null
   const lifecycle = runLifecycle(live)
   if (lifecycle.mode === 'finished') return null
@@ -260,26 +260,34 @@ function agentStatus(live, log) {
   // before the loop's first turn, so no marker, node or pending count has moved yet.
   // NOT `phase` — that name is already the run-level `live.phase` string ten lines up, and shadowing
   // it here is a parse error rather than a subtle bug only because they share a scope.
-  const stepLabel = phaseLabel(livePhase(live, log))
-  if (stepLabel) {
-    // Parallel builds still need the COUNT, which the phase alone cannot carry: one beacon describes
-    // one build. Keep the marker-derived fan-out and let the phase say what they are all doing.
-    const parallel = buildingMarkers(live)
-    return parallel.length > 1 ? `${stepLabel} (${parallel.length} in parallel)` : stepLabel
-  }
+  // BUILD-scoped, because the count appended below is a build's fan-out. Once the eval cursor shares
+  // the beacon stream an unfiltered newest-open record can be an eval stage, and "Stage train · 2 of 3
+  // (3 in parallel)" would report a build's parallelism about somebody else's evaluation.
+  const stepLabel = phaseLabel(livePhase(live, log, 'build'))
   const buildMarkers = buildingMarkers(live)
-  if (buildMarkers.length > 1) {
-    return `Writing ${buildMarkers.length} experiments in parallel…`
-  }
-  if (buildMarkers.length === 1) {
-    const op = buildMarkers[0].operator || ''
-    const id = buildMarkers[0].node_id
-    const action = /repair|debug/.test(op) ? 'Repairing' : /merge/.test(op) ? 'Merging into' : 'Writing'
-    return `${action} experiment #${id}…`
-  }
   // Surface eval_parallel fan-out — but SPLIT, because `pending` is three states and calling them
   // all "running in parallel" is false in the direction that hides a stall (see `pendingWork`).
   const pendingLabel = pendingWorkLabel(live, log)
+  // THE TWO LANES ARE COMPOSED, not ranked. This ladder used to `return` on the first build it found,
+  // so on any run wide enough to build and evaluate at once — the shipped default — every evaluating
+  // and queued node was invisible in the one strip that claims to say what is happening now. An
+  // operator watching a four-hour training saw "Writing experiment #7…" and no mention of the
+  // training at all. Build first because it is the shorter, faster-moving half; the eval clause
+  // carries its own step from the cursor.
+  const buildLabel = stepLabel
+    ? (buildMarkers.length > 1 ? `${stepLabel} (${buildMarkers.length} in parallel)` : stepLabel)
+    : buildMarkers.length > 1
+      ? `Writing ${buildMarkers.length} experiments in parallel…`
+      : buildMarkers.length === 1
+        ? (() => {
+            const op = buildMarkers[0].operator || ''
+            const id = buildMarkers[0].node_id
+            const action = /repair|debug/.test(op) ? 'Repairing' : /merge/.test(op) ? 'Merging into' : 'Writing'
+            return `${action} experiment #${id}…`
+          })()
+        : ''
+  if (buildLabel && pendingLabel) return `${buildLabel} · ${pendingLabel}`
+  if (buildLabel) return buildLabel
   if (pendingLabel) return pendingLabel
   // Between experiments: infer from the last MEANINGFUL event (skip the bookkeeping noise above), so the
   // label stays put on "Planning…" instead of blinking every time a coverage/cost event lands.

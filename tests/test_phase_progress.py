@@ -151,7 +151,15 @@ def test_the_run_prologue_stays_write_free_because_its_readers_key_on_the_raw_lo
     assert result.exit_code == 0, result.output
     rows, beacons = _beacons(resumed)
     # Nothing may claim a stage the registry does not declare, and `resume` is not declared.
-    assert PROGRESS_STAGES == {PROGRESS_STAGE_BUILD}
+    # Pinned as the ABSENCE of that one word rather than as the whole set, deliberately. This test's
+    # property is "the prologue writes no row of its own", which is what the byte-identical prefix
+    # below actually drives; an equality over `PROGRESS_STAGES` also forbids every UNRELATED stage,
+    # so registering the eval pipeline's own beacon (`PROGRESS_STAGE_EVAL`, a loop that runs hours
+    # after the prologue has returned) failed HERE, reading as a resume regression. That is the
+    # over-broad-pin trap CLAUDE.md's contract rule names: re-point it at the property, then
+    # re-verify the property — which the two assertions below do.
+    assert "resume" not in PROGRESS_STAGES
+    assert PROGRESS_STAGE_BUILD in PROGRESS_STAGES
     assert all(b["stage"] in PROGRESS_STAGES for b in beacons)
     # The already-durable prefix is untouched byte-for-byte: a re-entry appends only AFTER its
     # authorization and finalize-reconciliation reads, never before or between them.

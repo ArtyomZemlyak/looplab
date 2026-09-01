@@ -46,6 +46,17 @@ export function workingId(state) {
 
 export function nodeClass(node, state, workIds) {
   const cls = ['node-card', `s-${node.status}`]
+  // THE ACTIVITY CLASS, beside the terminal-status one rather than instead of it. `s-${status}` is
+  // the LIFECYCLE (pending | evaluated | failed | the synthetic building) and it is what the card's
+  // body colour has always keyed on — which is why a node waiting for a slot and a node three hours
+  // into training were the SAME slate `s-pending` wash, distinguished only by a 10px text chip. The
+  // two are different questions and now have different classes: `.working` still says "this run is
+  // spending something on this node", while `a-building` / `a-evaluating` / `a-queued` say WHICH
+  // lane is spending it. A queued node is deliberately NOT `.working` — nothing is running for it,
+  // and pulsing it amber is the "the box looks busy" lie `narration.js::pendingWork` was written
+  // about.
+  const activity = nodeActivityStatus(node, state)
+  cls.push(`a-${activity}`)
   if (node.id === state.best_node_id) cls.push('best')
   if (node.feasible === false) cls.push('infeasible')
   const working = workIds instanceof Set ? workIds.has(Number(node.id)) : node.id === workIds

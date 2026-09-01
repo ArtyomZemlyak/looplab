@@ -9,6 +9,7 @@ import { REVIEW_SAFE_VIEWS, reviewInspectorTabs, reviewPanelAllowed,
   runRouteStateHasTarget } from './runRouteState.js'
 import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
   storageGet, storageSet, runApiPath, nodeActivityView } from './util.js'
+import { evalStages } from './buildingModel.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
 import GlobalMenu, { BrandMark } from './GlobalMenu.jsx'
@@ -727,6 +728,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     liveSeq: seq, liveEventCount, expectedGeneration: generation,
     enabled: !reviewMode && !routeFenceBlocked && !timelineDeferred,
   })
+  // WHICH STEP each evaluating node is on, decoded once here and shared by every surface that draws a
+  // node. It is derived from the timeline the Dock already fetches, so it costs no request; when the
+  // timeline is deferred (the report view) or disabled (review mode) `rows` is empty and every surface
+  // falls back to the label it had before the cursor existed.
+  const liveEvalStages = useMemo(() => evalStages(timeline.rows || []), [timeline.rows])
   const compactWorkspace = useMediaQuery('(max-width: 900px)')
   const [compactGoalExpanded, setCompactGoalExpanded] = useState(false)
   useEffect(() => setCompactGoalExpanded(false), [runId, generation, compactWorkspace])
@@ -2939,6 +2945,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 menu WITHOUT the branch item (`Dag.jsx::NODE_MENU_ITEMS`'s `snapshotOnly`). */}
             <Dag key={`experiment-graph:${runId}:${generation || 'pending'}`}
               state={state} selectedId={selectedId} onSelect={onCanvasSelect}
+              evalStages={liveEvalStages}
               compact={compactWorkspace}
               groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
               onCollapseAll={collapseAllGroups} onExpandAll={expandAllGroups}

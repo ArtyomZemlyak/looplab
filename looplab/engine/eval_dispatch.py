@@ -708,6 +708,15 @@ class EvalDispatchMixin:
                 # clause it is on `_safe_reuse_start` — the two arguments are the same pair that
                 # predicate takes, deliberately.
                 stage_key_fn=self._stage_key_fn(workdir, cwd=es.get("cwd") or None),
+                # THE LIVE STAGE CURSOR. `stage_finished` lands only at a stage's COMPLETION, so
+                # between two rows nothing could say which of `mine`/`train`/`score` was running:
+                # `train_monitor.resolve_stage_log` guessed it from freshest-mtime (its own docstring
+                # concedes the cursor "genuinely is unobservable from here") and every UI status
+                # surface simply called the whole multi-hour pipeline "Training / evaluating".
+                # Diagnostic beacons only — nothing here folds, decides, kills or selects.
+                on_stage_event=self._stage_progress_fn(
+                    node.id if node is not None else None,
+                    node.attempt if node is not None else 0, stages),
                 # The one-shot deadline judge (doc 39 site #2). Both are needed and are separate on
                 # purpose: the callback may be None (no client) while the cap is set, and the cap is
                 # the OPERATOR'S number — `sandbox._granted_grace` clamps to it in the runtime, so a

@@ -725,6 +725,55 @@ class EvalStagesMixin:
                                    cwd=cwd, digests=digests)
         return _key
 
+    def _stage_progress_fn(self, node_id, generation, stages=None):
+        """The `on_stage_event` callback `runtime/command_eval.py` calls at each stage boundary.
+
+        Turns the runtime's layer-free cursor into a registered `phase_progress` beacon, so the
+        status surfaces can finally name the step a node is on. Injected for the SAME layering
+        reason `_stage_key_fn` is: `runtime` may not import `looplab.events`, so the event vocabulary
+        and its `assert_progress_phase` check have to live on this side of the line.
+
+        WHAT IT ADDS TO THE RUNTIME'S PAYLOAD, and why each half is here rather than there:
+
+        * `node_id`/`generation` — the runtime knows neither. Without the generation a reset's
+          abandoned lifecycle and its replacement publish the same key, which is the exact confusion
+          `nodeActivity.js::markerFor` already refuses for build markers.
+        * `role` — the stage's resolved `LOG_ROLES` member from `eval_log_plan`. THE NAME IS NOT
+          EVIDENCE and this is the whole reason the role rides along: `train` is a slug the agent
+          chose, so a surface claiming "training" from the name alone is guessing. The role comes
+          from the manifest declaration the engine already trusts to say what runs and in what
+          order, and `eval_log_plan` is a pure derivation over the resolved pipeline.
+
+        Both the plan and the closure fail SOFT: an instrument may never take down an eval, so a
+        pipeline whose plan cannot be built still reports the stage NAME and simply carries the
+        `unknown` role — strictly more than the nothing that came before.
+        """
+        from looplab.engine.train_monitor import eval_log_plan
+        from looplab.events.types import LOG_ROLE_UNKNOWN, PROGRESS_STAGE_EVAL
+
+        try:
+            _plan = eval_log_plan(stages or []).roles or {}
+            roles = {stage: role for stage, role in _plan.values()}
+            # THE SINGLE-COMMAND PATH keys its one role under `None` (there is no stage name to key
+            # it by), and the runtime reports that step as `eval`. Bridge the two HERE rather than
+            # letting the lookup miss and degrade to `unknown`: that command IS the training on this
+            # path — `eval_log_plan` grants it `LOG_ROLE_TRAINING` for exactly that reason — so a
+            # miss would hide the one case where the role is unambiguous. Guarded on `not stages`
+            # because a MULTI-stage plan also carries a `None` key, and there it means `setup.log`.
+            if not stages:
+                roles = {"eval": roles.get(None, LOG_ROLE_UNKNOWN)}
+        except Exception:  # noqa: BLE001 — an instrument may never take down an eval
+            roles = {}
+
+        def _emit(payload):
+            name = str(payload.get("name") or "")
+            self._emit_progress(
+                PROGRESS_STAGE_EVAL, "stage", str(payload.get("status") or ""),
+                {"node_id": node_id, "generation": generation, "name": name[:64],
+                 "index": payload.get("index"), "total": payload.get("total"),
+                 "role": roles.get(name, LOG_ROLE_UNKNOWN)})
+        return _emit
+
     def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir,
                           deleted=None, cwd=None, prev_manifest=None, params=None):
         """The stage to RESTART from so a repaired node reuses the completed EARLIER stages (e.g. skip

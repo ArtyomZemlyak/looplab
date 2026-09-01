@@ -138,6 +138,52 @@ class SharedEngineMixin:
         tr = getattr(self, "tracer", None)
         return tr.span(name, new_trace=True, **attrs) if tr is not None else contextlib.nullcontext()
 
+    def _emit_progress(self, stage: str, phase: str, status: str,
+                       detail: Optional[dict] = None, *, store=None) -> None:
+        """Append ONE `phase_progress` row. The single spelling of that append.
+
+        Extracted from `_progress`'s `_emit` when the eval-stage cursor became a second producer.
+        The two could not share a context manager — `_progress` brackets a block on the main task,
+        while the cursor is driven by two discrete callbacks from the eval WORKER THREAD, where
+        there is no block to wrap — but they must not come to disagree about the row's SHAPE, which
+        is what a second hand-written `store.append(EV_PHASE_PROGRESS, …)` would eventually do.
+
+        WHY A WORKER THREAD MAY CALL THIS. `EV_PHASE_PROGRESS` is in `DIAGNOSTIC_EVENTS`, and
+        invariant #1 permits a concurrent producer exactly those: the fold ignores them AND
+        `speculation.py::_proposal_authority_seq` excludes the whole set, so a beacon landing inside
+        a paid proposal's CAS window cannot discard that proposal. That second half is the
+        load-bearing one — this is not "the fold ignores it", it is "no reader keys on its position".
+        Note this is NOT the board-wide case `audit.py` refuses a worker (`hypothesis_ranked`, a
+        last-write-wins register whose thread byte-order would fold nondeterministically): a beacon
+        is per-node, transient, and read only as an open/closed pair.
+
+        `assert_progress_phase` runs OUTSIDE the containment, exactly as it does in `_progress`: an
+        unregistered triple is a coding error to fix, not a runtime condition to survive, and a
+        beacon that silently stopped emitting is the defect the registry exists for.
+        """
+        assert_progress_phase(stage, phase, status)
+        self._append_progress_row(stage, phase, status, detail, store=store)
+
+    def _append_progress_row(self, stage: str, phase: str, status: str,
+                             detail: Optional[dict] = None, *, store=None) -> None:
+        """The contained append itself, with NO validation of its own.
+
+        Split from `_emit_progress` so the check can sit where each caller needs it. `_progress`
+        validates once on entry and then emits its `finished` row from a `finally` — and a raise
+        from there REPLACES the exception the phase was propagating, which is precisely the failure
+        its own `_emit` comment records (a body reporting what it learned destroying the failure it
+        was reporting). So that path must reach an append that cannot raise, while the cursor's
+        discrete callbacks, which have no such `finally`, go through the validating entry above.
+        """
+        sink = store if store is not None else getattr(self, "store", None)
+        if sink is None:
+            return
+        try:
+            sink.append(EV_PHASE_PROGRESS,
+                        {**(detail or {}), "stage": stage, "phase": phase, "status": status})
+        except Exception:  # noqa: BLE001 - observability must never take down the work it reports on
+            pass
+
     @contextlib.contextmanager
     def _progress(self, stage: str, phase: str, *, enabled: bool = True, **detail):
         """Bracket one step of a long operation with a `phase_progress` beacon, so the operator's
@@ -181,12 +227,8 @@ class SharedEngineMixin:
             # cannot overwrite the beacon's authority fields either.
             if store is None:
                 return
-            try:
-                store.append(EV_PHASE_PROGRESS,
-                             {**detail, **(extra or {}),
-                              "stage": stage, "phase": phase, "status": status})
-            except Exception:  # noqa: BLE001 - observability must never take down the work it reports on
-                pass
+            self._append_progress_row(stage, phase, status,
+                                      {**detail, **(extra or {})}, store=store)
 
         _emit("started")
         t0 = time.time()

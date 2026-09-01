@@ -1,4 +1,5 @@
-import { buildingMarkers } from './buildingModel.js'
+import { buildingMarkers, evalStageFor, evalStageLabel,
+  evalStageShortLabel } from './buildingModel.js'
 
 // The public activity vocabulary is deliberately independent of the node's terminal-status enum.
 // `pending` alone does not establish ownership by either the build or evaluation lane.
@@ -60,7 +61,7 @@ const runCanWork = state => !!state && !runStopped(state) && !state.paused
   // pre-existing live behaviour; null is a known snapshot and must never pulse as work happening now.
   && state.engine_running !== null
 
-export function nodeActivityView(node, state = null) {
+export function nodeActivityView(node, state = null, log = null) {
   const status = nodeActivityStatus(node, state)
   const stopped = runStopped(state)
   const paused = !!state?.paused
@@ -83,7 +84,19 @@ export function nodeActivityView(node, state = null) {
       label: stopLabel(state, 'Evaluation'), shortLabel: state?.stop_requested ? 'eval stopping' : 'eval interrupted' }
     if (paused) return { status, tone: 'paused', active: false,
       label: 'Evaluation paused', shortLabel: 'eval paused' }
-    return { status, tone: 'evaluating', active,
+    // WHICH STEP of the evaluation, when the run's own cursor says. `Training / evaluating` was one
+    // label for an entire multi-hour pipeline, and on `mine` -> `train` -> `score` it is false for
+    // two thirds of it — the flat word is what made "which node is training?" unanswerable from any
+    // screen. `stage` rides on the view so a surface can render the step without re-decoding the
+    // log, and `label`/`shortLabel` stay the ONE place the words are chosen.
+    //
+    // The fallback is unchanged and stays deliberately vague: with no beacon (an older engine, a
+    // windowed log whose `started` scrolled out, a task that runs no staged eval) the only honest
+    // answer is still that evaluation owns the node.
+    const stage = log ? evalStageFor(node, log) : null
+    if (stage) return { status, tone: 'evaluating', active, stage,
+      label: evalStageLabel(stage), shortLabel: evalStageShortLabel(stage) }
+    return { status, tone: 'evaluating', active, stage: null,
       label: 'Training / evaluating', shortLabel: 'training / eval' }
   }
   if (status === NODE_ACTIVITY.QUEUED) {

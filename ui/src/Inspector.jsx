@@ -2467,12 +2467,22 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   const activity = nodeActivityView(n, live)
   const building = working && activity.status === NODE_ACTIVITY.BUILDING
   const _op = building ? (_bmarker?.operator || n.operator || '') : ''
-  const statusLabel = !working ? null
-    : building
-      ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
-      : '🏋️ training / evaluating…'
-  const status = statusLabel && <div className="trace-live-status" role="status"><span className="tls-dot" />{statusLabel}
-    <span className="muted trace-live-note">live · auto-updates</span></div>
+  // A QUEUED node used to render nothing here at all: `working` is build-or-evaluate, so the one tab
+  // an operator opens to ask "what is this node doing?" answered with a blank strip for the whole
+  // time it sat waiting for a slot — indistinguishable from a node nobody is watching. It gets its
+  // own line, and deliberately no `live · auto-updates` note and no pulse, because nothing is running
+  // for it and there is nothing to auto-update.
+  const queued = activity.status === NODE_ACTIVITY.QUEUED
+  const statusLabel = working
+    ? (building
+        ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
+        // The activity label, not a fixed string: when the run reports a live stage cursor this reads
+        // "Stage train · 2 of 3" instead of calling a whole multi-hour pipeline "training".
+        : `🏋️ ${activity.label}…`)
+    : queued ? `⏳ ${activity.label}…` : null
+  const status = statusLabel && <div className={'trace-live-status' + (queued ? ' waiting' : '')} role="status">
+    <span className="tls-dot" />{statusLabel}
+    {!queued && <span className="muted trace-live-note">live · auto-updates</span>}</div>
   const retryParentTrace = () => onReload?.('retry')
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
   // The attempt picker. Only rendered when there IS an earlier generation — a node that never got

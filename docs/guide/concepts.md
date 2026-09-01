@@ -685,6 +685,30 @@ step boundary of a build (`propose` → `novelty` → `reserve` → `implement`/
 must rebuild the same `RunState` with or without it, and because it is appended from concurrent
 producers where only a fold-ignored type is permitted (invariant #1).
 
+An **evaluation** had the same hole, one level down and far larger: a build is minutes, an evaluation
+is hours. `stage_finished` is folded but lands only at a stage's *completion*, so between two stage
+rows nothing could say whether a node was mining negatives, training or scoring — and on a real
+`mine` → `train` → `score` pipeline the single label every status surface showed, "Training /
+evaluating", is false for two of the three. The engine's own watchdog had the same problem and
+guessed: `train_monitor.resolve_stage_log` picks the freshest-mtime log, and its docstring concedes
+that "the sandbox's live stage cursor genuinely is unobservable from here".
+
+So the stage loop publishes that cursor itself: one `phase_progress` beacon on the `eval` stage as
+each pipeline step begins, and one however it leaves. The step's own name (`mine`, `train`, `score`)
+rides as *detail* rather than becoming a phase, because eval stage names are agent-authored and a
+phase is a closed word `assert_progress_phase` can refuse. Beside the name rides the **role** the
+engine resolved from the manifest through `train_monitor.eval_log_plan` — and that split is the
+point: `train` is a slug the agent chose, so a surface may *show* the name but may only *claim*
+"Training" from the role. A pipeline that declares no `role: "training"` therefore reads
+"Stage `train` · 2 of 3" and not "Training", which is deliberately weaker than guessing from a slug
+that would usually be right — `eval_log_plan` refuses the same inference for kill authority, and a
+status surface quietly applying a looser rule would let an operator read an engine claim into a word
+the candidate picked.
+
+Both halves are closed in the browser by the same rule: a `started` with no `finished` is *live* by
+design, so the cursor is closed in a `finally` — an unclosed beacon would report a node that died
+hours ago as still training, which is the one failure mode that makes a live signal worse than none.
+
 A **resume** is just as blank as a build was — every line of `Engine._enter_run` runs before the
 loop's first turn, so nothing the UI polls has moved — and it deliberately has **no** beacon. The
 event log is the wrong channel for that particular wait: the prologue is where the speculation
@@ -1793,9 +1817,13 @@ drives a `✍️ writing` / `🔧 repairing` / `🔀 merging` status (by the nod
 node's trace live; a `pending` node is being **trained** (the sandbox eval — no LLM), shown as
 `running (training)` with no live pulse. The Dock's status strip goes one level finer, from the
 `phase_progress` beacons above: it names the STEP ("Proposing 4 experiments…", "Writing code for
-experiment #7…") rather than only the fact that a build is running,
+experiment #7…", "Experiment #5 training / evaluating · train 2/3…") rather than only the fact that a
+build or an evaluation is running,
 and its age clock measures the current *phase* rather than the whole build — so `40m` beside "Writing
-code for experiment #7…" means the Developer has been going forty minutes. The decode is the pure
+code for experiment #7…" means the Developer has been going forty minutes. The two lanes are
+COMPOSED, not ranked: the strip used to return on the first build it found, so on any run wide enough
+to build and evaluate at once — the shipped default — every evaluating and queued node was invisible
+in the one surface that claims to say what is happening now. The decode is the pure
 model `ui/src/buildingModel.js::openPhases`/`livePhase`/`phaseLabel`; `Dock.jsx` keeps only the choice
 of which label to show. A resume still shows only the transport strip's "Resume requested…". The assistant chat streams the same way — interstitial prose
 (`SSE_TEXT`) and tool steps (`SSE_STEP`) between tool rounds, Claude-Desktop-style.
