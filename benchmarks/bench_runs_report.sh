@@ -23,7 +23,16 @@ add () { [ -d "$1" ] && ROOTS+=("$1"); }
 add "${BENCH_ROOT:-/var/tmp/looplab-bench}"
 add "${LOOPLAB_RUNS_DIR:-}"
 add "${SNAPSHOT_RUNS_ARCHIVE:-/home/jovyan/data/looplab-bench/runs-archive}"
-add "/home/jovyan/data/looplab-bench/snapshots"
+# THE ONLY ROOT HERE THAT COULD NOT BE MOVED, and every other line above says why it should be.
+# `snapshot.sh` already reads `SNAPSHOT_DEST` (its line 65) and `snapshot_timer.sh` documents
+# setting BOTH it and `BENCH_ROOT` to test against a scratch tree. This line ignored it, so a
+# test of this script scanned the operator's live snapshots whatever it set -- inert today
+# only because measurements land in `runs-archive`, which IS overridable, and that default is
+# `$DEST/../runs-archive`: one different DEST puts them inside the snapshots tree and every
+# such test starts silently reading live data. Two tests reddened this afternoon for exactly
+# this shape (probe fixtures writing into the live corpus, the profiler guard reading the live
+# dataset dir), which is why a latent third is worth one line.
+add "${SNAPSHOT_DEST:-/home/jovyan/data/looplab-bench/snapshots}"
 for extra in "$@"; do add "$extra"; done
 
 if [ ${#ROOTS[@]} -eq 0 ]; then

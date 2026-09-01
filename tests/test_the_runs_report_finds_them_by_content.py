@@ -17,6 +17,8 @@ So the contract is: find run trees by CONTENT, at any depth, across mount bounda
 taken from the same variables the rest of the bench writes with. These tests hold it to that.
 """
 import os
+import pytest
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -370,3 +372,51 @@ def test_an_unreadable_score_log_is_announced_not_skipped(tmp_path):
         "a score.log with no JSON at all was skipped in silence:\n" + r.stdout
     )
     assert "torn" in r.stdout
+
+
+# --- every root must be movable -------------------------------------------------------------------
+
+def test_the_snapshots_root_can_be_redirected_like_every_other(tmp_path):
+    """One root in this script could not be moved, and it was the operator's live snapshots tree.
+
+    `BENCH_ROOT`, `LOOPLAB_RUNS_DIR` and `SNAPSHOT_RUNS_ARCHIVE` are all read from the environment;
+    `/home/jovyan/data/looplab-bench/snapshots` was a literal. So a test of this script scanned live
+    data whatever it set. Inert on 2026-09-01 only because measurements land in `runs-archive`,
+    which IS overridable -- and `snapshot.sh` defaults that to `$DEST/../runs-archive`, so one
+    different DEST puts them inside the snapshots tree and the leak becomes real.
+
+    Driven the way a leak would actually show: a measurement is planted in the DEFAULT location and
+    the run is redirected away from it. Seeing it would mean the redirect does not hold.
+    """
+    live = Path("/home/jovyan/data/looplab-bench/snapshots")
+    if not live.is_dir():
+        pytest.skip("no live snapshots tree on this box")
+
+    planted = live / "zz-hermetic-probe" / "runs" / "t" / "run"
+    empty, elsewhere = tmp_path / "empty", tmp_path / "elsewhere"
+    for d in (empty, elsewhere):
+        d.mkdir()
+    try:
+        planted.mkdir(parents=True)
+        (planted / "events.jsonl").write_text(
+            '{"type": "node_evaluated", "ts": 1, "data": {"metric": 4242.0}}\n')
+
+        env = dict(os.environ)
+        env["BENCH_ROOT"] = str(empty)
+        env["SNAPSHOT_RUNS_ARCHIVE"] = str(tmp_path / "nonexistent")
+        env["SNAPSHOT_DEST"] = str(elsewhere)
+        r = subprocess.run(["bash", str(TREES)], capture_output=True, text=True,
+                           timeout=600, env=env)
+        assert "zz-hermetic-probe" not in r.stdout, (
+            "the redirected run still read the live snapshots tree:\n" + r.stdout)
+
+        # …and the planted tree IS findable when the root points at it, or the assertion above
+        # would pass for a script that simply found nothing anywhere.
+        env["SNAPSHOT_DEST"] = str(live)
+        r2 = subprocess.run(["bash", str(TREES)], capture_output=True, text=True,
+                            timeout=600, env=env)
+        assert "zz-hermetic-probe" in r2.stdout, (
+            "the plant is invisible even when pointed at, so the negative above proves nothing:\n"
+            + r2.stdout)
+    finally:
+        shutil.rmtree(live / "zz-hermetic-probe", ignore_errors=True)
