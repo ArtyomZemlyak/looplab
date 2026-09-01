@@ -4056,3 +4056,36 @@ prints them rather than a human retyping them.
 Both `final.json` survived: these were the first two probes launched after the offset hazard was
 fixed, and they are the evidence that the fix holds on the path that destroyed remEEctl1's and
 remEEctl2's scores.
+
+### 91.2 A seventh run, and the p walks away
+
+`remEEctl7` finished twenty minutes after §91 was written: **233.5064**, a 52-line kernel, three
+nodes, 25 % spent before the first node — the highest score the control arm has produced, above the
+shipped card's own median of 209.28.
+
+| n | control median | exact one-sided p |
+|---|---|---|
+| 3 | 169.34 | 0.0804 |
+| 4 | 159.05 | 0.0529 |
+| 6 | 163.30 | 0.0589 |
+| **7** | **169.34** | **0.1349** |
+
+Sorted, the seven are 34.8, 148.8, 157.3, 169.3, 184.2, 201.3, 233.5 against a shipped range of
+102.2 – 276.7. Six of the seven sit inside that range; the seventh is `remEEctl1`, still the only
+run that did not compile.
+
+§91 said "not shown" and priced what showing it would cost. The seventh run says something narrower
+and firmer: **the p is not converging, it is wandering, and the last step was away from
+significance.** Four readings that walk 0.08 → 0.05 → 0.06 → 0.13 are the signature of a sample
+drawn from one distribution, not two — which is exactly what a within-task spread of 2.7× produces
+when the arms do not differ.
+
+Buying the fourteen-to-sixteen runs §91 priced would be buying resolution on an effect the corpus
+now gives no reason to expect. The honest recommendation is to stop this arm at seven and spend the
+lanes on §83's next queued question instead, which is what they are now doing
+(`--no-reference-affordance`, the arm §78 lost).
+
+The section this corrects is twenty minutes old. It was not wrong — it reported n = 6 accurately and
+hedged correctly — but it invited a reading ("needs more runs") that one more run undercut. That is
+the ninth reversal in this document, and the first where the correction and the claim were written
+in the same hour.
