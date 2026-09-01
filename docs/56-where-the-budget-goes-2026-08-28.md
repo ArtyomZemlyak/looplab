@@ -4214,3 +4214,33 @@ lines).
 
 Three runs is half of §83's floor. `remEEref4` and `remEEref5` are in flight and `remEEref6`,
 `remEEref7` launched on the lanes these two freed.
+
+### 93.3 Four finished runs, and the p lands back on 0.0430 — from a different set
+
+`remEEref4` finished at 160.329 (62-line kernel). The arm now has four completed runs and the
+pre-registered outcome reads, finished-only:
+
+| run | reference use | `run_probe` calls |
+|---|---|---|
+| remEEref1 | 10.0 % | 20 |
+| remEEref2 | 3.3 % | 30 |
+| remEEref3 | **0.0 %** | 10 |
+| remEEref4 | **0.0 %** | 18 |
+
+Median 1.6 % against the shipped card's 8.4 % over ten. Exact one-sided **p = 0.0430**.
+
+**That is the same number §93 printed, and it is not a confirmation of it.** §93's 0.0430 came from
+one finished run plus three partials; §93.2 showed the finished-only set gave 0.1119; this 0.0430
+comes from four finished runs, two of which imported the reference in *none* of their probes. Same
+digits, different evidence, and a reader who sees 0.0430 twice will take the second for the first
+being right. It was not — the intermediate reading is what the completed data supported at the time,
+and both are below §83's floor of six.
+
+Two runs at exactly 0.0 % is the part that is not a p-value. Those runs made 10 and 18 `run_probe`
+calls and imported the reference in none of them, on a card that still tells them the file holds the
+contract. That is the clause's own claim being visible in behaviour rather than in a rank statistic.
+
+The score remains untouched: control n = 4 median 184.41 against shipped 209.28, p = 0.4196.
+
+Four of six. `remEEref5`, `remEEref6`, `remEEref7` are in flight and `remEEref8` launched on the lane
+remEEref4 freed.
