@@ -3191,3 +3191,37 @@ Across the whole corpus, the runs that reached a second evaluated node are `accE
 `remEE2`, `remPde3` and `remDL2` — the top score of every task they belong to, except that `accPde`
 reached 120.76 on one node. Five points and one exception is not a rule either; it is written here so
 the next `discrete_log` probe has something specific to refute.
+
+### 74.3 `remPde5`: one node, 83 % spent before it, and the highest `pde_heat1d` score on record
+
+`remPde5` (pde_heat1d, $1.0059, **TEST 167.2103**) finished while the previous section's ink was
+drying and refutes two of the soft patterns this document has been circling.
+
+**Node count does not decide it.** §74.2 recorded that the five runs reaching a second evaluated node
+held the top score of every task they belong to, with `accPde` as the one exception, and asked the
+next probe to refute it. `remPde5` did: ONE evaluated node (161.5536 train, 167.2103 test), and it is
+now the highest `pde_heat1d` number in the corpus, above `remPde3`'s 129.75 which had two. Two
+exceptions out of six on this task is not a pattern with an exception; it is no pattern.
+
+**Spend before the first node does not decide it either.** `remPde5` spent 83 % of its dollar before
+that node existed — inside the band §72 flagged as the waste signature (`remPde` 91 %, `remPde2`
+79 %, `remPde4` 85 %) and far above the runs that scored well by the earlier reading. `pde_heat1d`
+now reads:
+
+| probe | TEST | nodes | before first node | `eval_train` |
+|---|---|---|---|---|
+| remPde5 | **167.2103** | 1 | 83 % | 21 |
+| remPde3 | 129.75 | 2 | 55 % | 26 |
+| accPde | 120.7621 | 1 | 53 % | 18 |
+| remPde | 54.1227 | 1 | 91 % | 22 |
+| remPde2 | 30.3282 | 1 | 79 % | 21 |
+| remPde4 | 0.0 | 1 | 85 % | 11 |
+
+83 % sits between the 79 % that scored 30 and the 85 % that scored 0, and it scored 167. Six points,
+0.0 to 167.21, and none of the three cheap summary statistics this document has reached for — node
+count, spend-before-first-node, `eval_train` — orders them.
+
+What that leaves is §73's conclusion, now with six points on one task instead of three: the
+per-configuration spread is enormous, and single-run comparisons on `pde_heat1d` mean nothing. The
+statistics kept failing because they were being asked to explain variance that is not yet shown to
+have structure.
