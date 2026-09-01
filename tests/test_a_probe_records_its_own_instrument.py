@@ -144,15 +144,42 @@ def test_the_record_is_written_before_anything_is_spent(tmp_path):
     which is a fix whose falsifier cannot run.
     """
     src = SCRIPT.read_text()
-    i_rec = src.index("INSTRUMENT.txt")
-    i_gate = src.index('PROBE_DRY_RUN:-0')
-    # The LAST occurrence: `make_task.py` is named in a comment a hundred lines above its
-    # invocation, and `index()` found the comment — the assertion then compared against a line that
-    # spends nothing.
-    i_task = src.rindex("make_task.py")
-    assert i_rec < i_gate < i_task, (
-        "the dry-run gate is no longer between the instrument record and make_task.py, so either "
-        "the record cannot be tested for free or the gate no longer guards the spending"
+
+    def where(marker):
+        """Position of a marker that must appear EXACTLY ONCE, and in code rather than prose.
+
+        Both of this test's earlier anchors -- "INSTRUMENT.txt" and "make_task.py" -- also occur in
+        comments, tens of lines from the statements they were meant to locate. The original version
+        hit that trap once and left a note about it; the 2026-09-01 rewrite hit it again, in the
+        very comment it had just added. Uniqueness is the property that makes an anchor mean
+        something: a new comment mentioning the name now fails loudly here instead of silently
+        re-pointing the assertion at prose.
+        """
+        n = src.count(marker)
+        assert n == 1, f"anchor {marker!r} occurs {n} times; it cannot locate anything"
+        return src.index(marker)
+
+    i_task = where('/make_task.py" --algotune-root')
+    i_rec = where('} > "$OUT/INSTRUMENT.txt"')
+    i_gate = where('PROBE_DRY_RUN:-0')
+    # AGAINST THE THING THAT ACTUALLY SPENDS, which is the model call. This assertion used to name
+    # make_task and was right by accident: make_task happened to sit below the gate, so it stood in
+    # for "the expensive part". On 2026-09-01 make_task moved ABOVE the record -- so the record
+    # could hash the card it produces -- and the test went red while both properties it exists to
+    # protect still held. A proxy that fails when the proxy moves is testing the layout, not the
+    # promise.
+    i_spend = where('python -m looplab.cli run "')
+
+    assert i_task < i_rec, (
+        "the card is built after the instrument record, so card_sha256 cannot describe the card "
+        "this probe was actually given"
+    )
+    assert i_rec < i_gate, (
+        "the instrument record is no longer above the dry-run gate, so it cannot be checked "
+        "without spending a dollar"
+    )
+    assert i_gate < i_spend, (
+        "the dry-run gate no longer sits above the model call, so it no longer guards the spending"
     )
 
 
