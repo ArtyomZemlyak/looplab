@@ -309,3 +309,64 @@ def test_a_solver_failure_is_still_a_solver_failure(tmp_path):
     assert "BUILD" not in line and "RULER" not in line, (
         f"a build that succeeded and computed wrong values was misfiled: {line}"
     )
+
+
+def _score(root, probe, body):
+    d = root / "model-probes" / probe / "runs" / "t" / "run" / "nodes" / "node_0"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "score.log").write_text(body)
+
+
+def test_a_brace_inside_the_build_prefix_does_not_lose_the_node(tmp_path):
+    """C and Cython print braces freely: `error: expected '}' before` is an ordinary message.
+
+    `raw.find("{")` aimed the decoder at that brace, `json.loads` raised, and `except: continue`
+    dropped the node -- the failure this section exists to prevent, inside its own repair.
+    """
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/br/runs/t/run")
+    _score(root, "br", 'looplab_eval: build_ext failed rc=1: error: expected 4{5} before return\n'
+                       '{"speedup": 0.0, "eval_seconds": 9.9, '
+                       '"no_speedup": {"reason": "compilation_failed"}}\n')
+    r = _run(root)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "node_0" in r.stdout and "compilation_failed" in r.stdout, (
+        "a brace in the build prefix lost the node again:\n" + r.stdout
+    )
+
+
+def test_text_after_the_json_does_not_lose_the_node(tmp_path):
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/tr/runs/t/run")
+    _score(root, "tr", '{"speedup": 0.0, "eval_seconds": 9.9, '
+                       '"no_speedup": {"reason": "no_valid_speedups"}}\n'
+                       'looplab_eval: cleanup ok\n')
+    r = _run(root)
+    assert "node_0" in r.stdout and "no_valid_speedups" in r.stdout, (
+        "a trailing line made the whole tail undecodable and the node vanished:\n" + r.stdout
+    )
+
+
+def test_a_missing_eval_seconds_is_unknown_not_a_ruler_failure(tmp_path):
+    """`float(x or 0.0)` turned an absent field into 0.0 and then into a diagnosis."""
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/ns/runs/t/run")
+    _score(root, "ns", '{"speedup": 0.0, "no_speedup": {"reason": "no_valid_speedups"}}\n')
+    r = _run(root)
+    line = next(l for l in r.stdout.splitlines() if "node_0" in l)
+    assert "RULER" not in line, (
+        f"an absent eval_seconds was read as 'the evaluation never reached the solver': {line}"
+    )
+    assert "unknown" in line and "?s" in line, f"the absence is not reported as an absence: {line}"
+
+
+def test_an_unreadable_score_log_is_announced_not_skipped(tmp_path):
+    """A torn file is a node whose outcome is UNKNOWN, which is worse than a zero, not better."""
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/torn/runs/t/run")
+    _score(root, "torn", "looplab_eval: build_ext ok\n")
+    r = _run(root)
+    assert "COULD NOT BE READ" in r.stdout, (
+        "a score.log with no JSON at all was skipped in silence:\n" + r.stdout
+    )
+    assert "torn" in r.stdout

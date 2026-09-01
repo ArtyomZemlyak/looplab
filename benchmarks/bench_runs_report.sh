@@ -89,6 +89,7 @@ python3 - "$_ZL" <<'PY'
 import json, os, sys
 
 seen = {}
+unreadable = []
 for line in open(sys.argv[1]):
     path = line.strip()
     if not path:
@@ -101,15 +102,35 @@ for line in open(sys.argv[1]):
     # corpus's three zero-scoring nodes was invisible because of it -- remEE6's node_3, whose Cython
     # kernel failed to compile ('cpython/long/PyLong_AS_LONG.pxd' not found). A section built to stop
     # a zero going unreported was itself losing one.
+    # SCAN for the first offset that actually decodes, and keep everything before it.
+    #
+    # `raw.find("{")` plus a whole-tail `json.loads` was the previous rule and it failed two ways,
+    # both reproduced 2026-09-01: a brace INSIDE the build prefix (C and Cython print them freely --
+    # `error: expected '}' before` is an ordinary compiler message) aimed the decoder at the wrong
+    # offset, and any text AFTER the JSON made the tail undecodable. Both ended at the same
+    # `except: continue`, dropping the node in silence -- the very failure this section exists to
+    # prevent, in the repair for the first version of it.
     raw = open(path, errors="replace").read().strip()
-    prefix = ""
-    brace = raw.find("{")
-    if brace > 0:
-        prefix = raw[:brace].strip().splitlines()[-1].strip() if raw[:brace].strip() else ""
-    try:
-        j = json.loads(raw[brace:] if brace >= 0 else raw)
-    except Exception:
+    dec = json.JSONDecoder()
+    j = None
+    prefix_raw = ""
+    k = raw.find("{")
+    while k >= 0:
+        try:
+            j, _ = dec.raw_decode(raw[k:])
+        except ValueError:
+            k = raw.find("{", k + 1)
+            continue
+        prefix_raw = raw[:k]
+        break
+    if not isinstance(j, dict):
+        # NOT silent. A score.log that cannot be read is a node whose outcome is UNKNOWN, which is
+        # a different and more alarming fact than "it scored fine".
+        unreadable.append((path.split("/runs/", 1)[0].rsplit("/", 1)[-1] if "/runs/" in path else "?",
+                           os.path.basename(os.path.dirname(path)), path))
         continue
+    plines = [x.strip() for x in prefix_raw.strip().splitlines() if x.strip()]
+    prefix = " | ".join(plines)[:200]
     sp = j.get("speedup")
     if isinstance(sp, (int, float)) and sp > 0:
         continue                       # a real score is not a zero
@@ -117,6 +138,12 @@ for line in open(sys.argv[1]):
     run = path.split("/runs/", 1)[0].rsplit("/", 1)[-1] if "/runs/" in path else "?"
     key = (run, node)
     seen.setdefault(key, []).append((path, j))
+
+if unreadable:
+    print("score.log FILES THAT COULD NOT BE READ (outcome unknown, not 'fine'):")
+    for run_u, node_u, path_u in sorted(set(unreadable)):
+        print(f"  {run_u:<10} {node_u:<8} {path_u}")
+    print()
 
 if not seen:
     print("no zero-scoring nodes on this box")
@@ -126,7 +153,10 @@ print("ZERO-SCORING NODES (reason read from nodes/<id>/score.log):")
 for (run, node), copies in sorted(seen.items()):
     _, j = copies[0]
     sp = j.get("speedup")
-    secs = float(j.get("eval_seconds") or 0.0)
+    # ABSENT IS NOT ZERO. `float(... or 0.0)` turned a missing field into 0.0 and then into
+    # "RULER (never reached the solver)" -- a diagnosis invented out of an absence.
+    raw_secs = j.get("eval_seconds")
+    secs = float(raw_secs) if isinstance(raw_secs, (int, float)) else None
     ns = j.get("no_speedup") or {}
     reason = str(ns.get("reason") or ("speedup is null" if sp is None else "unstated"))
     # THE SWEEP LIST'S OWN RULE: ~0.1 s means the evaluation never reached the solver. A THIRD
@@ -138,12 +168,15 @@ for (run, node), copies in sorted(seen.items()):
     # `looplab_eval` puts in `no_speedup.reason`, and it is the only thing that says so reliably.
     if reason == "compilation_failed" or "build_ext failed" in prefix:
         flag = "BUILD (the submission never compiled)"
+    elif secs is None:
+        flag = "unknown (no eval_seconds recorded)"
     elif secs < 1.0:
         flag = "RULER (never reached the solver)"
     else:
         flag = "solver"
     dupes = f"  [{len(copies)} copies]" if len(copies) > 1 else ""
-    print(f"  {run:<10} {node:<8} {secs:>7.1f}s  {flag:<32} {reason}{dupes}")
+    shown = f"{secs:>7.1f}s" if secs is not None else "      ?s"
+    print(f"  {run:<10} {node:<8} {shown}  {flag:<32} {reason}{dupes}")
     verdict = str(ns.get("evaluator_verdict") or "")[:70]
     if verdict:
         print(f"             {verdict}")
