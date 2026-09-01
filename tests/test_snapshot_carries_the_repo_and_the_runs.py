@@ -458,6 +458,35 @@ def test_a_named_source_that_is_not_there_is_counted(tmp_path):
     assert "INCOMPLETE SNAPSHOT: 1 source(s)" in result.stdout
 
 
+
+def _mode_denies_this_uid(tmp_path, mode: int, write: bool) -> bool:
+    """Does `chmod` actually deny THIS uid here? PROBED, never assumed.
+
+    `CAP_DAC_OVERRIDE` -- i.e. root, which is how a container routinely runs a suite -- reads a
+    mode-000 file and writes a mode-444 one perfectly well, and some FUSE/overlay mounts do not
+    enforce owner bits at all. Both falsifiers below express "the mount refuses this" as a chmod, so
+    on such a box their PREMISE is false and they fail while the production code is fine: measured
+    as root, `2 failed, 39 passed`, `assert 0 == 1`, with `cp` succeeding and the alarm correctly
+    silent. `tests/test_algotune_fence_keeps_results_walkable.py::_mode_000_denies_a_walk` is the
+    house answer to exactly this and says why probing beats an `os.geteuid() == 0` skip: it also
+    covers the mount case, and it keeps the control LIVE wherever the premise really does hold.
+    """
+    probe = tmp_path / f"_mode_probe_{mode:o}_{int(write)}"
+    probe.write_text("x", encoding="utf-8")
+    probe.chmod(mode)
+    try:
+        if write:
+            with probe.open("a", encoding="utf-8"):
+                pass
+        else:
+            probe.read_text(encoding="utf-8")
+        return False
+    except PermissionError:
+        return True
+    finally:
+        probe.chmod(0o644)
+        probe.unlink(missing_ok=True)
+
 def test_a_source_that_exists_and_cannot_be_read_is_still_a_shortfall(tmp_path):
     """The alarm that must survive all this: `copy` counts a source that is THERE and unreadable.
     That is the case the exit code was built for, and it is untouched by mode-awareness.
@@ -477,6 +506,10 @@ def test_a_source_that_exists_and_cannot_be_read_is_still_a_shortfall(tmp_path):
     # DIRECTORY creates the destination with the source's own 0o000 mode before it fails to read
     # it, and pytest's tmp-dir cleanup then cannot remove what it made -- the test would pass and
     # leave `d---------` behind for every later session. Same arm of `copy()`, no litter.
+    if not _mode_denies_this_uid(tmp_path, 0o000, write=False):
+        import pytest
+
+        pytest.skip("this uid reads a mode-000 file, so `cp` cannot be made to fail this way here")
     summary.chmod(0o000)                    # there, named, and unreadable -- the geesefs case
     try:
         result = _snapshot(src, tmp_path / "snapshots", tmp_path / "runs-archive")
@@ -607,6 +640,10 @@ def test_an_archive_that_is_still_short_after_the_repair_is_not_reported_as_arch
     # The FILE is made unwritable rather than its directory: `cp` opens an existing destination
     # O_WRONLY|O_TRUNC and never unlinks it, so a read-only parent does not stop the repair --
     # measured, the first version of this test made the parent 0o500 and the repair landed anyway.
+    if not _mode_denies_this_uid(tmp_path, 0o444, write=True):
+        import pytest
+
+        pytest.skip("this uid writes a mode-444 file, so the repair cannot be made to fail here")
     archived.chmod(0o444)
     try:
         result = _snapshot(src, dest, archive)

@@ -57,6 +57,18 @@ CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "ca
 # `final_banner` printed COMPLETE with no WALL-CUT line and four tests here were red against a
 # production script that was fine (the 2026-08-29 merge introduced the helper; this list lagged it,
 # the way it lagged LANE_LAYOUT at 41d111a). Both are top-level `name() {` blocks like the rest.
+# THE BANNER'S OWN HEADING, checked against the production script rather than only typed here.
+# These assertions said _CUT_BANNER while `final_banner` prints "STOPPED BY THE HARNESS (wall cut or
+# stall cut)": two of them were red against a script that was fine, and the third -- the CONTROL
+# that asserts the line is ABSENT when nothing was cut -- was green VACUOUSLY, because the string it
+# looked for never appears at all. A control that cannot fail is the shape this file exists to
+# refuse, so the heading is asserted to exist in the source and a rename goes red here instead of
+# silently retiring all three.
+_CUT_BANNER = "STOPPED BY THE HARNESS"
+assert _CUT_BANNER in CAMPAIGN.read_text(encoding="utf-8"), (
+    "final_banner no longer prints this heading; re-point these assertions and RE-CHECK that the "
+    "cut task-arms are still named inside the banner rather than only making the tests green")
+
 _FUNCTIONS = ("run_started_evidence", "successful_calls", "next_attempt",
               "marker_is_harness_cut", "marker_is_operator_skip", "already_measured",
               "record_done", "refuse_to_start", "final_banner")
@@ -476,9 +488,9 @@ def test_the_banner_names_the_wall_cut_task_arms_inside_its_own_complete(tmp_pat
     got = _bash(f'final_banner "{out}" B 2 "alpha beta"', tmp_path)
     assert got.returncode == 0, got.stdout + got.stderr
     assert "COMPLETE (2/2 markers)" in got.stdout, got.stdout
-    assert "WALL-CUT" in got.stdout, got.stdout
+    assert _CUT_BANNER in got.stdout, got.stdout
     assert "B-beta" in got.stdout, got.stdout
-    assert "B-alpha" not in got.stdout.split("WALL-CUT", 1)[1], got.stdout
+    assert "B-alpha" not in got.stdout.split(_CUT_BANNER, 1)[1], got.stdout
     assert "RETRY_WALL_CUT=1" in got.stdout
 
 
@@ -489,7 +501,7 @@ def test_the_banner_says_nothing_about_wall_cuts_when_there_are_none(tmp_path):
     (out / "B-alpha.done").write_text("wall=100 rc=0 state=ran_to_completion cpus=0-21\n")
     got = _bash(f'final_banner "{out}" B 1 "alpha"', tmp_path)
     assert got.returncode == 0, got.stdout
-    assert "WALL-CUT" not in got.stdout, got.stdout
+    assert _CUT_BANNER not in got.stdout, got.stdout
 
 
 def test_the_banner_reads_a_marker_written_before_state_existed(tmp_path):
@@ -500,7 +512,7 @@ def test_the_banner_reads_a_marker_written_before_state_existed(tmp_path):
     out.mkdir()
     (out / "A-convex_hull.done").write_text(_LEGACY_WALL_CUT)
     got = _bash(f'final_banner "{out}" A 1 "convex_hull"', tmp_path)
-    assert "WALL-CUT" in got.stdout, got.stdout
+    assert _CUT_BANNER in got.stdout, got.stdout
     assert "A-convex_hull" in got.stdout, got.stdout
 
 

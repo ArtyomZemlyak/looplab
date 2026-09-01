@@ -26,10 +26,24 @@
 # ours) instead of a directory of files nobody can date.
 set -u
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
 # WHICH TREES HOLD MEASUREMENTS is answered in one place, shared with `snapshot_timer.sh`. Two
 # copies of that question is how `camp-runs/` came to be archived by neither -- see bench_trees.sh.
-. "$HERE/bench_trees.sh"
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# SOURCED, AND A FAILURE TO SOURCE IT IS FATAL. `bench_campaign_trees`/`bench_run_trees` are the
+# only things that find anything to archive, so without them every loop below reads an empty list,
+# `FOUND_CAMPAIGN`/`FOUND_RUNS` stay 0, the script prints "(idle box ... nothing has been measured
+# here yet)" and exits 0 -- a snapshot carrying two git bundles and NONE of the measurements, over
+# a box that is full of them. That is precisely the outcome this file's own header calls the worst
+# one ("an archive that is silently empty ... is one somebody will restore from"), and both callers
+# read the exit code as the claim: `snapshot_timer.sh` records the fingerprint and never retries,
+# `campaign.sh`'s `|| echo "(snapshot failed...)"` arm cannot fire. Driven with the file removed:
+# rc=0, "idle box", and a campaign directory plus a camp-runs/ full of events.jsonl left behind.
+# `CDPATH= cd --` because an exported CDPATH makes `cd` ECHO the directory it resolved, so `$HERE`
+# becomes two lines and this source fails for a reason nobody would look for.
+. "$HERE/bench_trees.sh" || {
+  echo "cannot source $HERE/bench_trees.sh -- it answers WHICH TREES HOLD MEASUREMENTS, so"
+  echo "without it this snapshot would archive nothing and report an idle box. Refusing."
+  exit 1; }
 
 SRC="${BENCH_ROOT:-/var/tmp/looplab-bench}"
 # THE DESTINATION IS A VARIABLE, like the source. `$BENCH_ROOT` has always moved this script's
@@ -184,9 +198,21 @@ fi
 # "(0 dirty files)" is a claim worth being able to CHECK, and a dirty tree is worth being able to
 # restore.
 if [ -d "$SRC/looplab/.git" ]; then
-  ( cd "$SRC/looplab" && git bundle create "$OUT/looplab.bundle" --all 2>/dev/null ) \
-    && echo "  looplab.bundle        $(du -h "$OUT/looplab.bundle" | cut -f1)  ($(cd "$SRC/looplab" && git log --oneline -1))" \
-    || { echo "  BUNDLE FAILED        looplab -- OUR COMMITS ARE NOT IN THIS SNAPSHOT"; SHORT=$((SHORT + 1)); }
+  # THE SAME STATUS-AND-SIZE TEST SECTION 1 GOT, on the half whose loss actually costs work.
+  # Section 1 was hardened because a failure that leaves a PREFIX behind is the ordinary error on
+  # this geesefs mount and a zero exit status is not the claim the archive needs; this block still
+  # asked only the status, so a `git bundle create` that exited 0 over a truncated or empty file
+  # counted as a backup of "the one whose loss actually costs work". The asymmetry was in one file.
+  if ( cd "$SRC/looplab" && git bundle create "$OUT/looplab.bundle" --all 2>/dev/null ) \
+     && [ -s "$OUT/looplab.bundle" ]; then
+    echo "  looplab.bundle        $(du -h "$OUT/looplab.bundle" | cut -f1)  ($(cd "$SRC/looplab" && git log --oneline -1))"
+  else
+    echo "  BUNDLE FAILED        looplab -- OUR COMMITS ARE NOT IN THIS SNAPSHOT"
+    # Whatever the failed attempt left is not a backup, and leaving it is how a failure comes to
+    # look like one -- section 1's own lesson, applied here.
+    rm -f "$OUT/looplab.bundle"
+    SHORT=$((SHORT + 1))
+  fi
   ( cd "$SRC/looplab" && git log --oneline -3 > "$OUT/looplab-HEAD.txt"
     git status --porcelain > "$OUT/looplab-dirty.txt"
     git diff HEAD > "$OUT/looplab-uncommitted.patch" ) 2>/dev/null
@@ -241,17 +267,28 @@ while IFS= read -r D; do
   [ -n "$D" ] || continue
   FOUND_CAMPAIGN=$((FOUND_CAMPAIGN + 1))
   copy "$D" "$(printf '%-21s' "$(basename "$D")")"
+  # A RECEIPT ABOUT THIS SNAPSHOT, written where the copy happens. `_measured` below decides which
+  # snapshot to DESTROY, and it asked a NAME question (`campaign*`) about a directory this loop
+  # finds by the operator's own `$CAMPAIGN_OUT` variable -- precisely the "a pattern over directory
+  # names is what went stale twice" rule `bench_trees.sh` was extracted to state. With
+  # CAMPAIGN_OUT=$BENCH_ROOT/arms-2026-09 the snapshot holding the only copy of that campaign
+  # answered "not measured" and was pruned FIRST, with the message "carries no campaign and no
+  # runs; the checkouts in it regenerate from git" -- the irreplaceable-for-reproducible trade the
+  # prune block's own header exists to prevent, arriving through the fix for it. Driven end to end.
+  # Unlike `runs-manifest.txt` this is a receipt about the snapshot's OWN contents, which is exactly
+  # the property that disqualified the runs manifest from voting.
+  basename "$D" >> "$OUT/campaign-manifest.txt"
 done < <(bench_campaign_trees "$SRC")
 
 # EVERY tree of RUNS -- where a run's `events.jsonl` and `spans.jsonl` actually live. DISCOVERED,
 # by what a directory holds and by the operator's own `$CAMPAIGN_RUNS`, never by a pattern over
 # names; see bench_trees.sh for the two times a pattern went stale and what each cost.
 #
-# The second of those is why this paragraph was rewritten. `campaign.sh:52` writes every task-arm's
+# The second of those is why this paragraph was rewritten. `campaign.sh`'s `RUNS_ROOT` writes every task-arm's
 # run to `$CAMPAIGN_RUNS/<task>/run/events.jsonl` -- `camp-runs/` on this box -- and the glob here
 # was `runs-* model-probes probes`, which that name matches nowhere: `grep -c camp-runs` over this
 # file returned 0. The campaign path had the SAME hole the probe path had on 2026-08-29, still open,
-# and worse: `campaign.sh:1078` does `rm -rf "$TASK_ROOT"` at the head of every attempt, so a retry
+# and worse: `campaign.sh::run_one` does `rm -rf "$TASK_ROOT"` at the head of every attempt, so a retry
 # destroys the previous attempt's evidence without any container restart being involved.
 #
 # This is the rawest measurement on the box: what the loop proposed, what each call cost, which node
@@ -280,9 +317,23 @@ done < <(bench_campaign_trees "$SRC")
 # FILES BY NAME.
 #
 # So the repair asks the only question `-u` cannot: is the archived file SHORTER than its source?
-# These are append-only logs, so shorter means unfinished, and `cp -ru` has already handled every
-# case where the source is merely newer. The incrementality the comment above defends is untouched:
-# a finished run whose archived copy is the same length (or longer -- see below) is not re-read.
+# These are append-only logs, so shorter means unfinished. The incrementality the comment above
+# defends is untouched: a finished run whose archived copy is the same length (or longer -- see
+# below) is not re-read.
+#
+# AND THE BULK COPY IS `-n`, NOT `-u`, WHICH IS THE OTHER HALF OF THE SAME RULE. `-u` compares
+# MTIME, and a retry's log is always newer than the archived copy of the attempt it replaced --
+# `campaign.sh::run_one` does `rm -rf "$TASK_ROOT"` at the head of every attempt, so attempt 2 opens
+# a brand-new `events.jsonl` at the same path. Driven: a 5-line archived attempt-1 log, then the
+# rm -rf and a 1-line attempt-2 log, then `cp -ru` -- the archive holds ONE line, and the verify
+# loop below then measures 1 against 1, calls the tree whole and writes a clean manifest row. That
+# is the retry-loss `bench_trees.sh`'s own header calls "the 2026-08-29 loss without a container
+# restart", destroyed by the copy that was added to prevent it, before the loop that would have
+# refused it ever runs. `-n` never overwrites, so the ONLY thing that can rewrite an archived file
+# is the repair below, which rewrites exactly when the destination is SHORT -- i.e. the archive
+# grows and never shrinks, which is the rule the "LONGER is left alone" branch already states.
+# `-p` because `-n` (unlike `-u`) has no implied preservation and the archive's mtimes are what a
+# later `-n`-plus-repair cycle reasons about.
 #
 # The verify is separate from the repair on purpose. `cp` exiting 0 is not the claim the archive
 # needs; "the bytes are there" is, and until now nothing checked it, which is how a truncated run
@@ -332,17 +383,68 @@ archive_tree() {  # $1 = source tree, $2 = archive root. Sets ARCH_REPAIRED / AR
     ssz=$(stat -c %s "$S/$rel" 2>/dev/null) || continue
     dsz=$(stat -c %s "$A/$B/$rel" 2>/dev/null || echo -1)
     [ "$dsz" -lt "$ssz" ] || continue
+    # THE PARENT MAY NOT EXIST YET, and `cp` does not create one. A run that is LIVE grows while
+    # this walk reads it: `cp -ru` copies the tree, LoopLab then creates `nodes/<n>/` and writes
+    # into it, and `find` -- which runs after that -- hands us a path whose directory the archive
+    # has never seen. Without this `mkdir -p` the copy failed "No such file or directory", which
+    # set rc=1 AND ARCH_STILL_SHORT, so the snapshot reported "COPY FAILED ... NOT archived" and
+    # "that is a TRUNCATED run" about a file that is simply NEW -- and exited 1, which makes
+    # `snapshot_timer.sh` re-snapshot on the very next tick, for ever, while any run is live. That
+    # is the unbounded re-snapshot loop this file's own mode block records at 3.0 GB twice.
+    mkdir -p "$(dirname "$A/$B/$rel")" 2>/dev/null || true
     # LONGER than the source is left alone: the box's writable layer is where a run gets deleted or
     # restarted, and the archive is the durable half. Only SHORT is a defect.
-    if cp -p "$S/$rel" "$A/$B/$rel"; then ARCH_REPAIRED=$((ARCH_REPAIRED + 1)); else rc=1; fi
+    if cp -p "$S/$rel" "$A/$B/$rel" 2>/dev/null; then
+      # ONLY A FILE THE ARCHIVE ALREADY HELD COUNTS AS REPAIRED. `dsz` of -1 is a file the archive
+      # never had -- one that appeared after `cp -ru` walked past its directory -- and reporting it
+      # as "re-copied SHORT of its source" tells the operator a previous cycle left a partial run
+      # behind when nothing of the sort happened. The `-u` trap this counter exists to expose is a
+      # destination that EXISTS and is shorter, so that is what it counts.
+      [ "$dsz" -ge 0 ] && ARCH_REPAIRED=$((ARCH_REPAIRED + 1))
+    elif [ ! -e "$S/$rel" ]; then
+      # THE SAME VANISHED-SOURCE RULE AS THE `stat` ABOVE, applied to the copy. `campaign.sh`
+      # rm -rf's a task root at the head of every attempt, and it can land BETWEEN the stat and
+      # this cp; a file that is no longer there is not a shortfall in the archive, and charging one
+      # for it fails the whole snapshot over work the campaign deliberately deleted.
+      continue
+    else
+      rc=1
+    fi
+    # THE VERIFY COMPARES AGAINST THE SIZE THE COPY SET OUT TO REACH, not against a fresh reading of
+    # the source. Re-stat'ing `ssz` here looks like the same vanished-source courtesy one branch up
+    # and is not: a LIVE log grows between the `cp` and this line, so the destination would be
+    # measured against bytes that did not exist when it was written and every growing run would be
+    # reported as a TRUNCATED one -- the false COPY FAILED the `mkdir -p` above was just added to
+    # remove, arriving by another route. `$ssz` is the size stat'ed before the copy; a destination
+    # that reached it is whole, and the next cycle covers whatever arrived after.
+    [ -e "$S/$rel" ] || continue      # deleted under us after the copy: not a shortfall
     dsz=$(stat -c %s "$A/$B/$rel" 2>/dev/null || echo -1)
     if [ "$dsz" -lt "$ssz" ]; then ARCH_STILL_SHORT=$((ARCH_STILL_SHORT + 1)); rc=1; fi
   done < <(find "$S" -type f -printf '%P\0' 2>/dev/null)
   return $rc
 }
 FOUND_RUNS=0
+# THE ARCHIVE IS NOT A SOURCE. `bench_trees.sh` excludes the DEFAULT name; this covers an archive
+# the operator moved with `SNAPSHOT_RUNS_ARCHIVE`, and the destination rotation too. Compared by
+# resolved path and on the directory chain, because copying a tree into itself (or into its own
+# parent) is what nests the archive one level deeper per cycle and then fails every later snapshot.
+_is_own_output() {   # $1 = candidate tree
+  local c a d
+  c="$(readlink -f "$1" 2>/dev/null || echo "$1")"
+  for a in "$(readlink -f "$RUNS_ARCHIVE" 2>/dev/null || echo "$RUNS_ARCHIVE")" \
+           "$(readlink -f "$DEST" 2>/dev/null || echo "$DEST")"; do
+    [ -n "$a" ] || continue
+    case "$c/" in "$a/"*) return 0 ;; esac
+    case "$a/" in "$c/"*) return 0 ;; esac
+  done
+  return 1
+}
 while IFS= read -r D; do
   [ -n "$D" ] || continue
+  if _is_own_output "$D"; then
+    echo "  (skipping $D -- it is this snapshot's own archive or destination, not a source)"
+    continue
+  fi
   FOUND_RUNS=$((FOUND_RUNS + 1))
   B="$(basename "$D")"
   if archive_tree "$D" "$RUNS_ARCHIVE"; then
@@ -487,6 +589,15 @@ _measured() {  # $1 = snapshot dir -- does it hold anything that cannot be recom
   # collapsed back into plain oldest-first, and the sentence reserved for real loss printed on every
   # routine cycle -- observed in this box's own timer log on 2026-08-31, three cycles running.
   # The manifest is a RECEIPT ABOUT ANOTHER STORE; losing this snapshot loses none of those runs.
+  # THE RECEIPT FIRST, the name pattern only as the fallback for snapshots written before it
+  # existed. Each line names a campaign directory THIS snapshot copied, whatever the operator
+  # called it; `compgen -G` alone answers "not measured" about a campaign named anything but
+  # `campaign*`, and the prune then deletes it as reproducible.
+  if [ -s "$1/campaign-manifest.txt" ]; then
+    while IFS= read -r _c; do
+      [ -n "$_c" ] && [ -d "$1/$_c" ] && return 0
+    done < "$1/campaign-manifest.txt"
+  fi
   compgen -G "$1/campaign*" > /dev/null && return 0
   return 1
 }

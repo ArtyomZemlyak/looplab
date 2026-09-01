@@ -759,10 +759,20 @@ def main() -> int:
     # every line it prints, so a mean taken across two baseline regimes is now visible instead of
     # being a property of the environment two scripts happened to run under. Rows written before
     # 2026-08-30 carry no regime and are counted as "unstated" rather than assumed to match.
+    # OVER THE ROWS THAT CARRY A NUMBER, and only those. Iterating ALL rows folded every task-arm
+    # that never ran -- operator-skipped, refused, still owed, or whose `.final.json` is absent --
+    # into "unstated", and the sentences below then describe them as rows that WERE measured
+    # ("do not state the baseline regime they were measured on", "whose result predates the regime
+    # being recorded at all"). On a campaign with three refusals and two skips that is a false
+    # claim about five rows, printed six lines under the block that has just excluded the skipped
+    # ones from the table, inside the one paragraph whose whole subject is comparability.
     seen_regimes: dict[str, list[str]] = {}
-    for task, *_rest in rows:
+    for task, _va, vb, *_rest in rows:
+        if vb is None:
+            continue
         key = _arm_b_regime(args.final_dir / f"B-{task}.final.json") if args.final_dir else None
         seen_regimes.setdefault(key or "unstated", []).append(task)
+    measured_n = sum(len(v) for v in seen_regimes.values())
     stated = {k: v for k, v in seen_regimes.items() if k != "unstated"}
     if len(stated) > 1:
         print("ARM B'S ROWS WERE MEASURED ON MORE THAN ONE BASELINE REGIME, so the mean above is "
@@ -773,7 +783,7 @@ def main() -> int:
             print(f"  {'unstated':<14} {len(seen_regimes['unstated'])} task(s) whose result "
                   f"predates the regime being recorded at all")
     elif stated and "unstated" in seen_regimes:
-        print(f"{len(seen_regimes['unstated'])} of {len(rows)} arm-B rows do not state the "
+        print(f"{len(seen_regimes['unstated'])} of {measured_n} scored arm-B rows do not state the "
               f"baseline regime they were measured on;\nthe rest say {next(iter(stated))}. A row "
               f"that does not say cannot be shown to be comparable.")
 

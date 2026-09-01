@@ -135,7 +135,7 @@ same way … and as the campaign".
 
 Provenance cannot be resolved from the tree: docs/51 §10 and docs/52 §8 contradict each other on
 this point and carry an OPEN marker
-(an OPEN marker with the slug `docs52-launch-block-contradicts-docs51-regime`), and nothing from that era survives under
+with the slug `docs52-launch-block-contradicts-docs51-regime`, and nothing from that era survives under
 `runs-B/`, `model-probes/` or `campaign-final/`. The NAMES are reused and the paths exist today —
 `runs-archive/model-probes/` holds three probes from 08-31, `/var/tmp/looplab-bench/model-probes/`
 three more, and every `campaign-final/` on disk belongs to the 08-24 campaign — so the correct
@@ -266,8 +266,8 @@ survives:
   the `Current cost boundary (2026-08-08)` blockquote — "`CostAccountant` can enforce a limit
   supplied directly by a caller, but every shipped Settings path uses no limit". Settings expose one
   and a shipped path uses it: `Settings.llm_budget_usd`
-  (`looplab/core/config.py:1894`, `llm_budget_usd: float = Field(default=0.0, ge=0.0)`) is threaded
-  into `CostAccountant(limit=…)` at `looplab/core/llm.py:2737` inside `run_cost_accountant`, and it
+  (`looplab/core/config.py::Settings.llm_budget_usd`, `llm_budget_usd: float = Field(default=0.0, ge=0.0)`) is threaded
+  into `CostAccountant(limit=…)` at `looplab/core/llm.py::run_cost_accountant` inside `run_cost_accountant`, and it
   is the ceiling that ends **eleven of the campaign's twenty** arm-B runs with `Refused: LLM spend
   ceiling reached` — not "every campaign run", which is the §58.2 over-reach corrected above.
   Two further defects of this bullet's own, corrected here: the emphasis in `without a *configured*

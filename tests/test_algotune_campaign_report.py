@@ -573,6 +573,26 @@ def test_a_snapshot_that_could_not_copy_something_says_so_and_exits_nonzero(tmp_
     # unreadable DIRECTORY creates the destination with the source's 0o000 mode before it fails to
     # read it, and pytest's tmp cleanup then cannot remove what it made. Same failure arm, no litter.
     events = root / "model-probes" / "dsX" / "runs" / "r1" / "run" / "events.jsonl"
+    probe = tmp_path / "_mode000_probe"
+    probe.write_text("x", encoding="utf-8")
+    probe.chmod(0o000)
+    try:
+        probe.read_text(encoding="utf-8")
+        readable_anyway = True
+    except PermissionError:
+        readable_anyway = False
+    finally:
+        probe.chmod(0o644)
+        probe.unlink(missing_ok=True)
+    if readable_anyway:
+        # root (CAP_DAC_OVERRIDE), and some FUSE/overlay mounts, read a mode-000 file perfectly
+        # well, so the PREMISE of this falsifier is false here and `cp` cannot be made to fail --
+        # the test would be red against production code that is fine. Probing beats a
+        # `geteuid() == 0` skip because it also covers the mount case; see
+        # `tests/test_algotune_fence_keeps_results_walkable.py::_mode_000_denies_a_walk`.
+        import pytest
+
+        pytest.skip("this uid reads a mode-000 file, so the copy cannot be made to fail this way")
     events.chmod(0o000)                     # present, owed, and unreadable
     dest = tmp_path / "snapshots"
     try:
@@ -660,7 +680,8 @@ def test_the_watchdog_does_not_report_ok_over_a_dead_campaign(tmp_path):
     """
     line = _watchdog_once(tmp_path, campaign_running=False, owed=True)
     assert "] ok |" not in line, line
-    assert "DEAD, not done" in line, line
+    # The watchdog's own words; "DEAD, not done" was retired and this pin went with it.
+    assert "the campaign DIED, it did not finish" in line, line
 
 
 def test_a_finished_campaign_with_no_driver_is_still_ok(tmp_path):
@@ -891,18 +912,10 @@ def test_arm_b_status_shows_a_wall_cut_and_keeps_it_out_of_the_median(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "3.1223" in proc.stdout, proc.stdout                     # shown
     assert "[wall_cut]" in proc.stdout, proc.stdout                 # and labelled
-    # OPEN[report-test-pins-a-retired-phrase] TWO assertions in this file are RED over retired
-    # spellings: this one (the banner now says "STOPPED BY THE HARNESS (a wall cut or a stall
-    # cut)") and `test_the_watchdog_does_not_report_ok_over_a_dead_campaign`'s "DEAD, not done"
-    # (the watchdog now prints "the campaign DIED, it did not finish").
-    # proof:`present:assert "CUT AT THE WALL CLOCK"@tests/test_algotune_campaign_report.py`
-    # REVIEW 2026-08-30 (baseline-red): both behaviours under test HOLD on the current output (the
-    # cut row is shown, labelled, and kept out of the median; the dead campaign is named dead and
-    # never "ok" — each test's surrounding assertions prove it); only the phrases moved. CLAUDE.md's
-    # contract rule: a changed output contract moves its tests in the SAME change. Re-point BOTH
-    # pins at the new phrases (or at stable clauses like "shown and not averaged" / the absent
-    # "] ok |").
-    assert "CUT AT THE WALL CLOCK" in proc.stdout, proc.stdout
+    # RE-POINTED at the phrase the reporter actually prints. Both pins in this file were red over
+    # retired spellings while the behaviours under test held; a stranded pin is not a regression,
+    # it is an assertion that stopped running, which is worse because it reads as coverage.
+    assert "STOPPED BY THE HARNESS" in proc.stdout, proc.stdout
     assert "median 2.0000" in proc.stdout, proc.stdout              # not averaged in
     assert "over 1 at the budget" in proc.stdout, proc.stdout
 

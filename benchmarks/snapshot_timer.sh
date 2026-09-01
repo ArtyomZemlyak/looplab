@@ -17,10 +17,17 @@
 # copies (snapshot.sh also keeps only the last SNAPSHOT_KEEP).
 set -u
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
 # The SAME answer `snapshot.sh` archives from. Two copies of "which trees hold measurements" is
 # exactly how `camp-runs/` came to be archived by neither and watched by neither -- bench_trees.sh.
-. "$HERE/bench_trees.sh"
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# FATAL if it cannot be sourced, for `snapshot.sh`'s reason: without these functions `fingerprint`
+# watches only the three static paths, so a campaign could fill `$CAMPAIGN_RUNS` for hours and this
+# loop would report "nothing new" throughout -- the exact blindness bench_trees.sh was extracted to
+# end. `CDPATH= cd --` because an exported CDPATH makes `cd` echo its resolved path into `$HERE`.
+. "$HERE/bench_trees.sh" || {
+  echo "cannot source $HERE/bench_trees.sh -- it answers which trees this timer must watch."
+  echo "Refusing rather than watching a shorter list and reporting a quiet box."
+  exit 1; }
 ROOT="${BENCH_ROOT:-/var/tmp/looplab-bench}"
 PIDFILE="$ROOT/snapshot_timer.pid"
 LOGFILE="$ROOT/logs/snapshot_timer.log"

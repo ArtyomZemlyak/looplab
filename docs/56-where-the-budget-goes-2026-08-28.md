@@ -2959,7 +2959,8 @@ have, and misses entirely a run that spends its budget before the first draw. Th
 
 `propose` and `repropose` carry the Spend guidance line; `plan`, `plan_step`, `deep_research`,
 `foresight_rank` and `hyp_prioritize` do not — the reach is pinned in
-`proposal_cues.py`'s a CLAIM pin with the slug `llm-budget-cue-reaches-propose-only`. The cost of the gap now has a
+a CLAIM pin in `proposal_cues.py` with the slug `llm-budget-cue-reaches-propose-only`. The
+cost of the gap now has a
 number twice over: `plan_step` + `plan` took **73.7 %** of `remPde`'s dollar and **61.1 %** of
 `remDL2`'s, and neither role can see what is left. The role that spends is the role without the
 receipt.

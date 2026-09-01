@@ -496,7 +496,23 @@ except OSError:
 # the answer -- the env-var NAME is quoted too and does not start with a slash.
 m = re.search(r"_ll_cache_dir\s*=\s*(.{0,400}?)\n\s*_ll_key", src, re.S)
 found = re.findall(r"['\"](/[^'\"]*)['\"]", m.group(1)) if m else []
-print(found[0] if found else str(Path(sys.argv[2]) / "benchmarks" / "algotune" / ".baseline_times"))
+if found:
+    print(found[0])
+else:
+    # THE FALLBACK SAYS SO. This is a REGEX over generated Python, and every way it can miss ends
+    # in the same place: `$REPO`'s own `.baseline_times`, which in the documented two-clone
+    # workflow is a directory the patched `BaselineManager` never writes -- i.e. the exact
+    # "fingerprint a directory nothing writes" defect this function was added to abolish, restored
+    # silently and indistinguishably from a successful read. It misses on a `--cache-dir` the
+    # operator gave as a RELATIVE path (`patch_baseline_cache.py::main` never resolves it, so the
+    # baked `repr` has no leading slash), on a path Python's `repr` escapes, on a checkout that
+    # carries no patch at all, and on any reordering of the two emitted lines. The stderr line is
+    # not decoration: the caller substitutes stdout, so this is the only channel left, and an
+    # operator who sees it knows the ruler is a guess rather than the patch's own answer.
+    print("baseline_cache_dir: could NOT read the patched baseline_manager.py -- falling back to"
+          " $REPO's .baseline_times, which the patch may not be the one writing. Check"
+          f" {patched}", file=sys.stderr)
+    print(str(Path(sys.argv[2]) / "benchmarks" / "algotune" / ".baseline_times"))
 PYEOF
 }
 
@@ -510,12 +526,44 @@ declare_baseline_ruler() {
   ALGOTUNE_BASELINE_CACHE_DIR="${ALGOTUNE_BASELINE_CACHE_DIR:-$(baseline_cache_dir "$AT")}"
   export ALGOTUNE_BASELINE_CACHE_DIR
   export ALGOTUNE_EVAL_WORKERS="${ALGOTUNE_EVAL_WORKERS:-auto}"
-  # Pinned at the arena's own default rather than inherited: a box profile that set this would
-  # move the regime key under a campaign that never mentioned it.
-  export ALGOTUNE_EVAL_CORES_PER_WORKER="${ALGOTUNE_EVAL_CORES_PER_WORKER:-1}"
+  # PINNED, not defaulted -- `${VAR:-1}` is exactly the inheritance the sentence above says it is
+  # refusing, and `set -a; . .env; set +a` two hundred lines up is a live channel for setting it.
+  # An inherited 2 on a 22-core lane makes the arena key `__w11x2r3`, a cache the box has never
+  # written, so the reference is re-measured in the same pass and the evaluator reports the
+  # reference against ITSELF at ~1.0 -- the exact defect this whole block exists to prevent.
+  # Override it deliberately with ALGOTUNE_EVAL_CORES_PER_WORKER_PIN, and an inherited value that
+  # is being overridden is SAID rather than silently dropped -- a pin that quietly discards what an
+  # operator exported is the same class of surprise as the inheritance it replaces.
+  if [ -n "${ALGOTUNE_EVAL_CORES_PER_WORKER:-}" ] \
+     && [ "${ALGOTUNE_EVAL_CORES_PER_WORKER}" != "${ALGOTUNE_EVAL_CORES_PER_WORKER_PIN:-1}" ]; then
+    echo "  NOTE: ALGOTUNE_EVAL_CORES_PER_WORKER=$ALGOTUNE_EVAL_CORES_PER_WORKER was inherited from" \
+         "the environment and is PINNED to ${ALGOTUNE_EVAL_CORES_PER_WORKER_PIN:-1} for this" \
+         "campaign (the regime is part of the measurement). Export" \
+         "ALGOTUNE_EVAL_CORES_PER_WORKER_PIN to mean it."
+  fi
+  export ALGOTUNE_EVAL_CORES_PER_WORKER="${ALGOTUNE_EVAL_CORES_PER_WORKER_PIN:-1}"
+  # THE STARTUP FLOOR IS PART OF THE RULER TOO, and it was the one export `run_probe.sh` declares
+  # that this driver did not -- so the two were still two instruments after the ruler was
+  # "declared in the same words". `patch_parallel_eval.py` makes it the per-subprocess startup
+  # allowance FLOOR, so a candidate slower to start than the arena's default is a timeout, i.e.
+  # INVALID, i.e. 0.0 in a campaign lane and a real number in a probe. It matters more here than
+  # there, not less: the line above puts this driver on the PARALLEL evaluator, which is the
+  # contention this floor exists to absorb.
+  export ALGOTUNE_MIN_TIMEOUT_S="${ALGOTUNE_MIN_TIMEOUT_S:-120}"
   # The guard globs this directory; a missing one makes `_baseline_fingerprint` answer `{}` both
   # times and compare equal, which is the silence again by another route.
   mkdir -p "$ALGOTUNE_BASELINE_CACHE_DIR" 2>/dev/null || true
+  # AND AN EMPTY ANSWER IS NOT A DIRECTORY. `baseline_cache_dir` always prints something, so an
+  # empty value can only mean the helper itself did not run -- and an empty
+  # ALGOTUNE_BASELINE_CACHE_DIR is FALSY to every reader of it: `DEFAULT_TIMES_DIR` falls back to
+  # the `__file__`-derived path (the two-clone defect this function exists to close) and
+  # `_regime_mismatch` returns None on its first line. Refuse rather than run a campaign whose
+  # denominator is unwatched.
+  [ -n "$ALGOTUNE_BASELINE_CACHE_DIR" ] || {
+    echo "REFUSED: could not determine the baseline cache directory (baseline_cache_dir produced" >&2
+    echo "  nothing). An empty ALGOTUNE_BASELINE_CACHE_DIR silently disarms the reference-measured-" >&2
+    echo "  in-pass guard AND points the bridge at a directory the patch does not write." >&2
+    exit 2; }
 }
 declare_baseline_ruler
 
@@ -632,9 +680,18 @@ with open(log, "r", encoding="utf-8", errors="replace") as fh:
             continue
         if d.get("arm") != arm or d.get("task") != task:
             continue
-        seen += 1
         if attempt and d.get("attempt") not in ("", None, attempt):
             continue
+        # COUNTED AFTER THE ATTEMPT FILTER, and that order is the whole rule. `seen` exists only to
+        # answer "could this log be windowed at all"; counting a row this attempt has just excluded
+        # made "no rows for THIS attempt" indistinguishable from "no clock on ANY row", so a RETRY
+        # over a log holding the previous attempt's rows answered "" (unknowable) where it used to
+        # answer "0" -- and only "0" refuses a marker. Driven: `successful_calls B t a2 <start>`
+        # over a log of `attempt=a1` 200s returned "" here and "0" before the window landed, so an
+        # a2 that bought nothing because the endpoint was down earned `state=ran_to_completion`.
+        # A retry is exactly when the endpoint is most likely to still be down, so the rung was
+        # failing open on the case it was written for.
+        seen += 1
         if since:
             try:
                 ts = float(d["ts"])
@@ -673,9 +730,18 @@ with open(log, "r", encoding="utf-8", errors="replace") as fh:
             continue
         if d.get("arm") != arm or d.get("task") != task:
             continue
-        seen += 1
         if attempt and d.get("attempt") not in ("", None, attempt):
             continue
+        # COUNTED AFTER THE ATTEMPT FILTER, and that order is the whole rule. `seen` exists only to
+        # answer "could this log be windowed at all"; counting a row this attempt has just excluded
+        # made "no rows for THIS attempt" indistinguishable from "no clock on ANY row", so a RETRY
+        # over a log holding the previous attempt's rows answered "" (unknowable) where it used to
+        # answer "0" -- and only "0" refuses a marker. Driven: `successful_calls B t a2 <start>`
+        # over a log of `attempt=a1` 200s returned "" here and "0" before the window landed, so an
+        # a2 that bought nothing because the endpoint was down earned `state=ran_to_completion`.
+        # A retry is exactly when the endpoint is most likely to still be down, so the rung was
+        # failing open on the case it was written for.
+        seen += 1
         if since:
             try:
                 ts = float(d["ts"])
@@ -1008,15 +1074,31 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
   # above and for the same reason: it really is terminal, `already_measured` will not re-run it,
   # and a banner that only prints a marker count hides that nothing measured it. See
   # `marker_is_operator_skip` for the measurement that forced this.
+  #
+  # THE CUTS ARE COUNTED IN THE SAME PASS, because "MEASURED" has to mean the same thing as the two
+  # paragraphs printed above it. Subtracting only the skips said `3 MEASURED` over 2 clean markers,
+  # 1 wall cut and 2 skips -- four lines after this same banner told the operator the cut ones "are
+  # not measurements at that ceiling" and that `compare_arms.py` leaves them out of the means. One
+  # banner, two answers, and the larger one is the one a watcher greps. `WALL_CUT` above is a name
+  # LIST built in its own loop over the same files; the count is taken here rather than derived
+  # from it because a task-arm name may not contain a space and a word count would silently start
+  # lying on the day one does.
   SKIPPED=""
   SKIPPED_N=0
+  CUT_N=0
   for M in "$1/$2"-*.done; do
     [ -s "$M" ] || continue
-    if marker_is_operator_skip "$(cat "$M")"; then
+    _MK="$(cat "$M")"
+    if marker_is_operator_skip "$_MK"; then
       SKIPPED="$SKIPPED $(basename "${M%.done}")"
       SKIPPED_N=$((SKIPPED_N + 1))
+    elif marker_is_harness_cut "$_MK"; then
+      CUT_N=$((CUT_N + 1))
     fi
   done
+  # The TRIGGER stays the skips alone, deliberately: a banner that names no MEASURED count claims
+  # nothing, so the wall-cut-only case keeps the plain `COMPLETE (N/N markers)` it has always
+  # printed and only the arithmetic below had to be corrected.
   if [ "$SKIPPED_N" -gt 0 ]; then
     echo "[$(date +%H:%M:%S)] SKIPPED BY THE OPERATOR --$SKIPPED"
     echo "  These carry a .done marker that was WRITTEN rather than earned, so a resume will not"
@@ -1024,7 +1106,8 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
     echo "  them as SKIPPED and leaves those pairs out of the means. Delete a marker to queue that"
     echo "  task-arm again; RETRY_WALL_CUT does NOT reopen a skip, because a skip is a decision."
     echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers;" \
-         "$((DONE_N - SKIPPED_N)) MEASURED, $SKIPPED_N SKIPPED) ====="
+         "$((DONE_N - SKIPPED_N - CUT_N)) MEASURED, $SKIPPED_N SKIPPED," \
+         "$CUT_N STOPPED BY THE HARNESS) ====="
     return 0
   fi
   echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers) ====="
@@ -1165,7 +1248,23 @@ echo "model $ALGOTUNE_MODEL_KEY | llm ${METER_BASE:-$LOOPLAB_LLM_BASE_URL}${METE
 # The RULER, in the log, beside the model. A speedup is a ratio and this names the instrument
 # that measured its denominator; every number below is only comparable to numbers from the
 # same two values.
-echo "baseline cache $ALGOTUNE_BASELINE_CACHE_DIR | eval workers $ALGOTUNE_EVAL_WORKERS x $ALGOTUNE_EVAL_CORES_PER_WORKER core(s)"
+echo "baseline cache $ALGOTUNE_BASELINE_CACHE_DIR | eval workers $ALGOTUNE_EVAL_WORKERS x $ALGOTUNE_EVAL_CORES_PER_WORKER core(s) | min timeout ${ALGOTUNE_MIN_TIMEOUT_S}s"
+# AND SAY WHICH INSTRUMENT THAT IS, because this driver used to run serial and now does not.
+# docs/51 s10 measures the PARALLEL evaluation regime inflating the metric ~75 % on a solver that
+# IS the reference (1.0011 serial vs 1.7795 at two workers, ~75x the measured noise floor) and
+# states the operational rule "leave ALGOTUNE_EVAL_WORKERS unset"; docs/58 s58.4 records a campaign
+# measured that way whose numbers "must be discarded rather than rescaled". Setting it here is a
+# real change of instrument and the driver's own header says "THE REGIME IS PART OF THE
+# MEASUREMENT", so it is named in the log rather than left to be inferred from an export. This is
+# the warn half of the remedy docs/52 s8's OPEN item prescribes.
+case "${ALGOTUNE_EVAL_WORKERS:-1}" in
+  1|"") ;;
+  *) echo "  NOTE: this is the PARALLEL evaluation regime. docs/51 s10 measures it inflating the"
+     echo "        metric ~75 % (reference-equivalent solver: 1.0011 serial, 1.7795 at 2 workers)"
+     echo "        and mandates leaving ALGOTUNE_EVAL_WORKERS unset until that is explained;"
+     echo "        docs/58 s58.4 discards a campaign measured under it. Numbers from this arm are"
+     echo "        NOT comparable to the serial ones. Set ALGOTUNE_EVAL_WORKERS=1 for that ruler." ;;
+esac
 echo "card $CARD_ARGS ${MAKE_TASK_ARGS:-}"
 reap_orphan_workers
 

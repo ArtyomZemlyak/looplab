@@ -195,30 +195,71 @@ DEFAULT_TIMES_DIR = Path(
 # Now the guard and the record read the same function, and a drift between what is refused and what
 # is reported is not expressible.
 #
-# The open item declared at `_regime_mismatch` -- `regime-replica-reads-the-wrong-env-var`, and it
-# is DECLARED there, not here, because a slug names exactly one item -- applies to this function
-# too: it reads `ALGOTUNE_CORES_PER_WORKER` where the arena's `resolve_workers` reads
-# `ALGOTUNE_EVAL_CORES_PER_WORKER`, and omits that helper's clamp. Behaviour is preserved here
-# deliberately -- moving the guard's answer is a different finding from recording it -- and both
-# spellings default to 1, which is what the campaign now pins.
+# THE ARENA'S OWN RULE, IMPORTED. This used to be a REPLICA of `parallel_eval.py::resolve_workers`
+# and it was a known-wrong one: it read `ALGOTUNE_CORES_PER_WORKER` where the arena reads
+# `ALGOTUNE_EVAL_CORES_PER_WORKER` (the spelling `patch_parallel_eval.py` tells operators to set,
+# and the one `campaign.sh::declare_baseline_ruler` now pins), and it dropped that helper's
+# `min(workers, allowed // cores)` clamp. Measured on a 4-core lane: with
+# `ALGOTUNE_EVAL_CORES_PER_WORKER=2` the replica answered `__w2x2r3` against the arena's
+# `__w4x1r3`, and with `ALGOTUNE_EVAL_WORKERS=8` it answered `__w8x1r3` against `__w4x1r3`.
+#
+# That divergence stopped being private the day this key started riding on every emitted line and
+# feeding `compare_arms.py`'s comparability verdict, and it stopped being inert the day
+# `campaign.sh` began exporting `ALGOTUNE_BASELINE_CACHE_DIR` -- which is the very condition
+# `_regime_mismatch` returns early on. A wrong key there REFUSES a correctly-matched cache and
+# fails the whole evaluation; a wrong key here files a real number under an instrument that never
+# measured it.
+#
+# `benchmarks/algotune/parallel_eval.py` is OUR file, imports only stdlib, has no module-level side
+# effects, and is the source `patch_parallel_eval.py` installs the arena's copy FROM -- so it is the
+# authority rather than a second opinion. The replica survives only as the ImportError fallback,
+# and it now reads the arena's spelling first and carries the clamp, so the two cannot answer
+# differently even on that path.
+def _resolve_workers(env: dict[str, str]) -> tuple[int, int]:
+    try:
+        _here = str(Path(__file__).resolve().parent)
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        from parallel_eval import resolve_workers          # noqa: PLC0415 - optional authority
+    except Exception:                                      # noqa: BLE001 - fall back to the replica
+        cores = max(1, int(env.get("ALGOTUNE_EVAL_CORES_PER_WORKER")
+                           or env.get("ALGOTUNE_CORES_PER_WORKER") or 1))
+        allowed = len(os.sched_getaffinity(0))
+        raw = (env.get("ALGOTUNE_EVAL_WORKERS") or "1").strip().lower()
+        if raw in ("auto", "max"):
+            return max(1, allowed // cores), cores
+        try:
+            workers = int(raw)
+        except ValueError:
+            return 1, cores
+        if workers <= 1:
+            return 1, cores
+        return max(1, min(workers, allowed // cores)), cores
+    return resolve_workers(dict(env))
+
+
 def eval_regime() -> dict[str, Any]:
     """What this invocation would key its baseline as, and the environment that decides it."""
     raw = (os.environ.get("ALGOTUNE_EVAL_WORKERS") or "").strip().lower()
     declared = os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR")
+    # TWO try BLOCKS, because they are two different failures with two different remedies. One
+    # `except Exception` around both meant a typo'd `ALGOTUNE_EVAL_CORES_PER_WORKER=two` raised
+    # ValueError and was reported as `detail: "no CPU affinity available"` -- a false claim about
+    # the machine, stamped on every emitted line, while `_regime_mismatch` silently disarmed.
     try:
-        cores = max(1, int(os.environ.get("ALGOTUNE_CORES_PER_WORKER") or 1))
         width = len(os.sched_getaffinity(0))
     except Exception:                           # noqa: BLE001 - no affinity, no claim
         return {"key": None, "eval_workers": raw or None, "cores_per_worker": None,
                 "lane_width": None, "baseline_cache_dir": declared,
                 "detail": "no CPU affinity available, so no regime key can be derived"}
-    if raw in ("auto", "max"):
-        workers = max(1, width // cores)
-    else:
-        try:
-            workers = int(raw)
-        except ValueError:
-            workers = 1
+    try:
+        workers, cores = _resolve_workers(os.environ)
+    except (TypeError, ValueError) as exc:
+        return {"key": None, "eval_workers": raw or None, "cores_per_worker": None,
+                "lane_width": width, "baseline_cache_dir": declared,
+                "detail": f"the worker environment does not parse ({exc}), so no regime key can "
+                          f"be derived -- fix ALGOTUNE_EVAL_WORKERS / "
+                          f"ALGOTUNE_EVAL_CORES_PER_WORKER"}
     key = f"__lane{width}r3" if workers <= 1 else f"__w{workers}x{cores}r3"
     return {"key": key, "eval_workers": raw or "(unset -> 1)", "cores_per_worker": cores,
             "lane_width": width, "baseline_cache_dir": declared}
@@ -710,10 +751,17 @@ def _emit(out: dict[str, Any]) -> None:
     slightly wrong label, and the failure mode the timeout branch below was already fixed for once.
     """
     # THE RULER RIDES ON EVERY LINE, and it is stamped HERE for the same reason the reason-check
-    # below is: this is the ONE exit, so no path can leave without it. NESTED, for
-    # `runtime/sandbox.py::json_line_extras`' reason -- it sweeps every top-level NUMERIC key into
-    # the node's `extra_metrics` as an undeclared `auto` measurement, so `eval_workers` at the top
-    # level would enter the operator's metrics table as a score.
+    # below is: this is the exit EVERY SCORED path takes, so none of them can leave without it.
+    # It is NOT the only `print(json.dumps(...))` in this file and saying so was wrong: the
+    # `rules_violation` branch in `main()` prints its own complete line and deliberately does not
+    # come through here (routing it through would give it a `no_speedup` block that
+    # `_NO_SPEEDUP_REASONS`' own comment forbids), so it stamps `eval_regime()` itself. A claim
+    # that a funnel is total is worth exactly as much as the grep behind it -- and this one made
+    # the campaign's most newly-reachable branch, now that `CARD_ARGS` enables `--enforce-rules`
+    # by default, look covered when it was not. NESTED, for `runtime/sandbox.py::json_line_extras`'
+    # reason -- it sweeps every top-level NUMERIC key into the node's `extra_metrics` as an
+    # undeclared `auto` measurement, so `eval_workers` at the top level would enter the operator's
+    # metrics table as a score.
     out.setdefault("eval_regime", eval_regime())
     speedup = out.get("speedup")
     if not isinstance(speedup, (int, float)) or speedup <= 0:
@@ -965,8 +1013,19 @@ def main() -> int:
             # does NOT spend a repair on it, because there is nothing here a repair could fix that
             # would not be a way around the arena's rule. The full text rides along so the next
             # proposer reads WHAT was refused, not just that something was.
+            # THE RULER RIDES ON THIS LINE TOO, and it is stamped here rather than by routing this
+            # path through `_emit`. `_emit` normalises a non-positive speedup into a `no_speedup`
+            # block, and the comment at `_NO_SPEEDUP_REASONS` says why this path must not acquire
+            # one: `rules_violation` is a COMPLETE explanation in its own channel and the engine
+            # reads it as a DECLARED reason, not as a score. What it may not do is be the one
+            # result line in a campaign with no instrument on it -- `campaign.sh::CARD_ARGS` turns
+            # `--enforce-rules` on by default for both `eval_train` and the `score` stage, so this
+            # branch is live on every task-arm now, and `compare_arms.py::_arm_b_regime` reads
+            # `eval_regime` off exactly these files. Without it the row reads as "predates the
+            # regime being recorded at all" rather than as a candidate that was never eligible.
             print(json.dumps({"speedup": None, "rules_violation": violation,
                               "looplab_failure_reason": "rules_violation",
+                              "eval_regime": eval_regime(),
                               "error": f"rules_violation: {violation}"}))
             return 2
 
@@ -1181,22 +1240,11 @@ def main() -> int:
         if not (os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR")
                 or "--baseline-times-dir" in sys.argv):
             return None
-        # OPEN[regime-replica-reads-the-wrong-env-var] the replica reads a cores-per-worker
-        # variable the arena does not, and omits `resolve_workers`' clamp, so it can compute a key
-        # the arena will never write and refuse a correctly-matched cache.
-        # proof:present:get("ALGOTUNE_CORES_PER_WORKER@benchmarks/algotune/looplab_eval.py
-        # REVIEW 2026-08-30 (correctness): the helper this replicates reads
-        # ALGOTUNE_EVAL_CORES_PER_WORKER (`parallel_eval.py::resolve_workers`, and
-        # `patch_parallel_eval.py` tells operators to set exactly that name) and clamps workers to
-        # `allowed // cores_per_worker`. With the EVAL_ spelling set to 2, or workers above the
-        # lane width, the two computations diverge and the refusal's remedy ("set
-        # ALGOTUNE_EVAL_WORKERS to match") cannot satisfy the guard.
-        # `test_algotune_refuses_a_regime_mismatch.py::test_the_replicated_rule_matches_the_arenas_own`
-        # pins `cores = 1` and workers below the affinity width, so neither drift dimension can go
-        # red. Read both spellings (theirs first) and carry the clamp — or import the rule when the
-        # arena is importable and keep the replica only as the fallback.
-        # ONE AUTHORITY: the same `eval_regime()` every emitted line now carries, so what is
-        # REFUSED and what is REPORTED cannot come apart.
+        # ONE AUTHORITY, TWICE OVER: the same `eval_regime()` every emitted line carries, and it
+        # now IMPORTS `parallel_eval.py::resolve_workers` rather than replicating it -- so what is
+        # REFUSED, what is REPORTED and what the arena actually KEYS cannot come apart. The replica
+        # that read the wrong cores-per-worker spelling and dropped the clamp is gone; see
+        # `eval_regime` for the two measured divergences it could produce.
         mine = eval_regime()["key"]
         if mine is None:
             return None

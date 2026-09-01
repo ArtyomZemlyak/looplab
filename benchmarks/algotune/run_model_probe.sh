@@ -25,4 +25,7 @@
 #
 # `exec` — та же защита от правки на ходу, что и обёртка в функцию у `run_probe.sh`, только строже:
 # процесс замещается, и оболочке больше нечего дочитывать из этого файла.
-exec bash "$(cd "$(dirname "$0")" && pwd)/run_probe.sh" "$@"
+# `CDPATH= cd --`: an exported CDPATH makes `cd` ECHO the directory it resolved for any operand
+# that does not start with / ./ or .., so `$( )` would capture TWO lines and this exec would die
+# 127 on a path nobody can see in the error.
+exec bash "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/run_probe.sh" "$@"

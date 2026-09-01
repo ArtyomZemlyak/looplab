@@ -1,6 +1,7 @@
 """`BENCH_ROOT` moved what the snapshot READ and nothing moved where it WROTE.
 
-`snapshot.sh:28` was `DEST="${1:-/home/jovyan/data/looplab-bench/snapshots}"`, and both of its
+`snapshot.sh`'s `DEST` assignment was `DEST="${1:-/home/jovyan/data/looplab-bench/snapshots}"`,
+and both of its
 callers invoke it with no argument -- `snapshot_timer.sh` in its `_loop`, `campaign.sh` after an
 arm. So on both paths the hardcoded persistent path was the only destination reachable, whatever
 `BENCH_ROOT` said. Measured on 35124d05: `grep -rn SNAPSHOT_DEST` over the whole tree returned

@@ -23,6 +23,20 @@ from pathlib import Path
 BRIDGE = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "looplab_eval.py"
 
 
+def _load_bridge():
+    """The SHIPPED bridge module, imported rather than re-implemented.
+
+    `looplab_eval.py` is a script, so it is loaded by path; its module body only defines things,
+    and `main()` is what argparse-and-exits, so importing it is safe.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_looplab_eval_under_test", BRIDGE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _marker() -> str:
     """The bridge's OWN marker constant, read from its source so the two cannot drift."""
     import re
@@ -110,32 +124,70 @@ def test_a_different_subset_is_not_the_same_baseline(tmp_path):
     assert (row.get("no_speedup") or {}).get("reason") != "baseline_regime_mismatch", row
 
 
-def test_the_replicated_rule_matches_the_arenas_own():
-    """The guard replicates `resolve_workers` rather than importing it (see its docstring). This is
-    the drift check: where the arena IS importable, the two must agree on every setting."""
+def test_the_regime_key_is_the_arenas_own_answer(monkeypatch):
+    """The drift check, driving the SHIPPED `eval_regime()` against the SHIPPED `resolve_workers`.
+
+    Its predecessor could not go red. It skipped unless `AlgoTuner` was importable (it never is
+    here), and where it did run it compared the arena against a copy of the replica written INSIDE
+    the test with `cores = 1` hardcoded -- so neither of the two real drift dimensions was
+    reachable. Both were live: measured on a 4-core lane, the replica answered `__w2x2r3` where the
+    arena keys `__w4x1r3` (it read `ALGOTUNE_CORES_PER_WORKER`, the arena reads the `EVAL_`
+    spelling) and `__w8x1r3` where the arena keys `__w4x1r3` (it dropped the
+    `min(workers, allowed // cores)` clamp).
+
+    `benchmarks/algotune/parallel_eval.py` is the authority -- it is the file
+    `patch_parallel_eval.py` installs the arena's copy FROM -- and `eval_regime` now imports it, so
+    this drives the join rather than a third opinion. A regression to a replica goes red here.
+    """
     import os
+    import sys
 
-    try:
-        from AlgoTuner.utils.evaluator.looplab_parallel import resolve_workers
-    except Exception:                                   # noqa: BLE001
-        import pytest
+    sys.path.insert(0, str(BRIDGE.parent))
+    from parallel_eval import resolve_workers
 
-        pytest.skip("AlgoTuner not importable here; the replica has nothing to be checked against")
-
+    bridge = _load_bridge()
     width = len(os.sched_getaffinity(0))
-    for raw in ("auto", "max", "1", "4", "", "nonsense"):
-        theirs_w, theirs_c = resolve_workers({"ALGOTUNE_EVAL_WORKERS": raw} if raw else {})
-        theirs = (f"__lane{width}r3" if theirs_w <= 1 else f"__w{theirs_w}x{theirs_c}r3")
-        cores = 1
-        if raw in ("auto", "max"):
-            mine_w = max(1, width // cores)
-        else:
-            try:
-                mine_w = int(raw)
-            except ValueError:
-                mine_w = 1
-        mine = f"__lane{width}r3" if mine_w <= 1 else f"__w{mine_w}x{cores}r3"
-        assert mine == theirs, f"{raw!r}: replica says {mine}, arena says {theirs}"
+    cases = [
+        {"ALGOTUNE_EVAL_WORKERS": "auto"},
+        {"ALGOTUNE_EVAL_WORKERS": "max"},
+        {"ALGOTUNE_EVAL_WORKERS": "1"},
+        {"ALGOTUNE_EVAL_WORKERS": "2"},
+        {"ALGOTUNE_EVAL_WORKERS": "nonsense"},
+        # DIMENSION ONE: the cores-per-worker SPELLING. The replica read the name on the right.
+        {"ALGOTUNE_EVAL_WORKERS": "auto", "ALGOTUNE_EVAL_CORES_PER_WORKER": "2"},
+        {"ALGOTUNE_EVAL_WORKERS": "auto", "ALGOTUNE_EVAL_CORES_PER_WORKER": "1",
+         "ALGOTUNE_CORES_PER_WORKER": "2"},
+        # DIMENSION TWO: workers ABOVE the lane width, which the arena clamps and the replica did not.
+        {"ALGOTUNE_EVAL_WORKERS": str(width * 4)},
+        {"ALGOTUNE_EVAL_WORKERS": str(width * 4), "ALGOTUNE_EVAL_CORES_PER_WORKER": "2"},
+    ]
+    for env in cases:
+        for name in ("ALGOTUNE_EVAL_WORKERS", "ALGOTUNE_EVAL_CORES_PER_WORKER",
+                     "ALGOTUNE_CORES_PER_WORKER"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        theirs_w, theirs_c = resolve_workers(dict(os.environ))
+        theirs = f"__lane{width}r3" if theirs_w <= 1 else f"__w{theirs_w}x{theirs_c}r3"
+        mine = bridge.eval_regime()["key"]
+        assert mine == theirs, f"{env}: the bridge says {mine}, the arena keys {theirs}"
+
+
+def test_an_unparseable_worker_environment_says_which_one(monkeypatch):
+    """A bad env value is not a machine without CPU affinity, and the record must not say it is.
+
+    One `except Exception` wrapped both the `int()` parse and `os.sched_getaffinity`, so
+    `ALGOTUNE_EVAL_CORES_PER_WORKER=two` stamped `detail: "no CPU affinity available"` onto every
+    emitted line -- a false claim about the box, in the field an operator reads to find out why the
+    ruler is unstated -- while `_regime_mismatch` silently disarmed.
+    """
+    monkeypatch.setenv("ALGOTUNE_EVAL_WORKERS", "auto")
+    monkeypatch.setenv("ALGOTUNE_EVAL_CORES_PER_WORKER", "two")
+    got = _load_bridge().eval_regime()
+    assert got["key"] is None, got
+    assert "CPU affinity" not in got.get("detail", ""), got
+    assert "ALGOTUNE_EVAL_CORES_PER_WORKER" in got.get("detail", ""), got
+    assert got["lane_width"], "the affinity WAS readable; the record should still say so"
 
 
 def test_auto_keys_a_worker_regime_not_a_lane_one(tmp_path):

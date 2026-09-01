@@ -346,8 +346,19 @@ What is left is a structural difference between the serial timing path and the p
 pool is used at all, the solver's measured time and the reference's stop being taken the same way.
 A ratio only cancels overhead when both halves carry it.
 
-**Operational rule until this is explained: leave `ALGOTUNE_EVAL_WORKERS` unset.** `campaign.sh`
-does not set it, so every campaign so far is serial and unaffected. The prize for fixing it is large
+**Operational rule until this is explained: leave `ALGOTUNE_EVAL_WORKERS` unset.**
+
+**[2026-09-01 — the second sentence of this paragraph was "`campaign.sh` does not set it, so every
+campaign so far is serial and unaffected", and it stopped being true when
+`campaign.sh::declare_baseline_ruler` began exporting `ALGOTUNE_EVAL_WORKERS=auto` to match the
+ruler `run_probe.sh` declares. The rule above is NOT withdrawn and the 75 % measurement is not
+retracted: a campaign run on the default now uses the regime this section disqualifies, so its
+numbers are not comparable with the serial ones recorded before it, and `docs/58` §58.4 records a
+campaign measured that way whose numbers had to be discarded rather than rescaled. The driver now
+NAMES the regime in its launch banner and points at this section when the effective width is >1
+(the warn half of the remedy `docs/52` §8's OPEN item prescribes); set `ALGOTUNE_EVAL_WORKERS=1`
+to get the ruler this section mandates. What is still open is the mechanism, which is what the
+rule is waiting on.]** The prize for fixing it is large
 — 107 s → 20 s per evaluation, and evaluation is ~98 % of a real arm's wall clock — but a 75 %
 inflation would have read as "LoopLab beats the reference by 1.7×" on a solver that is literally the
 reference.

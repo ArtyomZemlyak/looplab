@@ -5,8 +5,8 @@ Measured 2026-08-31 on `35124d05`:
     grep -c camp-runs benchmarks/snapshot.sh        -> 0
     grep -c camp-runs benchmarks/snapshot_timer.sh  -> 0
 
-`box-jhub-l40s.sh:39` sets `CAMPAIGN_RUNS="$BENCH_ROOT/camp-runs"`. `campaign.sh:52` reads it into
-`RUNS_ROOT` and `campaign.sh:1077-1091` writes every task-arm's run to
+`box-jhub-l40s.sh`'s `CAMPAIGN_RUNS` sets `CAMPAIGN_RUNS="$BENCH_ROOT/camp-runs"`. `campaign.sh`'s `RUNS_ROOT` reads it into
+`RUNS_ROOT` and `campaign.sh::run_one` writes every task-arm's run to
 `$RUNS_ROOT/<task>/run/events.jsonl`. The archiver's discovery loop was
 
     for D in "$SRC"/runs-* "$SRC"/model-probes "$SRC"/probes
@@ -17,7 +17,7 @@ were copied by no line of either script.
 
 This is the same shape of loss that took sixty-nine runs and ~$100 of metered spend on 2026-08-29,
 closed for the probe path on 2026-08-30 and left open for the campaign path. It is worse here in one
-respect: `campaign.sh:1078` runs `rm -rf "$TASK_ROOT"` at the head of every attempt, so a RETRY
+respect: `campaign.sh::run_one` runs `rm -rf "$TASK_ROOT"` at the head of every attempt, so a RETRY
 destroys the previous attempt's evidence. No container restart is required; re-running a task is
 enough.
 

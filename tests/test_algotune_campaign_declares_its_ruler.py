@@ -178,9 +178,15 @@ def _foreign_cache(tmp: Path) -> Path:
     """A reference cache keyed for a regime `auto` will not key on this box."""
     cache = tmp / "times"
     cache.mkdir(exist_ok=True)
-    # `auto` keys `__w<width>x1r3`; a one-worker lane key is therefore always the foreign one.
-    (cache / f"demo__train__lane{len(os.sched_getaffinity(0))}r3.json").write_text(
-        "{}", encoding="utf-8")
+    # `auto` keys `__w<width>x1r3` -- EXCEPT on a one-CPU lane, where `width // 1` is 1, the
+    # `workers <= 1` branch fires and `auto` keys `__lane1r3`. So "a one-worker lane key is always
+    # the foreign one" is false exactly when the lane is one core wide, and this whole end-to-end
+    # falsifier then went red in a single-CPU container against production code that is fine --
+    # with a message ("the campaign would have re-timed the reference in this pass") pointing the
+    # reader at a defect that is not there. The foreign key is now a width this lane CANNOT have,
+    # so it is foreign at any affinity.
+    _width = len(os.sched_getaffinity(0))
+    (cache / f"demo__train__lane{_width + 1}r3.json").write_text("{}", encoding="utf-8")
     return cache
 
 
