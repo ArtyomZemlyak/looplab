@@ -3371,3 +3371,35 @@ Recorded because §69.1's whole point was that the goalposts must not move: the 
 a verdict but "the experiment lost its control arm to an unrelated crash, and no amount of new data
 restores it". A clean answer needs a deliberate arm with the clause removed — a between-arms change
 under §73.3's rule, several runs each — and that is a decision about spending, not a sweep task.
+
+## 79. What the champion rule has now saved: 2 %, 59 %, 95 %
+
+`remEE4` finished at **TEST 262.0356**, the highest `edge_expansion` score in this corpus, and its
+three evaluated nodes ran **178.9456 → 265.7918 → 12.9883**. The run submitted the second.
+
+That is the third time the "best EVALUATED node is kept, not the last" rule has bitten, and the
+three cases together are the first measurement of what the clause is worth:
+
+| probe | nodes (train) | submitted | last | cost of submitting the last |
+|---|---|---|---|---|
+| remDL2 | 14.295, 13.982 | 14.295 | 13.982 | 2 % |
+| remPde3 | 123.1297, 50.0147 | 123.1297 | 50.0147 | 59 % |
+| remEE4 | 178.9456, **265.7918**, 12.9883 | 265.7918 | 12.9883 | **95 %** |
+
+§72 recorded `remDL2` as the first empirical demonstration and called it thin — a 2 % difference on
+one run. Three runs later the same rule is standing between a corpus-best 262 and a 13. Ten of the
+seventeen probes here reached only one node and could not exercise it at all; of the seven that
+reached two or more, three ended on a node worse than their best.
+
+The clause telling the model this (`KEEP_BEST`, shipped 2026-08-31) is aimed at the other side of it:
+a model that does not know the rule has every reason to protect a working solver rather than attack
+it, and `remEE4`'s third node is what attacking it looks like when it fails. The engine already kept
+the good one; what the card adds is the model knowing it will.
+
+**Not shown:** that the clause caused any of this. `remDL2` predates it. `remEE4` and `remPde3` carry
+it, and both also carry every other change of that batch. What the table measures is the RULE's
+value, which is a property of the engine, not the card's effect on behaviour — and separating those
+needs the arm §78 says this corpus cannot supply.
+
+The money ceiling still has not fired: `remEE4` and `remPde6` both closed plans with `cut_steps: []`,
+the third and fourth runs to report it (§75).
