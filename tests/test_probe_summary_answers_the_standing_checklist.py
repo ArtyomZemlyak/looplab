@@ -25,7 +25,10 @@ def _mk_probe(root, name, task, *, nodes, costs_before, costs_after, test=None,
     run = root / "model-probes" / name / "runs" / task / "run"
     run.mkdir(parents=True, exist_ok=True)
     t = 1000.0
-    events, spans = [], []
+    # A real run always has events before its first node -- `run_started`, `llm_usage`, and so on --
+    # and `summarise` skips a tree with an empty events.jsonl entirely. A fixture without one is a
+    # run that cannot exist, and it made the no-nodes case look like a disappearing probe.
+    events, spans = [{"type": "run_started", "ts": t, "data": {}}], []
 
     def gen(ts, cost, phase="plan_step"):
         spans.append({"name": "generation", "start": ts, "duration_s": 1.0,
@@ -214,4 +217,41 @@ def test_run_finished_is_not_used_as_the_discriminator(tmp_path):
     code = body.split('"""')[-1]
     assert "run_finished" not in code, (
         "run_finished crept into the discriminator; its absence means nothing on its own"
+    )
+
+
+def test_an_unscored_run_with_nodes_is_told_it_is_recoverable_for_free(tmp_path):
+    """A run that spent its budget and reached a node has already paid for everything expensive.
+
+    `accEE` sat unscored for twenty hours after an import bug that was fixed the same morning.
+    Recovering it cost two commands and $0, and the score came back 224.8846 -- within 0.2 % of the
+    figure the brief had been carrying with no evidence behind it on this box. Nothing said the
+    recovery was possible, which is the only reason it waited.
+    """
+    p = _mk_probe(tmp_path, "acc2", "t", nodes=[221.539], costs_before=[0.3], costs_after=[0.7])
+    (p / "probe.log").write_text("could not fold /x: ModuleNotFoundError: No module named 'looplab'\n")
+    out = _run(tmp_path)
+    assert "recoverable for $0" in out, (
+        "an unscored run holding an evaluated node was not told it can be re-scored for nothing:\n"
+        + out
+    )
+    assert "extract_champion.py" in out and "--subset test" in out, (
+        "the recovery is named but not spelled out, so it still costs a reconstruction:\n" + out
+    )
+    assert "looplab resume" not in out, (
+        "resume continues the RUN and spends more money; accEE had already spent $1.0042 of $1.00, "
+        "so resuming would break the budget contract that makes it comparable"
+    )
+
+
+def test_an_unscored_run_with_no_nodes_is_not_promised_a_recovery(tmp_path):
+    """Nothing to extract: a run that never evaluated a node cannot be re-scored at any price."""
+    p = _mk_probe(tmp_path, "empty2", "t", nodes=[], costs_before=[0.4], costs_after=[])
+    (p / "probe.log").write_text("could not fold /x: ModuleNotFoundError\n")
+    out = _run(tmp_path)
+    block = out.split("probes with NO test score", 1)[-1].split("per-probe detail")[0]
+    assert "empty2" in block, "the unscored run vanished entirely"
+    assert "recoverable for $0" not in block, (
+        "a run with zero evaluated nodes was promised a free recovery there is nothing to do:\n"
+        + block
     )

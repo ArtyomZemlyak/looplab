@@ -157,6 +157,7 @@ def summarise(run_dir: Path) -> dict | None:
         "ref_calls": ref_calls,
         "champion_lines": champ_lines,
         "kernel": kernel,
+        "probe_dir": str(probe_dir),
         "why_no_test": "" if _test_score(probe_dir) is not None else _why_no_test(probe_dir),
         "phases": sorted(by_phase.items(), key=lambda kv: -kv[1])[:4],
         "calls": calls,
@@ -195,6 +196,25 @@ def main(argv: list[str]) -> int:
         print("\nprobes with NO test score, and why (from the probe's own logs):")
         for s in sorted(unscored, key=lambda x: x["probe"]):
             print(f"  {s['probe']:10s} {s['why_no_test']}")
+            # RECOVERABLE FOR FREE, and say so with the command. A run that spent its budget and
+            # reached an evaluated node has already paid for everything expensive; extraction and
+            # the test pass cost CPU and nothing else. `accEE` sat unscored for twenty hours after
+            # an import bug that was fixed the same morning, and recovering it on 2026-09-01 took
+            # two commands and $0 -- the score came back 224.8846, within 0.2 % of the figure the
+            # operator brief had been carrying with no evidence behind it on this box.
+            #
+            # NOT `looplab resume`: that continues the RUN and spends more money, and accEE had
+            # already spent $1.0042 of its $1.00, so resuming would break the budget contract that
+            # makes it comparable. The cheap half is the only half that is missing.
+            if s["nodes"]:
+                print(f"             recoverable for $0 -- it has {len(s['nodes'])} evaluated "
+                      f"node(s) and its budget is already spent:")
+                print(f"               cd {s['probe_dir']} && python "
+                      f"benchmarks/algotune/extract_champion.py --run-dir runs/{s['task']}/run "
+                      f"--all-files --out champion_solver.py")
+                print(f"               ALGOTUNE_BASELINE_CACHE_DIR=<.baseline_times> "
+                      f"ALGOTUNE_EVAL_WORKERS=auto looplab_eval.py --task {s['task']} "
+                      f"--solver champion_solver.py --subset test")
 
     print("\nper-probe detail:")
     for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):

@@ -2997,7 +2997,7 @@ the champion earned afterwards:
 
 | probe | task | evaluated nodes (train) | TEST |
 |---|---|---|---|
-| accEE | edge_expansion | 27.466, **221.539** | *not measured here — see 73.4* |
+| accEE | edge_expansion | 27.466, **221.539** | 224.8846 *(re-scored 2026-09-01, see 73.4)* |
 | remEE | edge_expansion | 132.695, **183.603** | 179.6451 |
 | remEE2 | edge_expansion | 27.833, **101.153** | 102.175 |
 | accPde | pde_heat1d | **119.795** | 120.7621 |
@@ -3061,7 +3061,7 @@ that separates `edge_expansion` runs. §72 read `remPde`'s missing kernel as the
 is not yet measured, and n = 3 will not settle it — the honest next step is more points on this task
 before any mechanism is proposed for it.
 
-### 73.4 `accEE` has no test score on this box, and 224.4432 is not from here
+### 73.4 `accEE` had no test score on this box; it was recovered, and 224.4432 was right
 
 *Added 2026-09-01.* `accEE` is quoted with TEST 224.4432 in the operator brief and in the tables
 above. That number appears **nowhere** on this box — not in the probe tree, not in the archive, not
@@ -3077,11 +3077,23 @@ So the champion was never extracted and no test pass was ever run. The import fa
 and a half hours AFTER `accEE` ran (02:17–04:02). The run hit a bug that was fixed the same morning
 and its result was never recovered.
 
-Two consequences. The comparisons above that set a measured-here number beside `accEE`'s 224.4432
-were comparing against a figure of unknown provenance, which is the exact hazard §73 is otherwise
-about; `accEE`'s verifiable contribution is its train metric, 221.539, and nothing else. And the run
-is RESUMABLE and still owed the work: `looplab resume` on a free lane would recover a $1.00 probe
-that has been sitting unfinished since 04:02.
+**Recovered the same night, and the old figure was right.** The fix is not to resume the run —
+`accEE` already spent $1.0042 of its $1.00, so continuing it would break the budget contract that
+makes it comparable. What failed was only the step AFTER the money: champion extraction and the test
+pass, neither of which costs a cent. Both were re-run on a free lane against the same `__w22x1r3`
+baselines:
+
+    champion node 1 (metric=221.5387) -> champion_solver.py (+2 siblings: edge_expansion_cy.pyx, setup.py)
+    {"speedup": 224.8846, "eval_seconds": 41.5, "build": "ok"}
+
+So `accEE`'s TEST is **224.8846**, measured here, with its Cython kernel building. The 224.4432 the
+brief carries sits 0.2 % away — the figure was sound all along; what was missing was any evidence for
+it on this box, and a number one cannot reproduce is not the same thing as a number that is wrong.
+The tables above now carry the re-scored value.
+
+The cost of the whole recovery was CPU on an idle lane. It sat undone for twenty hours because
+nothing said the score was missing — which is what the new `probes with NO test score` section of
+`probe_summary.py` exists to prevent.
 
 ### 73.3 The consequence for reading this document
 
@@ -3126,7 +3138,7 @@ The sharpest difference between the two is how often they measured: 26 `eval_tra
 | probe | task | `eval_train` | nodes | TEST |
 |---|---|---|---|---|
 | remEE | edge_expansion | 29 | 2 | 179.6451 |
-| accEE | edge_expansion | 27 | 2 | *not measured here (73.4)* |
+| accEE | edge_expansion | 27 | 2 | 224.8846 |
 | remPde3 | pde_heat1d | 26 | 2 | 129.75 |
 | remDL2 | discrete_log | 25 | 2 | 14.0483 |
 | remPde | pde_heat1d | 22 | 1 | 54.1227 |
