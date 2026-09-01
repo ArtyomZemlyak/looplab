@@ -48,7 +48,13 @@ main() {
 set -u
 MODEL="$1"; LABEL="$2"; LANE="$3"; TASK="${4:-edge_expansion}"; METER="${5:-http://127.0.0.1:8802}"; BUDGET="${6:-1.00}"
 ROOT=/var/tmp/looplab-bench
-OUT=$ROOT/model-probes/$LABEL
+# КУДА ПИШЕТ ПРОБА — отдельно от того, ГДЕ СТОИТ СТЕНД. Стенд неподвижен (в нём venv,
+# AlgoTune и линейка), а вот выход перенаправляем, и это не удобство: тесты этого скрипта
+# гоняют его насухо и до сих пор писали ПРЯМО В КОРПУС — шесть каталогов `t_instr_*`
+# лежали среди настоящих проб 01.09. Сейчас в них только INSTRUMENT.txt, и потому это
+# ничего не испортило; тест, который однажды оставит там events.jsonl, попадёт в каждую
+# сводку по корпусу молча и без следа в git.
+OUT=${PROBE_OUT_ROOT:-$ROOT/model-probes}/$LABEL
 LOG=$OUT/probe.log
 mkdir -p "$OUT/ws" "$OUT/runs/$TASK/memory" "$OUT/runs/$TASK/knowledge"
 say() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }

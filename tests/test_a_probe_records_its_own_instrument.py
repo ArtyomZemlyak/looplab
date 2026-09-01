@@ -27,14 +27,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _dry_run(label, *, stream="1", lane="44-47,92-95", task="discrete_log"):
+# NOT the live corpus. Six `t_instr_*` directories from this very file were sitting among the real
+# probes on 2026-09-01, holding an INSTRUMENT.txt each. Harmless as it happened -- no events.jsonl,
+# so no corpus statistic counted them -- but the version of this file that leaves run data behind
+# would enter every summary silently and leave no trace in git. `PROBE_OUT_ROOT` is why the script
+# now separates where the STAND is from where a probe WRITES.
+OUT_ROOT = Path(os.environ.get("PYTEST_PROBE_OUT_ROOT") or "")
+
+
+def _dry_run(label, *, stream="1", lane="44-47,92-95", task="discrete_log", out_root=None):
     """PROBE_DRY_RUN=1: every refusal is checked, the record is written, nothing is spent."""
-    out = ROOT / "model-probes" / label
+    base = Path(out_root) if out_root else ROOT / "model-probes"
+    out = base / label
     if out.exists():
         import shutil
         shutil.rmtree(out)
     env = dict(os.environ)
     env["PROBE_DRY_RUN"] = "1"
+    env["PROBE_OUT_ROOT"] = str(base)
     if stream is None:
         env.pop("LOOPLAB_LLM_STREAM", None)
     else:
@@ -48,7 +58,7 @@ def _dry_run(label, *, stream="1", lane="44-47,92-95", task="discrete_log"):
 
 
 def test_the_probe_writes_which_instrument_it_is_on(tmp_path):
-    r, rec = _dry_run("t_instr_a")
+    r, rec = _dry_run("t_instr_a", out_root=tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     assert rec.is_file(), (
         "a probe still leaves no record of the gateway it ran through:\n" + r.stdout + r.stderr
@@ -68,7 +78,7 @@ def test_a_stray_unstreamed_setting_is_overridden_and_the_record_says_what_RAN(t
     right. A record of the requested value would be worse than none: it would name an instrument
     the run was not on.
     """
-    r, rec = _dry_run("t_instr_b", stream="false")
+    r, rec = _dry_run("t_instr_b", out_root=tmp_path, stream="false")
     assert r.returncode == 0, r.stdout + r.stderr
     body = rec.read_text()
     assert "LOOPLAB_LLM_STREAM=1" in body, (
@@ -82,7 +92,8 @@ def test_a_deliberate_opt_out_is_recorded_as_the_other_instrument(tmp_path):
     env["PROBE_DRY_RUN"] = "1"
     env["LOOPLAB_LLM_STREAM"] = "false"
     env["LOOPLAB_ALLOW_UNSTREAMED"] = "1"
-    out = ROOT / "model-probes" / "t_instr_f"
+    env["PROBE_OUT_ROOT"] = str(tmp_path)
+    out = tmp_path / "t_instr_f"
     if out.exists():
         import shutil
         shutil.rmtree(out)
@@ -98,7 +109,7 @@ def test_a_deliberate_opt_out_is_recorded_as_the_other_instrument(tmp_path):
 
 def test_an_unset_setting_records_what_the_profile_resolved_it_to(tmp_path):
     """Unset in the caller's environment is not unset by the time the run starts."""
-    r, rec = _dry_run("t_instr_c", stream=None)
+    r, rec = _dry_run("t_instr_c", out_root=tmp_path, stream=None)
     assert r.returncode == 0, r.stdout + r.stderr
     body = rec.read_text()
     assert "LOOPLAB_LLM_STREAM=1" in body, (
@@ -107,7 +118,7 @@ def test_an_unset_setting_records_what_the_profile_resolved_it_to(tmp_path):
 
 
 def test_it_pins_the_code_that_produced_the_run(tmp_path):
-    r, rec = _dry_run("t_instr_d")
+    r, rec = _dry_run("t_instr_d", out_root=tmp_path)
     body = rec.read_text()
     assert re.search(r"looplab:\s+[0-9a-f]{7}", body), f"no looplab commit recorded:\n{body}"
     assert re.search(r"AlgoTune:\s+[0-9a-f]{7}", body), f"no AlgoTune commit recorded:\n{body}"
@@ -119,7 +130,7 @@ def test_it_pins_the_code_that_produced_the_run(tmp_path):
 def test_no_api_key_reaches_the_record(tmp_path):
     """The probe tree goes into snapshots, and snapshots go to S3."""
     env_key = os.environ.get("LOOPLAB_LLM_API_KEY")
-    r, rec = _dry_run("t_instr_e")
+    r, rec = _dry_run("t_instr_e", out_root=tmp_path)
     body = rec.read_text()
     assert "API_KEY" not in body, f"a key name reached the record:\n{body}"
     if env_key:
@@ -142,4 +153,28 @@ def test_the_record_is_written_before_anything_is_spent(tmp_path):
     assert i_rec < i_gate < i_task, (
         "the dry-run gate is no longer between the instrument record and make_task.py, so either "
         "the record cannot be tested for free or the gate no longer guards the spending"
+    )
+
+
+def test_a_dry_run_writes_nothing_into_the_live_corpus(tmp_path):
+    """The tests in this file used to leave directories among the real probes.
+
+    Six of them -- `t_instr_a` .. `t_instr_f` -- were sitting in
+    /var/tmp/looplab-bench/model-probes on 2026-09-01, each holding an INSTRUMENT.txt. Nothing was
+    corrupted, because none carried an events.jsonl and every corpus statistic keys off that. The
+    defect is not the damage, it is that the damage was one fixture field away and would have
+    entered `probe_summary`, `bench_runs_report` and docs/56 without a trace in git.
+
+    Asserted by taking a census of the corpus before and after, so it fails for a test that writes
+    there under ANY label, not only the ones this file happens to use today.
+    """
+    corpus = ROOT / "model-probes"
+    before = {p.name for p in corpus.iterdir()} if corpus.is_dir() else set()
+    _dry_run("t_instr_hermetic", out_root=tmp_path)
+    after = {p.name for p in corpus.iterdir()} if corpus.is_dir() else set()
+    assert after == before, (
+        "a dry run added %s to the live probe corpus" % sorted(after - before)
+    )
+    assert (tmp_path / "t_instr_hermetic" / "INSTRUMENT.txt").exists(), (
+        "the run wrote nowhere at all, so the census above proves nothing"
     )

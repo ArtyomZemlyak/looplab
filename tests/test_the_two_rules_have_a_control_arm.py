@@ -114,8 +114,8 @@ def test_the_probe_records_which_card_it_ran(tmp_path):
         pytest.skip("bench root not on this box")
 
     def _instrument(label, env_extra):
-        out = root / "model-probes" / label
-        env = {**os.environ, "PROBE_DRY_RUN": "1", **env_extra}
+        out = tmp_path / label
+        env = {**os.environ, "PROBE_DRY_RUN": "1", "PROBE_OUT_ROOT": str(tmp_path), **env_extra}
         r = subprocess.run(
             ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",
              "http://127.0.0.1:8801", "1.00"],
@@ -161,8 +161,9 @@ def test_the_probe_carries_its_own_credential(tmp_path):
     env = {k: v for k, v in os.environ.items()
            if k not in ("LOOPLAB_LLM_API_KEY", "LOOPLAB_LLM_API_KEY_BASE_URL", "OPENAI_API_KEY")}
     env["PROBE_DRY_RUN"] = "1"
+    env["PROBE_OUT_ROOT"] = str(tmp_path)
     label = "selftest-credential"
-    out = root / "model-probes" / label
+    out = tmp_path / label
     try:
         subprocess.run(
             ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",
