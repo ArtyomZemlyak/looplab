@@ -260,3 +260,91 @@ def test_the_timer_does_not_record_a_fingerprint_for_a_non_zero_snapshot():
         "the timer records a fingerprint regardless of outcome, which is what makes a false "
         "success permanent rather than merely wrong once"
     )
+
+
+# --------------------------------------------------- the environment record may not leak a secret
+#
+# Measured 2026-09-01 on the real script: `ALGOTUNE_AUTH`, `LOOPLAB_GATEWAY_CREDENTIALS` and a
+# `LOOPLAB_LLM_BASE_URL` carrying `user:hunter2@` were all written in FULL, because the rule was a
+# denylist on the NAME (KEY|TOKEN|SECRET|PASSWORD) and none of those names contains one of those
+# words. The same file redacted BASE_URL in its `.env` section, so it contradicted itself. Probe
+# trees and snapshots go to S3.
+
+
+def _env_record(tmp_path, extra_env):
+    store = tmp_path / "looplab-bench"
+    dest = store / "snapshots"
+    dest.mkdir(parents=True)
+    (store / ".persistent-store-id").write_text("test")
+    r = _run(dest, env=extra_env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    tree = next(d for d in dest.iterdir() if d.is_dir() and d.name[0].isdigit())
+    return (tree / "ENVIRONMENT.txt").read_text()
+
+
+def test_a_credential_whose_NAME_looks_innocent_is_still_redacted(tmp_path):
+    body = _env_record(tmp_path, {
+        "ALGOTUNE_AUTH": "sk-LEAK-auth",
+        "LOOPLAB_GATEWAY_CREDENTIALS": "sk-LEAK-creds",
+    })
+    assert "sk-LEAK-auth" not in body and "sk-LEAK-creds" not in body, (
+        "a name-based denylist let a credential through:\n" + body
+    )
+    assert "ALGOTUNE_AUTH" in body, "the variable vanished entirely; its NAME is not the secret"
+
+
+def test_a_url_carrying_userinfo_is_redacted(tmp_path):
+    body = _env_record(tmp_path, {"LOOPLAB_LLM_BASE_URL": "https://user:hunter2@gw.example/v1"})
+    assert "hunter2" not in body, "a password embedded in a URL was written into the record:\n" + body
+
+
+def test_the_measurement_settings_are_still_shown(tmp_path):
+    """A redaction that hides everything records nothing; the point is the settings."""
+    body = _env_record(tmp_path, {"LOOPLAB_LLM_STREAM": "1", "ALGOTUNE_EVAL_WORKERS": "auto"})
+    live = body.split("live process environment", 1)[1]
+    assert "LOOPLAB_LLM_STREAM                       = 1" in live, (
+        "the one setting that decides the 300 s ceiling is no longer legible:\n" + live
+    )
+    assert "ALGOTUNE_EVAL_WORKERS                    = auto" in live
+
+
+def test_the_record_says_which_of_two_values_was_in_force(tmp_path):
+    """A real snapshot carried STREAM=false and STREAM=1 with nothing saying which one ran."""
+    body = _env_record(tmp_path, {"LOOPLAB_LLM_STREAM": "1"})
+    assert "THIS IS THE ONE IN FORCE" in body, (
+        "the live section is not marked as authoritative, so a reader facing two values for one "
+        "setting cannot tell which produced the numbers:\n" + body
+    )
+    assert "ON DISK ONLY" in body, "the .env section is not marked as possibly superseded"
+
+
+def test_it_no_longer_promises_a_sha_it_never_computes(tmp_path):
+    body = _env_record(tmp_path, {})
+    assert "truncated sha256." not in body.split("none was ever computed")[0], (
+        "the header still claims a sha256 that is not computed anywhere"
+    )
+
+
+# The two defences -- an allowlist on the NAME and a sniff of the VALUE -- overlap on every fixture
+# above, so mutation could delete either one and the other caught it. These two separate them.
+
+
+def test_the_allowlist_alone_covers_a_value_that_does_not_look_like_a_secret(tmp_path):
+    """A denylist on the name would print this; only the allowlist stops it."""
+    body = _env_record(tmp_path, {"LOOPLAB_INTERNAL_ENDPOINT": "prod-db-17.internal:5432"})
+    live = body.split("live process environment", 1)[1]
+    assert "prod-db-17.internal" not in live, (
+        "a variable that is not a measurement setting had its value printed; nothing about the "
+        "VALUE looks secret, so only the allowlist can stop this:\n" + live
+    )
+    assert "LOOPLAB_INTERNAL_ENDPOINT" in live, "the name should still be recorded"
+
+
+def test_the_value_sniff_alone_covers_an_allowlisted_name_holding_a_credential(tmp_path):
+    """If a measurement setting ever carries a token, the allowlist would wave it through."""
+    body = _env_record(tmp_path, {"LOOPLAB_LLM_MODEL": "sk-oops-a-token-in-the-model-field"})
+    live = body.split("live process environment", 1)[1]
+    assert "sk-oops-a-token" not in live, (
+        "an ALLOWLISTED name printed a value that looks like a credential; only the value sniff "
+        "can stop this:\n" + live
+    )

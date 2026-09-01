@@ -70,7 +70,15 @@ def test_start_meter_is_still_syntactically_valid():
 
 
 def test_no_open_marker_is_left_for_an_item_that_shipped():
+    """Assembled, not spelled: the open-item index reads any literal occurrence as a DECLARATION.
+
+    Writing the marker out here put it back on the open list and turned the branch red -- the fourth
+    time in this repository that citing what a guard forbids has tripped the guard, after the same
+    thing with an OPEN marker in docs/58, a CLAIM pin in docs/56, and a retired default in
+    proxy.py's docstring. The lesson keeps not sticking because each occurrence looks like prose.
+    """
     body = START.read_text()
-    assert "OPEN[meter-key-rides-argv]" not in body, (
-        "the item shipped but its OPEN marker is still declared, so it stays on the open list"
+    marker = "OPEN" + "[" + "meter-key-rides-argv" + "]"
+    assert marker not in body, (
+        "the item shipped but its open-item marker is still declared, so it stays on the open list"
     )

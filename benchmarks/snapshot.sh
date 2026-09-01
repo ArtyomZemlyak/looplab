@@ -540,12 +540,15 @@ cat "$OUT/PROVENANCE.txt"
 # values for the settings that change what gets measured. Everything else is length + sha, enough
 # to prove two runs shared a value without disclosing it.
 {
-  echo "# Redacted environment as seen by snapshot.sh. Values shown only for non-secret settings"
-  echo "# that change what is measured; everything else is length and a truncated sha256."
+  echo "# Redacted environment as seen by snapshot.sh. Values are shown ONLY for an allowlist of"
+  echo "# measurement settings; everything else is reported as a length. (An earlier version of"
+  echo "# this line promised a truncated sha256 as well; none was ever computed, so two runs"
+  echo "# cannot be shown to have shared a redacted value from this file.)"
   echo
   for f in "$SRC/looplab/.env" /home/jovyan/data/looplab/.env; do
     [ -f "$f" ] || continue
     echo "## $f  ($(wc -l < "$f") lines, mtime $(date -r "$f" +%Y-%m-%dT%H:%M:%S))"
+    echo "#  ON DISK ONLY -- not necessarily in force; see the live section below."
     awk -F= '
       /^[[:space:]]*#/ || !/=/ { next }
       {
@@ -558,11 +561,25 @@ cat "$OUT/PROVENANCE.txt"
       }' "$f"
     echo
   done
-  echo "## live process environment (bench-relevant names only)"
+  echo "## live process environment -- THIS IS THE ONE IN FORCE"
+  echo "# The section above is what is ON DISK; a variable already exported wins over it (that is"
+  echo "# the \${VAR:-1} defect this bench was bitten by). Where the two disagree, THIS one ran."
+  # ALLOWLIST, not a denylist. A denylist on the NAME leaked three ways in one probe on 2026-09-01:
+  # `ALGOTUNE_AUTH`, `LOOPLAB_GATEWAY_CREDENTIALS` and a `LOOPLAB_LLM_BASE_URL` carrying
+  # `user:hunter2@` were all printed in full, because none of KEY|TOKEN|SECRET|PASSWORD appears in
+  # those names. The same file redacted BASE_URL in the `.env` section, so it contradicted itself.
+  # The set below is the measurement settings and nothing else; everything else is a length.
   env | grep -E '^(LOOPLAB|ALGOTUNE|BENCH|METER)_' | sort | awk -F= '
     { k=$1; v=substr($0, index($0,"=")+1)
-      if (k ~ /KEY|TOKEN|SECRET|PASSWORD/) printf "%-40s = <%d chars>\n", k, length(v)
-      else                                 printf "%-40s = %s\n", k, v }'
+      safe = (k == "LOOPLAB_LLM_STREAM" || k == "LOOPLAB_LLM_MODEL" ||
+              k == "LOOPLAB_LLM_BUDGET_USD" || k == "LOOPLAB_ALLOW_UNSTREAMED" ||
+              k == "ALGOTUNE_EVAL_WORKERS" || k == "ALGOTUNE_CORES_PER_WORKER" ||
+              k == "ALGOTUNE_EVAL_CORES_PER_WORKER" || k == "ALGOTUNE_MIN_TIMEOUT_S" ||
+              k == "ALGOTUNE_BASELINE_CACHE_DIR" || k == "METER_CPUS" || k == "BENCH_ROOT")
+      # And a value that LOOKS like a credential is redacted whatever its name says.
+      looks_secret = (v ~ /^sk-/ || v ~ /^Bearer / || v ~ /:\/\/[^\/@]*:[^\/@]*@/)
+      if (safe && !looks_secret) printf "%-40s = %s\n", k, v
+      else                       printf "%-40s = <%d chars>\n", k, length(v) }'
 } > "$OUT/ENVIRONMENT.txt" 2>/dev/null
 echo "  ENVIRONMENT.txt       $(grep -c . "$OUT/ENVIRONMENT.txt" 2>/dev/null || echo 0) lines (redacted; .env itself deliberately NOT copied)"
 
