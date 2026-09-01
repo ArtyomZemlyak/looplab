@@ -4185,3 +4185,32 @@ two tests.
 Two of the arm's own tests had to change with it: their fixtures never wrote a `champion_solver.py`,
 so under the new rule every fixture probe was "running" and the median vanished. That is the code
 being right and the tests being older than the distinction.
+
+### 93.2 Finished-only, the reading is 0.1119 — and the mixture was doing the work
+
+`remEEref1` and `remEEref3` finished, so the arm has three completed runs and the pre-registered
+outcome can be read the way §93.1 said it had to be.
+
+| | n | median | sorted |
+|---|---|---|---|
+| shipped card, reference use | 10 | 8.4 % | 2.7 … 20.0 |
+| `--no-reference-affordance`, **finished only** | 3 | 3.3 % | 0.0 3.3 10.0 |
+
+Exact one-sided **p = 0.1119**, floor 0.0035.
+
+§93 quoted **0.0430** over one finished run and three partials. The finished-only number is two and a
+half times larger. So the mixture was not merely imprecise, as §93.1 concluded from the bias
+measurement — it produced a p the completed data does not support. §93.1 was right that partial
+rates are noisier rather than lower, and wrong to treat "noisier" as the whole of the harm: three
+partial denominators of 10-17 calls, resampled hours later, moved the median from 3.3 % to 1.7 %
+and the p below 0.05. The correction to §93 is therefore stronger than §93.1 wrote, and this is that
+correction.
+
+**The score is untouched**, which is what this arm predicts and worth stating: control n = 3 at
+median 205.58 against shipped 209.28, p = 0.5944. `remEEref3` scored **262.4246** — the second
+highest number in the whole `edge_expansion` corpus, behind only remEE8's 276.73 — on a card that
+never told it the reference was queryable. Both new champions are compiled kernels (44 and 34
+lines).
+
+Three runs is half of §83's floor. `remEEref4` and `remEEref5` are in flight and `remEEref6`,
+`remEEref7` launched on the lanes these two freed.
