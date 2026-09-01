@@ -3947,3 +3947,27 @@ said, on the first run of the tool after the event:
 
 — correct about the destruction and its remedy, and wrong in its first two words, which is its own
 defect and fixed in 82f8b4ea. Recovery gives 184.222 against the 186.7953 in the log, 1.4 % apart.
+
+### 89.2 The score at n = 3: p = 0.08, and that is the number §83 asked for
+
+`remEEctl3` finished at 169.3404 — a 41-line Cython kernel, three nodes, and its LAST node scored
+0.0, the fourth zero-ending run in the corpus and another save by the champion rule. Its
+`final.json` survived, unlike remEEctl1's and remEEctl2's: the offset damage is byte-position
+dependent, so "launched before the fix" predicts exposure, not certainty.
+
+The arm's three TEST scores against the shipped card's ten:
+
+| arm | n | median | range | ranks among all 13 |
+|---|---|---|---|---|
+| shipped card | 10 | 209.28 | 102.17 – 276.73 | |
+| `--no-unteachable-rules` | 3 | 169.34 | 34.76 – 184.22 | 1, 4, 7 |
+
+Exact one-sided rank-sum p = **0.0804**, floor 0.0035. Not significant, and §83 said in advance that
+n = 3 settles nothing — its power table puts even a 2.0× effect at 63 % detection with n = 4.
+
+**This is the pre-registered outcome.** The dollars (§87, p = 0.0070) and the minutes (§87.1,
+p = 0.0040) are process metrics; the score is what the programme is about and what §83 sized n = 6
+for. As of this sweep the two disagree in exactly the way the plan anticipated they might: removing
+the clauses reliably delays the first build, and has not been shown to change what gets shipped.
+
+`remEEctl4`, `remEEctl5` and `remEEctl6` are in flight, which takes the arm to six.
