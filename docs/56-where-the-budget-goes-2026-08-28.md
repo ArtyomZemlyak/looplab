@@ -3528,3 +3528,70 @@ not have cut.
 
 `remDL6`'s 4.0326 is the lowest `discrete_log` score on record, and this section does not claim the
 cuts caused it — one run, and the two cut steps are the two that wrote the most.
+
+## 83. A plan for deciding the open questions, sized from the spread we actually have
+
+Every open question about the loop is an A/B, and until now none has been sized. Here is what the
+corpus says it costs to answer one, and which questions are therefore worth asking.
+
+### 83.1 What the noise permits
+
+Within-task spread over the runs on the current instrument:
+
+| task | n | range | ratio | CV |
+|---|---|---|---|---|
+| edge_expansion | 8 | 102.2 – 276.7 | 2.7× | **0.27** |
+| discrete_log | 6 | 4.0 – 16.8 | 4.2× | 0.43 |
+| pde_heat1d | 9 | 30.3 – 167.2 | 5.5× | 0.54 |
+
+`edge_expansion` is the quietest by a factor of two, so **experiments belong there** and nowhere
+else. Running an A/B on `pde_heat1d` at CV 0.54 is buying noise.
+
+Exact one-sided rank-sum, best case, is `1/C(2n,n)`: **n = 3 per arm can never beat p = 0.05**, and
+only then if the arms separate perfectly — which a 2.7× within-arm spread makes unlikely. Power,
+resampled from the observed `edge_expansion` distribution, 300 trials per cell:
+
+| true effect | n = 4 | n = 6 | n = 8 |
+|---|---|---|---|
+| 1.25× | 25 % | 50 % | 61 % |
+| 1.50× | 41 % | 67 % | 78 % |
+| 2.00× | 63 % | 92 % | 95 % |
+
+So the floor for any loop experiment is **6 runs per arm on `edge_expansion`**, and that buys a
+two-in-three chance of seeing a 1.5× effect. Anything smaller than 1.25× is not detectable at any
+sample size this stand will pay for. Every "n = 3 looked clean" in §74-§76 is explained by this table.
+
+### 83.2 The queue, cheapest-decidable first
+
+**1. The card batch (§81). $6, decidable.** The new-card arm already has 5 `edge_expansion` runs
+(remEE3-6, remEE8, plus remEE9 running). The old-card arm has ONE on this instrument (remEE2 —
+accEE and remEE ran unstreamed, §80). Six deliberate old-card runs on `edge_expansion` completes it.
+This is the only open question the stand can settle at this price, and it is the one that decides
+whether the 2026-08-31 batch was worth shipping.
+
+**2. The reference-module clause (§78). $6, decidable, and currently unanswerable.** Same shape: an
+arm with the clause REMOVED, six runs on `edge_expansion`. Its control was destroyed with /var/tmp
+on 2026-08-29 and no quantity of new probes rebuilds it.
+
+**3. Arm A versus arm B — the programme's actual question. p = 0.75 over 10 comparable tasks
+(docs/58). NOT an `edge_expansion` experiment** and not sized by the table above: it pools tasks
+rather than repeating one, so its power comes from task count, not run count. What it needs is arm A
+re-measured on the verified ruler for the 10 tasks that have no arm-A number. Cost is arm A's own
+budget, not $1/run, and it should be quoted before it is started.
+
+**4. The variance mechanism. Not an A/B at all.** Six summary statistics have failed (§74.3, §76.1,
+and the build-duration gap that died in thirty minutes), so a seventh is not the move. The corpus now
+holds a 102.2 and a 276.7 from the SAME card on the SAME task; the question is what differs between
+those two artefacts, which is read by diffing two champions and their traces, not by correlating a
+column. Free, and unscheduled because it needs attention rather than money.
+
+**5. The money ceiling (§75, §82).** It has never fired; the 1200 s wall fires instead, and its
+closest approach was 76 % of the cap. Nothing to decide until either bound moves, and moving one to
+see what happens is a change to the instrument mid-corpus. Left alone deliberately.
+
+### 83.3 What this plan refuses
+
+It does not queue more probes on the CURRENT configuration. That arm has 8 `edge_expansion` runs and
+a ninth changes nothing anyone is asking. Idle-lane probes have been filling it by default; from here
+a free lane should take an arm from the queue above or stay idle, because an unpaired run costs a
+dollar and answers nothing.
