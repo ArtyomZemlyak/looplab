@@ -3448,3 +3448,41 @@ probes here are on a different instrument from the other fourteen, which is not 
 score, any card, or any run log — only in a `stream` field on the meter rows. Nothing in the probe's
 own evidence records which instrument it ran on, and that is worth fixing before the next comparison
 is drawn: `ENVIRONMENT.txt` in each snapshot records the setting, but a probe tree does not.
+
+## 81. The card batch, tested at last: nothing shown, and the best number was the instrument
+
+The corpus has reached twenty scored probes, which is the first point at which §73.3's rule — several
+runs of each configuration before a comparison says anything — can actually be met. So: did the batch
+of card changes shipped 2026-08-31 (the 10× per-instance ceiling, KEEP_BEST, and the clauses beside
+them) raise the score?
+
+Exact one-sided permutation rank-sum, new card against old, per task:
+
+| task | old card | new card | p (all runs) | p (streamed only) |
+|---|---|---|---|---|
+| edge_expansion | 102.2, 179.6, 224.9 | 193.7, 227.4, 232.8, 262.0 | 0.057 | **0.200** |
+| pde_heat1d | 30.3, 54.1, 120.8 | 0.0, 125.9, 129.8, 133.5, 167.2 | 0.125 | 0.190 |
+| discrete_log | 14.0 | 7.1, 7.6, 12.2 | 1.000 | 1.000 |
+
+**Nothing is shown.** Two tasks lean the right way, one leans the other, none reaches any threshold
+worth naming, and `discrete_log`'s single old-card point is not a comparison at all.
+
+**And the most promising number is an artefact of the instrument.** `edge_expansion`'s p = 0.057 rests
+on `accEE` (224.9) and `remEE` (179.6) being in the OLD group — and both ran unstreamed (§80),
+`remEE` losing nine calls to the gateway's 300 s ceiling. Restrict to the single instrument every
+current probe uses and the old group is one run, p = 0.200. The apparent effect was two-thirds
+composed of runs that are not comparable with either group.
+
+That is the same shape as the six summary statistics before it (§74.3, §76.1, and the build-duration
+gap that died in thirty minutes): a number that looks like structure until the thing it is actually
+tracking is named.
+
+**What would settle it.** Not more probes on the new card — that arm has 12 and adding to it moves
+nothing. The old card has 4 runs on the current instrument, one of them per task on two of the three
+tasks. A deliberate old-card arm, several runs per task, is the only thing that answers this, and it
+costs a dollar a run to buy back a comparison the batch was shipped without.
+
+**Not tested, and worth keeping separate:** §79's champion-rule tally (2 %, 59 %, 95 %, 83 %, 100 %)
+is a property of the ENGINE and does not depend on any of this. The rule fires whether or not the
+card mentions it; what the card changes is whether the model knows it will, and that is exactly what
+this section cannot yet measure.
