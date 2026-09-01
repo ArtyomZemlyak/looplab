@@ -345,6 +345,24 @@ def code_diff(old: str, new: str, max_lines: int = 60) -> str:
 
 _PAIR_LINE = re.compile(r"^P(\d+)\b\s*[:.\-]?\s*(.*)$", re.I)
 
+# A SECOND VERDICT ON THE SAME LINE. The prompt asks for one line per pair; a model that answers
+# on one line instead used to collapse every pair into a single lesson, because the only splitter
+# here was `splitlines()`.
+#
+# Measured 2026-09-01 in the shared store: ONE row of 55, 861 characters, ZERO newlines, carrying
+# three lessons joined by `. P2  ` and `. P3  ` — no [GOOD]/[BAD] tags either. Three consequences,
+# none cosmetic: two lessons were lost outright; the survivor carried P2's and P3's text under P1's
+# index and outcome; and at 861 characters it is the only statement in the store that the prior
+# renderer truncates (`LESSON_STATEMENT_CHARS` is 400), which is the standing red in
+# `test_lesson_prior_render_budget`. Widening that cap would have hidden all three.
+#
+# Split only where the marker cannot be prose. Either sentence-ending punctuation then whitespace,
+# or two or more spaces — and in both cases the marker must be followed by whitespace or `[`. "the
+# P2 quantile" survives on the first condition (a single space after "the"), which is the false
+# positive worth caring about: splitting a lesson mid-sentence would invent a lesson rather than
+# lose one.
+_INLINE_PAIR = re.compile(r"(?:(?<=[.!?])\s+|\s{2,})(?=P\d+\b[\s\[])")
+
 
 def parse_credit_lessons(text: str, n_pairs: int, limit: Optional[int] = None) -> list[tuple[int, str, str]]:
     """Parse the LLM's per-pair verdict lines (`P<n> [GOOD|BAD] <lesson>`) into
@@ -358,7 +376,10 @@ def parse_credit_lessons(text: str, n_pairs: int, limit: Optional[int] = None) -
     silently capped reflection lessons at 3 instead of the intended 8 (architecture-review M6)."""
     cap = limit if limit is not None else max(3, n_pairs)
     out: list[tuple[int, str, str]] = []
+    raw_lines = []
     for line in (text or "").splitlines():
+        raw_lines.extend(_INLINE_PAIR.split(line))
+    for line in raw_lines:
         s = line.strip().lstrip("-*•0123456789.) ").strip()
         m = _PAIR_LINE.match(s)
         idx = (int(m.group(1)) - 1) if m else -1
