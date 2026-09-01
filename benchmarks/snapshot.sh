@@ -98,10 +98,29 @@ fi
 # write into ONE directory. Observed rc=0 and rc=1 with a single 30-file tree interleaved from
 # both runs -- and the survivor reports success. The stamp is not an identity, so take a lock.
 mkdir -p "$DEST" 2>/dev/null || true
+# THE LOCK MUST NOT BE ABLE TO REPORT SUCCESS OVER AN EMPTY ARCHIVE.
+#
+# The first cut of this block did `exec 9>...` unchecked and `exit 0` on a timeout, and both paths
+# were measured on 2026-09-01 to leave ZERO bytes written and exit 0:
+#   * destination not creatable (ro store, ENOSPC, vanished mount): the redirect fails, flock gets
+#     a bad fd, and the script prints "another snapshot is running (waited 60s)" instantly and
+#     exits 0. A lie about the reason on top of a lie about the outcome.
+#   * lock genuinely held: waits its 60 s and exits 0 having written nothing.
+# `snapshot_timer.sh` records its fingerprint on rc=0 and does not retry, so either path is the
+# 2026-08-29 failure -- an empty backup under a success code -- reintroduced by the fix meant to
+# prevent a different one. The file's own doctrine is one line up: THE EXIT CODE IS THE CLAIM.
+if ! : > "$DEST/.snapshot.lock" 2>/dev/null; then
+  echo "FATAL: cannot create $DEST/.snapshot.lock -- the destination is not writable." >&2
+  echo "       NOTHING WAS WRITTEN. This is not a skip; it is a failed snapshot." >&2
+  exit 1
+fi
 exec 9>"$DEST/.snapshot.lock"
 if ! flock -w 60 9; then
-  echo "another snapshot is running (waited 60s); skipping" >&2
-  exit 0
+  # A legitimate skip -- another snapshot IS writing -- but still nothing written by THIS run, so
+  # it may not claim success. 3, not 0 and not 1: the timer must retry rather than record a
+  # fingerprint, and an operator must be able to tell "busy" from "broken".
+  echo "another snapshot holds the lock (waited 60s); NOTHING WRITTEN by this run" >&2
+  exit 3
 fi
 
 # The stamp has one-second resolution, so it is not an identity -- two snapshots a second apart

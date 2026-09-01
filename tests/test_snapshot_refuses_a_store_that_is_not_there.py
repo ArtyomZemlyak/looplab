@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parents[1]
 SNAPSHOT = REPO / "benchmarks" / "snapshot.sh"
 
 
-def _run(dest, env=None, timeout=600):
+def _run(dest, env=None, timeout=600):  # noqa: D401 - timeout is raised by the lock tests
     e = dict(os.environ)
     e.setdefault("BENCH_ROOT", "/var/tmp/looplab-bench")
     if env:
@@ -185,3 +185,78 @@ def test_b2_a_taken_stamp_does_not_become_a_shared_directory():
         assert others, "the run reported success but produced no snapshot directory of its own"
         assert (others[0] / "PROVENANCE.txt").is_file(), \
             f"{others[0].name} is not a real snapshot"
+
+
+# ---------------------------------------------------- the lock may not claim success over nothing
+#
+# Measured 2026-09-01, and both paths were introduced by the flock added to fix a DIFFERENT defect:
+#   * destination not creatable -> the `exec 9>` redirect fails, flock gets a bad fd, and the script
+#     printed "another snapshot is running (waited 60s)" INSTANTLY and exited 0 having written
+#     nothing. A lie about the reason on top of a lie about the outcome.
+#   * lock genuinely held -> waited its 60 s and exited 0 having written nothing.
+# `snapshot_timer.sh` records its fingerprint on rc=0 and does not retry, so either path is the
+# 2026-08-29 failure -- an empty backup under a success code -- reintroduced by its own repair.
+
+
+def test_an_unwritable_destination_is_a_failure_not_a_skip(tmp_path):
+    store = tmp_path / "looplab-bench"
+    store.mkdir()
+    (store / ".persistent-store-id").write_text("test")
+    store.chmod(0o555)
+    try:
+        r = _run(store / "snapshots")
+    finally:
+        store.chmod(0o755)
+    assert r.returncode != 0, (
+        "a destination that cannot even hold a lock file reported SUCCESS:\n" + r.stdout + r.stderr
+    )
+    assert "NOTHING WAS WRITTEN" in r.stderr, (
+        "it failed, but not in words that stop somebody reading it as a skip:\n" + r.stderr
+    )
+    assert "another snapshot is running" not in r.stderr, (
+        "it still blames a concurrent snapshot for a permission problem"
+    )
+
+
+def test_a_busy_lock_exits_non_zero_so_the_timer_retries(tmp_path):
+    """Skipping is legitimate; claiming a snapshot was taken is not."""
+    import subprocess as sp
+    import time
+
+    store = tmp_path / "looplab-bench"
+    dest = store / "snapshots"
+    dest.mkdir(parents=True)
+    (store / ".persistent-store-id").write_text("test")
+    lock = dest / ".snapshot.lock"
+    lock.touch()
+
+    holder = sp.Popen(["bash", "-c", f'flock 8; sleep 90 8>"{lock}"'], stdout=sp.DEVNULL,
+                      stderr=sp.DEVNULL)
+    holder2 = sp.Popen(["bash", "-c", f'( flock 8; sleep 90 ) 8>"{lock}"'], stdout=sp.DEVNULL,
+                       stderr=sp.DEVNULL)
+    time.sleep(2)
+    try:
+        r = _run(dest, timeout=200)
+    finally:
+        for h in (holder, holder2):
+            h.kill()
+            h.wait()
+
+    assert r.returncode != 0, (
+        "a run that waited out the lock and wrote nothing reported success, so the timer records "
+        "its fingerprint and never retries:\n" + r.stdout + r.stderr
+    )
+    assert not [d for d in dest.iterdir() if d.is_dir() and d.name[0].isdigit()], \
+        "premise: nothing should have been written"
+
+
+def test_the_timer_does_not_record_a_fingerprint_for_a_non_zero_snapshot():
+    """The exit code only helps if the caller reads it."""
+    timer = (REPO / "benchmarks" / "snapshot_timer.sh").read_text()
+    assert 'if [ "$snap_rc" = "0" ]' in timer, (
+        "snapshot_timer no longer branches on the snapshot's exit code"
+    )
+    assert "NOT recording this fingerprint" in timer, (
+        "the timer records a fingerprint regardless of outcome, which is what makes a false "
+        "success permanent rather than merely wrong once"
+    )
