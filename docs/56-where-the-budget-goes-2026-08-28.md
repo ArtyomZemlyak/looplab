@@ -3971,3 +3971,37 @@ for. As of this sweep the two disagree in exactly the way the plan anticipated t
 the clauses reliably delays the first build, and has not been shown to change what gets shipped.
 
 `remEEctl4`, `remEEctl5` and `remEEctl6` are in flight, which takes the arm to six.
+
+## 90. The process finding is dissolving as n grows, which is what §83 said it would do
+
+§87 and §87.1 reported that removing the two clauses delays the first build, on two units of one
+construct, and §87.2 checked the censoring caveat and called it resolved. Four more control runs
+later, both readings have moved back toward nothing:
+
+| metric | n = 2 | n = 4 | now |
+|---|---|---|---|
+| dollars before first node | p = 0.0303 | p = 0.0070 | **p = 0.0276** (n = 5) |
+| minutes to first build | — | p = 0.0040 | **p = 0.0492** (n = 6) |
+
+`remEEctl5` reached its first build in 24 minutes and `remEEctl6` in 17 — the shipped card's range
+is 14–49, so both landed inside it, at the fast end. The control arm's build times now read
+17, 24, 38, 46, 54, 66 against the shipped 14, 18, 20, 21, 21, 22, 24, 29, 30, 49. Median 42.0
+against 21.5, and an exact one-sided p that has walked from 0.004 to 0.049 by adding two runs.
+
+The score never separated at all (§89.2, p = 0.0804 at n = 3).
+
+**This is the ninth statistic in this document to move against itself, and the first where I had
+already written a caveat, watched it resolve favourably, and said so.** §87.2's sentence — "the
+caveat was worth writing and it did not come true" — was accurate about the censoring and wrong as
+reassurance: the reading survived the two runs that had been excluded, and then weakened on the two
+that came after. Surviving one specific objection is not the same as being stable, and a section
+that says "the caveat did not bite" invites exactly that conflation.
+
+What holds up, and it is not nothing: the arm's build times still have a much wider spread than the
+shipped card's (17–66 against 14–49) and a higher median. What does not hold up is any claim that
+the difference is established. §83 put the floor at n = 6 for the SCORE against a 1.5× effect, the
+score is at n = 3, and this is what a small-or-absent effect looks like on the way there.
+
+No number in this section was typed by hand. `probe_summary.py` prints the by-card rows on every
+run, which is the only reason the reversal was seen the same afternoon rather than quoted stale for
+a week — the discipline §84 bought after being wrong for thirty minutes.
