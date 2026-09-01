@@ -3904,3 +3904,46 @@ INSTRUMENT.txt records gives 35.0205, and a third scoring under load gives 34.75
 The instrument had reported this probe as "STILL RUNNING (no stated reason)" — a finished,
 fully-paid run filed under "not done yet". That is fixed too: a zero-byte `final.json` now reports
 as a destroyed score, and says whether the champion survives to re-score.
+
+## 89. The second control run compiles, scores 184, and refutes yesterday's sharp question
+
+`remEEctl2` finished. §88 proposed watching one nearly-binary thing — whether the control arm
+compiles at all — because `remEEctl1` had shipped 49 lines of plain Python where all ten
+shipped-card runs shipped Cython. Two runs in, the answer is no:
+
+| run | TEST | champion | eval_train | before % |
+|---|---|---|---|---|
+| remEEctl1 | 34.7566 | 49 L plain Python | 35 | 54 % |
+| remEEctl2 | **184.2220** | **70 L kernel** (`edge_scan.pyx` + `setup.py`) | 31 | 37 % |
+| shipped card, n = 10 | 102.18 – 276.73 | Cython in all ten | 19 – 32 | 24 – 47 % |
+
+`remEEctl2` compiled, landed inside the shipped range, and spent 37 % before its first node — inside
+the shipped range for that too. The control arm's two scores are 34.76 and 184.22, a factor of 5.3
+between them, which is twice the whole shipped-card spread on this task (2.7×).
+
+So the picture after two runs is: the process metrics still separate (§87, §87.1 — dollars and
+minutes to the first build, both at n = 4 including the two unfinished runs), and the SCORE does
+not separate at all. Those are compatible: a clause can change when a run starts building without
+changing what it eventually ships. It is also exactly what §83 warned the corpus would look like at
+small n on a task whose within-arm spread is 2.7×, and why it put the floor at n = 6.
+
+What §88 got wrong is worth stating plainly rather than quietly dropping: it read one run's plain
+Python champion as a candidate pattern, and the very next run refuted it. The section said "n = 1"
+and "changes none of that", which was the right hedge — and the hedge is the only reason this is a
+correction of a hypothesis rather than of a claim.
+
+### 89.1 The same file was destroyed again, and the instrument caught it this time
+
+`remEEctl2`'s `final.json` was also zero bytes. It was launched at 12:35, before the offset hazard
+was fixed at 15:35, so it ran the poisoned bytes; `remEEctl3` and `remEEctl4` were too and will lose
+theirs the same way. `remEEctl5` launched after the fix.
+
+The difference from §88.1 is that nothing had to be noticed. Yesterday the summary said "STILL
+RUNNING (no stated reason)" and it took a directory listing to find the zero-byte file. Today it
+said, on the first run of the tool after the event:
+
+    remEEctl2  -- STILL RUNNING final.json is ZERO BYTES -- the score was written and then
+                  destroyed; re-score it: the champion is preserved
+
+— correct about the destruction and its remedy, and wrong in its first two words, which is its own
+defect and fixed in 82f8b4ea. Recovery gives 184.222 against the 186.7953 in the log, 1.4 % apart.
