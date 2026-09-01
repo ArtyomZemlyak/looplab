@@ -4089,3 +4089,39 @@ The section this corrects is twenty minutes old. It was not wrong — it reporte
 hedged correctly — but it invited a reading ("needs more runs") that one more run undercut. That is
 the ninth reversal in this document, and the first where the correction and the claim were written
 in the same hour.
+
+## 92. The card-batch arm closes at eight runs: no effect on the score, and the ranks say why
+
+`remEEctl8` finished at 175.0618 — a 48-line kernel, three nodes, and a best-of 176.3262 against a
+last node of 27.8174, the arm's sixth champion-rule save. That is the eighth and final run of
+`--no-unteachable-rules`, the arm §83 put first in its queue.
+
+| arm | n | median | sorted |
+|---|---|---|---|
+| shipped card | 10 | 209.28 | 102.2 … 276.7 |
+| `--no-unteachable-rules` | 8 | 172.20 | 34.8 148.8 157.3 169.3 175.1 184.2 201.3 233.5 |
+
+Exact one-sided rank-sum **p = 0.1185**, floor 0.0000229. Median ratio 1.22×. **Seven of the eight
+control runs fall inside the shipped range**, and their ranks among all eighteen are
+1, 4, 5, 6, 8, 10, 12, 16 — interleaved through the shipped distribution rather than shifted below
+it. The one at rank 1 is `remEEctl1`, still the only run in either arm that shipped plain Python.
+
+The p over the arm's life: 0.0804 (n=3), 0.0529 (n=4), 0.0589 (n=6), 0.1349 (n=7), 0.1185 (n=8).
+It never crossed 0.05 and its last three steps went the wrong way. Interleaved ranks and a wandering
+p are what one distribution looks like sampled twice.
+
+**What this closes.** Removing the two clauses that experience never teaches — the per-instance
+ceiling and "the best EVALUATED node is submitted" — does not measurably change what a run ships, on
+this task, at this spread, for eight dollars. The process metrics that looked strong three sweeps ago
+dissolved on the same schedule (§90). The arm answered its question; the answer is no.
+
+**What this does NOT touch.** §84 measured the champion RULE at 17 of 24 runs saved and a 7×
+difference in median submitted score. The rule is load-bearing; TELLING the model about it is what
+shows nothing. Those are different claims and §84's is the one with p = 1/131072 behind it — six of
+this arm's own eight runs are in that ledger, including remEEctl8's 6.34× and remEEctl4's 5.51×.
+The arm removed the sentence, not the rule.
+
+**Cost and verdict.** Eight dollars, eight runs, one clean negative on the question §83 ranked first.
+That is what the plan was for: it named the sample size in advance, the arm ran to it, and the result
+is reportable either way. The lanes have moved to §83's queue item 2 (`--no-reference-affordance`,
+§78's lost control), where three runs are in flight.
