@@ -784,3 +784,32 @@ def test_time_to_first_build_is_reported_beside_the_dollars(tmp_path):
         assert m, line
         for v in m.groups():
             assert "." not in v, f"unrounded minutes in the range: {v!r} — {line}"
+
+
+def test_a_zero_byte_final_json_is_a_destroyed_score_not_an_unfinished_run(tmp_path):
+    """`remEEctl1` scored 35.0981, printed it, and had its final.json truncated to zero bytes.
+
+    The run_probe.sh offset hazard (dcdf1f29) resumed the shell at a stale offset after the file had
+    grown under it, re-parsed the scoring block, and applied its `> "$OUT/final.json"` redirect to
+    nothing. The summary reported "STILL RUNNING (no stated reason)" -- a finished, fully paid probe
+    filed under "not done yet", which is exactly how a spent dollar goes unnoticed. The two states
+    need opposite actions: one is waited for, the other is recovered.
+    """
+    probe = _mk_probe(tmp_path, "wiped", "edge_expansion", nodes=[10.0],
+                      costs_before=[0.5], costs_after=[0.01])
+    (probe / "final.json").write_text("")
+    (probe / "champion_solver.py").write_text("# preserved\n")
+    out = _run(tmp_path)
+    assert "ZERO BYTES" in out, out
+    assert "re-score it" in out, out
+    assert "STILL RUNNING" not in out.split("wiped")[1][:200], out
+
+
+def test_a_zero_byte_final_json_with_no_champion_says_so(tmp_path):
+    """Recoverable and unrecoverable must not read the same: without the champion there is nothing
+    to re-score, and the honest report is that the number is gone."""
+    probe = _mk_probe(tmp_path, "gone", "edge_expansion", nodes=[10.0],
+                      costs_before=[0.5], costs_after=[0.01])
+    (probe / "final.json").write_text("")
+    out = _run(tmp_path)
+    assert "champion is gone too" in out, out

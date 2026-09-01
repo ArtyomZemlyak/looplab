@@ -142,6 +142,21 @@ def _why_no_test(probe_dir: Path) -> str:
     and remEE2, all of which scored a test perfectly well, so its absence means nothing on its own --
     which is the sort of thing that reads as a signal until you count it.
     """
+    # A DESTROYED result first, because it looks exactly like a run that has not finished and it is
+    # the opposite. `remEEctl1` scored 35.0981 on 2026-09-01, printed it, and then had its
+    # final.json truncated to ZERO BYTES by the run_probe.sh offset hazard (dcdf1f29): the shell,
+    # resuming at a stale offset after the file grew under it, re-parsed the scoring block and
+    # applied its `> "$OUT/final.json"` redirect to nothing. The summary called it "STILL RUNNING
+    # (no stated reason)" -- a finished, fully paid probe filed under "not done yet", which is how a
+    # lost dollar goes unnoticed. The champion survives, so the score is recoverable by re-scoring
+    # it; saying so here is the difference between a recovery and a rerun.
+    fin = probe_dir / "final.json"
+    if fin.is_file() and fin.stat().st_size == 0:
+        champ = probe_dir / "champion_solver.py"
+        how = ("re-score it: the champion is preserved" if champ.is_file()
+               else "and the champion is gone too")
+        return f"final.json is ZERO BYTES -- the score was written and then destroyed; {how}"
+
     # The needle list is a convenience, not the gate -- every unscored probe is listed whether or
     # not one matches (see the caller). These are the phrasings seen on this box, and `remDL`'s is
     # here because it was the one the first six needles missed: nine attempts of exponential
