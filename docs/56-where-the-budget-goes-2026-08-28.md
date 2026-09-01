@@ -3698,3 +3698,80 @@ accountant that ticks, and the mutation reddens two tests.
 
 The number this buys is not available yet — it arrives with the next cut session — but from then on
 "the money ceiling never fires" stops being a sentence and becomes a column.
+
+## 86. The variance has a mechanism for the bottom of the range, and the first rule derived from it was wrong
+
+§83 item 4 said the variance question is not an A/B and needs two champions diffed rather than a
+seventh statistic. Done here, on the extremes of the nine `edge_expansion` runs that share a card:
+`remEE8` at 276.7268 against `remEE2` at 102.1750, a 2.71× gap.
+
+**Both runs found the same algorithm.** One C pass over the adjacency list-of-lists, counting edges
+whose endpoints differ in membership. No difference in idea at all. Two implementation differences:
+
+1. `remEE8` compiles with `boundscheck=False, wraparound=False, cdivision=True,
+   initializedcheck=False`; `remEE2` carries only `language_level=3`.
+2. `remEE8`'s kernel takes `nodes_S` — the INDEX LIST — and builds the membership mask itself in a
+   `malloc`'d `unsigned char` buffer, doing the division in C too. `remEE2`'s kernel takes a
+   ready-made buffer, so its Python `solve()` builds `np.zeros(n)`, fancy-indexes it from
+   `np.asarray(nodes_S)` and copies it with `.tobytes()` on EVERY call.
+
+Measured, not reasoned. `remEE2`'s own kernel source recompiled with only the directive line changed:
+**0.378 ms → 0.281 ms, a factor of 1.34**. Then both complete per-call paths on a real instance from
+`EdgeExpansionTask().generate_problem(n=400, random_seed=1)` (400 nodes, mean degree 8.0, both paths
+returning 13.333333):
+
+| path | per call |
+|---|---|
+| `remEE2` as scored | 17.0 µs |
+| `remEE8` as scored | 8.1 µs |
+| of which `remEE2`'s per-call numpy setup + `tobytes()` | 3.1 µs (18 % of its own path) |
+
+2.09× against an observed score ratio of 2.71×: same direction, same order.
+
+### 86.1 The first rule died on the corpus, which is the part to keep
+
+The mechanism yields a prediction, so I tested it. Across all ten `edge_expansion` runs, grouped by
+whether the champion carries `boundscheck=False` and `wraparound=False`:
+
+| group | n | median TEST |
+|---|---|---|
+| with both directives | 7 | 193.67 |
+| without | 3 | **224.88** |
+
+The wrong way round, p = 0.33 in the predicted direction. `remEE5` (227.35) and `accEE` (224.88)
+score near the top with no directives at all; `remEE7` (144.24) scores near the bottom with them.
+The micro-benchmark is not wrong — the 1.34× is real — it is simply not what separates these runs.
+That is the eighth statistic in this document to die on the corpus, and the first to die after being
+derived from a physical measurement rather than a correlation, which is worth knowing about the
+method: a mechanism you can time in isolation still has to be shown to be the one that bites.
+
+### 86.2 The second rule holds, and is POST-HOC
+
+Reading the survivors is what suggested it: `remEE5` and `accEE` lack the directives but pass
+`nodes_S` straight into C. So the split that matters may be difference 2, not difference 1 — where
+the membership mask is BUILT:
+
+| group | n | median TEST | runs |
+|---|---|---|---|
+| kernel takes the index list, mask built in C | 7 | 227.35 | 169.66 – 276.73 |
+| kernel takes a ready-made buffer | 2 | 123.21 | 144.24, 102.18 |
+
+Exact one-sided rank-sum p = 0.0278. **This is the SECOND rule tried on the same ten runs, and it
+was suggested by looking at which runs survived the first.** Two tries make the naive corrected p
+about 0.056, and "suggested by the survivors" is not a correction any arithmetic fixes. What it has
+that the directive rule did not is an independent physical measurement of the same quantity — the
+3.1 µs of per-call marshalling, 18 % of the slower path, measured before the corpus was scored on
+it. That makes it a hypothesis worth a deliberate arm, not a result.
+
+It also explains only the BOTTOM of the range. The seven indices-in runs still spread 169.66 to
+276.73, a factor of 1.63, and nothing here touches that.
+
+### 86.3 What is NOT being shipped, and why
+
+The card tells the model that `__init__` is on the clock. It does not say that data marshalled into
+a compiled kernel is on the clock ON EVERY CALL, which is what cost `remEE2` 18 % of its per-call
+time before any counting began. That is the obvious candidate clause and it is **not going in
+today**: four control probes are running under `card_sha256 d20e9c0e0b3eb26f`, and editing the card
+mid-arm would leave four dollars measuring a card that no longer exists. It goes in the queue behind
+the arm now in flight — which is the same discipline §83 asked for and the first time it has cost
+anything to keep.
