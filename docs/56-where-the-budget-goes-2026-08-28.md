@@ -4319,3 +4319,40 @@ is the reason §83 insisted the outcome be named before the runs.
 `remEEref8` and `remEEref9` are still running; they will make it nine, and they answer nothing new.
 Under §83's own rule — a free lane takes a queued arm or stays idle — the two lanes those runs free
 should NOT go to a tenth reference probe.
+
+## 95. The quote §83 asked for: what re-measuring arm A would cost, and why the lanes are idle
+
+`remEEref8` finished at 237.1105 (34-line kernel, best-of 238.7815 against a last node of 25.4787 —
+a 9.37× champion-rule save), taking the reference arm to **eight** completed runs: median 0.0 %,
+**p = 0.00103**, six of eight importing the reference in none of their probes. The arm answered its
+question at n = 7 (§94) and a ninth run answers nothing new, so under §83's own rule — *a free lane
+takes a queued arm or stays idle* — the three lanes it freed are not going to a tenth probe.
+
+The next queued question is item 3, arm A against arm B: p = 0.75 over the ten comparable tasks, the
+programme's actual question, and the one §83 said must be **priced before it is started**. Here is
+the price, from the corpus rather than from an estimate.
+
+**Arm A's own accounting is not the price.** docs/58 records it measured: *"12 of 12 scored arm-A
+tasks exceed the $1.00 budget on their scoring attempt alone (100 % – 241 %); the six that exceed it
+by ≥ 12 % are `pde_heat1d` 241 %, `sparse_eigenvectors_complex` 238 %, `rbf_interpolation` 201 %,
+`rectanglepacking` 126 %, `kcenters` 125 %, `integer_factorization` 112 %."* The cause is named there
+too — the arena does not count reasoning tokens.
+
+**What it actually spent**, from §56: arm A's a3 attempt spent **$23.0073 over 2,225 calls =
+$1.1504 per task**, against the $1.19 the comparison reports.
+
+So re-measuring arm A on the ten tasks that have no number on the verified ruler:
+
+| | |
+|---|---|
+| nominal, at the $1.00 the arena is told | $10 |
+| at the measured per-task actual ($1.1504) | **≈ $11.50** |
+| at the worst measured per-task overshoot (241 %) | up to **$24** |
+
+And a known waste inside that: 5.2 % of arm A's budget bought 4.59 M completion tokens it was billed
+for and never received, cut mid-stream on a precise 600-second period that is neither of the two
+timeouts this bench controls.
+
+**This is a spending decision and not a sweep task**, which is what §83 said about it in advance. The
+lanes stay idle until it is made. Idle is the correct state for them: an unpaired run costs a dollar
+and answers nothing, and that sentence has now survived three arms.
