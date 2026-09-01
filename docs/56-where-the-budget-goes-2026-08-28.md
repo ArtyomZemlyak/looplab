@@ -3387,9 +3387,12 @@ three cases together are the first measurement of what the clause is worth:
 | remDL2 | 14.295, 13.982 | 14.295 | 13.982 | 2 % |
 | remPde3 | 123.1297, 50.0147 | 123.1297 | 50.0147 | 59 % |
 | remEE4 | 178.9456, **265.7918**, 12.9883 | 265.7918 | 12.9883 | **95 %** |
+| remDL5 | **11.5564**, 1.9865 | 11.5564 | 1.9865 | **83 %** |
 
 §72 recorded `remDL2` as the first empirical demonstration and called it thin — a 2 % difference on
-one run. Three runs later the same rule is standing between a corpus-best 262 and a 13. Nine of the
+one run. Three runs later the same rule was standing between a corpus-best 262 and a 13, and
+`remDL5` (added 2026-09-01) makes four: 2 %, 59 %, 95 %, 83 %. Three of the four cost more than half
+the run's score, so the 2 % that made §72 call it thin is the outlier, not the type. Nine of the
 seventeen probes here reached exactly one node and one reached none, so ten could not exercise the
 rule at all; of the seven that reached two or more, three ended on a node worse than their best.
 
@@ -3403,8 +3406,8 @@ it, and both also carry every other change of that batch. What the table measure
 value, which is a property of the engine, not the card's effect on behaviour — and separating those
 needs the arm §78 says this corpus cannot supply.
 
-The money ceiling still has not fired: `remEE4` and `remPde6` both closed plans with `cut_steps: []`,
-the third and fourth runs to report it (§75).
+The money ceiling still has not fired: `remEE4`, `remPde6` and `remDL5` all closed plans with
+`cut_steps: []` — the third, fourth and fifth runs to report it (§75).
 
 ## 80. Three probes ran on the other instrument, and one of them is §73's controlled pair
 
