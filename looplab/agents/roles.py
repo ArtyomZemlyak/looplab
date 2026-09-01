@@ -340,7 +340,16 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     # `runs/`, 12 of the 12 `inert` repairs in the corpus ran past their wall clock and 0 of the 65
     # that finished inside it are inert, so `inert` alone cannot tell "decided not to edit" from
     # "ran out of clock mid-investigation".
-    "last_budget_exhausted")
+    "last_budget_exhausted",
+    # THE NUMBERS BEHIND THAT WORD: {"kind", "seconds", "detail"}, {} when nothing was cut.
+    # A second attribute rather than a wider `last_budget_exhausted`, because that one is a
+    # durable vocabulary other code compares against a KIND and prose in it would break every
+    # such reader. Registered for the reason the whole tuple exists and for one more: the
+    # default here is `{}`, so a rename would report "this session was never cut" for every
+    # step of every run -- and the corpus reading it is trying to settle whether the money
+    # ceiling ever fires (docs/56 §85). A silent falsy default would answer that question
+    # wrongly and look like data.
+    "last_budget_facts")
 RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
 
 # Duck-typed attributes that answer "does building one node make provider calls at all?" — the seam

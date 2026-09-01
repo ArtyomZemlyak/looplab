@@ -18,9 +18,33 @@ _ALL = set(DEVELOPER_OUTPUT_ATTRS) | set(RESEARCHER_ACTION_ATTRS)
 _CONSUMER = re.compile(r'getattr\([A-Za-z_][\w.]*,\s*"((?:last_|choose_)[a-z_]+)"')
 # Producer writes: `self.last_files = …` / `obj.last_files = …` (also catches `last_filez =`
 # style renames as long as the prefix survives — the near-miss check below covers the rest).
-_PRODUCER = re.compile(
-    r'\.((?:last_files?|last_deleted|last_footprint|last_file|last_report|last_seed|last_run|last_patch'
-    r'|last_rollback_stage|last_budget_exhausted|choose_action)[a-z_]*)\s*=[^=]')
+#
+# BUILT FROM THE REGISTRY, not hand-listed beside it. The alternation used to spell the vocabulary a
+# SECOND time, and on 2026-09-01 adding `last_budget_facts` to roles.py left this scanner behind:
+# `test_registry_attrs_still_have_producers_and_consumers` then reported "no producer left —
+# registry rot" for an attribute whose producer was three lines above its sibling's. The registry is
+# the vocabulary; anything that has to agree with it should be derived from it. (`claimpin.py`
+# carries the same note about the same mistake in a different file.)
+#
+# The trailing `[a-z_]*` is kept: it is what catches a `last_filez = …` near-miss rename, which a
+# derived-but-exact alternation would let through. Longest names first so the alternation cannot
+# prefix-match a shorter sibling and truncate the captured name.
+def _producer_pattern(names) -> re.Pattern:
+    """`.<registered-name><lowercase-suffix> =` — the alternation, built from whatever it is given.
+
+    `sorted()` gives a stable pattern across runs, and does nothing else. I wrote `key=len,
+    reverse=True` believing a registered name that PREFIXES another (`last_run` before
+    `last_run_id`) would otherwise capture the short one and leave the long one reading as "no
+    producer left — registry rot". Tested on exactly that synthetic pair: it does not happen. The
+    trailing `[a-z_]*` is greedy, so the short alternative matches and then swallows `_id` anyway,
+    and BOTH orderings capture `last_run_id`. The ordering is inert. The note stays because the
+    hazard is plausible enough to be re-invented, and the test that would have guarded it was
+    unfalsifiable — it passed under both orderings, which is how this was found.
+    """
+    return re.compile(r'\.((?:' + "|".join(sorted(names)) + r')[a-z_]*)\s*=[^=]')
+
+
+_PRODUCER = _producer_pattern(_ALL)
 
 
 def test_every_consumer_probe_is_registered():
@@ -103,3 +127,46 @@ def test_unified_developer_syncs_the_registered_footprint_output():
     agent = UnifiedAgent(researcher=_Researcher(), developer=_Developer())
     assert agent.implement(None) == "print(1)"
     assert agent.last_footprint == {"gpus": 1, "gpu_mem_mib": 6_000}
+
+
+def test_the_producer_scanner_cannot_fall_behind_the_registry():
+    """The alternation used to spell the registry a SECOND time, and drifted from it.
+
+    Adding `last_budget_facts` to roles.py on 2026-09-01 left the hand-written alternation behind,
+    so `test_registry_attrs_still_have_producers_and_consumers` reported "no producer left —
+    registry rot" for an attribute whose producer sat three lines from its sibling's. The scanner
+    was wrong about the code, and the message blamed the code.
+
+    Asserted structurally: every registered name must be matchable by the producer pattern. A test
+    that merely ran the scanner would pass again the moment someone re-hardcodes the list and
+    happens to include today's names.
+    """
+    for attr in sorted(_ALL):
+        assert _PRODUCER.search(f"        self.{attr} = 1\n"), (
+            f"the producer scanner cannot see a write to registered attr {attr!r}"
+        )
+
+
+def test_the_producer_scanner_still_catches_a_near_miss_rename():
+    """The trailing `[a-z_]*` is the near-miss mechanism, and this is exactly what it can see.
+
+    A SUFFIX addition of lowercase letters or underscores is caught: `last_files_old` still starts
+    with a name the registry knows, so the write is spotted and reported as unregistered. A suffix
+    containing a DIGIT (`last_files_v2`) is not, because the trailing class is `[a-z_]*` — asserted
+    below so the boundary is written down rather than assumed either way.
+
+    A SUBSTITUTION inside the name is NOT, and this test says so on purpose. The hand-written
+    alternation appeared to catch `last_filez` — but only because it spelled `last_files?`, listing
+    a `last_file` stem the registry does not contain. That was cruft from two spellings of one
+    attribute, not a designed property, and deriving the alternation from the registry drops it.
+    Writing the limit down beats discovering later that a test was protecting an accident.
+    """
+    m = _PRODUCER.search("        self.last_files_old = 1\n")
+    assert m and m.group(1) == "last_files_old", m
+    assert not _PRODUCER.search("        self.last_files_v2 = 1\n"), (
+        "the trailing class is [a-z_]*, so a digit in the suffix is outside it"
+    )
+    assert not _PRODUCER.search("        self.last_filez = 1\n"), (
+        "a mid-name substitution is outside what a prefix rule can see; if this now matches, the "
+        "alternation has grown stems the registry does not have"
+    )
