@@ -4356,3 +4356,28 @@ timeouts this bench controls.
 **This is a spending decision and not a sweep task**, which is what §83 said about it in advance. The
 lanes stay idle until it is made. Idle is the correct state for them: an unpaired run costs a dollar
 and answers nothing, and that sentence has now survived three arms.
+
+### 94.1 The arm closes at nine, and the monotone run ended on the last one
+
+`remEEref9` finished at 218.8475 (26-line kernel, two nodes, 14 m to first build, and a tie in the
+champion ledger). That is the last of the arm; every lane is now idle per §95.
+
+**Reference use, all nine:** 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.3, 8.7, 10.0 — median **0.0 %** against
+the shipped card's 8.4 %, exact one-sided **p = 0.00280**. Six of nine imported the reference in
+none of their probes.
+
+**§94 said the sequence was "monotone the whole way" and it stopped being so on the next run.**
+0.1119 (n = 3), 0.0430, 0.0140, 0.00211, 0.00103 (n = 8), **0.00280** (n = 9). `remEEref9` used the
+reference in 8.7 % of its probes — the second-highest rate in the arm — and pushed the p back up.
+The claim held through eight runs and the ninth qualified it, which is the tenth time in this
+document a sentence has been overtaken by its own next measurement. It does not change the verdict:
+0.00280 is still two orders below the 0.05 the arm was sized for, and §83's floor was six.
+
+**The score, all nine:** median **218.85** against the shipped 209.28 — now slightly ABOVE it —
+p = 0.5789, and **nine of nine land inside the shipped range**. Nine of nine shipped a compiled
+kernel. Whatever the clause does, it does not cost score, and the arm never suggested it would.
+
+Final ledger of the two arms this document ran: `--no-unteachable-rules`, eight runs, no effect on
+anything measured (§92); `--no-reference-affordance`, nine runs, a clear effect on the behaviour it
+names and none on the score (§94). Seventeen dollars, two clean answers, both to questions written
+down before the runs started.
