@@ -189,6 +189,15 @@ export LOOPLAB_LLM_API_KEY=meter
 export OPENAI_BASE_URL="$LOOPLAB_LLM_BASE_URL"
 export OPENAI_API_KEY=meter
 
+# $PROBE_MAKE_TASK_ARGS is UNQUOTED on purpose: it carries goal VARIANTS for control arms
+# (`--no-unteachable-rules` is the first) and word splitting is how a caller passes two of
+# them. It is empty in every ordinary probe, and `run_probe.sh` is not run on untrusted input.
+# shellcheck disable=SC2086
+python3 "$ROOT/looplab/benchmarks/algotune/make_task.py" --algotune-root "$ROOT/AlgoTune" \
+    --task "$TASK" --out-dir "$OUT/ws" --deliver --one-card --enforce-rules \
+    ${PROBE_MAKE_TASK_ARGS:-} >> "$LOG" 2>&1 \
+  || { say "make_task ПРОВАЛИЛСЯ — см. $LOG"; exit 1; }
+
 mkdir -p "$OUT"
 {
   echo "probe:          $LABEL"
@@ -210,6 +219,12 @@ mkdir -p "$OUT"
   # unstreamed with nothing in the tree to say it. Printed even when empty, so "this probe
   # took the default card" is a POSITIVE statement in the record rather than a missing line.
   echo "card_args:      ${PROBE_MAKE_TASK_ARGS:-(none -- the shipped card)}"
+  # ХЕШ САМОЙ КАРТОЧКИ, а не только флагов. Флаги называют вариант; хеш ловит любое
+  # изменение текста -- новый пункт, поправленную формулировку, сдвинувшуюся константу.
+  # 01.09 медиана обращений к reference-модулю по 28 пробам вышла 7.6 %, ровно внутри
+  # доклаузульной полосы §69.1 в 4.9-8.3 %, и РАЗДЕЛИТЬ корпус по версии карточки было
+  # нечем: до сегодня ни одна проба не записывала, какую карточку получила.
+  echo "card_sha256:    $(python3 -c 'import hashlib,json,sys;print(hashlib.sha256(json.load(open(sys.argv[1]))["goal"].encode()).hexdigest()[:16])' "$OUT/ws/algotune_$TASK.json" 2>/dev/null || echo "(unreadable)")"
   # Полнота пары, а не ключ: имена и вердикт. Отказ движка стоит секунды и случается уже
   # после этой записи, так что прибор — единственное место, где видно, что пара собрана.
   # НИКАКИХ `${KEY:-...}` ЗДЕСЬ. Первая версия этой строки писала
@@ -224,24 +239,21 @@ mkdir -p "$OUT"
 } > "$OUT/INSTRUMENT.txt"
 say "прибор записан: $OUT/INSTRUMENT.txt (stream=${LOOPLAB_LLM_STREAM:-unset})"
 
-# THE DRY-RUN GATE SITS HERE, below the environment and the instrument record and above everything
-# that costs. It used to sit above both, which made the instrument record unreachable without
-# spending a dollar -- a fix whose falsifier cannot run is a fix nobody can check. Everything
-# between the old position and this one is exports and one file write: no `make_task`, no model, no
-# money, so the gate's promise is unchanged and the record is now testable.
+# THE DRY-RUN GATE SITS HERE, below the environment, the card and the instrument record, and above
+# everything that costs MONEY. It used to sit above all of them, which made the instrument record
+# unreachable without spending a dollar -- a fix whose falsifier cannot run is a fix nobody can
+# check.
+#
+# What is now above the gate: the credential exports, `make_task.py`, and one file write. That list
+# grew today when `make_task` moved up so the record could hash the card it produced, and the
+# promise had to be restated to stay true: the gate no longer means "nothing has happened yet", it
+# means NO MODEL HAS BEEN CALLED AND NO MONEY SPENT. A dry run costs about four seconds of CPU and
+# leaves a `ws/` directory behind. Saying "no `make_task`" here after moving `make_task` above it
+# would have been a comment describing a script that no longer exists.
 if [ "${PROBE_DRY_RUN:-0}" = "1" ]; then
   say "сухой прогон: все проверки пройдены, прибор записан, ничего не запущено"
   exit 0
 fi
-
-# $PROBE_MAKE_TASK_ARGS is UNQUOTED on purpose: it carries goal VARIANTS for control arms
-# (`--no-unteachable-rules` is the first) and word splitting is how a caller passes two of
-# them. It is empty in every ordinary probe, and `run_probe.sh` is not run on untrusted input.
-# shellcheck disable=SC2086
-python3 "$ROOT/looplab/benchmarks/algotune/make_task.py" --algotune-root "$ROOT/AlgoTune" \
-    --task "$TASK" --out-dir "$OUT/ws" --deliver --one-card --enforce-rules \
-    ${PROBE_MAKE_TASK_ARGS:-} >> "$LOG" 2>&1 \
-  || { say "make_task ПРОВАЛИЛСЯ — см. $LOG"; exit 1; }
 
 say "===== $MODEL на $TASK, полоса $LANE, бюджет \$$BUDGET ====="
 S=$(date +%s)

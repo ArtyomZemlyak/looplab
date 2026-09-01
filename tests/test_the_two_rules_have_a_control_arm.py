@@ -208,3 +208,45 @@ def test_no_echo_in_the_record_block_mentions_the_key(tmp_path):
         "an echo in the instrument record expands the API key variable, so a run can write the key "
         "into a file:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_the_record_pins_the_card_itself_not_only_the_flags(tmp_path):
+    """Flags name a variant; a hash catches any change to the text the model actually read.
+
+    Measured 2026-09-01: median reference-module use across 28 probes came out at 7.6 %, dead centre
+    of §69.1's pre-clause 4.9-8.3 % band -- and the corpus could not be SPLIT by card version to say
+    whether the clause had landed for any given run, because no probe had ever recorded which card
+    it was given. The flag line alone would not have closed that: a reworded clause or a moved
+    constant changes the card without changing the flags.
+
+    Two arms must therefore hash differently, and a repeat of the same arm must hash the same.
+    """
+    probe = REPO / "benchmarks" / "algotune" / "run_probe.sh"
+    if not ARENA.exists():
+        pytest.skip("bench root not on this box")
+
+    def _hash(label, extra):
+        env = {**os.environ, "PROBE_DRY_RUN": "1", "PROBE_OUT_ROOT": str(tmp_path), **extra}
+        r = subprocess.run(
+            ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",
+             "http://127.0.0.1:8801", "1.00"],
+            capture_output=True, text=True, timeout=1800, env=env,
+        )
+        rec = (tmp_path / label / "INSTRUMENT.txt")
+        assert rec.exists(), r.stdout[-2000:] + r.stderr[-2000:]
+        line = [ln for ln in rec.read_text().splitlines() if ln.startswith("card_sha256:")]
+        assert line, "the record does not pin the card:\n" + rec.read_text()
+        return line[0].split(":", 1)[1].strip()
+
+    shipped = _hash("selftest-hash-a", {})
+    assert shipped != "(unreadable)", "the hash could not be computed from the generated card"
+    assert len(shipped) == 16, "expected a 16-hex-char digest, got %r" % shipped
+
+    again = _hash("selftest-hash-b", {})
+    assert again == shipped, "the same arm hashed differently, so the pin is not a pin"
+
+    control = _hash("selftest-hash-c", {"PROBE_MAKE_TASK_ARGS": "--no-unteachable-rules"})
+    assert control != shipped, (
+        "the control arm's card hashes identically to the shipped one, so the record cannot tell "
+        "two arms apart"
+    )
