@@ -166,6 +166,23 @@ export LOOPLAB_LLM_BUDGET_USD="$BUDGET"
 # The meter is one file for the whole box and is not copied into a snapshot; a probe tree is. So the
 # settings that decide what the ruler measures go in beside the run, at launch, before a token is
 # spent. The API key is NOT among them -- only what changes the measurement.
+# УЧЁТНАЯ ПАРА ЦЕЛИКОМ, И ОБЕ ПОЛОВИНЫ ОТСЮДА. Счётчик держит ключ к шлюзу сам, поэтому
+# клиенту НАСТОЯЩИЙ ключ не нужен — но движок требует пару `LOOPLAB_LLM_API_KEY` +
+# `LOOPLAB_LLM_API_KEY_BASE_URL` неразрывно и отказывается стартовать, если задана одна
+# половина. Скрипт задавал только `_BASE_URL`, а ключ МОЛЧА наследовал из оболочки: пробы
+# шли лишь потому, что оператор перед запуском делал `source .env`. Из чистого окружения
+# (`setsid nohup`) тот же скрипт умирал за секунду с rc=2 — уже ПОСЛЕ проверки забора и
+# записи прибора, то есть выглядел исправным ровно до момента траты. Вдобавок
+# унаследованный ключ выписан на шлюз, а `_BASE_URL` здесь переставлялся на 127.0.0.1 —
+# ровно та полупереопределённая пара, ради запрета которой отказ и написан.
+# Значение `meter`: счётчик его игнорирует, а ключ шлюза остаётся у счётчика.
+export LOOPLAB_LLM_MODEL="$MODEL"
+export LOOPLAB_LLM_BASE_URL="$METER/m/$LABEL/$TASK/p1/v1"
+export LOOPLAB_LLM_API_KEY_BASE_URL="$LOOPLAB_LLM_BASE_URL"
+export LOOPLAB_LLM_API_KEY=meter
+export OPENAI_BASE_URL="$LOOPLAB_LLM_BASE_URL"
+export OPENAI_API_KEY=meter
+
 mkdir -p "$OUT"
 {
   echo "probe:          $LABEL"
@@ -187,6 +204,17 @@ mkdir -p "$OUT"
   # unstreamed with nothing in the tree to say it. Printed even when empty, so "this probe
   # took the default card" is a POSITIVE statement in the record rather than a missing line.
   echo "card_args:      ${PROBE_MAKE_TASK_ARGS:-(none -- the shipped card)}"
+  # Полнота пары, а не ключ: имена и вердикт. Отказ движка стоит секунды и случается уже
+  # после этой записи, так что прибор — единственное место, где видно, что пара собрана.
+  # НИКАКИХ `${KEY:-...}` ЗДЕСЬ. Первая версия этой строки писала
+  # `${LOOPLAB_LLM_API_KEY:+set}${LOOPLAB_LLM_API_KEY:-MISSING}` — когда ключ ЗАДАН,
+  # вторая подстановка раскрывается в его ЗНАЧЕНИЕ, и запись прибора вынесла бы ключ в
+  # файл. Тот же дефект уже был в ENVIRONMENT.txt снимка. Здесь только вердикт.
+  if [ -n "${LOOPLAB_LLM_API_KEY:-}" ] && [ -n "${LOOPLAB_LLM_API_KEY_BASE_URL:-}" ]; then
+    echo "llm_credential: pair complete, bound to ${LOOPLAB_LLM_API_KEY_BASE_URL}"
+  else
+    echo "llm_credential: INCOMPLETE PAIR -- the engine will refuse to start"
+  fi
 } > "$OUT/INSTRUMENT.txt"
 say "прибор записан: $OUT/INSTRUMENT.txt (stream=${LOOPLAB_LLM_STREAM:-unset})"
 
@@ -208,13 +236,6 @@ python3 "$ROOT/looplab/benchmarks/algotune/make_task.py" --algotune-root "$ROOT/
     --task "$TASK" --out-dir "$OUT/ws" --deliver --one-card --enforce-rules \
     ${PROBE_MAKE_TASK_ARGS:-} >> "$LOG" 2>&1 \
   || { say "make_task ПРОВАЛИЛСЯ — см. $LOG"; exit 1; }
-
-# Счётчик OpenRouter слушает 8802 и держит ключ сам; клиенту ключ не нужен.
-export LOOPLAB_LLM_MODEL="$MODEL"
-export LOOPLAB_LLM_BASE_URL="$METER/m/$LABEL/$TASK/p1/v1"
-export LOOPLAB_LLM_API_KEY_BASE_URL="$LOOPLAB_LLM_BASE_URL"
-export OPENAI_BASE_URL="$LOOPLAB_LLM_BASE_URL"
-export OPENAI_API_KEY=meter
 
 say "===== $MODEL на $TASK, полоса $LANE, бюджет \$$BUDGET ====="
 S=$(date +%s)

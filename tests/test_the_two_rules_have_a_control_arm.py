@@ -138,3 +138,72 @@ def test_the_probe_records_which_card_it_ran(tmp_path):
     assert "--no-unteachable-rules" in control, (
         "the control arm ran a different card and the record does not say which"
     )
+
+
+def test_the_probe_carries_its_own_credential(tmp_path):
+    """The script set half the credential pair and inherited the other half from the operator.
+
+    `run_probe.sh` exported `LOOPLAB_LLM_API_KEY_BASE_URL` (re-pointed at the local meter) and
+    `OPENAI_API_KEY`, but never `LOOPLAB_LLM_API_KEY`. The engine treats those two as ONE atomic
+    credential and refuses when only one is present, so every probe that ever ran did so because the
+    launching shell happened to carry the key from a `source .env`. Launched from a clean
+    environment on 2026-09-01 the same script died in ONE SECOND with rc=2 -- after the fence check
+    and after the instrument record, so it looked healthy right up to the moment it would have spent.
+
+    Driven under PROBE_DRY_RUN with the key REMOVED from the environment, which is the condition
+    that used to fail. The record must show a complete pair, and it must not show the key.
+    """
+    probe = REPO / "benchmarks" / "algotune" / "run_probe.sh"
+    root = Path("/var/tmp/looplab-bench")
+    if not (root / "AlgoTune").exists():
+        pytest.skip("bench root not on this box")
+
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("LOOPLAB_LLM_API_KEY", "LOOPLAB_LLM_API_KEY_BASE_URL", "OPENAI_API_KEY")}
+    env["PROBE_DRY_RUN"] = "1"
+    label = "selftest-credential"
+    out = root / "model-probes" / label
+    try:
+        subprocess.run(
+            ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",
+             "http://127.0.0.1:8801", "1.00"],
+            capture_output=True, text=True, timeout=1800, env=env,
+        )
+        rec = (out / "INSTRUMENT.txt").read_text()
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+    assert "llm_credential:" in rec, "the record says nothing about the credential pair"
+    assert "INCOMPLETE PAIR" not in rec, (
+        "the probe still depends on a key from the operator's shell:\n" + rec
+    )
+    assert "pair complete" in rec
+
+
+def test_no_echo_in_the_record_block_mentions_the_key(tmp_path):
+    """The first version of that record line printed the KEY whenever the key was set.
+
+    `${LOOPLAB_LLM_API_KEY:+set}${LOOPLAB_LLM_API_KEY:-MISSING}` looks like a presence test and is
+    not: the second expansion yields the VALUE whenever the variable is non-empty. The same defect
+    shipped once already in the snapshot's ENVIRONMENT.txt.
+
+    Asserted on the SOURCE, not on a run, and that is the point. The runtime version of this test
+    planted a sentinel key in the environment and looked for it in the record -- and it stayed green
+    under a deliberately leaky record line, because the script now pins the key to `meter` before
+    writing anything, so the sentinel never reaches the record whatever the line says. A test that
+    cannot fail is not evidence; mutation is what showed the difference. The checkable property is
+    structural: no `echo` inside the record block names the key variable at all.
+    """
+    src = (REPO / "benchmarks" / "algotune" / "run_probe.sh").read_text()
+    block = src.split('mkdir -p "$OUT"', 1)[1].split('} > "$OUT/INSTRUMENT.txt"', 1)[0]
+    assert "probe:" in block, "could not isolate the instrument record block"
+
+    offenders = [ln.strip() for ln in block.splitlines()
+                 if ln.strip().startswith("echo ") and "LOOPLAB_LLM_API_KEY" in ln
+                 and "LOOPLAB_LLM_API_KEY_BASE_URL" not in ln.replace("LOOPLAB_LLM_API_KEY_BASE_URL", "")]
+    offenders = [ln for ln in offenders
+                 if "LOOPLAB_LLM_API_KEY" in ln.replace("LOOPLAB_LLM_API_KEY_BASE_URL", "")]
+    assert not offenders, (
+        "an echo in the instrument record expands the API key variable, so a run can write the key "
+        "into a file:\n  " + "\n  ".join(offenders)
+    )
