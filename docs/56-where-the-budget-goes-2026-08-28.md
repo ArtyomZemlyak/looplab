@@ -3225,3 +3225,43 @@ What that leaves is §73's conclusion, now with six points on one task instead o
 per-configuration spread is enormous, and single-run comparisons on `pde_heat1d` mean nothing. The
 statistics kept failing because they were being asked to explain variance that is not yet shown to
 have structure.
+
+## 75. The step ceiling, evaluated against the corpus it was designed from
+
+The per-step money ceiling (half of what remains, never below a fifth of the run) was chosen from
+seven observed steps. The corpus now holds **81** `plan_step` sessions across thirteen probes, so the
+rule can be checked rather than argued.
+
+**The wall binds rarely, and unevenly.** Six of the 81 steps (7 %) ran to the 1200 s session wall.
+What they cost varies more than threefold:
+
+| probe | duration | step cost | budget left when it started | share of what remained | would the ceiling cut it? |
+|---|---|---|---|---|---|
+| remPde | 1212 s | $0.4820 | $0.7331 | 66 % | **yes** |
+| remPde5 | 1236 s | $0.3276 | $0.6993 | 47 % | no |
+| accPde | 1212 s | $0.2822 | $0.8941 | 32 % | no |
+| remDL3 | 1213 s | $0.1609 | $0.7241 | 22 % | no |
+| remDL3 | 1211 s | $0.1587 | $0.5632 | 28 % | no |
+| remDL2 | 1202 s | $0.1484 | $0.7370 | 20 % | no |
+
+Same wall, same 20 minutes, and between $0.15 and $0.48 of a $1.00 run — which is the original point
+restated with six observations instead of two: seconds are not dollars, and bounding one does not
+bound the other.
+
+**The ceiling bites once, and it is the right once.** Of the six wall-hitters it cuts only `remPde`'s
+$0.4820 — the runaway it was built for. Across all 11 steps in the corpus costing more than $0.15 it
+would cut 3. It notably does NOT cut `remPde5`'s $0.3276 step, and `remPde5` scored **167.2103**, the
+highest `pde_heat1d` number on record (§74.3). A tighter rule — half of remaining with no floor, or a
+flat quarter — would have cut that step, and on the evidence available that would have been a change
+for the worse.
+
+So the rule stays as shipped. This section exists because the alternative was to tighten it on the
+intuition that 7 % of steps hitting a wall sounds like a lot; the corpus says the wall is rare, its
+cost is what varies, and the one step worth cutting is already the one being cut.
+
+**Still unverified:** whether the ceiling has ever actually fired in a live run. The trace that would
+show it (`cut_steps` on the `plan_steps` span) shipped after every probe that has finished, and the
+four running now are 25 minutes in and have not closed a plan yet. The `plan_steps` span itself is
+real — 12 of the 13 finished runs wrote one — so the wiring has somewhere to land. Next sweep can
+answer it; this one cannot, and the table above is a retrospective on what the rule WOULD have done,
+not a report of what it did.
