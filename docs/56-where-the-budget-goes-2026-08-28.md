@@ -3336,6 +3336,6 @@ lowered the count cannot be read off these numbers: 26 % and 36 % are different 
 §76.1's hand-listed subsets, one denominator further out.
 
 What is worth keeping is the shape: the second step is usually empty, the third usually rewrites what
-an earlier one wrote (`superseding_steps` names step 3 in 9 of 14 runs). A plan of three to five steps
+an earlier one wrote (`superseding_steps` names step 3 in **11 of 14** runs). A plan of three to five steps
 is, in practice, one or two steps that write and a tail that mostly does not. That is a fact about
 how the plan is used, at a cost of 4 %, and it is recorded rather than acted on.
