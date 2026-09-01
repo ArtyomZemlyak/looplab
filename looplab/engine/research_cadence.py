@@ -809,6 +809,11 @@ class ResearchCadenceMixin:
         would otherwise add five rows per memo forever, and one extra row from a concurrent human is
         exactly the case where the human's intent should win.
         """
+        # A BOARD WE COULD NOT READ IS UNKNOWN, NOT EMPTY. The `except` below degrades the
+        # admission to the pre-bound behaviour on purpose (see the docstring), but the two empty
+        # lists it leaves behind are a fallback and not a measurement — reporting "0 open" off them
+        # tells the operator the board was clear when in fact the fold raised.
+        board_read = True
         try:
             board = fold(self.store.read_all())
             # A DIRECTION THAT HAS BEEN TAKEN UP NO LONGER OCCUPIES A SLOT, and without this clause
@@ -841,25 +846,49 @@ class ResearchCadenceMixin:
             open_statements = [c.seed_statement for c in beliefs]
             unanswered = [c.seed_statement for c in beliefs if c.id not in taken_up]
         except Exception:  # noqa: BLE001 — see the docstring: degrade to the pre-bound behaviour
+            board_read = False
             open_statements = unanswered = []
         admitted = admit_research_beliefs(open_statements, directions, counted=unanswered)
         dropped = len(directions) - len(admitted)
         if dropped:
             # Not silent: the operator reading the log sees a memo whose directions did not all
-            # become cards, and the memo body + `hint` row still carry every one of them.
+            # become cards, and the MEMO BODY still carries every one of them.
             #
-            # WARNING, NOT INFO, AND THE COMMENT ABOVE IS WHY. Nothing in this package configures
-            # logging — no `basicConfig`, no `setLevel` anywhere — so Python's default applies and
-            # the root logger sits at WARNING. This was the ONLY `_LOG.info` in the package against
-            # 39 `_LOG.warning`, which means it was the one operator-facing line that could never
-            # reach an operator: it claimed "not silent" and was silent on every run ever recorded.
-            # Measured on `runs/e5small-dr-unified-v12`: nine memos proposed 94 directions, the
-            # board holds NINE rows, and the console carries ZERO of these lines — so `dropped` was
-            # non-zero repeatedly and said so to nobody.
+            # WARNING, NOT INFO.
+            # CLAIM[looplab-configures-no-logging] nothing in `looplab/` configures logging, so the
+            # root logger keeps its default WARNING and no handler of ours exists — `lastResort` is
+            # what puts a record on stderr, which `serve/engine_proc.py` captures into
+            # `engine.stderr.log`. An INFO record therefore reaches nobody, on every run.
+            # decided:absent:basicConfig(@looplab
+            #
+            # This was the only `_LOG.info` in a package that otherwise logs at one level, i.e. the
+            # one operator-facing line that could never reach an operator: it claimed "not silent"
+            # and was silent on every run ever recorded. No count is written down here —
+            # `tests/test_dropped_directions_reach_the_operator.py` re-derives the whole population
+            # from the tree, because a hand-copied total is the drift CLAUDE.md's claim rule and
+            # its own "the count comes from the parser, never from a person" both exist to stop.
+            #
+            # THE HINT IS NOT THE RECORD, and this line said it was until the level change made
+            # anyone read it. `deep_research_hint_text` carries the FIRST
+            # `DEEP_RESEARCH_HINT_DIRECTIONS` directions and no more — the same false half
+            # `admit_research_beliefs`' own docstring already retracted ("reading it as the record
+            # is how 'nothing is lost' gets believed by whoever next decides a drop is safe"), left
+            # standing in the one place an operator would see it. A memo that recommends more
+            # directions than the hint carries is the ordinary case and not the corner one — which
+            # is exactly the memo this line fires about — so the hint half was false on essentially
+            # every emission. The memo body is the record; it is what this now names.
+            #
+            # EACH NUMBER NAMES THE POPULATION IT COMES FROM, because there are two and reporting
+            # the narrow one as "already open" produced a line that refutes itself. `unanswered` is
+            # only the subset occupying a cap slot; the DEDUP universe that refuses a restatement is
+            # `open_statements`, taken-up directions included. A board of three taken-up directions,
+            # restated by a memo, logged "3 of 3 … (0 already open, cap 5)" — nothing open, room for
+            # five, and all three refused, with nothing in the line able to explain it.
+            board_state = (f"{len(open_statements)} open, {len(unanswered)} of them unanswered"
+                           if board_read else "unreadable")
             _LOG.warning("deep research: %d of %d recommended direction(s) not registered as "
-                         "beliefs (%d already open, cap %d) — the memo and its hint still carry "
-                         "them", dropped, len(directions), len(unanswered),
-                         DEEP_RESEARCH_OPEN_BELIEF_CAP)
+                         "beliefs (board: %s, cap %d) — the memo body still carries every one",
+                         dropped, len(directions), board_state, DEEP_RESEARCH_OPEN_BELIEF_CAP)
         return admitted
 
     @staticmethod

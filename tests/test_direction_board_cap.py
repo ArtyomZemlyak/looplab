@@ -35,11 +35,21 @@ def _board(cards) -> RunState:
 
 
 def _admissible(st: RunState, directions):
-    """The exact expression `_admissible_beliefs` evaluates, driven without an engine."""
+    """The exact expression `_admissible_beliefs` evaluates, driven without an engine.
+
+    IT STOPPED BEING THAT EXPRESSION and the docstring kept the claim. This helper applied the
+    `c.id not in taken_up` narrowing to `open_statements` and then passed no `counted` at all, i.e.
+    it was the ONE-POPULATION form — precisely the defect the two-population fix below it exists to
+    prevent, frozen into the harness that every test above it runs through. It coincided with
+    production only while no fixture combined a taken-up direction with a restatement of it; the
+    tests that DO cover that call `admit_research_beliefs` directly, which is why nothing was red.
+    A helper claiming to mirror production has to be re-derived from production, not from memory.
+    """
     taken_up = {c.parent_card_id for c in st.cards.values() if c.parent_card_id}
-    open_statements = [c.seed_statement for c in st.open_research_beliefs()
-                       if is_pure_belief(c) and c.id not in taken_up]
-    return admit_research_beliefs(open_statements, directions)
+    beliefs = [c for c in st.open_research_beliefs() if is_pure_belief(c)]
+    return admit_research_beliefs(
+        [c.seed_statement for c in beliefs], directions,
+        counted=[c.seed_statement for c in beliefs if c.id not in taken_up])
 
 
 def test_a_full_board_of_UNANSWERED_directions_still_refuses_a_new_one():
