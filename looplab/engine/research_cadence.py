@@ -847,10 +847,19 @@ class ResearchCadenceMixin:
         if dropped:
             # Not silent: the operator reading the log sees a memo whose directions did not all
             # become cards, and the memo body + `hint` row still carry every one of them.
-            _LOG.info("deep research: %d of %d recommended direction(s) not registered as beliefs "
-                      "(%d already open, cap %d) — the memo and its hint still carry them",
-                      dropped, len(directions), len(unanswered),
-                      DEEP_RESEARCH_OPEN_BELIEF_CAP)
+            #
+            # WARNING, NOT INFO, AND THE COMMENT ABOVE IS WHY. Nothing in this package configures
+            # logging — no `basicConfig`, no `setLevel` anywhere — so Python's default applies and
+            # the root logger sits at WARNING. This was the ONLY `_LOG.info` in the package against
+            # 39 `_LOG.warning`, which means it was the one operator-facing line that could never
+            # reach an operator: it claimed "not silent" and was silent on every run ever recorded.
+            # Measured on `runs/e5small-dr-unified-v12`: nine memos proposed 94 directions, the
+            # board holds NINE rows, and the console carries ZERO of these lines — so `dropped` was
+            # non-zero repeatedly and said so to nobody.
+            _LOG.warning("deep research: %d of %d recommended direction(s) not registered as "
+                         "beliefs (%d already open, cap %d) — the memo and its hint still carry "
+                         "them", dropped, len(directions), len(unanswered),
+                         DEEP_RESEARCH_OPEN_BELIEF_CAP)
         return admitted
 
     @staticmethod
