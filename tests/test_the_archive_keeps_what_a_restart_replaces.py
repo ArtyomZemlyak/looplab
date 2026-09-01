@@ -122,3 +122,74 @@ def test_a_growing_live_run_is_not_mistaken_for_a_restart(tmp_path):
         "a run that merely GREW was archived as if it had restarted -- every cycle of every live "
         "run would duplicate its log"
     )
+
+
+# ------------------------------------- size was the wrong question; continuation is the right one
+#
+# The first rule preserved an archived file only when it was LONGER than its source, and nothing
+# makes a second attempt shorter than a first. Measured 2026-09-01: an attempt-2 log of EQUAL length
+# replaced 400 archived rows of attempt 1 with 400 rows of attempt 2 -- no `.superseded` written,
+# no row of attempt 1 left, rc=0, in silence. A longer second attempt did the same. These are
+# append-only logs, so the only benign difference is growth: the archive must be a PREFIX of the
+# source.
+
+
+def test_a_restart_of_equal_length_does_not_take_the_previous_attempt_with_it(tmp_path):
+    src, arch = tmp_path / "src" / "dsX", tmp_path / "arch"
+    log = src / "runs" / "t" / "run" / "events.jsonl"
+
+    _write(log, 400, attempt=1)
+    assert _archive_tree(src, arch).returncode == 0
+    archived = arch / "dsX" / "runs" / "t" / "run" / "events.jsonl"
+    assert archived.read_text().count("\n") == 400
+
+    import shutil
+    shutil.rmtree(src)
+    _write(log, 400, attempt=2)          # SAME length, different content
+    r = _archive_tree(src, arch)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    kept = archived.parent / "events.jsonl.superseded-1"
+    assert kept.is_file(), (
+        "an equal-length restart overwrote the archive and nothing was kept:\n" + r.stdout + r.stderr
+    )
+    body = kept.read_text()
+    assert '"attempt": 1' in body and '"attempt": 2' not in body
+    assert body.count("\n") == 400
+
+
+def test_a_longer_restart_is_also_preserved(tmp_path):
+    src, arch = tmp_path / "src" / "dsX", tmp_path / "arch"
+    log = src / "runs" / "t" / "run" / "events.jsonl"
+    _write(log, 400, attempt=1)
+    assert _archive_tree(src, arch).returncode == 0
+
+    import shutil
+    shutil.rmtree(src)
+    _write(log, 900, attempt=2)          # LONGER, and not a continuation
+    assert _archive_tree(src, arch).returncode == 0
+    run = arch / "dsX" / "runs" / "t" / "run"
+    kept = [p for p in run.iterdir() if ".superseded-" in p.name]
+    assert kept, "a longer restart wiped the archive, which size alone can never notice"
+    assert '"attempt": 1' in kept[0].read_text()
+
+
+def test_a_live_run_that_merely_appended_is_still_left_alone(tmp_path):
+    """The ordinary case must stay free: growth is a prefix, and a prefix is not a restart."""
+    src, arch = tmp_path / "src" / "dsX", tmp_path / "arch"
+    log = src / "runs" / "t" / "run" / "events.jsonl"
+
+    _write(log, 100, attempt=1)
+    assert _archive_tree(src, arch).returncode == 0
+    with open(log, "a") as fh:
+        for i in range(100, 300):
+            fh.write('{"i": %d, "attempt": %d}\n' % (i, 1))
+    r = _archive_tree(src, arch)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    run = arch / "dsX" / "runs" / "t" / "run"
+    assert not [p for p in run.iterdir() if ".superseded-" in p.name], (
+        "a run that only appended was archived as if it had restarted -- every cycle of every live "
+        "run would duplicate its log"
+    )
+    assert (run / "events.jsonl").read_text().count("\n") == 300

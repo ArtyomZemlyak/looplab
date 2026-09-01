@@ -384,7 +384,20 @@ archive_tree() {  # $1 = source tree, $2 = archive root. Sets ARCH_REPAIRED / AR
     local asz ssz2 n
     asz=$(stat -c %s "$A/$B/$rel" 2>/dev/null) || continue
     ssz2=$(stat -c %s "$S/$rel" 2>/dev/null) || continue
-    [ "$asz" -gt "$ssz2" ] || continue
+    # THE TEST IS "IS THE SOURCE A CONTINUATION OF THE ARCHIVE", NOT "IS IT LONGER".
+    #
+    # Size alone was the first rule and it has a hole measured 2026-09-01: `campaign.sh` rm -rf's a
+    # task root at the start of every attempt, and nothing makes attempt 2 SHORTER than attempt 1.
+    # An attempt-2 log of equal length replaced 400 archived rows of attempt 1 with 400 rows of
+    # attempt 2 -- zero `.superseded` files written, zero rows of attempt 1 left, rc=0, in silence.
+    # A longer second attempt does the same.
+    #
+    # These are append-only logs, so the ONLY benign difference is growth: the archive must be a
+    # PREFIX of the source. `cmp -n` compares exactly the archived bytes and says nothing about the
+    # rest, so a live run that has merely appended still costs one cheap read and no copy.
+    if [ "$asz" -le "$ssz2" ] && cmp -s -n "$asz" "$A/$B/$rel" "$S/$rel"; then
+      continue                       # the source extends the archive: ordinary growth, leave it
+    fi
     n=1
     while [ -e "$A/$B/$rel.superseded-$n" ]; do n=$((n + 1)); done
     if cp -p "$A/$B/$rel" "$A/$B/$rel.superseded-$n"; then
