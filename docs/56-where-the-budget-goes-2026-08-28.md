@@ -3486,3 +3486,45 @@ costs a dollar a run to buy back a comparison the batch was shipped without.
 is a property of the ENGINE and does not depend on any of this. The rule fires whether or not the
 card mentions it; what the card changes is whether the model knows it will, and that is exactly what
 this section cannot yet measure.
+
+## 82. The step-cutoff trace fired, and it says the money ceiling still has not
+
+`remDL6` (discrete_log, $1.0103, TEST **4.0326**) is the first run in the corpus whose `plan_steps`
+span carries a non-empty `cut_steps`. §75 recorded the ceiling as never having fired and §79 repeated
+it for five runs; this is what the trace was added to be able to say, and what it says is narrower
+than "it fired".
+
+    план: total=4  noop=[2]  cut=[1, 4]
+      step 1  cutoff='time'  wrote solver.py                                  $0.1425  1300 s
+      step 2  cutoff=None    wrote nothing (noop)                             $0.0167    19 s
+      step 3  cutoff=None    wrote solver.py                                  $0.0718   503 s
+      step 4  cutoff='time'  wrote rho_dlog.pyx, setup.py, solver.py          $0.2250  1264 s
+
+**Both cuts are `time`** — the 1200 s session wall, at 1300 s and 1264 s. The money ceiling did not
+fire, and this run is the closest it has come:
+
+| step | spent | budget left at its start | ceiling | fired? |
+|---|---|---|---|---|
+| 1 | 0.1425 | 0.8244 | 0.4122 | no |
+| 2 | 0.0167 | 0.6819 | 0.3410 | no |
+| 3 | 0.0718 | 0.6653 | 0.3326 | no |
+| 4 | **0.2250** | 0.5935 | **0.2967** | no — 76 % of the way |
+
+Three things this settles, none of them the one being watched for:
+
+**The trace works.** It names the bound, the step, its title and what it wrote, and it did so on the
+first run that had anything to name. Before it, a cut step was indistinguishable from a finished one
+in every run tree on this box (§75).
+
+**A cut step is not a lost step.** Both cut steps WROTE — step 4 produced `rho_dlog.pyx`, `setup.py`
+and `solver.py` after being cut. The salvage this was designed around is doing its job, which is why
+cutting is a cheaper intervention than it sounds.
+
+**The two bounds do not fire together.** §75 argued from 81 steps that seconds are not dollars; here
+is the same argument from one step, on the other side. Step 4 hit the wall at 1264 s having spent
+76 % of what it was allowed to spend — so on this run the wall was the binding constraint and the
+money ceiling was slack, exactly as the retrospective predicted for the five wall-hitters it would
+not have cut.
+
+`remDL6`'s 4.0326 is the lowest `discrete_log` score on record, and this section does not claim the
+cuts caused it — one run, and the two cut steps are the two that wrote the most.
