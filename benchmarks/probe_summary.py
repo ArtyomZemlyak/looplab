@@ -136,7 +136,8 @@ def summarise(run_dir: Path) -> dict | None:
                 if (r.get("attributes") or {}).get("phase") == "plan_step"]
     to_build = ((min(build_ts) - t0) / 60.0) if (build_ts and t0 is not None) else None
 
-    tools = [r for r in spans if r.get("name") == "tool"]
+    tools_all = [r for r in spans if r.get("name") == "tool"]
+    tools = tools_all
     dev = [r for r in tools
            if str((r.get("attributes") or {}).get("tool") or "") == "run_dev_command"]
     eval_train = sum(1 for r in dev if "eval_train" in json.dumps(r.get("attributes") or {}))
@@ -144,6 +145,22 @@ def summarise(run_dir: Path) -> dict | None:
     blob = json.dumps(spans)
     ref_imports = len(re.findall(r"(?:from|import)\s+reference_\w+", blob))
     ref_calls = len(re.findall(r"\b(?:is_solution|generate_problem)\s*\(", blob))
+
+    # AND THE SAME THING IN THE UNITS THE ACCEPTANCE CRITERION USES. §69.1 pinned the comparison
+    # before its data arrived -- "against 4.9-8.3 %, not against 3.0 %" -- and that band is a share
+    # of `run_probe` CALLS, not a raw count of regex hits. Reporting counts against a percentage
+    # baseline is the same different-denominators mistake this file keeps catching elsewhere, and it
+    # sat in this tool for three sweeps.
+    probes = [r for r in tools_all
+              if str((r.get("attributes") or {}).get("tool") or "") == "run_probe"]
+    ref_pct = ref_call_pct = None
+    if probes:
+        hit_i = sum(1 for r in probes
+                    if re.search(r"(?:from|import)\s+reference_\w+", json.dumps(r.get("attributes") or {})))
+        hit_c = sum(1 for r in probes
+                    if re.search(r"\b(?:is_solution|generate_problem)\s*\(", json.dumps(r.get("attributes") or {})))
+        ref_pct = 100.0 * hit_i / len(probes)
+        ref_call_pct = 100.0 * hit_c / len(probes)
 
     probe_dir = Path(str(run_dir).split("/runs/", 1)[0]) if "/runs/" in str(run_dir) else run_dir
     champ = probe_dir / "champion_solver.py"
@@ -168,6 +185,9 @@ def summarise(run_dir: Path) -> dict | None:
         "dev_commands": len(dev),
         "ref_imports": ref_imports,
         "ref_calls": ref_calls,
+        "run_probe": len(probes),
+        "ref_pct": ref_pct,
+        "ref_call_pct": ref_call_pct,
         "champion_lines": champ_lines,
         "kernel": kernel,
         "to_build_min": to_build,
@@ -233,8 +253,11 @@ def main(argv: list[str]) -> int:
 
     print("\nper-probe detail:")
     for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):
+        pct = ("—" if s["ref_pct"] is None
+               else f"{s['ref_pct']:.1f}% import / {s['ref_call_pct']:.1f}% is_solution")
         print(f"  {s['probe']} ({s['task']}) nodes(train)={s['nodes']}  "
-              f"reference: {s['ref_imports']} imports / {s['ref_calls']} is_solution+generate calls")
+              f"reference over {s['run_probe']} run_probe calls: {pct}   "
+              f"(§69.1 baseline 4.9-8.3 %)")
         for ph, cost in s["phases"]:
             share = 100 * cost / s["spent"] if s["spent"] else 0
             print(f"      {ph:16s}{s['calls'][ph]:>5} calls  ${cost:.4f}  {share:4.1f}%")

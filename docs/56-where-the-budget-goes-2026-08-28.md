@@ -3339,3 +3339,35 @@ What is worth keeping is the shape: the second step is usually empty, the third 
 an earlier one wrote (`superseding_steps` names step 3 in **11 of 14** runs). A plan of three to five steps
 is, in practice, one or two steps that write and a tail that mostly does not. That is a fact about
 how the plan is used, at a cost of 4 %, and it is recorded rather than acted on.
+
+## 78. §69.1's acceptance test cannot be run here, and the tool was reporting the wrong units
+
+§69.1 pinned a comparison before its data arrived: the reference-module clause is accepted or
+rejected against **4.9–8.3 %**, the share of `run_probe` calls that import the reference, measured on
+three probes carrying the OLD card. Two things were wrong with how that has been carried since.
+
+**The units.** `probe_summary.py` reported raw regex hits — "115 imports / 1350 is_solution+generate
+calls" — against a percentage baseline. A count cannot be compared with a share, and this sat in the
+tool for three sweeps while the brief carried the band on every page. It now reports the rate over
+`run_probe` calls, with the baseline printed beside it, and counts CALLS rather than occurrences: one
+call importing the reference five times is one call.
+
+**The control group is gone.** All sixteen probes on this box carry the clause — it landed
+2026-08-30, and the earliest surviving probe ran 2026-08-31. The three runs the 4.9–8.3 % band was
+measured on (dsCH6, dsRBF2, dsPde2) were in `/var/tmp` when it was wiped on 2026-08-29. So there is
+no before-group here and the acceptance test as pinned cannot be run, however many probes accumulate.
+
+What the sixteen do say, for whatever a one-armed measurement is worth:
+
+| | n | median | range |
+|---|---|---|---|
+| all probes on this box (all carry the clause) | 16 | 7.3 % | 0.0 – 18.8 % |
+| §69.1's pre-clause band | 3 | — | 4.9 – 8.3 % |
+
+The median lands inside the old band and the range is four times wider than it. That is compatible
+with no effect and with a large one, and it is not evidence for either.
+
+Recorded because §69.1's whole point was that the goalposts must not move: the honest outcome is not
+a verdict but "the experiment lost its control arm to an unrelated crash, and no amount of new data
+restores it". A clean answer needs a deliberate arm with the clause removed — a between-arms change
+under §73.3's rule, several runs each — and that is a decision about spending, not a sweep task.

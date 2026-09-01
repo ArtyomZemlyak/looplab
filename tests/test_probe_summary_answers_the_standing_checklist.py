@@ -304,3 +304,67 @@ def test_only_plan_step_counts_as_a_build(tmp_path):
     assert row.split()[-2] == "-", (
         f"propose/deep_research/plan were counted as reaching a build step: {row}"
     )
+
+
+def _mk_run_probe(root, name, task, *, total, with_import=0, with_call=0):
+    """Append `run_probe` tool spans, some carrying reference usage."""
+    run = root / "model-probes" / name / "runs" / task / "run"
+    spans = [json.loads(l) for l in open(run / "spans.jsonl")] if (run / "spans.jsonl").is_file() else []
+    for i in range(total):
+        code = "x = 1\n"
+        if i < with_import:
+            code = "from reference_t import Task\n" + code
+        if i < with_call:
+            code += "Task().is_solution(p, s)\n"
+        spans.append({"name": "tool", "start": 2000 + i, "duration_s": 0.1,
+                      "attributes": {"tool": "run_probe", "args": {"code": code}}})
+    (run / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans))
+
+
+def test_reference_use_is_reported_as_a_share_of_run_probe_calls(tmp_path):
+    """§69.1 pinned the comparison as 4.9-8.3 %, and that band is a share of `run_probe` CALLS.
+
+    This tool reported raw regex hits for three sweeps -- a count against a percentage baseline,
+    which is the different-denominators mistake the corpus keeps catching elsewhere.
+    """
+    # eval_trains=8 puts OTHER tool spans in the tree. Without them tools_all == run_probe calls
+    # and the denominator cannot be got wrong: mutation showed dividing by every tool span left the
+    # file green.
+    _mk_probe(tmp_path, "refr", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0,
+              eval_trains=8)
+    _mk_run_probe(tmp_path, "refr", "t", total=20, with_import=2, with_call=3)
+    out = _run(tmp_path)
+    line = next(l for l in out.splitlines() if l.strip().startswith("refr ("))
+    assert "over 20 run_probe calls" in line, f"the denominator is not stated: {line}"
+    assert "10.0% import" in line, f"2 of 20 imports should read 10.0 %: {line}"
+    assert "15.0% is_solution" in line, f"3 of 20 calls should read 15.0 %: {line}"
+    assert "4.9-8.3" in line, "the baseline the number is meant to be compared against is missing"
+
+
+def test_a_probe_that_never_called_run_probe_reports_no_rate_rather_than_zero(tmp_path):
+    """0 % would say "it had the chance and did not take it"; no calls means no denominator."""
+    _mk_probe(tmp_path, "norp", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0)
+    out = _run(tmp_path)
+    line = next(l for l in out.splitlines() if l.strip().startswith("norp ("))
+    assert "0.0% import" not in line, (
+        f"a probe with zero run_probe calls was given a 0 % rate: {line}"
+    )
+
+
+def test_the_rate_counts_calls_not_occurrences(tmp_path):
+    """One call importing the reference five times is one call, not five."""
+    _mk_probe(tmp_path, "many", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0)
+    run = tmp_path / "model-probes" / "many" / "runs" / "t" / "run"
+    spans = [json.loads(l) for l in open(run / "spans.jsonl")]
+    code = "from reference_t import A\n" * 5
+    spans.append({"name": "tool", "start": 3000, "duration_s": 0.1,
+                  "attributes": {"tool": "run_probe", "args": {"code": code}}})
+    for i in range(9):
+        spans.append({"name": "tool", "start": 3010 + i, "duration_s": 0.1,
+                      "attributes": {"tool": "run_probe", "args": {"code": "y = 2\n"}}})
+    (run / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans))
+    out = _run(tmp_path)
+    line = next(l for l in out.splitlines() if l.strip().startswith("many ("))
+    assert "10.0% import" in line, (
+        f"five imports inside ONE call were counted as five calls: {line}"
+    )
