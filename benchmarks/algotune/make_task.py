@@ -537,7 +537,7 @@ def per_instance_cap(root: Path) -> tuple[float, float, float] | None:
     return (mult, warm, 10.0)
 
 
-def timing_clause(root: Path) -> str:
+def timing_clause(root: Path, unteachable: bool = True) -> str:
     """HOW the number is taken, derived from the arena's config and its benchmark module."""
     runs = benchmark_runs(root)
     if runs is None:
@@ -560,7 +560,11 @@ def timing_clause(root: Path) -> str:
         "210 ms. Setup belongs at module level or behind a first-call guard, where the warm-up "
         "absorbs it -- not in a constructor that runs again with the clock running. "
     )
-    cap = per_instance_cap(root)
+    # GATED so the clause can be REMOVED for a control arm. It is one of the two rules a run
+    # never demonstrates (see KEEP_BEST for the other), which is exactly why its effect is
+    # unmeasurable without an arm that lacks it -- and until this gate existed there was no
+    # way to build that arm at all. Default ON: the measuring arm is the shipped one.
+    cap = per_instance_cap(root) if unteachable else None
     if cap:
         mult, warm, floor = cap
         clause += (
@@ -1148,6 +1152,13 @@ def main() -> int:
                          "that runs the real evaluator on the staged files, replacing the "
                          "--deliver clause's YOU CANNOT MEASURE half with MEASURE. ON by default; "
                          "`--no-full-context` reproduces the goal card the 2026-08-24 arm B ran on.")
+    ap.add_argument("--unteachable-rules", action=argparse.BooleanOptionalAction, default=True,
+                    help="State the two rules the run never demonstrates: the per-instance "
+                         "ceiling (inside --full-context's timing clause) and KEEP_BEST "
+                         "(inside --one-card). ON by default. `--no-unteachable-rules` is the "
+                         "CONTROL arm for those two clauses and nothing else -- every other "
+                         "clause the same flags produce is byte-identical, which is what "
+                         "makes the two arms comparable.")
     ap.add_argument("--role-split", action="store_true",
                     help="Append the ONE EXPERIMENT = ONE ALGORITHM clause (see ROLE_SPLIT).")
     args = ap.parse_args()
@@ -1208,14 +1219,14 @@ def main() -> int:
                  # WHAT the instances are, then HOW they are timed -- the second is what decides
                  # whether the first one's per-instance overhead can be paid before the clock
                  # starts. See `timing_clause`.
-                 + (timing_clause(root) if args.full_context else "")
+                 + (timing_clause(root, args.unteachable_rules) if args.full_context else "")
                  + ((_DELIVER_WRITE if args.full_context else DELIVER) if args.deliver else "")
                  + (MEASURE.format(cost=eval_cost_sentence()) if args.full_context else "")
                  + (ONE_CARD.format(task=args.task) if args.one_card else "")
                  # Under the same flag as ONE_CARD: both are statements about how THIS loop scores
                  # what you produce, and both are rules the run itself never demonstrates. See
                  # KEEP_BEST -- it is the reason "commit to one card" is not a reason to be timid.
-                 + (KEEP_BEST if args.one_card else "")
+                 + (KEEP_BEST if args.one_card and args.unteachable_rules else "")
                  # BANS then PERMISSIONS, in that order and both under the same flag: they are one
                  # statement of what this arena allows, and the half that was missing is the half
                  # that costs score. See `solution_space_clause`.

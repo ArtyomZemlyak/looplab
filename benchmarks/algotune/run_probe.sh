@@ -181,6 +181,12 @@ mkdir -p "$OUT"
   echo "looplab:        $(cd "$ROOT/looplab" && git log --oneline -1 2>/dev/null)"
   echo "looplab_dirty:  $(cd "$ROOT/looplab" && git status --porcelain 2>/dev/null | wc -l) file(s)"
   echo "AlgoTune:       $(cd "$ROOT/AlgoTune" && git log --oneline -1 2>/dev/null)"
+  # RECORDED, not merely honoured. A probe whose card differs from its neighbours' and whose
+  # tree does not say so is a run that cannot be pooled and cannot be excluded either --
+  # accEE and remEE cost a dollar each and are unusable for exactly that reason, having run
+  # unstreamed with nothing in the tree to say it. Printed even when empty, so "this probe
+  # took the default card" is a POSITIVE statement in the record rather than a missing line.
+  echo "card_args:      ${PROBE_MAKE_TASK_ARGS:-(none -- the shipped card)}"
 } > "$OUT/INSTRUMENT.txt"
 say "прибор записан: $OUT/INSTRUMENT.txt (stream=${LOOPLAB_LLM_STREAM:-unset})"
 
@@ -194,8 +200,13 @@ if [ "${PROBE_DRY_RUN:-0}" = "1" ]; then
   exit 0
 fi
 
+# $PROBE_MAKE_TASK_ARGS is UNQUOTED on purpose: it carries goal VARIANTS for control arms
+# (`--no-unteachable-rules` is the first) and word splitting is how a caller passes two of
+# them. It is empty in every ordinary probe, and `run_probe.sh` is not run on untrusted input.
+# shellcheck disable=SC2086
 python3 "$ROOT/looplab/benchmarks/algotune/make_task.py" --algotune-root "$ROOT/AlgoTune" \
-    --task "$TASK" --out-dir "$OUT/ws" --deliver --one-card --enforce-rules >> "$LOG" 2>&1 \
+    --task "$TASK" --out-dir "$OUT/ws" --deliver --one-card --enforce-rules \
+    ${PROBE_MAKE_TASK_ARGS:-} >> "$LOG" 2>&1 \
   || { say "make_task ПРОВАЛИЛСЯ — см. $LOG"; exit 1; }
 
 # Счётчик OpenRouter слушает 8802 и держит ключ сам; клиенту ключ не нужен.
