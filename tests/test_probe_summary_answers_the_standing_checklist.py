@@ -368,3 +368,102 @@ def test_the_rate_counts_calls_not_occurrences(tmp_path):
     assert "10.0% import" in line, (
         f"five imports inside ONE call were counted as five calls: {line}"
     )
+
+
+def _mk_meter(tmp_path, rows):
+    d = tmp_path / "meter"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "meter.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return d / "meter.jsonl"
+
+
+def _run_with_meter(root, meter, monkeypatch=None):
+    import os
+    env = dict(os.environ)
+    env["LOOPLAB_METER_LOG"] = str(meter)
+    r = subprocess.run([sys.executable, str(TOOL), str(root)],
+                       capture_output=True, text=True, timeout=600, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return r.stdout
+
+
+
+def _instrument_block(out: str) -> str:
+    """Just the instrument section. Both it and the main table start rows with the probe name, so a
+    bare `startswith(name)` picks whichever comes first -- which is the table, and the test then
+    asserts about the wrong line."""
+    if "NOT on the current instrument" not in out:
+        return ""
+    return out.split("NOT on the current instrument", 1)[1].split("per-probe detail")[0]
+
+
+def test_an_unstreamed_probe_is_named_as_being_on_another_instrument(tmp_path):
+    """A probe tree says what the run did and nothing about the gateway it did it through.
+
+    accEE, accPde and remEE ran entirely unstreamed; remEE lost 9 calls to the 300 s ceiling, 45
+    minutes returning nothing. §73 had built a "controlled pair" on remEE against a streamed run
+    before anyone looked.
+    """
+    _mk_probe(tmp_path, "old", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0)
+    meter = _mk_meter(tmp_path, [{"arm": "old", "prompt_tokens": 9000, "stream": False,
+                                  "status": 200}] * 50
+                      + [{"arm": "old", "prompt_tokens": 9000, "stream": False, "status": 504}] * 3)
+    out = _run_with_meter(tmp_path, meter)
+    assert "NOT on the current instrument" in out, "the instrument section is missing:\n" + out
+    line = next(l for l in _instrument_block(out).splitlines() if l.strip().startswith("old "))
+    assert "UNSTREAMED" in line, f"an unstreamed probe was not flagged: {line}"
+    assert "3 call(s) killed" in line, f"the ceiling kills are not counted: {line}"
+
+
+def test_a_streamed_probe_is_not_flagged(tmp_path):
+    _mk_probe(tmp_path, "cur", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0)
+    meter = _mk_meter(tmp_path, [{"arm": "cur", "prompt_tokens": 9000, "stream": True,
+                                  "status": 200}] * 50)
+    out = _run_with_meter(tmp_path, meter)
+    assert "NOT on the current instrument" not in out, (
+        "a fully streamed probe was reported as being on another instrument:\n" + out
+    )
+
+
+def test_preflights_do_not_make_every_probe_look_mixed(tmp_path):
+    """`agents/preflight.py` sets stream=False by design and sends ten tokens."""
+    _mk_probe(tmp_path, "pf", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0)
+    meter = _mk_meter(tmp_path, [{"arm": "pf", "prompt_tokens": 10, "stream": False, "status": 200}]
+                      + [{"arm": "pf", "prompt_tokens": 9000, "stream": True, "status": 200}] * 50)
+    out = _run_with_meter(tmp_path, meter)
+    assert "NOT on the current instrument" not in out, (
+        "a 10-token preflight put a fully streamed probe on the other instrument:\n" + out
+    )
+
+    # And the COUNT, not just the verdict. Mutation showed that dropping the >1000-token filter
+    # left this green: the probe still had streamed calls, so it was still not flagged, and the
+    # three preflights it would then have carried were invisible to the assertion. A probe whose
+    # ONLY unstreamed traffic is preflights must report zero of them.
+    meter2 = _mk_meter(tmp_path / "b",
+                       [{"arm": "pf2", "prompt_tokens": 10, "stream": False, "status": 200}] * 3
+                       + [{"arm": "pf2", "prompt_tokens": 9000, "stream": False, "status": 200}] * 5)
+    _mk_probe(tmp_path, "pf2", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0)
+    out2 = _run_with_meter(tmp_path, meter2)
+    line = next(l for l in _instrument_block(out2).splitlines() if l.strip().startswith("pf2 "))
+    assert "5 unstreamed" in line, (
+        f"three 10-token preflights were counted as real unstreamed calls: {line}"
+    )
+
+
+def test_a_streamed_probe_that_still_hit_the_ceiling_is_named(tmp_path):
+    """Streaming makes the ceiling unreachable in practice; if one is hit anyway, say so."""
+    _mk_probe(tmp_path, "odd", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0)
+    meter = _mk_meter(tmp_path, [{"arm": "odd", "prompt_tokens": 9000, "stream": True,
+                                  "status": 200}] * 50
+                      + [{"arm": "odd", "prompt_tokens": 9000, "stream": True, "status": 504}])
+    out = _run_with_meter(tmp_path, meter)
+    line = next(l for l in _instrument_block(out).splitlines() if l.strip().startswith("odd "))
+    assert "1 call(s) killed" in line, f"a streamed probe's ceiling kill went unreported: {line}"
+
+
+def test_no_meter_is_silence_not_a_verdict(tmp_path):
+    _mk_probe(tmp_path, "nom", "t", nodes=[1.0], costs_before=[0.5], costs_after=[0.5], test=1.0)
+    out = _run_with_meter(tmp_path, tmp_path / "does-not-exist.jsonl")
+    assert "NOT on the current instrument" not in out, (
+        "with no meter to read, the tool guessed instead of staying quiet:\n" + out
+    )

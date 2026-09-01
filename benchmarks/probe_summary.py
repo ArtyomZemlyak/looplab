@@ -30,6 +30,46 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
+def _meter_by_arm(path: str | None = None) -> dict:
+    """Which INSTRUMENT each probe ran on, from the meter ledger — the only place it is recorded.
+
+    A probe tree says what the run did and nothing about the gateway it did it through. Measured
+    2026-09-01: `accEE`, `accPde` and `remEE` ran entirely UNSTREAMED, before the bench profile was
+    made to set `LOOPLAB_LLM_STREAM` rather than default it. Without streaming the gateway's nginx
+    times the whole generation against a 300 s window, and `remEE` lost 9 calls to it — 45 minutes
+    of wall clock returning nothing, on a $1.00 budget.
+
+    That is invisible in every score, card and run log, and §73 had built a "controlled pair" on
+    `remEE` against a streamed run before anyone looked (§80). So it belongs in the summary that
+    every comparison is drawn from.
+    """
+    p = Path(path or os.environ.get("LOOPLAB_METER_LOG")
+             or (os.environ.get("BENCH_ROOT") or "/var/tmp/looplab-bench") + "/meter/meter.jsonl")
+    out: dict = {}
+    if not p.is_file():
+        return out
+    with open(p, errors="replace") as fh:
+        for line in fh:
+            if '"arm"' not in line:
+                continue
+            try:
+                r = json.loads(line)
+            except Exception:       # noqa: BLE001 - a torn tail is normal on a LIVE meter
+                continue
+            arm = r.get("arm")
+            if not arm:
+                continue
+            d = out.setdefault(arm, {"streamed": 0, "unstreamed": 0, "ceiling": 0})
+            # PREFLIGHTS ARE EXCLUDED. `agents/preflight.py` sets stream=False by design and sends
+            # ten tokens; counting them would put every probe on "mostly streamed, some not" and
+            # hide the three that are genuinely on the other instrument.
+            if (r.get("prompt_tokens") or 0) > 1000:
+                d["streamed" if r.get("stream") else "unstreamed"] += 1
+            if r.get("status") == 504:
+                d["ceiling"] += 1
+    return out
+
+
 def _roots(argv: list[str]) -> list[Path]:
     if argv:
         return [Path(a) for a in argv if Path(a).is_dir()]
@@ -203,6 +243,7 @@ def main(argv: list[str]) -> int:
     if not roots:
         print("no bench roots on this box", file=sys.stderr)
         return 1
+    meter = _meter_by_arm()
     seen: dict[str, dict] = {}
     for root in roots:
         for ev in sorted(root.rglob("events.jsonl")):
@@ -250,6 +291,22 @@ def main(argv: list[str]) -> int:
                 print(f"               ALGOTUNE_BASELINE_CACHE_DIR=<.baseline_times> "
                       f"ALGOTUNE_EVAL_WORKERS=auto looplab_eval.py --task {s['task']} "
                       f"--solver champion_solver.py --subset test")
+
+    odd = []
+    for s in seen.values():
+        m = meter.get(s["probe"])
+        if not m:
+            continue
+        if m["unstreamed"] and not m["streamed"]:
+            odd.append((s["probe"], m, "UNSTREAMED — nginx timed whole generations at 300 s"))
+        elif m["ceiling"]:
+            odd.append((s["probe"], m, "streamed, but hit the gateway ceiling"))
+    if odd:
+        print("\nprobes NOT on the current instrument (from the meter, not the probe tree):")
+        for probe, m, why in sorted(odd):
+            lost = f", {m['ceiling']} call(s) killed at the 300 s ceiling" if m["ceiling"] else ""
+            print(f"  {probe:10s} {m['unstreamed']} unstreamed / {m['streamed']} streamed"
+                  f"{lost} — {why}")
 
     print("\nper-probe detail:")
     for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):
