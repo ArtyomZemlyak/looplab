@@ -3860,3 +3860,47 @@ come in low and killed the finding, a reader of §87 alone would have had no way
 had been provisional. Both metrics now stand at n = 4 on the same construct — $0.4127 against
 $0.3119 (p = 0.00699) and 50.0 m against 21.5 m (p = 0.0040) — and neither is a score. The control
 arm has still produced no TEST number at all.
+
+## 88. The control arm's first score: 34.76 against a shipped range of 102 to 277
+
+`remEEctl1` finished. It is the first `--no-unteachable-rules` run to produce a TEST number, and the
+number is far outside everything the shipped card has produced on `edge_expansion`.
+
+| | remEEctl1 (control) | shipped card, n = 10 |
+|---|---|---|
+| TEST | **34.7566** | 102.18 – 276.73 |
+| nodes (train) | 35.0197, 34.8131 | |
+| champion | **49 lines of plain Python** | Cython kernel in all ten |
+| eval_train calls | 35 | 19 – 32 |
+| spend before first node | 54 % | 24 – 47 % |
+| spend after last node | 0 % | |
+| reference use | 6.9 % import / 6.9 % is_solution | §69.1 baseline 4.9 – 8.3 % |
+
+The champion is the finding. Every one of the ten shipped-card runs shipped a compiled kernel
+(37–70 lines of Cython); this run shipped plain Python and scored 2.9× below the lowest of them.
+It also ran the MOST `eval_train` calls of any `edge_expansion` probe — 35 against a shipped range
+of 19–32 — so it was not idle, and it was not starved of measurements. It measured more and built
+less.
+
+**n = 1.** §83's table says a one-run arm settles nothing, and this changes none of that. What it
+does is make the next four runs worth watching for one specific thing — whether the control arm
+compiles at all — which is a sharper question than "is the score lower", and answerable at a smaller
+n because it is nearly binary. Four control runs are in flight (`remEEctl2`–`remEEctl5`).
+
+### 88.1 Its score was destroyed and recovered, and the recovery nearly lied
+
+`final.json` was ZERO BYTES when I looked. The score had been written and printed — the probe log
+holds `{"speedup": 35.0981, ...}` — and then the `run_probe.sh` offset hazard (§dcdf1f29) resumed
+the shell at a stale offset, re-parsed the scoring block, and applied its `> "$OUT/final.json"`
+redirect to nothing. One file across all 29 probes; every other `final.json` is intact.
+
+Recovered by re-scoring the preserved champion rather than by rerunning the probe. And the first
+attempt at that returned **1.0002**, which I came close to filing as the real number. It was run
+without `ALGOTUNE_BASELINE_CACHE_DIR` — one missing environment variable, a factor of 35, because
+the cache IS the denominator of every speedup. Repeating it under the environment the probe's own
+INSTRUMENT.txt records gives 35.0205, and a third scoring under load gives 34.7566: three readings
+0.7 % apart. The recorded row carries a `recovered_note` saying which it is.
+
+The instrument had reported this probe as "STILL RUNNING (no stated reason)" — a finished,
+fully-paid run filed under "not done yet". That is fixed too: a zero-byte `final.json` now reports
+as a destroyed score, and says whether the champion survives to re-score.
