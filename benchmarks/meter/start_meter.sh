@@ -34,14 +34,19 @@ if S="$(alive)" && [ -n "$S" ]; then
   exit 0
 fi
 
-# OPEN[meter-key-rides-argv] the gateway API key is passed as an argv flag, world-readable in
-# /proc/<pid>/cmdline for the meter's whole multi-day lifetime on the shared JupyterHub box.
-# proof:`present:--api-key "$KEY"@benchmarks/meter/start_meter.sh`
-# REVIEW 2026-08-30 (security): the deployment this script exists for is the box CLAUDE.md's
-# `_on_shared_hub` describes — one origin, many users — and every one of them can read another
-# process's command line. `proxy.py::main` already reads METER_API_KEY from the environment, so the
-# fix is to export the variable and drop the flag: same idempotence, zero proxy changes. (The proxy
-# itself is clean — rows and stderr never carry headers or the key.)
+# CLOSED 2026-09-01: the gateway API key goes through the ENVIRONMENT, not argv.
+#
+# It used to be `--api-key "$KEY"`, world-readable in /proc/<pid>/cmdline for the meter's whole
+# multi-day lifetime on a box CLAUDE.md's `_on_shared_hub` describes as one origin with many users,
+# every one of whom can read another process's command line. The item was diagnosed on 2026-08-30
+# with the repair spelled out — `proxy.py::main` already reads METER_API_KEY — and left open. It was
+# demonstrated again today by a sweep that listed the meter's command line to check an unrelated
+# flag and printed the key into a transcript. That is the whole argument for closing it: an
+# exposure whose cost is "anyone who looks", and looking is a routine part of the job.
+#
+# Same idempotence, zero proxy changes. THE RUNNING METER IS UNAFFECTED — its key is already on its
+# command line and restarting it would zero the healthz counters that four live probes are being
+# reconciled against. This takes effect at the next start.
 # PINNED OFF THE LANES, or loudly not. See METER_CPUS in the box profile for why; in short, the
 # meter is infrastructure every lane talks to, and a lane it shares is a lane whose timings include
 # a proxy. An unset METER_CPUS is not silently accepted: an unpinned meter is a measurement risk the
@@ -54,8 +59,8 @@ else
   echo "WARNING: METER_CPUS unset or no taskset -- the meter is UNPINNED and may land on a lane," >&2
   echo "         which puts its CPU into somebody's timings. Source the box profile first." >&2
 fi
-setsid nohup "${PIN[@]}" python3 "$HERE/proxy.py" --port "$PORT" --upstream "$UPSTREAM" --api-key "$KEY" \
-    --log "$LOG" --rpm "$RPM" >> "$STDOUT" 2>&1 < /dev/null &
+METER_API_KEY="$KEY" setsid nohup "${PIN[@]}" python3 "$HERE/proxy.py" --port "$PORT" \
+    --upstream "$UPSTREAM" --log "$LOG" --rpm "$RPM" >> "$STDOUT" 2>&1 < /dev/null &
 sleep 2
 if S="$(alive)" && [ -n "$S" ]; then
   echo "meter up on :$PORT -> $UPSTREAM  (rpm $RPM, log $LOG)"

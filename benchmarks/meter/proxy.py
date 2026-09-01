@@ -36,10 +36,20 @@ GATEWAY cut without one is priced from the content deltas it forwarded plus a pr
 from the request (`PromptTokens`), labelled `cost_basis: estimated_from_deltas`; a stream that
 produced neither is recorded `metered=false` -- never as $0.
 
-A stream that runs past `--delta-ceiling` content deltas (135,000 by default) is ended BY THIS
+A stream that runs past `--delta-ceiling` content deltas is ended BY THIS
 PROXY, with the same frames and the same price, and the upstream socket is closed so the generation
 stops being billed. That is a cut this file chooses rather than one it survives, and the difference
 is the point: see `abort_is_not_retryable`. The ceiling never enters the request.
+
+THE DEFAULT IS OFF (`DELTA_CEILING_DEFAULT = 0`). Until 2026-09-01 this paragraph named 135_000 as
+the default instead -- phrased that way here on purpose, because a test forbids the literal claim and
+would read a verbatim quotation of it as the claim itself; that is the third time in this repository
+a guard has been tripped by citing what it forbids. The two disagreed for as long as both existed,
+and the disagreement cost a real
+investigation: a `plan_step` generation on `remDL4` ran to **241,943** content deltas -- 1,820 s, one
+call, $0.0706, carrying that run 5 % past its $1.00 budget -- and the first question asked was why
+the ceiling had not cut it at 135,000. It was never armed. Whether to arm it is a separate decision
+(see `DELTA_CEILING_VALUE` below); saying so accurately is not.
 
 That synthetic frame is SENT TO THE CLIENT, in the two-chunk shape `stream_options.include_usage`
 uses -- the cut on a chunk with the `finish_reason`, the price on a chunk with `choices: []`,
