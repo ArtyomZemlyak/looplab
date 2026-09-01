@@ -271,3 +271,19 @@ def test_a_goal_with_no_pins_is_reported_as_UNCHECKED_not_as_clean(tmp_path, cap
     # ...and the goal-scoped verdicts, which ARE this test's business: one file in, one answer out.
     assert not check_task_goal(unpinned, root=ROOT), "a pinless goal has no DEFECTS to report"
     assert not check_task_goal(pinned, root=ROOT), "the pinned goal's claim holds against its file"
+
+
+def test_the_unpinned_diagnostic_names_the_citation_case():
+    """Five reds in this family were the same move: prose citing an existing claim in bracket form.
+
+    The convention already decides it -- `test_each_claim_slug_names_exactly_one_claim` exists so a
+    slug names ONE declaration -- but the message said only "carries no `decided:` clause", which
+    reads as an instruction to add one. Adding one is the wrong repair: it creates the duplicate the
+    next test then rejects. The message now names the alternative.
+    """
+    slug = "some-" + "unpinned-" + "example"
+    text = "CLAIM" + "[" + slug + "] a sentence with no deciding clause after it."
+    out = check_text(text, "x.md", root=Path("."), allow_absolute=False)
+    assert out, "an unpinned claim must still be a defect"
+    assert "drop the brackets" in out[0], out[0]
+    assert slug in out[0]

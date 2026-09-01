@@ -3687,7 +3687,7 @@ when there is no accountant (never `$0.0000`, which is a real reading), and says
 set" for the sessions that have none — which is every session except the plan step, and those hit
 the wall too. `LLMRepoDeveloper` keeps `seconds` and the spend on a second attribute rather than
 widening `last_budget_exhausted`, which other code compares against a KIND
-(CLAIM[budget-exhausted-vocabulary]), and the plan-step row carries both.
+(the `budget-exhausted-vocabulary` claim), and the plan-step row carries both.
 
 **The test hole, found by mutation and worth more than the fix.** The first version of
 `test_the_wall_says_what_it_spent.py` exercised `_spend_detail` and `_note_budget` directly and

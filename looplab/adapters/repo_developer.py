@@ -1000,7 +1000,7 @@ class LLMRepoDeveloper:
             # corpus at all -- and a bound whose distance from firing is unobservable can only be
             # argued about. Kept on a SECOND attribute rather than folded into the first: the
             # `budget_exhausted` column is a durable vocabulary other code branches on
-            # (see CLAIM[budget-exhausted-vocabulary] above), and widening it to carry prose would
+            # (see the `budget-exhausted-vocabulary` claim above), and widening it to carry prose would
             # break every reader that compares it to a kind.
             self.last_budget_facts = {"kind": kind[:32], "seconds": seconds, "detail": detail[:200]}
 
