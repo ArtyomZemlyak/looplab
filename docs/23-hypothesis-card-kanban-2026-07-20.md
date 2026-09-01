@@ -991,6 +991,20 @@ flowchart LR
   CH --> R
 ```
 
+- The AGENT's own board says the same thing. `tools/question_board.py::read_questions` renders a
+  question, its `concepts:`, its children — and, since 2026-09-01, `answered: best vs champion …`
+  on the question's own line. Every child row's `delta=` is the parent-relative `best_delta`, so
+  before this a question answered by a DRAFT was a row of em-dashes to the role deciding what to
+  propose next. Live on v11 and v12 the same four questions the operator's board now answers read:
+
+      QUESTION_ID=does-mining-hard-negatives-…   answered: best vs champion -0.018059 by card-1
+      QUESTION_ID=does-parameter-efficient-…     answered: best vs champion -0.0583   by card-2
+      QUESTION_ID=does-the-infonce-family-…      answered: best vs champion -0.013805 by card-7
+      QUESTION_ID=does-training-the-e5-small-…   answered: best vs champion -0.003272 by card-0
+
+  It sits on the QUESTION line and not on a child, because the two numbers have different
+  baselines and disagree in sign on that very InfoNCE row (`best +0.01724` against its own parent).
+
 - `RunState.cards: dict[str,Card]=default_factory(dict)`, assigned only inside `_derive_cards`.
 - **Reserve now** the operator-override maps + the final-overlay phase:
   `RunState.card_priority_pins`/`card_operator_edits`/`card_resource_pins` (`default_factory=dict`), even
