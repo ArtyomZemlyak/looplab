@@ -68,11 +68,50 @@ one delegate attempt, because retrying an exception after an ambiguous append co
 worker is reused across sporadic submits and is retired by an explicit flush/shutdown (or a long calm idle
 period), so a long run neither creates a thread per span nor retains unbounded daemon workers.
 
-Loss is observable in two forms:
+Loss is observable in three forms:
 
 - `AsyncJsonlSpanExporter.metrics()` is a race-consistent process-local snapshot;
 - coalesced `looplab.exporter.loss` internal spans durably record dropped-span and export-failure deltas
   through a direct, bounded writer path that cannot itself enter or be evicted by the ordinary queue.
+- `trace_export_health` rows, appended to `events.jsonl` **by the engine**, publish that same snapshot
+  whenever `trace_export_unhealthy` holds — see below for why the first two are not enough.
+
+### A dead exporter cannot report that it is dead
+
+Both loss surfaces above are written BY the exporter. The durable receipt is appended from
+`_worker_main`, and the `_LOG.warning` beside it is raised on the same path, so an exporter whose
+worker has stopped emits neither. `metrics()` survives the worker, but nothing in the product read it.
+
+MEASURED on `e5small-dr-unified-v12`, 2026-09-01: `spans.jsonl` last written 18:20, `events.jsonl`
+still appending 10.5 hours later, `py-spy dump` showing no `looplab-trace-export-*` thread in the live
+engine, and zero loss receipts in the run. The outage was total, ongoing, and completely silent.
+
+    span ends ──▶ exporter queue ──▶ worker ──▶ spans.jsonl
+                                       │
+                                       ├──▶ loss receipt (spans.jsonl)   ─┐ both die WITH
+                                       └──▶ _LOG.warning                 ─┘ the worker
+                                       ·
+                       metrics() ──────┴──▶ (survives the worker)
+                                              │
+    run loop turn ────────────────────────────┴──▶ trace_export_unhealthy?
+                                                     │ no  ──▶ nothing appended
+                                                     │ yes ──▶ engine appends
+                                                               trace_export_health
+                                                               to events.jsonl
+
+The engine is the one writer that outlives the exporter, so `Engine._record_trace_export_health` reads
+the snapshot once per turn and publishes it on the run's own log. The row is DIAGNOSTIC (invariant #1:
+`_proposal_authority_seq` excludes `DIAGNOSTIC_EVENTS` wholesale, so it cannot displace a paid
+proposal), it is gated on `trace_export_unhealthy` so a healthy run's log is untouched, and it is
+deduplicated on the snapshot itself so a permanently-dead exporter costs one row per distinct state
+rather than one per turn. It is published BEFORE the turn's decision prefix is read, so the row is part
+of the fold that turn reasons over and cannot move the tail under the sequence recheck that follows.
+
+`trace_export_unhealthy` fires on three independent symptoms: `shutdown` (the exporter stopped
+accepting for good), a dead worker with rows still QUEUED (an idle exporter with an empty queue
+legitimately owns no thread), or any recorded loss — a drop, an export failure, or a loss receipt that
+itself failed to write. This surface reports that spans are being lost; it does not diagnose WHY the
+worker stopped, which remains open.
 The receipt receives one delegate attempt as well: an exception may happen after its append committed,
 so retrying the same delta could inflate every postmortem count. On ambiguous failure the process-local
 snapshot remains authoritative for that process, while the durable summary may undercount but never

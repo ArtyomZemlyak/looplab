@@ -427,6 +427,14 @@ EV_PHASE_PROGRESS = "phase_progress"
 # not name its own exit is still infinitely more than the silence it replaces.
 EV_RUN_LOOP_EXITED = "run_loop_exited"
 
+# The span exporter's own loss receipt is written BY the exporter (`AsyncJsonlSpanExporter`), so an
+# exporter whose worker has stopped reports NOTHING: v12 lost 10.5 hours of spans in total silence
+# while `events.jsonl` kept flowing normally, and `metrics()` — a "process-local, race-consistent
+# exporter health snapshot" — was read by no surface in the product. The ENGINE is the one writer
+# that survives a dead exporter, so it publishes that snapshot itself. Diagnostic, dedup'd, and
+# emitted ONLY while the exporter is unhealthy: a run whose spans are fine appends no row at all.
+EV_TRACE_EXPORT_HEALTH = "trace_export_health"
+
 # The closed vocabulary of run-loop exits, in the registry shape this repo uses for every duck-typed
 # word (`CARD_BUILD_SKIP_REASONS`, `CARD_STAGE_REFUSALS`, `REPAIR_VERDICTS`, `TRIAGE_ACTIONS`): a
 # two-way AST guard keeps the loop's exits and this tuple in step, so a FOURTEENTH exit cannot be
@@ -444,6 +452,35 @@ RUN_EXIT_REASONS: tuple[str, ...] = (
     "awaiting_approval",     # HITL: EV_APPROVAL_REQUESTED is on the log, the run is resumable
     "unattributed",          # the loop exited and the engine could not name why — see above
 )
+
+
+def trace_export_unhealthy(snapshot) -> bool:
+    """Is this exporter health snapshot worth a durable row?
+
+    THREE INDEPENDENT SYMPTOMS, any one of which means spans are being lost right now:
+
+      * `shutdown` — the exporter stopped accepting and never resumes (`_accepting` is set False
+        in exactly two places, and `shutdown()` is the terminal one);
+      * a dead worker with rows still QUEUED — an idle exporter with an empty queue legitimately
+        has no thread, so the queue is what separates "resting" from "stranded";
+      * any recorded loss — a drop, an export failure, or a loss receipt that itself failed to
+        write, which is the exact circularity that made v12's outage silent.
+
+    A healthy exporter matches none of them, which is what keeps this off a good run's log.
+    """
+    if not isinstance(snapshot, dict):
+        return False
+
+    def _count(key: str) -> int:
+        value = snapshot.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    if bool(snapshot.get("shutdown")):
+        return True
+    if not bool(snapshot.get("worker_alive")) and _count("queued_spans") > 0:
+        return True
+    return any(_count(key) > 0 for key in
+               ("dropped_spans", "export_failures", "loss_receipt_failures"))
 
 
 def run_exit_reason(state) -> str:
@@ -786,6 +823,7 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
+    EV_TRACE_EXPORT_HEALTH,
     EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
     EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN,

@@ -1672,6 +1672,19 @@ class AsyncJsonlSpanExporter:
                             time.monotonic() + self._loss_receipt_interval_s)
                         # Do not leave a daemon retrying forever on a dead filesystem. New deltas can
                         # trigger a new receipt later; this ambiguous delta is never attempted twice.
+                        #
+                        # OPEN[trace-export-worker-stops-without-a-reason] the worker returns here
+                        # (and at every other terminal path) recording WHICH condition retired it
+                        # nowhere, so a stopped exporter cannot be diagnosed after the fact.
+                        # proof:absent:_worker_stop_reason@looplab/core/tracing.py
+                        # STILL OPEN: e5small-dr-unified-v12 wrote its last span at 18:20 and kept
+                        # appending events for 10.5 hours with no exporter thread alive (`py-spy
+                        # dump`) and zero loss receipts. `trace_export_health` (engine-side) now
+                        # PUBLISHES that the exporter is dead, which is what made the outage
+                        # findable at all — but the counters it carries name the symptom, not the
+                        # condition that retired the worker. Closing this means recording the
+                        # reason at the stop, in the registry shape this repo uses for every other
+                        # duck-typed word.
                         if not self._queue:
                             self._worker = None
                             self._condition.notify_all()
