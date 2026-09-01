@@ -122,6 +122,32 @@ needs_algotune = pytest.mark.skipif(
     reason="needs the AlgoTune checkout with its venv and downloaded datasets")
 
 
+def _task_data(task: str) -> Path:
+    """Where this box keeps ONE task's instances."""
+    return ALGOTUNE / ".hf_datasets" / "oripress__AlgoTune" / "data" / task
+
+
+def needs_task(task: str):
+    """Skip when THIS TASK's data is absent, not merely when the dataset directory is.
+
+    The old guard asked whether `.hf_datasets/` exists. It does here, and holds four tasks --
+    discrete_log, edge_expansion, pde_heat1d, pagerank, two files each -- and NOT convex_hull, whose
+    202 instance files never downloaded and cannot now, the box being offline. So the one test that
+    profiles convex_hull ran and failed on every sweep from 2026-08-30, and I twice called it
+    "background" instead of a defect.
+
+    A permanent red is not a cheap thing to carry: it trains a reader to skim this file, which is
+    where a real regression would appear. And failing here says nothing about the profiler -- with
+    no instances the tool cannot be exercised at all, so there is nothing to regress against. That
+    is what a skip is FOR, and it is the honest verdict only when the guard names the task, which
+    this one does and the old one could not.
+    """
+    d = _task_data(task)
+    return pytest.mark.skipif(
+        not (VENV_PY.exists() and d.is_dir() and any(d.iterdir())),
+        reason=f"no cached instances for AlgoTune task {task!r} at {d}")
+
+
 def _profile(workspace: Path, task: str, *flags: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [str(VENV_PY), str(PROFILER), "--algotune-root", str(ALGOTUNE), "--task", task, *flags],
@@ -164,7 +190,7 @@ def test_it_profiles_a_helper_module_the_scorer_would_have_accepted(tmp_path):
     assert "table[val] = j" in done.stdout, "the hot line inside the helper was never named"
 
 
-@needs_algotune
+@needs_task("convex_hull")
 def test_it_profiles_the_real_instance_at_the_graded_size(tmp_path):
     """No toy input. `convex_hull` is n = 267 021 and the probes that chose its champion ran at
     n = 100, 1 000 and 10 000 (`test_algotune_full_context.py`). A profiler that quietly shrinks
@@ -234,3 +260,43 @@ def test_the_report_fits_the_budget_a_dev_command_result_is_clipped_to(tmp_path)
     # And what survives is the part worth keeping: the header and the hottest function.
     assert done.stdout.startswith("profile: discrete_log"), done.stdout[:200]
     assert "Solver.solve" in done.stdout, done.stdout
+
+
+# --- the guard itself ----------------------------------------------------------------------------
+
+def test_the_guard_skips_only_the_task_whose_data_is_missing():
+    """A blanket skip is how a real regression hides, so the guard must be per-task and provable.
+
+    On this box `.hf_datasets/` holds discrete_log, edge_expansion, pde_heat1d and pagerank, and not
+    convex_hull. The old guard asked only whether the DIRECTORY exists, so the convex_hull test ran
+    and failed on every sweep from 2026-08-30 while the rest of the file passed -- a permanent red
+    that trains a reader to skim exactly the file a regression would appear in.
+    """
+    if not VENV_PY.exists() or not (ALGOTUNE / ".hf_datasets").is_dir():
+        pytest.skip("no AlgoTune checkout on this box")
+
+    present = [t for t in ("discrete_log", "edge_expansion", "pde_heat1d", "pagerank")
+               if _task_data(t).is_dir()]
+    assert present, (
+        "no task data at all — then this whole file is skipped and proves nothing; that is a "
+        "stand problem, not a test problem"
+    )
+    for task in present:
+        assert not needs_task(task).args[0], f"{task} has data and the guard would skip it anyway"
+
+    missing = _task_data("definitely_not_a_task_zzz")
+    assert not missing.exists()
+    mark = needs_task("definitely_not_a_task_zzz")
+    assert mark.args[0], "the guard does not skip a task with no data"
+    assert "definitely_not_a_task_zzz" in mark.kwargs["reason"], mark.kwargs["reason"]
+
+
+def test_the_file_still_exercises_the_profiler_on_this_box():
+    """The fix must not have turned the file into a no-op. At least one profiling test must run
+    here, or "green" means "skipped" and the profiler is unguarded."""
+    if not VENV_PY.exists() or not (ALGOTUNE / ".hf_datasets").is_dir():
+        pytest.skip("no AlgoTune checkout on this box")
+    assert _task_data("discrete_log").is_dir(), (
+        "the three discrete_log profiling tests are the only ones this box can run, and its data "
+        "is gone — nothing here is being tested"
+    )
