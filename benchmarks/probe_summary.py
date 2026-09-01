@@ -123,6 +123,19 @@ def summarise(run_dir: Path) -> dict | None:
         by_phase[ph] += float(a.get("cost") or 0)
         calls[ph] += 1
 
+    # TIME TO THE FIRST BUILD STEP. Measured 2026-09-01 across eight runs, this is the one quantity
+    # that separates cleanly, and it separates by TASK rather than by run: discrete_log reaches its
+    # first `plan_step` at 64-74 minutes, edge_expansion at 18-21, pde_heat1d at 29-33. Two live
+    # discrete_log probes at 55 minutes with no build looked stuck until this was computed; they were
+    # on schedule for their task. Three summary statistics in three sweeps failed to order the
+    # scores (§74.3); this one is not offered as a predictor of score, it is offered because a sweep
+    # that cannot tell "slow task" from "stuck run" wastes an investigation every time.
+    starts = [float(r.get("start") or 0) for r in spans if r.get("start") is not None]
+    t0 = min(starts) if starts else None
+    build_ts = [float(r.get("start") or 0) for r in gens
+                if (r.get("attributes") or {}).get("phase") == "plan_step"]
+    to_build = ((min(build_ts) - t0) / 60.0) if (build_ts and t0 is not None) else None
+
     tools = [r for r in spans if r.get("name") == "tool"]
     dev = [r for r in tools
            if str((r.get("attributes") or {}).get("tool") or "") == "run_dev_command"]
@@ -157,6 +170,7 @@ def summarise(run_dir: Path) -> dict | None:
         "ref_calls": ref_calls,
         "champion_lines": champ_lines,
         "kernel": kernel,
+        "to_build_min": to_build,
         "probe_dir": str(probe_dir),
         "why_no_test": "" if _test_score(probe_dir) is not None else _why_no_test(probe_dir),
         "phases": sorted(by_phase.items(), key=lambda kv: -kv[1])[:4],
@@ -182,14 +196,15 @@ def main(argv: list[str]) -> int:
         return 0
 
     print(f"{'probe':10s}{'task':16s}{'$':>8}{'TEST':>10}{'nodes':>7}"
-          f"{'before%':>9}{'after%':>8}{'eval_tr':>8}  champion")
+          f"{'before%':>9}{'after%':>8}{'eval_tr':>8}{'->build':>9}  champion")
     for s in sorted(seen.values(), key=lambda x: (x["task"], -(x["test"] or -1))):
         test = f"{s['test']:.4f}" if s["test"] is not None else "-"
         champ = (f"{s['champion_lines']}L {'kernel' if s['kernel'] else 'plain python'}"
                  if s["champion_lines"] else "(none)")
+        tb = f"{s['to_build_min']:.0f}m" if s["to_build_min"] is not None else "-"
         print(f"{s['probe']:10s}{s['task']:16s}{s['spent']:>8.4f}{test:>10}"
               f"{len(s['nodes']):>7}{s['before_pct']:>8.0f}%{s['after_pct']:>7.0f}%"
-              f"{s['eval_train']:>8}  {champ}")
+              f"{s['eval_train']:>8}{tb:>9}  {champ}")
 
     unscored = [s for s in seen.values() if s["test"] is None and s["why_no_test"]]
     if unscored:

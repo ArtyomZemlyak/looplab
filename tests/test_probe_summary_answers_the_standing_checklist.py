@@ -30,7 +30,10 @@ def _mk_probe(root, name, task, *, nodes, costs_before, costs_after, test=None,
     # run that cannot exist, and it made the no-nodes case look like a disappearing probe.
     events, spans = [{"type": "run_started", "ts": t, "data": {}}], []
 
-    def gen(ts, cost, phase="plan_step"):
+    # NOT `plan_step` by default. It was, and that silently made every fixture reach its first
+    # build step at minute zero -- so the time-to-build test asserted 30m against a run that had
+    # "built" before it started, and the tool was right while the harness was lying.
+    def gen(ts, cost, phase="propose"):
         spans.append({"name": "generation", "start": ts, "duration_s": 1.0,
                       "attributes": {"cost": cost, "phase": phase}})
 
@@ -254,4 +257,50 @@ def test_an_unscored_run_with_no_nodes_is_not_promised_a_recovery(tmp_path):
     assert "recoverable for $0" not in block, (
         "a run with zero evaluated nodes was promised a free recovery there is nothing to do:\n"
         + block
+    )
+
+
+def test_time_to_the_first_build_step_is_reported(tmp_path):
+    """A sweep that cannot tell a slow TASK from a stuck RUN investigates every one of them.
+
+    Two discrete_log probes at 55 minutes with no build looked stuck; their task's completed runs
+    reach a first build step at 64 and 74 minutes, so they were on schedule. Four commands to find
+    that out, hence the column.
+    """
+    p = _mk_probe(tmp_path, "slow", "t", nodes=[5.0], costs_before=[0.5], costs_after=[0.5], test=5.0)
+    run = p / "runs" / "t" / "run"
+    spans = [json.loads(l) for l in open(run / "spans.jsonl")]
+    t0 = min(float(x["start"]) for x in spans)
+    spans.append({"name": "generation", "start": t0 + 1800, "duration_s": 1.0,
+                  "attributes": {"cost": 0.01, "phase": "plan_step"}})
+    (run / "spans.jsonl").write_text("".join(json.dumps(x) + "\n" for x in spans))
+    out = _run(tmp_path)
+    row = next(l for l in out.splitlines() if l.startswith("slow"))
+    assert row.split()[-2] == "30m", f"time to the first build step is not reported: {row}"
+
+
+def test_a_run_that_has_not_built_yet_shows_a_dash_not_a_zero(tmp_path):
+    """Zero minutes would read as "built instantly", which is the opposite of the truth."""
+    _mk_probe(tmp_path, "nobuild", "t", nodes=[], costs_before=[0.3], costs_after=[])
+    out = _run(tmp_path)
+    row = next(l for l in out.splitlines() if l.startswith("nobuild"))
+    assert row.split()[-2] == "-", (
+        f"a run with no build step yet was reported as having built at minute zero: {row}"
+    )
+
+
+def test_only_plan_step_counts_as_a_build(tmp_path):
+    """`propose` and `deep_research` are what a slow run is BUSY with; they are not building."""
+    p = _mk_probe(tmp_path, "prop", "t", nodes=[], costs_before=[], costs_after=[])
+    run = p / "runs" / "t" / "run"
+    spans = [json.loads(l) for l in open(run / "spans.jsonl")] if (run / "spans.jsonl").read_text().strip() else []
+    base = 1000.0
+    for ph in ("propose", "deep_research", "plan"):
+        spans.append({"name": "generation", "start": base + 60, "duration_s": 1.0,
+                      "attributes": {"cost": 0.01, "phase": ph}})
+    (run / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans))
+    out = _run(tmp_path)
+    row = next(l for l in out.splitlines() if l.startswith("prop"))
+    assert row.split()[-2] == "-", (
+        f"propose/deep_research/plan were counted as reaching a build step: {row}"
     )

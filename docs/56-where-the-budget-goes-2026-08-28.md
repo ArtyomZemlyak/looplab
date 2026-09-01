@@ -3265,3 +3265,46 @@ four running now are 25 minutes in and have not closed a plan yet. The `plan_ste
 real — 12 of the 13 finished runs wrote one — so the wiring has somewhere to land. Next sweep can
 answer it; this one cannot, and the table above is a retrospective on what the rule WOULD have done,
 not a report of what it did.
+
+## 76. Time to the first build step: useful for triage, useless as a predictor, and I nearly said otherwise
+
+Two live `discrete_log` probes sat at 55 minutes with $0.14 and $0.18 spent, zero `eval_train` calls
+and zero `plan`/`plan_step` generations, while an `edge_expansion` probe started at the same minute
+had spent $0.52, made 12 `eval_train` calls and evaluated a node. That looked like two stuck runs.
+
+They were on schedule. Minutes from a run's first span to its first `plan_step` generation:
+
+| task | runs | time to first build step |
+|---|---|---|
+| edge_expansion | 5 | 18, 20, 21, 21, 30 |
+| pde_heat1d | 6 | 12, 19, 19, 29, 50, 57 |
+| discrete_log | 2 | 64, 74 |
+
+`discrete_log`'s two completed runs are the two slowest of the thirteen, and the two live ones at 55
+minutes with no build are consistent with that rather than with a fault. That is the whole of what
+this measurement is for: **a sweep that cannot tell a slow task from a stuck run spends an
+investigation on every one of them**, and this one cost four commands before the answer arrived.
+`probe_summary.py` now carries the column.
+
+### 76.1 It is not a predictor, and the way I found that out is the point
+
+The first version of this section said the three tasks separate cleanly — edge_expansion 18-21,
+pde_heat1d 29-33, discrete_log 64-74 — computed over the eight runs I happened to list. The full
+fifteen do not separate: `pde_heat1d` runs from 12 to 57 minutes and overlaps `edge_expansion`
+entirely. The clean bands were an artefact of which runs I typed into the script.
+
+Then, computing the correlation with TEST, I got r = −0.81 on `pde_heat1d` (n = 5) — a strong signal,
+and the first thing in four sweeps that looked like structure. It was wrong the same way: my data
+literal held five of the task's six runs. The missing one is `remPde4`, which reached its first build
+step at **19 minutes** — the same minute as `remPde3` — and scored **0.0** against `remPde3`'s
+**129.75**. With all six the coefficient is −0.40; on `edge_expansion` it is −0.01.
+
+So this is the fourth summary statistic to fail, after node count, spend-before-first-node and
+`eval_train` (§74.3), and it failed by the same mechanism twice in one hour: a subset that separated
+cleanly, and a second subset that dropped the single run which destroys the relation. Both times the
+subset was mine, chosen by hand, and neither was chosen to prove anything — which is exactly why it
+is worth writing down. The corpus keeps offering clean-looking structure to anyone willing to list
+the runs themselves.
+
+What survives is narrow and operational: build time is a property worth SEEING, so a slow task is not
+mistaken for a broken run. It orders nothing.
