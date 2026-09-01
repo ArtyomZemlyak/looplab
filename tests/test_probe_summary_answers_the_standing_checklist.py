@@ -60,6 +60,19 @@ def _mk_probe(root, name, task, *, nodes, costs_before, costs_after, test=None,
     return probe
 
 
+def _cell(out: str, probe: str, column: str) -> str:
+    """One cell of the main table, addressed BY COLUMN NAME.
+
+    The tests used to index from the end (`row.split()[-2]`), and adding a `build` column silently
+    moved every one of those assertions onto its neighbour. A table read positionally is a table
+    that breaks the next time it grows.
+    """
+    lines = out.splitlines()
+    head = next(l for l in lines if l.startswith("probe "))
+    row = next(l for l in lines if l.split() and l.split()[0] == probe)
+    return row.split()[head.split().index(column)]
+
+
 def _run(*roots):
     r = subprocess.run([sys.executable, str(TOOL), *[str(x) for x in roots]],
                        capture_output=True, text=True, timeout=600)
@@ -275,18 +288,16 @@ def test_time_to_the_first_build_step_is_reported(tmp_path):
                   "attributes": {"cost": 0.01, "phase": "plan_step"}})
     (run / "spans.jsonl").write_text("".join(json.dumps(x) + "\n" for x in spans))
     out = _run(tmp_path)
-    row = next(l for l in out.splitlines() if l.startswith("slow"))
-    assert row.split()[-2] == "30m", f"time to the first build step is not reported: {row}"
+    assert _cell(out, "slow", "->build") == "30m", (
+        "time to the first build step is not reported:\n" + out)
 
 
 def test_a_run_that_has_not_built_yet_shows_a_dash_not_a_zero(tmp_path):
     """Zero minutes would read as "built instantly", which is the opposite of the truth."""
     _mk_probe(tmp_path, "nobuild", "t", nodes=[], costs_before=[0.3], costs_after=[])
     out = _run(tmp_path)
-    row = next(l for l in out.splitlines() if l.startswith("nobuild"))
-    assert row.split()[-2] == "-", (
-        f"a run with no build step yet was reported as having built at minute zero: {row}"
-    )
+    assert _cell(out, "nobuild", "->build") == "-", (
+        "a run with no build step yet was reported as having built at minute zero:\n" + out)
 
 
 def test_only_plan_step_counts_as_a_build(tmp_path):
@@ -300,10 +311,8 @@ def test_only_plan_step_counts_as_a_build(tmp_path):
                       "attributes": {"cost": 0.01, "phase": ph}})
     (run / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans))
     out = _run(tmp_path)
-    row = next(l for l in out.splitlines() if l.startswith("prop"))
-    assert row.split()[-2] == "-", (
-        f"propose/deep_research/plan were counted as reaching a build step: {row}"
-    )
+    assert _cell(out, "prop", "->build") == "-", (
+        "propose/deep_research/plan were counted as reaching a build step:\n" + out)
 
 
 def _mk_run_probe(root, name, task, *, total, with_import=0, with_call=0):
@@ -467,3 +476,56 @@ def test_no_meter_is_silence_not_a_verdict(tmp_path):
     assert "NOT on the current instrument" not in out, (
         "with no meter to read, the tool guessed instead of staying quiet:\n" + out
     )
+
+
+def test_how_long_the_build_itself_took_is_reported(tmp_path):
+    """`->build` and `build` together answer "stuck run, or slow task?"; neither does alone.
+
+    Measured 2026-09-01 over 19 runs, first plan_step to first node: edge_expansion 5-14 min,
+    pde_heat1d 25-44, discrete_log 23-54, with no point between 14 and 23. A discrete_log probe 42
+    minutes into a build with no node is inside its band; the same reading on edge_expansion would
+    be three times the worst ever seen.
+    """
+    p = _mk_probe(tmp_path, "bd", "t", nodes=[], costs_before=[0.5], costs_after=[], test=None)
+    run = p / "runs" / "t" / "run"
+    spans = [json.loads(l) for l in open(run / "spans.jsonl")]
+    events = [json.loads(l) for l in open(run / "events.jsonl")]
+    t0 = min(float(x["start"]) for x in spans)
+    spans.append({"name": "generation", "start": t0 + 60, "duration_s": 1.0,
+                  "attributes": {"cost": 0.01, "phase": "plan_step"}})
+    events.append({"type": "node_evaluated", "ts": t0 + 60 + 1500, "data": {"metric": 5.0}})
+    (run / "spans.jsonl").write_text("".join(json.dumps(x) + "\n" for x in spans))
+    (run / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in events))
+    out = _run(tmp_path)
+    assert _cell(out, "bd", "build") == "25m", "build duration is not reported:\n" + out
+
+
+def test_a_build_still_running_shows_a_dash_not_a_number(tmp_path):
+    """A run mid-build has no duration yet; printing one would invent a finished build."""
+    p = _mk_probe(tmp_path, "bd2", "t", nodes=[], costs_before=[0.5], costs_after=[])
+    run = p / "runs" / "t" / "run"
+    spans = [json.loads(l) for l in open(run / "spans.jsonl")]
+    t0 = min(float(x["start"]) for x in spans)
+    spans.append({"name": "generation", "start": t0 + 60, "duration_s": 1.0,
+                  "attributes": {"cost": 0.01, "phase": "plan_step"}})
+    (run / "spans.jsonl").write_text("".join(json.dumps(x) + "\n" for x in spans))
+    out = _run(tmp_path)
+    assert _cell(out, "bd2", "build") == "-", (
+        "a build with no node yet was given a duration:\n" + out)
+
+
+def test_a_node_that_predates_the_first_build_step_is_not_a_negative_build(tmp_path):
+    """Ordering is not guaranteed; a negative duration would be printed as fact."""
+    p = _mk_probe(tmp_path, "bd3", "t", nodes=[], costs_before=[0.5], costs_after=[])
+    run = p / "runs" / "t" / "run"
+    spans = [json.loads(l) for l in open(run / "spans.jsonl")]
+    events = [json.loads(l) for l in open(run / "events.jsonl")]
+    t0 = min(float(x["start"]) for x in spans)
+    events.append({"type": "node_evaluated", "ts": t0 + 10, "data": {"metric": 5.0}})
+    spans.append({"name": "generation", "start": t0 + 600, "duration_s": 1.0,
+                  "attributes": {"cost": 0.01, "phase": "plan_step"}})
+    (run / "spans.jsonl").write_text("".join(json.dumps(x) + "\n" for x in spans))
+    (run / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in events))
+    out = _run(tmp_path)
+    assert _cell(out, "bd3", "build") == "-", (
+        "a node before the first build step produced a duration:\n" + out)

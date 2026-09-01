@@ -176,6 +176,23 @@ def summarise(run_dir: Path) -> dict | None:
                 if (r.get("attributes") or {}).get("phase") == "plan_step"]
     to_build = ((min(build_ts) - t0) / 60.0) if (build_ts and t0 is not None) else None
 
+    # AND HOW LONG THE BUILD ITSELF TAKES. The pair answers the question a sweep actually asks of a
+    # quiet probe — "is this run stuck, or is this task slow?" — and neither half answers it alone.
+    # Measured 2026-09-01 over 19 runs, first `plan_step` to first `node_evaluated`:
+    # edge_expansion 5-14 min, pde_heat1d 25-44, discrete_log 23-54. No point falls between 14 and
+    # 23. A discrete_log probe 42 minutes into a build with no node is inside its task's band; the
+    # same reading on edge_expansion would be three times the worst ever seen.
+    #
+    # It does NOT predict the score, and that is stated here so nobody has to rediscover it: within
+    # task, r = -0.01 (EE, n=6), -0.12 (pde, n=8), -0.59 (DL, n=4). Fifth summary statistic in five
+    # sweeps to separate cleanly by task and order nothing inside one (§74.3, §76.1).
+    build_min = None
+    if build_ts and stamps:
+        first_node = min(stamps)
+        b0 = min(build_ts)
+        if first_node > b0:
+            build_min = (first_node - b0) / 60.0
+
     tools_all = [r for r in spans if r.get("name") == "tool"]
     tools = tools_all
     dev = [r for r in tools
@@ -231,6 +248,7 @@ def summarise(run_dir: Path) -> dict | None:
         "champion_lines": champ_lines,
         "kernel": kernel,
         "to_build_min": to_build,
+        "build_min": build_min,
         "probe_dir": str(probe_dir),
         "why_no_test": "" if _test_score(probe_dir) is not None else _why_no_test(probe_dir),
         "phases": sorted(by_phase.items(), key=lambda kv: -kv[1])[:4],
@@ -257,15 +275,16 @@ def main(argv: list[str]) -> int:
         return 0
 
     print(f"{'probe':10s}{'task':16s}{'$':>8}{'TEST':>10}{'nodes':>7}"
-          f"{'before%':>9}{'after%':>8}{'eval_tr':>8}{'->build':>9}  champion")
+          f"{'before%':>9}{'after%':>8}{'eval_tr':>8}{'->build':>9}{'build':>7}  champion")
     for s in sorted(seen.values(), key=lambda x: (x["task"], -(x["test"] or -1))):
         test = f"{s['test']:.4f}" if s["test"] is not None else "-"
         champ = (f"{s['champion_lines']}L {'kernel' if s['kernel'] else 'plain python'}"
                  if s["champion_lines"] else "(none)")
         tb = f"{s['to_build_min']:.0f}m" if s["to_build_min"] is not None else "-"
+        bm = f"{s['build_min']:.0f}m" if s["build_min"] is not None else "-"
         print(f"{s['probe']:10s}{s['task']:16s}{s['spent']:>8.4f}{test:>10}"
               f"{len(s['nodes']):>7}{s['before_pct']:>8.0f}%{s['after_pct']:>7.0f}%"
-              f"{s['eval_train']:>8}{tb:>9}  {champ}")
+              f"{s['eval_train']:>8}{tb:>9}{bm:>7}  {champ}")
 
     unscored = [s for s in seen.values() if s["test"] is None and s["why_no_test"]]
     if unscored:
