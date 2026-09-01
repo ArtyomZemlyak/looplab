@@ -902,6 +902,10 @@ def test_reference_use_is_reported_by_card_with_the_band(tmp_path):
     _mk_probe(tmp_path, "b", "edge_expansion", nodes=[5.0], costs_before=[0.2], costs_after=[0.1])
     _instrument(tmp_path, "b")
     _probe_span(tmp_path, "b", "edge_expansion", run_probes=[True, True, True, True])     # 100 %
+    # FINISHED, both of them: the median is over completed runs only, since a rate on a probe still
+    # working counts only the calls it has made so far.
+    for name in ("a", "b"):
+        (tmp_path / "model-probes" / name / "champion_solver.py").write_text("# done\n")
     out = _run(tmp_path)
     # ON THE reference-use LINES THEMSELVES, not "somewhere in the block". The block was extracted
     # as `split("spend before the FIRST")[1].split("the champion rule")[0]`, and these fixtures have
@@ -930,6 +934,8 @@ def test_a_run_that_never_probed_is_named_and_kept_OUT_of_the_rate(tmp_path):
     _instrument(tmp_path, "quiet", args="--no-reference-affordance")                      # no spans
     _mk_probe(tmp_path, "other", "edge_expansion", nodes=[5.0], costs_before=[0.2], costs_after=[0.1])
     _instrument(tmp_path, "other")
+    for name in ("used", "quiet", "other"):
+        (tmp_path / "model-probes" / name / "champion_solver.py").write_text("# done\n")
     out = _run(tmp_path)
     block = out.split("spend before the FIRST")[1].split("the champion rule")[0]
     assert "median  50.0%" in block, block          # not 25 %, which is what averaging a 0 % gives
@@ -948,3 +954,45 @@ def test_a_card_group_with_no_rates_at_all_prints_no_rate_line(tmp_path):
     fresh_rows = out.split("--no-reference-affordance")[1].split("edge_expansion")[0]
     assert "reference use:" not in fresh_rows, fresh_rows
     assert "NO run_probe call" in fresh_rows and "fresh" in fresh_rows, fresh_rows
+
+
+def test_a_running_probes_rate_is_kept_out_of_the_median_and_shown_separately(tmp_path):
+    """The same four probes read 2.1 % and then 1.7 % an hour apart, from nobody's edit.
+
+    A rate over a probe still working is a rate over the calls it has made SO FAR. §93 computed
+    p = 0.0430 over three unfinished runs and one finished one against ten finished ones, and did
+    not say so. The median must be over comparable things, and the partials must still be visible --
+    hiding them would trade one silent mixture for a silent omission.
+    """
+    def _mk(name, hits, finished):
+        _mk_probe(tmp_path, name, "edge_expansion", nodes=[5.0],
+                  costs_before=[0.2], costs_after=[0.1])
+        _instrument(tmp_path, name, args="--no-reference-affordance")
+        _probe_span(tmp_path, name, "edge_expansion", run_probes=hits)
+        if finished:
+            (tmp_path / "model-probes" / name / "champion_solver.py").write_text("# done\n")
+
+    _mk("fin", [True, False, False, False], True)          # 25 %, finished
+    _mk("live", [False, False, False, False], False)       # 0 %, still running
+    _mk("other", [True, True, True, True], True)
+    _instrument(tmp_path, "other")                          # a second card, so the block prints
+    out = _run(tmp_path)
+    block = out.split("--no-reference-affordance")[1].split("edge_expansion")[0]
+    assert "n= 1 median  25.0%" in block, block
+    assert "STILL RUNNING, rate so far 0.0%" in block, block
+
+
+def test_a_group_of_only_running_probes_reports_no_median_at_all(tmp_path):
+    """An arm whose every run is in flight has no rate yet. Printing one would be a number with no
+    subject -- the state the --no-reference-affordance row was in for its first three hours."""
+    _mk_probe(tmp_path, "live", "edge_expansion", nodes=[5.0], costs_before=[0.2], costs_after=[0.1])
+    _instrument(tmp_path, "live", args="--no-reference-affordance")
+    _probe_span(tmp_path, "live", "edge_expansion", run_probes=[True, False])
+    _mk_probe(tmp_path, "other", "edge_expansion", nodes=[5.0], costs_before=[0.2], costs_after=[0.1])
+    _instrument(tmp_path, "other")
+    (tmp_path / "model-probes" / "other" / "champion_solver.py").write_text("# done\n")
+    _probe_span(tmp_path, "other", "edge_expansion", run_probes=[True])
+    out = _run(tmp_path)
+    block = out.split("--no-reference-affordance")[1].split("edge_expansion")[0]
+    assert "reference use: n=" not in block, block
+    assert "STILL RUNNING, rate so far 50.0%" in block, block

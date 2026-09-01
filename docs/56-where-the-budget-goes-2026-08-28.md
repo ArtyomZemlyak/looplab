@@ -4159,3 +4159,29 @@ lanes will free as the others finish.
 The number is printed by `probe_summary.py` on every run, beside §69.1's band, and was made a
 command BEFORE this arm had any data (67f774d7) — precisely so the reading could not be typed by
 hand into a section written after the fact.
+
+### 93.1 That p was computed over three unfinished runs, and the correction is not the one I expected
+
+§93 reported the reference arm at n = 4, median 2.1 %, p = 0.0430. An hour later the same four
+probes read 1.7 %, from nobody's edit. **Three of the four had not finished.** A rate on a running
+probe counts only the `run_probe` calls it has made so far, and §93 compared one finished run plus
+three partials against ten finished ones without saying so.
+
+Finished-only, the arm is n = 1 at 3.3 %. There is no reading yet.
+
+**The bias I assumed is not there.** I expected partial rates to run low — a model discovers the
+reference module partway through, so an early sample should undercount. Measured over the 18
+finished `edge_expansion` runs, the rate across the first fifteen `run_probe` calls has a median of
+6.7 % against a final 7.8 %, and only **6 of 18 understate**; twelve overstate or tie. A partial rate
+is NOISIER, not lower, over a denominator a third the size. So §93's number was not slanted toward
+its conclusion — it was a median over two different precisions, which is a different fault and a
+smaller one.
+
+`probe_summary.py` now takes the median over completed runs only and prints the partials beside it
+with their rate so far, the same split `after%` got. Hiding them would trade a silent mixture for a
+silent omission; the mutation that hides them and the mutation that re-mixes them redden the same
+two tests.
+
+Two of the arm's own tests had to change with it: their fixtures never wrote a `champion_solver.py`,
+so under the new rule every fixture probe was "running" and the median vanished. That is the code
+being right and the tests being older than the distinction.

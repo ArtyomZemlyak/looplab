@@ -513,12 +513,29 @@ def main(argv: list[str]) -> int:
             # it is still empty. Runs with no `run_probe` call at all are excluded and counted --
             # a probe that never probed has no rate, and averaging it in as 0 % would push any arm
             # toward the floor for a reason unrelated to the clause.
-            rates = sorted(g["ref_pct"] for g in group if g.get("ref_pct") is not None)
+            # SPLIT BY WHETHER THE RUN IS OVER, like `after%` two commits earlier. A rate over a
+            # probe still working is a rate over the calls it has made SO FAR: the same four
+            # probes read 2.1 % and then 1.7 % an hour apart, from nobody's edit. §93 computed
+            # p = 0.0430 over three unfinished runs and one finished one against ten finished ones
+            # and did not say so.
+            #
+            # NOT because a partial rate is biased -- I assumed that and measured otherwise. Over
+            # the 18 finished edge_expansion runs, the rate across the first fifteen `run_probe`
+            # calls has a median of 6.7 % against a final 7.8 %, and only 6 of the 18 understate.
+            # It is NOISIER, not lower, over a denominator a third the size. Mixing the two is
+            # still mixing two precisions in one median, which is what the marker makes visible.
+            done_g = [g for g in group if (Path(g["probe_dir"]) / "champion_solver.py").is_file()]
+            rates = sorted(g["ref_pct"] for g in done_g if g.get("ref_pct") is not None)
+            partial = sorted(g["ref_pct"] for g in group
+                             if g not in done_g and g.get("ref_pct") is not None)
             silent = [g["probe"] for g in group if g.get("ref_pct") is None]
             if rates:
                 print(f"  {'':16s} {'':34s} reference use: n={len(rates):2d} "
                       f"median {statistics.median(rates):5.1f}%  range {rates[0]:.1f}-{rates[-1]:.1f}%"
                       f"   (§69.1 pre-clause band 4.9-8.3 %)")
+            if partial:
+                print(f"  {'':16s} {'':34s} + {len(partial)} run(s) STILL RUNNING, rate so far "
+                      f"{', '.join(f'{x:.1f}%' for x in partial)} — not in the median above")
             if silent:
                 print(f"  {'':16s} {'':34s} + {len(silent)} run(s) with NO run_probe call, so no "
                       f"rate: {', '.join(sorted(silent))}")
