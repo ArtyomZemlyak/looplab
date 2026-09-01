@@ -701,7 +701,17 @@ class ResearchCadenceMixin:
         # keeps every log already on disk and every memo from a pre-split prompt folding exactly as
         # it did — absence means "this memo did not draw the distinction", never "it has no
         # questions".
-        questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()] or directions
+        open_questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()]
+        questions = open_questions or directions
+        # WHICH MEMO FIELD `questions` CAME FROM, minted at the site that decides the
+        # fallback. The refusal line names it to the operator, and it named the wrong one:
+        # `_admissible_beliefs` has been handed `questions` since the 2026-08-27 split while
+        # its message still said "recommended direction(s)", so on every memo that filled
+        # `open_questions` the operator was pointed at the field carrying NONE of the refused
+        # items — and on the shape that field is empty, at a field with nothing in it at all.
+        # Derived from the same binding the fallback is, never re-derived downstream from
+        # `questions is directions`: one rule, one place.
+        question_channel = "open question" if open_questions else "recommended direction"
         # TWO CHANNELS, TWO GATES, and they were one until 2026-08-27. The legacy hint projection
         # is keyed on `recommended_directions` and the board registration on `questions`, but both
         # sat under `if directions:` — so a schema-valid memo that filled `open_questions` and left
@@ -734,7 +744,8 @@ class ResearchCadenceMixin:
         # exactly the signal the caller needs; swallowing there would discard a paid think in
         # silence. The boundary is "is the memo on disk", not "is this an append".
         try:
-            self._record_research_steering(memo, memo_d, directions, questions)
+            self._record_research_steering(memo, memo_d, directions, questions,
+                                           question_channel)
         except BudgetExceeded:
             raise
         except Exception as exc:  # noqa: BLE001 — see above: a durable memo is not undone by this
@@ -743,7 +754,7 @@ class ResearchCadenceMixin:
                          1 if directions else 0, len(questions or []), exc)
 
     def _record_research_steering(self, memo, memo_d: dict, directions: list,
-                                  questions: list) -> None:
+                                  questions: list, question_channel: str) -> None:
         """The hint + open-belief projections of an ALREADY-DURABLE memo. Split out of
         `_record_deep_research` so the boundary "the memo is on disk" is a place in the code and not
         a comment — the caller's one `try` covers exactly this and nothing above it."""
@@ -782,14 +793,15 @@ class ResearchCadenceMixin:
             # empty" outcome this cadence's own cap fix was written for. `admit_research_beliefs`
             # owns both the dedup universe and the cap, and it bounds its OUTPUT, so handing it the
             # whole list is what lets the cap mean what it says.
-            for direction in self._admissible_beliefs(questions):
+            for direction in self._admissible_beliefs(questions, channel=question_channel):
                 concepts = by_statement.get(str(direction).strip())
                 self.store.append(EV_HYPOTHESIS_ADDED, {
                     "statement": direction, "source": "deep_research",
                     "at_node": memo.at_node,
                     **({"concepts": concepts} if concepts else {})})
 
-    def _admissible_beliefs(self, directions: list) -> list[str]:
+    def _admissible_beliefs(self, directions: list, *,
+                            channel: str = "recommended direction") -> list[str]:
         """Read the open belief board and apply `admit_research_beliefs` to this memo's directions.
 
         THE WRITE-SIDE HALF of the duplicate fix, and deliberately a REFUSAL TO APPEND rather than a
@@ -884,11 +896,18 @@ class ResearchCadenceMixin:
             # `open_statements`, taken-up directions included. A board of three taken-up directions,
             # restated by a memo, logged "3 of 3 … (0 already open, cap 5)" — nothing open, room for
             # five, and all three refused, with nothing in the line able to explain it.
+            # AND THE NOUN NAMES A FIELD, so it is passed in rather than written here. This
+            # method is handed `questions` — `open_questions` when the memo filled it — and
+            # said "recommended direction(s)" about all of it, which on the ordinary memo
+            # shape points the operator at a list holding none of the refused items and
+            # often nothing at all. The DEFAULT is the fallback channel, so a memo that drew
+            # no distinction reads exactly as it always did.
             board_state = (f"{len(open_statements)} open, {len(unanswered)} of them unanswered"
                            if board_read else "unreadable")
-            _LOG.warning("deep research: %d of %d recommended direction(s) not registered as "
-                         "beliefs (board: %s, cap %d) — the memo body still carries every one",
-                         dropped, len(directions), board_state, DEEP_RESEARCH_OPEN_BELIEF_CAP)
+            _LOG.warning("deep research: %d of %d %s(s) not registered as beliefs "
+                         "(board: %s, cap %d) — the memo body still carries every one",
+                         dropped, len(directions), channel, board_state,
+                         DEEP_RESEARCH_OPEN_BELIEF_CAP)
         return admitted
 
     @staticmethod

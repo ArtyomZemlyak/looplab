@@ -49,7 +49,10 @@ from looplab.engine.research_cadence import (DEEP_RESEARCH_HINT_DIRECTIONS,
                                              DEEP_RESEARCH_OPEN_BELIEF_CAP,
                                              deep_research_hint_text)
 
-_LOGGER = "looplab.engine.research_cadence"
+# DERIVED, never typed. `logging.getLogger(<any name>)` mints a fresh logger inheriting root,
+# so a hard-coded string keeps answering after a rename while naming a logger nothing emits
+# through — and this repo moves modules (`looplab/__init__.py::_RENAMED` exists for that).
+_LOGGER = rc._LOG.name
 
 
 # --------------------------------------------------------------------------------------------
@@ -73,7 +76,8 @@ def _child_of(cid: str, parent: str) -> Card:
                     action_source="card_added", action_owner_count=1))
 
 
-def _emit(monkeypatch, caplog, cards, directions, *, fold_raises: bool = False):
+def _emit(monkeypatch, caplog, cards, directions, *, fold_raises: bool = False,
+          channel: str | None = None):
     """Run the real method and return `(admitted, [record, …])` captured at WARNING.
 
     Capturing AT WARNING is the mutation that matters: put the call back to `_LOG.info` and the
@@ -90,8 +94,9 @@ def _emit(monkeypatch, caplog, cards, directions, *, fold_raises: bool = False):
 
     monkeypatch.setattr(rc, "fold", _fold)
     engine = types.SimpleNamespace(store=types.SimpleNamespace(read_all=lambda: []))
+    kw = {} if channel is None else {"channel": channel}
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
-        admitted = rc.ResearchCadenceMixin._admissible_beliefs(engine, directions)
+        admitted = rc.ResearchCadenceMixin._admissible_beliefs(engine, directions, **kw)
     return admitted, [r for r in caplog.records if r.name == _LOGGER]
 
 
@@ -112,6 +117,28 @@ def test_a_dropped_direction_is_reported_at_a_level_that_SHOWS(monkeypatch, capl
     assert "not registered as beliefs" in msg
     assert f"cap {DEEP_RESEARCH_OPEN_BELIEF_CAP}" in msg, (
         "the operator cannot act on a refusal whose bound is not named")
+    assert "recommended direction(s)" in msg, (
+        "no channel passed is the FALLBACK channel — a memo that drew no distinction really\n"
+        "is offering `recommended_directions`, and that reading must not move")
+
+
+def test_the_line_names_the_memo_FIELD_the_refused_items_ARE_in(monkeypatch, caplog):
+    """The noun is not decoration — it is the only thing telling the operator where to look.
+
+    `_admissible_beliefs` has been handed `questions` since the 2026-08-27 channel split
+    (`open_questions` when the memo filled it, `recommended_directions` otherwise) while its
+    message said "recommended direction(s)" about both. On the ordinary memo shape that
+    points at the field holding NONE of the refused items — and `recommended_directions` is
+    optional and defaults to `[]`, so it routinely points at an empty list. Promoting the
+    line to WARNING is what made a wrong noun cost something: the operator now reads it.
+    """
+    board = [_direction(f"d{i}", f"direction {i}") for i in range(DEEP_RESEARCH_OPEN_BELIEF_CAP)]
+    msg = _message(monkeypatch, caplog, board, ["a genuinely new question"],
+                   channel="open question")
+    assert "open question(s)" in msg, msg
+    assert "recommended direction" not in msg, (
+        "the refused items came from `open_questions`; naming `recommended_directions` sends "
+        f"the operator to a field that carries none of them: {msg}")
 
 
 def test_the_line_does_NOT_claim_the_hint_still_carries_the_dropped_directions(monkeypatch, caplog):
@@ -199,7 +226,20 @@ def test_nothing_configures_logging_so_INFO_reaches_nobody():
     assert scanned > 1, "the package walk found nothing — this guard would pass on an empty tree"
     assert not configured, (
         f"logging is configured in {configured} — re-check whether INFO now reaches an operator")
-    assert logging.getLogger(_LOGGER).getEffectiveLevel() >= logging.WARNING
+    # THE CHAIN, not the effective level. `getEffectiveLevel()` was the wrong probe twice
+    # over: it reads a level pytest itself lowers (`--log-cli-level=INFO` sets root to INFO
+    # and turned this red for a debugging flag, with a message blaming the package), and it
+    # answers WARNING for a logger nobody emits through. What the premise actually needs is
+    # that nothing of OURS sets a level or attaches a handler, which is what leaves the
+    # record to the root default and to `lastResort` — and a handler is the half that
+    # decides delivery once one exists.
+    chain = [_LOGGER]
+    while "." in chain[-1]:
+        chain.append(chain[-1].rsplit(".", 1)[0])
+    for name in chain:
+        owned = logging.getLogger(name)
+        assert owned.level == logging.NOTSET, f"{name} sets its own level"
+        assert not owned.handlers, f"{name} has a handler of its own"
 
 
 # `logging` itself is in the set because `logging.info(...)` is the module-level shortcut onto the
