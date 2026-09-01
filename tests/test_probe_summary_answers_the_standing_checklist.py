@@ -662,3 +662,87 @@ def test_the_ledger_says_what_it_does_not_measure(tmp_path):
     out = _run(tmp_path)
     assert "PROTECTIVE value" in out
     assert "--no-unteachable-rules" in out
+
+
+def _instrument(root, name, *, args="", sha=""):
+    """The record a probe writes about the card it was given."""
+    p = root / "model-probes" / name
+    p.mkdir(parents=True, exist_ok=True)
+    lines = ["probe:          " + name]
+    if args or sha:
+        lines.append("card_args:      " + (args or "(none -- the shipped card)"))
+    if sha:
+        lines.append("card_sha256:    " + sha)
+    (p / "INSTRUMENT.txt").write_text("\n".join(lines) + "\n")
+
+
+def test_one_arm_is_one_row_even_when_the_record_gained_a_field_mid_arm(tmp_path):
+    """Keyed on the hash, four probes of ONE arm split into two rows on 2026-09-01.
+
+    remEEctl1 and remEEctl2 launched before `card_sha256` was added to INSTRUMENT.txt; remEEctl3 and
+    remEEctl4 launched after. Same flags, same card, four dollars -- and the summary reported them as
+    two separate arms because the INSTRUMENT gained a field between the second probe and the third.
+    An instrument that improves mid-arm must not partition the arm it is measuring. The flags are the
+    key; the hash is evidence about the key.
+    """
+    for i, sha in ((1, ""), (2, ""), (3, "d20e9c0e0b3eb26f"), (4, "d20e9c0e0b3eb26f")):
+        name = f"ctl{i}"
+        _mk_probe(tmp_path, name, "edge_expansion", nodes=[10.0 + i],
+                  costs_before=[0.1 * i], costs_after=[0.01])
+        _instrument(tmp_path, name, args="--no-unteachable-rules", sha=sha)
+    _mk_probe(tmp_path, "shipped1", "edge_expansion", nodes=[9.0],
+              costs_before=[0.05], costs_after=[0.01])
+    out = _run(tmp_path)
+    block = out.split("spend before the FIRST evaluated node")[1].split("the champion rule")[0]
+    rows = [ln for ln in block.splitlines() if "--no-unteachable-rules" in ln]
+    assert len(rows) == 1, "the arm is split across %d rows:\n%s" % (len(rows), block)
+    assert "n= 4" in rows[0], rows[0]
+
+
+def test_the_same_flags_over_two_different_card_TEXTS_is_reported(tmp_path):
+    """The flag column cannot see a reworded clause; the hash can, and must say so.
+
+    Pooling two card texts under one set of flags is the confound `card_sha256` exists to catch --
+    the same failure as the split above, wearing the other hat.
+    """
+    for i, sha in ((1, "aaaaaaaaaaaaaaaa"), (2, "bbbbbbbbbbbbbbbb")):
+        name = f"ctl{i}"
+        _mk_probe(tmp_path, name, "edge_expansion", nodes=[10.0],
+                  costs_before=[0.1], costs_after=[0.01])
+        _instrument(tmp_path, name, args="--no-unteachable-rules", sha=sha)
+    _mk_probe(tmp_path, "shipped1", "edge_expansion", nodes=[9.0],
+              costs_before=[0.05], costs_after=[0.01])
+    out = _run(tmp_path)
+    assert "pools 2 DIFFERENT card texts" in out, out
+    assert "aaaaaaaaaaaa" in out and "bbbbbbbbbbbb" in out, out
+
+
+def test_a_run_with_no_node_is_NAMED_and_not_silently_dropped(tmp_path):
+    """Spend-before-first-node can only be computed for a run that reached one, so the arm that
+    fails to evaluate leaves the table instead of landing at the far end of it. That censors the
+    comparison toward whichever arm evaluates least, which is the outcome being measured."""
+    _mk_probe(tmp_path, "ctl1", "edge_expansion", nodes=[10.0], costs_before=[0.5], costs_after=[0.01])
+    _instrument(tmp_path, "ctl1", args="--no-unteachable-rules")
+    _mk_probe(tmp_path, "ctl2", "edge_expansion", nodes=[], costs_before=[0.9], costs_after=[])
+    _instrument(tmp_path, "ctl2", args="--no-unteachable-rules")
+    _mk_probe(tmp_path, "shipped1", "edge_expansion", nodes=[9.0], costs_before=[0.05], costs_after=[0.01])
+    out = _run(tmp_path)
+    assert "ctl2" in out.split("spend before the FIRST")[1].split("the champion rule")[0], out
+    assert "censoring this row" in out, out
+
+
+def test_before_usd_is_absolute_and_does_not_move_as_the_run_continues(tmp_path):
+    """`before_pct` is 100 % at the first node and shrinks all run; the dollars do not. An arm
+    readable in flight needs the figure that is fixed once the first node lands."""
+    _mk_probe(tmp_path, "early", "edge_expansion", nodes=[5.0],
+              costs_before=[0.20], costs_after=[0.80])
+    _mk_probe(tmp_path, "young", "edge_expansion", nodes=[5.0],
+              costs_before=[0.20], costs_after=[])
+    _instrument(tmp_path, "early", args="--no-unteachable-rules")
+    _instrument(tmp_path, "young")
+    out = _run(tmp_path)
+    block = out.split("spend before the FIRST")[1].split("the champion rule")[0]
+    assert block.count("$0.2000") >= 2, (
+        "the same $0.20 before the first node must read the same for a finished run and a young "
+        "one; it does not:\n" + block
+    )

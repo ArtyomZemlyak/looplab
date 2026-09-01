@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sys
+import statistics
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -160,6 +161,37 @@ def _why_no_test(probe_dir: Path) -> str:
     return ""
 
 
+def _card_of(probe: str, roots) -> tuple:
+    """What the probe RECORDED about the card it was given, or `unrecorded`.
+
+    Never inferred. A probe from before INSTRUMENT.txt existed cannot be shown to have run today's
+    default card, and quietly pooling it with the ones that did is how two arms become one number.
+    """
+    for root in roots:
+        rec = Path(root) / "model-probes" / probe / "INSTRUMENT.txt"
+        if not rec.exists():
+            rec = Path(root) / probe / "INSTRUMENT.txt"
+        try:
+            text = rec.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        args = sha = ""
+        for line in text.splitlines():
+            if line.startswith("card_args:"):
+                args = line.split(":", 1)[1].strip()
+            elif line.startswith("card_sha256:"):
+                sha = line.split(":", 1)[1].strip()
+        if args or sha:
+            # THE FLAGS ARE THE GROUPING KEY, the hash is evidence about it. Keyed on the hash,
+            # remEEctl1/2 and remEEctl3/4 landed in DIFFERENT rows on 2026-09-01 -- one arm, four
+            # dollars, split in half because the record gained `card_sha256` between the second
+            # probe and the third. An instrument that improves mid-arm must not silently partition
+            # the arm it is measuring; that is the failure `card_sha256` was added to catch, wearing
+            # the other hat.
+            return (args or "(shipped card)", sha[:12])
+    return ("unrecorded (pre-INSTRUMENT.txt)", "")
+
+
 def summarise(run_dir: Path) -> dict | None:
     events = _load(run_dir / "events.jsonl")
     try:
@@ -275,7 +307,16 @@ def summarise(run_dir: Path) -> dict | None:
         "spent": total,
         "test": _test_score(probe_dir),
         "nodes": [round(float((r.get("data") or {}).get("metric") or 0), 4) for r in nodes],
+        "before_usd": before,
+        # The ABSOLUTE figure beside the percentage, because they answer different questions and
+        # only one of them is stable. `before_pct` moves for the whole life of a run: the same
+        # $0.24 is 100 % at the first node and 24 % at the last. `before_usd` is fixed the moment
+        # the first node lands, which is what makes an arm readable while it is still in flight.
         "before_pct": (100 * before / total) if total else 0.0,
+        # Kept in the table rather than dropped: a run that NEVER evaluates is the outcome the
+        # "measure early" clause is about, and excluding it censors the comparison in the direction
+        # that flatters whichever arm fails to evaluate. See docs/56 §87.
+        "reached_a_node": bool(nodes),
         "after_pct": (100 * after / total) if total else 0.0,
         "eval_train": eval_train,
         "dev_commands": len(dev),
@@ -382,6 +423,42 @@ def main(argv: list[str]) -> int:
     # run is a statistic that will be quoted stale; this prints it from the corpus every time.
     # Ties (last node WAS the best) are counted and shown, because the sign test's denominator is
     # the non-ties and a reader who cannot see the ties cannot check the p.
+    # SPEND BEFORE THE FIRST EVALUATED NODE, by card. The `KEEP_BEST` clause ends "Measure
+    # early, measure often", so this is the quantity it names, and the arm that removes it is the
+    # only way to find out whether saying so changes anything. Grouped by what the probe RECORDED
+    # about its card (INSTRUMENT.txt); probes older than that record are pooled as "unrecorded",
+    # which is honest about what can and cannot be compared rather than assuming they match the
+    # default of today.
+    by_card, hashes = {}, {}
+    for s2 in seen.values():
+        args, sha = _card_of(s2["probe"], roots)
+        key = (s2["task"], args)
+        by_card.setdefault(key, []).append(s2)
+        if sha:
+            hashes.setdefault(key, {}).setdefault(sha, []).append(s2["probe"])
+    if len(by_card) > 1:
+        print("\nspend before the FIRST evaluated node, by card "
+              "(the quantity KEEP_BEST's 'measure early' names):")
+        for (task, card), group in sorted(by_card.items()):
+            got = sorted(g["before_usd"] for g in group if g["reached_a_node"])
+            never = [g["probe"] for g in group if not g["reached_a_node"]]
+            med = f"${statistics.median(got):.4f}" if got else "—"
+            rng = f"${got[0]:.4f}-${got[-1]:.4f}" if got else "—"
+            print(f"  {task:16s} {card:34s} n={len(got):2d} median {med:>9s}  range {rng}")
+            seen_hashes = hashes.get((task, card), {})
+            if len(seen_hashes) > 1:
+                # Same flags, DIFFERENT card text: the flags did not change but the card did, so
+                # this row pools runs that were not given the same thing. Loud, because it is
+                # exactly the confound a flag column cannot see.
+                print(f"  {'':16s} {'':34s} ! this row pools {len(seen_hashes)} DIFFERENT card "
+                      f"texts under one set of flags: "
+                      + "; ".join(f"{h}={','.join(sorted(v))}" for h, v in sorted(seen_hashes.items())))
+            if never:
+                # NAMED, not silently absent: "has not evaluated yet" and "never will" look
+                # identical here, and both would otherwise leave the arm looking thriftier.
+                print(f"  {'':16s} {'':34s} + {len(never)} run(s) with NO node yet, excluded "
+                      f"and censoring this row: {', '.join(sorted(never))}")
+
     pairs = [(s["probe"], s["task"], max(s["nodes"]), s["nodes"][-1])
              for s in seen.values() if len(s["nodes"]) >= 2]
     if pairs:
