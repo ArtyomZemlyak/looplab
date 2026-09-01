@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Iterable, Optional
+from typing import Iterable, NamedTuple, Optional
 
 from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
@@ -76,9 +76,53 @@ def normalized_belief_key(statement) -> str:
     return " ".join(str(statement or "").split()).casefold()
 
 
-def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[str], *,
-                           cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP,
-                           counted: "Iterable[str] | None" = None) -> list[str]:
+class BeliefAdmission(NamedTuple):
+    """WHY each of a memo's directions did or did not become a board row.
+
+    `admitted` is the whole of what `admit_research_beliefs` has always answered; the four counts
+    beside it exist because the ONE number the caller had was their SUM, reported to the operator as
+    "not registered as beliefs" and then explained by the board and the cap. That explanation is
+    true of two of the four and false of the other two, which are facts about the MEMO and about
+    nothing else: a memo listing the same question twice, or carrying one blank entry, raised an
+    operator-facing refusal for a board that had refused nothing and a cap that never bound. The
+    over-statement scales with how repetitive the model is, which is the thing the number exists to
+    help diagnose.
+
+      `blank`     an entry that was never a statement (empty / whitespace / None).
+      `repeated`  the memo restating ITSELF — collapsed against an earlier entry of the same memo.
+      `restated`  already an open belief on the board: rule 1, the duplicate the board refuses.
+      `capped`    genuinely new, and the board had no room: rule 2.
+    """
+    admitted: list
+    blank: int
+    repeated: int
+    restated: int
+    capped: int
+
+    @property
+    def dropped(self) -> int:
+        """Everything that did not become a row — the historical single number."""
+        return self.blank + self.repeated + self.restated + self.capped
+
+    @property
+    def refused(self) -> int:
+        """The drops the BOARD is answerable for, i.e. the ones a cap/dedup account explains."""
+        return self.restated + self.capped
+
+    def reasons(self) -> str:
+        """The non-zero causes, in the operator's words. Empty string when nothing was dropped.
+
+        Only the causes that FIRED are named: a line that always lists four numbers, three of them
+        zero, is the wall of text every bounded-output rule in this repo exists to refuse.
+        """
+        named = ((self.restated, "already on the board"), (self.capped, "no room"),
+                 (self.repeated, "the memo repeated itself"), (self.blank, "blank"))
+        return ", ".join(f"{n} {why}" for n, why in named if n)
+
+
+def classify_research_beliefs(open_statements: Iterable[str], directions: Iterable[str], *,
+                              cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP,
+                              counted: "Iterable[str] | None" = None) -> BeliefAdmission:
     """Which of a memo's directions may become OPEN BELIEFS, given the board already open.
 
     PURE and stateable on purpose (CLAUDE.md tier 2): the rule used to be "all five, every memo,
@@ -115,8 +159,7 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
     is a bounded PUSH, not the record, and reading it as the record is how "nothing is lost" gets
     believed by whoever next decides a drop is safe. The memo body genuinely is the record, which is
     why the corrected sentence names it alone.
-    """
-    # ONE spelling of "usable statements, keyed", used for both populations. Written out twice, the
+    """    # ONE spelling of "usable statements, keyed", used for both populations. Written out twice, the
     # dedup universe and the cap-occupancy set are keyed by two expressions that a later change to
     # what counts as a usable statement (a length bound inside `normalized_belief_key`, blank
     # detection moving off `str(s or "").strip()`) can update independently — which is the two
@@ -124,22 +167,51 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
     def _keys(statements) -> set:
         return {normalized_belief_key(s) for s in statements if str(s or "").strip()}
 
-    seen = _keys(open_statements)
-    occupied = set(seen) if counted is None else _keys(counted)
+    board = _keys(open_statements)
+    occupied = set(board) if counted is None else _keys(counted)
+    # `witnessed` is the CLASSIFIER's memory and is deliberately not `seen`: the admission rule
+    # remembers a key only once it holds a row, so it cannot tell the memo's own repeat of a
+    # REFUSED direction from a first sighting. Nothing here reaches the admission decision — a key
+    # is witnessed after the two rules that could still admit it have both been asked.
+    witnessed: set = set()
     admitted: list[str] = []
+    blank = repeated = restated = capped = 0
     for direction in directions:
         text = str(direction or "").strip()
         if not text:
+            blank += 1
             continue
         key = normalized_belief_key(text)
-        if key in seen:
+        if key in board:
+            restated += 1
             continue
+        if key in witnessed:       # never registered twice, whether or not it holds a slot
+            repeated += 1
+            continue
+        witnessed.add(key)
         if len(occupied) >= max(0, int(cap)):
-            break
-        seen.add(key)          # never registered twice, whether or not it holds a slot
-        occupied.add(key)      # …and a newly admitted direction is unanswered, so it holds one
+            # NOT a `break`, and the admitted list is identical either way: `occupied` only ever
+            # grows, so once the cap binds nothing further can be admitted. What the `break` cost
+            # was the CLASSIFICATION of the tail — every remaining entry, blank and repeat alike,
+            # went unexamined and was charged to the cap by subtraction.
+            capped += 1
+            continue
+        occupied.add(key)      # …a newly admitted direction is unanswered, so it holds one
         admitted.append(text)
-    return admitted
+    return BeliefAdmission(admitted, blank, repeated, restated, capped)
+
+
+def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[str], *,
+                           cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP,
+                           counted: "Iterable[str] | None" = None) -> list[str]:
+    """Which of a memo's directions may become OPEN BELIEFS — the admitted list alone.
+
+    The rule itself lives in `classify_research_beliefs`, which answers the same question and also
+    says WHY each of the others was dropped. This wrapper is what every caller that only needs the
+    list keeps calling, unchanged; a caller that reports a refusal to a human wants the classifier,
+    because the four causes do not have one explanation between them.
+    """
+    return classify_research_beliefs(open_statements, directions, cap=cap, counted=counted).admitted
 
 
 # HOW MANY DIRECTIONS THE PUSHED HINT CARRIES — a bound on a PROMPT, not on the record.
@@ -854,31 +926,40 @@ class ResearchCadenceMixin:
             # card for a question already under way, and since a direction never accrues evidence the
             # open population then grew unbounded past the five-row prompt window.
             taken_up = {c.parent_card_id for c in board.cards.values() if c.parent_card_id}
-            beliefs = [c for c in board.open_research_beliefs() if is_pure_belief(c)]
+            # FILTERED BEFORE THE COLLAPSE — see `open_research_beliefs`' own docstring. As a
+            # list comprehension AFTER it, a belief whose first-elected card owned an action
+            # was not narrowed but DELETED: its pure sibling never became the representative,
+            # so the question left the dedup universe and a later memo restating it opened a
+            # second row for work already under way.
+            beliefs = board.open_research_beliefs(only=is_pure_belief)
             open_statements = [c.seed_statement for c in beliefs]
             unanswered = [c.seed_statement for c in beliefs if c.id not in taken_up]
         except Exception:  # noqa: BLE001 — see the docstring: degrade to the pre-bound behaviour
             board_read = False
             open_statements = unanswered = []
-        admitted = admit_research_beliefs(open_statements, directions, counted=unanswered)
-        dropped = len(directions) - len(admitted)
-        if dropped:
+        verdict = classify_research_beliefs(open_statements, directions, counted=unanswered)
+        if verdict.dropped:
             # Not silent: the operator reading the log sees a memo whose directions did not all
             # become cards, and the MEMO BODY still carries every one of them.
             #
             # WARNING, NOT INFO.
-            # CLAIM[looplab-configures-no-logging] nothing in `looplab/` configures logging, so the
-            # root logger keeps its default WARNING and no handler of ours exists — `lastResort` is
-            # what puts a record on stderr, which `serve/engine_proc.py` captures into
-            # `engine.stderr.log`. An INFO record therefore reaches nobody, on every run.
-            # decided:absent:basicConfig(@looplab
+            # CLAIM[cli-logs-at-warning-by-default] the CLI configures logging once, at its entry
+            # point, and the level it installs absent `LOOPLAB_LOG_LEVEL` is WARNING — so an INFO
+            # record still reaches nobody on a run nobody asked to be verbose, and a run started
+            # from the UI is no different (`serve/engine_proc.py` spawns `python -m looplab.cli`).
+            # decided:line:DEFAULT_LOG_LEVEL&&WARNING@looplab/cli/__init__.py
             #
-            # This was the only `_LOG.info` in a package that otherwise logs at one level, i.e. the
-            # one operator-facing line that could never reach an operator: it claimed "not silent"
-            # and was silent on every run ever recorded. No count is written down here —
-            # `tests/test_dropped_directions_reach_the_operator.py` re-derives the whole population
-            # from the tree, because a hand-copied total is the drift CLAUDE.md's claim rule and
-            # its own "the count comes from the parser, never from a person" both exist to stop.
+            # THAT PIN USED TO SAY "nothing in `looplab/` configures logging", which was true and was
+            # the defect rather than the justification: with no configuration anywhere, the level of
+            # every site in the package was Python's default rather than anyone's choice, `lastResort`
+            # (fixed at WARNING) was what put a record on stderr, and this line — the one telling an
+            # operator a paid memo's directions were refused, under a comment reading "Not silent" —
+            # was written at INFO and was silent on every run ever recorded. The general fix landed in
+            # `cli/__init__.py::_configure_cli_logging`; what keeps THIS line correct is no longer the
+            # absence of a knob but the DEFAULT of the one that now exists. No count is written down
+            # here — `tests/test_dropped_directions_reach_the_operator.py` re-derives the whole
+            # population from the tree, because a hand-copied total is the drift CLAUDE.md's claim
+            # rule and its own "the count comes from the parser, never from a person" both stop.
             #
             # THE HINT IS NOT THE RECORD, and this line said it was until the level change made
             # anyone read it. `deep_research_hint_text` carries the FIRST
@@ -904,11 +985,39 @@ class ResearchCadenceMixin:
             # no distinction reads exactly as it always did.
             board_state = (f"{len(open_statements)} open, {len(unanswered)} of them unanswered"
                            if board_read else "unreadable")
-            _LOG.warning("deep research: %d of %d %s(s) not registered as beliefs "
-                         "(board: %s, cap %d) — the memo body still carries every one",
-                         dropped, len(directions), channel, board_state,
-                         DEEP_RESEARCH_OPEN_BELIEF_CAP)
-        return admitted
+            # AND WHY EACH ONE WAS DROPPED, because the four causes do not share an
+            # explanation. The single number this used to print was their SUM, offered to the
+            # operator with the board and the cap as the account — true of `restated` and
+            # `capped`, and false of the two that are facts about the MEMO. A memo listing one
+            # question twice logged "2 of 4 … (board: 0 open, cap 5)": literally true, an
+            # alarm about a provably empty board, and unexplainable by any number in the line.
+            said = ("deep research: %d of %d %s(s) not registered as beliefs (%s; board: %s, "
+                    "cap %d) — the memo body still carries every one" % (
+                        verdict.dropped, len(directions), channel, verdict.reasons(),
+                        board_state, DEEP_RESEARCH_OPEN_BELIEF_CAP))
+            # ONCE PER DISTINCT SENTENCE, the `core/tracing.py::_untraced_seen` bound applied
+            # to content rather than to a call site. Research repeats on a timer
+            # (`concurrent_research_interval_s`), and once the board fills every later memo is
+            # refused whole — so the unbounded form prints one WARNING per tick, for the life
+            # of the run, into the stream carrying the package's genuine degradations (evals
+            # running UNFENCED, a re-executed setup). A key on the rendered line and not on
+            # the site is what keeps that from hiding anything: any number that moves — a
+            # different count, a different cause, a board that changed, a board that became
+            # unreadable — is a different sentence and speaks. Per-ENGINE, never module-level:
+            # one engine is one run, and a process-wide memo would let one run silence another
+            # (and would make the suite order-dependent, since tests share a process).
+            # It needs no ceiling and that is a fact about the CALLER, not an optimism: this
+            # method runs once per RECORDED MEMO, and a run's memos are bounded by
+            # `concurrent_research_max_calls` — so the set holds at most one short string per
+            # memo, whatever the model puts in one.
+            already = getattr(self, "_belief_refusal_said", None)
+            if already is None:
+                already = set()
+                setattr(self, "_belief_refusal_said", already)
+            if said not in already:
+                already.add(said)
+                _LOG.warning("%s", said)
+        return verdict.admitted
 
     @staticmethod
     def _card_enrichment_subject(state: RunState, node_id: int):

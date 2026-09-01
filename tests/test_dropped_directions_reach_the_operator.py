@@ -1,18 +1,22 @@
 """The line that says "not silent" is not silent — and what it says is true.
 
-Nothing in this package configures logging: no `basicConfig`, no `dictConfig`, no `setLevel`
-anywhere in `looplab/`, so Python's default applies, the root logger sits at WARNING with no
-handlers, and `logging.lastResort` is what puts a record on stderr (which `serve/engine_proc.py`
-captures into `engine.stderr.log`). An `_LOG.info(...)` therefore reaches nobody, on every run —
-and the one line telling the operator that a paid memo's recommended directions did not all become
-board rows was written at exactly that level, under a comment reading "Not silent".
+`looplab/cli/__init__.py::_configure_cli_logging` installs WARNING by default (overridable with
+`LOOPLAB_LOG_LEVEL`, and a UI-launched engine comes through the same entry point), so an
+`_LOG.info(...)` still reaches nobody on a run nobody asked to be verbose — and the one line telling
+the operator that a paid memo's directions did not all become board rows was written at exactly that
+level, under a comment reading "Not silent". THAT ENTRY POINT DID NOT EXIST when this file was first
+written: nothing in `looplab/` configured logging at all, so `logging.lastResort` — fixed at WARNING,
+writing the bare message with no level or logger on it — was what put a record on stderr, and the
+package had exactly one usable level. The first cut of this file pinned that absence as an
+invariant, which made the general fix cost deleting a test; the guards at the bottom hold the fix
+instead: logging is configured ONCE, at the entry point, and its default is still WARNING.
 
 DRIVEN, NOT PINNED. CLAUDE.md's guard ladder puts "drive the property" first and "AST, never
 substrings" last, and the first cut of this file sat below the bottom rung: it read
 `research_cadence.py` as TEXT and asserted a `_LOG.<level>(` spelling near a message literal. That
-is not the property — the property is that a record ARRIVES at a level an unconfigured root logger
-keeps — and reading source instead of driving it cost the two defects below, because nobody who
-only greps for `_LOG.warning(` ever reads the sentence being emitted:
+is not the property — the property is that a record ARRIVES at a level the shipped configuration
+keeps — and reading source instead of driving it cost every defect below, because nobody who only
+greps for `_LOG.warning(` ever reads the sentence being emitted:
 
   * the line told the operator "the memo and its hint still carry them", which
     `admit_research_beliefs`' own docstring had already retracted in writing —
@@ -20,26 +24,30 @@ only greps for `_LOG.warning(` ever reads the sentence being emitted:
     a memo of ten directions the hint half is simply false;
   * it reported `len(unanswered)` as "%d already open", which is the CAP-OCCUPANCY subset and not
     the dedup universe, so a board of three taken-up directions restated by a memo logged
-    "3 of 3 … (0 already open, cap 5)" — nothing open, room for five, all three refused.
+    "3 of 3 … (0 already open, cap 5)" — nothing open, room for five, all three refused;
+  * it called them "recommended direction(s)" while being handed `questions`, i.e. `open_questions`
+    whenever the memo filled it — pointing the operator at a field carrying none of the refused
+    items, and one that is optional and defaults to `[]`;
+  * it reported ONE number, the sum, and then offered the board and the cap to explain it — true of
+    two of the four causes and false of the two that are facts about the MEMO, so a memo listing one
+    question twice raised an operator-facing alarm about a provably empty board.
 
-So every assertion here is made on a CAPTURED RECORD. No comment can satisfy any of it, and the
-message's content is checked where an operator would read it. The house precedent is
-`test_memo_keeps_what_validated.py::test_the_REFUSAL_is_recorded_and_not_silent`, whose own
+So every assertion here is made on a CAPTURED RECORD or on a real subprocess. No comment can satisfy
+any of it, and the message's content is checked where an operator would read it. The house precedent
+is `test_memo_keeps_what_validated.py::test_the_REFUSAL_is_recorded_and_not_silent`, whose own
 docstring cites `_admissible_beliefs` as the pattern to copy.
 
-The two package-wide sweeps that remain go through `tests/_source_scan.py::iter_sources` /
-`iter_trees` rather than a private `rglob`, which is not tidiness: the shared walk decodes
-`utf-8-sig` with `errors="replace"` and skips `.ipynb_checkpoints`, and this file's first cut did
-neither — so a stale Jupyter autosave holding the PRE-FIX `_LOG.info(` would have failed the INFO
-bound with no source change able to make it pass.
+The package-wide sweep goes through `tests/_source_scan.py::iter_sources` rather than a private
+`rglob`, which is not tidiness: the shared walk decodes `utf-8-sig` with `errors="replace"` and skips
+`.ipynb_checkpoints`, and this file's first cut did neither — so a stale Jupyter autosave holding the
+PRE-FIX `_LOG.info(` would have failed the old INFO bound with no source change able to make it pass.
 """
 from __future__ import annotations
 
-import ast
 import logging
 import types
 
-from _source_scan import PKG, iter_sources, iter_trees
+from _source_scan import PKG, iter_sources
 
 from looplab.core.claimpin import text_without_markers
 
@@ -77,7 +85,7 @@ def _child_of(cid: str, parent: str) -> Card:
 
 
 def _emit(monkeypatch, caplog, cards, directions, *, fold_raises: bool = False,
-          channel: str | None = None):
+          channel: str | None = None, engine=None):
     """Run the real method and return `(admitted, [record, …])` captured at WARNING.
 
     Capturing AT WARNING is the mutation that matters: put the call back to `_LOG.info` and the
@@ -93,7 +101,8 @@ def _emit(monkeypatch, caplog, cards, directions, *, fold_raises: bool = False,
         return state
 
     monkeypatch.setattr(rc, "fold", _fold)
-    engine = types.SimpleNamespace(store=types.SimpleNamespace(read_all=lambda: []))
+    engine = engine or types.SimpleNamespace(
+        store=types.SimpleNamespace(read_all=lambda: []))
     kw = {} if channel is None else {"channel": channel}
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
         admitted = rc.ResearchCadenceMixin._admissible_beliefs(engine, directions, **kw)
@@ -188,33 +197,94 @@ def test_a_board_that_could_not_be_READ_is_unknown_and_not_empty(monkeypatch, ca
     assert "0 open" not in msg
 
 
+def test_the_line_says_WHY_each_direction_was_dropped(monkeypatch, caplog):
+    """One number was four causes, and the account offered — the board and the cap — is true of two.
+
+    MUTATION: report the sum alone, as this did, and a memo that merely repeated itself raises an
+    operator-facing alarm naming a board the same line proves is empty.
+    """
+    msg = _message(monkeypatch, caplog, [], ["mine harder negatives", "MINE HARDER NEGATIVES"])
+    assert "the memo repeated itself" in msg, msg
+    assert "already on the board" not in msg and "no room" not in msg, (
+        f"the board refused nothing and the cap never bound; naming them is the false alarm: {msg}")
+    assert "0 open" in msg, "the line still has to say what the board held"
+
+
+def test_the_board_and_the_cap_are_named_when_they_ARE_the_reason(monkeypatch, caplog):
+    """The complement, so the test above cannot be satisfied by dropping the causes altogether."""
+    board = [_direction(f"d{i}", f"direction {i}") for i in range(DEEP_RESEARCH_OPEN_BELIEF_CAP)]
+    msg = _message(monkeypatch, caplog, board, ["direction 0", "a genuinely new question"])
+    assert "already on the board" in msg and "no room" in msg, msg
+
+
+def test_the_SAME_sentence_is_not_repeated_for_the_life_of_the_run(monkeypatch, caplog):
+    """Research repeats on a timer, and once the board fills every later memo is refused whole — so
+    the unbounded form prints one WARNING per tick into the stream carrying the package's genuine
+    degradations. Bounded on the rendered CONTENT and not on the call site, which is what keeps it
+    from hiding anything: any number that moves is a different sentence and speaks."""
+    board = [_direction(f"d{i}", f"direction {i}") for i in range(DEEP_RESEARCH_OPEN_BELIEF_CAP)]
+    engine = types.SimpleNamespace(store=types.SimpleNamespace(read_all=lambda: []))
+    said = []
+    for _ in range(3):
+        caplog.clear()
+        _, records = _emit(monkeypatch, caplog, board, ["a sixth question"], engine=engine)
+        said.append([r.getMessage() for r in records])
+    assert len(said[0]) == 1 and said[1] == [] and said[2] == [], (
+        f"the identical refusal was printed on every tick: {said}")
+
+    # …and a refusal that reads DIFFERENTLY speaks again, which is the whole difference between
+    # this and a once-per-site bound. Same board, a memo that now also restates one of its rows:
+    # a different count and a different cause, so a different sentence.
+    caplog.clear()
+    _, records = _emit(monkeypatch, caplog, board, ["a sixth question", "direction 0"],
+                       engine=engine)
+    assert len(records) == 1, "a changed refusal reported nothing — the bound is hiding a change"
+    assert "already on the board" in records[0].getMessage()
+
+
 # --------------------------------------------------------------------------------------------
-# The premise, and the bound that keeps it true. Both sweep the package through the SHARED walk.
+# The premise — which MOVED, and the move is the general fix. There used to be no logging
+# configuration anywhere in `looplab/`, so the level of every site in the package was Python's
+# default rather than anyone's choice: `lastResort` (fixed at WARNING, and writing the bare message
+# with no level or logger on it) was what put a record on stderr, INFO reached nobody on any run,
+# and an author with a genuinely informational line had to inflate it to WARNING — level inflation
+# in the one stream carrying real degradations — or bury it where nothing could show it. The first
+# cut of this file pinned that absence as an invariant, which made the general fix cost deleting a
+# test. `cli/__init__.py::_configure_cli_logging` is the fix; what these two guards hold now is that
+# it stays ONE decision and that its default did not quietly change under the line above.
 # --------------------------------------------------------------------------------------------
 
-# Call-shaped on purpose: what must not come back is the TEXT of a logging configuration, and a
+# Call-shaped on purpose: what must not spread is the TEXT of a logging configuration, and a
 # negative pin is the one place CLAUDE.md keeps substrings ("a commented-out copy is as much of a
 # drift risk as a live one"). The `(` and `=` are what keep this file's own prose — and the
 # `research_cadence.py` comment naming these very spellings — from falsifying it.
 #
 # Read through `claimpin.text_without_markers`, which is not decoration: `research_cadence.py`
-# carries the same premise as a pinned claim, and that pin's own deciding clause spells one of
-# these very literals inside the file this scans. Without the shared marker-stripping rule the pin
-# and this guard falsify each other. One implementation, for exactly the reason its docstring
-# gives — "so a marker can neither satisfy nor falsify itself, in EITHER index".
+# carries the level premise as a pinned claim, and that pin's deciding clause spells one of these
+# literals. Without the shared marker-stripping rule the pin and this guard falsify each other. One
+# implementation, for exactly the reason its docstring gives — "so a marker can neither satisfy nor
+# falsify itself, in EITHER index".
 _CONFIGURES = ("basicConfig(", "dictConfig(", "fileConfig(", ".setLevel(", "log_level=")
 
-# The ONE site in the package that hands a level to a logging framework, named so this guard SEES
-# it instead of missing it. `uvicorn.run(..., log_level="info")` runs uvicorn's default
-# LOGGING_CONFIG, which configures the three `uvicorn*` loggers and their level; the ROOT logger is
-# left alone and `disable_existing_loggers` is False, so a `looplab.*` record still reaches no
-# handler and still inherits the default WARNING. If that ever grows a root handler, this is the
-# exemption to delete — and the level choice below can then be revisited on purpose.
+# THE ONE SITE ALLOWED TO CONFIGURE LOGGING, and it is required to — see the non-vacuity assertion.
+_ENTRY_POINT = "cli/__init__.py"
+
+# The one OTHER site that hands a level to a logging framework, named so this guard SEES it instead
+# of missing it. `uvicorn.run(..., log_level="info")` runs uvicorn's default LOGGING_CONFIG, which
+# configures the three `uvicorn*` loggers and their level; the ROOT logger is left alone and
+# `disable_existing_loggers` is False, so it neither grants nor withholds anything from a `looplab.*`
+# record. If it ever grows a root handler, this is the exemption to delete.
 _EXEMPT = {"serve/server.py"}
 
 
-def test_nothing_configures_logging_so_INFO_reaches_nobody():
-    """The premise, asserted rather than assumed."""
+def test_logging_is_configured_ONCE_and_at_the_ENTRY_POINT():
+    """One decision, not one per call site — which is the whole content of the general fix.
+
+    Thirty-nine warning sites were reachable and every other level was not, because nobody had
+    decided anything; the remedy is a single `basicConfig` where the CLI is invoked, not a level
+    argued afresh at each site. A second configuring site anywhere in the package is that decision
+    being taken twice, and the two will disagree.
+    """
     configured, scanned = {}, 0
     for path, _text in iter_sources():
         scanned += 1
@@ -224,15 +294,18 @@ def test_nothing_configures_logging_so_INFO_reaches_nobody():
         if hits and rel not in _EXEMPT:
             configured[rel] = sorted(hits)
     assert scanned > 1, "the package walk found nothing — this guard would pass on an empty tree"
-    assert not configured, (
-        f"logging is configured in {configured} — re-check whether INFO now reaches an operator")
-    # THE CHAIN, not the effective level. `getEffectiveLevel()` was the wrong probe twice
-    # over: it reads a level pytest itself lowers (`--log-cli-level=INFO` sets root to INFO
-    # and turned this red for a debugging flag, with a message blaming the package), and it
-    # answers WARNING for a logger nobody emits through. What the premise actually needs is
-    # that nothing of OURS sets a level or attaches a handler, which is what leaves the
-    # record to the root default and to `lastResort` — and a handler is the half that
-    # decides delivery once one exists.
+    assert _ENTRY_POINT in configured, (
+        f"{_ENTRY_POINT} no longer configures logging — every level in the package is back to being "
+        "Python's default, and an INFO line reaches nobody again")
+    assert set(configured) == {_ENTRY_POINT}, (
+        f"logging is configured outside the entry point: {configured} — one decision, one place")
+
+    # …and nothing of OURS overrides it. `getEffectiveLevel()` was the wrong probe twice over: it
+    # reads a level pytest itself lowers (`--log-cli-level=INFO` sets root to INFO and turned this
+    # red for a debugging flag, with a message blaming the package), and it answers WARNING for a
+    # logger nobody emits through. What the premise needs is that no logger on our chain sets a
+    # level or attaches a handler, which is what leaves every record to the ONE decision above — and
+    # a handler is the half that decides delivery once one exists.
     chain = [_LOGGER]
     while "." in chain[-1]:
         chain.append(chain[-1].rsplit(".", 1)[0])
@@ -242,42 +315,78 @@ def test_nothing_configures_logging_so_INFO_reaches_nobody():
         assert not owned.handlers, f"{name} has a handler of its own"
 
 
-# `logging` itself is in the set because `logging.info(...)` is the module-level shortcut onto the
-# ROOT logger — the same invisible line under a different spelling. Matching on the LAST dotted
-# segment is what keeps `catalog.info(...)` out of it.
-_LOGGER_RECEIVERS = frozenset({"_log", "log", "logger", "_logger", "logging"})
+# DRIVEN IN A SUBPROCESS, THROUGH THE REAL ENTRY POINT. Two reasons, and the second is what a
+# mutation pass found: logging is process-global, so configuring it inside the pytest process would
+# install a handler on the session's root logger and change what every later test sees — and a probe
+# that calls `_configure_cli_logging()` DIRECTLY still passes when the entry point stops calling it,
+# which is the whole failure mode ("the call is present in the text" vs "the call runs", CLAUDE.md's
+# note on what tier 3 does not prove). So this builds a real `_TotalOutputTyper`, registers one
+# command and invokes it: the level arrives the way it arrives for `looplab run`, and for a
+# UI-launched engine, which `serve/engine_proc.py` spawns as `python -m looplab.cli`.
+_PROBE = """
+import logging
+from looplab.cli import _TotalOutputTyper
+
+app = _TotalOutputTyper()
+
+@app.command()
+def noop():
+    _log = logging.getLogger("looplab.engine.research_cadence")
+    _log.warning("a real degradation")
+    _log.info("routine chatter")
+
+try:
+    app([])
+except SystemExit:
+    pass
+"""
 
 
-def _receiver(node: ast.AST) -> str:
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-    return ".".join(reversed(parts))
+def _stderr_of(level: "str | None") -> str:
+    import os
+    import subprocess
+    import sys
+    env = {k: v for k, v in os.environ.items() if k != "LOOPLAB_LOG_LEVEL"}
+    if level is not None:
+        env["LOOPLAB_LOG_LEVEL"] = level
+    done = subprocess.run([sys.executable, "-c", _PROBE], capture_output=True, text=True, env=env)
+    assert done.returncode == 0, done.stdout + done.stderr
+    return done.stderr
 
 
-def _info_calls(tree: ast.AST) -> list[int]:
-    """Every `<logger>.info(...)` call in *tree*, by line. AST, so a comment cannot produce one."""
-    return [node.lineno for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "info"
-            and _receiver(node.func.value).rsplit(".", 1)[-1].lower() in _LOGGER_RECEIVERS]
+def test_the_DEFAULT_still_shows_a_WARNING_and_still_hides_an_INFO():
+    """The default is what the line above rests on, so the knob must not have moved it.
+
+    This is what `research_cadence.py` pins under the slug `cli-logs-at-warning-by-default`
+    (spelled without its marker on purpose — a slug names exactly ONE claim, and writing the
+    token here declares a second): adding a level knob changed what an operator MAY ask for and
+    deliberately nothing about what they get without asking. If this fails, the comment
+    justifying that line's level is false.
+    """
+    out = _stderr_of(None)
+    assert "a real degradation" in out, "the default hides the records the package actually emits"
+    assert "routine chatter" not in out, (
+        "INFO now reaches an operator who did not ask — the deep-research line's level was chosen "
+        "on the premise that it does not")
+    assert "WARNING looplab.engine.research_cadence" in out, (
+        "the record arrives without its level and logger, i.e. as `lastResort` wrote it: "
+        "indistinguishable from a stray print and ungreppable by level")
 
 
-def test_no_operator_line_in_the_package_is_written_at_INFO():
-    """A second INFO line would be the same defect again, and the first cut of this guard bounded
-    only the literal `_LOG.info(` — so `logger.info(...)`, `logging.info(...)` and `self._log.info(
-    ...)` all walked past a test whose message claimed the package held none."""
-    assert _info_calls(ast.parse("_LOG.info('a')\nlogger.info('b')\nlogging.info('c')\n"
-                                 "self._log.info('d')\ncatalog.info('e')\n")) == [1, 2, 3, 4], (
-        "the detector does not detect — every assertion below it would be vacuous")
-    infos, scanned = [], 0
-    for path, tree in iter_trees():
-        scanned += 1
-        infos += [f"{path.relative_to(PKG)}:{n}" for n in _info_calls(tree)]
-    assert scanned > 1, "the package walk found nothing — this guard would pass on an empty tree"
-    assert not infos, (
-        "these lines are written at INFO and an unconfigured root logger discards them — either "
-        "raise them or accept they are for a debugger only:\n  " + "\n  ".join(infos))
+def test_an_operator_CAN_ask_for_INFO_which_is_what_makes_the_level_a_choice():
+    """The other half: an informational line is now a deployment choice rather than dead text.
+
+    Without this the package still has exactly one usable level and the fix is cosmetic.
+    """
+    assert "routine chatter" in _stderr_of("INFO")
+
+
+def test_an_unusable_LEVEL_degrades_and_says_so_rather_than_killing_the_CLI():
+    """It runs before `super().__call__`, i.e. outside `_RefusalBoundaryGroup`, so a raise here is
+    not a refusal an operator reads — it is a raw traceback at exit 1, the presentation that
+    boundary exists to remove. Degrading silently would be the other failure: a shell exporting a
+    typo'd level would run at a level it did not ask for and never learn."""
+    out = _stderr_of("verbose")
+    assert "LOOPLAB_LOG_LEVEL" in out and "not a logging level" in out, out
+    assert "a real degradation" in out, "the degradation dropped the records it fell back to keeping"
+    assert "routine chatter" not in out

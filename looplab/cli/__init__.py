@@ -19,6 +19,7 @@ deliberate refusal (`core/errors.py::OperatorRefusal`) becomes a message + exit
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import sys
 import copy
@@ -73,11 +74,65 @@ def _make_cli_streams_total() -> None:
             continue
 
 
+# THE ONE PLACE LOOPLAB CONFIGURES LOGGING, and until 2026-09-01 there was none — which made the
+# level of all 39 `_LOG.warning` sites in the package a property of Python's defaults rather than a
+# choice anybody had made. The cost was not theoretical: an `_LOG.info` reached NOBODY on every run
+# ever recorded (root sits at WARNING with no handlers, so `logging.lastResort` is what puts a
+# record on stderr and it is fixed at WARNING), so the package had exactly ONE usable level and an
+# author with a genuinely informational line had to inflate it to WARNING or bury it where nothing
+# could ever show it. One line per site, promoted forever, instead of one decision here.
+#
+# The DEFAULT IS WARNING, so this changes what nobody asked for: the same records reach stderr, and
+# an INFO line still reaches nobody unless an operator asks for it. What it adds is that asking is
+# now possible, and that a record arrives with its level and logger on it — `lastResort` writes the
+# bare message, indistinguishable from a stray `print` or a library's own output and ungreppable by
+# level.
+LOG_LEVEL_ENV = "LOOPLAB_LOG_LEVEL"
+DEFAULT_LOG_LEVEL = "WARNING"
+
+
+def _configure_cli_logging() -> None:
+    """Configure logging when the CLI is invoked — never on import, never for an embedder.
+
+    Same shape and same reasoning as `_make_cli_streams_total` beside it: a library embedding
+    LoopLab owns its own logging, and a module that configures logging at import time takes that
+    away from every host that merely imported it. `basicConfig` is additionally a NO-OP when the
+    root logger already has a handler, so an embedder that configured logging first keeps it even
+    on the path where its own code then calls into this CLI — the host wins, without a probe here
+    that could disagree with the one `basicConfig` makes internally.
+
+    A deployment env var rather than a `Settings` field or a `--verbose` flag, for exactly the
+    reason `LOOPLAB_TRACEBACK` is one (see its comment): it is a property of the shell you are
+    debugging in, it must work on EVERY command including the ones with no settings surface at all,
+    and it must never be snapshotted into a run. It reaches a UI-launched engine too — those are
+    spawned as `python -m looplab.cli` (`serve/engine_proc.py`), so they come through here and
+    inherit the exporting shell's environment.
+
+    An UNPARSEABLE value degrades to the default and says so, rather than raising: this runs before
+    `super().__call__`, i.e. outside `_RefusalBoundaryGroup`, so a raise here is not a refusal an
+    operator reads — it is a raw traceback at exit 1, the presentation that boundary exists to
+    remove. Degrading keeps the CLI usable, and the complaint is visible because the default level
+    that carries it has just been installed.
+    """
+    raw = os.environ.get(LOG_LEVEL_ENV, "").strip()
+    level = logging.getLevelName(raw.upper()) if raw else DEFAULT_LOG_LEVEL
+    # `getLevelName` answers the STRING "Level <x>" for anything it does not know, so a non-int
+    # result is exactly "this is not a level" — the documented way to ask, and the reason this is
+    # not a hand-written name table that would drift from the stdlib's.
+    unknown = raw and not isinstance(level, int)
+    logging.basicConfig(level=DEFAULT_LOG_LEVEL if unknown else level,
+                        format="%(levelname)s %(name)s: %(message)s")
+    if unknown:
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a logging level; using %s", LOG_LEVEL_ENV, raw, DEFAULT_LOG_LEVEL)
+
+
 class _TotalOutputTyper(typer.Typer):
     """Typer entry point that configures output only when the CLI is actually invoked."""
 
     def __call__(self, *args, **kwargs):
         _make_cli_streams_total()
+        _configure_cli_logging()
         return super().__call__(*args, **kwargs)
 
 
