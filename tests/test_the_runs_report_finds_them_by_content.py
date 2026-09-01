@@ -248,3 +248,64 @@ def test_the_zero_section_actually_reads_its_input(tmp_path):
         "the section reported a clean box while a zero sat in front of it:\n" + r.stdout
     )
     assert "no_valid_speedups" in r.stdout
+
+
+def test_a_score_log_with_a_build_prefix_is_still_read(tmp_path):
+    """`looplab_eval` prints its build result BEFORE the JSON, and parsing the whole file raises.
+
+    Measured 2026-09-01: 31 of 76 score.log files on this box carry such a prefix, and one of the
+    corpus's three zero-scoring nodes was invisible because of it -- remEE6's node_3, whose Cython
+    kernel failed to compile. A section built to stop a zero going unreported was losing one.
+    """
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/pfx/runs/t/run")
+    d = root / "model-probes/pfx/runs/t/run/nodes/node_3"
+    d.mkdir(parents=True)
+    import json as _j
+    (d / "score.log").write_text(
+        "looplab_eval: build_ext failed rc=1: kernel.pyx:27:0: 'x.pxd' not found\n"
+        + _j.dumps({"speedup": 0.0, "eval_seconds": 7.6,
+                    "no_speedup": {"reason": "compilation_failed",
+                                   "evaluator_verdict": "Compilation failed"}}))
+    r = _run(root)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "node_3" in r.stdout, (
+        "a zero whose score.log starts with a build line was dropped:\n" + r.stdout
+    )
+    assert "compilation_failed" in r.stdout
+
+
+def test_a_failed_build_is_named_as_such_not_blamed_on_the_solver(tmp_path):
+    """Three categories, not two: the ruler failing, the solver failing, and never compiling.
+
+    No eval_seconds threshold separates the third -- remEE6's node_3 came back in 8.3 s, far from
+    the ~0.1 s that means the ruler never ran.
+    """
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/bld/runs/t/run")
+    d = root / "model-probes/bld/runs/t/run/nodes/node_0"
+    d.mkdir(parents=True)
+    import json as _j
+    (d / "score.log").write_text(_j.dumps(
+        {"speedup": 0.0, "eval_seconds": 8.3,
+         "no_speedup": {"reason": "compilation_failed", "evaluator_verdict": "Compilation failed"}}))
+    r = _run(root)
+    line = next(l for l in r.stdout.splitlines() if "node_0" in l and "compilation_failed" in l)
+    assert "BUILD" in line, f"a build failure was reported as a solver failure: {line}"
+    assert "RULER" not in line, f"a 8.3 s build failure was blamed on the ruler: {line}"
+
+
+def test_a_solver_failure_is_still_a_solver_failure(tmp_path):
+    root = tmp_path / "bench"
+    _mk_run(root, "model-probes/slv/runs/t/run")
+    d = root / "model-probes/slv/runs/t/run/nodes/node_0"
+    d.mkdir(parents=True)
+    import json as _j
+    (d / "score.log").write_text("looplab_eval: build_ext ok\n" + _j.dumps(
+        {"speedup": 0.0, "eval_seconds": 60.7,
+         "no_speedup": {"reason": "no_valid_speedups", "evaluator_verdict": "No valid speedups"}}))
+    r = _run(root)
+    line = next(l for l in r.stdout.splitlines() if "node_0" in l and "no_valid_speedups" in l)
+    assert "BUILD" not in line and "RULER" not in line, (
+        f"a build that succeeded and computed wrong values was misfiled: {line}"
+    )

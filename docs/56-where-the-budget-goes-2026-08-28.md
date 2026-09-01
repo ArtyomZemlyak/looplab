@@ -3389,11 +3389,15 @@ three cases together are the first measurement of what the clause is worth:
 | remPde3 | 123.1297, 50.0147 | 123.1297 | 50.0147 | 59 % |
 | remEE4 | 178.9456, **265.7918**, 12.9883 | 265.7918 | 12.9883 | **95 %** |
 | remDL5 | **11.5564**, 1.9865 | 11.5564 | 1.9865 | **83 %** |
+| remEE6 | 22.5791, **234.8928**, 148.7194, 0.0 | 234.8928 | 0.0 | **100 %** |
 
 §72 recorded `remDL2` as the first empirical demonstration and called it thin — a 2 % difference on
 one run. Three runs later the same rule was standing between a corpus-best 262 and a 13, and
-`remDL5` (added 2026-09-01) makes four: 2 %, 59 %, 95 %, 83 %. Three of the four cost more than half
-the run's score, so the 2 % that made §72 call it thin is the outlier, not the type. Nine of the
+`remDL5` and `remEE6` (both 2026-09-01) make five: 2 %, 59 %, 95 %, 83 %, **100 %**. Four of the five
+cost more than half the run's score, so the 2 % that made §72 call it thin is the outlier, not the
+type. `remEE6` is the limit case — its fourth and last node scored **0.0** (its Cython kernel failed
+to compile), so submitting the last node would have submitted nothing that runs, on a run that
+scored 232.7736. Nine of the
 seventeen probes here reached exactly one node and one reached none, so ten could not exercise the
 rule at all; of the seven that reached two or more, three ended on a node worse than their best.
 

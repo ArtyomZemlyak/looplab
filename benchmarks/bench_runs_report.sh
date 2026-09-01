@@ -93,8 +93,21 @@ for line in open(sys.argv[1]):
     path = line.strip()
     if not path:
         continue
+    # THE FILE IS NOT ALWAYS PURE JSON. `looplab_eval` prints its build result first --
+    # `looplab_eval: build_ext ok`, or `build_ext failed rc=1: ...` -- and the JSON follows. Parsing
+    # the whole file therefore raises, and the `except: continue` above silently DROPPED the node.
+    #
+    # Measured 2026-09-01: 31 of 76 score.log files on this box carry such a prefix, and one of the
+    # corpus's three zero-scoring nodes was invisible because of it -- remEE6's node_3, whose Cython
+    # kernel failed to compile ('cpython/long/PyLong_AS_LONG.pxd' not found). A section built to stop
+    # a zero going unreported was itself losing one.
+    raw = open(path, errors="replace").read().strip()
+    prefix = ""
+    brace = raw.find("{")
+    if brace > 0:
+        prefix = raw[:brace].strip().splitlines()[-1].strip() if raw[:brace].strip() else ""
     try:
-        j = json.loads(open(path, errors="replace").read().strip())
+        j = json.loads(raw[brace:] if brace >= 0 else raw)
     except Exception:
         continue
     sp = j.get("speedup")
@@ -116,13 +129,26 @@ for (run, node), copies in sorted(seen.items()):
     secs = float(j.get("eval_seconds") or 0.0)
     ns = j.get("no_speedup") or {}
     reason = str(ns.get("reason") or ("speedup is null" if sp is None else "unstated"))
-    # THE SWEEP LIST'S OWN RULE: ~0.1 s means the evaluation never reached the solver.
-    flag = "RULER (never reached the solver)" if secs < 1.0 else "solver"
+    # THE SWEEP LIST'S OWN RULE: ~0.1 s means the evaluation never reached the solver. A THIRD
+    # category sits between the two and is named separately: the submission never COMPILED, which
+    # `looplab_eval` reports in the prefix line and which no eval_seconds threshold can distinguish
+    # (remEE6's node_3 came back in 8.3 s).
+    # Keyed on the harness's OWN reason, not on sniffing the prefix: the build error is multi-line
+    # and its last line before the JSON says nothing about building. `compilation_failed` is what
+    # `looplab_eval` puts in `no_speedup.reason`, and it is the only thing that says so reliably.
+    if reason == "compilation_failed" or "build_ext failed" in prefix:
+        flag = "BUILD (the submission never compiled)"
+    elif secs < 1.0:
+        flag = "RULER (never reached the solver)"
+    else:
+        flag = "solver"
     dupes = f"  [{len(copies)} copies]" if len(copies) > 1 else ""
     print(f"  {run:<10} {node:<8} {secs:>7.1f}s  {flag:<32} {reason}{dupes}")
     verdict = str(ns.get("evaluator_verdict") or "")[:70]
     if verdict:
         print(f"             {verdict}")
+    if "build_ext failed" in prefix:
+        print("             " + prefix[:110])
     errs = ns.get("is_solution_errors") or []
     if errs:
         first = errs[0] if isinstance(errs[0], dict) else {"message": str(errs[0])}
