@@ -4005,3 +4005,54 @@ score is at n = 3, and this is what a small-or-absent effect looks like on the w
 No number in this section was typed by hand. `probe_summary.py` prints the by-card rows on every
 run, which is the only reason the reversal was seen the same afternoon rather than quoted stale for
 a week — the discipline §84 bought after being wrong for thirty minutes.
+
+## 91. The control arm reached §83's floor and the answer is "not shown"
+
+`remEEctl5` and `remEEctl6` finished, taking the `--no-unteachable-rules` arm to six scored runs —
+the sample size §83 set as the floor, chosen in advance from the measured within-task spread.
+
+| arm | n | median | sorted |
+|---|---|---|---|
+| shipped card | 10 | 209.28 | 102.2 144.2 169.7 179.6 193.7 224.9 227.4 232.8 262.0 276.7 |
+| `--no-unteachable-rules` | 6 | 163.30 | 34.8 148.8 157.3 169.3 184.2 201.3 |
+
+Exact one-sided rank-sum **p = 0.0589**, floor 0.000125. Control ranks 1, 4, 5, 6, 9, 11 of 16.
+
+The p has not been converging on anything: 0.0804 at n = 3, 0.0529 at n = 4, 0.0589 at n = 6. That
+is what a small effect looks like — and the size is measurable: **the medians differ by 1.28×**.
+§83's power table puts n = 6 at 50 % against a 1.25× effect. So the experiment ran to its planned
+floor and produced the outcome the plan said was a coin flip at that effect size. A null here is not
+evidence of no effect; it is evidence that this arm, at this n, cannot see one this small.
+
+**What it would take.** The same table gives 1.25× only 61 % detection at n = 8. Reaching 80 %
+against 1.28× needs roughly fourteen to sixteen runs per arm — another eight to ten dollars on the
+control side alone, on top of ten shipped-card runs that already exist. That is the honest price of
+converting "not shown" into "shown or ruled out", and it should be a decision rather than a drift.
+
+**What is settled.** The two clauses do not cost anything visible: five of the six control runs
+shipped a compiled kernel (36–55 lines) exactly as all ten shipped-card runs did, and four of the
+six land inside the shipped range. §88's guess that the arm might not compile is dead twice over.
+The one outlier remains `remEEctl1` at 34.76 with a plain-Python champion, now clearly a single run
+and not a pattern.
+
+**What dissolved.** The process metrics that looked strong two sweeps ago (§87, §87.1) kept
+weakening as runs arrived (§90) — dollars-to-first-node and minutes-to-first-build both walked back
+toward 0.05. Nine statistics in this document have now moved against themselves; this arm produced
+three of them, and the only reason each was caught the same afternoon is that `probe_summary.py`
+prints them rather than a human retyping them.
+
+### 91.1 The two runs, dissected
+
+| | remEEctl5 | remEEctl6 |
+|---|---|---|
+| TEST | 157.2637 | 201.3289 |
+| champion | 43 L kernel (`edge_cut.pyx`) | 36 L kernel (`_edge_expansion.pyx`) |
+| nodes | 3 | 3 |
+| eval_train | 23 | 32 |
+| spend before first node | 29 % | 41 % |
+| spend after last node | 5 % | 0 % |
+| to first build | 24 m | 17 m |
+
+Both `final.json` survived: these were the first two probes launched after the offset hazard was
+fixed, and they are the evidence that the fix holds on the path that destroyed remEEctl1's and
+remEEctl2's scores.
