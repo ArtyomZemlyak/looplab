@@ -22,6 +22,7 @@ from typing import Iterable, Optional
 
 from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
+from looplab.core.cards import hypothesis_id
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.jsonutil import canonical_json_digest
@@ -199,6 +200,79 @@ def question_concept_rows(questions: Iterable, per_question: Iterable) -> dict[s
         if isinstance(row, list) and row:
             joined[statement] = row
     return joined
+
+
+def question_parent_rows(questions, per_question, known_ids=None) -> dict[str, str]:
+    """Join each question to the belief id of the BROADER question it sits under.
+
+    Positional, exactly like `question_concept_rows`, and deliberately its twin: `question_parents[i]`
+    names the parent of `questions[i]`. Same order rule for the same measured reason — blanks are
+    skipped AFTER the index is read, never before, or every question after a top-level one inherits
+    its predecessor's parent and the tree grows edges nobody authored.
+
+    A parent may be named two ways, because a memo mints questions that do not exist yet:
+
+      * the exact STATEMENT of another question in THIS memo (the common case — a memo proposing a
+        broad question and two narrower ones under it has no ids to point at), resolved through
+        `hypothesis_id`, which is the same content address the board itself keys on;
+      * an id already on the board (`known_ids`), used as given.
+
+    RESOLVED, NEVER FABRICATED. A name that matches neither yields no parent, and the question is
+    registered exactly as it was before this shipped. That is the same rule the concept join uses:
+    a wrong edge is not recoverable, an absent one is.
+
+    REFUSED: any edge lying on a cycle closed inside this memo — including the degenerate one-step
+    cycle, a question naming its OWN statement as parent. Both are the same defect (a row that is
+    its own ancestor makes `card_child_rollup` recurse), so they are refused by one walk rather than
+    two rules. An explicit self-parent branch WAS written here and removed: no mutant could kill it,
+    because the cycle walk already reached every case it did. A guard no test can fail is not a
+    guard. The whole cycle is dropped rather than one arbitrary member, because which member is
+    "the wrong one" is not knowable here.
+
+    Edges pointing at the EXISTING board cannot close a cycle in this memo, so only same-memo ids
+    are walked.
+    """
+    rows = list(per_question or [])
+    statements: list[str] = []
+    by_id: dict[str, str] = {}
+    for question in questions or []:
+        statement = str(question or "").strip()
+        if not statement:
+            continue
+        statements.append(statement)
+        by_id.setdefault(hypothesis_id(statement), statement)
+    on_board = {str(i) for i in (known_ids or []) if str(i or "").strip()}
+
+    edges: dict[str, str] = {}
+    for index, question in enumerate(questions or []):
+        statement = str(question or "").strip()
+        if not statement:
+            continue
+        raw = str(rows[index] or "").strip() if index < len(rows) else ""
+        if not raw:
+            continue
+        if raw in statements:
+            parent = hypothesis_id(raw)
+        elif raw in on_board or raw in by_id:
+            parent = raw
+        else:
+            continue
+        edges[statement] = parent
+
+    # Drop any edge that lies on a cycle CLOSED INSIDE this memo (see the docstring: this is also
+    # what refuses a self-parent).
+    doomed: set[str] = set()
+    for statement in list(edges):
+        seen = {hypothesis_id(statement)}
+        walk = statement
+        while walk in edges:
+            nxt = edges[walk]
+            if nxt in seen:
+                doomed.add(statement)
+                break
+            seen.add(nxt)
+            walk = by_id.get(nxt, "")
+    return {k: v for k, v in edges.items() if k not in doomed}
 
 
 def is_pure_belief(card) -> bool:
