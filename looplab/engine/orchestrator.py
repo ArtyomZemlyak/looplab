@@ -1993,7 +1993,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         THE `finished` EXIT WRITES NO ROW, deliberately: `run_finished` already names that exit on
         the log, and the terminal gate appends it immediately after `finalize_step(begun)` — the
         head of `events/finalize_protocol.py::QUIET_FINALIZATION_SUFFIX`, whose readers
-        (`search/speculation_quality.py::_quiet_finalization` and the real-run half of
+        (`search/speculation_quality.py::_validate_calibration_terminal` and the real-run half of
         `tests/test_finalize_protocol.py`) demand that exact contiguous terminal shape. The first
         cut appended `run_loop_exited: finished` between `run_finished` and `budget`, which made
         the speculation gate refuse every calibration run recorded at that commit.
@@ -2011,7 +2011,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return
         self._run_loop_exit_owed = False
         try:
-            reason = run_exit_reason(fold(self.store.read_all()))
+            events = self.store.read_all()
+            # A staged terminal boundary that is still OPEN owns this exit. The loop is stopping
+            # precisely so the (resumed) finalization can finish that scope, and a row spliced
+            # after `finalize_step(begun)` is an event `events/finalize_scope.py`'s recovery
+            # projection does not recognize — measured by `tests/test_stop_finalize_resume.py` and
+            # `tests/test_report.py`: it turned a begun-only crash recovery into a silent
+            # no-recovery and a paid finish report into a re-bill. The receipt yields to the
+            # protocol here exactly as it yields to `run_finished` on the finished path.
+            from looplab.events.finalize_scope import incomplete_finalize_scope
+            if incomplete_finalize_scope(events) is not None:
+                return
+            reason = run_exit_reason(fold(events))
             if reason != "finished":
                 self.store.append(EV_RUN_LOOP_EXITED, {"reason": reason})
         except Exception:  # noqa: BLE001 - contain: never mask the exception already in flight

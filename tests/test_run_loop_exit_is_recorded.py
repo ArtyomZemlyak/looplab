@@ -154,7 +154,7 @@ def test_a_raising_exit_still_writes_the_receipt(tmp_path):
 
 def test_a_finished_run_writes_no_row_because_run_finished_is_that_receipt(tmp_path):
     """The `finished` skip. `run_finished` sits inside `QUIET_FINALIZATION_SUFFIX`, whose readers
-    (`speculation_quality._quiet_finalization`, `test_finalize_protocol`'s real-run half) demand
+    (`speculation_quality._validate_calibration_terminal`, `test_finalize_protocol`'s real-run half) demand
     the exact contiguous terminal shape — the first cut of this feature spliced a row between
     `run_finished` and `budget` and the calibration gate refused every run recorded with it."""
     engine = make_engine(tmp_path / "run", n_seeds=1, max_nodes=1)

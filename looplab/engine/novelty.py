@@ -234,9 +234,9 @@ class NoveltyGateMixin:
         worker, then publishes the bounded intents from the main task only if the prepared Card
         still passes its lifecycle/cue fence.
 
-        TWO INSTALLER MODULES, and one of them is THIS ONE (the guard test derives the set from
-        the tree — a count typed here rotted twice in two days, reading FOUR and THREE at once
-        while the true set was neither). `_offload_under_proposal_sink` below installs it around
+        TWO INSTALLER MODULES, and one of them is THIS ONE, `novelty.py` (the guard test derives
+        the set from the tree — a count typed here rotted twice in two days, reading FOUR and
+        THREE at once while the true set was neither). `_offload_under_proposal_sink` below installs it around
         BOTH offloaded proposal lanes — `card_reservation.py::_stage_card_creates` (per-action) and
         `orchestrator.py::_await_batch_proposal` (batch) reach the sink only through that helper,
         never by opening this context themselves — and `speculation.py::_prepare_raw_card_stage`

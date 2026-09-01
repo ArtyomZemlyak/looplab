@@ -232,7 +232,7 @@ reason is **derived from the final fold** rather than set at thirteen call sites
 
 | fold says | receipt |
 |---|---|
-| `finished` | **no row** — `run_finished` already names that exit, and it sits at the head of `QUIET_FINALIZATION_SUFFIX`, whose readers (`speculation_quality._quiet_finalization`, `test_finalize_protocol`) demand the exact contiguous terminal shape a spliced row breaks |
+| `finished` | **no row** — `run_finished` already names that exit, and it sits at the head of `QUIET_FINALIZATION_SUFFIX`, whose readers (`speculation_quality._validate_calibration_terminal`, `test_finalize_protocol`) demand the exact contiguous terminal shape a spliced row breaks |
 | `stop_requested` | `run_loop_exited: aborted` — more specific than the pause an abort also latches |
 | `paused` | `run_loop_exited: paused` |
 | `awaiting_approval` | `run_loop_exited: awaiting_approval` — resumable, and neither a pause nor a stop |
