@@ -18,8 +18,13 @@ import ast
 import inspect
 import pathlib
 
+import anyio
+import pytest
+
+from looplab.events.eventstore import EventStore
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_RUN_LOOP_EXITED, RUN_EXIT_REASONS,
                                   run_exit_reason)
+from tests.factories import make_engine
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -76,26 +81,88 @@ def test_every_registry_word_is_actually_PRODUCIBLE():
         f"unregistered: {sorted(produced - set(RUN_EXIT_REASONS))}")
 
 
-def test_the_loop_appends_it_exactly_once_and_after_the_loop():
-    """Mutation: delete the append, or move it inside the `while`, and this goes red.
+def _fn(tree, name):
+    return next(n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
 
-    Once, because a row per turn is not a receipt; AFTER the loop, because every one of the
-    thirteen exits has to pass through it — that is what makes the derivation complete without
-    touching a single `break`.
+
+def test_the_receipt_has_one_writer_and_both_exit_kinds_reach_it():
+    """Mutation: delete the append, move it inside the `while`, or drop either call site, and this
+    goes red.
+
+    The append lives in `_record_run_loop_exit` exactly once (the latch there is what makes two
+    call sites exactly-once). `_run_with_llm_broker` reaches it once, AFTER the loop — inside it,
+    it fires every turn and stops being the answer to 'why did this run stop' — and `Engine.run`
+    reaches it from the `finally` that owns the raising exits, which the original inline append
+    silently skipped (a BudgetExceeded hard stop, a provider/store error, cancellation).
     """
-    src = (ROOT / "looplab/engine/orchestrator.py").read_text()
-    fn = next(n for n in ast.walk(ast.parse(src))
-              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-              and n.name == "_run_with_llm_broker")
-    appends = [c for c in ast.walk(fn)
+    tree = ast.parse((ROOT / "looplab/engine/orchestrator.py").read_text())
+    helper = _fn(tree, "_record_run_loop_exit")
+    appends = [c for c in ast.walk(helper)
                if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "append"
                and any(isinstance(a, ast.Name) and a.id == "EV_RUN_LOOP_EXITED" for a in c.args)]
-    assert len(appends) == 1, f"exactly one exit receipt, found {len(appends)}"
-    loops = [w for w in ast.walk(fn) if isinstance(w, (ast.While, ast.For))]
-    inside = [w for w in loops for c in ast.walk(w) if c is appends[0]]
-    assert not inside, (
-        "the exit receipt must sit AFTER the loop — inside it, it fires every turn and stops being "
-        "the answer to 'why did this run stop'")
+    assert len(appends) == 1, f"exactly one exit-receipt append, found {len(appends)}"
+
+    loop_fn = _fn(tree, "_run_with_llm_broker")
+    calls = [c for c in ast.walk(loop_fn)
+             if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "_record_run_loop_exit"]
+    assert len(calls) == 1, "the fall-through exit records the receipt exactly once"
+    loops = [w for w in ast.walk(loop_fn) if isinstance(w, (ast.While, ast.For))]
+    inside = [w for w in loops for c in ast.walk(w) if c is calls[0]]
+    assert not inside, "the exit receipt must sit AFTER the loop"
+
+    run_fn = _fn(tree, "run")
+    assert any(isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "_record_run_loop_exit"
+               for c in ast.walk(run_fn)), (
+        "Engine.run must record the receipt on the raising exits — without its call the thirteen "
+        "breaks are covered and a BudgetExceeded/crash/cancellation ends the run in silence again")
+
+
+def _exit_rows(run_dir):
+    return [e for e in EventStore(run_dir / "events.jsonl").read_all()
+            if e.type == EV_RUN_LOOP_EXITED]
+
+
+def test_a_raising_exit_still_writes_the_receipt(tmp_path):
+    """THE EXITS THE INLINE APPEND MISSED. A crash unwinding out of the loop body must still leave
+    the one row this feature exists for — before this, exactly the exit classes the v11 chase had
+    to rule out by hand (budget stop, crash) were the ones that wrote nothing."""
+    engine = make_engine(tmp_path / "run", n_seeds=1, max_nodes=1)
+
+    class _Boom(RuntimeError):
+        pass
+
+    def _explode(*_a, **_k):
+        raise _Boom("loop body died")
+
+    # `CreationRunawayCounters()` is the first thing the loop constructs AFTER `_enter_run`
+    # latched the receipt (a refused re-entry must append nothing), so breaking it is the earliest
+    # honest raising exit.
+    import looplab.engine.orchestrator as orch
+    original = orch.CreationRunawayCounters
+    orch.CreationRunawayCounters = _explode
+    try:
+        with pytest.raises(_Boom):
+            anyio.run(engine.run)
+    finally:
+        orch.CreationRunawayCounters = original
+    rows = _exit_rows(tmp_path / "run")
+    assert len(rows) == 1, "exactly one receipt, from Engine.run's finally"
+    assert rows[0].data["reason"] == "unattributed"
+    assert rows[0].data["reason"] in RUN_EXIT_REASONS
+
+
+def test_a_finished_run_writes_no_row_because_run_finished_is_that_receipt(tmp_path):
+    """The `finished` skip. `run_finished` sits inside `QUIET_FINALIZATION_SUFFIX`, whose readers
+    (`speculation_quality._quiet_finalization`, `test_finalize_protocol`'s real-run half) demand
+    the exact contiguous terminal shape — the first cut of this feature spliced a row between
+    `run_finished` and `budget` and the calibration gate refused every run recorded with it."""
+    engine = make_engine(tmp_path / "run", n_seeds=1, max_nodes=1)
+    state = anyio.run(engine.run)
+    assert state.finished
+    assert _exit_rows(tmp_path / "run") == [], (
+        "a finished run's exit is already named by run_finished; a run_loop_exited row here "
+        "breaks the finalization suffix every calibration reader pins")
 
 
 def test_it_is_diagnostic_and_the_fold_ignores_it():

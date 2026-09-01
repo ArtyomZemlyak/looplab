@@ -159,7 +159,8 @@ def classify_research_beliefs(open_statements: Iterable[str], directions: Iterab
     is a bounded PUSH, not the record, and reading it as the record is how "nothing is lost" gets
     believed by whoever next decides a drop is safe. The memo body genuinely is the record, which is
     why the corrected sentence names it alone.
-    """    # ONE spelling of "usable statements, keyed", used for both populations. Written out twice, the
+    """
+    # ONE spelling of "usable statements, keyed", used for both populations. Written out twice, the
     # dedup universe and the cap-occupancy set are keyed by two expressions that a later change to
     # what counts as a usable statement (a length bound inside `normalized_belief_key`, blank
     # detection moving off `str(s or "").strip()`) can update independently — which is the two

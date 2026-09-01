@@ -164,7 +164,7 @@ function ResetBtn({ runId, id, generation, onToast }) {
 // concept tree's) passes the jump, because from those surfaces "where does this sit in the run?" is
 // a real question, and it is exactly the jump the concept tree used to make without being asked.
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false,
-  onOpenLineage = null, onOpenCard = null,
+  evalStages = null, onOpenLineage = null, onOpenCard = null,
   historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true,
   commentsRevision = null, focusCommentId = null, traceClearRecoveryStore: sharedClearStore = null,
   traceClearRecoverySnapshot: sharedClearSnapshot = null,
@@ -403,7 +403,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId}
           onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration}
-          onOpenCard={onOpenCard} />}
+          onOpenCard={onOpenCard} evalStages={evalStages} />}
         {activeTab === 'Comments' && <CommentsThread runId={runId} nodeId={n.id}
           nodeGeneration={n.attempt} expectedGeneration={expectedGeneration} refreshKey={commentsRevision}
           readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId}
@@ -412,7 +412,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
         {activeTab === 'Trace' && <Trace key={`trace:${detailScope}:${n.attempt ?? 'pending'}`}
           n={n} runId={runId} expectedGeneration={expectedGeneration} onOpenCard={onOpenCard}
           expectedTraceRevision={n.trace_revision}
-          live={live} working={nodeWorking}
+          live={live} working={nodeWorking} evalStages={evalStages}
           detailStatus={detailStatus} reloadPending={!!detailPending}
           clearScope={traceClearScope} clearRecoveryStore={traceClearRecoveryStore}
           recoverClearState={traceClearRecoveryStore.current.get(traceClearScope) || null}
@@ -486,6 +486,7 @@ function KV({ k, v }) { return <><div className="k">{k}</div><div className="v">
 // Summary for a COLLAPSED group's super-node (semantic zoom): aggregate + drill back to members.
 export function GroupSummary({
   groupKey, memberIds, state, themeFilter = null, highlightIds = null, onSelectNode, onClose,
+  evalStages = null,
 }) {
   const dir = state.direction
   // Keep the drill-down on exactly the same semantic projection as its collapsed super-node. Without
@@ -523,7 +524,7 @@ export function GroupSummary({
               <td><button type="button" className="btn xs ghost" data-group-member-id={n.id}
                 aria-label={`Open experiment #${n.id}`} onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
               <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
-              <td>{nodeActivityView(n, state).shortLabel}</td></tr>)}</tbody></table></DataTable>
+              <td>{nodeActivityView(n, state, evalStages).shortLabel}</td></tr>)}</tbody></table></DataTable>
         </>}
     </div>
   </>
@@ -989,7 +990,8 @@ function DerivedMemory({ n, state, runId }) {
   </>
 }
 
-function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, onOpenCard }) {
+function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, onOpenCard,
+  evalStages = null }) {
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
   const chg = nodeChip(n, state.nodes || {}, state)        // same chip as the card (sweep-aware; '' for merges)
@@ -1005,7 +1007,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
   // the whole point: an inherited rationale under a bare "Rationale" reads as this experiment's own
   // justification, which is the misreading the fork receipt was stamped to prevent.
   const forkProv = forkProvenance(n)
-  const activity = nodeActivityView(n, state)
+  const activity = nodeActivityView(n, state, evalStages)
   const ideaNote = field => {
     const note = forkFieldNote(forkProv, field)
     return note ? <span className="muted idea-attribution"> — {note}</span> : ''
@@ -2400,7 +2402,7 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
 }
 
 export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, working, onReload,
-  onOpenCard = null,
+  onOpenCard = null, evalStages = null,
   detailStatus = 'ready',
   reloadPending = false, clearScope, clearRecoveryStore, recoverClearState = null,
   clearRecoverySignal = null, publishClearRecovery }) {
@@ -2464,7 +2466,7 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   // node_reset re-build of an existing node, which the spliced `building` flag misses because
   // withBuilding never overwrites an id already in state.nodes), not the singular `live.building`.
   const _bmarker = buildingMarkers(live).find(m => Number(m?.node_id) === Number(n.id))
-  const activity = nodeActivityView(n, live)
+  const activity = nodeActivityView(n, live, evalStages)
   const building = working && activity.status === NODE_ACTIVITY.BUILDING
   const _op = building ? (_bmarker?.operator || n.operator || '') : ''
   // A QUEUED node used to render nothing here at all: `working` is build-or-evaluate, so the one tab

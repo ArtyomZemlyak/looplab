@@ -8,7 +8,7 @@ export * from './format.js'
 export * from './layout.js'
 export * from './nodeActivity.js'
 
-import { nodeActivityStatus, workingNodeIds, NODE_ACTIVITY } from './nodeActivity.js'
+import { nodeActivityStatus, runCanWork, workingNodeIds, NODE_ACTIVITY } from './nodeActivity.js'
 
 // Browser storage is optional infrastructure, not a render prerequisite. SecurityError is common in
 // locked-down/private contexts; every preference read/write therefore degrades to an in-memory
@@ -55,8 +55,15 @@ export function nodeClass(node, state, workIds) {
   // lane is spending it. A queued node is deliberately NOT `.working` — nothing is running for it,
   // and pulsing it amber is the "the box looks busy" lie `narration.js::pendingWork` was written
   // about.
-  const activity = nodeActivityStatus(node, state)
-  cls.push(`a-${activity}`)
+  // Only while the run CAN be doing work. The `a-evaluating` rail is styled as "a process of ours
+  // is running", and the generation-scoped activity row it keys on survives an engine crash — so a
+  // dead, paused or stopped run kept the amber running rail while the same card's own chip (via
+  // `nodeActivityView`, which consults this exact predicate) said "Evaluation interrupted · engine
+  // stopped". One card, two opposite claims. Without the class the card keeps its lifecycle
+  // `s-${status}` wash — the pre-cursor appearance for a run nothing is running. The lane CENSUSES
+  // (group dots, MiniMap) deliberately keep counting by raw activity: composition is a fact about
+  // the members either way, and it is the styled "running now" claim that must not outlive the run.
+  if (runCanWork(state)) cls.push(`a-${nodeActivityStatus(node, state)}`)
   if (node.id === state.best_node_id) cls.push('best')
   if (node.feasible === false) cls.push('infeasible')
   const working = workIds instanceof Set ? workIds.has(Number(node.id)) : node.id === workIds

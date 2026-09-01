@@ -55,7 +55,6 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_deriv
                                    settle_width, settled_width_refusal)
 from looplab.engine.audit import AuditMixin
 from looplab.engine.cadence import occupancy_due
-from looplab.engine.novelty import proposal_limiter
 from looplab.engine.card_reservation import (CardReservationMixin, _BuildReservation,
                                              scored_anchor,
                                             _discarded_proposal_text)
@@ -1591,6 +1590,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # exception case and let a genuine multi-failure group through as itself.
                     raise _sole_task_group_error(group) from None
         finally:
+            # The raising exits' half of the run-loop exit receipt (see `_record_run_loop_exit`):
+            # a no-op when the fall-through already recorded it or the loop was never entered.
+            self._record_run_loop_exit()
             # Engine.run owns exactly one exporter lifetime. Always make its final barrier terminal:
             # a background span that closes after return must be rejected rather than append behind
             # reset/clear. Shutdown drains accepted work and, on its bounded timeout, atomically
@@ -1673,6 +1675,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     async def _run_with_llm_broker(self) -> RunState:
         entry_finished = self._enter_run()
+        # Only an ENTERED loop owes an exit receipt: `_enter_run` raising (e.g. the speculation
+        # receipt gate refusing re-entry) must keep the log byte-identical —
+        # `tests/test_speculation_runtime_gate.py` pins those bytes.
+        self._run_loop_exit_owed = True
         start = time.time()
         # The creation-level runaway guard's two bounds and the rule that charges them — see
         # `CreationRunawayCounters`, which carries the whole argument for why they read the LOG.
@@ -1960,23 +1966,56 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # diversity archive, case store. Draining here — not at the task group's join, which happens
         # after `finalize_run` has already returned — is what keeps that read complete.
         await self._drain_adopted_evals()
-        # WHY THE LOOP STOPPED, exactly once, DERIVED FROM THE FINAL FOLD rather than from thirteen
-        # hand-set locals. Deriving is the whole point: it cannot disagree with the state a reader
-        # reconstructs, it adds no control flow to the hottest loop in the engine, and it is
-        # complete by construction — every exit passes through here.
-        #
-        # `unattributed` is a legal answer and the reason this exists. Measured on 2026-08-31,
-        # three runs of eight (v6, v9, v11) ended with NO pause and NO run_finished row; v11's last
-        # event is a `trust_scan`, so anyone folding its log sees a run still in flight, forever.
-        # Chasing it ruled out a crash, a budget stop, max_nodes, an operator stop, a pause and the
-        # approval exit — and then ran out of record. A row saying the engine could not name its own
-        # exit is infinitely more than that silence, and it is the input a second rung would need to
-        # turn `unattributed` into a specific reason per exit.
-        self.store.append(EV_RUN_LOOP_EXITED, {"reason": run_exit_reason(fold(self.store.read_all()))})
+        # WHY THE LOOP STOPPED, exactly once — the receipt rule, the `finished` skip and the
+        # exactly-once latch all live on `_record_run_loop_exit`. This fall-through covers the
+        # thirteen `break`s; `Engine.run`'s outer `finally` calls the same helper so the RAISING
+        # exits (the BudgetExceeded hard stop, a provider/store error, cancellation) get the same
+        # receipt — the previous inline append sat only here and silently skipped every one of
+        # them, i.e. exactly the exit classes the motivating v11 chase had to rule out by hand.
+        self._record_run_loop_exit()
         # Finalize (extracted to looplab/engine/finalize.py, a pure move): budget summary,
         # diversity archive, LLM cost roll-up, case store + reflection note, read-model,
         # trace.json + tree.html. Event emission order is preserved exactly.
         return finalize_run(self, entry_finished=entry_finished, start_time=start)
+
+    def _record_run_loop_exit(self) -> None:
+        """Append the run loop's exit receipt exactly once per entered loop, wherever the exit is.
+
+        WHY THE LOOP STOPPED, DERIVED FROM THE FINAL FOLD rather than from thirteen hand-set
+        locals: a derivation cannot disagree with the state a reader reconstructs from the same
+        log. `unattributed` is a legal answer and the reason this exists — measured 2026-08-31,
+        three runs of eight (v6, v9, v11) ended with NO pause and NO `run_finished` row; v11's
+        last event is a `trust_scan`, so anyone folding its log sees a run still in flight,
+        forever. A row saying the engine could not name its own exit is infinitely more than that
+        silence, and it is the input a second rung would need to turn `unattributed` into a
+        specific reason per exit.
+
+        THE `finished` EXIT WRITES NO ROW, deliberately: `run_finished` already names that exit on
+        the log, and the terminal gate appends it immediately after `finalize_step(begun)` — the
+        head of `events/finalize_protocol.py::QUIET_FINALIZATION_SUFFIX`, whose readers
+        (`search/speculation_quality.py::_quiet_finalization` and the real-run half of
+        `tests/test_finalize_protocol.py`) demand that exact contiguous terminal shape. The first
+        cut appended `run_loop_exited: finished` between `run_finished` and `budget`, which made
+        the speculation gate refuse every calibration run recorded at that commit.
+
+        CALLED FROM TWO PLACES because the exits are of two kinds: `_run_with_llm_broker`'s
+        fall-through covers the thirteen `break`s, and `Engine.run`'s outer `finally` covers the
+        raising exits — BudgetExceeded, a provider/store error, cancellation. `_run_loop_exit_owed`
+        makes the pair exactly-once: latched only after `_enter_run` returns (a refused re-entry
+        must keep the log byte-identical) and cleared on the first receipt. Errors are contained
+        because the receipt must never break a shutdown — and a raise from `Engine.run`'s
+        `finally` would REPLACE the exception already unwinding (`shared.py::_append_progress_row`
+        documents that shape).
+        """
+        if not getattr(self, "_run_loop_exit_owed", False):
+            return
+        self._run_loop_exit_owed = False
+        try:
+            reason = run_exit_reason(fold(self.store.read_all()))
+            if reason != "finished":
+                self.store.append(EV_RUN_LOOP_EXITED, {"reason": reason})
+        except Exception:  # noqa: BLE001 - contain: never mask the exception already in flight
+            _LOG.warning("the run loop's exit receipt could not be appended", exc_info=True)
 
     def _settle_terminal_gate(self, state, reason: str, *, decision_seq: int,
                               max_es: Optional[float] = None,
@@ -5362,8 +5401,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 return None
             # WHICH BOUND ENDED THE PAID PROPOSE, if any. `roles.RESEARCHER_OUTPUT_ATTRS` carries
             # the rule; the Researcher sets it per call and "" means the model emitted on its own
-            # terms. Surfaced HERE because `_link` is the one funnel every proposal passes through,
-            # so a lane that forgets to look cannot exist. Warning-only on purpose: with
+            # terms — and in unified mode `UnifiedAgent.propose` mirrors it onto the facade this
+            # handle is, exactly as `_sync_audit` does for the Developer's, or this read reports
+            # the DEVELOPER's last cutoff instead. Surfaced HERE for the per-action lanes
+            # (draft/improve/debug and a preproposed idea crossing `_prepare_node_idea`); the
+            # BATCH lane hands its Ideas straight to the stager without crossing `_link`
+            # (card_reservation.py's staging loop says so), so `novelty._propose_batch` makes the
+            # same check per roll at the propose site. Warning-only on purpose: with
             # `agent_max_turns`/`agent_time_budget_s` both shipping at 0 this can only fire for an
             # operator who set a cap, and the value of saying so is telling a TRUNCATED proposal
             # from a converged one — the distinction a cap destroys if nobody records it.

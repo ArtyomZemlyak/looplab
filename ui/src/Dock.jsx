@@ -226,7 +226,7 @@ export function LiveTrace({ runId, generation, active }) {
 // because the status CLOCK reads the same filter: the label and its age must never be able to
 // describe different moments.
 
-export function agentStatus(live, log) {
+export function agentStatus(live, log, evalStages = null) {
   if (!live) return null
   const lifecycle = runLifecycle(live)
   if (lifecycle.mode === 'finished') return null
@@ -267,25 +267,25 @@ export function agentStatus(live, log) {
   const buildMarkers = buildingMarkers(live)
   // Surface eval_parallel fan-out — but SPLIT, because `pending` is three states and calling them
   // all "running in parallel" is false in the direction that hides a stall (see `pendingWork`).
-  const pendingLabel = pendingWorkLabel(live, log)
+  const pendingLabel = pendingWorkLabel(live, log, evalStages)
   // THE TWO LANES ARE COMPOSED, not ranked. This ladder used to `return` on the first build it found,
   // so on any run wide enough to build and evaluate at once — the shipped default — every evaluating
   // and queued node was invisible in the one strip that claims to say what is happening now. An
   // operator watching a four-hour training saw "Writing experiment #7…" and no mention of the
   // training at all. Build first because it is the shorter, faster-moving half; the eval clause
   // carries its own step from the cursor.
-  const buildLabel = stepLabel
-    ? (buildMarkers.length > 1 ? `${stepLabel} (${buildMarkers.length} in parallel)` : stepLabel)
-    : buildMarkers.length > 1
-      ? `Writing ${buildMarkers.length} experiments in parallel…`
-      : buildMarkers.length === 1
-        ? (() => {
-            const op = buildMarkers[0].operator || ''
-            const id = buildMarkers[0].node_id
-            const action = /repair|debug/.test(op) ? 'Repairing' : /merge/.test(op) ? 'Merging into' : 'Writing'
-            return `${action} experiment #${id}…`
-          })()
-        : ''
+  let buildLabel = ''
+  if (stepLabel) {
+    buildLabel = buildMarkers.length > 1
+      ? `${stepLabel} (${buildMarkers.length} in parallel)` : stepLabel
+  } else if (buildMarkers.length > 1) {
+    buildLabel = `Writing ${buildMarkers.length} experiments in parallel…`
+  } else if (buildMarkers.length === 1) {
+    const op = buildMarkers[0].operator || ''
+    const id = buildMarkers[0].node_id
+    const action = /repair|debug/.test(op) ? 'Repairing' : /merge/.test(op) ? 'Merging into' : 'Writing'
+    buildLabel = `${action} experiment #${id}…`
+  }
   if (buildLabel && pendingLabel) return `${buildLabel} · ${pendingLabel}`
   if (buildLabel) return buildLabel
   if (pendingLabel) return pendingLabel
@@ -687,7 +687,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   onReturnToLive, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false,
   publishTransport = null, filter = '', onFilterChange = null, kindFilters = [],
   onKindFiltersChange = null, focusOnMount = false, onInitialFocus = null,
-  collapseControlRef = null, startOverState = null, onStartOver = null }) {
+  collapseControlRef = null, startOverState = null, onStartOver = null, evalStages = null }) {
   const log = timeline.rows
   const collapseButtonRef = useRef(null)
   const startOverDialogRef = useRef(null)
@@ -1329,7 +1329,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
                   })} />
               }} />}
         {!showControls && (() => {
-          const pipeline = atLiveView ? agentStatus(live, log) : null
+          const pipeline = atLiveView ? agentStatus(live, log, evalStages) : null
           if (!pipeline) return null
           // HOW LONG. The label named the phase but never its age, so a build silent for forty
           // minutes looked exactly like one that started two seconds ago — the operator's "it hangs

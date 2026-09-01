@@ -418,9 +418,13 @@ function GroupSuper({ data }) {
   // An older aggregate (or one built before the lane tally existed) carries no `activity`; the dots
   // below then fall through to the single ○ exactly as they always did.
   const lanes = activity || {}
-  // What the lane dots could NOT place. Never negative: an aggregate whose lanes somehow outnumber
-  // its pending census must not render "○-1", so the floor is 0 and the lanes still show.
-  const unplacedPending = Math.max(0, (status.pending || 0)
+  // What the lane dots could NOT place — counted per member in `grouping.js::groupAggregate`, where
+  // each node's lifecycle AND lane are both in view. The subtraction this replaces mixed two
+  // censuses over different populations (a synthetic building member is in the lanes but not in
+  // `status.pending`), so every such member ate one genuinely-unplaced pending node's dot under the
+  // Math.max floor. The floor survives only as the fallback for an aggregate built before the
+  // per-member count existed.
+  const unplacedPending = lanes.unplacedPending ?? Math.max(0, (status.pending || 0)
     - (lanes.building || 0) - (lanes.evaluating || 0) - (lanes.queued || 0))
   const zeroMatch = filterActive && count === 0
   const countText = filterActive ? `${count}/${totalCount}` : String(count)
@@ -743,18 +747,26 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   // Inject the transient `actionsOpen` flag onto ONLY the node whose action menu is open, keyed on
   // menu?.nodeId. This is an O(n) shallow pass over the already-laid-out nodes (one new object for the
   // open node, others returned by reference) — so toggling the menu never re-runs the layout memo above.
-  // The live stage cursor rides this same cheap pass, deliberately NOT the layout memo above. It is
-  // a fresh Map on every timeline poll, so putting it in that dependency list would re-run
-  // `dagLayoutProjection` seconds apart for a signal that changes once per stage — hours apart on a
-  // real pipeline. Here it costs one shallow rebuild of the node array, which is what this memo was
-  // extracted to make cheap.
+  // The live stage cursor rides this same cheap pass, deliberately NOT the layout memo above —
+  // putting the Map in that dependency list would re-run `dagLayoutProjection` for a signal that
+  // changes once per stage, hours apart on a real pipeline (RunView keeps the Map's identity stable
+  // between stage moves for the same reason). And it rides by the SAME only-what-changed rule as
+  // the flag: a new `data` object goes only to the nodes the cursor actually names (plus the
+  // open-menu node). Stamping the Map onto every exp node handed ReactFlow N fresh identities per
+  // pass — every card re-rendered per poll, empty Map included, because a Map is truthy even when
+  // it names nothing and RunView always passes one.
   const nodes = useMemo(() => {
     const openId = menu?.nodeId
-    if (openId == null && !evalStages) return base.nodes
-    return base.nodes.map(n => (n.type === 'exp'
-      ? { ...n, data: { ...n.data, evalStages,
-                        ...(n.data.node?.id === openId ? { actionsOpen: true } : {}) } }
-      : n))
+    const stages = evalStages?.size ? evalStages : null
+    if (openId == null && !stages) return base.nodes
+    return base.nodes.map(n => {
+      if (n.type !== 'exp') return n
+      const menuOpen = n.data.node?.id === openId
+      const staged = stages != null && stages.has(Number(n.data.node?.id))
+      if (!menuOpen && !staged) return n
+      return { ...n, data: { ...n.data, ...(staged ? { evalStages: stages } : {}),
+                             ...(menuOpen ? { actionsOpen: true } : {}) } }
+    })
   }, [base.nodes, menu?.nodeId, evalStages])
   const interactiveNodeCount = nodes.filter(node => node.type === 'exp' || node.type === 'groupSuper').length
   const graphSignature = `${groupMode}:${nodes.map(node => node.id).sort().join('|')}`

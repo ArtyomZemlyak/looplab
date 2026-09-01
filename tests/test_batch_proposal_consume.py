@@ -19,14 +19,14 @@ do. So the protocol has one owner now, and these pin it.
 """
 from __future__ import annotations
 
+import ast
 import inspect
-import textwrap
 
 import pytest
 
 from looplab.core.models import Idea
 from looplab.engine.orchestrator import Engine
-from tests._source_scan import called_names
+from tests._source_scan import called_names, function_tree
 
 
 class _Host:
@@ -218,11 +218,20 @@ def test_both_call_sites_go_through_the_awaited_offload(method):
 
 
 def test_the_awaited_wrapper_delegates_to_the_SHARED_consume():
-    """The second link. Without it the pin above is satisfiable by hollowing the wrapper out."""
-    source = inspect.getsource(Engine._await_batch_proposal)
-    assert "_consume_batch_proposal" in source, (
+    """The second link. Without it the pin above is satisfiable by hollowing the wrapper out.
+
+    AST over the ATTRIBUTE REFERENCE, not a substring: the wrapper's own docstring names
+    `_consume_batch_proposal` three times, so the previous text pin stayed green with the real
+    `functools.partial(self._consume_batch_proposal, ...)` deleted — and the funnel reference is a
+    bare `ast.Attribute` (a partial ARGUMENT, not a Call), so a Call-name walk cannot see it
+    either. Comments are not AST nodes; a reference is.
+    """
+    refs = [n for n in ast.walk(function_tree(Engine._await_batch_proposal))
+            if isinstance(n, ast.Attribute) and n.attr == "_consume_batch_proposal"]
+    assert refs, (
         "the offload must still go through the ONE funnel — reading the attribute protocol inside "
         "the wrapper is the same defect one frame down")
+    source = inspect.getsource(Engine._await_batch_proposal)
     assert 'getattr(self, "_pending_batch_telemetry"' not in source
     assert 'getattr(self, "_pending_batch_dropped"' not in source
 
@@ -233,31 +242,24 @@ def test_the_wrapper_really_OFFLOADS_and_publishes_from_the_main_task():
     breach (`_append_proposal_event` falls through to `store.append` with no sink installed).
 
     AST, not substrings, for the two calls that must be PRESENT — a comment naming either would
-    satisfy a text pin, which is exactly what CLAUDE.md's ladder warns about.
+    satisfy a text pin, which is exactly what CLAUDE.md's ladder warns about. Through
+    `tests/_source_scan.py::called_names`, not a local re-parse: the shared helper resolves dotted
+    targets in source order with the decode pitfalls handled once, which is the whole reason it
+    exists (its docstring records the diverged private copies it replaced).
     """
-    import ast
-
-    def _calls(fn):
-        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-        names = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                func = node.func
-                names.add(getattr(func, "attr", None) or getattr(func, "id", None))
-        return names
-
     # BOTH PROPERTIES STILL HOLD; since 2026-08-31 they hold one call deeper. The wrapper delegates
     # to `_offload_under_proposal_sink`, which is where the triple lives now — see
     # `test_proposal_publish_is_hoisted_once.py` for why it was hoisted (it was hand-written at four
     # sites) and for the guard that stops a lane re-inlining it. Following the delegation here rather
     # than deleting the assertion keeps the ORIGINAL property driven: a wrapper that stopped
     # offloading, or offloaded without the sink, still fails on this line.
-    called = _calls(Engine._await_batch_proposal)
-    assert "_offload_under_proposal_sink" in called, (
+    called = called_names(Engine._await_batch_proposal)
+    assert any(name.endswith("_offload_under_proposal_sink") for name in called), (
         "the batch wrapper must reach the paid proposal through the offload helper")
-    inner = _calls(Engine._offload_under_proposal_sink)
-    assert "run_sync" in inner, "the paid batch proposal must leave the event-loop thread"
-    assert "_capture_proposal_events" in inner, (
+    inner = called_names(Engine._offload_under_proposal_sink)
+    assert any(name.endswith("run_sync") for name in inner), (
+        "the paid batch proposal must leave the event-loop thread")
+    assert any(name.endswith("_capture_proposal_events") for name in inner), (
         "the folded proposal events must be BUFFERED — an uncaptured offload appends them from a "
         "worker, which invariant #1 forbids and `_proposal_authority_seq` is fenced on")
 

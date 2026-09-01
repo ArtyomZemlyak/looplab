@@ -56,7 +56,10 @@ const stopLabel = (state, subject) => {
   return `${subject} no longer running · run finished`
 }
 
-const runCanWork = state => !!state && !runStopped(state) && !state.paused
+// Exported because it is the ONE spelling of "may this run be doing work right now": `nodeClass`
+// keys the styled `a-*` activity rail on it too, and a re-derived copy there is how the rail and
+// this view's own labels would come to disagree about the same dead run.
+export const runCanWork = state => !!state && !runStopped(state) && !state.paused
   // Historical state explicitly carries null. An omitted field is an older server and preserves the
   // pre-existing live behaviour; null is a known snapshot and must never pulse as work happening now.
   && state.engine_running !== null

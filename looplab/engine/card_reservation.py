@@ -142,13 +142,6 @@ def scored_anchor(state) -> tuple[Optional[int], Optional[int]]:
     return node_id, (None if node is None else node.attempt)
 
 
-def _proposal_limiter():
-    """Lazy hop to `novelty.proposal_limiter` — the same shape the monitors use for
-    `evaluate._watch_limiter`, and it keeps the import graph one-directional at module load."""
-    from looplab.engine.novelty import proposal_limiter
-    return proposal_limiter()
-
-
 def _fold(events):
     """Fold THROUGH the orchestrator module attribute — see the module docstring.
 
@@ -1615,6 +1608,7 @@ class CardReservationMixin:
 
             staged: list[str] = []
             refused: collections.Counter = collections.Counter()
+            attached = 0
             for action, idea, source, at_node, steering, advisory_receipt in prepared:
                 # The BATCH lane reaches here without passing `_prepare_node_idea`'s `_link` funnel
                 # (`_consume_batch_proposal` hands its Ideas straight to the stager), so the proposal
@@ -1636,6 +1630,13 @@ class CardReservationMixin:
                 )
                 if card_id is not None:
                     staged.append(card_id)
+                elif getattr(self, "_card_stage_attached_to", None) is not None:
+                    # An attach is a HANDOFF, not a loss: the proposal repairs a question a live
+                    # Card already owns, staging can never publish it as inventory, and the serial
+                    # boundary builds the node (`_stage_prepared_card`'s attach branch). Counting
+                    # it under the fence-moved warning below announced a mid-propose authority
+                    # race that never happened, on a refusal that is permanent by design.
+                    attached += 1
                 else:
                     refused[getattr(self, "_card_stage_refusal", None) or "unnamed"] += 1
 
@@ -1652,9 +1653,15 @@ class CardReservationMixin:
             # cadence over.
             if refused:
                 _LOG.warning(
-                    "card staging refused %d of %d prepared proposal(s) — the fence moved during "
-                    "the paid propose: %s", sum(refused.values()), len(prepared),
+                    "card staging refused %d of %d prepared proposal(s): %s (a named slug is the "
+                    "fence half that moved during the paid propose; unnamed = refused before any "
+                    "fence, i.e. entry validation or CAS exhaustion)",
+                    sum(refused.values()), len(prepared),
                     ", ".join(f"{name}={count}" for name, count in sorted(refused.items())))
+            if attached:
+                _LOG.info(
+                    "card staging attached %d prepared proposal(s) to existing Cards — handed to "
+                    "the serial boundary, not lost", attached)
 
             # Preserve the existing audit treatment for batch proposals rejected before Node ownership.
             # Accepted staged Cards land first, so rejected receipts allocate fresh ids after them.

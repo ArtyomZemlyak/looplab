@@ -148,6 +148,13 @@ export function groupAggregate(memberIds, nodesObj, direction, state = null) {
   // keys to `status`: that object is the terminal-lifecycle census several callers already sum, and
   // widening it would double-count every pending node.
   const activity = { building: 0, evaluating: 0, queued: 0 }
+  // The ○ dot's own census, counted PER MEMBER here rather than by subtracting the lane tally from
+  // the lifecycle tally in the JSX. The two tallies count DIFFERENT populations — a synthetic
+  // `withBuilding` member is `building` in the lanes and absent from `status.pending`, while a
+  // reset node being rebuilt is the reverse — so the subtraction over-deducted one per synthetic
+  // member, and the Math.max floor over it then silently ate a genuinely-unplaced pending node's
+  // dot. A member is unplaced-pending iff its LIFECYCLE is pending and no activity lane claims it.
+  let unplacedPending = 0
   const members = memberIds.map(id => nodesObj[id]).filter(node => nodeIsActive(node, state))
   members.sort((a, b) => a.id - b.id).forEach(n => {
     const m = n.confirmed_mean ?? n.metric
@@ -160,8 +167,9 @@ export function groupAggregate(memberIds, nodesObj, direction, state = null) {
     status[n.status] = (status[n.status] || 0) + 1
     const lane = nodeActivityStatus(n, state)
     if (Object.hasOwn(activity, lane)) activity[lane] += 1
+    else if (n.status === 'pending') unplacedPending += 1
   })
-  return { best, series, status, activity, count: members.length }
+  return { best, series, status, activity: { ...activity, unplacedPending }, count: members.length }
 }
 
 // A direction chip is a semantic filter, not just decoration. Collapsed cards therefore aggregate

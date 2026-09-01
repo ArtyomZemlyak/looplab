@@ -138,9 +138,55 @@ test('a collapsed group counts lanes instead of calling three training nodes "pe
       activity: { schema: 1, status: 'evaluated', generation: 0 } } }
   const state = { engine_running: true, nodes }
   const agg = groupAggregate([5, 6, 7], nodes, 'max', state)
-  assert.deepEqual(agg.activity, { building: 0, evaluating: 1, queued: 1 })
+  assert.deepEqual(agg.activity,
+    { building: 0, evaluating: 1, queued: 1, unplacedPending: 0 })
   // The lifecycle census is untouched: it is what several other callers sum.
   assert.equal(agg.status.pending, 2)
   assert.equal(agg.status.evaluated, 1)
 })
 
+test('the unplaced-pending dot is counted per member, not by subtracting mismatched censuses', () => {
+  // The two tallies count DIFFERENT populations: a synthetic withBuilding member is `building` in
+  // the lanes and ABSENT from `status.pending`, so the old JSX subtraction
+  // max(0, pending - building - evaluating - queued) over-deducted one per synthetic member and
+  // the floor silently ate a genuinely-unplaced pending node's ○ dot. One synthetic building
+  // member + one legacy pending member (no activity evidence at all) must read ◐1 ○1 — not ◐1 ○0.
+  const nodes = {
+    7: { id: 7, status: 'building', attempt: 0 },              // withBuilding splice: not in pending
+    5: { id: 5, status: 'pending', attempt: 0 },               // legacy: no activity row, no lane
+  }
+  const agg = groupAggregate([5, 7], nodes, 'max', { engine_running: true, nodes })
+  assert.equal(agg.activity.building, 1)
+  assert.equal(agg.status.pending, 1)
+  assert.equal(agg.activity.unplacedPending, 1,
+    'the legacy pending member must keep its dot beside the synthetic building one')
+  // …and a pending member a lane DOES place is not unplaced.
+  const placed = groupAggregate([5], {
+    5: { id: 5, status: 'pending', attempt: 0,
+      activity: { schema: 1, status: 'evaluating', generation: 0 } },
+  }, 'max', { engine_running: true, nodes: {} })
+  assert.deepEqual(placed.activity,
+    { building: 0, evaluating: 1, queued: 0, unplacedPending: 0 })
+})
+
+
+test('the a-* activity rail does not outlive the run', () => {
+  // The rail is styled "a process of ours is running", and the generation-scoped activity row it
+  // keys on survives an engine crash — so a dead/paused/stopped run kept the amber rail while the
+  // same card's chip (nodeActivityView, which consults runCanWork) said "interrupted". One card,
+  // two opposite claims. The lifecycle wash stays either way.
+  const node = evaluating(5)
+  for (const deadState of [
+    { engine_running: false, best_node_id: null, nodes: { 5: node } },
+    { engine_running: true, paused: true, best_node_id: null, nodes: { 5: node } },
+    { engine_running: true, stop_requested: true, best_node_id: null, nodes: { 5: node } },
+    { engine_running: null, best_node_id: null, nodes: { 5: node } },
+  ]) {
+    const cls = nodeClass(node, deadState, new Set())
+    assert.ok(!cls.includes('a-evaluating'), JSON.stringify([deadState, cls]))
+    assert.ok(cls.includes('s-pending'), cls)
+  }
+  const liveCls = nodeClass(node, { engine_running: true, best_node_id: null,
+    nodes: { 5: node } }, new Set())
+  assert.ok(liveCls.includes('a-evaluating'), 'a live run keeps the rail')
+})

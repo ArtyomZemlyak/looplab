@@ -100,6 +100,44 @@ def test_the_engine_READS_it_at_the_one_proposal_funnel():
         "the record stays silent")
 
 
+def test_unified_facade_mirrors_the_researchers_cutoff_not_the_developers():
+    """THE SHIPPED-DEFAULT HOP. Under `unified_agent=True` the engine's researcher handle is the
+    UnifiedAgent facade: `_note_cutoff` writes the INNER researcher, and `WrapsDeveloper._sync_audit`
+    stamps the DEVELOPER's cutoff onto the same facade attribute after every code stage. Without
+    the mirror in `UnifiedAgent.propose`, `_link` read the developer's last cutoff off the facade —
+    a budget-cut repair marked every later proposal TRUNCATED until the next clean code stage, and
+    a genuinely cut propose (recorded on the inner researcher only) was never reported at all."""
+    from looplab.agents.unified_agent import UnifiedAgent
+
+    class _CutResearcher:
+        last_budget_exhausted = ""
+
+        def propose(self, state, parent):
+            self.last_budget_exhausted = "turns"   # this propose was cut short
+            return object()
+
+    agent = UnifiedAgent.__new__(UnifiedAgent)
+    agent.researcher = _CutResearcher()
+    agent.last_budget_exhausted = "time"           # a budget-cut Developer stamped the facade
+    assert UnifiedAgent.propose(agent, None, None) is not None
+    assert agent.last_budget_exhausted == "turns", (
+        "the funnel reads the facade, so the facade must carry THIS propose's bound")
+
+    class _ConvergedResearcher:
+        last_budget_exhausted = ""
+
+        def propose(self, state, parent):
+            self.last_budget_exhausted = ""        # emitted on its own terms
+            return object()
+
+    agent.researcher = _ConvergedResearcher()
+    agent.last_budget_exhausted = "time"           # stale developer stamp again
+    UnifiedAgent.propose(agent, None, None)
+    assert agent.last_budget_exhausted == "", (
+        "a stale developer cutoff surviving a converged propose is the repeated false-TRUNCATED "
+        "warning coming back")
+
+
 def test_the_attribute_is_REGISTERED_so_a_rename_cannot_be_silent():
     """Both sides read/write it with `getattr(..., default)`, so a one-sided rename fails silently —
     which is the entire argument `DEVELOPER_OUTPUT_ATTRS` was written down for.

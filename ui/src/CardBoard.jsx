@@ -691,7 +691,7 @@ function _CardKanbanCard({
 // experiment (its operator, its params, its footprint, its delta) and offered its evidence node ids
 // as a row of bare `#7` buttons. That reads as "this card IS node 7". It is not: node 7 is one
 // attempt at the question the card asks, and a retry, a debug child or a repeat is another.
-function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }) {
+function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, state = null }) {
   const roll = cardAttemptSummary(attempts)
   return <section className="card-attempts" aria-label="Experiments for this work item">
     <h3 className="card-attempts-h">
@@ -720,12 +720,16 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }
         // back to the lifecycle word whenever it cannot place the node.
         const status = _cardText(node?.status) || 'unknown'
         const lifecycleUnsettled = status !== 'evaluated' && status !== 'failed'
-        // No run state here, exactly as `workingOn` below already accepts: this pane is handed
-        // attempts, not the fold. The projection then reads the server's generation-scoped
-        // `node.activity` and simply cannot see a build MARKER, which is the one case it degrades
-        // on — and it degrades to the lifecycle word this chip printed anyway.
-        const activityLabel = node && lifecycleUnsettled
-          ? nodeActivityView(node).shortLabel : null
+        // WITH the run state, computed once per row: `_CardDetailPane` has the fold in scope and
+        // hands it to the sibling `_CardKanbanCard` two lines below this pane's render — so
+        // omitting it here was self-inflicted, and it cost the stopped/paused/dead-engine guards
+        // inside the projection. A durable generation-matching `activity` row survives an engine
+        // crash, so this chip read 'training / eval' about a run nothing was running while the
+        // Inspector one click away said 'Evaluation interrupted · engine stopped' — the exact
+        // two-surfaces contradiction the chip was added to end. Without a state prop (an older
+        // caller) the projection degrades exactly as before.
+        const view = node && lifecycleUnsettled ? nodeActivityView(node, state) : null
+        const activityLabel = view?.shortLabel ?? null
         const statusText = activityLabel || status
         const metric = _cardNumber(node?.metric)
         const attempt = _cardInt(node?.attempt)
@@ -747,7 +751,7 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }
             <span className="card-attempt-op">{_cardText(node?.idea?.operator)
               || _cardText(node?.operator) || (entry.present ? 'operator unknown' : 'unavailable')}</span>
             <span className={'chip xs' + (status === 'evaluated' ? ' ok' : status === 'failed' ? ' warn' : '')}
-              title={activityLabel ? `experiment #${entry.nodeId} — ${nodeActivityView(node).label}` : undefined}>
+              title={activityLabel ? `experiment #${entry.nodeId} — ${view.label}` : undefined}>
               {entry.present ? statusText : 'not in snapshot'}</span>
             {attempt != null && <span className="muted">attempt {attempt}</span>}
             {metric != null && <span className="card-attempt-metric">{fmt(metric)}</span>}
@@ -907,7 +911,7 @@ function _CardDetailPane({
   }
   return <div className="card-detail">
     <_CardAttempts attempts={attempts} selectedNodeId={selectedNodeId} onOpenNode={onOpenNode}
-      coverage={cardAttemptCoverage(attempts, receipt)} />
+      coverage={cardAttemptCoverage(attempts, receipt)} state={state} />
     <_CardKanbanCard card={card} receipt={receipt} presentation="full" state={state}
       controlState={controlState} controlsLocked={controlsLocked} onControl={onControl}
       onRecover={onRecover} onSelect={onSelect} onClose={null} lineage={lineage} />

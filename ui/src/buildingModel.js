@@ -215,28 +215,39 @@ export function evalStageFor(node, log) {
 // guessing from it would be right most of the time, which is exactly what makes the guess dangerous
 // — `eval_log_plan` refuses the same inference for kill authority, and a status surface that quietly
 // applied a looser rule would let an operator read an engine claim into a string the agent picked.
-export function evalStageLabel(record) {
+// The trimmed name and the index/total coherence rule, decided ONCE for both widths. The two label
+// functions below differ only in wording; when each carried its own copy of this guard, a change
+// landing in one (say, admitting `total === 1`) made the strip and the node card disagree about the
+// same running stage — the exact drift the shared-label design exists to prevent.
+function stageParts(record) {
   if (!record || record.stage !== 'eval') return null
   const name = typeof record.name === 'string' ? record.name.trim() : ''
   const step = Number.isInteger(record.index) && Number.isInteger(record.total)
     && record.total > 1 && record.index < record.total
-    ? ` · ${record.index + 1} of ${record.total}` : ''
-  if (record.role === 'training') return `Training${name && name !== 'eval' ? ` (${name})` : ''}${step}`
-  if (!name) return `Evaluating${step}`
-  return `Stage ${name}${step}`
+    ? { index: record.index, total: record.total } : null
+  return { name, step }
+}
+
+export function evalStageLabel(record) {
+  const parts = stageParts(record)
+  if (!parts) return null
+  const step = parts.step ? ` · ${parts.step.index + 1} of ${parts.step.total}` : ''
+  if (record.role === 'training') {
+    return `Training${parts.name && parts.name !== 'eval' ? ` (${parts.name})` : ''}${step}`
+  }
+  if (!parts.name) return `Evaluating${step}`
+  return `Stage ${parts.name}${step}`
 }
 
 // The same answer at chip width. The name alone once the run has more than one stage to place it in,
 // because a 10px chip that spends its width on the word "stage" says less than one that spends it on
 // the word the operator is looking for.
 export function evalStageShortLabel(record) {
-  if (!record || record.stage !== 'eval') return null
-  const name = typeof record.name === 'string' ? record.name.trim() : ''
-  const step = Number.isInteger(record.index) && Number.isInteger(record.total)
-    && record.total > 1 && record.index < record.total
-    ? ` ${record.index + 1}/${record.total}` : ''
-  if (record.role === 'training' && (!name || name === 'eval')) return `training${step}`
-  return `${name || 'evaluating'}${step}`
+  const parts = stageParts(record)
+  if (!parts) return null
+  const step = parts.step ? ` ${parts.step.index + 1}/${parts.step.total}` : ''
+  if (record.role === 'training' && (!parts.name || parts.name === 'eval')) return `training${step}`
+  return `${parts.name || 'evaluating'}${step}`
 }
 
 // The words. A closed table rather than string-building at the call site, so the vocabulary is

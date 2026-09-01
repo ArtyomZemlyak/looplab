@@ -227,28 +227,36 @@ Its last durable event is a `trust_scan`, so anyone folding its log sees a run s
 Trying to answer "why did it stop" from that record ruled out a crash, a budget stop, `max_nodes`,
 an operator stop, a pause and the approval exit — and then ran out of evidence.
 
-So the loop appends one `run_loop_exited` row on its way out, and the reason is **derived from the
-final fold** rather than set at thirteen call sites:
+So the loop records one exit receipt on its way out (`Engine._record_run_loop_exit`), and the
+reason is **derived from the final fold** rather than set at thirteen call sites:
 
-| fold says | reason |
+| fold says | receipt |
 |---|---|
-| `finished` | `finished` — the report was written; a pause latching on the way out does not un-end it |
-| `stop_requested` | `aborted` — more specific than the pause an abort also latches |
-| `paused` | `paused` |
-| `awaiting_approval` | `awaiting_approval` — resumable, and neither a pause nor a stop |
-| none of them | **`unattributed`** — the case this exists for |
+| `finished` | **no row** — `run_finished` already names that exit, and it sits at the head of `QUIET_FINALIZATION_SUFFIX`, whose readers (`speculation_quality._quiet_finalization`, `test_finalize_protocol`) demand the exact contiguous terminal shape a spliced row breaks |
+| `stop_requested` | `run_loop_exited: aborted` — more specific than the pause an abort also latches |
+| `paused` | `run_loop_exited: paused` |
+| `awaiting_approval` | `run_loop_exited: awaiting_approval` — resumable, and neither a pause nor a stop |
+| none of them | **`run_loop_exited: unattributed`** — the case this exists for |
 
-Deriving keeps the receipt complete by construction (every exit passes the same point), adds no
-control flow to the hottest loop, and cannot disagree with the state a reader reconstructs. Finer
-per-exit reasons are a second rung: name them at the exits, then extend `RUN_EXIT_REASONS` in the
-same change — the guard refuses a word the deriver cannot produce.
+The receipt covers **both exit kinds**: the fall-through after the thirteen `break`s, and — via
+the same latched helper called from `Engine.run`'s `finally` — the raising exits (the
+`BudgetExceeded` hard stop, a provider/store error, cancellation), which are exactly the classes
+the v11 chase had to rule out by hand. The latch arms only after `_enter_run` returns, so a
+refused re-entry still appends nothing, and the append is contained: a receipt must never mask
+the exception already unwinding.
+
+Deriving keeps the receipt complete by construction, adds no control flow to the hottest loop, and
+cannot disagree with the state a reader reconstructs. Finer per-exit reasons are a second rung:
+name them at the exits, then extend `RUN_EXIT_REASONS` in the same change — the guard refuses a
+word the deriver cannot produce.
 
 ```mermaid
 flowchart TB
   L["_run_with_llm_broker<br/>13 break / return"] --> D["_drain_adopted_evals"]
-  D --> R["fold(store.read_all())"]
+  X["raising exit<br/>(budget stop, crash, cancel)"] --> R
+  D --> R["_record_run_loop_exit<br/>fold(store.read_all())"]
   R --> Q{"which flag?"}
-  Q -->|finished| F["run_loop_exited: finished"]
+  Q -->|"finished"| F["no row — run_finished<br/>is that receipt"]
   Q -->|stop_requested| A2["run_loop_exited: aborted"]
   Q -->|paused| P["run_loop_exited: paused"]
   Q -->|awaiting_approval| W["run_loop_exited: awaiting_approval"]
@@ -282,8 +290,11 @@ had zero `refused` lines.
 audit prefix on an ATTACH refusal only: on a stale-fence refusal "the whole proposal is being
 abandoned and re-made, so dropping them keeps the log honest" — republishing novelty rows for work
 about to be repeated would double-count it. What was missing is the ACCOUNTING, which carries no
-novelty rows and cannot double-count: one counted warning per abandonment, naming the slug from the
-same `CARD_STAGE_REFUSALS` vocabulary the create lane has counted since `6262f3a1`.
+novelty rows and cannot double-count: one counted warning per abandonment, with the reason from
+the path that knows — the staging fence's own `CARD_STAGE_REFUSALS` slug when the stager refused,
+`producer_failed`/`proposal_refused` (`RAW_STAGE_PRE_STAGING_REASONS`) when the paid propose never
+reached the stager, and no warning at all for the attach handoff, which is handed to the serial
+boundary and built rather than abandoned.
 
 The seconds are deliberately not repeated in that line — they are already on the phase's own
 `phase_progress` row, and one number in two places is how they drift.

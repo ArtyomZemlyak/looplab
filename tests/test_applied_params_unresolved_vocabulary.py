@@ -113,6 +113,29 @@ def test_an_AMBIGUOUS_document_survives_a_settled_reading_from_another_carrier()
         "MUTATION: pop unconditionally and the plural document vanishes from the record")
 
 
+def test_an_AMBIGUOUS_document_survives_a_second_DOCUMENT_answering_in_either_order():
+    """The INTAKE half of the same rule. The settle loop's guard (above) covered a `.py` answer,
+    but the document branch's own pop still erased the marker whenever the ANSWERING document came
+    later in the carrier order — the guarantee was order-dependent, and carrier order is a staging
+    detail no record may depend on. MUTATION: restore the bare intake `unresolved.pop(key, None)`
+    and the ambiguous-first order goes red while the answering-first order stays green."""
+    ambiguous = ("train:\n  training:\n    batch_size: 512\n"
+                 "test:\n  training:\n    batch_size: 64\n")
+    answering = "training:\n  batch_size: 2048\n"
+    for first, second in (((("plural.yaml"), ambiguous), (("single.yaml"), answering)),
+                          ((("single.yaml"), answering), (("plural.yaml"), ambiguous))):
+        root = _tmp({first[0]: first[1], second[0]: second[1]})
+        record = bind_applied_params({"training.batch_size": 8192.0}, str(root),
+                                     carriers=(first[0], second[0]))
+        assert record is not None
+        assert record["applied"] == {"training.batch_size": 2048.0}, (
+            "the settled reading still rides — this fix withholds nothing")
+        assert record["unresolved"] == {
+            "training.batch_size": param_carriers.UNRESOLVED_AMBIGUOUS}, (
+            f"order {(first[0], second[0])}: the plural document's refusal must survive on "
+            "whichever side of the answering carrier it stages")
+
+
 def test_an_ABSENT_marker_is_still_popped_by_a_settled_reading():
     """The negative control, and the half the narrowing must not eat: a carrier that simply does not
     mention the key says nothing about the declaration, so a later answer settles it clean."""

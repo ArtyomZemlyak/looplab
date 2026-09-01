@@ -660,7 +660,9 @@ def test_the_raw_speculative_lane_keeps_the_receipts_of_the_proposal_it_could_no
             "reason": "the producer's own audit intent", "action": "kept"}, None, None),),
     )
 
-    assert engine._serve_raw_card_stage() == (True, False), "an attach is never staged inventory"
+    assert engine._serve_raw_card_stage() == (True, False, None), (
+        "an attach is never staged inventory — and it carries no abandon reason: the work is "
+        "handed to the serial boundary and built, not lost")
     assert engine._card_stage_attached_to == "card-0"
     assert [event.data.get("reason") for event in engine.store.read_all()
             if event.type == "novelty_rejected"] == ["the producer's own audit intent"]
