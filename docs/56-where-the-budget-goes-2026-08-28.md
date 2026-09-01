@@ -3775,3 +3775,36 @@ today**: four control probes are running under `card_sha256 d20e9c0e0b3eb26f`, a
 mid-arm would leave four dollars measuring a card that no longer exists. It goes in the queue behind
 the arm now in flight — which is the same discipline §83 asked for and the first time it has cost
 anything to keep.
+
+## 87. First reading from the control arm, at n = 2, on the quantity the removed clause names
+
+`KEEP_BEST` ends: *"Measure early, measure often, and spend late time on attempts rather than on
+caution."* So the quantity it targets is how much a run spends before its FIRST evaluated node, and
+that number is fixed the moment the first node lands — it does not drift as the run continues, which
+makes it readable from a probe still in flight. This is pre-registered in the sense that matters:
+the clause names it, and it is the first thing measured after the arm produced anything at all.
+
+`edge_expansion`, dollars spent before the first evaluated node:
+
+| arm | n | median | range |
+|---|---|---|---|
+| shipped card | 10 | $0.3119 | $0.2440 – $0.4771 |
+| `--no-unteachable-rules` | 2 | $0.4575 | $0.3730 – $0.5421 |
+
+Exact one-sided rank-sum p = 0.0303. **The floor at n = 2 against n = 10 is 0.0152**, so this is one
+step off the best a two-run arm can produce and there is no room below it worth chasing: `remEEctl1`
+at $0.5421 is outside the whole shipped range, `remEEctl2` at $0.3730 is not — it sits seventh of
+twelve.
+
+**Two reasons this is a reading and not a result.**
+
+n = 2 against §83's table, which puts a two-run arm below every useful power figure. Four runs are in
+flight; six is the floor for 67 % power against a 1.5× effect, and this metric is not the score
+anyway.
+
+And the statistic is CENSORED in the direction that flatters the control. It can only be computed
+for a run that reached a first node. If the clause does what it says, the arm without it should
+produce runs that evaluate late *or never* — and "never" leaves this table rather than landing at
+the far end of it. `remEEctl3` and `remEEctl4` have no first node yet; whichever way they resolve,
+the censoring has to be handled before this number means what it appears to mean. The fix is to
+report time-to-first-node with the non-evaluators kept in at their run's total, not to add runs.
