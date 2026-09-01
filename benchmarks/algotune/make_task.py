@@ -676,6 +676,23 @@ def eval_cost_sentence() -> str:
 
 # The clause that REPLACES `_DELIVER_NO_MEASURE`. It states what is now true, and states the cost,
 # because an expensive capability offered without its price is used until the budget is gone.
+# THE AFFORDANCE CLAUSE, SPLIT OUT SO IT CAN BE REMOVED. Added 2026-08-30 in f906ea07 and
+# never tested: §69.1 pinned its acceptance against a 4.9-8.3 % band measured on three probes
+# that were in /var/tmp when it was wiped on 2026-08-29, so the control group is gone and no
+# quantity of new probes restores it (§78). A clean answer needs an arm WITHOUT the clause,
+# which until now `make_task.py` had no way to build -- the same blocker `--no-unteachable-
+# rules` removed for the other two clauses.
+REFERENCE_AFFORDANCE = (
+    " AND YOU CAN ASK THE REFERENCE ANYTHING, ON AN INPUT YOU MAKE UP. `reference_<task>.py` is a "
+    "real module sitting in your staged tree, so a `run_probe` can import it and call it: "
+    "`generate_problem(n, random_seed=k)` builds an instance, `solve(problem)` returns the "
+    "reference's own answer, and `is_solution(problem, answer)` says whether YOUR answer would be "
+    "accepted and logs the reason when it would not. That is how you learn the input's SHAPE and "
+    "SCALE, what edge cases the reference refuses, and whether a faster-but-different formula is "
+    "still acceptable -- none of which `eval_train` or `profile` will ever tell you. It costs a "
+    "probe, it writes nothing, and it touches no baseline. "
+)
+
 MEASURE = (
     " YOU CAN MEASURE YOUR OWN SCORE, AND YOU SHOULD -- ON THE TRAIN SPLIT, THE SAME ONE EVERY NODE "
     "IS SCORED ON. `run_dev_command(\"eval_train\")` runs the REAL evaluator over the real "
@@ -718,14 +735,7 @@ MEASURE = (
     # It is the AFFORDANCE that was missing, and the corpus says so: 3,124 probes, of which 95
     # (3.0 %) import the reference at all and 72 (2.3 %) call `is_solution` or `generate_problem`.
     # The models were writing timing loops by hand next to a module that answers the question.
-    " AND YOU CAN ASK THE REFERENCE ANYTHING, ON AN INPUT YOU MAKE UP. `reference_<task>.py` is a "
-    "real module sitting in your staged tree, so a `run_probe` can import it and call it: "
-    "`generate_problem(n, random_seed=k)` builds an instance, `solve(problem)` returns the "
-    "reference's own answer, and `is_solution(problem, answer)` says whether YOUR answer would be "
-    "accepted and logs the reason when it would not. That is how you learn the input's SHAPE and "
-    "SCALE, what edge cases the reference refuses, and whether a faster-but-different formula is "
-    "still acceptable -- none of which `eval_train` or `profile` will ever tell you. It costs a "
-    "probe, it writes nothing, and it touches no baseline. "
+    "{reference_affordance}"
     "THE REPORTED SCORE IS ON A SPLIT YOU CANNOT SEE. Train is what you tune against; the champion "
     "is finally scored on held-out instances from the same generator. So anything that fits the "
     "train instances SPECIFICALLY -- a lookup table, a hard-coded answer, a threshold tuned to one "
@@ -1166,6 +1176,14 @@ def main() -> int:
                          "CONTROL arm for those two clauses and nothing else -- every other "
                          "clause the same flags produce is byte-identical, which is what "
                          "makes the two arms comparable.")
+    ap.add_argument("--reference-affordance", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="State that `reference_<task>.py` is an importable module the "
+                         "solver can query for instances, answers and verdicts (f906ea07). "
+                         "ON by default. `--no-reference-affordance` is the CONTROL arm §78 "
+                         "says the corpus lost when /var/tmp was wiped: every probe on this "
+                         "box carries the clause, so its acceptance band has no before-group "
+                         "and cannot be recovered from new data alone.")
     ap.add_argument("--role-split", action="store_true",
                     help="Append the ONE EXPERIMENT = ONE ALGORITHM clause (see ROLE_SPLIT).")
     args = ap.parse_args()
@@ -1228,7 +1246,10 @@ def main() -> int:
                  # starts. See `timing_clause`.
                  + (timing_clause(root, args.unteachable_rules) if args.full_context else "")
                  + ((_DELIVER_WRITE if args.full_context else DELIVER) if args.deliver else "")
-                 + (MEASURE.format(cost=eval_cost_sentence()) if args.full_context else "")
+                 + (MEASURE.format(cost=eval_cost_sentence(),
+                                  reference_affordance=(REFERENCE_AFFORDANCE
+                                                        if args.reference_affordance else ""))
+                    if args.full_context else "")
                  + (ONE_CARD.format(task=args.task) if args.one_card else "")
                  # Under the same flag as ONE_CARD: both are statements about how THIS loop scores
                  # what you produce, and both are rules the run itself never demonstrates. See
