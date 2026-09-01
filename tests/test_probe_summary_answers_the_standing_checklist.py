@@ -846,3 +846,31 @@ def test_a_probe_with_no_champion_and_a_fresh_log_still_reads_as_running(tmp_pat
     block = out.split("probes with NO test score")[1].split("\n\n")[0]
     line = [l for l in block.splitlines() if l.strip().startswith("live")]
     assert line and "STILL RUNNING" in line[0], block
+
+
+def test_after_pct_is_marked_while_it_is_still_accumulating(tmp_path):
+    """`after%` means two different things and the table printed them identically.
+
+    For a FINISHED probe it is waste: money spent after the last node it will ever evaluate -- the
+    §75 pattern, and accEE's 41 % is a real instance of it. For a RUNNING one it is only "time since
+    the last node", which grows until the next node lands and then collapses. On 2026-09-01 the live
+    remEEctl5 showed 47 % directly beneath accEE's 41 %, inviting a reader to take them for the same
+    thing.
+    """
+    _mk_probe(tmp_path, "done", "t", nodes=[5.0], costs_before=[0.2], costs_after=[0.8], test=5.0)
+    (tmp_path / "model-probes" / "done" / "champion_solver.py").write_text("# ok\n")
+    _mk_probe(tmp_path, "live", "t", nodes=[5.0], costs_before=[0.2], costs_after=[0.8])
+    out = _run(tmp_path)
+    done = [l for l in out.splitlines() if l.startswith("done")][0]
+    live = [l for l in out.splitlines() if l.startswith("live")][0]
+    assert "80%+" in live, live
+    assert "80%+" not in done and "80%" in done, done
+    assert "STILL ACCUMULATING" in out, out
+
+
+def test_the_legend_is_absent_when_every_probe_has_finished(tmp_path):
+    """A legend for a marker nothing carries teaches a reader to skip legends."""
+    _mk_probe(tmp_path, "done", "t", nodes=[5.0], costs_before=[0.2], costs_after=[0.8], test=5.0)
+    (tmp_path / "model-probes" / "done" / "champion_solver.py").write_text("# ok\n")
+    out = _run(tmp_path)
+    assert "STILL ACCUMULATING" not in out, out

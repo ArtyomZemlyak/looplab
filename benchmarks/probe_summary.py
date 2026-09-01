@@ -378,9 +378,24 @@ def main(argv: list[str]) -> int:
                  if s["champion_lines"] else "(none)")
         tb = f"{s['to_build_min']:.0f}m" if s["to_build_min"] is not None else "-"
         bm = f"{s['build_min']:.0f}m" if s["build_min"] is not None else "-"
+        # `after%` MEANS TWO DIFFERENT THINGS depending on whether the run is over, and the table
+        # used to print them identically. For a finished probe it is waste: money spent after the
+        # last node it will ever evaluate. For a RUNNING one it is just "time since the last node",
+        # which grows until the next one lands and then collapses. On 2026-09-01 the live
+        # `remEEctl5` showed 47 % beside `accEE`'s 41 % -- and accEE's 41 % is the real §75 waste
+        # pattern on a finished run, while remEEctl5 had merely evaluated eight minutes earlier.
+        # A `+` marks the figure as still accumulating; the legend below says so once.
+        running = not (Path(s["probe_dir"]) / "champion_solver.py").is_file()
+        after = f"{s['after_pct']:.0f}%" + ("+" if running else " ")
         print(f"{s['probe']:10s}{s['task']:16s}{s['spent']:>8.4f}{test:>10}"
-              f"{len(s['nodes']):>7}{s['before_pct']:>8.0f}%{s['after_pct']:>7.0f}%"
+              f"{len(s['nodes']):>7}{s['before_pct']:>8.0f}%{after:>8}"
               f"{s['eval_train']:>8}{tb:>9}{bm:>7}  {champ}")
+
+    # The legend once, and only when it applies: a `+` on every row would be noise, and a legend
+    # for a marker nothing carries teaches a reader to ignore legends.
+    if any(not (Path(x["probe_dir"]) / "champion_solver.py").is_file() for x in seen.values()):
+        print("  (after% marked + is STILL ACCUMULATING: the run has no champion yet, so the figure "
+              "is time since the last node, not waste)")
 
     # EVERY unscored probe, not only those whose logs match one of six phrases. The needle list
     # matched NONE of the five probes carrying no TEST on 2026-09-01 -- including `remDL`, dead
