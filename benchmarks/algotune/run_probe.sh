@@ -133,8 +133,16 @@ for pid in os.listdir("/proc"):
             continue
         line = " ".join(argv)
         theirs = any(k in line for k in ("AlgoTuner", "algotune.sh"))
-        ours = ("looplab.cli" in line
-                and any(f" {verb} " in f" {line} " for verb in ("run", "resume"))
+        # AND IT MUST BE A PYTHON INTERPRETER RUNNING THE MODULE. The watcher that caught the two
+        # pytest children caught a third the same evening: `ugrep … looplab.cli …` -- a SEARCH for
+        # the probe command line, run by me, inside the bench root. It satisfies every condition
+        # above, because a grep for a string contains that string. `argv[0]` is the discriminator no
+        # text match can forge: a probe is `python -m looplab.cli run …`, and `grep`, `ugrep`, `rg`
+        # and an editor are not python.
+        exe = os.path.basename(argv[0])
+        ours = (exe.startswith("python")
+                and "-m" in argv and "looplab.cli" in argv
+                and any(v in argv for v in ("run", "resume"))
                 and root in line)
         if not (theirs or ours):
             continue

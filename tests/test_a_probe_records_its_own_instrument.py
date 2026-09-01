@@ -253,14 +253,29 @@ def test_the_lane_guard_ignores_a_looplab_cli_that_is_not_a_bench_probe():
     assert 'root in line' in guard, "the guard no longer requires the bench root"
     assert '"run", "resume"' in guard, "the guard no longer distinguishes the occupying verbs"
     # The two real offenders, and a real probe, checked against those two conditions directly.
+    assert "exe.startswith" in guard, (
+        "the guard no longer requires a python interpreter, so a SEARCH for the probe command line "
+        "counts as a probe")
     root = "/var/tmp/looplab-bench"
+
     def occupies(line):
-        return ("looplab.cli" in line
-                and any(f" {v} " in f" {line} " for v in ("run", "resume"))
+        argv = line.split()
+        exe = os.path.basename(argv[0])
+        return (exe.startswith("python")
+                and "-m" in argv and "looplab.cli" in argv
+                and any(v in argv for v in ("run", "resume"))
                 and root in line)
+
+    # The three offenders the watcher actually caught, on 2026-09-01.
     assert not occupies("/opt/conda/bin/python -m looplab.cli ui --help")
     assert not occupies("/opt/conda/bin/python -m looplab.cli resume "
                         "/tmp/pytest-of-jovyan/pytest-805/test_crash0/run --task-id x")
+    # …and the third, which defeated the first version of this fix: a grep FOR the probe command
+    # line, inside the bench root, satisfies every text condition, because a search for a string
+    # contains that string. argv[0] is what no text match can forge.
+    assert not occupies("grep -rn looplab.cli run /var/tmp/looplab-bench/looplab/benchmarks")
+    assert not occupies("ugrep -G --exclude-dir=.git looplab.cli run /var/tmp/looplab-bench")
+    # Real probes, both forms.
     assert occupies("python -m looplab.cli run "
                     "/var/tmp/looplab-bench/model-probes/remEEref6/ws/algotune_edge_expansion.json")
     assert occupies("python -m looplab.cli resume /var/tmp/looplab-bench/model-probes/x/runs/t/run")
