@@ -5630,3 +5630,58 @@ happens — and no fix ships on a detector whose own arithmetic contradicts it.
 
 `check_money` behaved correctly throughout: it named the parts it could, refused to call the rest
 explained, and exited 1. That refusal is the reason any of this was looked at.
+
+## 121. §120's residue is growing, and four hypotheses about it are dead
+
+`check_money` now reports **`UNEXPLAINED: $+0.055313`**, up from $0.0209 an hour earlier. It sits on
+two probes and nowhere else:
+
+```
+expEEd  +$0.034416  (8 extra metered calls)
+expEEc  +$0.020908  (5)
+expEEa, ctlEEa, ctlEEb, ctlEEc  +$0.000002 each  (1 = the preflight)
+```
+
+Four things it is not, each measured rather than argued:
+
+* **Not the read race.** The span glob takes 1.9 s and the counter is byte-identical either side of
+  it.
+* **Not a double WRITE.** `proxy.py` has exactly one `fh.write` and one `Meter.record`; each of the
+  four `record()` call sites is on a mutually exclusive path and returns. Two rows means two
+  REQUESTS reached the proxy, not one request logged twice.
+* **Not end-of-run flushing.** If the engine stopped writing spans before its last calls, the extra
+  rows would sit after the final span. Rows after the last generation span: **0 in all four probes
+  checked.**
+* **Not corpus-wide double metering.** A `tok_per_s > 10000` detector flags 254 rows worth $0.566,
+  and a "nested inside another call's window" detector flags 10,297 worth $27.76 — the second is
+  simply what concurrency looks like (§100 measured >100 % wall-clock occupancy). Neither survives
+  the arithmetic: the entire meter-minus-spans gap is $0.079.
+
+What stands is one proven instance and its shape: two rows 0.20 s apart with identical
+22,313/25,966 tokens and identical cost, the second at 907,902 tok/s and 28.6 ms — and **one**
+generation span covering both, 182.1 s long, starting before the first row and ending after the
+second. A second request, inside the window of the first, that the engine never recorded as a
+generation.
+
+That points at a retry the engine does not see — its own client re-sending while a response is in
+flight — and it is money the engine's budget accounting cannot know it spent. **It is not proven,
+and it is not being fixed on this evidence.** What the next sweep needs is the proxy logging a
+request fingerprint so a re-send is identifiable as such; that is a one-field change and it is the
+right next step, not another detector fitted to the same 254 rows.
+
+### The two probes that finished
+
+**expEEd** — TEST **252.5617** against best train 250.0101 (ratio 1.010). 50-line kernel, $1.0059,
+33 % before the first node and 10 % after the last, 31 `eval_train`, reference 9.1 % / 13.6 %.
+Nodes [250.01, 151.25, 143.54]. Money: `plan_step` 37.8 %, `propose` 30.3 %, `deep_research` 16.0 %.
+
+**expEEc** — TEST **236.7576** against best train 233.0148 (ratio 1.016 — the new high end of
+`edge_expansion`'s band, previously 1.015). 48-line kernel, $1.0087, 28 % before / 1 % after, 22
+`eval_train`, reference **30.0 % import / 20.0 %** `is_solution` over 10 `run_probe` calls, the
+highest reference use in the corpus. Nodes [165.30, 131.79, 233.01] — the only run today whose LAST
+node is its best.
+
+**Arm standing at six finished:** treatment **268.25, 252.56, 251.35, 236.76**; control **179.14,
+156.91**. Four against two, every treatment run above every control run. Exact one-sided rank-sum
+over that split is **p = 1/15 = 0.0667** — below nothing conventional, and the first time this arm
+has been able to produce a p at all. `ctlEEc` is finishing and will make it 4 v 3.
