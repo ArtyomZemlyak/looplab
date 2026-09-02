@@ -1,3 +1,7 @@
+// The ranking rungs live in `runIndex.js` and are asked from there, never restated here —
+// see `comparableRunRanking` for what restating them cost.
+import { metricComparable, sourceIncomplete } from './runIndex.js'
+
 const CONTROL = /[\u0000-\u001f\u007f]/
 const CONTROL_GLOBAL = /[\u0000-\u001f\u007f]/g
 export const MAX_PORTFOLIO_VIEWS = 12
@@ -195,12 +199,24 @@ const metricObservation = run => {
   return { runId: run?.run_id, phase: 'missing', value: null }
 }
 
-// OPEN[compare-view-has-its-own-comparability-rule] this elects a best run from one task id and one
-// direction by raw min/max, without the source-integrity and comparability rungs the cross-run panel
-// documents as load-bearing (a run folded from a 20-of-1,624-record prefix holds NO rank there). Two
-// screens can therefore crown two different winners, and this is the screen an operator picks a
-// configuration to reuse from. One rule: read the grouping the ranking model already produces.
-// proof:absent:metricComparable@ui/src/portfolioModel.js
+// THE RANKING RUNGS ARE ASKED FROM ONE PLACE, and this screen was the one asking its own.
+//
+// `runIndex.js::metricComparable` calls itself "THE ONE PREDICATE every ranking surface in this tree
+// asks before it orders metrics — the run list's metric sort, `RegistryPanel`, `ParetoPanel`'s
+// cross-run rung and `crossRunRank.js`, which re-tests its own partitions with it precisely so that
+// a tightening here reaches all of them on one commit." The compare view re-implemented its
+// task/direction half inline and therefore never asked `comparabilityConflict` at all — so a pair of
+// runs the cross-run panel refuses to order, this screen ordered.
+//
+// SOURCE INTEGRITY is the second rung and it is the sharper one. `crossRunRank.js` states it: a run
+// whose `source_integrity` says the fold saw a PREFIX keeps its row and its value and holds NO rank
+// — the shipped corpus has a run whose 0.8077 came from a 20-record prefix of a 1,624-record log.
+// Two screens could therefore crown two different winners, and this is the screen an operator picks
+// a configuration to REUSE from.
+//
+// Such a run keeps its observation (its number is still what the readable prefix says) and is
+// excluded from `bestRunIds`; when that leaves nothing rankable the status says WHY rather than
+// falling back to a population complaint.
 export function comparableRunRanking(runs = []) {
   const task = runs[0]?.task_id
   const direction = runs[0]?.direction
@@ -216,22 +232,25 @@ export function comparableRunRanking(runs = []) {
     ...extra,
   })
   if (runs.length < 2) return result('insufficient-population')
-  if (!task || !['min', 'max'].includes(direction)
-      || runs.some(run => run.task_id !== task || run.direction !== direction)) {
-    return result('incompatible')
-  }
+  if (!metricComparable(runs)) return result('incompatible')
   if (observations.some(item => item.phase === 'missing' || item.phase === 'invalid')) {
     return result('missing-metric')
   }
   const phases = new Set(observations.map(item => item.phase))
   if (phases.size !== 1) return result('mixed-phase')
   const phase = observations[0].phase
-  const values = observations.map(item => item.value)
+  // A run folded from a readable PREFIX is shown with its number and holds no rank.
+  const rankable = runs.filter(run => !sourceIncomplete(run))
+  if (rankable.length < 2) return result('source-incomplete', { phase })
+  const rankableIds = new Set(rankable.map(run => run.run_id))
+  const ranked = observations.filter(item => rankableIds.has(item.runId))
+  const values = ranked.map(item => item.value)
   const bestValue = direction === 'max' ? Math.max(...values) : Math.min(...values)
   return result('ranked', {
     phase,
     bestValue,
-    bestRunIds: observations.filter(item => item.value === bestValue).map(item => item.runId),
+    bestRunIds: ranked.filter(item => item.value === bestValue).map(item => item.runId),
+    sourceIncompleteRunIds: runs.filter(sourceIncomplete).map(run => run.run_id),
   })
 }
 

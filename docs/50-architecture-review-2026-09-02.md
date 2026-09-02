@@ -1184,7 +1184,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `tagger-item-has-no-untrusted-envelope` | `search/concept_tagging.py` | the envelope the comment promises |
 | `rule-fallback-picks-a-serialising-policy` | `agents/strategist.py` | a width conjunct |
 | `event-payloads-have-no-registry` | `events/types.py` | a payload-key registry + generated page |
-| `compare-view-has-its-own-comparability-rule` | `ui/src/portfolioModel.js` | read the ranking model |
 | `ranked-metrics-print-fewer-digits-than-they-rank` | `ui/src/format.js` | hoist the widening formatter |
 | `command-envelopes-are-unversioned` | `ui/src/commandStorage.js` | a version field + a migration step |
 | `legacy-control-route-has-no-retry-identity` | `serve/routers/control.py` | sunset headers, then port the 41 call sites |

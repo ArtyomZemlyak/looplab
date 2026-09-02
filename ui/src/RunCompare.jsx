@@ -261,7 +261,14 @@ export default function RunCompare({
       ? 'Metrics are shown but not ranked because confirmed means and raw metrics are mixed.'
       : ranking.status === 'missing-metric'
         ? 'Metrics are shown but not ranked because one or more selected runs lack a finite metric.'
-        : ''
+        : ranking.status === 'source-incomplete'
+          ? 'Metrics are shown but not ranked: too few of these runs folded from a complete event '
+            + 'log, and a number read from a readable prefix is not evidence about the rest.'
+          : ''
+  // A run whose fold saw a PREFIX keeps its number and holds no rank. Said out loud, because the
+  // row still shows a value and an operator picking a configuration to reuse would otherwise read
+  // its absence from the winner's place as the number being worse.
+  const unrankedBySource = new Set(ranking.sourceIncompleteRunIds || [])
   const refreshCapture = () => {
     if (snapshotBusy) return
     setRetry(value => value + 1)
@@ -338,6 +345,7 @@ export default function RunCompare({
             const label = run.label || run.run_id
             const detail = detailById[run.run_id]
             const isBest = ranking.status === 'ranked' && bestRunIds.has(run.run_id)
+            const unranked = unrankedBySource.has(run.run_id)
             const championHref = championRunHref(run, detail)
             return <tr key={run.run_id} className={isBest ? 'best-row' : ''}>
               <th scope="row" className="compare-pinned">
@@ -345,6 +353,10 @@ export default function RunCompare({
                   onClick={() => openComparisonRoute(onOpen, run.run_id,
                     `#/run/${encodeURIComponent(run.run_id)}`)}>{label}</button>
                 {isBest && <span className="pill compare-best">{tiedBest ? 'Tied best' : 'Best'}</span>}
+                {unranked && <span className="pill" title={
+                  'This run folded from a readable PREFIX of its event log. Its number describes '
+                  + 'the records that could be read and is not evidence about the rest, so it is '
+                  + 'shown but never ranked.'}>Not ranked — partial log</span>}
                 {run.label && <small>{run.run_id}</small>}
                 {detail?.partial && <small>partial detail</small>}
               </th>
