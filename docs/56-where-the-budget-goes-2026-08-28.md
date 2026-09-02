@@ -5244,7 +5244,13 @@ run against the same checkout:
 | shipped card, as the control ran it | `8043dd2df7162322` | 16,735 |
 | shipped card, today | `24a3d7803af799c2` | 16,797 |
 
-**Not the same card.** The diff is one clause, and it is not cosmetic:
+**RETRACTED — see §113.** They are the same card. The reconstruction ran a COPY of `make_task.py`
+from a scratch directory, and `BASELINE_TIMES_DIR` resolves against `Path(__file__).resolve().parent`
+— so the copy could not find `.baseline_times` and silently built the fallback wording. Today's
+script, run from the same scratch directory, produces `8043dd2df7162322` too. Rebuilding the card at
+all 24 recorded commits gives that one sha every time. The control group was valid and the four
+probes were stopped on an artifact of my own instrument. What follows below is the diff between a
+card WITH this box's timings and one without, not a diff between then and now:
 
 ```
 - The dataset's name says the reference took about 100 ms per instance ON THE MACHINE THAT BUILT
@@ -5282,3 +5288,53 @@ RESIDUE $-0.000007 after the named parts
 
 Two falsifiers; dropping the subtraction reddens the first, and a probe WITH a tree is never called
 abandoned however its calls line up.
+
+## 113. The card I thought had changed was the same card; my copy of the script could not find the timings
+
+§112 stopped a four-probe arm on the finding that the shipped card had changed since the control
+group ran. **It had not.** Rebuilding the `edge_expansion` card at every one of the 24 commits any
+probe records:
+
+```
+f4258573 8043dd2df7162322 16735     ea2f9a6a 8043dd2df7162322 16735
+33368329 8043dd2df7162322 16735     2cb7b965 8043dd2df7162322 16735
+…  (24 commits, one sha, one length)
+```
+
+One card, unchanged across the whole corpus — including `f4258573`, which is this morning's HEAD and
+which yesterday I had compared AGAINST and found different.
+
+The difference was in how I ran it. `make_task.py` resolves its timings as
+
+```python
+BASELINE_TIMES_DIR = Path(os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR")
+                          or (Path(__file__).resolve().parent / ".baseline_times"))
+```
+
+and my reconstruction copied the script into a scratch directory, where that path does not exist.
+Without the timings the card states the dataset name's target — *"about 100 ms … an order of
+magnitude"* — and with them it states the measured one — *"THE REFERENCE COSTS 46 ms PER INSTANCE
+ON THIS BOX"*. Running TODAY's script from the same scratch directory reproduces the "old" card
+exactly: `8043dd2df7162322`, 16,735 characters.
+
+So the diff §112 printed is real, and it is a diff between **a card built beside its timings and a
+card built away from them** — not between then and now. Retracted in place.
+
+### What the mistake cost, and what it bought
+
+Cost: four probes stopped at three minutes, **$0.0579**, and a relaunch. The relaunch is not itself a
+loss — a control arm running concurrently on the same box is a better design than a historical one,
+and the old ten-run control is now additional evidence rather than the only evidence.
+
+Bought, and worth more than that: **the card silently becomes a different card when the timings are
+missing, and nothing said so.** A probe built on a box without `.baseline_times`, or with
+`ALGOTUNE_BASELINE_CACHE_DIR` pointing anywhere wrong, ships the vague clause and scores against a
+model that was told a number 2.2× too large. `make_task.py` now prints to stderr, naming the
+directory it looked in and what the fallback does; `run_probe.sh` puts that in the probe's log.
+Three falsifiers, and removing the print reddens the first.
+
+**The instrument that lied was mine, again, and the shape is the one this notebook keeps writing
+down.** A script is not a pure function of its source: `make_task.py` reads a directory beside
+itself, so a copy of it is a different program. I checked what the code said and not what the
+program did, and it took a $10 decision with it. What caught it was the boring version of the same
+measurement — rebuilding all 24 commits instead of one, and seeing every single one agree.

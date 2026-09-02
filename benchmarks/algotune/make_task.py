@@ -341,6 +341,23 @@ def measured_reference_ms(task: str, subset: str = "train",
         if vals:
             medians.append(vals[len(vals) // 2])
     if not medians:
+        # SAY SO, ON STDERR, BECAUSE THE CARD SILENTLY BECOMES A DIFFERENT CARD.
+        #
+        # With the timings the card states "THE REFERENCE COSTS 46 ms PER INSTANCE ON THIS BOX --
+        # the median of the per-instance reference timings the scorer itself divides by"; without
+        # them it falls back to "the dataset's name says about 100 ms ... treat that as an order of
+        # magnitude". Two different numbers for the model to size its work against, chosen by
+        # whether a directory happens to be beside this file, and nothing said which one shipped.
+        #
+        # MEASURED 2026-09-02, on myself: reconstructing an old card by copying `make_task.py` into
+        # a scratch directory produced the 100 ms wording, I read that as "the card changed since
+        # the control ran", and I stopped a four-probe arm on it. The card had not changed; my copy
+        # could not find `.baseline_times`, which resolves against `Path(__file__).parent`. The
+        # cheapest thing that would have stopped me is this line.
+        print(f"make_task: no per-instance reference timings for {task}/{subset} under {root} -- "
+              "the timing clause falls back to the dataset name's target, which is a DIFFERENT "
+              "card. Set ALGOTUNE_BASELINE_CACHE_DIR or run this script from its own checkout.",
+              file=sys.stderr)
         return None
     return (min(medians), max(medians))
 
