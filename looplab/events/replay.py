@@ -2940,7 +2940,13 @@ def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
     if (clean_statement and len(clean_statement) <= _CARD_REPLAY_STATEMENT_MAX
             and statement_bytes <= _CARD_REPLAY_STATEMENT_MAX_BYTES):
         receipt = {"statement": clean_statement}
-        for key, limit in (("id", 256), ("source", 64), ("rationale", 400)):
+        # `parent_belief_id` carries the QUESTION-UNDER-QUESTION edge, resolved at the append site
+        # by `research_cadence.question_parent_rows` (statement of a same-memo sibling, or an id
+        # already on the board). Bounded exactly like `id` because it IS one; absent leaves the key
+        # out entirely, so every log on disk folds byte-identically and a writer that said nothing
+        # is never turned into a writer that claimed "no parent".
+        for key, limit in (("id", 256), ("parent_belief_id", 256),
+                           ("source", 64), ("rationale", 400)):
             value = d.get(key)
             if isinstance(value, str) and value.strip() and len(value.strip()) <= limit:
                 receipt[key] = value.strip()

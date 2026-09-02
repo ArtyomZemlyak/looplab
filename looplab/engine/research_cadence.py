@@ -22,6 +22,7 @@ from typing import Iterable, NamedTuple, Optional
 
 from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
+from looplab.core.cards import hypothesis_id
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.jsonutil import canonical_json_digest
@@ -272,6 +273,79 @@ def question_concept_rows(questions: Iterable, per_question: Iterable) -> dict[s
         if isinstance(row, list) and row:
             joined[statement] = row
     return joined
+
+
+def question_parent_rows(questions, per_question, known_ids=None) -> dict[str, str]:
+    """Join each question to the belief id of the BROADER question it sits under.
+
+    Positional, exactly like `question_concept_rows`, and deliberately its twin: `question_parents[i]`
+    names the parent of `questions[i]`. Same order rule for the same measured reason — blanks are
+    skipped AFTER the index is read, never before, or every question after a top-level one inherits
+    its predecessor's parent and the tree grows edges nobody authored.
+
+    A parent may be named two ways, because a memo mints questions that do not exist yet:
+
+      * the exact STATEMENT of another question in THIS memo (the common case — a memo proposing a
+        broad question and two narrower ones under it has no ids to point at), resolved through
+        `hypothesis_id`, which is the same content address the board itself keys on;
+      * an id already on the board (`known_ids`), used as given.
+
+    RESOLVED, NEVER FABRICATED. A name that matches neither yields no parent, and the question is
+    registered exactly as it was before this shipped. That is the same rule the concept join uses:
+    a wrong edge is not recoverable, an absent one is.
+
+    REFUSED: any edge lying on a cycle closed inside this memo — including the degenerate one-step
+    cycle, a question naming its OWN statement as parent. Both are the same defect (a row that is
+    its own ancestor makes `card_child_rollup` recurse), so they are refused by one walk rather than
+    two rules. An explicit self-parent branch WAS written here and removed: no mutant could kill it,
+    because the cycle walk already reached every case it did. A guard no test can fail is not a
+    guard. The whole cycle is dropped rather than one arbitrary member, because which member is
+    "the wrong one" is not knowable here.
+
+    Edges pointing at the EXISTING board cannot close a cycle in this memo, so only same-memo ids
+    are walked.
+    """
+    rows = list(per_question or [])
+    statements: list[str] = []
+    by_id: dict[str, str] = {}
+    for question in questions or []:
+        statement = str(question or "").strip()
+        if not statement:
+            continue
+        statements.append(statement)
+        by_id.setdefault(hypothesis_id(statement), statement)
+    on_board = {str(i) for i in (known_ids or []) if str(i or "").strip()}
+
+    edges: dict[str, str] = {}
+    for index, question in enumerate(questions or []):
+        statement = str(question or "").strip()
+        if not statement:
+            continue
+        raw = str(rows[index] or "").strip() if index < len(rows) else ""
+        if not raw:
+            continue
+        if raw in statements:
+            parent = hypothesis_id(raw)
+        elif raw in on_board or raw in by_id:
+            parent = raw
+        else:
+            continue
+        edges[statement] = parent
+
+    # Drop any edge that lies on a cycle CLOSED INSIDE this memo (see the docstring: this is also
+    # what refuses a self-parent).
+    doomed: set[str] = set()
+    for statement in list(edges):
+        seen = {hypothesis_id(statement)}
+        walk = statement
+        while walk in edges:
+            nxt = edges[walk]
+            if nxt in seen:
+                doomed.add(statement)
+                break
+            seen.add(nxt)
+            walk = by_id.get(nxt, "")
+    return {k: v for k, v in edges.items() if k not in doomed}
 
 
 def is_pure_belief(card) -> bool:
@@ -856,6 +930,13 @@ class ResearchCadenceMixin:
             # spelled twice is a join that will disagree with itself.
             by_statement = question_concept_rows(
                 memo_d.get("open_questions") or [], memo_d.get("question_concepts") or [])
+            # THE SECOND POSITIONAL JOIN, and it is deliberately resolved against the SAME question
+            # list for the same reason: `question_parents[i]` names the parent of
+            # `open_questions[i]`. `known_ids` is the live board, so a memo may also file a new
+            # question under a direction that already exists.
+            parent_by_statement = question_parent_rows(
+                memo_d.get("open_questions") or [], memo_d.get("question_parents") or [],
+                known_ids=self._board_card_ids())
             # NO INTAKE TRUNCATION, and the bare `5` that used to be here was wrong twice over.
             # `DEEP_RESEARCH_OPEN_BELIEF_CAP` is DERIVED from `BOARD_PROMPT_CARDS` precisely so
             # raising the prompt window cannot leave a stale literal behind (see its comment), and
@@ -868,10 +949,36 @@ class ResearchCadenceMixin:
             # whole list is what lets the cap mean what it says.
             for direction in self._admissible_beliefs(questions, channel=question_channel):
                 concepts = by_statement.get(str(direction).strip())
+                parent = parent_by_statement.get(str(direction).strip())
                 self.store.append(EV_HYPOTHESIS_ADDED, {
                     "statement": direction, "source": "deep_research",
                     "at_node": memo.at_node,
-                    **({"concepts": concepts} if concepts else {})})
+                    **({"concepts": concepts} if concepts else {}),
+                    **({"parent_belief_id": parent} if parent else {})})
+
+    def _board_card_ids(self) -> list[str]:
+        """The ids currently on the board, for resolving a parent named as an EXISTING direction.
+
+        Folded here rather than taken from a caller: `_record_research_steering` runs on the
+        concurrent research task and is handed the memo, not the state. `state` is simply not in
+        scope there — reaching for it raised `NameError` inside the projection's own try/except,
+        which logged one line and swallowed EVERY question registration for the memo. The guards
+        caught it as `(0, 1) == (2, 1)`: zero questions reached the board.
+
+        BEST-EFFORT, exactly like `_admissible_beliefs`: a fold that fails yields no board ids, so
+        a parent named as an existing direction goes unresolved and the question registers with no
+        parent — the behaviour it had before any of this shipped. Refusing to register a direction
+        because a fold hiccuped would drop the stage's only durable output, which is the same
+        reason that method gives.
+
+        `RunState.cards` is a MAPPING id -> Card, so the KEYS are the ids. Iterating it for `.id`
+        attributes yields the key strings and reads "" off each — that was the first version, and
+        it would have made every board-id parent unresolvable while looking like it worked.
+        """
+        try:
+            return list(getattr(fold(self.store.read_all()), "cards", None) or {})
+        except Exception:  # noqa: BLE001 - a diagnostic read must never cost the memo its questions
+            return []
 
     def _admissible_beliefs(self, directions: list, *,
                             channel: str = "recommended direction") -> list[str]:

@@ -27,7 +27,8 @@ import anyio
 from looplab.core.llm import BudgetExceeded
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
-from looplab.events.types import (EV_RUN_LOOP_EXITED, run_exit_reason,
+from looplab.events.types import (EV_RUN_LOOP_EXITED, EV_TRACE_EXPORT_HEALTH,
+                                  trace_export_unhealthy, run_exit_reason,
     EV_ABLATE,
     EV_APPROVAL_REQUESTED,
     EV_COMMAND_ACK,
@@ -1225,6 +1226,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                  lifecycle_fence=True),
                              run_id=self.run_dir.name,
                              capture_llm_io=self._trace_llm_io)
+        # Last exporter-health snapshot PUBLISHED (not merely observed): the row is a state
+        # change, so an exporter that stays broken is recorded once, not once per loop turn.
+        self._trace_export_health_seen: tuple = ()
         # Task assets (e.g. the dataset) materialized into each node's sandbox workdir.
         assets = getattr(task, "assets", None)
         self._assets: dict = assets() if callable(assets) else {}
@@ -1534,6 +1538,36 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         mark_finish_report_complete(self, scope)
         return finished.seq == tail_seq + 1
 
+    def _record_trace_export_health(self) -> bool:
+        """Publish the span exporter's own health while it is failing. Returns whether a row landed.
+
+        The exporter's loss receipt is written BY the exporter, so a worker that has stopped
+        reports nothing at all: v12 wrote its last span at 18:20 and kept appending events for the
+        next ten and a half hours with no receipt, no warning and no surface — `metrics()` carried
+        the whole story (`worker_alive`, `shutdown`, per-reason drops) and was read by NOTHING in
+        the product. The engine is the one writer that outlives a dead exporter, so it publishes
+        that snapshot here, on the run's own log.
+
+        DIAGNOSTIC and dedup'd: `trace_export_unhealthy` keeps a healthy run's log untouched, and
+        the fingerprint keeps a permanently-dead exporter to one row per distinct state.
+        """
+        exporter = getattr(getattr(self, "tracer", None), "exporter", None)
+        snapshot_fn = getattr(exporter, "metrics", None)
+        if not callable(snapshot_fn):
+            return False
+        try:
+            snapshot = dict(snapshot_fn())
+        except Exception:  # noqa: BLE001 - a diagnostic read must never stop the run loop
+            return False
+        if not trace_export_unhealthy(snapshot):
+            return False
+        fingerprint = tuple(sorted((str(k), v) for k, v in snapshot.items()))
+        if fingerprint == self._trace_export_health_seen:
+            return False
+        self._trace_export_health_seen = fingerprint
+        self.store.append(EV_TRACE_EXPORT_HEALTH, snapshot)
+        return True
+
     async def run(self) -> RunState:
         """Run under one shared broker context inherited by anyio tasks and worker threads."""
         # The engine's OWN main-loop thread. The concurrent build fan-out dispatches `_create_node` to
@@ -1690,6 +1724,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # below then reaches its CAS over a log with no evaluation in flight.
             if self._eval_drain_requested:
                 await self._drain_adopted_evals()
+            # Before the decision prefix is read, so a published row is part of THIS turn's fold
+            # and cannot move the tail under the seq recheck below.
+            self._record_trace_export_health()
             decision_events = self.store.read_all()
             state = fold(decision_events)
             decision_seq = decision_events[-1].seq if decision_events else -1

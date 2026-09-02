@@ -762,6 +762,7 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
         "open_questions": [],
         "next_experiments": [],
         "question_concepts": [],
+        "question_parents": [],
         "proposed_ideas": [],
         "at_node": (src.get("at_node") if type(src.get("at_node")) is int
                     and 0 <= src.get("at_node") <= (1 << 63) - 1 else None),
@@ -850,6 +851,14 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
     out["question_concepts"] = [
         list(bounded_raw_concept_values(list(_items(row, 8)))[0])
         for row in _items(src.get("question_concepts"), 16)
+    ]
+    # THE PARENT OF EACH QUESTION, positionally aligned with `open_questions` and bounded by the
+    # same text rule the questions themselves get — the value is either another question's exact
+    # statement or a board id, so both fit that bound. A row that empties out stays as "" rather
+    # than vanishing, for the alignment reason spelled out for `question_concepts` above.
+    out["question_parents"] = [
+        _text(v, 1_200, budget, single_line=True)
+        for v in _items(src.get("question_parents"), 16)
     ]
     for _field in ("recommended_directions", "open_questions", "next_experiments"):
         out[_field] = [
