@@ -6,10 +6,11 @@
 > control plane under `ui/src` with 189 `node --test` files, 49 numbered design records plus the
 > guide, 137 registered event types, 218 `Settings` fields, 52 CLI commands, ~140 HTTP routes.
 
-**Status: OPEN — a findings ledger, not a record of fixes.** No finding here has been fixed; what
-the review DID do is mint the 44 `OPEN[…]` markers listed in §8, each at the site it is about and
-each carrying a falsifier `tests/test_open_item_index.py` re-derives from the tree on every run —
-so a row that ships goes red instead of sitting here. It is the review the user asked for on 2026-09-02: every level, every surface, with
+**Status: a findings ledger, not a record of fixes.** What the review DID do is mint 44 `OPEN[…]`
+markers, each at the site it is about and each carrying a falsifier `tests/test_open_item_index.py`
+re-derives from the tree on every run — so a row that ships goes red instead of sitting here. That
+44 is a fact about the review, not a running total: closing an item DELETES its marker and its §8
+row, so the live index is `grep -rn 'OPEN\['` and never a number written in this document. It is the review the user asked for on 2026-09-02: every level, every surface, with
 proposals. Where a finding is already tracked by an `OPEN[…]`/`DECLINED[…]` marker in the tree it
 says so and does not re-open it. Line numbers are never cited (the claim-pin guard refuses them);
 every site is `path::symbol` and was resolved against the baseline. Counts carry the command that
@@ -1111,7 +1112,7 @@ SC-01's exploit reach, TO-05 (torch absent here).
 
 ## 7. How to work this document
 
-This is a ledger, not a plan. Forty-four rows carry an `OPEN[…]` marker at their site (§8); the
+This is a ledger, not a plan. Forty-four rows carried an `OPEN[…]` marker at their site (§8); the
 rest do not, and that is deliberate — the CLAUDE.md rule is that a marker carries a falsifier
 somebody re-derived, and minting one for a row whose predicate nobody can state is the unverified
 glyph the convention exists to abolish. For an untagged row the path is: re-derive its evidence
@@ -1161,7 +1162,7 @@ and the suite's own history records a dropped brace passing 767 tests. Seven hub
 rendered by no test at all. One shared jsdom harness (fetch stub keyed by path, fake timers) and
 one gate-flip test per component. proof:missing:ui/test/_mount.js
 
-### The forty site markers
+### The site markers
 
 | slug | home | the fix it is waiting for |
 |---|---|---|
@@ -1200,7 +1201,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `tagger-item-has-no-untrusted-envelope` | `search/concept_tagging.py` | the envelope the comment promises |
 | `rule-fallback-picks-a-serialising-policy` | `agents/strategist.py` | a width conjunct |
 | `event-payloads-have-no-registry` | `events/types.py` | a payload-key registry + generated page |
-| `probe-tests-assume-a-landlock-kernel` | `tests/test_dev_probe.py` | a skip keyed on the kernel probe |
 | `compare-view-has-its-own-comparability-rule` | `ui/src/portfolioModel.js` | read the ranking model |
 | `ranked-metrics-print-fewer-digits-than-they-rank` | `ui/src/format.js` | hoist the widening formatter |
 | `command-envelopes-are-unversioned` | `ui/src/commandStorage.js` | a version field + a migration step |

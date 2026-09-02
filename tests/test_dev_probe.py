@@ -29,6 +29,26 @@ def _probe(code, **kw):
     return DevProbeTools(timeout_s=kw.pop("timeout_s", 30), **kw).execute("run_probe", {"code": code})
 
 
+# The probe's no-write guarantee is THREE rungs (dev_probe.py): the audit hook is the MESSAGE, for
+# what CPython audits; a Landlock ruleset handling every filesystem-mutating right covers a file's
+# EXISTENCE for every caller; `RLIMIT_FSIZE 0` covers its CONTENT. Most tests below hold on any of
+# the three. A few assert the guarantee for writers CPython does NOT audit — a native library, an
+# `AF_UNIX` bind, `libc.open` straight through — and only the kernel rung can refuse those.
+#
+# Landlock ships OFF below Linux 5.13 and on a kernel built without CONFIG_SECURITY_LANDLOCK, and
+# `dev_probe`'s launcher DELIBERATELY supports that: it prints one line naming the reduced guarantee
+# rather than shrinking it silently. A suite that goes RED there is asserting a guarantee the shipped
+# code does not claim on that box, so these tests skip with the kernel's own reason in the message.
+# The skip is deliberately NARROW: it may only ever cover a case whose refusal has no audit event at
+# all, never one the hook is supposed to catch — the hook's own tests stay unconditional, and
+# `test_the_kernel_no_write_rung_is_applied_and_says_so_when_it_is_not` still runs on every box,
+# because "the rung is missing AND the launcher said so" is exactly the property that holds here.
+_LANDLOCK_REASON = landlock.unavailable_reason()
+_needs_landlock = pytest.mark.skipif(
+    _LANDLOCK_REASON is not None,
+    reason=f"needs the Landlock rung; this kernel has none ({_LANDLOCK_REASON})")
+
+
 @pytest.fixture()
 def outside(tmp_path):
     """A directory the PROBE has no business touching — it stands in for site-packages, the run dir
@@ -251,12 +271,7 @@ def test_the_refusal_for_an_unaudited_mutator_is_not_an_oserror(outside):
     ("pyarrow", "import pyarrow as pa, pyarrow.parquet as pq; "
                 "pq.write_table(pa.table({'a': [1]}), T)"),
 ])
-# OPEN[probe-tests-assume-a-landlock-kernel] this test and its two native-writer siblings assert the
-# probe's no-write-anywhere guarantee for writers CPython does not audit, which only the kernel rung
-# provides — and Landlock ships off and is simply absent below Linux 5.13. On such a box all three
-# fail rather than skip, so the suite is red for an environment the launcher deliberately supports
-# (it prints one line naming the reduced guarantee). A shared skip keyed on the kernel probe.
-# proof:absent:_needs_landlock@tests/test_dev_probe.py
+@_needs_landlock
 def test_a_native_writer_cannot_create_a_file_either(outside, mod, code):
     """THE test that says why the fix is a kernel boundary and not a list of names.
 
@@ -272,6 +287,7 @@ def test_a_native_writer_cannot_create_a_file_either(outside, mod, code):
     assert "THROUGH" not in out
 
 
+@_needs_landlock
 def test_a_unix_socket_cannot_be_bound_into_the_filesystem(outside):
     """`socket.bind` on an AF_UNIX path creates a filesystem entry and raises `socket.bind`, an event
     the probe's `_MUTATE` list never held — audited, and unchecked, which is the same hole from the
@@ -283,6 +299,7 @@ def test_a_unix_socket_cannot_be_bound_into_the_filesystem(outside):
     assert "THROUGH" not in out
 
 
+@_needs_landlock
 def test_ctypes_straight_into_libc_creates_nothing(outside):
     """The WRITE half of this module's `ctypes.dlopen` residual, closed by the kernel rung.
 
