@@ -5546,3 +5546,39 @@ the one-sided permutation p moves from 0.000127 to **0.005673**. The shift is st
 not the clean sweep the first four suggested. The lesson is the arithmetic one — a fifth point can
 only move a p that was computed on four — and it is the reason §114 was written as an observation
 with a named confound rather than as a result.
+
+## 119. Seven first nodes, one dichotomy, no exceptions
+
+Read at run level across every probe launched today, the first evaluated node and what was in its
+directory:
+
+| probe | node 0 | `.pyx` | `check` calls before it | of those naming `build_ext` |
+|---|---|---|---|---|
+| expEEb | 269.31 | yes | 4 | 2 |
+| expEEa | 250.11 | yes | 5 | 2 |
+| expEEd | 250.01 | yes | 10 | 10 (3 answered `ok: false`) |
+| ctlEEa | 172.93 | yes | 5 | 5 |
+| expEEc | 165.30 | yes | 3 | 3 |
+| ctlEEb | 159.79 | yes | 3 | 1 |
+| **ctlEEc** | **20.57** | **no** | 4 | **0** |
+
+**Six kernels between 159.8 and 269.3, one non-kernel at 20.57, and nothing in between.** The
+`check` column moves with it and cannot do otherwise: with no `.pyx` there is nothing for the build
+gate to report, so `ctlEEc` is the one run whose four pre-node checks never mention `build_ext`.
+
+`expEEd` is the clearest single view of §99 working: **ten checks before its first node, all ten
+carrying a build result, three of them `ok: false`.** The gate caught three broken kernels and the
+model fixed them before spending an evaluation — which is precisely what the corpus could not do,
+because before §99 a `check` on a Cython solver silently validated the pure-Python fallback.
+
+This is the variable §108 measured and §114 watched move, and it appeared in no column of the sweep
+summary. `probe_summary.py` now prints `node 0 kernel` / `node 0 NO kernel` on every probe's detail
+line, for every task — `discrete_log`'s corpus reads 4 with and 7 without, which is the same
+question asked where §110 found the answer is different.
+
+Four falsifiers. Two mutations redden: reading the BEST node instead of the first (the running-max
+question is §108's, not this one), and staying silent when there is no kernel — which would make
+silence mean two things, "no kernel" and "no node at all".
+
+*Standing, unchanged:* four probes finished, treatment 268.25 / 251.35 against control 179.14 /
+156.91, and two per arm cannot produce a one-sided rank-sum p below 1/6. Three running.

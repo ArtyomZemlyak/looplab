@@ -233,6 +233,20 @@ def summarise(run_dir: Path) -> dict | None:
     # the last `check` before that node's evaluation, and whether any file WRITE landed after it.
     # See docs/56 §104 for the measurement this counts (33 % of such nodes score zero, against
     # 3.0 % of the rest, p = 0.0024) and for why this is reported rather than acted on.
+    # DID THE FIRST NODE CARRY A COMPILED KERNEL? §108 measured the gap it makes on this task --
+    # median 166.49 against ~26 -- and §114/§119 found the answer moving. Across the seven probes of
+    # 2026-09-02 it is a clean dichotomy: six first nodes with a `.pyx` scored 159.8-269.3 and the
+    # one without scored 20.57. Cheap to read off the node's own directory, and invisible in every
+    # column this summary had.
+    first_kernel = None
+    if nodes:
+        try:
+            nid = (nodes[0].get("data") or {}).get("node_id")
+            nd = run_dir / "nodes" / f"node_{nid}"
+            first_kernel = any(f.name.endswith((".pyx", ".pxd")) for f in nd.iterdir())
+        except (OSError, TypeError):
+            first_kernel = None
+
     tool_spans = [r for r in spans if r.get("kind") == "tool"]
     checks, writes = [], []
     for r in tool_spans:
@@ -359,6 +373,7 @@ def summarise(run_dir: Path) -> dict | None:
         # "measure early" clause is about, and excluding it censors the comparison in the direction
         # that flatters whichever arm fails to evaluate. See docs/56 §87.
         "reached_a_node": bool(nodes),
+        "first_kernel": first_kernel,
         "graded_unchecked": graded_unchecked,
         "graded_nodes": len(nodes),
         "after_pct": (100 * after / total) if total else 0.0,
@@ -699,9 +714,11 @@ def main(argv: list[str]) -> int:
         pct = ("—" if s["ref_pct"] is None
                else f"{s['ref_pct']:.1f}% import / {s['ref_call_pct']:.1f}% is_solution")
         nov = f"; proposer repeated itself {s['novelty_rejected']}x" if s.get("novelty_rejected") else ""
+        kern = ("" if s.get("first_kernel") is None
+                else "; node 0 kernel" if s["first_kernel"] else "; node 0 NO kernel")
         print(f"  {s['probe']} ({s['task']}) nodes(train)={s['nodes']}  "
               f"reference over {s['run_probe']} run_probe calls: {pct}   "
-              f"(§69.1 baseline 4.9-8.3 %){nov}")
+              f"(§69.1 baseline 4.9-8.3 %){kern}{nov}")
         for ph, cost in s["phases"]:
             share = 100 * cost / s["spent"] if s["spent"] else 0
             print(f"      {ph:16s}{s['calls'][ph]:>5} calls  ${cost:.4f}  {share:4.1f}%")
