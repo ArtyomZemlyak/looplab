@@ -326,6 +326,29 @@ class _MemoOut(_StringifiedListTolerant):
     # value for a field it has nothing to say about pads it, and a fabricated concept membership is
     # a lie the fold will persist and the board will render. Absence is recoverable; a wrong
     # membership is not. The default stays, and a memo that genuinely has nothing may still say so.
+    # WHICH BROADER QUESTION EACH QUESTION SITS UNDER, positionally aligned with `open_questions`
+    # exactly like `question_concepts`. A flat list of strings rather than objects for the same
+    # reason: the emit schema becomes a provider tool signature, and the alignment rule is one
+    # sentence checked at the append site, not trusted.
+    #
+    # Without it a question can only ever be a LEAF: measured on e5small-dr-unified-v12, all 11
+    # `hypothesis_added` rows carried [at_node, concepts, source, statement] and nothing else, while
+    # `Card` has carried `parent_card_id`/`child_card_ids` the whole time. The model was permitted a
+    # tree it had no way to describe.
+    #
+    # It carries a `description` for the measured reason `question_concepts` does: the field is the
+    # only channel in front of the model at the moment the emit call is constructed.
+    question_parents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Which BROADER open question each entry of open_questions sits under, at the SAME "
+            "position: question_parents[0] is the parent of open_questions[0]. Give the parent's "
+            "EXACT statement text when it is another entry of this same open_questions list, or an "
+            "existing DIRECTION_ID from the board. Empty string means the question is top-level, "
+            "which is the right answer whenever no listed question genuinely contains it — a "
+            "fabricated parent files the question under a lineage it does not belong to, and that "
+            "is not recoverable."),
+    )
     question_concepts: list[list[str]] = Field(
         default_factory=list,
         description=(
@@ -818,6 +841,7 @@ class DeepResearcher:
         memo.open_questions = clean["open_questions"]
         memo.next_experiments = clean["next_experiments"]
         memo.question_concepts = clean["question_concepts"]
+        memo.question_parents = clean.get("question_parents") or []
         memo.sources = clean["sources"]
         return memo
 

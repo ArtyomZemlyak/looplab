@@ -1639,11 +1639,27 @@ def _seed_cards_from_receipts(
                      "hypothesis_added", present=True)}
                 if isinstance(question_concepts, list) and question_concepts else {}
             )
+            # THE QUESTION-UNDER-QUESTION EDGE, on the same non-native path as the concepts above.
+            # `_card_added_snapshot` already decodes `parent_card_id` for a NATIVE card; a question
+            # arrives through `hypothesis_added`, whose carrier names its parent `parent_belief_id`
+            # — resolved at the append site by `question_parent_rows` against this memo's own
+            # statements or the live board, never fabricated. Same rule as the tags: absent leaves
+            # the field alone, so every log on disk folds byte-identically.
+            #
+            # NOT re-guarded here. A self-edge and a cycle are refused by `_apply_card_lineage`
+            # step 2/3, which is the authoritative place for both (it resolves aliases first, so it
+            # sees the id the row actually landed under, and it peels cycles exactly rather than
+            # refusing whole chains). A duplicate check here was written and removed: no mutant
+            # could kill it, because every case it caught the lineage pass already refused. A guard
+            # no test can fail is not a guard.
+            question_parent = _card_id(d.get("parent_belief_id")) if not native_row else None
+            question_edge = {"parent_card_id": question_parent} if question_parent else {}
             cards[cid] = Card(
                 id=cid, statement=stmt, seed_statement=stmt,
                 source=str(d.get("source") or "human"),   # mirror _derive_hypotheses' default
                 rationale=str(d.get("rationale", ""))[:400], created_at_node=at_node,
                 **question_source,
+                **question_edge,
                 **snapshot,
             )
             card_origins[cid] = "card_added_unbound" if native_row else "hypothesis_shadow"

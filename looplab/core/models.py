@@ -1591,6 +1591,13 @@ class ResearchMemo(BaseModel):
     # "no concepts" about a memo whose carrier could not hold any. Two writers, one payload; the
     # sanitizer was looking for a key the object was structurally unable to provide.
     question_concepts: list[list[str]] = Field(default_factory=list)
+    # WHICH BROADER QUESTION EACH QUESTION SITS UNDER, positionally aligned with `open_questions`
+    # exactly like `question_concepts` above, and carried here for the same reason that field is:
+    # a memo whose CARRIER cannot hold the value ships the feature inert no matter what the emit
+    # schema asks for, and the sanitizer would then default the key and record "no parent" about a
+    # memo that was structurally unable to express one. Resolved at the append site by
+    # `engine/research_cadence.py::question_parent_rows`, never trusted as given.
+    question_parents: list[str] = Field(default_factory=list)
 
     next_experiments: list[str] = Field(default_factory=list)  # one concrete change each
     # Optional concrete proposals the engine may materialize as injected nodes (empty for v1; the

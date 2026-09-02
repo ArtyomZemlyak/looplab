@@ -1414,6 +1414,46 @@ raising on it, so repairing that carrier is exactly what makes this reachable. A
 non-list row still yields no concepts for that question, and a question with none is registered
 exactly as it was before any of this shipped.
 
+**A question may also sit under a BROADER question**, and until 2026-09-02 it could not: every
+`hypothesis_added` row on `e5small-dr-unified-v12` carried exactly `[at_node, concepts, source,
+statement]`, while `Card` had carried `parent_card_id` and `child_card_ids` the whole time. The
+model was permitted a tree it had no way to describe, and the only edge any prompt asked for was
+experiment -> direction. `question_parents[i]` names the parent of `open_questions[i]` — the twin of
+`question_concepts`, resolved by the twin function, with the same order rule for the same measured
+reason. The path is five links long and each one is a place the feature could ship inert:
+
+    _MemoOut.question_parents          the EMIT schema; its `description` is the only channel in
+      │                                front of the model when the tool call is constructed
+      ▼
+    sanitize_research_memo_payload     builds its OWN dict — a key it does not know is dropped, which
+      │                                is how question_concepts once recorded "no concepts" about
+      ▼                                memos structurally unable to hold any
+    ResearchMemo.question_parents      the carrier; a schema asking for what the memo cannot hold
+      │                                ships the feature inert
+      ▼
+    question_parent_rows(...)          RESOLVES: the exact statement of another question in THIS
+      │                                memo (through hypothesis_id, the board's own content
+      │                                address) or an id already on the board. Unmatched -> NO EDGE.
+      ▼                                Cycles closed inside one memo are dropped whole.
+    hypothesis_added.parent_belief_id  the durable row; absent leaves the key out entirely
+      │
+      ▼
+    _on_hypothesis_added -> Card.parent_card_id -> _apply_card_lineage fills child_card_ids
+
+A wrong edge is not recoverable and an absent one is, so nothing is ever fabricated: a parent naming
+neither a sibling statement nor a live board id yields a question with no parent, exactly as before.
+Self-edges and cycles are refused **once**, by `_apply_card_lineage` steps 2-3, which resolves
+aliases first and peels cycles exactly; two earlier duplicate guards (one in the resolver, one in
+the ledger) were deleted because no mutant could kill them — a guard no test can fail is not a
+guard.
+
+The board read behind `known_ids` is its own hazard and cost a near-miss: `_record_research_steering`
+runs on the concurrent research task and is handed the memo, not the state, so reaching for `state`
+raised `NameError` **inside the projection's own try/except** — one log line, and every question
+registration for that memo silently vanished. `tests/test_memo_questions_reach_the_board.py` caught
+it as `(0, 1) == (2, 1)`. `_board_card_ids()` now folds for itself, best-effort: a fold that fails
+yields no board ids and a question registers with no parent rather than not registering at all.
+
 **The carrier had a SECOND blockage and it was the ENCODING**, found live on the run launched from
 the fix above. That run's first memo came back rich — 10 findings, 11 claims, 64 sources — and the
 console read `deep research: emitted memo kept, 1 field(s) refused for shape: open_questions`, so

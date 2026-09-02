@@ -846,6 +846,13 @@ class ResearchCadenceMixin:
             # spelled twice is a join that will disagree with itself.
             by_statement = question_concept_rows(
                 memo_d.get("open_questions") or [], memo_d.get("question_concepts") or [])
+            # THE SECOND POSITIONAL JOIN, and it is deliberately resolved against the SAME question
+            # list for the same reason: `question_parents[i]` names the parent of
+            # `open_questions[i]`. `known_ids` is the live board, so a memo may also file a new
+            # question under a direction that already exists.
+            parent_by_statement = question_parent_rows(
+                memo_d.get("open_questions") or [], memo_d.get("question_parents") or [],
+                known_ids=self._board_card_ids())
             # NO INTAKE TRUNCATION, and the bare `5` that used to be here was wrong twice over.
             # `DEEP_RESEARCH_OPEN_BELIEF_CAP` is DERIVED from `BOARD_PROMPT_CARDS` precisely so
             # raising the prompt window cannot leave a stale literal behind (see its comment), and
@@ -858,10 +865,36 @@ class ResearchCadenceMixin:
             # whole list is what lets the cap mean what it says.
             for direction in self._admissible_beliefs(questions):
                 concepts = by_statement.get(str(direction).strip())
+                parent = parent_by_statement.get(str(direction).strip())
                 self.store.append(EV_HYPOTHESIS_ADDED, {
                     "statement": direction, "source": "deep_research",
                     "at_node": memo.at_node,
-                    **({"concepts": concepts} if concepts else {})})
+                    **({"concepts": concepts} if concepts else {}),
+                    **({"parent_belief_id": parent} if parent else {})})
+
+    def _board_card_ids(self) -> list[str]:
+        """The ids currently on the board, for resolving a parent named as an EXISTING direction.
+
+        Folded here rather than taken from a caller: `_record_research_steering` runs on the
+        concurrent research task and is handed the memo, not the state. `state` is simply not in
+        scope there — reaching for it raised `NameError` inside the projection's own try/except,
+        which logged one line and swallowed EVERY question registration for the memo. The guards
+        caught it as `(0, 1) == (2, 1)`: zero questions reached the board.
+
+        BEST-EFFORT, exactly like `_admissible_beliefs`: a fold that fails yields no board ids, so
+        a parent named as an existing direction goes unresolved and the question registers with no
+        parent — the behaviour it had before any of this shipped. Refusing to register a direction
+        because a fold hiccuped would drop the stage's only durable output, which is the same
+        reason that method gives.
+
+        `RunState.cards` is a MAPPING id -> Card, so the KEYS are the ids. Iterating it for `.id`
+        attributes yields the key strings and reads "" off each — that was the first version, and
+        it would have made every board-id parent unresolvable while looking like it worked.
+        """
+        try:
+            return list(getattr(fold(self.store.read_all()), "cards", None) or {})
+        except Exception:  # noqa: BLE001 - a diagnostic read must never cost the memo its questions
+            return []
 
     def _admissible_beliefs(self, directions: list) -> list[str]:
         """Read the open belief board and apply `admit_research_beliefs` to this memo's directions.
