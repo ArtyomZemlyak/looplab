@@ -5398,3 +5398,39 @@ within itself. The historical comparison is not.
 And the same fact is the strongest available argument for a proper measurement of the harness
 repairs themselves: this is `n = 4` with `p = 0.000127` on ranks and a mechanism visible in three
 independent counters, which is exactly the shape that deserves an arm rather than a paragraph.
+
+## 115. The loop did not work harder for that first node — it did the same work and got a different answer
+
+§114 measured the outcome. This is the effort behind it, on the same 27-versus-4 split, counting
+only what happened BEFORE the first evaluated node:
+
+| before node 0 | corpus (n=27) | today (n=4) |
+|---|---|---|
+| `check` calls | median 5.0 (2–8) | 4.5 (3–5) |
+| `eval_train` calls | 4.0 (2–15) | 4.5 (2–5) |
+| `run_probe` calls | 9.0 (2–27) | 10.5 (6–20) |
+| **money spent** | **$0.3208** ($0.2366–$0.5331) | **$0.2910** ($0.2327–$0.3289) |
+
+**Indistinguishable, and slightly cheaper.** The loop is not measuring more, planning longer or
+spending more to arrive at a compiled kernel on its first draw. It runs the same commands the same
+number of times; what changed is what those commands ANSWER. §114's counter is the one that moved:
+`build_ext` appears in 10 of 17 `check` answers today and in 0 of the corpus's.
+
+That is the sharpest form of the §99/§103 claim. The repairs did not give the loop a new capability
+or a new instruction — they made the capability it already had report on the code the grader runs.
+
+### The confound I cannot rule out from here
+
+Everything in §114 and above compares runs from different DAYS, and the model on the other end is a
+shared endpoint whose behaviour is not under this bench's control — §101 already measured its
+throughput moving by a third between the corpus and today. Nothing here separates "our pre-flight
+repairs changed the first draw" from "the endpoint changed".
+
+The arm that would separate them is cheap and specific: **two probes today on the OLD `check`** —
+the pre-§99 `looplab_check.py`, everything else identical. If the first node comes back at ~27 the
+repair is the cause; if it comes back at ~200 the endpoint is. That is 2 probes, about $2.30, and it
+is the first item this notebook has queued whose answer would change what we believe about our own
+work rather than about the loop's.
+
+Not run now: all four lanes are on §109's arm, and taking one down mid-arm to answer a different
+question is how §112 already cost $0.06.
