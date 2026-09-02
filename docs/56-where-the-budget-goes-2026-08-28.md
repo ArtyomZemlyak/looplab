@@ -5013,3 +5013,92 @@ is where §84's champion rule and §97's repeating proposer already pointed.
 the spread and a median alone would hide the one run that broke it. Three falsifiers; printing only
 the median reddens the test that plants an overfitted run at 0.500 and demands it be named, and
 lowering the five-probe floor reddens the test that refuses to call four points a band.
+
+## 108. What the loop is missing: the score is one binary choice, and the loop walks away from it on a coin flip
+
+Asked the corpus the question the programme is actually about — why a dollar buys the score it buys.
+
+### The dollar
+
+| | median share of the run |
+|---|---|
+| before the first evaluated node | 37.9 % |
+| each step between nodes | 32.6 % (n = 64 transitions) |
+| after the last node | 3.6 % |
+
+Node counts: 12 runs got one, 14 got two, 19 got three, 4 got four. So a dollar buys **two to three
+draws**, and the first one costs nearly two fifths of it.
+
+### The draws are not a refinement sequence
+
+Running maximum, normalised to the first node:
+
+| task | after 1 | after 2 | after 3 | after 4 |
+|---|---|---|---|---|
+| edge_expansion | 1.00× | **5.17×** (n=27) | 6.93× (n=21) | 8.33× (n=4) |
+| discrete_log | 1.00× | 1.00× (n=5) | — | — |
+| pde_heat1d | 1.00× | 1.00× (n=5) | — | — |
+
+On two of the three tasks **no later node ever beats the first one.** On the third the second node is
+worth five times the first — and then look at the actual sequences:
+
+```
+remEE3     [28.1, 194.7, 20.5]          remEEctl4  [154.4, 26.7, 28.0]
+remEE4     [178.9, 265.8, 13.0]         remEEctl7  [25.4, 162.0, 238.4]
+remEE5     [27.2, 27.9, 232.5]          remEEref3  [22.8, 267.7, 22.4, 0.0]
+remEE6     [22.6, 234.9, 148.7, 0.0]    remEEref5  [25.2, 157.4, 28.3, 23.1]
+```
+
+Two clusters, ~20–30 and ~150–280, and the run hops between them. That is not refinement; it is
+sampling from a bimodal distribution, which is why §84's champion rule carries so much weight
+(p = 7.45e-09) and why "more nodes" barely moves the final score.
+
+### The two clusters are one binary choice
+
+| edge_expansion, per node | n | median | max |
+|---|---|---|---|
+| Cython `.pyx` kernel | 42 | **166.49** | 277.23 |
+| numba | 14 | 27.52 | 28.33 |
+| pure Python | 23 | 22.86 | 35.02 |
+
+**Six-fold, and it is the whole spread.** `discrete_log` points the same way with a smaller gap
+(Cython 10.75 against numba 7.04). The score of a run is very nearly the answer to one question:
+did it write a compiled kernel.
+
+### Two things the loop does not do
+
+**1. It does not stay on the regime it found.** Of the 28 transitions in `edge_expansion` that
+START from a kernel node, **14 propose a kernel again and 14 propose something else** — a coin flip
+away from a 166× median toward a 25× one. `remEEctl4` is the clean case: 154.4, then 26.7, then
+28.0. §97 measured the other half of the same behaviour — 43 novelty rejections in 35 of 46 probes,
+every one naming node 0 or 1 — so the second move is either a literal repeat of the first or a
+regression to the other cluster. **There is no exploitation phase.**
+
+**2. The finding never leaves the task.** Kernel adoption, per task:
+
+| task | runs with an evaluated node | runs that ever wrote a `.pyx` |
+|---|---|---|
+| edge_expansion | 27 | **26 (96 %)** |
+| discrete_log | 11 | 5 (45 %) |
+| pde_heat1d | 11 | **0 (0 %)** |
+
+And in the shared lesson store: **0 of 60 statements mention Cython, `.pyx`, a compiled kernel or
+`build_ext`.** The single highest-leverage fact this benchmark has produced has never been distilled
+into a lesson, so there is nothing to carry it to the task where it was never tried.
+
+Whether a kernel would help `pde_heat1d` is NOT established here — numba reaches 161.55 there and
+that may be near the ceiling. What is established is the asymmetry: 42 kernel nodes on one task,
+6 on another, 0 on the third, with nothing in memory that would explain the difference to the next
+run.
+
+### So the answer to "what is missing"
+
+Not measurement: the ruler agrees with itself to 1.6 % and train predicts test to a few per cent
+(§107). Not throughput: endpoint speed buys no nodes (§101). Not the budget's size: 57 % of it goes
+to planning at every budget (§65's correction). **What is missing is memory of a win and the will to
+stay on it.** The loop finds the 166× regime, records nothing about it, and spends its next third of
+a dollar proposing either the same node again or a 25× one.
+
+Both halves are testable with arms this bench can already build, and neither is shipped on the
+strength of this section — §92 is the standing rule. The queue entry that follows from it is a
+control arm on ONE clause: *when a node scored well, propose a variant OF IT.*
