@@ -41,6 +41,10 @@ from dataclasses import dataclass, field
 from statistics import mean, pstdev
 from typing import Callable, Optional
 
+# From `core.errors`, not `core.llm`: this module is a pure trust-tier gate and `memo_verify`'s
+# `core.llm` spelling only works because that module already imports the client for other reasons.
+from looplab.core.errors import BudgetExceeded
+
 
 # --------------------------------------------------------------------------- #
 # Ordinal verdict scale (the sampling-based expectation the no-logprob backend forces)
@@ -252,12 +256,20 @@ def verify(subject: str, evidence: str, criteria: list[Criterion], *, client=Non
             # judge-call contract `verify_memo` uses, now written once (doc 25 CT-09).
             from looplab.trust.judge import structured_judge
             return structured_judge(client, msgs, _Verdicts, parser=parser, tools=tools)
-        # OPEN[verifier-swallows-the-budget-stop] `BudgetExceeded` subclasses Exception, so a tripped ceiling
-        # is reported here as `n_samples=0, score=None` — indistinguishable from an endpoint failure — and the
-        # loop keeps issuing the remaining samples. This is a SELECTION site (the calibrated tie-break reads
-        # it) and the sibling `memo_verify` re-raises, so the package's own containment rule is inverted in
-        # exactly the place it costs money. Re-raise first, and make the polarity an AST guard.
-        # proof:`absent:except BudgetExceeded@looplab/trust/verifier.py`
+        # THE HARD BUDGET STOP PROPAGATES, IT DOES NOT DEGRADE TO A VERDICT — the same sentence
+        # `crash_repair.py` writes at its two judge calls and `memo_verify.py` at its one. It has to
+        # come FIRST because `BudgetExceeded` subclasses `Exception`: swallowed here, a tripped
+        # ceiling reported `n_samples=0, score=None`, which is indistinguishable from an endpoint
+        # failure, AND the loop below went on issuing every remaining sample against a budget that
+        # was already spent. This is a SELECTION site — `verifier_tiebreak` reads the score — so the
+        # one containment in the package that pointed the wrong way was also the one costing money.
+        #
+        # Its CALLER still contains it: `_maybe_verify_ties` is an advisory tie-break whose
+        # documented behaviour is to abstain on any failure, and abstaining is the correct answer
+        # for a ceiling that tripped. What changes is that the spend stops at the first sample
+        # instead of running the requested count to completion.
+        except BudgetExceeded:
+            raise
         except Exception:  # noqa: BLE001 — a bad sample is dropped, never crashes the verifier
             return None
 

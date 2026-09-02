@@ -1177,7 +1177,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `capsule-readers-collapse-run-incarnations` | `engine/concept_capsules.py` | key on the run uid |
 | `claim-receipts-group-by-run-name` | `engine/claims_health.py` | key on the run uid |
 | `auto-skill-body-leaves-a-run-unredacted` | `engine/memory.py` | redact the body at both ends |
-| `verifier-swallows-the-budget-stop` | `trust/verifier.py` | re-raise, then guard the polarity |
 | `stage-manifest-keys-are-open` | `runtime/command_eval.py` | a closed stage key set |
 | `stage-row-statuses-unregistered` | `runtime/command_eval.py` | a status registry + two-way scan |
 | `adapter-reader-can-kill-the-run` | `runtime/command_eval.py` | refuse at submit, fail the node here |
