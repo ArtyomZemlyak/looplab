@@ -59,9 +59,12 @@ from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
     _spawn_engine)
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
+from looplab.serve.protocol import COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES
 
 
-TERMINAL_STATUSES = frozenset({"succeeded", "noop", "failed", "rejected", "timed_out"})
+# Kept under this name — its call sites read well — but DERIVED from `serve/protocol.py`, the
+# module whose docstring owns the string contracts the server, the TUI and the React UI share.
+TERMINAL_STATUSES = COMMAND_TERMINAL_STATUSES
 _RETRY_GUARDED_EVENTS = frozenset(CONTROL_EVENTS)
 _COMMAND_ID_RE = re.compile(r"^cmd_[0-9a-f]{32}$")
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -1310,7 +1313,7 @@ class RunCommandService:
             if record_semantic != semantic_payload_digest:
                 continue
             status = record.get("status")
-            if status not in {"accepted", "executing", "failed", "timed_out"}:
+            if status not in (COMMAND_ACTIVE_STATUSES | {"failed", "timed_out"}):
                 continue
             if status in {"failed", "timed_out"}:
                 # RECONCILE before blocking, exactly as `_unresolved_terminal_record` does — the
@@ -1327,7 +1330,7 @@ class RunCommandService:
             # accepted/executing is already one reserved logical command even in the tiny
             # reserve→append window. Failed/timed-out only block a new key if their intent became
             # durable; a pre-append validation/spawn failure is safe to correct under a new payload.
-            if status in {"accepted", "executing"} or record.get("event_seq") is not None \
+            if status in COMMAND_ACTIVE_STATUSES or record.get("event_seq") is not None \
                     or self._find_intent(rd, str(record.get("id") or ""), record):
                 # …and a durable intent whose EFFECT is already gone blocks nothing. This is the last
                 # rung of the 2026-08-11 wedge, and the one `_intent_spent` did not reach: a fresh
@@ -1405,7 +1408,7 @@ class RunCommandService:
                     and record.get("semantic_payload_digest", record.get("payload_digest"))
                     != semantic_payload_digest):
                 continue
-            if record.get("status") not in {"accepted", "executing", "failed", "timed_out"}:
+            if record.get("status") not in (COMMAND_ACTIVE_STATUSES | {"failed", "timed_out"}):
                 continue
             status = record.get("status")
             # accepted/executing is already the authoritative logical finalize even before its
@@ -1430,7 +1433,7 @@ class RunCommandService:
             if record is None:
                 # A malformed/half-reserved record is an active unknown, so submission fails closed.
                 record = {"id": path.stem, "status": "executing", "created_at": 0}
-            if record.get("status") not in {"accepted", "executing"}:
+            if record.get("status") not in COMMAND_ACTIVE_STATUSES:
                 continue
             candidates.append((float(record.get("created_at") or 0), path.name, path, record))
         if not candidates:

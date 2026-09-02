@@ -63,12 +63,24 @@ EXPECTED_RUN_GENERATION_FIELD = "expected_generation"
 # control_validation asserts a ControlSpec for. As a plain set, any imported module — or a test doing
 # `CONTROL_EVENTS.add(...)` — could widen it process-wide and authorize a new appendable type with
 # no failing assertion and no spec review. Adding a type must be an edit to THIS literal.
-# OPEN[command-status-vocabulary-has-no-home] this module's docstring calls itself the home of the
-# string contracts the server, the terminal client and the React UI share, and the command statuses
-# are not here: accepted/executing/succeeded/noop/failed/rejected/timed_out are spelled six times
-# across run_commands, the control router, both TUI halves, the run-control tool and commandModel.js,
-# with no test pinning any copy against another.
-# proof:absent:COMMAND_TERMINAL_STATUSES@looplab/serve/protocol.py
+# THE DURABLE COMMAND RECORD'S LIFECYCLE, in the module whose docstring calls itself the home of the
+# string contracts the server, the terminal client and the React UI share. These seven words were
+# spelled across `run_commands`, the control router, both TUI halves, the run-control tool and
+# `ui/src/commandModel.js`, with no test pinning any copy against another.
+#
+# `run_commands.TERMINAL_STATUSES` already existed and is kept under that name — its call sites read
+# well — but it now DERIVES from here, and the two in-flight subsets that were spelled inline derive
+# from here too. What a status MEANS stays at the surface that renders it; what the words ARE lives
+# once.
+COMMAND_ACTIVE_STATUSES = frozenset({"accepted", "executing"})
+# `noop` is a SUCCESS: the command was understood and the state it asked for already held. Splitting
+# it out from `succeeded` is what lets a surface say "already satisfied" rather than claiming it did
+# something. `rejected` is likewise not `failed` — the record never became work.
+COMMAND_SUCCEEDED_STATUSES = frozenset({"succeeded", "noop"})
+COMMAND_FAILED_STATUSES = frozenset({"failed", "rejected", "timed_out"})
+COMMAND_TERMINAL_STATUSES = COMMAND_SUCCEEDED_STATUSES | COMMAND_FAILED_STATUSES
+COMMAND_STATUSES = COMMAND_ACTIVE_STATUSES | COMMAND_TERMINAL_STATUSES
+
 CONTROL_EVENTS = frozenset({
     EV_RUN_ABORT, EV_PAUSE, EV_RESTART, EV_RESUME, EV_NODE_ABORT, EV_NODE_RESET, EV_BUDGET_EXTEND, EV_HINT,
     EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_FORK, EV_ANNOTATION, EV_PROMOTE,

@@ -1178,7 +1178,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `trace-clear-receipts-are-never-reaped` | `serve/service_reaper.py` | a fifth reaper rule |
 | `assistant-has-no-untrusted-evidence-boundary` | `serve/assistant.py` | one envelope, used by both agents |
 | `command-sequencer-is-not-reentrant` | `serve/run_commands.py` | a plain lock that raises on re-entry |
-| `command-status-vocabulary-has-no-home` | `serve/protocol.py` | the vocabulary, plus a JS pin |
 | `inject-origin-is-client-supplied-provenance` | `serve/control_validation.py` | mint it server-side only |
 | `read-fence-takes-the-command-sequencer` | `serve/routers/runs.py` | one lock-free generation fence |
 | `no-per-request-fold-budget` | `serve/appstate.py` | one fold per (identity, request) |
