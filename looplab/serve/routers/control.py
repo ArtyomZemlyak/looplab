@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import stat
+import threading
 import time
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -137,6 +138,43 @@ def _command_responses(description: str) -> dict[int, dict[str, Any]]:
     }
 
 
+# WHO STILL CALLS THE LEGACY `/control` ROUTE — a process-local tally, so the port to `/commands`
+# is a number rather than an intention. The route's own comment has said since it was written that
+# it needs "a deprecation window with a warning header and a migration note"; nothing counted, so
+# nobody could say how far along that was or whether anything outside the test suite still spoke it.
+#
+# `{event_type: {user_agent: count}}`. The User-Agent is what separates the suite's own httpx client
+# from a real deployment's browser or script — the whole question the port turns on — and it is a
+# header the caller volunteers about itself, not an identity, so it discloses nothing about who is
+# operating. Truncated and bounded because it is untrusted input on a hot path.
+#
+# NOT AN EVENT, deliberately. This measures the SERVER's clients over its lifetime, not a run's
+# history, and a durable row per legacy call would put that history into the very log this route is
+# criticised for appending to unfenced.
+_LEGACY_CONTROL_MAX_AGENTS = 32
+_LEGACY_CONTROL_AGENT_CHARS = 120
+_legacy_control_callers: dict[str, dict[str, int]] = {}
+_legacy_control_lock = threading.Lock()
+
+
+def _note_legacy_control_caller(event_type: str, user_agent: str) -> None:
+    """Record one SUCCESSFUL legacy control append. Never raises."""
+    agent = (user_agent or "unknown").strip()[:_LEGACY_CONTROL_AGENT_CHARS] or "unknown"
+    with _legacy_control_lock:
+        agents = _legacy_control_callers.setdefault(event_type or "unknown", {})
+        if agent not in agents and len(agents) >= _LEGACY_CONTROL_MAX_AGENTS:
+            # A caller that varies its User-Agent per request must not grow this map without bound.
+            # The overflow bucket keeps the COUNT honest while dropping the distinction.
+            agent = "(other)"
+        agents[agent] = agents.get(agent, 0) + 1
+
+
+def legacy_control_callers() -> dict[str, dict[str, int]]:
+    """A copy of the tally, for an operator or a test asking who has not migrated yet."""
+    with _legacy_control_lock:
+        return {etype: dict(agents) for etype, agents in _legacy_control_callers.items()}
+
+
 def _spawn_engine(*args, **kwargs):
     """Late-bound compatibility seam for patches on either this router or engine_proc."""
     return _engine_proc._spawn_engine(*args, **kwargs)
@@ -176,16 +214,32 @@ def build_router(srv) -> APIRouter:
     # reverted: it is the correct end state but breaks the contract this route exists to preserve
     # (41 call sites in the suite alone append here unfenced), so it needs a deprecation window with a
     # warning header and a migration note — not a silent 409.
-    # OPEN[legacy-control-route-has-no-retry-identity] the comment above states the end state and
-    # nothing schedules it: there is no sunset header, no migration note on the response and no
-    # counter saying who still calls this. A lost-response retry therefore still re-appends an
-    # additive intent, and the 41 unfenced suite call sites are the reason a silent 409 is not the
-    # fix. Emit the RFC 8594 header pair here, port the suite to `/commands`, then delete the route.
-    # proof:`absent:"Deprecation"@looplab/serve/routers/control.py`
+    # OPEN[legacy-control-route-is-not-retired] the route still exists and the suite still speaks
+    # it unfenced, which is the reason a silent 409 is not the fix. It now ANNOUNCES its
+    # deprecation (headers below) and COUNTS its callers (`legacy_control_callers`), so the port to
+    # `/commands` is schedulable and its progress readable; what is open is doing it and deleting
+    # the route.
+    # proof:`present:async def control(@looplab/serve/routers/control.py`
     @router.post("/api/runs/{run_id}/control")
-    async def control(run_id: str, request: Request):
+    async def control(run_id: str, request: Request, response: Response):
         rd = _run_dir(run_id)
         body = await json_object(request, "control body")
+        # ANNOUNCED, not silently tolerated. A caller cannot discover a deprecation it is never told
+        # about, and the paragraph above had been the entire notice — in a comment, where no client
+        # can read it. `Deprecation: true` is the boolean form of the deprecation header field, and
+        # `Link; rel="successor-version"` is what names the replacement (RFC 8288).
+        #
+        # THERE IS DELIBERATELY NO `Sunset`. RFC 8594's field carries a DATE, nobody has committed to
+        # one, and emitting an invented date would be a schedule this project has not agreed to —
+        # the same reason `DECLINED[…]` markers here must carry a number rather than a plausible
+        # sentence. The header pair is `Deprecation` + `Link` until a removal date is actually
+        # decided; adding `Sunset` then is one line.
+        response.headers["Deprecation"] = "true"
+        response.headers["Link"] = (
+            f'</api/runs/{run_id}/commands>; rel="successor-version"')
+        response.headers["Warning"] = (
+            '299 - "This endpoint has no durable request identity: a lost-response retry '
+            're-appends an ADDITIVE intent. Use POST /commands with an Idempotency-Key."')
 
         def _append_control() -> dict:
             # Offloaded to a worker thread: ``sequence`` takes the cross-process flock (blocking up to
@@ -234,7 +288,17 @@ def build_router(srv) -> APIRouter:
                     raise HTTPException(409, str(exc)) from exc
             return {"ok": True, "seq": ev.seq, "type": etype}
 
-        return await anyio.to_thread.run_sync(_append_control)
+        result = await anyio.to_thread.run_sync(_append_control)
+        # WHO STILL CALLS THIS. The comment above says the port needs "a deprecation window with a
+        # warning header and a migration note" and could not say how far along it is, because
+        # nothing counted. Recorded only for an append that SUCCEEDED: a 400/409 is a caller the
+        # route refused, and counting it as a migration blocker would inflate the number the port is
+        # tracked against. Process-local and deliberately not an event — this measures the SERVER's
+        # clients, not a run's history, and a durable row per legacy call would put that history in
+        # the log the route is criticised for appending to.
+        _note_legacy_control_caller(str(result.get("type") or ""),
+                                    request.headers.get("User-Agent", ""))
+        return result
 
     # ------------------------------------------------------------------ authoritative command lifecycle
     def _command_response_headers(response: Response) -> None:

@@ -457,8 +457,7 @@ Tracked: `asha-inert-on-this-task-family`, `f1i-b-serial-deep-research-gate`,
 `first-propose-runs-with-every-gpu-idle`, `monitor-fault-has-no-outcome-label`,
 `judge-bench-covers-two-judges-of-four`, `strategist-developer-field`,
 `concept-skeleton-matches-no-run`, `classifier-rewrites-authored-membership`, `overrun-grace-bar`,
-`crash-predictability-unmeasured`, `duplicate-receipt-lands-on-one-lane-of-three`,
-`next-experiments-never-reach-proposal`.
+`crash-predictability-unmeasured`, `next-experiments-never-reach-proposal`.
 
 **Top moves.** (1) Cadence offload behind a capture sink (EM-01). (2) Split `train_monitor.py`
 along its importer map (EM-06). (3) One watchdog tick helper (EM-05) so EM-04/08/12 land once.
@@ -1181,7 +1180,7 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `card-lane-fills-outside-the-policy-population` | `search/card_selection.py` | a legal-action set per policy |
 | `tagger-item-has-no-untrusted-envelope` | `search/concept_tagging.py` | the envelope the comment promises |
 | `event-payloads-have-no-registry` | `events/types.py` | a payload-key registry + generated page |
-| `legacy-control-route-has-no-retry-identity` | `serve/routers/control.py` | sunset headers, then port the 41 call sites |
+| `legacy-control-route-is-not-retired` | `serve/routers/control.py` | port the call sites to `/commands`, then delete it |
 
 **What was deliberately NOT tagged**, so the index does not fill with rows nobody can falsify: the
 structural proposals whose shape is a judgement call rather than a missing symbol (the package

@@ -58,7 +58,7 @@ from looplab.engine.audit import AuditMixin
 from looplab.engine.cadence import occupancy_due
 from looplab.engine.card_reservation import (CardReservationMixin, _BuildReservation,
                                              scored_anchor,
-                                            _discarded_proposal_text)
+                                            discarded_proposal_receipt)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
 from looplab.engine.costs import bind_cost_accountants
@@ -5520,9 +5520,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     "action": "dropped",
                 })
             elif plan.disposition not in {"mint", "reuse", "attach"}:
-                # THE ONLY PLACE A DISCARDED PROPOSAL IS RECEIPTED, and the placement is the
-                # decision. This branch runs immediately after the proposal call and nowhere else,
-                # so it is the one pass that can know a PAID proposal was refused. It returned None
+                # A DISCARDED PROPOSAL IS RECEIPTED HERE, and the placement is the decision. This
+                # branch runs immediately after the proposal call, so it is a pass that can know a
+                # PAID proposal was refused. (It said "THE ONLY PLACE ... and nowhere else" until
+                # 2026-09-02, and that overstated its coverage: the batch draft lane in
+                # `novelty.py::_link_card` and the Layer-5 speculative producer each run a paid
+                # propose and refuse one too, and both lost it in silence. All three now emit
+                # `card_reservation.py::discarded_proposal_receipt`, which is why the payload moved
+                # out of this branch — three hand-written copies of one row is how they came to
+                # disagree about whether the row exists at all.) It returned None
                 # on a non-accepting disposition and the caller (`_create_node_scoped`) then unwound
                 # through `_discard_node_build_telemetry`, which despite its name appends nothing —
                 # its body only nulls the per-role prediction attributes so a later build cannot
@@ -5542,18 +5548,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 #
                 # REFUSING THE MINT IS UNCHANGED — a card whose owner is in flight must not be
                 # minted twice. What is fixed is refusing in SILENCE.
-                self._append_proposal_event(EV_NOVELTY_REJECTED, {
-                    "node_id": prospective_node_id, "generation": 0,
-                    "kind": "card_duplicate" if plan.disposition == "duplicate"
-                            else "card_unplannable",
-                    "reason": ("an existing card already owns this action"
-                               if plan.disposition == "duplicate"
-                               else "the card plan named no bounded action"),
-                    "action": "dropped",
-                    "disposition": str(plan.disposition),
-                    "pass": "planner",
-                    "hypothesis": _discarded_proposal_text(linked),
-                })
+                self._append_proposal_event(EV_NOVELTY_REJECTED, discarded_proposal_receipt(
+                    plan.disposition, prospective_node_id, linked, lane="planner"))
             return plan.idea if plan.disposition in {"mint", "reuse", "attach"} else None
 
         if preproposed is not None:

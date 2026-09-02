@@ -2046,8 +2046,24 @@ class SpeculationMixin:
             return False, False, None
         self._spec_raw_stage_result = None
         if not result.success:
+            # PUBLISHED, not dropped. The producer ran a full paid Researcher call under
+            # `_capture_proposal_events`; whatever novelty/governance receipts it buffered before it
+            # raised describe work that really happened and was really paid for. Until 2026-09-02
+            # both of these branches returned without publishing, so the Layer-5 lane was the WORST
+            # of the three discard paths: the receipt was captured and then thrown away.
+            #
+            # This is deliberately NOT the same case as the stale-fence refusal below, and the
+            # difference is stated there: a moved fence abandons a SUCCESSFUL proposal that will be
+            # re-made from the same state, so dropping keeps the log from carrying two receipts for
+            # one eventual card. Here nothing is re-made from anything — the call failed or the
+            # planner refused it — and the receipts are the only record that this lane paid.
+            self._publish_proposal_events(result.audit_events)
             return True, False, "producer_failed"
         if result.idea is None:
+            # The refusal case bd182357 exists for, on the third lane. `_prepare_node_idea`
+            # returning None IS the novelty gate or the card planner refusing a paid proposal, and
+            # the receipt explaining which is in `audit_events`.
+            self._publish_proposal_events(result.audit_events)
             return True, False, "proposal_refused"
         card_id = self._stage_prepared_card(
             result.action,

@@ -174,6 +174,36 @@ def _discarded_proposal_text(idea) -> str:
     return text[:_DISCARDED_PROPOSAL_TEXT_MAX]
 
 
+# THE ONE SHAPE OF A DISCARDED-PROPOSAL RECEIPT, so the lanes that emit it cannot spell it three
+# ways. It landed in `orchestrator.py::_link` first (bd182357) with a comment reading "THE ONLY
+# PLACE A DISCARDED PROPOSAL IS RECEIPTED ... and nowhere else", which overstated its own coverage:
+# the BATCH draft lane (`novelty.py::_link_card`) and the Layer-5 SPECULATIVE producer each run a
+# paid propose and then refuse one too, and both lost it in silence. A `duplicate` disposition is a
+# busy board's ordinary answer, so this is not an edge case — it is the same 24.1 min / 81 calls /
+# 4.27M tokens loss bd182357 measured, one lane over.
+#
+# Here rather than on the mixin because BOTH callers are Engine methods in different modules and a
+# constructor with no `self` is what makes the row testable without simulating a turn.
+def discarded_proposal_receipt(disposition: str, node_id: int, idea, *, lane: str) -> dict:
+    """The `novelty_rejected` payload for a proposal a card planner refused.
+
+    `lane` names WHICH pass discarded it (`planner`, `batch_planner`, `speculative`) — the receipts
+    are otherwise identical and the whole reason this exists is that the lanes were measurably not
+    equivalent. Never raises: a receipt may not cost a build its refusal.
+    """
+    duplicate = str(disposition) == "duplicate"
+    return {
+        "node_id": node_id, "generation": 0,
+        "kind": "card_duplicate" if duplicate else "card_unplannable",
+        "reason": ("an existing card already owns this action" if duplicate
+                   else "the card plan named no bounded action"),
+        "action": "dropped",
+        "disposition": str(disposition),
+        "pass": lane,
+        "hypothesis": _discarded_proposal_text(idea),
+    }
+
+
 class _BuildReservation(NamedTuple):
     """Durable node/card reservation handed from the main task to one build worker.
 
