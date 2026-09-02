@@ -5924,3 +5924,39 @@ fell to 21.8 and climbed back. The clause is not doing one thing.
 
 *Champion rule, again:* `ctlEEe` reports 259.76 instead of 26.79 because the best evaluated node is
 what gets submitted. That is three of the batch's ten runs it has now carried.
+
+## 128. Two controls in a row land near the top, and the arm's p is now 0.214
+
+`ctlEEd` — control — finished at TEST **260.7523**, against a best train of 258.7298 (ratio 1.008).
+46-line Cython champion, $1.0117, 31 % of the dollar before the first node and 0 % after the last,
+27 `eval_train`, reference 11.8 % / 11.8 %. Nodes **[258.73, 235.75, 28.76]**, best over last
+**9.00×** — the fourth run of this batch the champion rule has carried.
+
+It is the second-highest score of the whole arm, and the control before it (`ctlEEe`, 259.76) is the
+third. The ranking:
+
+```
+268.2 T   260.8 C   259.8 C   252.6 T   251.4 T   236.8 T   221.6 T   198.4 T   197.8 C   179.1 C   156.9 C
+```
+
+| n | one-sided exact rank test |
+|---|---|
+| 4 v 3 (§122) | **0.0286** |
+| 6 v 4 (§127) | **0.0857** |
+| **6 v 5** | **0.2143** |
+
+Median ratio 244.05 / 197.85 = **1.234**, essentially unchanged from 1.295 — the arms' centres have
+not moved much; what has changed is that the control's spread now reaches the treatment's top.
+
+**This is the whole reason §83 exists, playing out in public.** Seven probes gave p = 0.0286 and it
+was recorded with "necessary, not sufficient" attached. Four more probes — two of them controls that
+scored 260 — took it to 0.2143. Any of the three numbers, read alone, would have supported a
+different conclusion, and the only thing that separates them is n.
+
+Nothing is claimed, and the earlier 0.0286 is now formally superseded rather than merely qualified.
+
+*Also measured, not an anomaly:* a live pid appeared on a probe that had already written
+`final.json`. It was gone on the second reading — the graded scoring pass exiting — and the probe's
+log shows `[23:04:04] ИТОГ` two seconds later. A process seen once is not a process.
+
+Three more launched (`ctlEEf`, `ctlEEg`, `expEEg`) to bring the arm to **7 v 7**.
