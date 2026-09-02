@@ -5227,3 +5227,58 @@ block prints lines starting with `discrete_log` too, so the assertion read
 HEADER and stops at the blank line. That is the same substring-anchor mistake this notebook has now
 recorded four times, and the only reason it did not survive is that the fixture made the wrong line
 obviously wrong.
+
+## 112. The control group ran on a different card, and the arm was three minutes old when that turned up
+
+Launched §109's arm on the four free lanes — four `edge_expansion` probes with `--exploit-best` —
+and then went looking for the control group's card fingerprint. It is not recorded: the ten shipped-
+card `edge_expansion` runs predate `INSTRUMENT.txt` entirely, and the four that have one
+(`remEE6`–`remEE9`) were written by 4a1c6940, the commit that FIRST added the file, before it
+carried `card_args` or `card_sha256`.
+
+So the control card had to be reconstructed. `git show 4a1c6940:benchmarks/algotune/make_task.py`,
+run against the same checkout:
+
+| | sha of `goal` | length |
+|---|---|---|
+| shipped card, as the control ran it | `8043dd2df7162322` | 16,735 |
+| shipped card, today | `24a3d7803af799c2` | 16,797 |
+
+**Not the same card.** The diff is one clause, and it is not cosmetic:
+
+```
+- The dataset's name says the reference took about 100 ms per instance ON THE MACHINE THAT BUILT
+  IT -- nothing here has measured this box, so treat that as an order of magnitude…
++ THE REFERENCE COSTS **46 ms** PER INSTANCE ON THIS BOX -- the median of the per-instance
+  reference timings the scorer itself divides by…
+```
+
+The control arm was told 100 ms and the treatment arm would have been told 46 ms. That is the exact
+property §92 and §94 were readable BECAUSE of — every other byte identical — and it would have been
+violated silently, in a comparison costing about ten dollars, by a corpus that looked free.
+
+Four probes stopped at three minutes, **$0.0579 spent**, trees removed. Relaunched as a paired
+design on the same four lanes: **two treatment (`expEEa`, `expEEb`) and two control (`ctlEEa`,
+`ctlEEb`), both cards built by today's code, running at the same time on the same box.** The old
+corpus is no longer the control group; it is background.
+
+### And the stop produced a defect worth keeping
+
+`check_money.py` immediately reported `RESIDUE $+0.057925` and exited 1. The money was never in
+doubt — it was the four stopped probes, whose meter rows outlived their trees — but the tool could
+not say so, and the standing brief carries this case as a MANUAL step: *the counter also counts the
+abandoned probe, so add it to the live sum by hand or you get a false discrepancy.* A step an
+operator must remember is a step that gets forgotten.
+
+The signature needs no list to maintain: **an arm the meter knows and the probe trees do not.**
+`run_probe.sh` writes the tree before the first call, so "meter rows, no tree" cannot be a running
+probe. `check_money` now names them:
+
+```
+38 call(s) from 4 ABANDONED probe(s) -- in the meter, no tree on disk:
+   expEE1 $0.0114, expEE2 $0.0148, expEE3 $0.0156, expEE4 $0.0162
+RESIDUE $-0.000007 after the named parts
+```
+
+Two falsifiers; dropping the subtraction reddens the first, and a probe WITH a tree is never called
+abandoned however its calls line up.

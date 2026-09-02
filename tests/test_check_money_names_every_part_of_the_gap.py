@@ -209,3 +209,53 @@ def test_a_missing_meter_log_is_not_a_crash(tmp_path):
 
     cost, calls, killed, empty = cm.meter_by_probe(str(tmp_path / "absent"), 0.0)
     assert (dict(cost), dict(calls), dict(killed), dict(empty)) == ({}, {}, {}, {})
+
+
+def test_an_abandoned_probe_is_named_and_not_left_unexplained(tmp_path):
+    """A probe stopped and swept away still costs money, and the meter still has it.
+
+    The standing brief carries this as a manual step -- the counter also counts the ABANDONED probe,
+    so at reconciliation time you must add it in by hand or read a false discrepancy -- and a step an
+    operator has to remember is a step that gets forgotten. Driven 2026-09-02: four probes were
+    launched, found mis-designed three minutes in, stopped, and their trees removed; the meter kept
+    78 calls and $0.057925 and this tool exited 1 with UNEXPLAINED.
+
+    The signature needs no list to maintain: an arm the METER knows and the probe trees do not.
+    `run_probe.sh` writes the tree before the first call, so "meter rows, no tree" cannot be a
+    running probe.
+
+    MUTATION: drop `- sum(abandoned.values())` from the residue and this reddens.
+    """
+    rows = [{"ts": 2000.0, "arm": "alive", "cost": 0.10, "status": 200, "stream": True},
+            {"ts": 2001.0, "arm": "alive", "cost": 0.000002, "status": 200, "stream": False},
+            {"ts": 2002.0, "arm": "ghost", "cost": 0.04, "status": 200, "stream": True},
+            {"ts": 2003.0, "arm": "ghost", "cost": 0.01, "status": 200, "stream": True}]
+    root = _bench(tmp_path, probes={"alive": [0.10]}, meter_rows=rows)
+    port, _t, srv = _serve({"cost_usd": 0.150002, "calls": 4})
+    try:
+        done = _run(root, port)
+    finally:
+        srv.close()
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "ABANDONED" in done.stdout, done.stdout
+    assert "ghost $0.0500" in done.stdout, done.stdout
+    assert "UNEXPLAINED" not in done.stdout, done.stdout
+    # The claim is that the abandoned dollars leave the residue, not that the residue is exactly
+    # zero: the preflight allowance is counted per PROBE and the ghost has one too, which is the
+    # $0.000002 that remains. Pinning an exact zero here would be pinning that rounding.
+    residue = float([l for l in done.stdout.splitlines() if "RESIDUE" in l][0]
+                    .split("$")[1].split()[0])
+    assert abs(residue) < 1e-5, done.stdout
+
+
+def test_a_live_probe_is_never_called_abandoned(tmp_path):
+    """MUTATION GUARD: a probe WITH a tree is not abandoned however its calls line up."""
+    rows = [{"ts": 2000.0, "arm": "alive", "cost": 0.10, "status": 200, "stream": True},
+            {"ts": 2001.0, "arm": "alive", "cost": 0.000002, "status": 200, "stream": False}]
+    root = _bench(tmp_path, probes={"alive": [0.10]}, meter_rows=rows)
+    port, _t, srv = _serve({"cost_usd": 0.100002, "calls": 2})
+    try:
+        done = _run(root, port)
+    finally:
+        srv.close()
+    assert "ABANDONED" not in done.stdout, done.stdout

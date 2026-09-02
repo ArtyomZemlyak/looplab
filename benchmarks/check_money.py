@@ -217,7 +217,26 @@ def main(argv: list[str]) -> int:
         unnamed = sum(extra.values()) - k - e
         if unnamed:
             print(f"         {unnamed} call(s) STILL UNNAMED -- neither killed nor empty")
-    residue = gap - preflight * 0.00000196
+    # AN ABANDONED PROBE IS ITS OWN CATEGORY, not an unexplained dollar.
+    #
+    # The standing brief carries this as a manual step -- "the counter also counts the ABANDONED
+    # probe remDL ($0.1292); at reconciliation time you must add it to the live sum or you get a
+    # false discrepancy" -- and a step an operator must remember is a step that gets forgotten.
+    # Driven 2026-09-02: four probes were launched, found to be mis-designed three minutes in,
+    # stopped and their trees removed. The meter kept their 78 calls and $0.057925, this tool
+    # reported it as UNEXPLAINED and exited 1, and the money was never in doubt for a second.
+    #
+    # The signature is unambiguous and needs no list to maintain: an arm the METER knows and the
+    # probe trees do not. A live probe always has a tree (`run_probe.sh` writes INSTRUMENT.txt
+    # before the first call), so "meter rows, no tree" cannot be a running probe -- it is a probe
+    # whose tree was deleted, i.e. one abandoned.
+    abandoned = {p: c for p, c in m_cost.items()
+                 if p != "?" and p not in s_calls and m_calls.get(p, 0) > 0}
+    if abandoned:
+        print(f"         {sum(m_calls[p] for p in abandoned)} call(s) from "
+              f"{len(abandoned)} ABANDONED probe(s) -- in the meter, no tree on disk: "
+              + ", ".join(f"{p} ${c:.4f}" for p, c in sorted(abandoned.items())))
+    residue = gap - preflight * 0.00000196 - sum(abandoned.values())
     print(f"  RESIDUE ${residue:+.6f} after the named parts")
     if abs(residue) > a.max_residue:
         print(f"UNEXPLAINED: ${residue:+.6f} exceeds --max-residue ${a.max_residue:.4f}")
