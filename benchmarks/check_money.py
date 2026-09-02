@@ -110,10 +110,11 @@ def spans_by_probe(root: str, since: float) -> tuple[dict, dict]:
     return cost, calls
 
 
-def meter_by_probe(root: str, since: float) -> tuple[dict, dict, dict]:
+def meter_by_probe(root: str, since: float) -> tuple[dict, dict, dict, dict]:
     cost: dict[str, float] = collections.defaultdict(float)
     calls: dict[str, int] = collections.Counter()
     killed: dict[str, int] = collections.Counter()
+    empty: dict[str, int] = collections.Counter()
     path = os.path.join(root, "meter", "meter.jsonl")
     if not os.path.exists(path):
         return cost, calls, killed
@@ -139,7 +140,21 @@ def meter_by_probe(root: str, since: float) -> tuple[dict, dict, dict]:
             pass
         if str(j.get("status") or "") not in ("200", ""):
             killed[arm] += 1
-    return cost, calls, killed
+        else:
+            # AN EMPTY 200. Found 2026-09-02 by asking what the four surplus calls this tool could
+            # not name actually were: status 200, streamed, `attempts: 2`, ZERO prompt and zero
+            # completion tokens, latency 60249-60764 ms. A stream that opened, produced nothing for
+            # a minute, and closed successfully -- on the RETRY, so the first attempt failed the
+            # same way. It is invisible to every other instrument here: not a 504, not unstreamed,
+            # costs nothing, and leaves no `generation` span. Four in 12,716 calls, all in probes
+            # that ran on 2026-08-31. Named so the next one is not chased again from scratch.
+            try:
+                if (int(j.get("prompt_tokens") or 0) == 0
+                        and int(j.get("completion_tokens") or 0) == 0):
+                    empty[arm] += 1
+            except (TypeError, ValueError):
+                pass
+    return cost, calls, killed, empty
 
 
 def main(argv: list[str]) -> int:
@@ -163,7 +178,7 @@ def main(argv: list[str]) -> int:
         return 2
     live = _counter(a.port)
     s_cost, s_calls = spans_by_probe(a.bench_root, since)
-    m_cost, m_calls, m_killed = meter_by_probe(a.bench_root, since)
+    m_cost, m_calls, m_killed, m_empty = meter_by_probe(a.bench_root, since)
 
     spans_total = sum(s_cost.values())
     gap = live["cost_usd"] - spans_total
@@ -179,8 +194,13 @@ def main(argv: list[str]) -> int:
     if extra:
         print(f"         {sum(extra.values())} further call(s) with no generation span: "
               + ", ".join(f"{p}+{n}" for p, n in sorted(extra.items())))
-        print(f"         (of those probes, killed by the gateway: "
-              + ", ".join(f"{p}={m_killed.get(p, 0)}" for p in sorted(extra)) + ")")
+        k = sum(m_killed.get(p, 0) for p in extra)
+        e = sum(m_empty.get(p, 0) for p in extra)
+        print(f"         of those: {k} killed by the gateway, {e} EMPTY 200s "
+              f"(streamed, zero tokens both ways, ~60 s)")
+        unnamed = sum(extra.values()) - k - e
+        if unnamed:
+            print(f"         {unnamed} call(s) STILL UNNAMED -- neither killed nor empty")
     residue = gap - preflight * 0.00000196
     print(f"  RESIDUE ${residue:+.6f} after the named parts")
     if abs(residue) > a.max_residue:

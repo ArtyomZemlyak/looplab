@@ -119,3 +119,44 @@ def test_no_meter_is_an_error_and_not_a_clean_zero(tmp_path):
         capture_output=True, text=True, timeout=300)        # no --since, nothing on :9
     assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
     assert "no meter" in r.stderr, r.stderr
+
+
+def test_an_empty_200_is_named_and_not_left_in_the_unnamed_pile(tmp_path):
+    """The four calls this tool could not name, found by asking what they were.
+
+    Status 200, streamed, `attempts: 2`, ZERO prompt and zero completion tokens, latency
+    60249-60764 ms: a stream that opened, produced nothing for a minute, and closed successfully --
+    on the RETRY, so the first attempt failed the same way. Invisible to every other instrument
+    here: not a 504, not unstreamed, costs nothing, no `generation` span. Four in 12,716 calls.
+    """
+    probes = {"p1": [1.0]}
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200",
+             "prompt_tokens": "100", "completion_tokens": "50"},
+            {"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200",
+             "prompt_tokens": "10", "completion_tokens": "2"},
+            {"ts": "3000", "arm": "p1", "cost": 0.0, "status": "200", "stream": "True",
+             "attempts": "2", "latency_ms": "60249", "prompt_tokens": "0",
+             "completion_tokens": "0"}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.00000196, "calls": 3})
+    r = _run(root, port)
+    srv.close()
+    assert "1 EMPTY 200s" in r.stdout, r.stdout + r.stderr
+    assert "STILL UNNAMED" not in r.stdout, r.stdout
+
+
+def test_a_call_that_is_neither_killed_nor_empty_is_reported_as_unnamed(tmp_path):
+    """The pile must stay visible. A decomposition that silently absorbs what it cannot classify is
+    the "answers clean about directories it never looked at" failure in another costume."""
+    probes = {"p1": [1.0]}
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200",
+             "prompt_tokens": "100", "completion_tokens": "50"},
+            {"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200",
+             "prompt_tokens": "10", "completion_tokens": "2"},
+            {"ts": "3000", "arm": "p1", "cost": 0.0, "status": "200",
+             "prompt_tokens": "7", "completion_tokens": "3"}]     # tokens flowed, no span, no kill
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.00000196, "calls": 3})
+    r = _run(root, port)
+    srv.close()
+    assert "1 call(s) STILL UNNAMED" in r.stdout, r.stdout + r.stderr
