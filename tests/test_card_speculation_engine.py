@@ -999,7 +999,7 @@ def test_raw_producer_exception_becomes_consumable_failure_result(tmp_path, monk
     result = engine._spec_raw_stage_result
     assert result is not None and result.success is False
     assert result.error == "RuntimeError: raw producer exploded"
-    assert engine._serve_raw_card_stage() == (True, False)
+    assert engine._serve_raw_card_stage() == (True, False, "producer_failed")
     assert engine._spec_raw_stage_result is None
 
 
@@ -1441,7 +1441,7 @@ def test_raw_stage_authority_allows_llm_telemetry_but_rejects_other_tail_churn(t
     engine.store.append(EV_LLM_COST, {"cost": 0.01})
     engine._spec_raw_stage_result = telemetry_result
 
-    assert engine._serve_raw_card_stage() == (True, True)
+    assert engine._serve_raw_card_stage() == (True, True, None)
     committed_types = [event.type for event in engine.store.read_all()]
     assert committed_types.index("card_added") < committed_types.index(
         "raw_committed_audit_test"
@@ -1465,7 +1465,7 @@ def test_raw_stage_authority_allows_llm_telemetry_but_rejects_other_tail_churn(t
     })
     engine._spec_raw_stage_result = stale_result
 
-    assert engine._serve_raw_card_stage() == (True, False)
+    assert engine._serve_raw_card_stage() == (True, False, "authority_seq_moved")
     stale_types = [event.type for event in engine.store.read_all()]
     assert stale_types.count("card_added") == 1
     assert "raw_stale_audit_test" not in stale_types

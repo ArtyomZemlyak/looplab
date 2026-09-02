@@ -97,3 +97,47 @@ test('legacy pending without a receipt is called unknown, not guessed queued', a
   assert.match(pendingWorkLabel(live, []), /evaluation start unknown/)
   })
 })
+
+test('a dead attempt\'s still-open stage beacon never labels the NEW lifecycle', async () => {
+  await withNarration(({ pendingWorkLabel }) => {
+    // Engine SIGKILLed mid-`train` of attempt 0 (the closing beacon never landed; `_stage_cursor`'s
+    // finally died with the process), run resumed, node reset to attempt 1 and evaluating again —
+    // the gen-0 beacon is still open in the bounded window. The strip must refuse it exactly as the
+    // node card does (`evalStageFor`'s generation fence); a bare `stages.get(id)` read let the
+    // abandoned lifecycle's cursor label the new one, and the two surfaces contradicted each other.
+    const cursor = generation => [{ type: 'phase_progress', ts: 100, data: {
+      stage: 'eval', phase: 'stage', status: 'started', node_id: 5, generation,
+      name: 'train', index: 1, total: 3, role: 'work' } }]
+    const live = { nodes: { 5: { id: 5, attempt: 1, status: 'pending',
+      activity: { schema: 1, status: 'evaluating', generation: 1, evidence: 'node_eval_started' } } } }
+    const stale = pendingWorkLabel(live, cursor(0))
+    assert.match(stale, /training \/ evaluating/, stale)
+    assert.ok(!/train/.test(stale.replace('training / evaluating', '')), stale)
+    // The negative control: a beacon of the CURRENT generation still names the step — the fence
+    // refuses stale, not everything.
+    assert.match(pendingWorkLabel(live, cursor(1)), /Stage train · 2 of 3/)
+  })
+})
+
+test('the status clock reads the SAME build filter as the label', async () => {
+  await withNarration(({ liveStatusStartedAt }) => {
+    // Build `implement` opened at 1000; an eval stage beacon opened at 9000. The label leads with
+    // the build (Dock.agentStatus filters livePhase to 'build'), so its age must be the build's —
+    // unfiltered, the clock latched the newest open record and reset to the eval's stage boundary
+    // under an unchanged build label, describing a different moment than the words beside it.
+    const live = { engine_running: true, nodes: {} }
+    const log = [
+      { type: 'phase_progress', ts: 1000, data: {
+        stage: 'build', phase: 'implement', status: 'started', node_id: 9 } },
+      { type: 'phase_progress', ts: 9000, data: {
+        stage: 'eval', phase: 'stage', status: 'started', node_id: 5, generation: 0,
+        name: 'train', index: 1, total: 3, role: 'work' } },
+    ]
+    assert.equal(liveStatusStartedAt(live, log), 1000)
+    // With NO build phase open, the eval-led label gets the eval lane's own clock: the projection's
+    // durable eval start, not the stage beacon's boundary.
+    const evalLive = { engine_running: true, nodes: { 5: { id: 5, attempt: 0, status: 'pending',
+      activity: { schema: 1, status: 'evaluating', generation: 0, started_at: 500 } } } }
+    assert.equal(liveStatusStartedAt(evalLive, [log[1]]), 500)
+  })
+})

@@ -108,6 +108,25 @@ export function openPhases(log) {
         count: Number.isInteger(d.count) && d.count > 0 ? d.count : null,
         prospective: d.prospective === true,
         speculative: d.speculative === true,
+        // The EVAL cursor's detail. A build phase carries none of it and keeps nulls, exactly as an
+        // eval beacon keeps the build's `operator`/`count` empty — one record shape, each producer
+        // filling its own half, so a consumer never has to know which stage it is looking at to
+        // read the fields it cares about.
+        //
+        // `name` is the AGENT'S OWN word for the step (`mine`, `train`, `score`) and proves nothing
+        // about what the step does; `role` is the authenticated half, resolved by the engine from
+        // the manifest through `train_monitor.eval_log_plan`. A surface may SHOW the name and may
+        // only CLAIM from the role — see `evalStageLabel`.
+        name: typeof d.name === 'string' ? d.name : '',
+        role: typeof d.role === 'string' ? d.role : '',
+        // The lifecycle this beacon is about. Absent on a build phase and on any legacy row, which
+        // `evalStageFor` treats as "no claim" rather than as a mismatch.
+        generation: Number.isInteger(d.generation) && d.generation >= 0 ? d.generation : null,
+        // 0-based. Each is validated on its own here; whether the PAIR is coherent is decided
+        // where it is rendered (`evalStageLabel`), because that is the only place an incoherent
+        // pair does harm — "step 4 of 3" reads as a bug in the run rather than in the strip.
+        index: Number.isInteger(d.index) && d.index >= 0 ? d.index : null,
+        total: Number.isInteger(d.total) && d.total > 0 ? d.total : null,
         ts: Number.isFinite(Number(event.ts)) && Number(event.ts) > 0 ? Number(event.ts) : null,
       })
     } else if (d.status === 'finished') {
@@ -129,9 +148,14 @@ export function openPhases(log) {
 // to splice then: a run whose engine died mid-build leaves every beacon open forever, and a phase
 // label ticking upward on a dead run is a worse lie than no label. `finished` alone is not enough —
 // a STALLED run is not finished, which is exactly the case that was rendering a phantom.
-export function livePhase(state, log) {
+// `stage` scopes the answer to one producer. The Dock needs that: it appends a build's PARALLEL
+// COUNT (from `node_building` markers) to whatever this returns, and once eval beacons share the
+// stream the newest-open record can be an eval stage — which would have read "Stage train · 2 of 3
+// (3 in parallel)", a build's fan-out reported about an evaluation. Unfiltered stays the default so
+// every existing caller is byte-identical.
+export function livePhase(state, log, stage = null) {
   if (!state || state.finished || state.engine_running === false) return null
-  const open = openPhases(log)
+  const open = openPhases(log).filter(record => !stage || record.stage === stage)
   if (!open.length) return null
   let newest = open[0]
   for (const record of open) {
@@ -139,6 +163,91 @@ export function livePhase(state, log) {
     if (record.ts != null && (newest.ts == null || record.ts >= newest.ts)) newest = record
   }
   return newest
+}
+
+// -------------------------------------------------------------- live STAGE of an in-flight eval
+//
+// The same question one level down, and the one the whole status vocabulary could not answer: a node
+// whose evaluation owns it has been "Training / evaluating" for hours, and on a real repo pipeline
+// (`mine` -> `train` -> `score`) that sentence is FALSE for two of the three stages. `stage_finished`
+// is folded but lands only at a stage's COMPLETION, so between two rows the record said nothing at
+// all — which is why the engine's own watchdog had to guess the running stage from freshest-mtime.
+//
+// `PROGRESS_STAGE_EVAL` beacons are that cursor. This is the node-keyed selector over them.
+//
+// Keyed by node AND generation: a reset's abandoned lifecycle and its replacement are different
+// experiments, and `nodeActivity.js::markerFor` already refuses to let a stale build marker claim a
+// new lifecycle. An eval cursor with no generation is a legacy row and is matched on node alone,
+// which is the same tolerance that rule grants.
+export function evalStages(log) {
+  const byNode = new Map()
+  for (const record of openPhases(log)) {
+    if (record.stage !== 'eval' || record.phase !== 'stage' || record.nodeId == null) continue
+    byNode.set(record.nodeId, record)
+  }
+  return byNode
+}
+
+export function evalStageFor(node, log) {
+  const id = Number(node?.id)
+  if (!Number.isInteger(id)) return null
+  const record = (log instanceof Map ? log : evalStages(log)).get(id)
+  if (!record) return null
+  // The generation fence. `openPhases` carries no generation of its own, so it is read back off the
+  // beacon's node key against the node's current attempt only when BOTH sides carry one — absent on
+  // either side is a legacy row, and refusing it would silently retire the signal on an older server.
+  const generation = record.generation
+  if (Number.isInteger(generation) && Number.isInteger(Number(node?.attempt))
+      && generation !== Number(node.attempt)) return null
+  return record
+}
+
+// WHAT A SURFACE MAY SAY ABOUT A RUNNING STAGE, and the split is the whole point.
+//
+// `role` is authenticated — the engine resolved it from the manifest via `eval_log_plan`, which
+// spends a page of its own docstring on why a stage NAME proves nothing. So "Training" is claimed
+// ONLY from `role === 'training'`. Everything else shows the stage's own name, which is honest for
+// a different reason: it is the word the agent chose and the word this operator already reads in the
+// stage strip, the logs tab and the trace bands, so it names the step without asserting what it does.
+//
+// A pipeline that declares no role therefore reads "Stage `train` · 2 of 3" rather than "Training".
+// That is deliberately weaker than it could be: `train` is the overwhelmingly common slug and
+// guessing from it would be right most of the time, which is exactly what makes the guess dangerous
+// — `eval_log_plan` refuses the same inference for kill authority, and a status surface that quietly
+// applied a looser rule would let an operator read an engine claim into a string the agent picked.
+// The trimmed name and the index/total coherence rule, decided ONCE for both widths. The two label
+// functions below differ only in wording; when each carried its own copy of this guard, a change
+// landing in one (say, admitting `total === 1`) made the strip and the node card disagree about the
+// same running stage — the exact drift the shared-label design exists to prevent.
+function stageParts(record) {
+  if (!record || record.stage !== 'eval') return null
+  const name = typeof record.name === 'string' ? record.name.trim() : ''
+  const step = Number.isInteger(record.index) && Number.isInteger(record.total)
+    && record.total > 1 && record.index < record.total
+    ? { index: record.index, total: record.total } : null
+  return { name, step }
+}
+
+export function evalStageLabel(record) {
+  const parts = stageParts(record)
+  if (!parts) return null
+  const step = parts.step ? ` · ${parts.step.index + 1} of ${parts.step.total}` : ''
+  if (record.role === 'training') {
+    return `Training${parts.name && parts.name !== 'eval' ? ` (${parts.name})` : ''}${step}`
+  }
+  if (!parts.name) return `Evaluating${step}`
+  return `Stage ${parts.name}${step}`
+}
+
+// The same answer at chip width. The name alone once the run has more than one stage to place it in,
+// because a 10px chip that spends its width on the word "stage" says less than one that spends it on
+// the word the operator is looking for.
+export function evalStageShortLabel(record) {
+  const parts = stageParts(record)
+  if (!parts) return null
+  const step = parts.step ? ` ${parts.step.index + 1}/${parts.step.total}` : ''
+  if (record.role === 'training' && (!parts.name || parts.name === 'eval')) return `training${step}`
+  return `${parts.name || 'evaluating'}${step}`
 }
 
 // The words. A closed table rather than string-building at the call site, so the vocabulary is
@@ -151,6 +260,10 @@ const PHASE_TEXT = {
   'build|novelty': (r) => `Checking experiment${r.nodeId != null ? ` #${r.nodeId}` : ''} is not a repeat…`,
   'build|reserve': (r) => `Reserving experiment${r.nodeId != null ? ` #${r.nodeId}` : ''}…`,
   'build|implement': (r) => `Writing code for experiment${r.nodeId != null ? ` #${r.nodeId}` : ''}…`,
+  // The EVAL cursor's own sentence. It defers to `evalStageLabel` so the strip and the node card
+  // cannot come to describe the same running stage differently — the rule about what may be CLAIMED
+  // (`role`) versus merely SHOWN (`name`) is stated once, there.
+  'eval|stage': (r) => `${evalStageLabel(r)}${r.nodeId != null ? ` — experiment #${r.nodeId}` : ''}…`,
   // NO `build|repair` row, and its absence is load-bearing rather than an oversight. That phase
   // existed for one day: it bracketed `developer.repair` inside the `debug` operator's build branch,
   // and F5 deleted that branch on 2026-08-13. `events/types.py::PROGRESS_PHASES` dropped it in the

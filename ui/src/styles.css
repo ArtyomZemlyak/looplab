@@ -299,19 +299,50 @@ button { font: inherit; }
 .node-card.s-pending { background-color: color-mix(in srgb, var(--pending) 12%, var(--bg-2)); }
 /* A node the engine has JUST STARTED building (before node_created): dashed + breathing so it reads as
    "forming", distinct from a pending node that's queued/evaluating. */
-.node-card.s-building { background-color: color-mix(in srgb, var(--accent) 9%, var(--bg-2));
+.node-card.s-building, .node-card.a-building {
+  background-color: color-mix(in srgb, var(--accent) 9%, var(--bg-2));
   border-style: dashed; border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   animation: breathe 1.6s ease-in-out infinite; }
 .node-card.working { border-color: var(--working); animation: pulse 1.3s infinite; }
+/* WHICH LANE is spending on this node, layered over the lifecycle wash above. The body colour keys on
+   `s-<status>`, where a node waiting for a slot and a node three hours into training are both
+   `s-pending` — one identical slate, so "which node is training?" could only be answered by reading a
+   10px chip on every card. These three give the answer preattentively, and each is a DIFFERENT visual
+   channel rather than three shades of one, so they stay separable for a colour-blind operator and
+   under `prefers-reduced-motion` (which kills the animations below, leaving the border treatments).
+     building   — shares `s-building`'s dashed accent above, which also gives the treatment to a node
+                  REBUILT after a reset (it keeps `s-pending`, so it used to get none)
+     evaluating — solid amber left rail, "a process of ours is running"
+     queued     — flat, no rail, no pulse: nothing is running for it, and saying otherwise is the
+                  "the box looks busy" lie `narration.js::pendingWork` records. */
+.node-card.a-evaluating { box-shadow: inset 3px 0 0 0 var(--working), var(--shadow-card);
+  background-color: color-mix(in srgb, var(--working) 9%, var(--bg-2)); }
+/* A queued node is dimmed rather than tinted: it is the one live state where the honest signal is the
+   ABSENCE of work. The dashed left rail says "there is a lane here, it just has not started". */
+.node-card.a-queued { box-shadow: inset 3px 0 0 0 color-mix(in srgb, var(--pending) 70%, transparent),
+  var(--shadow-card); opacity: .82; }
 .node-card.infeasible { opacity: .62; background-image: repeating-linear-gradient(45deg, transparent, transparent 7px, rgba(122,107,154,.10) 7px, rgba(122,107,154,.10) 14px); }
 .node-card.best { border-color: var(--best); box-shadow: 0 0 0 2px rgba(255,213,74,.35), var(--shadow-card); }
 /* confirmed/robust tick on the metric row (replaces the restated "robust …" sub-line) */
 .node-card .conf-chip { font-size: 11px; color: var(--ok); font-weight: 700; margin-left: 6px; white-space: nowrap; }
 /* zoom level-of-detail glyph (overview): the status-coloured body + operator icon + id, centred. The
    card keeps its footprint so the layout never shifts; only the contents collapse. */
-.node-card.lod { display: flex; align-items: center; justify-content: center; gap: 8px; height: 100%; }
+.node-card.lod { display: flex; align-items: center; justify-content: center; gap: 8px; height: 100%;
+  position: relative; }
 .node-card.lod .lod-ic { display: inline-flex; color: var(--fg-dim); }
 .node-card.lod .lod-id { font-weight: 700; font-size: 15px; color: var(--fg); }
+/* The level-of-detail activity mark. Position-independent of the glyph's flex row (absolute) so it
+   cannot push the icon/id off-centre, and shaped as well as coloured — a ring for "waiting", a solid
+   dot for "running" — so the building/evaluating/queued split does not rest on hue alone. */
+.node-card.lod .lod-activity { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px;
+  border-radius: 999px; background: var(--fg-mut); }
+.node-card.lod .lod-activity.building, .node-card.lod .lod-activity.evaluating {
+  animation: breathe 1.6s ease-in-out infinite; }
+.node-card.lod .lod-activity.building { background: var(--accent); }
+.node-card.lod .lod-activity.evaluating { background: var(--working); }
+.node-card.lod .lod-activity.queued, .node-card.lod .lod-activity.unknown {
+  background: transparent; border: 2px solid var(--pending); }
+.node-card.lod .lod-activity.unknown { border-style: dashed; border-color: var(--fg-mut); }
 @keyframes pulse { 0%,100%{ box-shadow: 0 0 0 0 rgba(240,180,41,.0), var(--shadow-card);} 50%{ box-shadow: 0 0 0 5px rgba(240,180,41,.28), var(--shadow-card);} }
 @keyframes shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-4px)} 60%{transform:translateX(4px)} }
 
@@ -485,7 +516,12 @@ button { font: inherit; }
   border: none; color: var(--grp-tint); cursor: pointer; font-size: 13px; padding: 0 2px 0 0; line-height: 1; }
 .grp-spark { display: block; margin: 4px 0 2px; }
 .grp-dots { display: flex; gap: 8px; font-size: 11px; font-variant-numeric: tabular-nums; }
-.grp-dots .dot.ok { color: var(--ok); } .grp-dots .dot.fail { color: var(--fail); } .grp-dots .dot.pend { color: var(--pending-text); }
+.grp-dots .dot.ok { color: var(--ok); } .grp-dots .dot.fail { color: var(--fail); } .grp-dots .dot.pend, .grp-dots .dot.queued { color: var(--pending-text); }
+/* The lane split of the pending dot. Same colour vocabulary as the card rails and the activity chip,
+   so one hue means one thing everywhere: accent = building, amber = a process is running, slate =
+   waiting. The glyphs (◐ ▶ ◔) carry the split on their own for a colour-blind operator. */
+.grp-dots .dot.build { color: var(--accent); }
+.grp-dots .dot.eval { color: var(--working); }
 
 /* ---------- cross-run Map view ---------- */
 .seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: var(--radius-sm); overflow: hidden; }
@@ -1807,6 +1843,9 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 /* Node Trace tab: live "what's the LLM doing now" status + scroll nav. */
 .trace-live-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent); margin-bottom: 8px; }
 .trace-live-status .tls-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 7px var(--accent); animation: breathe 1.4s infinite; flex: none; }
+/* A waiting node is not live work. The dot stops breathing and loses its glow, so the strip cannot
+   read as "something is happening" for a node the engine has not started yet. */
+.trace-live-status.waiting .tls-dot { background: var(--pending); box-shadow: none; animation: none; }
 .trace-small { font-size: 12px; }
 /* The shared-stage-log disclosure (traceProjection.js::stageLogAttribution). It sits directly
    above the log text it is about, so it is bordered rather than floated away from it. */

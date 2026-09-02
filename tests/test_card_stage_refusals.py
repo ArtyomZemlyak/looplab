@@ -20,10 +20,9 @@ operator greps, i.e. it reads as a refusal nobody can look up.
 from __future__ import annotations
 
 import ast
-import inspect
-import textwrap
 
 from looplab.engine.card_reservation import CARD_STAGE_REFUSALS, CardReservationMixin
+from tests._source_scan import function_tree
 
 
 def _plan_tree() -> ast.AST:
@@ -33,8 +32,7 @@ def _plan_tree() -> ast.AST:
     `_plan`, and a file-wide search would report about a fence nobody asked it to check — the same
     trap `tests/test_offload_lane_writes_no_folded_events.py` records for `run_sync`.
     """
-    src = textwrap.dedent(inspect.getsource(CardReservationMixin._stage_prepared_card))
-    for node in ast.walk(ast.parse(src)):
+    for node in ast.walk(function_tree(CardReservationMixin._stage_prepared_card)):
         if isinstance(node, ast.FunctionDef) and node.name == "_plan":
             return node
     raise AssertionError("`_plan` is gone from `_stage_prepared_card` — re-point this guard")
@@ -111,9 +109,7 @@ def test_the_seam_is_CLEARED_at_entry_so_a_reader_reads_THIS_call():
     """`_card_stage_refusal` is read by the caller right after the call, exactly like
     `_card_stage_attached_to`. A stale value from a previous idea would attribute one idea's
     refusal to the next. Mutation: delete the reset line."""
-    src = textwrap.dedent(inspect.getsource(CardReservationMixin._stage_prepared_card))
-    tree = ast.parse(src)
-    fn = next(n for n in ast.walk(tree)
+    fn = next(n for n in ast.walk(function_tree(CardReservationMixin._stage_prepared_card))
               if isinstance(n, ast.FunctionDef) and n.name == "_stage_prepared_card")
     resets = [n for n in fn.body
               if isinstance(n, ast.Assign)
@@ -126,8 +122,7 @@ def test_the_seam_is_CLEARED_at_entry_so_a_reader_reads_THIS_call():
 def test_the_caller_COUNTS_the_refusals_and_says_so():
     """A named refusal nobody reads is the same silence one layer up. Mutation: drop the `else`
     branch or the warning, and a batch whose fence moved is unattributable again."""
-    src = textwrap.dedent(inspect.getsource(CardReservationMixin._stage_card_creates))
-    tree = ast.parse(src)
+    tree = function_tree(CardReservationMixin._stage_card_creates)
     reads = [n for n in ast.walk(tree)
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
              and n.func.id == "getattr"

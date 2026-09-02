@@ -234,20 +234,19 @@ class NoveltyGateMixin:
         worker, then publishes the bounded intents from the main task only if the prepared Card
         still passes its lifecycle/cue fence.
 
-        FOUR INSTALLERS, and one of them is THIS MODULE. `_offload_under_proposal_sink` above
-        opens the sink for the two offloaded lanes, so `novelty.py` is itself an installer as of
-        2026-08-31 — the guard that derives installers from the tree counts it, and a docstring that
-        omitted it would be describing a lane that no longer exists where it says.
-
-        THREE INSTALLERS SINCE 2026-08-30, not one, and this sentence named only Layer 5 until
-        2026-08-31. The two offloaded proposal lanes install it for the reason Layer 5 does and then
-        publish UNCONDITIONALLY: `card_reservation.py::_stage_card_creates` (per-action) and
-        `orchestrator.py::_await_batch_proposal` (batch). Both moved their paid provider wait onto a
-        worker thread, where `_append_proposal_event` would otherwise fall through to `store.append`
-        and breach invariant #1's sole-writer rule with FOLDED, authority-bearing rows. Layer 5's
-        conditional publish is its own election rule and not the general contract: a refused
-        proposal is exactly when the receipt matters most (`bd182357`), so the offload lanes publish
-        whether or not an idea formed, and from a `finally` so a raise cannot discard the buffer.
+        TWO INSTALLER MODULES, and one of them is THIS ONE, `novelty.py` (the guard test derives
+        the set from the tree — a count typed here rotted twice in two days, reading FOUR and
+        THREE at once while the true set was neither). `_offload_under_proposal_sink` below installs it around
+        BOTH offloaded proposal lanes — `card_reservation.py::_stage_card_creates` (per-action) and
+        `orchestrator.py::_await_batch_proposal` (batch) reach the sink only through that helper,
+        never by opening this context themselves — and `speculation.py::_prepare_raw_card_stage`
+        installs it in Layer 5's isolated Researcher worker. All three lanes moved their paid
+        provider wait onto a worker thread, where `_append_proposal_event` would otherwise fall
+        through to `store.append` and breach invariant #1's sole-writer rule with FOLDED,
+        authority-bearing rows. The PUBLISH policies differ by design: Layer 5 publishes only if
+        the prepared Card still passes its lifecycle/cue fence (an election rule of its own), while
+        the offload helper publishes whether or not an idea formed, from a `finally`, because a
+        refused proposal is exactly when the receipt matters most (`bd182357`).
         """
 
         intents: list[tuple[str, dict, Optional[str], Optional[str]]] = []
@@ -291,19 +290,37 @@ class NoveltyGateMixin:
         unwind; cancellation is not the trigger, since the non-abandoned wait is shielded.
 
         The pool is `proposal_limiter()`, not anyio's shared default — an in-flight `_run_eval`
-        holds a default token for its whole multi-hour duration. Callers may override it, and pass
-        `abandon_on_cancel` through, but they get the right pool by DEFAULT so a new lane cannot
-        starve by omission.
+        holds a default token for its whole multi-hour duration. Callers may override the limiter,
+        and they get the right pool by DEFAULT so a new lane cannot starve by omission.
+        `abandon_on_cancel=True` is REFUSED, not merely unadvised: an abandoned worker keeps the
+        sink installed in its copied context and goes on buffering into the same list this task's
+        `finally` is publishing — late receipts land in a buffer nobody will ever publish (the
+        `bd182357` silence back, for exactly the refused-proposal case) while the publish iterates
+        a list another thread mutates.
         """
         import anyio
 
+        if run_sync_kwargs.get("abandon_on_cancel"):
+            raise TypeError(
+                "_offload_under_proposal_sink cannot abandon its worker: the proposal sink's "
+                "buffer must have exactly one owner (see docstring)")
         run_sync_kwargs.setdefault("limiter", proposal_limiter())
         captured: list = []
         try:
             with self._capture_proposal_events() as captured:
                 return await anyio.to_thread.run_sync(fn, **run_sync_kwargs)
         finally:
-            self._publish_proposal_events(captured)
+            # Contained: `store.append` raising HERE would REPLACE the exception already unwinding
+            # (`shared.py::_append_progress_row` documents that shape) — turning the clean
+            # `BudgetExceeded` terminal every caller `except`s for into a generic store error, so
+            # the run would crash without its budget receipt. Losing buffered rows to a store that
+            # cannot append is the lesser harm, and it is said out loud.
+            try:
+                self._publish_proposal_events(captured)
+            except Exception:  # noqa: BLE001 - never mask the raise already in flight
+                _LOG.warning(
+                    "buffered proposal receipts could not be published on the way out",
+                    exc_info=True)
 
     def _append_proposal_event(self, event_type: str, data: dict):
         sink = _PROPOSAL_EVENT_SINK.get()
@@ -821,6 +838,20 @@ class NoveltyGateMixin:
                                  f"component, not a variation of: {taken}"))
                 self._set_complexity_hint(state, None)          # A0d cues on the shared researcher
                 idea = self.researcher.propose(state, None)
+                # WHICH BOUND ENDED THIS PROPOSE — the batch lane's own read of the
+                # `roles.RESEARCHER_OUTPUT_ATTRS.last_budget_exhausted` receipt, per roll and
+                # BEFORE the next roll overwrites it on the shared researcher (the same reason
+                # `telem` snapshots per roll below). These Ideas go straight to the stager and
+                # never cross `_prepare_node_idea._link`, where the per-action lanes make this
+                # check — so without it the primary lane at the shipped width could not tell a
+                # TRUNCATED proposal from a converged one, which is the indistinguishability the
+                # receipt exists to remove. Warning-only, exactly like `_link`'s.
+                _bound = str(getattr(self.researcher, "last_budget_exhausted", "") or "")
+                if _bound:
+                    _LOG.warning(
+                        "batch proposal roll %d (draft %d of %d) was cut short by its %s budget "
+                        "— it did not emit on its own terms, so treat it as TRUNCATED rather "
+                        "than converged", attempts, len(ideas) + 1, n, _bound)
                 if idea is None:
                     continue
                 idea = _link_card(self._canonicalize_draft_idea(idea), len(ideas))

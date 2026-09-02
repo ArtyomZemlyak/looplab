@@ -3,7 +3,8 @@ import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel,
   useNodesInitialized, useReactFlow, useViewport } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { fmt, layoutWithGroups, nodeClass, delta, workingNodeIds, operatorMeta, OPERATOR_LEGEND,
-  isSweep, sweepInfo, chipFontSize, storageGet, storageSet, nodeActivityView, NODE_ACTIVITY } from './util.js'
+  isSweep, sweepInfo, chipFontSize, storageGet, storageSet, nodeActivityView, nodeActivityStatus,
+  NODE_ACTIVITY } from './util.js'
 import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
 import { forkChip } from './forkProvenance.js'
@@ -212,7 +213,7 @@ export function dagObjectiveSourceLabel(node) {
 const EMPTY_RUN_CONSTANT = new Set()
 
 function ExpNode({ data }) {
-  const { node, state, workIds, selectedId, onSelect, themeFilter, groupTint,
+  const { node, state, workIds, evalStages, selectedId, onSelect, themeFilter, groupTint,
     onOpenActions, actionsOpen } = data
   const lod = useContext(LodContext)   // overview zoom → render the compact glyph instead of the full card
   const m = node.confirmed_mean ?? node.metric
@@ -263,7 +264,10 @@ function ExpNode({ data }) {
       title={runConstant.has(c) ? `${c} — carried by every experiment in this run` : c}>{c.split('/').pop()}</span>)}
   </>
   const confirmed = node.confirmed_mean != null
-  const activity = nodeActivityView(node, state)
+  // The live stage cursor, decoded ONCE per render pass by the caller and handed down as a Map, so
+  // the card names the step (`mine 1/3`) instead of the whole pipeline ("training / eval"). Null on
+  // any surface with no timeline, where the view falls back to exactly the label it always had.
+  const activity = nodeActivityView(node, state, evalStages)
   const activityVisible = [NODE_ACTIVITY.BUILDING, NODE_ACTIVITY.EVALUATING,
     NODE_ACTIVITY.QUEUED, NODE_ACTIVITY.PENDING].includes(activity.status)
   const cardCls = nodeClass(node, state, workIds) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')
@@ -319,6 +323,12 @@ function ExpNode({ data }) {
         {node.id === state.best_node_id && <><span className="ll-ring" aria-hidden="true" /><Bolts /></>}
         <span className="lod-ic"><OpIcon name={op.icon} size={22} /></span>
         <span className="lod-id">#{node.id}</span>
+        {/* The one activity mark that survives level-of-detail. At overview zoom the chip below is
+            not rendered at all, so before this the answer to "which of these is training?" was
+            simply absent at the zoom an operator uses to look for it. Decorative only — the same
+            fact is already in `cardTitle` and in `selectionLabel`, which is what a screen reader
+            and the tooltip read, so this adds a channel rather than becoming the only one. */}
+        {activityVisible && <span className={`lod-activity ${activity.tone}`} aria-hidden="true" />}
         <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
       </div>
       {onOpenActions && <NodeActionTrigger nodeId={node.id} expanded={actionsOpen} onOpen={onOpenActions} />}
@@ -403,8 +413,19 @@ function GroupLane({ data }) {
 
 // Collapsed group → one aggregate card (semantic zoom). Body selects (group summary); the ▸ expands.
 function GroupSuper({ data }) {
-  const { label, count, totalCount, best, series, status, tint, selected, onExpand, onSelect,
+  const { label, count, totalCount, best, series, status, activity, tint, selected, onExpand, onSelect,
     filterActive, filterDescription } = data
+  // An older aggregate (or one built before the lane tally existed) carries no `activity`; the dots
+  // below then fall through to the single ○ exactly as they always did.
+  const lanes = activity || {}
+  // What the lane dots could NOT place — counted per member in `grouping.js::groupAggregate`, where
+  // each node's lifecycle AND lane are both in view. The subtraction this replaces mixed two
+  // censuses over different populations (a synthetic building member is in the lanes but not in
+  // `status.pending`), so every such member ate one genuinely-unplaced pending node's dot under the
+  // Math.max floor. The floor survives only as the fallback for an aggregate built before the
+  // per-member count existed.
+  const unplacedPending = lanes.unplacedPending ?? Math.max(0, (status.pending || 0)
+    - (lanes.building || 0) - (lanes.evaluating || 0) - (lanes.queued || 0))
   const zeroMatch = filterActive && count === 0
   const countText = filterActive ? `${count}/${totalCount}` : String(count)
   const matchText = filterActive
@@ -430,7 +451,16 @@ function GroupSuper({ data }) {
       <div className="grp-dots">
         {status.evaluated ? <span className="dot ok" title={`${status.evaluated} evaluated`}>✓{status.evaluated}</span> : null}
         {status.failed ? <span className="dot fail" title={`${status.failed} failed`}>✗{status.failed}</span> : null}
-        {status.pending ? <span className="dot pend" title={`${status.pending} pending`}>○{status.pending}</span> : null}
+        {/* The pending dot SPLITS by lane. `status.pending` is the lifecycle census, in which a node
+            three hours into training and a node that has not started are the same word — so a
+            collapsed group of actively-training experiments read "○3 pending", which is precisely
+            what an operator collapses a group to avoid having to expand it to learn. The shapes stay
+            distinct from each other and from ✓/✗ so the split survives without colour (WCAG 1.4.1),
+            and any pending node the projection cannot place keeps the original ○. */}
+        {lanes.building ? <span className="dot build" title={`${lanes.building} building`}>◐{lanes.building}</span> : null}
+        {lanes.evaluating ? <span className="dot eval" title={`${lanes.evaluating} training / evaluating`}>▶{lanes.evaluating}</span> : null}
+        {lanes.queued ? <span className="dot queued" title={`${lanes.queued} waiting for an evaluation slot`}>◔{lanes.queued}</span> : null}
+        {unplacedPending ? <span className="dot pend" title={`${unplacedPending} pending`}>○{unplacedPending}</span> : null}
       </div>
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </SuperShell>
@@ -459,7 +489,7 @@ function visibleViewportBounds() {
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
                              themeFilter = null, highlightIds = null, onNodeAction, mergeArm = null,
-                             nodeMenuActions = null, compact = false }) {
+                             nodeMenuActions = null, compact = false, evalStages = null }) {
   const workIds = useMemo(() => workingNodeIds(state), [state])
   const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
   const [groupActionKey, setGroupActionKey] = useState('')
@@ -638,7 +668,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         id: superId(key), type: 'groupSuper', position: p, zIndex: 1, draggable: false,
         data: {
           label: key, count: agg.matchedCount, totalCount: agg.totalCount,
-          best: agg.best, series: agg.series, status: agg.status,
+          best: agg.best, series: agg.series, status: agg.status, activity: agg.activity,
           filterActive: agg.filterActive, filterDescription: agg.filterDescription,
           tint: tintOf(key), selected: key === selectedGroup, onExpand: onToggleGroup, onSelect: onSelectGroup,
         },
@@ -717,12 +747,27 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   // Inject the transient `actionsOpen` flag onto ONLY the node whose action menu is open, keyed on
   // menu?.nodeId. This is an O(n) shallow pass over the already-laid-out nodes (one new object for the
   // open node, others returned by reference) — so toggling the menu never re-runs the layout memo above.
+  // The live stage cursor rides this same cheap pass, deliberately NOT the layout memo above —
+  // putting the Map in that dependency list would re-run `dagLayoutProjection` for a signal that
+  // changes once per stage, hours apart on a real pipeline (RunView keeps the Map's identity stable
+  // between stage moves for the same reason). And it rides by the SAME only-what-changed rule as
+  // the flag: a new `data` object goes only to the nodes the cursor actually names (plus the
+  // open-menu node). Stamping the Map onto every exp node handed ReactFlow N fresh identities per
+  // pass — every card re-rendered per poll, empty Map included, because a Map is truthy even when
+  // it names nothing and RunView always passes one.
   const nodes = useMemo(() => {
     const openId = menu?.nodeId
-    if (openId == null) return base.nodes
-    return base.nodes.map(n => (n.type === 'exp' && n.data.node?.id === openId)
-      ? { ...n, data: { ...n.data, actionsOpen: true } } : n)
-  }, [base.nodes, menu?.nodeId])
+    const stages = evalStages?.size ? evalStages : null
+    if (openId == null && !stages) return base.nodes
+    return base.nodes.map(n => {
+      if (n.type !== 'exp') return n
+      const menuOpen = n.data.node?.id === openId
+      const staged = stages != null && stages.has(Number(n.data.node?.id))
+      if (!menuOpen && !staged) return n
+      return { ...n, data: { ...n.data, ...(staged ? { evalStages: stages } : {}),
+                             ...(menuOpen ? { actionsOpen: true } : {}) } }
+    })
+  }, [base.nodes, menu?.nodeId, evalStages])
   const interactiveNodeCount = nodes.filter(node => node.type === 'exp' || node.type === 'groupSuper').length
   const graphSignature = `${groupMode}:${nodes.map(node => node.id).sort().join('|')}`
   const autoFit = shouldAutoFitDag(interactiveNodeCount)
@@ -867,8 +912,12 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       {showLegend && <Panel position="top-left" className="op-legend">
         <div className="legend-h">Node status</div>
         <div className="legend-row"><span className="activity-chip building">building</span><span>code is being built</span></div>
+        {/* The eval chip now carries the STAGE the node is on when the run's cursor says (`mine 1/3`),
+            and falls back to this wording when it does not. Both are legended, because an operator
+            who sees `mine 1/3` on a card needs to know it is the same lane as `training / eval`. */}
         <div className="legend-row"><span className="activity-chip evaluating">training / eval</span><span>evaluation owns the node</span></div>
-        <div className="legend-row"><span className="activity-chip queued">waiting</span><span>waiting for an evaluation slot</span></div>
+        <div className="legend-row"><span className="activity-chip evaluating">train 2/3</span><span>…on that pipeline step, when the run reports one</span></div>
+        <div className="legend-row"><span className="activity-chip queued">waiting for slot</span><span>queued — nothing is running for it yet</span></div>
         <div className="legend-row"><span className="activity-chip unknown">unknown</span><span>legacy start evidence unavailable</span></div>
         <div className="legend-h">Operators</div>
         {OPERATOR_LEGEND.map(o => { const m = operatorMeta(o); return (
@@ -882,6 +931,14 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         if (nd.id === state.best_node_id) return 'var(--best)'
         if (nd.status === 'failed') return 'var(--fail)'
         if (nd.status === 'evaluated') return 'var(--ok)'
+        // The overview map is where an operator looks to find the live work, and every unfinished
+        // node was ONE grey here: building, training and waiting-for-a-slot indistinguishable at the
+        // exact zoom level where the card chip is not rendered either. Keyed on the activity for the
+        // same reason the card body now is — `pending` is a lifecycle, not an answer to "what is
+        // happening". Anything the projection cannot place keeps the historical `--pending`.
+        const activity = nodeActivityStatus(nd, state)
+        if (activity === NODE_ACTIVITY.BUILDING) return 'var(--accent)'
+        if (activity === NODE_ACTIVITY.EVALUATING) return 'var(--working)'
         return 'var(--pending)'
       }} style={{ background: 'var(--bg-1)', width: 180, height: 130 }} />}
     </ReactFlow>

@@ -9,6 +9,7 @@ import { REVIEW_SAFE_VIEWS, reviewInspectorTabs, reviewPanelAllowed,
   runRouteStateHasTarget } from './runRouteState.js'
 import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
   storageGet, storageSet, runApiPath, nodeActivityView } from './util.js'
+import { evalStages } from './buildingModel.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
 import GlobalMenu, { BrandMark } from './GlobalMenu.jsx'
@@ -727,6 +728,30 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     liveSeq: seq, liveEventCount, expectedGeneration: generation,
     enabled: !reviewMode && !routeFenceBlocked && !timelineDeferred,
   })
+  // WHICH STEP each evaluating node is on, decoded once here and shared by every surface that draws a
+  // node (Dag, Inspector, GroupSummary, Dock). It is derived from the timeline the Dock already
+  // fetches, so it costs no request; when the timeline is deferred (the report view) or disabled
+  // (review mode) `rows` is empty and every surface falls back to the label it had before the cursor
+  // existed.
+  // IDENTITY-STABLE across polls: `timeline.rows` is a fresh array on EVERY merge
+  // (`flattenSegments` rebuilds it even for an empty newer page), so a memo keyed on it minted a new
+  // Map per ~2.5 s poll for a signal that moves once per stage boundary — hours apart on a real
+  // pipeline — and that identity feeds downstream passes that clone per change (Dag's node memo).
+  // The decode still runs per poll (it is cheap); what is handed back is the PREVIOUS Map whenever
+  // the entries say nothing moved.
+  const prevEvalStagesRef = useRef(new Map())
+  const liveEvalStages = useMemo(() => {
+    const next = evalStages(timeline.rows || [])
+    const prev = prevEvalStagesRef.current
+    const unmoved = prev.size === next.size && [...next].every(([id, r]) => {
+      const p = prev.get(id)
+      return !!p && p.generation === r.generation && p.name === r.name && p.index === r.index
+        && p.total === r.total && p.role === r.role && p.ts === r.ts
+    })
+    if (unmoved) return prev
+    prevEvalStagesRef.current = next
+    return next
+  }, [timeline.rows])
   const compactWorkspace = useMediaQuery('(max-width: 900px)')
   const [compactGoalExpanded, setCompactGoalExpanded] = useState(false)
   useEffect(() => setCompactGoalExpanded(false), [runId, generation, compactWorkspace])
@@ -2389,6 +2414,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const renderNodeInspector = nodeId => <LazyBoundary label="experiment inspector"
     resetKey={`node:${nodeId}`}>
     <Inspector runId={runId} nodeId={nodeId} state={state} live={live}
+      evalStages={liveEvalStages}
       onOpenLineage={view === 'dag' ? null : jumpToLineage}
       // The Card board is owner-only (`REVIEW_SAFE_VIEWS`), so a review bearer is offered no link
       // into it — the route would be refused and the button would be a dead end.
@@ -2939,6 +2965,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 menu WITHOUT the branch item (`Dag.jsx::NODE_MENU_ITEMS`'s `snapshotOnly`). */}
             <Dag key={`experiment-graph:${runId}:${generation || 'pending'}`}
               state={state} selectedId={selectedId} onSelect={onCanvasSelect}
+              evalStages={liveEvalStages}
               compact={compactWorkspace}
               groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
               onCollapseAll={collapseAllGroups} onExpandAll={expandAllGroups}
@@ -2986,7 +3013,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   ? <LazyBoundary label="group details" resetKey={`group:${selectedGroup}`}>
                       <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
                         state={state} themeFilter={themeFilter} highlightIds={conceptHighlight}
-                        onSelectNode={focusGroupMember}
+                        onSelectNode={focusGroupMember} evalStages={liveEvalStages}
                         onClose={() => selectGroup(null)} />
                     </LazyBoundary>
                   : renderNodeInspector(selectedId)}
@@ -3013,7 +3040,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         aria-valuemin={MIN_DOCK_HEIGHT} aria-valuemax={Math.max(MIN_DOCK_HEIGHT, window.innerHeight - 470)} aria-valuenow={Math.round(dockH)} title="Drag or use arrow keys to resize" />}
       {!reviewMode && !timelineDeferred && <LazyBoundary label="timeline" resetKey={`${runId}:${generation || 'pending'}`}>
         <Dock runId={runId} live={live} liveSeq={seq} expectedGeneration={generation}
-          timeline={timeline}
+          timeline={timeline} evalStages={liveEvalStages}
           viewSeq={viewSeq} setViewSeq={changeViewSeq} onReturnToLive={returnToLive} onFocus={focusNode}
           filter={routeState.timelineFilter}
           onFilterChange={value => route.update(current => ({ ...current, timelineFilter: value }), { mode: 'replace' })}

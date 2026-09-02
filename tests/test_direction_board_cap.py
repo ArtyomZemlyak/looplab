@@ -18,8 +18,12 @@ stay visible.
 """
 from __future__ import annotations
 
-from looplab.engine.research_cadence import (DEEP_RESEARCH_OPEN_BELIEF_CAP,
+import types
+
+from looplab.engine.research_cadence import (classify_research_beliefs,
+                                            DEEP_RESEARCH_OPEN_BELIEF_CAP,
                                              admit_research_beliefs, is_pure_belief)
+from looplab.engine import research_cadence as rc
 from looplab.core.models import Card, CardSelectionProvenance, RunState
 
 
@@ -35,11 +39,31 @@ def _board(cards) -> RunState:
 
 
 def _admissible(st: RunState, directions):
-    """The exact expression `_admissible_beliefs` evaluates, driven without an engine."""
-    taken_up = {c.parent_card_id for c in st.cards.values() if c.parent_card_id}
-    open_statements = [c.seed_statement for c in st.open_research_beliefs()
-                       if is_pure_belief(c) and c.id not in taken_up]
-    return admit_research_beliefs(open_statements, directions)
+    """The exact expression `_admissible_beliefs` evaluates, driven without an engine.
+
+    IT STOPPED BEING THAT EXPRESSION and the docstring kept the claim. This helper applied the
+    `c.id not in taken_up` narrowing to `open_statements` and then passed no `counted` at all, i.e.
+    it was the ONE-POPULATION form — precisely the defect the two-population fix below it exists to
+    prevent, frozen into the harness that every test above it runs through. It coincided with
+    production only while no fixture combined a taken-up direction with a restatement of it; the
+    tests that DO cover that call `admit_research_beliefs` directly, which is why nothing was red.
+    IT STOPPED MIRRORING A SECOND TIME, the same way — the purity filter moved INSIDE the collapse
+    (a comprehension after it DELETES a belief group rather than narrowing it; see
+    `RunState.open_research_beliefs`) — and a mutation pass proved the drift is not fixable by
+    re-deriving: reverting production left every test in this file green, because they run through
+    a copy of it. So this no longer mirrors production, it CALLS it. `_admissible_beliefs` reads
+    exactly one thing off `self` (`self.store.read_all()`) and hands it to the module-level `fold`,
+    so a stub engine plus the documented `research_cadence.fold` seam is the whole harness — the
+    same one `test_dropped_directions_reach_the_operator.py` drives the log line through. A helper
+    that IS the production expression cannot drift from it.
+    """
+    engine = types.SimpleNamespace(store=types.SimpleNamespace(read_all=lambda: []))
+    original = rc.fold
+    rc.fold = lambda _events: st
+    try:
+        return rc.ResearchCadenceMixin._admissible_beliefs(engine, directions)
+    finally:
+        rc.fold = original
 
 
 def test_a_full_board_of_UNANSWERED_directions_still_refuses_a_new_one():
@@ -132,3 +156,82 @@ def test_counted_defaults_to_the_open_list_byte_for_byte():
     proposed = ["q1", "a new one", "another"]
     assert (admit_research_beliefs(board, proposed)
             == admit_research_beliefs(board, proposed, counted=board))
+
+
+# --------------------------------------------------------------------------------------------
+# Filtering BEFORE the collapse, and WHY each direction was dropped. Two defects one call apart:
+# the first deleted beliefs the board still held, the second blamed the board for the memo's noise.
+# --------------------------------------------------------------------------------------------
+
+def _work_item(cid: str, statement: str, parent: str | None = None) -> Card:
+    """An open card that OWNS an action — a work item, not a pure belief."""
+    return Card(id=cid, statement=statement, seed_statement=statement, parent_card_id=parent,
+                selection_provenance=CardSelectionProvenance(
+                    action_source="card_added", action_owner_count=1))
+
+
+def test_a_belief_whose_FIRST_card_owns_an_action_is_narrowed_and_not_DELETED():
+    """`open_research_beliefs()` elects the FIRST no-evidence card of each belief and includes work
+    items, so filtering for purity afterwards drops the elected card and never reaches the pure
+    sibling that shares its wording — the belief leaves the dedup universe entirely.
+
+    NON-VACUITY: the work item is inserted FIRST, which is the only ordering under which the two
+    spellings differ; `_admissible` is the production expression, and the assertion below is that a
+    restatement of a question the board still holds is still refused.
+    """
+    statement = "distil from a teacher"
+    st = _board([_work_item("w0", statement), _direction("d0", statement)])
+    # The pre-fix spelling: filter after the collapse. The belief vanishes …
+    assert [c.id for c in st.open_research_beliefs() if is_pure_belief(c)] == []
+    # … and the fixed one narrows the group to its pure member instead.
+    assert [c.id for c in st.open_research_beliefs(only=is_pure_belief)] == ["d0"]
+    assert _admissible(st, [statement.upper() + "  "]) == [], (
+        "a question the board is already carrying was admitted a SECOND time, which is how a "
+        "direction that never accrues evidence grows the open population without bound")
+
+
+def test_the_default_collapse_is_UNCHANGED_for_every_other_consumer():
+    """`only=None` is byte-for-byte the historical behaviour — the proposal feed and the foresight
+    ranking consume this and legitimately want work items in it."""
+    st = _board([_work_item("w0", "a"), _direction("d1", "b")])
+    assert [c.id for c in st.open_research_beliefs()] == ["w0", "d1"]
+
+
+def test_the_memos_OWN_repeat_is_not_charged_to_the_board():
+    """`dropped` was `len(directions) - len(admitted)`, so four unrelated causes arrived as one
+    number the caller then explained with the board and the cap. Two of the four are facts about
+    the MEMO and the board refused nothing."""
+    verdict = classify_research_beliefs([], ["mine harder negatives", "MINE HARDER NEGATIVES",
+                                             "", None], counted=[])
+    assert verdict.admitted == ["mine harder negatives"]
+    assert (verdict.repeated, verdict.blank) == (1, 2)   # `""` and `None` are both blank
+    assert (verdict.restated, verdict.capped) == (0, 0), (
+        "an empty board and an unbound cap refused nothing; charging them is the alarm this fixes")
+    assert verdict.refused == 0 and verdict.dropped == 3, (
+        "`dropped` stays the historical total; `refused` is the half a board/cap account explains")
+    assert verdict.reasons() == "1 the memo repeated itself, 2 blank"
+
+
+def test_the_board_and_the_cap_are_still_named_when_they_ARE_the_reason():
+    """The complement: the two causes that ARE the board's, reported as such."""
+    full = [f"direction {i}" for i in range(DEEP_RESEARCH_OPEN_BELIEF_CAP)]
+    verdict = classify_research_beliefs(full, [full[0], "a genuinely new question"], counted=full)
+    assert (verdict.restated, verdict.capped) == (1, 1)
+    assert verdict.reasons() == "1 already on the board, 1 no room"
+    assert verdict.admitted == []
+
+
+def test_the_tail_after_the_cap_binds_is_CLASSIFIED_and_not_charged_to_the_cap():
+    """The rule used to `break`, so everything after the cap bound went unexamined and was charged
+    to it by subtraction. Admission is identical either way — `occupied` only grows — so the only
+    thing the `break` bought was a wrong account of the tail."""
+    full = [f"direction {i}" for i in range(DEEP_RESEARCH_OPEN_BELIEF_CAP)]
+    verdict = classify_research_beliefs(full, ["new one", "new one", "", full[0]], counted=full)
+    assert verdict.admitted == []
+    assert (verdict.capped, verdict.repeated, verdict.blank, verdict.restated) == (1, 1, 1, 1)
+
+
+def test_reasons_names_only_what_FIRED():
+    """A line that always lists four numbers, three of them zero, is the wall of text every bounded
+    output rule in this repo refuses."""
+    assert classify_research_beliefs([], ["a"], counted=[]).reasons() == ""

@@ -1,7 +1,7 @@
 import { durationLabel, fmt, fmtCost, NODE_ACTIVITY, nodeActivityStatus } from './util.js'
 import { stripMd } from './markdown.jsx'
 import { crossRunPriorNarration } from './crossRunPrior.js'
-import { livePhase } from './buildingModel.js'
+import { evalStageFor, evalStageLabel, evalStageShortLabel, evalStages, livePhase } from './buildingModel.js'
 
 // The event-feed NARRATION MODEL: pure data + pure functions that turn one raw run event into the
 // line a human reads, the kind chip it files under, and the answer to "does this type belong in the
@@ -629,17 +629,45 @@ export function pendingWork(live, log = []) {
   return { pending, started, queued, unknown }
 }
 
-export function pendingWorkLabel(live, log = []) {
+export function pendingWorkLabel(live, log = [], stagesIn = null) {
   // One sentence for the strip, and it never claims more than `pendingWork` established.
   const { pending, started, queued, unknown } = pendingWork(live, log)
   if (!pending.length) return ''
+  // The cursor Map can be handed in precomputed (`evalStages` is a full sweep of the retained
+  // timeline window, and the Dock renders on every poll tick); decoded here only as the standalone
+  // fallback, and only when something is actually EVALUATING — the all-queued case has no step to
+  // name and must not pay the sweep for an answer it cannot use.
+  const stages = stagesIn instanceof Map ? stagesIn
+    : started.length ? evalStages(log) : new Map()
+  // WHICH STEP, when the run's own cursor says. `training / evaluating` was one phrase for a whole
+  // multi-hour pipeline and is false for every stage of it that is not the trainer; the cursor makes
+  // the step nameable, and `evalStageShortLabel` is the ONE place those words are chosen so the strip
+  // and the node card cannot disagree about the same running stage — which is also why the record is
+  // read through `evalStageFor` and never by bare node id: the generation fence lives there, and a
+  // raw `stages.get(id)` let an abandoned attempt's still-open beacon label the NEW lifecycle the
+  // node card was correctly refusing to describe.
+  const stepOf = node => {
+    const label = evalStageShortLabel(evalStageFor(node, stages))
+    return label ? ` · ${label}` : ''
+  }
   if (pending.length === 1) {
+    // The step REPLACES the flat phrase rather than being appended to it. Appended, a mining node
+    // read "training / evaluating · mine 1/3" — the cursor's correction and the very claim it
+    // corrects, in one sentence, with the false half first. `evalStageLabel` already refuses to say
+    // "Training" for a step the manifest did not declare as one.
+    const record = started.length ? evalStageFor(pending[0], stages) : null
+    if (record) return `Experiment #${pending[0].id} · ${evalStageLabel(record)}…`
     if (started.length) return `Experiment #${pending[0].id} training / evaluating…`
     if (queued.length) return `Experiment #${pending[0].id} waiting for an evaluation slot…`
     return `Experiment #${pending[0].id} pending — evaluation start unknown…`
   }
   const parts = []
-  if (started.length) parts.push(`${started.length} evaluating`)
+  // With several evaluating at once the strip has no room for each one's step, so it names them only
+  // when they AGREE — "3 evaluating · train 2/3" is a fact about all three; listing three different
+  // steps would not fit and averaging them would be a claim about none of them.
+  const steps = new Set(started.map(node => stepOf(node)))
+  const shared = steps.size === 1 ? [...steps][0] : ''
+  if (started.length) parts.push(`${started.length} evaluating${shared}`)
   if (queued.length) parts.push(`${queued.length} waiting for a slot`)
   if (unknown.length) parts.push(`${unknown.length} start unknown`)
   return `${parts.join(', ')}…`
@@ -657,7 +685,12 @@ export function liveStatusStartedAt(live, log = []) {
   // below would report the age of the whole build — proposal, gate and all — under a label naming
   // only its last step. `livePhase` already refuses a finished or engine-less run, so this cannot
   // resurrect the phantom clock the guards below exist to prevent.
-  const phase = livePhase(live, log)
+  // BUILD-scoped, with the SAME filter `Dock.agentStatus` gives the label — the label and its age
+  // must never be able to describe different moments. Once eval|stage beacons share the stream the
+  // unfiltered newest-open record is routinely an eval cursor, so the clock reset to a stage
+  // boundary minutes old beside a build label forty minutes old. When no build phase is open, the
+  // eval-led label gets its age from the eval-start ladder below, which is that lane's own clock.
+  const phase = livePhase(live, log, 'build')
   if (phase?.ts != null) return phase.ts
   // The OLDEST in-flight build, not the newest: with several Developers writing at once the number
   // that matters is how long the slowest one has been going, which is the one that stalls the batch.

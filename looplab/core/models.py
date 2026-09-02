@@ -2291,7 +2291,7 @@ class RunState(BaseModel):
         return [c for c in self.research_cards()
                 if c.verdict == "open" and c.status != "dropped" and c.seed_statement.strip()]
 
-    def open_research_beliefs(self) -> list["Card"]:
+    def open_research_beliefs(self, *, only=None) -> list["Card"]:
         """The open, UNTESTED research board as distinct BELIEFS (peer review): the
         `[open_research_cards() with no evidence yet]` list the Researcher proposal feed and foresight
         ranking consume, collapsed by seed-statement DIGEST (the `grouped_beliefs` key) so two work-item
@@ -2303,11 +2303,26 @@ class RunState(BaseModel):
 
         The key is `Card.belief_id`, published by the fold (`card_ledger.py::_apply_card_belief_lineage`)
         so this method and `grouped_beliefs` provably group on ONE spelling; the inline fallback covers a
-        hand-assembled `RunState` that never went through `fold`."""
+        hand-assembled `RunState` that never went through `fold`.
+
+        `only` FILTERS BEFORE THE COLLAPSE, and that order is the whole reason it is a parameter
+        rather than the caller's own list comprehension. The representative is the FIRST no-evidence
+        card of its belief, and `open_research_cards()` includes ACTION-OWNING work items (this
+        docstring says so two paragraphs up), so a caller wanting only pure beliefs and filtering
+        AFTERWARDS does not narrow the group — it DELETES it: the work item is elected, the filter
+        drops it, and the pure sibling that shares its wording is never reached, because the collapse
+        already discarded it. `engine/research_cadence.py::_admissible_beliefs` filtered afterwards
+        and paid exactly that: the belief vanished from its dedup universe, a later memo restating
+        the question registered a SECOND card for work already under way, and the open population
+        then grew unbounded — the outcome that method's own two-population split exists to prevent,
+        arriving through a different door. A predicate rather than an import because `core` may not
+        import `engine`, and `None` is byte-for-byte the historical behaviour."""
         seen: set[str] = set()
         out: list["Card"] = []
         for c in self.open_research_cards():
             if c.evidence:                  # untested only (mirrors the consumers' `if not c.evidence`)
+                continue
+            if only is not None and not only(c):
                 continue
             key = c.belief_id or hypothesis_statement_digest(c.seed_statement)
             if key in seen:

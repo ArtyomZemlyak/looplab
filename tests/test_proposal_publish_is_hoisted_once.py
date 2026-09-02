@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import ast
 import inspect
-import pathlib
+
+from _source_scan import PKG, iter_trees
 
 from looplab.engine.novelty import NoveltyGateMixin
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+# The repo root, DERIVED from the shared walk rather than counted off this file's own
+# path: two spellings of one root is how a moved test starts reporting paths that do
+# not resolve. Only used to render a finding's location.
+ROOT = PKG.parent
 OWNER = "looplab/engine/novelty.py"
 
 
@@ -48,8 +52,8 @@ def _unpacks_the_audit_tuple(node) -> bool:
 def test_the_publish_loop_exists_exactly_once_and_it_is_in_the_sink_s_own_module():
     """Mutation: paste the loop back into any lane and this names the file and the line."""
     sites = []
-    for path in sorted((ROOT / "looplab").rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text())):
+    for path, tree in iter_trees():
+        for node in ast.walk(tree):
             if _unpacks_the_audit_tuple(node):
                 sites.append(f"{path.relative_to(ROOT)}:{node.lineno}")
     assert sites == [s for s in sites if s.startswith(OWNER)], (
@@ -63,10 +67,9 @@ def test_the_offload_triple_is_not_hand_written_outside_the_helper():
     through `SpecRawStageResult.audit_events` rather than publishing it). What must not recur is a
     lane that opens the sink around its OWN `to_thread` offload by hand."""
     offenders = []
-    for path in sorted((ROOT / "looplab").rglob("*.py")):
-        if str(path.relative_to(ROOT)) == OWNER:
+    for path, tree in iter_trees():
+        if str(path.relative_to(PKG.parent)) == OWNER:
             continue
-        tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if not isinstance(node, (ast.With, ast.AsyncWith)):
                 continue

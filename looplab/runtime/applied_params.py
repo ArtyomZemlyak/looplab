@@ -348,7 +348,13 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
                     unresolved[key] = how
                 continue
             _offer(readings, key, got, rel, int(line), how)
-            unresolved.pop(key, None)
+            # The same guard the aggregation loop's pop carries (see THE CONFLICT RULE below): a
+            # SECOND document answering a key an EARLIER document was unreadably plural about must
+            # not erase the `ambiguous` marker — unguarded, this pop made the survival rule
+            # order-dependent (marker kept when the answering carrier came first, erased when it
+            # came second). Only `absent` is settled by a later answer.
+            if unresolved.get(key) != param_carriers.UNRESOLVED_AMBIGUOUS:
+                unresolved.pop(key, None)
 
     # THE CONFLICT RULE, and it is the one thing this record must not get wrong. Two carriers of ONE
     # node that state DIFFERENT numbers for one declared coordinate are not a tie to break: static

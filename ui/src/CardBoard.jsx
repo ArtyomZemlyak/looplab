@@ -6,7 +6,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { fmt, fmtInt, CONTROL, commandFeedback, createIdempotencyKey, deadlineGet, getRunCommand,
   isTransientCommandReadError, retryRunCommand, runApiPath, runCommand,
-  submitCommand, traceDeadlineGet, traceGenerationMatches, nodeActivityStatus,
+  submitCommand, traceDeadlineGet, traceGenerationMatches, nodeActivityStatus, nodeActivityView,
   NODE_ACTIVITY } from './util.js'
 import { OpIcon } from './icons.jsx'
 import Panel, { PanelPresentationContext } from './PanelShell.jsx'
@@ -691,7 +691,7 @@ function _CardKanbanCard({
 // experiment (its operator, its params, its footprint, its delta) and offered its evidence node ids
 // as a row of bare `#7` buttons. That reads as "this card IS node 7". It is not: node 7 is one
 // attempt at the question the card asks, and a retry, a debug child or a repeat is another.
-function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }) {
+function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, state = null }) {
   const roll = cardAttemptSummary(attempts)
   return <section className="card-attempts" aria-label="Experiments for this work item">
     <h3 className="card-attempts-h">
@@ -712,7 +712,25 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }
     {attempts.length > 0 && <ul className="card-attempt-list">
       {attempts.map(entry => {
         const node = entry.node
+        // The LIFECYCLE word is what this chip has always shown, and for a settled attempt it is
+        // exactly right. For an unsettled one it was the bare word `pending` — so a node three hours
+        // into training read "pending" here while the Inspector, one click away, read "Training /
+        // evaluating" about the same node at the same instant. Two surfaces, one node, contradictory
+        // sentences. The activity projection is the same one every other surface uses, and it falls
+        // back to the lifecycle word whenever it cannot place the node.
         const status = _cardText(node?.status) || 'unknown'
+        const lifecycleUnsettled = status !== 'evaluated' && status !== 'failed'
+        // WITH the run state, computed once per row: `_CardDetailPane` has the fold in scope and
+        // hands it to the sibling `_CardKanbanCard` two lines below this pane's render — so
+        // omitting it here was self-inflicted, and it cost the stopped/paused/dead-engine guards
+        // inside the projection. A durable generation-matching `activity` row survives an engine
+        // crash, so this chip read 'training / eval' about a run nothing was running while the
+        // Inspector one click away said 'Evaluation interrupted · engine stopped' — the exact
+        // two-surfaces contradiction the chip was added to end. Without a state prop (an older
+        // caller) the projection degrades exactly as before.
+        const view = node && lifecycleUnsettled ? nodeActivityView(node, state) : null
+        const activityLabel = view?.shortLabel ?? null
+        const statusText = activityLabel || status
         const metric = _cardNumber(node?.metric)
         const attempt = _cardInt(node?.attempt)
         // `evidence` and `owned` are kept apart on purpose (see `cardAttempts`): "this node produced
@@ -732,8 +750,9 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }
             <span className="card-attempt-id">#{entry.nodeId}</span>
             <span className="card-attempt-op">{_cardText(node?.idea?.operator)
               || _cardText(node?.operator) || (entry.present ? 'operator unknown' : 'unavailable')}</span>
-            <span className={'chip xs' + (status === 'evaluated' ? ' ok' : status === 'failed' ? ' warn' : '')}>
-              {entry.present ? status : 'not in snapshot'}</span>
+            <span className={'chip xs' + (status === 'evaluated' ? ' ok' : status === 'failed' ? ' warn' : '')}
+              title={activityLabel ? `experiment #${entry.nodeId} — ${view.label}` : undefined}>
+              {entry.present ? statusText : 'not in snapshot'}</span>
             {attempt != null && <span className="muted">attempt {attempt}</span>}
             {metric != null && <span className="card-attempt-metric">{fmt(metric)}</span>}
             <span className={'chip xs' + (lane === 'reserved' ? ' warn' : '')}
@@ -892,7 +911,7 @@ function _CardDetailPane({
   }
   return <div className="card-detail">
     <_CardAttempts attempts={attempts} selectedNodeId={selectedNodeId} onOpenNode={onOpenNode}
-      coverage={cardAttemptCoverage(attempts, receipt)} />
+      coverage={cardAttemptCoverage(attempts, receipt)} state={state} />
     <_CardKanbanCard card={card} receipt={receipt} presentation="full" state={state}
       controlState={controlState} controlsLocked={controlsLocked} onControl={onControl}
       onRecover={onRecover} onSelect={onSelect} onClose={null} lineage={lineage} />

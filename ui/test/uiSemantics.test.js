@@ -52,7 +52,11 @@ test('trace loading, partial, and unavailable states expose recovery semantics',
   assert.match(inspector, /className="notice compact" role="status">\{TRACE_PARTIAL_EMPTY_NOTICE\}/)
   assert.match(await source('traceProjection.js'),
     /export const TRACE_PARTIAL_NOTICE = 'Trace projection is partial\.'/)
-  assert.match(inspector, /className="trace-live-status" role="status"/)
+  // The className became a template when the strip gained its WAITING variant (a queued node used to
+  // render no live region at all), so this pins the two things that carry the property — the region's
+  // class and its `role` — rather than the exact attribute text it happened to have.
+  assert.match(inspector, /className=\{'trace-live-status'[^}]*\} role="status"/,
+    'the live status must stay an announced live region')
   assert.match(dock, /const loaded = current\.projection != null[\s\S]*?!loaded[\s\S]*?role="status">loading trace…/)
   assert.match(dock, /function OpTrace[\s\S]*?className="muted trace-loading" role="status"[\s\S]*?loading trace…/)
   assert.match(dock, /nodeTraceError && <TraceUnavailable[\s\S]*?onRetry=\{retryNodeTrace\}/)

@@ -33,6 +33,7 @@ reader, in the sense `tools/log_tools.py` uses the word.
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from looplab.core.cards import card_is_direction
@@ -58,7 +59,10 @@ def _delta(card) -> str:
     to write next.
     """
     value = getattr(card, "best_delta", None)
-    if not isinstance(value, float) or value != value or value in (float("inf"), float("-inf")):
+    # `isinstance` excludes bool; `math.isfinite` is the one spelling of the NaN/inf refusal this
+    # record's own writer uses (`core/cards.py::card_child_rollup`) — a hand-rolled `!=`/`in` copy
+    # here is how the two surfaces drift about which values count as measured.
+    if not (isinstance(value, float) and math.isfinite(value)):
         return "—"
     return f"{value:+g}"
 
@@ -73,7 +77,7 @@ def _champion_verdict(rollup) -> str:
     if not isinstance(rollup, dict):
         return ""
     value = rollup.get("best_vs_champion")
-    if not isinstance(value, float) or value != value or value in (float("inf"), float("-inf")):
+    if not (isinstance(value, float) and math.isfinite(value)):
         return ""
     owner = rollup.get("best_vs_champion_card_id")
     tail = f" by {owner}" if isinstance(owner, str) and owner else ""

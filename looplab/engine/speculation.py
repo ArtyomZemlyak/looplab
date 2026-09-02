@@ -90,6 +90,18 @@ CARD_BUILD_SKIP_REASONS = (
     "commit_not_ours",           # the committed node is not this build's
 )
 
+# WHY a consumed raw proposal staged nothing BEFORE the staging fence could say — the two
+# pre-staging paths of `_serve_raw_card_stage`, named beside `CARD_BUILD_SKIP_REASONS` because a
+# bare slug on a warning nobody can look up is the defect both registries exist for. Deliberately
+# NOT members of `CARD_STAGE_REFUSALS`: that tuple may only carry slugs `_stage_prepared_card`
+# itself emits (`tests/test_card_stage_refusals.py` pins the set in both directions), and neither
+# of these is a staging refusal. `unrecorded` stays the residual for a stager `None` that set no
+# slug (entry validation, CAS exhaustion) — the signal a refusal path forgot to name itself.
+RAW_STAGE_PRE_STAGING_REASONS = (
+    "producer_failed",           # the paid propose raised — nothing reached the stager
+    "proposal_refused",          # the propose completed but formed no idea (novelty/degraded gates)
+)
+
 
 @dataclass(frozen=True)
 class SpecBuildResult:
@@ -2015,15 +2027,28 @@ class SpeculationMixin:
             self._spec_raw_stage_inflight = False
             notify_producer(notify, ("raw_proposal", proposal_state.search_epoch))
 
-    def _serve_raw_card_stage(self) -> tuple[bool, bool]:
-        """Main-task-only commit of one prepared proposal and its buffered audit intents."""
+    def _serve_raw_card_stage(self) -> tuple[bool, bool, Optional[str]]:
+        """Main-task-only commit of one prepared proposal and its buffered audit intents.
 
+        The third member says WHY a consumed result staged nothing, from the path that knows:
+        `RAW_STAGE_PRE_STAGING_REASONS` for the two paths that never reach the stager, the staging
+        fence's own `CARD_STAGE_REFUSALS` slug (or `unrecorded`) when `_stage_prepared_card`
+        refused, and `None` both for a staged Card and for the attach HANDOFF — which is not an
+        abandonment: the serial boundary builds that node (see the attach branch below). The
+        caller used to re-derive this by reading `self._card_stage_refusal`, which only
+        `_stage_prepared_card` writes — so on the pre-staging paths the attribute still held
+        whatever slug the LAST staging call anywhere recorded (the create lane's, possibly turns
+        earlier), and a producer crash was warned as e.g. `best_moved`: a specific-looking wrong
+        cause an operator then greps the fences for.
+        """
         result = self._spec_raw_stage_result
         if result is None:
-            return False, False
+            return False, False, None
         self._spec_raw_stage_result = None
-        if not result.success or result.idea is None:
-            return True, False
+        if not result.success:
+            return True, False, "producer_failed"
+        if result.idea is None:
+            return True, False, "proposal_refused"
         card_id = self._stage_prepared_card(
             result.action,
             result.idea,
@@ -2052,16 +2077,18 @@ class SpeculationMixin:
                 # its novelty/governance receipts describe a real paid call; on a stale-fence refusal
                 # the whole proposal is being abandoned and re-made, so dropping them keeps the log
                 # honest, but here the work is being handed to the serial spine and the receipts are
-                # the only record that this lane paid for it at all.
+                # the only record that this lane paid for it at all. No abandon reason for the same
+                # reason: handed-on work is not abandoned work.
                 self._publish_proposal_events(result.audit_events)
-            return True, False
+                return True, False, None
+            return True, False, str(getattr(self, "_card_stage_refusal", "") or "unrecorded")
         # the Card commit above and these proposal-audit events are separate appends. A crash
         # or append failure after EV_CARD_ADDED leaves an executable durable Card whose novelty/governance
         # audit prefix was silently lost; `_spec_raw_stage_result` was already cleared, so resume cannot
         # repair it. Commit the Card and its bounded audit intents in one tail-fenced append_many, or add a
         # durable proposal receipt plus recovery gate that keeps the Card non-selectable until it is closed.
         self._publish_proposal_events(result.audit_events)
-        return True, True
+        return True, True, None
 
     async def _close_developer_sentinel_once(self) -> bool:
         """Recover one sentinel lifecycle without ever re-pausing an acknowledged crash."""
@@ -2319,10 +2346,10 @@ class SpeculationMixin:
         """Commit one prepared raw proposal, then — where the session may still produce — elect and
         start its producer in the same turn."""
 
-        raw_consumed, raw_staged = self._serve_raw_card_stage()
+        raw_consumed, raw_staged, abandon_reason = self._serve_raw_card_stage()
         if not raw_consumed:
             return
-        if not raw_staged:
+        if not raw_staged and abandon_reason is not None:
             # A PREPARED PROPOSAL WAS ABANDONED, and until 2026-08-31 that left no trace of any kind.
             # Measured on v12: node 2's card took FIVE propose phases — four speculative ones
             # completed `ok: true` and staged nothing (604.8 + 317.7 + 139.8 + 524.5 s = 26.5 min of
@@ -2337,11 +2364,17 @@ class SpeculationMixin:
             #
             # `_stage_card_creates` has counted its refusals since 6262f3a1; that counter is on the
             # CREATE lane and this one reaches `_stage_prepared_card` by another route, so it had
-            # none. The slug comes from the same `_card_stage_refusal` that lane records, in the
-            # same `CARD_STAGE_REFUSALS` vocabulary. The DURATION is deliberately not repeated here:
+            # none. The reason rides on the serve's own RETURN — the staging fence's
+            # `CARD_STAGE_REFUSALS` slug (or `unrecorded`) when the stager refused, one of
+            # `RAW_STAGE_PRE_STAGING_REASONS` when the producer crashed or the proposal formed no
+            # idea, and no reason at all for the attach handoff, which is handed on and built
+            # rather than abandoned. It is NOT read off `_card_stage_refusal` here: only
+            # `_stage_prepared_card` writes that attribute, so on the pre-staging paths it still
+            # held an unrelated earlier call's slug and this warning misattributed a producer
+            # crash to a fence that never fired. The DURATION is deliberately not repeated here:
             # it is already on this phase's `phase_progress` row, and one number in two places is
             # how they drift.
-            reason = str(getattr(self, "_card_stage_refusal", "") or "unrecorded")
+            reason = abandon_reason
             counter = getattr(self, "_spec_raw_stage_abandoned", None)
             if counter is None:
                 counter = self._spec_raw_stage_abandoned = collections.Counter()

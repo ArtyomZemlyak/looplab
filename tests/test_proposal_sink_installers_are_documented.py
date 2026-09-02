@@ -20,21 +20,15 @@ from __future__ import annotations
 
 import ast
 import inspect
-import pathlib
+
+from _source_scan import iter_trees
 
 from looplab.engine import novelty
-
-_PKG = pathlib.Path(inspect.getsourcefile(novelty)).parent.parent
-
 
 def _installer_modules() -> set[str]:
     """Module basenames holding a `_capture_proposal_events()` call, excluding its definition."""
     found = set()
-    for path in sorted(_PKG.rglob("*.py")):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:                                  # pragma: no cover - not our files
-            continue
+    for path, tree in iter_trees():
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "_capture_proposal_events"):

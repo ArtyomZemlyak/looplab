@@ -5,8 +5,9 @@ carries `eval.env = {}` — v2, v4 and v11 got their data root from the SETTING,
 without it because it was launched from a copied task snapshot alone (#147). The result: every v12
 node crashes on S3 (`InvalidAccessKeyId`) and pays a triage+repair to rediscover the local corpus.
 
-`core/config.py:699` writes down why it is a setting and not only a shell export, and
-`core/models.py:1709` records what it decides: **which corpus a node trained on**. A run whose
+`core/config.py::Settings.eval_env` writes down why it is a setting and not only a shell export,
+and `core/models.py::RunState.eval_env` records what it decides: **which corpus a node trained
+on**. A run whose
 corpus is chosen per-node by a repair is not comparable to the 0.793426 champion.
 
 ## The command

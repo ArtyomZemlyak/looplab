@@ -222,3 +222,21 @@ test('a wire that predates card_kind puts every row in the LANES, unchanged', ()
 test('splitBoardByKind is total over junk', () => {
   assert.deepEqual(splitBoardByKind(null), { work: [], questions: [] })
 })
+
+test('the champion-relative verdict is a chip, mirroring card_rollup_brief', () => {
+  // The Python half and the wire (`serve/public_cards.py`) carry the pair; a mirror that omits the
+  // bucket shows an answered question as unmeasured on the operator's board — the defect the pair
+  // was added to end. Same finite discipline as `best`: NaN/inf/absent produce no chip, never a 0.
+  const chips = rollupChips({ children: 2, evaluated: 2,
+    best_vs_champion: -0.0027, best_vs_champion_card_id: 'card-0' })
+  const champion = chips.find(c => c.key === 'champion')
+  assert.ok(champion, JSON.stringify(chips))
+  assert.equal(champion.label, 'best vs champion -0.0027 by card-0')
+  const positive = rollupChips({ children: 1, best_vs_champion: 0.004 })
+    .find(c => c.key === 'champion')
+  assert.equal(positive.label, 'best vs champion +0.004')
+  for (const bad of [undefined, null, NaN, Infinity, '0.1']) {
+    assert.ok(!rollupChips({ children: 1, best_vs_champion: bad })
+      .some(c => c.key === 'champion'), String(bad))
+  }
+})

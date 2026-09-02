@@ -523,7 +523,21 @@ PROGRESS_STAGE_BUILD = "build"      # idea -> code: one node's whole build, `_cr
 # reconciliation and the width pins all read the raw log. Making a resume visible needs a channel
 # that is NOT events.jsonl (a run-dir progress sidecar the server tails is the obvious candidate);
 # adding a stage here without that channel would reintroduce all thirteen.
-PROGRESS_STAGES: frozenset[str] = frozenset({PROGRESS_STAGE_BUILD})
+# idea -> metric: one node's EVALUATION, i.e. the pipeline `run_command_eval` actually executes.
+# It is the second long silent stretch, and the larger one: a build is minutes, an evaluation is
+# hours. `stage_finished` is FOLDED and lands at each stage's COMPLETION, so between two stage rows
+# the durable record says only "this node is being evaluated" — which is why every status surface in
+# the UI labelled the whole of it "Training / evaluating". On a real repo pipeline
+# (`mine` -> `train` -> `score`) that sentence is FALSE for two of the three stages, and it is false
+# in the direction that matters: an operator reading "training" while a miner runs cannot tell a
+# stalled miner from a healthy trainer.
+#
+# The engine could not answer it either. `train_monitor.resolve_stage_log` picks the freshest-mtime
+# log and its own docstring concedes "the sandbox's live stage cursor genuinely is unobservable from
+# here" — so the watchdog that may KILL a stage was naming its subject by a filesystem guess. This
+# beacon is that cursor, published once by the only code that knows it: the stage loop itself.
+PROGRESS_STAGE_EVAL = "eval"
+PROGRESS_STAGES: frozenset[str] = frozenset({PROGRESS_STAGE_BUILD, PROGRESS_STAGE_EVAL})
 # The steps of each stage, in the order they actually happen. The ORDER is meaningful to a reader (a
 # UI may render a stepper) but it is NOT a contract the engine has to satisfy, and a surface that
 # assumes every phase appears will be wrong on most real runs. Which ones fire is CONFIGURATION-
@@ -556,6 +570,30 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
     # one is noise, and a phase listed here that nothing emits would be worse: this table is what a
     # UI stepper would render, so an entry no run ever reaches shows the operator a step that never
     # completes. Add one here only together with its append site.
+    PROGRESS_STAGE_EVAL: (
+        # ONE phase, and the pipeline stage's own name rides in the beacon's `name` DETAIL rather
+        # than becoming a phase of its own. That split is forced, not stylistic: a phase is a CLOSED
+        # word `assert_progress_phase` can refuse at the append site, and eval stage names are
+        # AGENT-AUTHORED — `mine`, `train`, `score`, `data_prep`, whatever the Developer wrote into
+        # `looplab_stages.json`. Registering them is impossible (the set is not knowable here) and
+        # leaving the phase open would forfeit exactly the typo-proofing this table exists for. The
+        # varying part therefore rides as detail, exactly as `node_id`, `operator` and `count`
+        # already do for the build phases above.
+        #
+        # WHAT A READER MAY CONCLUDE FROM THE NAME: nothing. `train` is a slug the agent chose, and
+        # `eval_log_plan`'s own docstring spends a page on why a stage NAME proves nothing. The
+        # beacon therefore carries the resolved `role` (a `LOG_ROLES` member) beside the name, which
+        # IS authenticated — it comes from the manifest declaration the engine already trusts to say
+        # what runs and in what order. A surface that wants to claim "training" reads the role; a
+        # surface that wants to SHOW the operator which step is running reads the name, because the
+        # name is what that operator sees in the stage strip, the logs tab and the trace bands.
+        "stage",
+        # NO `repair` phase, and its absence is a decision rather than an omission. An inline repair
+        # is a Developer call inside `_evaluate`'s own attempt loop, so it is genuinely a build-shaped
+        # step happening under an eval — but it has no append site here, and this table's own rule
+        # (stated for `commit` above) is that a listed phase nothing emits shows the operator a step
+        # that never completes. Add it here together with its append site, not before.
+    ),
 }
 PROGRESS_STATUSES: frozenset[str] = frozenset({"started", "finished"})
 

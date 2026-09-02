@@ -157,3 +157,77 @@ test('Dock consumes the narration model instead of owning it', async () => {
   // regression, whether it lands back in Dock or beside the merged table.
   assert.ok(!narration.includes('NARR_VALID'), 'the parallel validator registry must not come back')
 })
+
+
+// ---------------------------------------------------------------- the live status strip's two lanes
+//
+// `agentStatus` is pure over (live, log) and is exported for exactly this. It used to `return` on the
+// first build it found, so on any run wide enough to build and evaluate at once — the shipped default
+// — every evaluating and queued node was invisible in the one strip that claims to say what is
+// happening now: an operator watching a four-hour training saw "Writing experiment #7…" and no
+// mention of the training at all. A source pin cannot tell "both lanes are named" from "one is", so
+// this drives the sentence.
+const withDock = async (body) => {
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try { await body(await vite.ssrLoadModule('/src/Dock.jsx')) } finally { await vite.close() }
+}
+
+const evaluatingNode = (id) => ({
+  id, status: 'pending', attempt: 0,
+  activity: { schema: 1, status: 'evaluating', generation: 0, evidence: 'node_eval_started' },
+})
+
+const stageBeacon = (over = {}) => ({
+  type: 'phase_progress', ts: over.ts ?? 100,
+  data: {
+    stage: 'eval', phase: 'stage', status: 'started', node_id: 5, generation: 0,
+    name: 'train', index: 1, total: 3, role: 'work', ...over,
+  },
+})
+
+test('the status strip names the evaluation even while a build is in flight', async () => {
+  await withDock(({ agentStatus }) => {
+    const state = {
+      engine_running: true,
+      buildings: { 9: { node_id: 9, operator: 'improve', generation: 0, started: 50 } },
+      nodes: { 5: evaluatingNode(5) },
+    }
+    const sentence = agentStatus(state, [stageBeacon()])
+    assert.match(sentence, /experiment #9/, 'the build is still named')
+    assert.match(sentence, /#5/, 'and so is the evaluation it used to hide')
+    assert.match(sentence, /Stage train · 2 of 3/, 'with the step the live cursor reports')
+  })
+})
+
+test('the status strip still says only what is happening when one lane is idle', async () => {
+  await withDock(({ agentStatus }) => {
+    // The step REPLACES the flat phrase: appended, a mining node would read "training / evaluating ·
+    // mine 1/3", which states the claim the cursor exists to correct and states it first.
+    assert.equal(agentStatus({ engine_running: true, nodes: { 5: evaluatingNode(5) } }, [stageBeacon()]),
+      'Experiment #5 · Stage train · 2 of 3…')
+    assert.equal(agentStatus({ engine_running: true, nodes: { 5: evaluatingNode(5) } },
+      [stageBeacon({ name: 'mine', index: 0 })]), 'Experiment #5 · Stage mine · 1 of 3…')
+    // With no cursor at all the sentence is exactly the one that shipped before it existed.
+    assert.equal(agentStatus({ engine_running: true, nodes: { 5: evaluatingNode(5) } }, []),
+      'Experiment #5 training / evaluating…')
+    assert.equal(agentStatus({
+      engine_running: true, nodes: {},
+      buildings: { 9: { node_id: 9, operator: 'improve', generation: 0, started: 50 } },
+    }, []), 'Writing experiment #9…')
+  })
+})
+
+test('several evaluating nodes name a shared step and claim none when they differ', async () => {
+  await withDock(({ agentStatus }) => {
+    const state = { engine_running: true, nodes: { 5: evaluatingNode(5), 6: evaluatingNode(6) } }
+    assert.match(agentStatus(state, [stageBeacon({ node_id: 5 }), stageBeacon({ node_id: 6 })]),
+      /2 evaluating · train 2\/3/)
+    // No single step is true of both, and averaging them would be a claim about neither.
+    assert.match(agentStatus(state,
+      [stageBeacon({ node_id: 5, name: 'mine', index: 0 }), stageBeacon({ node_id: 6 })]),
+      /2 evaluating…/)
+  })
+})

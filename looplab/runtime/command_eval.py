@@ -23,7 +23,7 @@ import posixpath
 import re
 import sys
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -1851,6 +1851,10 @@ class _EvalExec:
     # (and last, so the non-default fields above keep their order) so a bare construction gains no
     # kill authority it did not ask for — the same rule the LEGACY snapshot row states for a resume.
     divergence_watch: bool = False
+    # THE LIVE STAGE CURSOR, published to whoever injected it. Defaulted to None for the reason
+    # every other instrument here is: `run_command_eval` is the public library entry point, and a
+    # caller that injects nothing must behave byte-identically to one from before this existed.
+    on_stage_event: object = None
 
 
 @dataclass
@@ -2311,6 +2315,54 @@ def absent_metric_subject() -> dict:
     return _ms.absent_declaration()
 
 
+def _stage_beacon(ex: _EvalExec, name: str, index: int, total: int, status: str) -> None:
+    """Publish the live stage cursor, and NEVER fail the eval for it.
+
+    Contained exactly as `stage_key_fn` is, and for the reason `Engine._progress` states: an
+    instrument that can take down the multi-hour work it reports on is a downgrade, not an
+    improvement. There is no `assert_progress_phase`-shaped escape hatch at THIS layer because
+    `runtime` may not import `looplab.events` at all — the registered-phase check lives in the
+    injected callback, on the engine side. Note what the containment below therefore costs: a
+    callback raising on an unregistered triple is SWALLOWED here rather than surfaced, so the
+    registry protects a developer calling `Engine._emit_progress` directly (where it raises, and
+    `tests/test_eval_stage_cursor.py` drives that) and not one who typos a status into this call.
+    That is the deliberate trade — the only alternative is letting an instrument kill a multi-hour
+    training — and it is why the two `status` values below are literals at their call sites.
+
+    `index`/`total` are 0-based and the DECLARED pipeline length, so a reader renders "2 of 3"
+    without re-deriving the plan.
+    """
+    callback = getattr(ex, "on_stage_event", None)
+    if callback is None:
+        return
+    try:
+        callback({"name": name, "index": index, "total": total, "status": status})
+    except Exception:  # noqa: BLE001 - observability must never take down the work it reports on
+        pass
+
+
+@contextmanager
+def _stage_cursor(ex: _EvalExec, name: str, index: int, total: int):
+    """Bracket the region in which a process of this stage is running.
+
+    A CONTEXT MANAGER rather than two bare calls, for two reasons that are both about the close.
+    First, `finally`: a cancelled eval, a tree-kill surfacing as an exception, or a bug in the span
+    machinery must all still CLOSE the cursor, because an unclosed beacon reads as live work forever
+    — `buildingModel.js::openPhases` keeps a `started` with no `finished` open by design, since
+    that is exactly the live case, so on a dead node it would report training that ended hours ago.
+    That is the one failure mode which makes a live signal worse than no signal.
+
+    Second, composition: entered as the FIRST item of the existing `with` statement, it adds no
+    indentation to the stage body, so the block's comments stay where they are and at the width they
+    were written for.
+    """
+    _stage_beacon(ex, name, index, total, "started")
+    try:
+        yield
+    finally:
+        _stage_beacon(ex, name, index, total, "finished")
+
+
 def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Optional[str],
                 metric: dict, eval_started: float, check_fn,
                 subject: Optional[list] = None,
@@ -2490,7 +2542,14 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         # declared artifact would read as stale). Taken here, before the command runs, so an artifact
         # written by a PREVIOUS attempt of this same stage cannot pass as this one's.
         _w0 = time.time()
-        with ex.span(_sname, kind="operation", sandboxed=bool(ex.wrap), stage=_sname) as _sh:
+        # THE LIVE STAGE CURSOR, opened here and closed however this stage leaves. Deliberately NOT
+        # at the top of the loop body: everything above (the reuse short-circuit, the `needs`
+        # contract, the env overlay, the subject bind) either runs no process or returns early, so a
+        # cursor opened there would name a stage that is not running. Its sibling `stage_started`
+        # span just below answers the same question for the TRACE; this answers it for the run-level
+        # status surfaces, which do not read spans.
+        with _stage_cursor(ex, _sname, _i, len(stages)), \
+                ex.span(_sname, kind="operation", sandboxed=bool(ex.wrap), stage=_sname) as _sh:
             # Live-band anchor: a training subprocess emits NO child LLM/tool spans, and this stage's
             # operation span is written to spans.jsonl only on CLOSE (tracing.Tracer.span), so without
             # a live child the trace view shows nothing for the whole ~hour of training and the
@@ -2658,7 +2717,12 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
 def _run_single(command: list, ex: _EvalExec, *, timeout: float) -> _EvalRun:
     """Run the eval as ONE command; its stdout feeds the metric read."""
     run = _EvalRun()
-    with ex.span("command", sandboxed=bool(ex.wrap)) as _h:
+    # THE LIVE STAGE CURSOR for the path that declares no stages. It reports ONE step named `eval`,
+    # which is what this branch is: `eval_log_plan` grants this command `LOG_ROLE_TRAINING` on the
+    # ground that it "IS the training (train->eval in one process, often multi-hour)", so the cursor
+    # must not go silent here just because nobody wrote a manifest. `1 of 1` is the honest count.
+    with _stage_cursor(ex, "eval", 0, 1), \
+            ex.span("command", sandboxed=bool(ex.wrap)) as _h:
         # Live-band anchor (see the multi-stage branch): flush a child the instant the single eval
         # command starts, so the "Evaluate" block shows live instead of only when the command ends.
         with ex.span("stage_started", kind="tool", phase="evaluate"):
@@ -2713,6 +2777,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      subject: Optional[list] = None,
                      subject_glob: Optional[list] = None,
                      stage_key_fn=None,
+                     on_stage_event=None,
                      divergence_watch: bool = False) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
@@ -2732,6 +2797,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     have. `None`/`[]` records nothing here; whether an unbound metric is then a VIOLATION is the
     engine's rung (`Settings.metric_subject`), never this function's, because this is also the
     library entry point tests and a future non-engine caller use.
+
+    `on_stage_event(payload)` is the LIVE STAGE CURSOR — called once with `status="started"` when
+    a stage's process is about to run and once with `"finished"` however it leaves, carrying
+    `{name, index, total, status}`. Injected for the same layering reason `stage_key_fn` is, and
+    contained for the same reason `check_fn` is: it may never fail the eval. It exists because
+    `stage_finished` lands only at COMPLETION, so between two stage rows nothing could say which of
+    `mine`/`train`/`score` was running — `train_monitor.resolve_stage_log` had to guess it from
+    freshest-mtime, and every UI status surface simply called the whole pipeline "training".
 
     `stage_key_fn(stages, index) -> (key, reason)` is the STAGE-IDENTITY instrument (see
     `runtime/stage_identity.py`). It is INJECTED rather than imported because the import closure the
@@ -2817,7 +2890,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                     is_docker=is_docker, wrap=wrap, stall_timeout=stall_timeout,
                     stall_cap=stall_cap, bound=_bound, wrap_argv=_w, log=_log, span=_sp,
                     on_deadline=on_deadline, deadline_grace_max_s=deadline_grace_max_s,
-                    divergence_watch=bool(divergence_watch))
+                    divergence_watch=bool(divergence_watch), on_stage_event=on_stage_event)
     # ONE object carries what either path produced into the metric read below, so the tail can never
     # read a name the branch that ran happened not to bind (doc 25 RA-02).
     _run = (_run_stages(stages, _ex, timeout=timeout, start_stage=start_stage, metric=metric,

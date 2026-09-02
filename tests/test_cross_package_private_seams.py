@@ -65,6 +65,12 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "engine": {
         "looplab.agents.roles": ("_state_brief",),
+        # WHO A DROP RECEIPT IS ATTRIBUTED TO, replayed over raw events by the card reopen gate
+        # rather than re-derived. Its own docstring is the reason it is imported and not copied:
+        # "ONE spelling, because three readers ask it and they must not drift" — the reopen gate is
+        # the fourth, and a private-by-convention rule that three readers already share is exactly
+        # what this registry exists to make renameable-with-a-red-test instead of promotable.
+        "looplab.events.card_ledger": ("_drop_author",),
         "looplab.events.eventstore": ("_interprocess_lock",),
         # The finalize-scope read side moved DOWN to `events/` so `search` could stop importing the
         # engine (doc 25 XP-07). Its two public names are the cluster's API; these three are the
