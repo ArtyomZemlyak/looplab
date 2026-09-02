@@ -35,6 +35,7 @@ import os
 import re
 import select
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -80,6 +81,20 @@ def _one_instance(reference: Path, solver: Path, size: int, seed: int) -> dict:
         task = task_cls()
     except TypeError:
         task = task_cls(n=size)
+    # THE SUBMISSION'S OWN DIRECTORY GOES ON `sys.path`, BECAUSE THE GRADER PUTS IT THERE.
+    #
+    # `AlgoTune/scripts/evaluate_results.py:396` does `sys.path.insert(0, str(code_dir))` before it
+    # imports the candidate, so a solver that says `from edge_cut import ...` -- a helper module or
+    # a compiled extension beside it -- is scored fine. This checker did not, and answered
+    # `ModuleNotFoundError: No module named 'edge_cut'` for every instance: 13 of the 480 `check`
+    # calls in the corpus (2.7 %, seven probes), reported as INVALID INSTANCES.
+    #
+    # That is a FALSE RED, and its direction is what makes it expensive. remEEref9's champion is
+    # exactly this shape and scores 218.85 on the graded split, while its own pre-flight command
+    # was telling the model the solver was invalid. The model is being steered to rewrite working
+    # code -- and `edit_surface` grants `*.pyx`/`*.pxd` precisely so it CAN write more than one
+    # file. The mirror of the false GREEN in `build_gate` above, in the same command.
+    sys.path.insert(0, str(solver.resolve().parent))
     solver_mod = _load_module(solver, "_looplab_candidate")
     solver_cls = getattr(solver_mod, "Solver", None)
     if solver_cls is None:
@@ -111,6 +126,65 @@ def _one_instance(reference: Path, solver: Path, size: int, seed: int) -> dict:
     return row
 
 
+def build_gate(solver_dir: Path, timeout: float = 120.0) -> dict:
+    """Compile the submission the way the EVALUATOR will, before validating anything.
+
+    THE HOLE THIS CLOSES, measured over the whole probe corpus on 2026-09-02. Six runs ended on a
+    node that scored 0; two of them (`remEE6` node 3, `remEEref6` node 2) died on a Cython
+    `CompileError`, and BOTH had run this checker -- ten and six times -- with `"ok": true` every
+    time. The reason is not that the model skipped the cheap command. It is that the cheap command
+    was answering a different question:
+
+        try:
+            from edge_expansion_cy import edge_expansion_count   # never built here
+        except ImportError:
+            ...                                                  # <- what `check` validated
+
+    `_run_isolated` imports `solver.py` in a child, the extension is absent, the guarded import
+    falls through, and the checker certifies the PURE-PYTHON path. `looplab_eval.py` then runs
+    `setup.py build_ext --inplace` (line 1067), the compile fails, and the node is graded 0 -- on a
+    path the checker never touched. A green light on code the grader will not run is worse than no
+    light: it is the last thing the model saw before spending its final draw.
+
+    THE RULE IS IMPORTED, NOT RE-SPELLED. `build_decision` is the evaluator's own -- a `.pyx` with
+    no `setup.py`/`pyproject.toml` is NOT compiled and the fallback IS what gets graded, which this
+    reports rather than treats as an error -- and `_build_error_digest` is the evaluator's own too,
+    so the model reads the compiler's line here in the same words it will read there. Two spellings
+    of one rule is how the two commands come to disagree.
+
+    IT IS CHEAP, WHICH IS WHY IT BELONGS ON THE CHEAP COMMAND. Measured on this box, 2026-09-02:
+    the broken `edge_expansion_cy.pyx` fails in 0.67 s (Cython errors before the C compiler is
+    reached), a healthy `edge_cut.pyx` compiles in 1.3 s, and an unchanged rebuild is 0.4 s --
+    against this checker's own 3.6-9.1 s and the card's 120 s ceiling.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from looplab_eval import _build_error_digest, build_decision
+
+    try:
+        submitted = {f.name for f in solver_dir.iterdir() if f.is_file()}
+    except OSError as exc:
+        return {"ok": True, "note": f"not run: {type(exc).__name__}: {exc}"}
+    run_build, skip_note = build_decision(submitted)
+    if skip_note:
+        # The evaluator grades the fallback in this case, so neither does this: it is a fact the
+        # model needs, not a failure. Reported, never fatal.
+        return {"ok": True, "note": skip_note}
+    if not run_build:
+        return {}
+    cmd = [sys.executable, "setup.py", "build_ext", "--inplace"]
+    try:
+        built = subprocess.run(cmd, cwd=str(solver_dir), capture_output=True, text=True,
+                               timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "note": f"timeout after {timeout:.0f}s"}
+    except OSError as exc:
+        return {"ok": True, "note": f"not run: {type(exc).__name__}: {exc}"}
+    if built.returncode == 0:
+        return {"ok": True, "note": "ok"}
+    return {"ok": False,
+            "note": f"failed rc={built.returncode}: {_build_error_digest(built.stderr)}"}
+
+
 def check(reference: Path, solver: Path, n: int, size: int, seed: int, timeout: float = 30.0) -> dict:
     """Validate `n` instances, EACH IN ITS OWN CHILD PROCESS.
 
@@ -135,17 +209,34 @@ def check(reference: Path, solver: Path, n: int, size: int, seed: int, timeout: 
     # back to the regex only as a fast pre-check that can acquit, never convict).
     if not re.search(r"^\s*class\s+Solver\b", solver.read_text(encoding="utf-8", errors="replace"), re.M):
         return {"ok": False, "error": f"{solver.name} defines no `Solver` class"}
+    # BEFORE ANY INSTANCE, because a submission that cannot compile is graded 0 whatever the
+    # instances say -- and because building it here is what makes the rows below describe the code
+    # the evaluator will actually run. See `build_gate`.
+    build = build_gate(solver.parent if str(solver.parent) else Path("."))
+    if build and not build.get("ok"):
+        # ONE copy of the digest, not two. A dev-command result is clipped to
+        # `core/context_budget.py::RESULT_CAP` (4000 chars) and this digest runs to ~700, so
+        # printing it under both `error` and `build_ext` spends a third of the model's window on
+        # the same sentence twice.
+        return {"ok": False, "error": f"build_ext {build['note']}",
+                "note": "THE EXTENSION DID NOT COMPILE. `looplab_eval` runs the same "
+                        "`setup.py build_ext --inplace` and grades the node 0 when it fails, so no "
+                        "number this checker could print about the instances would be the one you "
+                        "get. Fix the compile first."}
     rows = []
     for i in range(n):
         rows.append(_run_isolated(reference, solver, size, seed + i, timeout, i))
     n_valid = sum(1 for r in rows if r.get("valid"))
-    return {"ok": n_valid == len(rows), "instances": len(rows), "valid": n_valid,
+    out = {"ok": n_valid == len(rows), "instances": len(rows), "valid": n_valid,
             "invalid": len(rows) - n_valid, "size": size, "rows": rows,
             "note": ("ALL VALID on these instances. This is a correctness check on freshly generated "
                      "instances at the GRADED size, NOT the score -- the run's number still comes "
                      "from the engine's evaluation." if n_valid == len(rows) else
                      "INVALID INSTANCES PRESENT. The score is 0 unless every instance validates, so "
                      "fix this before optimising further.")}
+    if build.get("note"):
+        out["build_ext"] = build["note"]
+    return out
 
 
 def _run_isolated(reference: Path, solver: Path, size: int, seed: int, timeout: float, index: int) -> dict:

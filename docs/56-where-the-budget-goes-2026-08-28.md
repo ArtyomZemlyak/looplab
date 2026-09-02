@@ -4540,3 +4540,83 @@ EVALUATED solver is what gets submitted" — are both in the delivered card of e
 in the composed text, `KEEP_BEST` once), gated behind `--one-card --unteachable-rules`, which
 `run_probe.sh:242` passes. Composing a card WITHOUT `--one-card`, as I first did, shows neither: the
 absence was in my command line, not in the arm.
+
+## 99. The cheap pre-flight command was answering about a path the grader never runs — both ways
+
+Six runs in the corpus end on a node that scored 0. Two of them (`remEE6` node 3, `remEEref6`
+node 2) died on a Cython `CompileError`. The obvious hypothesis is that the model skipped the cheap
+command; **measured, it is false.** `check` is used heavily — 480 calls, 44.8 % of all dev-command
+traffic, a median of 11 per run, and every probe but one uses it — and those two runs called it ten
+and six times. Every call answered `"ok": true`.
+
+The reason is in the solver:
+
+```python
+try:
+    from edge_expansion_cy import edge_expansion_count
+except ImportError:                    # <- the path `check` was validating
+```
+
+`_one_instance` imports `solver.py` in a child. Nothing had compiled the extension, so the guarded
+import fell through and the checker certified the **pure-Python fallback**. `looplab_eval.py` then
+ran `setup.py build_ext --inplace`, the compile failed, and the node was graded 0 — on a path the
+checker never touched. That green light was the last thing the model saw before spending its final
+draw.
+
+**The mirror image was in the same command**, and the same experiment found it. The grader does
+`sys.path.insert(0, str(code_dir))` before importing the candidate
+(`AlgoTune/scripts/evaluate_results.py:396`), so a solver importing a sibling module or a compiled
+extension is scored normally. The checker did not, and answered `ModuleNotFoundError` for every
+instance: **13 of 480 `check` calls, across seven probes.** remEEref9's champion is exactly that
+shape and scores **218.85** on the graded split while its own pre-flight command was calling it
+invalid — a false RED steering a rewrite of working code, on the very affordance (`edit_surface`
+grants `*.pyx`/`*.pxd`) that exists so the model CAN write more than one file.
+
+One command, two verdicts, both about code the grader does not run:
+
+| | before | after |
+|---|---|---|
+| broken `.pyx`, guarded fallback | `ok: true` (fallback) | `ok: false`, Cython's own line in `error` |
+| helper module / compiled ext beside `solver.py` | `ModuleNotFoundError`, INVALID | valid, `build_ext: ok` |
+| `.pyx` with no `setup.py` | silent | `build_ext:` "…so nothing was compiled and the pure-Python path was graded" |
+
+`build_gate` imports the evaluator's own `build_decision` and `_build_error_digest` rather than
+re-spelling them: a `.pyx` with no recipe is NOT an error (the evaluator grades the fallback and now
+says so), and the compiler's line reaches the model in the same words both commands use. Two
+spellings of one rule is how two commands come to disagree.
+
+**It is cheap, which is why it belongs on the cheap command.** Measured 2026-09-02: the broken
+`edge_expansion_cy.pyx` fails in **0.67 s** (Cython errors before the C compiler is reached), a
+healthy `edge_cut.pyx` compiles in **1.3 s**, an unchanged rebuild is **0.4 s** — against this
+checker's own 3.6–9.1 s and the card's 120 s ceiling for it.
+
+Driven on the two real nodes: `remEE6` node 3 now returns `ok: false` with
+`edge_expansion_cy.pyx:27:0: 'cpython/long/PyLong_AS_LONG.pxd' not found` in under a second, and
+`remEEref9`'s champion — previously INVALID — now returns 2 of 2 valid with `build_ext: ok`.
+
+Three falsifiers in `tests/test_check_sees_what_the_grader_will_run.py`, and both mutations redden:
+removing `sys.path.insert` reddens the helper-module test, removing the `build_gate` call reddens
+the compile test and the no-recipe test.
+
+### And the archive comment that prescribed losing the other attempt
+
+`snapshot.sh`'s own paragraph said **"THE BULK COPY IS `-n`, NOT `-u`"** while the code five lines
+down is `cp -ru`. Extracted `archive_tree` and ran it twice over the same fixture — 400 archived
+rows, `campaign.sh`'s `rm -rf`, then a 50-row second attempt:
+
+| copy flag | canonical path | `.superseded-1` |
+|---|---|---|
+| `cp -ru` (the code) | attempt 2 (50) | attempt 1 (400) |
+| `cp -rn` (the comment) | attempt 1 (400) | attempt 1 (400) |
+
+Under `-n` the canonical path keeps attempt 1, the repair loop then sees a destination LONGER than
+its source and leaves it alone by its own correct rule, and **attempt 2 is never archived at all** —
+rc=0, `SUPERSEDED=1`, two copies of one attempt and a clean manifest row. The comment was right
+about the danger and wrong about the cure; the preservation belongs in the `.superseded-N` loop,
+which runs before any copy. Comment corrected against the measurement. Two existing tests already
+hold the shape and both redden under `-n`, which is how the mismatch was confirmed rather than
+argued.
+
+**The standing list still carries this as open** — "closes only by versioning the archive per
+attempt". Driven here, it is closed: `.superseded-N` IS that versioning, one layer down from where
+the list looked for it.

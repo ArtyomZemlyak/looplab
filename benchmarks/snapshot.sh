@@ -340,19 +340,33 @@ done < <(bench_campaign_trees "$SRC")
 # defends is untouched: a finished run whose archived copy is the same length (or longer -- see
 # below) is not re-read.
 #
-# AND THE BULK COPY IS `-n`, NOT `-u`, WHICH IS THE OTHER HALF OF THE SAME RULE. `-u` compares
-# MTIME, and a retry's log is always newer than the archived copy of the attempt it replaced --
-# `campaign.sh::run_one` does `rm -rf "$TASK_ROOT"` at the head of every attempt, so attempt 2 opens
-# a brand-new `events.jsonl` at the same path. Driven: a 5-line archived attempt-1 log, then the
-# rm -rf and a 1-line attempt-2 log, then `cp -ru` -- the archive holds ONE line, and the verify
-# loop below then measures 1 against 1, calls the tree whole and writes a clean manifest row. That
-# is the retry-loss `bench_trees.sh`'s own header calls "the 2026-08-29 loss without a container
-# restart", destroyed by the copy that was added to prevent it, before the loop that would have
-# refused it ever runs. `-n` never overwrites, so the ONLY thing that can rewrite an archived file
-# is the repair below, which rewrites exactly when the destination is SHORT -- i.e. the archive
-# grows and never shrinks, which is the rule the "LONGER is left alone" branch already states.
-# `-p` because `-n` (unlike `-u`) has no implied preservation and the archive's mtimes are what a
-# later `-n`-plus-repair cycle reasons about.
+# THE BULK COPY STAYS `-u`, AND THE PRESERVATION IS THE `.superseded-N` LOOP ABOVE, NOT THE COPY.
+#
+# This paragraph used to prescribe `-n` here, and it was right about the danger and wrong about the
+# cure. The danger is real: `-u` compares MTIME, a retry's log is always newer than the archived
+# copy of the attempt it replaced (`campaign.sh::run_one` rm -rf's `$TASK_ROOT` at the head of every
+# attempt, so attempt 2 opens a brand-new `events.jsonl` at the same path), and before the loop above
+# existed `cp -ru` did overwrite 400 archived rows of attempt 1 with 50 rows of attempt 2, rc=0, in
+# silence. That is the retry-loss `bench_trees.sh`'s header calls "the 2026-08-29 loss without a
+# container restart".
+#
+# But `-n` does not fix it, it swaps which attempt is lost. Driven 2026-09-02 on this very function,
+# extracted and run twice over the same fixture -- 400 archived rows, `rm -rf`, then a 50-row second
+# attempt:
+#
+#   cp -ru (this code)          events.jsonl = attempt 2 (50)   .superseded-1 = attempt 1 (400)
+#   cp -rn (the old paragraph)  events.jsonl = attempt 1 (400)  .superseded-1 = attempt 1 (400)
+#
+# Under `-n` the canonical path keeps attempt 1, the repair loop below then sees a destination
+# LONGER than its source and leaves it alone by its own correct rule, and ATTEMPT 2 IS NEVER
+# ARCHIVED AT ALL -- rc=0, SUPERSEDED=1, two copies of the same attempt and a clean manifest row.
+# The archive would be losing the newer half instead of the older one, which is not an improvement.
+#
+# The preservation belongs where it now is: the loop above copies aside anything the source is not a
+# continuation OF, before any copy runs, so `-u` can then do the one job it is good at -- track the
+# current attempt cheaply while a live log grows. Two tests hold this shape and BOTH redden if this
+# reverts to `-n`: `test_a_restart_does_not_take_the_previous_attempt_with_it` and
+# `test_every_restart_gets_its_own_layer`.
 #
 # The verify is separate from the repair on purpose. `cp` exiting 0 is not the claim the archive
 # needs; "the bytes are there" is, and until now nothing checked it, which is how a truncated run
