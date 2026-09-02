@@ -1173,9 +1173,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `paid-cadences-hold-the-engine-loop` | `engine/orchestrator.py` | offload under a capture sink |
 | `engine-terminal-reasons-unregistered` | `core/models.py` | a registry + AST guard |
 | `repair-ledger-drops-rows-without-a-receipt` | `core/models.py` | per-node bound + omission receipt |
-| `reconcile-retires-another-incarnations-lessons` | `engine/lessons_reconcile.py` | key on the run uid |
-| `capsule-readers-collapse-run-incarnations` | `engine/concept_capsules.py` | key on the run uid |
-| `claim-receipts-group-by-run-name` | `engine/claims_health.py` | key on the run uid |
 | `auto-skill-body-leaves-a-run-unredacted` | `engine/memory.py` | redact the body at both ends |
 | `stage-row-statuses-unregistered` | `runtime/command_eval.py` | a status registry + two-way scan |
 | `adapter-reader-runs-outside-the-eval-boundary` | `runtime/command_eval.py` | thread the eval env through |

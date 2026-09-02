@@ -665,14 +665,20 @@ def _research_source_summary(rows) -> dict:
     read_health = validated.read_health["research"]
     groups: dict[str, list[dict]] = {}
     for row in source:
-        run_id = _identity_text(row.get("run_id"), _MAX_SOURCE_ID)
-        # OPEN[claim-receipts-group-by-run-name] same identity defect one layer up: two incarnations of one
-        # directory name each write a complete v3 row set, the summary sees one group whose retained count
-        # cannot match, and `producer_receipt_known` goes False — which demotes every one-sided verdict to
-        # `inconclusive` and refuses every ratification portfolio-wide. `run_uid` appears in no line of
-        # tests/test_claims.py.
-        # proof:`present:groups.setdefault(run_id or@looplab/engine/claims_health.py`
-        groups.setdefault(run_id or "<unknown-run>", []).append(row)
+        # GROUPED BY INCARNATION, NOT BY DIRECTORY NAME. A receipt group is a PRODUCER's complete
+        # row set, and two incarnations of one name each write a complete one: merged, the group's
+        # retained count could not match its recorded cardinality, `producer_receipt_known` went
+        # False, and every one-sided verdict was demoted to `inconclusive` — portfolio-wide, from a
+        # name that is `demo`/`baseline` on half the corpus. `_identity_text` still bounds both
+        # halves, since either can arrive from a durable row a caller did not write.
+        # Imported at CALL time, not module scope: `claims.py` is a barrel that re-exports this
+        # module's names one by one, and `test_the_barrel_re_exports_the_same_objects` derives that
+        # surface from `dir()` — a module-level import would make somebody else's function part of
+        # this module's API and demand a re-export of it.
+        from looplab.core.run_identity import run_ref
+        ref = run_ref(_identity_text(row.get("run_uid"), _MAX_SOURCE_ID),
+                      _identity_text(row.get("run_id"), _MAX_SOURCE_ID))
+        groups.setdefault(ref or "<unknown-run>", []).append(row)
 
     partial = unknown = known_total = known_omitted = 0
     for members in groups.values():
