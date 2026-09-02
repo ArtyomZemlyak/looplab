@@ -4927,3 +4927,49 @@ Yesterday I wrote a sentence about a metric without reading the line that comput
 as the strongest form of the finding. Both halves of this sweep's method note apply at once: the
 measurement was right and the sentence around it was not, and the only thing that caught it was
 opening `probe_summary.py:316` to ask what `ref_imports` actually counts.
+
+## 106. The money tool read its two halves in the wrong order, and its graceful path was the one that crashed
+
+**The first non-zero residue of the campaign, and it was negative.** With four probes live this
+sweep reported `RESIDUE $-0.003329` — about the price of one generation. A leak does not point that
+way: negative means the SPANS held more than the counter, i.e. money the engine recorded and the
+meter had not.
+
+Re-run seconds later: `$-0.000000`. That is the signature of a race, not of a leak, and the race is
+in `check_money.py` itself:
+
+```python
+live = _counter(a.port)                              # counter snapshot
+s_cost, s_calls = spans_by_probe(a.bench_root, since)   # ...then the slow glob over every probe tree
+```
+
+The counter was sampled first and the spans second, so any call that COMPLETED between the two reads
+was in the span sum and not in the counter. The file's own header states the opposite rule —
+*"sum `attributes.cost` over `generation` spans, then read the counter"* — which is also what the
+standing brief prescribes on every sweep. **The rule was documented at the top of the file and
+inverted twenty lines down.**
+
+Spans first, counter second: the counter can then only have GAINED between the reads, the gap is
+non-negative by construction, and what remains in it is what the named parts explain. Reading the
+spans is the slow half, which is exactly why it must go first.
+
+### And the test found a second one on its way in
+
+The order test points the tool at a root that does not exist. It died before reaching its assertion:
+
+```
+ValueError: not enough values to unpack (expected 4, got 3)   check_money.py:191
+```
+
+`meter_by_probe` returns four dicts everywhere except its missing-file branch, which returns three.
+So the one path built to be graceful — no meter log yet, a fresh `BENCH_ROOT`, a mistyped
+`--bench-root` — was the only one that crashed, and it crashed in the tool the sweep uses to decide
+whether money is intact. No earlier test had ever pointed it at an absent root.
+
+Both fixed, both with falsifiers: reverting the order reddens the order test, and restoring the
+three-tuple reddens two.
+
+**The shape, for the third time this week:** §99's `check` certified a path the grader would not
+run, §103's probe could not import the file its card names, and now the reconciler samples its two
+sides in an order its own docstring forbids. None of these is a broken component. Each is a
+component that measured something adjacent to what it claimed.

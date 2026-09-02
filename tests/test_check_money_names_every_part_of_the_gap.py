@@ -160,3 +160,52 @@ def test_a_call_that_is_neither_killed_nor_empty_is_reported_as_unnamed(tmp_path
     r = _run(root, port)
     srv.close()
     assert "1 call(s) STILL UNNAMED" in r.stdout, r.stdout + r.stderr
+
+
+def test_the_spans_are_read_before_the_counter(monkeypatch):
+    """The order the sweep prescribes, and the one this file's header already stated.
+
+    MEASURED 2026-09-02 with four probes live: residue $-0.003329 -- the first non-zero one of the
+    campaign, about the price of one generation, and NEGATIVE. `_counter` ran before the spans were
+    read, so a call that completed between the two reads was in the span sum and not yet in the
+    counter snapshot. Re-running seconds later gave $-0.000000: the signature of a race, not a leak.
+
+    Spans first means the counter can only have GAINED between the reads, so the gap is non-negative
+    by construction. MUTATION: move `live = _counter(...)` back above `spans_by_probe` and this
+    reddens.
+    """
+    import benchmarks.check_money as cm
+
+    order: list[str] = []
+    real_spans = cm.spans_by_probe
+
+    def spans(root, since):
+        order.append("spans")
+        return real_spans(root, since)
+
+    def counter(port):
+        order.append("counter")
+        return {"cost_usd": 0.0, "calls": 0}
+
+    monkeypatch.setattr(cm, "spans_by_probe", spans)
+    monkeypatch.setattr(cm, "_counter", counter)
+    monkeypatch.setattr(cm, "_meter_start", lambda port: 0.0)
+    cm.main(["--bench-root", "/nonexistent-bench-root", "--port", "1"])
+
+    assert order == ["spans", "counter"], (
+        f"the counter must be read AFTER the span sum, got {order}")
+
+
+def test_a_missing_meter_log_is_not_a_crash(tmp_path):
+    """The graceful path was the one that died.
+
+    `meter_by_probe` returned a THREE-tuple when `meter/meter.jsonl` is absent while `main` unpacks
+    four, so a fresh BENCH_ROOT or a mistyped `--bench-root` produced
+    `ValueError: not enough values to unpack (expected 4, got 3)` instead of a reconciliation over
+    zero rows. Found 2026-09-02 by pointing the tool at a root that does not exist -- which is what
+    the order test above happened to do, and what no earlier test had.
+    """
+    import benchmarks.check_money as cm
+
+    cost, calls, killed, empty = cm.meter_by_probe(str(tmp_path / "absent"), 0.0)
+    assert (dict(cost), dict(calls), dict(killed), dict(empty)) == ({}, {}, {}, {})

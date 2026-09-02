@@ -117,7 +117,12 @@ def meter_by_probe(root: str, since: float) -> tuple[dict, dict, dict, dict]:
     empty: dict[str, int] = collections.Counter()
     path = os.path.join(root, "meter", "meter.jsonl")
     if not os.path.exists(path):
-        return cost, calls, killed
+        # FOUR, like the signature and like every other exit from this function. It returned THREE
+        # and `main` unpacks four, so the one path that is meant to be graceful -- no meter log yet,
+        # a fresh BENCH_ROOT, a mistyped `--bench-root` -- was the one that died with
+        # `ValueError: not enough values to unpack (expected 4, got 3)`. Found 2026-09-02 by a test
+        # that pointed the tool at a root that does not exist, which no earlier test had done.
+        return cost, calls, killed, empty
     for line in open(path):
         line = line.strip()
         if not line:
@@ -176,9 +181,20 @@ def main(argv: list[str]) -> int:
     if since is None:
         print(f"no meter on :{a.port} -- nothing to reconcile against", file=sys.stderr)
         return 2
-    live = _counter(a.port)
+    # SPANS FIRST, COUNTER SECOND -- the order this file's own header prescribes, and did not obey.
+    #
+    # MEASURED 2026-09-02 with four probes live: residue $-0.003329, the first non-zero one of the
+    # campaign, about the price of one generation. `live = _counter(...)` ran BEFORE the spans were
+    # read, so a call that COMPLETED between the two reads was in the span sum and not yet in the
+    # counter snapshot -- spans exceeded the meter and the gap went negative. Re-running seconds
+    # later gave $-0.000000, which is the signature of a race and not of a leak.
+    #
+    # In this order the counter can only have GAINED between the reads, so the gap is non-negative
+    # by construction and the only thing left in it is what the named parts explain. Reading the
+    # spans is the slow half (a glob over every probe tree), which is exactly why it must be first.
     s_cost, s_calls = spans_by_probe(a.bench_root, since)
     m_cost, m_calls, m_killed, m_empty = meter_by_probe(a.bench_root, since)
+    live = _counter(a.port)
 
     spans_total = sum(s_cost.values())
     gap = live["cost_usd"] - spans_total
