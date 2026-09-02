@@ -1175,7 +1175,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `auto-skill-body-leaves-a-run-unredacted` | `engine/memory.py` | redact the body at both ends |
 | `adapter-reader-runs-outside-the-eval-boundary` | `runtime/command_eval.py` | thread the eval env through |
 | `task-spec-models-ignore-unknown-keys` | `adapters/repo_task.py` | forbid extras, grandfathered |
-| `trace-clear-receipts-are-never-reaped` | `serve/service_reaper.py` | a fifth reaper rule |
 | `assistant-has-no-untrusted-evidence-boundary` | `serve/assistant.py` | one envelope, used by both agents |
 | `command-sequencer-is-not-reentrant` | `serve/run_commands.py` | a plain lock that raises on re-entry |
 | `inject-origin-is-client-supplied-provenance` | `serve/control_validation.py` | mint it server-side only |

@@ -740,6 +740,7 @@ are the design (`serve/service_reaper.py`):
 | `.looplab-delete-identity-*` | its receipt is being removed; or no receipt was ever published and it is cold | its receipt is being kept — the pair is never split |
 | `.looplab-lifecycle-*.lock` | its digest matches no surviving run directory and it is cold | the run it fences still exists — `flock` is per-inode, so unlinking a held lock silently lets two processes hold it at once |
 | `.looplab-reset-receipt-*` | the reset **succeeded** and the receipt is cold | the reset is unfinished and re-enterable |
+| `.trace-clear.*` | the trace clear **succeeded** and the receipt is cold | it is `pending` (a retry resumes from it), `superseded` (the only record that a clear was overtaken), or UNREADABLE — a malformed one refuses every future clear of that run, so it is kept to be found rather than swept away |
 | `.looplab-delete-fence-*` | never | it is live ownership of a run identity |
 | `.looplab-delete-quarantine-*` | never | it holds the run's own bytes |
 | `<artifact>.reset-<operation id>` | never | it is the pre-Replay copy of an artifact the run replaced |
