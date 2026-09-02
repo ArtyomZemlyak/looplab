@@ -1039,3 +1039,58 @@ def test_no_running_multi_node_probe_means_no_held_out_line(tmp_path):
     (done / "champion_solver.py").write_text("# done\n")
     out = _run(tmp_path)
     assert "held out" not in out, out
+
+
+def test_trust_flags_the_loop_raised_are_surfaced(tmp_path):
+    """`reward_hack_suspected` sat in every event log and in no summary.
+
+    Found 2026-09-02 by counting event types rather than re-reading the ones already named: four in
+    the corpus, all `critic:params_ignored` -- "none of the proposed params are referenced in the
+    code" -- and all on discrete_log. BOTH nodes of remDL2 and BOTH of remDL7, whose 16.7799 is the
+    best discrete_log number this bench has.
+
+    Not a defect in the engine: those runs carry `trust_gate: audit`, the shipped default, under
+    which a flag is advisory and the node stays eligible to win. What was wrong is that the standing
+    brief calls discrete_log the corpus's finest load-bearing number and nothing told a reader its
+    best run had been flagged twice by the loop's own critic.
+    """
+    probe = _mk_probe(tmp_path, "flagged", "discrete_log", nodes=[5.0],
+                      costs_before=[0.2], costs_after=[0.1], test=5.0)
+    run = probe / "runs" / "discrete_log" / "run"
+    rows = [json.loads(l) for l in open(run / "events.jsonl")]
+    rows.append({"type": "reward_hack_suspected", "ts": 1500.0,
+                 "data": {"node_id": 0, "generation": 0,
+                          "signals": [{"signal": "critic:params_ignored",
+                                       "detail": "none of the proposed params are referenced"}]}})
+    (run / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = _run(tmp_path)
+    assert "trust flags the loop raised" in out, out
+    # By PARTS, not by column alignment: the first version hand-counted the padding of a
+    # `{probe:10s}` field and was one space out, failing about spacing while the content was right.
+    line = [l for l in out.splitlines() if l.strip().startswith("flagged") and "flag(s)" in l]
+    assert line, out
+    assert "1 flag(s)" in line[0] and "critic:params_ignored" in line[0], line[0]
+    assert "trust_gate=audit" in out, "the summary does not say the flag was advisory"
+
+
+def test_a_clean_corpus_prints_no_trust_section(tmp_path):
+    """A heading for a thing that did not happen teaches a reader to skim headings."""
+    _mk_probe(tmp_path, "clean", "discrete_log", nodes=[5.0],
+              costs_before=[0.2], costs_after=[0.1], test=5.0)
+    out = _run(tmp_path)
+    assert "trust flags the loop raised" not in out, out
+
+
+def test_the_signal_NAME_is_carried_not_just_the_count(tmp_path):
+    """"Two flags" and "two flags for ignoring every proposed parameter" call for different reading;
+    a count alone sends someone back to the event log, which is where this was hiding."""
+    probe = _mk_probe(tmp_path, "two", "discrete_log", nodes=[5.0],
+                      costs_before=[0.2], costs_after=[0.1], test=5.0)
+    run = probe / "runs" / "discrete_log" / "run"
+    rows = [json.loads(l) for l in open(run / "events.jsonl")]
+    for sig in ("critic:params_ignored", "grader_import"):
+        rows.append({"type": "reward_hack_suspected", "ts": 1500.0,
+                     "data": {"signals": [{"signal": sig}]}})
+    (run / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = _run(tmp_path)
+    assert "critic:params_ignored" in out and "grader_import" in out, out

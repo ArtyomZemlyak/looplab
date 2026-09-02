@@ -4381,3 +4381,45 @@ Final ledger of the two arms this document ran: `--no-unteachable-rules`, eight 
 anything measured (§92); `--no-reference-affordance`, nine runs, a clear effect on the behaviour it
 names and none on the score (§94). Seventeen dollars, two clean answers, both to questions written
 down before the runs started.
+
+## 96. The loop flagged its own best `discrete_log` node twice, and no sweep had looked
+
+Zero of the last twenty-five commits touched `looplab/`. That is measurable and it is the drift this
+document was warned about, so this sweep went looking for a defect in the LOOP rather than another
+bench instrument. It found something better than a defect: a signal the engine has been raising for
+days that no summary shows.
+
+Counting event types rather than re-reading the ones already named turns up
+`reward_hack_suspected` — **four events**, all the same signal:
+
+    critic:params_ignored — "none of the proposed params [...] are referenced in the code"
+
+All four are on `discrete_log`: **both** nodes of `remDL2`, and **both** nodes of `remDL7`. `remDL7`
+scored **16.7799**, the best `discrete_log` number this bench has produced.
+
+**This is not an engine defect.** Those runs carry `trust_gate: audit` — the shipped default, in
+which a flag is advisory and the node stays eligible to win (`engine/options.py:184`,
+`leakage.py:152`: *"under `trust_gate='audit'` (the default) these flags are advisory"*). The engine
+did exactly what it was configured to do, and I checked that before writing this rather than after.
+
+What was wrong is the reading. The standing brief calls `discrete_log` *"самое тонкое несущее число
+корпуса"* — the corpus's finest load-bearing number, spread 5.1× — and nothing anywhere told a
+reader that its best run had been flagged twice by the loop's own critic for writing code that
+ignores every parameter the Researcher proposed. The diagnosis was in each run's event log, which is
+the same place the zeros diagnosis and the refusal reason were hiding before they were surfaced.
+
+`probe_summary.py` now prints the flags with their signal names and the sentence that they were
+advisory. Two things are deliberately not done: the flags are not treated as disqualifying, because
+under `audit` they are not; and no score is withdrawn, because a critic saying the params were
+ignored is not evidence that the measurement was wrong.
+
+### 96.1 What else the event census showed
+
+`generation` is 0 on all 109 `node_evaluated` events and on every other event type that carries it.
+It is the node's ATTEMPT number (`engine/ablation.py:34` compares `parent.attempt == generation`),
+so this says **no evaluated node in the corpus was ever a repair** — every node that reached
+evaluation did so on its first attempt. I first read it as a flat, non-deepening search and that was
+wrong; measuring what the field means came before concluding, and the second reading is the dull one.
+
+Also: 43 `novelty_rejected`, 155 `research_attempted`, 117 `card_build_attempted`, 44 event types and
+16,782 events in total. Of those 44 types, this document has ever discussed about six.

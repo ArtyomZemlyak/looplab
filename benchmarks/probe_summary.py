@@ -346,6 +346,10 @@ def summarise(run_dir: Path) -> dict | None:
         "build_min": build_min,
         "age_s": age_s,
         "probe_dir": str(probe_dir),
+        "trust_flags": sum(1 for r in events if r.get("type") == "reward_hack_suspected"),
+        "trust_signals": [str((sig or {}).get("signal") or "")
+                          for r in events if r.get("type") == "reward_hack_suspected"
+                          for sig in ((r.get("data") or {}).get("signals") or [])],
         "why_no_test": "" if _test_score(probe_dir) is not None else _why_no_test(probe_dir),
         "phases": sorted(by_phase.items(), key=lambda kv: -kv[1])[:4],
         "calls": calls,
@@ -573,6 +577,27 @@ def main(argv: list[str]) -> int:
         print("  NOTE: this is the rule's PROTECTIVE value given the nodes these runs produced.")
         print("        Whether STATING the rule changes which nodes appear is a different question")
         print("        and needs the --no-unteachable-rules control arm; see docs/56 §83, §84.")
+
+    # TRUST FLAGS, which no sweep had ever looked at. The event log carries `reward_hack_suspected`
+    # and it appears in no summary: found 2026-09-02 by counting event types rather than reading the
+    # ones already named. Four in the corpus, all `critic:params_ignored` -- "none of the proposed
+    # params are referenced in the code" -- and all on `discrete_log`: BOTH nodes of remDL2 and BOTH
+    # nodes of remDL7, and remDL7's 16.7799 is the best discrete_log number this bench has.
+    #
+    # NOT a defect: those runs carry `trust_gate: audit`, the shipped default, under which a flag is
+    # advisory and the node stays eligible to win. The engine did what it was configured to do. What
+    # was wrong is that the standing brief calls discrete_log "the corpus's finest load-bearing
+    # number" and nothing told a reader that its best run was flagged twice by the loop's own critic.
+    flagged = {}
+    for s2 in seen.values():
+        n = s2.get("trust_flags") or 0
+        if n:
+            flagged[s2["probe"]] = (n, s2.get("trust_signals") or [])
+    if flagged:
+        print("\ntrust flags the loop raised on its own nodes (trust_gate=audit: advisory, "
+              "the node still competes):")
+        for probe, (n, sigs) in sorted(flagged.items()):
+            print(f"  {probe:10s} {n} flag(s): {', '.join(sorted(set(sigs))) or '(unnamed)'}")
 
     print("\nper-probe detail:")
     for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):
