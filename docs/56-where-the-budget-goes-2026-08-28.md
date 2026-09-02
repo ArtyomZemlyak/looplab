@@ -4675,3 +4675,62 @@ invisible to it by construction — and generations of 314 s, 500 s and 639 s co
 four probes while I was looking. The second instrument settled it: `/proc/PID/wchan` said
 `do_epoll_wait`, `state=S`, no children — waiting on a socket, which is what a long stream looks
 like. Silence in a completion-stamped log is not evidence of a stall.
+
+## 101. The four new probes are running at a third of corpus speed, and it is none of the things I suspected
+
+`remDL9`–`remDL12` (discrete_log, one per lane, launched 09:04) are making **0.44–1.22 calls per
+minute** against a corpus median of **2.34** — two to five times slower per probe. Three candidate
+causes, all measurable, taken in order:
+
+**Not the rate limiter.** `proxy.py` runs at `--rpm 45`. The four probes together are at **2.73
+calls/min**, and `queued_s` is **0.00 s on every one of their 122 calls** — the limiter has not made
+a single call wait. The corpus median `queued_s` is 0.00 s too.
+
+**Not our own concurrency.** This one deserved a real measurement rather than a shrug, because
+running four lanes into one shared endpoint is exactly the kind of thing that would slow itself
+down. Every metered call bucketed by how many DISTINCT probes were calling within ±150 s of it:
+
+| probes at once | calls | median tok/s |
+|---|---|---|
+| 1 | 304 | 104.9 |
+| 2 | 2,504 | 112.2 |
+| 3 | 3,512 | 100.1 |
+| 4 | 6,993 | 101.8 |
+| 5+ | 33 | 96.2 |
+
+Flat from one lane to four. **Four-way occupancy is free**, which also settles that the lane layout
+is not costing the campaign anything.
+
+**It is the shared endpoint, right now.** Same task, same card, same box:
+
+| | calls | median latency | mean latency | median completion tokens | **median tok/s** |
+|---|---|---|---|---|---|
+| the four live probes | 122 | 9.3 s | 108.7 s | 456 | **68.2** |
+| corpus, discrete_log | 1,658 | 6.8 s | 59.3 s | 766 | **106.4** |
+| corpus, everything else | 11,592 | 4.2 s | 25.7 s | 472 | **103.3** |
+
+**68 tok/s against 103–106.** The answers are not longer — they are shorter. The communal model is
+simply generating at about a third less throughput than it did for the corpus, and nothing on this
+box is responsible.
+
+### The obvious consequence does not exist, and that is the finding
+
+§100 established that a run's wall clock IS generation time. The inference is immediate and
+appealing: a third slower endpoint means a third fewer draws for the same run, so throughput is a
+hidden term in every score this campaign reports. **Measured over 45 probes, it is not:**
+
+| half | median tok/s | median evaluated nodes |
+|---|---|---|
+| slower | 92.8 | **3.0** |
+| faster | 119.5 | **2.0** |
+
+Spearman ρ = **−0.090**. No relationship, and what little there is points the wrong way.
+
+The reason is one this notebook already recorded and I did not connect: **50 of 50 finished runs
+end on `budget_exhausted`, none on any other reason** (§67's table, `max_eval_seconds` None on every
+one). Money binds first, and money is priced per TOKEN, not per second. A slower endpoint changes
+how long you wait for the same dollar's worth of tokens — not what the dollar buys. The wall clock
+is generation time and the wall clock is not the constraint; both are true, and holding only the
+first one makes a confident wrong prediction.
+
+So: the four probes will finish, later than usual, for the same money. Nothing to fix.
