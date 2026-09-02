@@ -60,8 +60,24 @@ fingerprint() {
   while IFS= read -r d; do P+=("$d"); done < <(bench_campaign_trees "$ROOT"; bench_run_trees "$ROOT")
   P+=("$ROOT/AlgoTune/reports" "$ROOT/meter" \
       "$ROOT/looplab/benchmarks/algotune/.baseline_times")
-  find "${P[@]}" -type f -newermt '-1 day' -printf '%T@ %s\n' 2>/dev/null \
-    | sort | tail -20 | md5sum
+  # AND THE REPO ITSELF, which nothing above can see. Measured 2026-09-02 01:03: HEAD was 8c288f59
+  # and the newest snapshot recorded 88560d41 -- FOUR commits of code with no snapshot taken,
+  # because every watched path answers "has anything been MEASURED", and committing measures
+  # nothing. That is defensible for the trigger and not for the ARTEFACT: the snapshot this trigger
+  # fires copies `looplab.bundle`, and the bundle exists to survive a /var/tmp wipe. The 2026-08-29
+  # wipe cost 37 UNPUSHED commits; the bundle is the only backup work that is not yet pushed has.
+  # So a box where measurement stops and coding continues -- exactly this box for the last ninety
+  # minutes -- lets the bundle fall arbitrarily far behind by construction.
+  #
+  # NOT a `find` over the tree: pytest leaves `.pyc` and `.pytest_cache` under it, so that would
+  # fire on every test run and snapshot nothing new. The two things at risk are the committed HEAD
+  # and the uncommitted diff, and both are one cheap git call.
+  local repo="$ROOT/looplab" head dirty
+  head=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo no-head)
+  dirty=$(git -C "$repo" status --porcelain 2>/dev/null | md5sum | cut -c1-32)
+  { find "${P[@]}" -type f -newermt '-1 day' -printf '%T@ %s\n' 2>/dev/null | sort | tail -20
+    echo "repo $head $dirty"
+  } | md5sum
 }
 
 case "${1:-status}" in
