@@ -435,6 +435,20 @@ EV_RUN_LOOP_EXITED = "run_loop_exited"
 # emitted ONLY while the exporter is unhealthy: a run whose spans are fine appends no row at all.
 EV_TRACE_EXPORT_HEALTH = "trace_export_health"
 
+# THE BOARD'S OWN REFUSALS, written down. `classify_research_beliefs` answers, per memo, how many
+# of its directions became open beliefs and why the rest did not — and until this row that answer
+# reached a `_LOG.warning` and nothing else. Establishing that v12's cap refused 394 of 413
+# proposals (including all 55 requests for the seed-replicate experiment) required reconstructing
+# the board memo by memo and re-running the classifier, because the run records the memo BEFORE it
+# classifies and never records the verdict.
+#
+# DIAGNOSTIC rather than BACKGROUND_APPENDABLE, and the two are not interchangeable here. Its
+# siblings at the same append site (`hint`, `hypothesis_added`) are FOLDED events that the
+# concurrent research task is licensed to write because they move no reader's position. This row
+# is not folded at all — nothing needs it in RunState — and DIAGNOSTIC_EVENTS is excluded WHOLESALE
+# from `speculation._proposal_authority_seq`, which is the stronger form of that same licence.
+EV_BELIEF_ADMISSION = "belief_admission"
+
 # The closed vocabulary of run-loop exits, in the registry shape this repo uses for every duck-typed
 # word (`CARD_BUILD_SKIP_REASONS`, `CARD_STAGE_REFUSALS`, `REPAIR_VERDICTS`, `TRIAGE_ACTIONS`): a
 # two-way AST guard keeps the loop's exits and this tuple in step, so a FOURTEENTH exit cannot be
@@ -861,7 +875,7 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
-    EV_TRACE_EXPORT_HEALTH,
+    EV_TRACE_EXPORT_HEALTH, EV_BELIEF_ADMISSION,
     EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
     EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN,
