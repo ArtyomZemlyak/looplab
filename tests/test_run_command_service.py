@@ -1879,8 +1879,10 @@ def test_cross_service_os_sequencer_excludes_the_same_run(tmp_path):
         assert not entered.is_set()
         assert errors and getattr(errors[0], "status_code", None) == 503
 
-    # Production uses one service instance. Its in-process RLock must honor the same acquisition
-    # ceiling instead of blocking forever before the bounded OS-lock loop is even reached.
+    # Production uses one service instance. Its in-process lock must honor the same acquisition
+    # ceiling instead of blocking forever before the bounded OS-lock loop is even reached. (It is a
+    # plain `Lock`, not an `RLock`: see `tests/test_sequencer_reentry.py` for why re-entry on one
+    # thread is a named refusal rather than something the guard lets through.)
     same = RunCommandService(srv, lock_acquire_timeout=0.08, poll_interval=0.01)
     attempting = threading.Event()
     errors = []

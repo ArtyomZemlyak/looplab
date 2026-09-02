@@ -313,13 +313,19 @@ class RunCommandService:
         self.poll_interval = max(0.01, float(poll_interval))
         self.lock_acquire_timeout = max(0.05, float(lock_acquire_timeout))
         self._local_lock = threading.RLock()
-        # OPEN[command-sequencer-is-not-reentrant] the in-process guard is re-entrant and the interprocess
-        # half is not: a nested `sequence()` on one thread passes the RLock, then contends with its own first
-        # descriptor and spins to the full acquire timeout before a 503 (measured). No production nesting
-        # exists today, which is exactly why the RLock is a decoy — make the rule statable by raising on
-        # re-entry instead of inviting it.
-        # proof:present:threading.RLock()@looplab/serve/run_commands.py
-        self._run_locks: dict[str, threading.RLock] = {}
+        self._run_locks: dict[str, threading.Lock] = {}
+        # WHICH RUNS THIS THREAD IS ALREADY SEQUENCING. The in-process guard used to be an `RLock`
+        # while the interprocess half is not re-entrant at all, so a nested `sequence()` on one
+        # thread passed the RLock and then contended with ITS OWN first descriptor: POSIX `flock` is
+        # per open-file-description, and this opens a fresh one per call, so the second acquire spun
+        # to the full timeout and answered 503 "timed out waiting for the run command sequencer" —
+        # a message describing contention with another process, about a thread blocked on itself.
+        #
+        # No production path nests today, which is exactly why the `RLock` was a decoy: it read as
+        # permission for something the layer below cannot do. A plain `Lock` states the rule, and
+        # this set makes re-entry a NAMED refusal rather than a deadlock against a plain lock —
+        # which would have been a worse answer to the same mistake.
+        self._sequenced_by_thread: dict[int, set[str]] = {}
         self._command_observations = CommandObservationIndex(max_indexed_runs=8)
 
     def _engine_state(self, rd: Path) -> Optional[bool]:
@@ -1061,12 +1067,23 @@ class RunCommandService:
         giving up early is the safe direction there. Every ordinary caller omits it.
         """
         key = _lock_identity(rd)
+        thread_id = threading.get_ident()
         with self._local_lock:
-            local = self._run_locks.setdefault(key, threading.RLock())
+            if key in self._sequenced_by_thread.get(thread_id, ()):
+                # Raised rather than allowed: the interprocess half cannot be re-entered, so
+                # "allowing" it means blocking on this thread's own descriptor until the acquire
+                # budget runs out and then reporting cross-process contention that never happened.
+                raise RuntimeError(
+                    "run command sequencer re-entered on one thread: the interprocess half is not "
+                    "re-entrant, so a nested `sequence()` would block on its own lock. Hoist the "
+                    "inner call out of the outer `sequence()` block.")
+            local = self._run_locks.setdefault(key, threading.Lock())
         budget = self.lock_acquire_timeout if timeout is None else max(0.0, float(timeout))
         deadline = time.monotonic() + budget
         if not local.acquire(timeout=max(0.0, deadline - time.monotonic())):
             raise HTTPException(503, "timed out waiting for the in-process run command sequencer")
+        with self._local_lock:
+            self._sequenced_by_thread.setdefault(thread_id, set()).add(key)
         try:
             lock_path = self._sequence_path(rd)
             handle = open(lock_path, "a+")
@@ -1125,6 +1142,14 @@ class RunCommandService:
                         pass
                 handle.close()
         finally:
+            with self._local_lock:
+                held = self._sequenced_by_thread.get(thread_id)
+                if held is not None:
+                    held.discard(key)
+                    # Dropped when empty: a long-lived worker pool would otherwise accumulate one
+                    # empty set per thread that ever sequenced anything.
+                    if not held:
+                        self._sequenced_by_thread.pop(thread_id, None)
             local.release()
 
     def validate_paths(self, rd: Path) -> Path:
