@@ -2,20 +2,53 @@
 // font-size fitter. Split out of util.js (mega-refactor P5.2 — bodies verbatim); util.js re-exports
 // everything, so importers are unchanged.
 
-// OPEN[ranked-metrics-print-fewer-digits-than-they-rank] the cross-run table ranks at full precision
-// and renders through this four-significant-figure formatter, so the two best numbers on the corpus
-// (0.793426 and 0.793411) both print 0.7934 under ranks 1 and 2 with no tie marker, while the claim
-// sentence beside the table prints the unrounded value. Driven: `Number(v.toPrecision(4)).toString()`
-// returns the same string for both. No caller anywhere in `ui/src` asks for more than 4, so the
-// remedy is a formatter that widens until the ranked values it is given render distinctly, used
-// wherever a rank is shown.
-// proof:absent:distinctMetricFormatter@ui/src/format.js
 export function fmt(v, p = 4) {
   if (v === null || v === undefined || Number.isNaN(v)) return '—'
   if (typeof v !== 'number') return String(v)
   const a = Math.abs(v)
   if (a !== 0 && (a < 1e-3 || a >= 1e6)) return v.toExponential(2)
   return Number(v.toPrecision(p)).toString()
+}
+
+// A formatter for a column that RANKS. `fmt`'s four significant figures are right for a number an
+// operator READS and wrong for one an operator COMPARES, and the cross-run table does both at once:
+// it ranks at full precision and renders through `fmt`.
+//
+// MEASURED on the shipped corpus: the two best numbers on this box are 0.793426 and 0.793411. Both
+// print `0.7934`, under ranks 1 and 2, with no tie marker — while the claim sentence beside the same
+// table prints the unrounded value. An operator sees two identical strings ordered, which reads as
+// an arbitrary ordering of equals, and the one thing a ranked column must never look like is a coin
+// toss between rows it can distinguish.
+//
+// HOISTED, not invented: this is `RunCompare.jsx`'s own widening walk moved to the module that owns
+// value formatting, so every surface that ranks can ask for it instead of one screen having solved
+// it privately. Behaviour is unchanged — same 4-to-17 walk, same exact-value map, same
+// `String(value)` last resort.
+//
+// Widening is bounded by the VALUES, not by a taste in digits: it stops at the first precision where
+// every DISTINCT value renders distinctly, so a column of genuine ties stays as short as it has
+// always been. 17 is where a double stops carrying measurement — past it the extra characters are
+// the binary representation talking.
+//
+// Takes the whole COLUMN deliberately. A per-value formatter cannot know what it is being compared
+// against, which is exactly the information that decides how many digits are honest here.
+export function distinctMetricFormatter(values = []) {
+  const finite = (Array.isArray(values) ? values : [])
+    .filter(value => typeof value === 'number' && Number.isFinite(value))
+  const distinct = [...new Set(finite)]
+  // The fallback differs between the two exits and that is the hoisted code's own behaviour: inside
+  // the loop a value absent from the map is still formattable at the precision this column settled
+  // on, while past the loop no precision separated the values and the raw number is all there is.
+  const render = (byValue, spare) => value => typeof value === 'number' && Number.isFinite(value)
+    ? byValue.get(value) ?? spare(value) : '—'
+  for (let precision = 4; precision <= 17; precision += 1) {
+    const labels = distinct.map(value => fmt(value, precision))
+    if (new Set(labels).size === distinct.length) {
+      return render(new Map(distinct.map((value, index) => [value, labels[index]])),
+                    value => fmt(value, precision))
+    }
+  }
+  return render(new Map(distinct.map(value => [value, String(value)])), String)
 }
 
 export function fmtInt(v) {

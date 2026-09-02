@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { get, fmt, fmtAgo, fmtCost, fmtElapsedSeconds, normalizeRunGeneration, runApiPath } from './util.js'
+import { distinctMetricFormatter, get, fmt, fmtAgo, fmtCost, fmtElapsedSeconds, normalizeRunGeneration, runApiPath } from './util.js'
 import { effectiveRunStatus } from './runIndex.js'
 import { comparableRunRanking, COMPARE_COLUMNS, configDifferences } from './portfolioModel.js'
 import { deadlineRequest } from './requestDeadline.js'
@@ -36,22 +36,11 @@ const retainedCapture = (resource, nextRuns) => {
   }
 }
 
-const comparisonMetricFormatter = runs => {
-  const values = runs.map(run => run.best_confirmed ?? run.best_metric)
-    .filter(value => typeof value === 'number' && Number.isFinite(value))
-  const distinct = [...new Set(values)]
-  for (let precision = 4; precision <= 17; precision += 1) {
-    const labels = distinct.map(value => fmt(value, precision))
-    if (new Set(labels).size === distinct.length) {
-      const byValue = new Map(distinct.map((value, index) => [value, labels[index]]))
-      return value => typeof value === 'number' && Number.isFinite(value)
-        ? byValue.get(value) ?? fmt(value, precision) : '—'
-    }
-  }
-  const byValue = new Map(distinct.map(value => [value, String(value)]))
-  return value => typeof value === 'number' && Number.isFinite(value)
-    ? byValue.get(value) ?? String(value) : '—'
-}
+// The values this screen ranks, handed to the shared widening formatter. The walk itself used to
+// live here; `format.js::distinctMetricFormatter` is that code, moved so every ranking surface can
+// ask for it rather than this one screen having solved it privately.
+const comparisonMetricFormatter = runs => distinctMetricFormatter(
+  (runs || []).map(run => run.best_confirmed ?? run.best_metric))
 
 export async function loadDetail(run, signal, timeoutMs = COMPARE_DETAIL_TIMEOUT_MS) {
   let snapshot = null, config = null, probe = null, configReady = false
