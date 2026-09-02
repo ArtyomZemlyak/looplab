@@ -2177,6 +2177,25 @@ class Tracer:
                     otel_cm.__exit__(None, None, None)
                 except Exception:  # noqa: BLE001
                     pass
+            # EXPORT BEFORE THE RESETS, and the ordering is the whole fix. Every `reset` below is a
+            # `ContextVar.reset`, which RAISES `ValueError: ... was created in a different Context`
+            # when a span's enter and exit land in different contexts — and this `finally` used to
+            # end with the export, so one raising reset skipped it and the span vanished. Driven:
+            # entering under `contextvars.copy_context().run(...)` and exiting outside it produces
+            # exactly that ValueError and NO row, while the tracer itself keeps working.
+            #
+            # MEASURED on `runs/e5small-dr-unified-v12/spans.jsonl`: 4 parent ids appear on 268
+            # children while owning no row of their own — `891a4e7216bf6d` alone has 256, and it is
+            # the parent of the last six spans the run ever wrote. A row is written on CLOSE, so an
+            # operation that loses its close writes nothing while its children write normally.
+            #
+            # The export is still wrapped, so a failing exporter cannot mask the in-flight
+            # exception; moving it first only stops the CONTEXT bookkeeping from deciding whether a
+            # diagnostic gets recorded.
+            try:
+                self.exporter.export(rec)
+            except Exception:  # noqa: BLE001 - spans are diagnostics: an export failure (disk full,
+                pass           # a non-serializable attribute) must never mask the in-flight exception
             _stack.reset(token)
             _current_tracer.reset(tok_tr)
             if _tok_node is not None:
@@ -2187,8 +2206,4 @@ class Tracer:
             if _tok_prev is not None:
                 _prev_gen.reset(_tok_prev)     # restore the outer trace's chain (or None at top level)
             _capture_ctx.reset(_tok_cap)       # restore the enclosing run's policy (or None = process)
-            try:
-                self.exporter.export(rec)
-            except Exception:  # noqa: BLE001 - spans are diagnostics: an export failure (disk full,
-                pass           # a non-serializable attribute) must never mask the in-flight exception
                 #                or crash the traced engine operation.
