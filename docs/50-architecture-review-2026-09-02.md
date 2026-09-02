@@ -1178,7 +1178,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `repeated-sweep-refolds-the-whole-corpus` | `tools/_runcache.py` | a bound that covers the corpus, or a cheaper per-run projection — after measuring |
 | `knowledge-index-re-embeds-every-record` | `tools/knowledge_tools.py` | memoize by content digest — after measuring |
 | `card-lane-fills-outside-the-policy-population` | `search/card_selection.py` | a legal-action set per policy |
-| `tagger-item-has-no-untrusted-envelope` | `search/concept_tagging.py` | the envelope the comment promises |
 | `event-payloads-have-no-registry` | `events/types.py` | a payload-key registry + generated page |
 | `legacy-control-route-is-not-retired` | `serve/routers/control.py` | port the call sites to `/commands`, then delete it |
 
