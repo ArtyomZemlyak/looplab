@@ -5065,6 +5065,13 @@ sampling from a bimodal distribution, which is why §84's champion rule carries 
 (Cython 10.75 against numba 7.04). The score of a run is very nearly the answer to one question:
 did it write a compiled kernel.
 
+*Correction, measured the next sweep — see §110.* That last sentence is true of `edge_expansion`
+and of nothing else. Read at CHAMPION level rather than node level: 26 of 27 `edge_expansion`
+champions carry a kernel and the one that does not is last by a factor of three, but on
+`discrete_log` the kernel is neither necessary nor sufficient, and on `pde_heat1d` not one of the
+ten champions has one while the spread there is still 5.5×. `edge_expansion` is 27 of the corpus's
+49 runs, which is why the pooled view reads as a general law.
+
 ### Two things the loop does not do
 
 **1. It does not stay on the regime it found.** Of the 28 transitions in `edge_expansion` that
@@ -5140,3 +5147,45 @@ effect, n = 9 is what the reference arm needed to close. The control side is fre
 the answer is **9 probes ≈ $10.35** at the measured $1.1504 — and `edge_expansion` is the task to
 run it on, because it is the only one of the three where later nodes beat the first at all (§108),
 i.e. the only one where "propose a variant" has anything to act on.
+
+## 110. §108's binary choice is one task's story, not the corpus's
+
+§108 said the score is very nearly the answer to "did it write a compiled kernel". Checked at
+CHAMPION level — the solver that was actually submitted, per run — that holds on one task out of
+three.
+
+| task | champions | with a kernel | spread of TEST |
+|---|---|---|---|
+| edge_expansion | 27 | **26** | 34.76 – 276.73 |
+| discrete_log | 10 | 4 | 4.03 – 16.78 |
+| pde_heat1d | 10 | **0** | 30.33 – 167.21 |
+
+**edge_expansion — the claim survives and gets sharper.** The single champion without a kernel is
+`remEEctl1` at **34.76**, against a next-worst of 102.17 and a median of 193.67. One run out of
+twenty-seven failed to write a kernel and it lost by a factor of three to everyone else.
+
+**discrete_log — the kernel is neither necessary nor sufficient.** The top three champions have one
+(16.78, 14.05, 12.40), but 12.18 and 8.10 do not, and the run at the very bottom — `remDL6` at
+**4.03** — does. Whatever separates 16.78 from 4.03 here, it is not that choice.
+
+**pde_heat1d — nothing this corpus can see.** Not one champion in ten uses Cython, every one uses
+`njit`, and the spread is still 5.5× (30.33 to 167.21). Scanning the champions for coarse
+algorithmic markers separates nothing: `dst` appears in 3 of the 7 above 115 and 1 of the 3 below,
+`np.linalg` in 3 and 2, `fastmath` in 2 and 0. **The 5.5× is unexplained**, and saying so is the
+honest state of it.
+
+`edge_expansion` is 27 of the corpus's 49 runs, so a pooled count is dominated by the one task where
+the effect is real — which is exactly how §108 came to state it as a general law.
+
+### And a hypothesis of my own, killed on arrival
+
+The finished `discrete_log` probes made a pattern look obvious in the summary's champion column:
+16.78 with a 26-line kernel, 14.05 with 41, 12.40 with 16 — against 240–324 lines further down. A
+short champion looked like a good champion. Measured over every run, Spearman between champion size
+and TEST is **+0.091** (discrete_log), **+0.181** (edge_expansion), **+0.139** (pde_heat1d): no
+relationship, and all three the opposite sign from the guess. Two numbers in a column that were
+already sorted by score is not a pattern; it is the column being sorted.
+
+**Nothing follows for §109's arm.** That clause is about proposing a VARIANT of what worked, and its
+evidence is the transition count — 14 of 28 proposals from a kernel node walk away from the kernel
+— which is a fact about `edge_expansion`, the task §109 already names as the one to run it on.
