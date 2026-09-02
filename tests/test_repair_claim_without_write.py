@@ -112,8 +112,13 @@ def test_the_verdict_tier_is_untouched():
 # its one shot, said nothing to the model, and additionally destroyed the summary and the
 # `rollback_stage` the emit carried.
 
-def _loop(monkeypatch, *, forced_summary, exit_kind, validate):
-    """Drive the REAL `drive_tool_loop` to one of its forced-emit exits."""
+def _loop(monkeypatch, *, forced_summary, exit_kind, validate, terminal_salvage=False):
+    """Drive the REAL `drive_tool_loop` to one of its forced-emit exits.
+
+    `terminal_salvage` mirrors the production kwarg and DEFAULTS FALSE exactly as the loop does, so
+    a test that wants the repair session's behaviour has to ask for it the way `repo_developer`
+    does — the one caller that opts in.
+    """
     from looplab.agents import tool_loop
 
     monkeypatch.setattr(tool_loop, "_force_emit",
@@ -131,7 +136,7 @@ def _loop(monkeypatch, *, forced_summary, exit_kind, validate):
         _Client(), None, [{"role": "user", "content": "go"}], spec,
         max_turns=(1 if exit_kind == "exhausted" else 4),
         finalize=lambda a: (a or {}).get("summary", ""),
-        fallback=lambda m: "", validate=validate)
+        fallback=lambda m: "", validate=validate, terminal_salvage=terminal_salvage)
     return out, seen
 
 
@@ -142,11 +147,23 @@ def test_budget_exhaustion_keeps_the_repair_instead_of_discarding_it(monkeypatch
     `last_rollback_stage` is never set from the emit, and `is_developer_stuck` can never fire. That
     is strictly worse than an unverified summary, which `inert`/`unmet` already grade on bytes.
     """
+    _bounce = lambda a: repair_claimed_without_writing((a or {}).get("summary", ""), wrote=False)
+
     out, _ = _loop(monkeypatch, forced_summary=_V8_SUMMARY, exit_kind="exhausted",
-                   validate=lambda a: repair_claimed_without_writing(
-                       (a or {}).get("summary", ""), wrote=False))
+                   validate=_bounce, terminal_salvage=True)
 
     assert out == _V8_SUMMARY, "the terminal salvage must keep the emit it paid for"
+
+    # ...and the OTHER half of the same rule, since 2026-08-30: the skip is a per-call POLICY that
+    # defaults FALSE, so every other caller keeps its validator on every exit. The stages session's
+    # `validate` is the operator's wall budget and the manifest-collision fence; a blanket skip
+    # would disable both on any exit with no turn left, and `_finalize` would persist whatever was
+    # merely shape-valid. Asserting only the opt-in is how that default flips without a red test.
+    out_default, _ = _loop(monkeypatch, forced_summary=_V8_SUMMARY, exit_kind="exhausted",
+                           validate=_bounce)
+
+    assert out_default == "", (
+        "a caller that did not opt in must still be validated on the exhausted exit")
 
 
 def test_the_prose_exit_delivers_the_REFUSAL_not_a_generic_nudge(monkeypatch):

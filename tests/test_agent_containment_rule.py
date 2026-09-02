@@ -179,9 +179,15 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
     seen = {}
 
     def spy(_self, messages, emit_spec, finalize, fallback, *, state=None, bind_state=True,
-            transport_fallback=None, extra_tools=None, extra_turns=0, wall_when_unbounded=0.0):
+            transport_fallback=None, extra_tools=None, extra_turns=0, wall_when_unbounded=0.0,
+            on_budget=None):
         seen.update(state=state, bind_state=bind_state, extra_tools=extra_tools,
-                    extra_turns=extra_turns, wall=wall_when_unbounded)
+                    extra_turns=extra_turns, wall=wall_when_unbounded, on_budget=on_budget)
+        # Fire the observer the way the loop would when a bound cuts the emit short. Recording the
+        # kwarg alone would pass for a caller that forwards `None`, and the cutoff key is stamped
+        # from THIS callable — a model cannot emit it — so the wiring is the whole property.
+        if callable(on_budget):
+            on_budget({"kind": "turns", "turns": 3, "seconds": None})
         # The two degradations must arrive as two DIFFERENT callables: the loop's no-emit fallback
         # says `unreadable` (the endpoint answered), the transport one says `unanswerable` and
         # carries the marker. One callable for both is how a prose-answering live endpoint paused a
@@ -199,7 +205,7 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
     # `triage_time_budget_s` pass as "no wall configured" instead of failing loudly.
     agent._triage_time_budget_s = 0.0
     node = type("N", (), {"id": 1, "code": ""})()
-    agent.triage_crash(node, "boom", 1)
+    verdict = agent.triage_crash(node, "boom", 1)
     assert (seen["state"], seen["bind_state"]) == (None, False), (
         "triage with no run state must not ask the helper to bind tools to it")
     # ...and a caller that was given no log tools asks for no per-call provider, so the loop is handed
@@ -216,6 +222,15 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
     assert not is_transport_failure_verdict(seen["no_emit"])
     assert seen["transport"]["action"] == UNANSWERABLE_TRIAGE_ACTION
     assert is_transport_failure_verdict(seen["transport"])
+    # ...and the cutoff observer is FORWARDED, so a rescued answer can say which bound ended it.
+    # `on_budget` is in `EXPLICIT_ONLY_LOOP_ARGS` precisely so it cannot arrive through `loop_opts`
+    # as well: reachable both ways it raises a duplicate-keyword TypeError that the loop's own
+    # containment `except` swallows, degrading the phase silently. Asserting the callable ARRIVES
+    # and that its payload reaches the verdict is what a signature-only check cannot see.
+    from looplab.engine.triage import TRIAGE_BUDGET_CUTOFF_KEY
+    assert callable(seen["on_budget"]), "triage must forward the budget-cutoff observer"
+    assert verdict[TRIAGE_BUDGET_CUTOFF_KEY]["kind"] == "turns"
+    assert verdict[TRIAGE_BUDGET_CUTOFF_KEY]["turns"] == 3
 
 
 def test_every_public_entry_point_goes_through_the_helper():
