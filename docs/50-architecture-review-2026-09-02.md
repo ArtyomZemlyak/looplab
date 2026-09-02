@@ -1176,7 +1176,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `eval-attempt-is-one-giant-method` | `engine/evaluate.py` | the `EvalAttempt` phase object |
 | `serial-node-build-holds-the-loop` | `engine/orchestrator.py` | one offload helper for four sites |
 | `paid-cadences-hold-the-engine-loop` | `engine/orchestrator.py` | offload under a capture sink |
-| `adapter-reader-runs-outside-the-eval-boundary` | `runtime/command_eval.py` | thread the eval env through |
 | `assistant-tool-results-are-unlabelled` | `serve/assistant.py` | stamp the label on each tool result |
 | `read-fence-takes-the-command-sequencer` | `serve/routers/runs.py` | one lock-free generation fence |
 | `repeated-sweep-refolds-the-whole-corpus` | `tools/_runcache.py` | a bound that covers the corpus, or a cheaper per-run projection — after measuring |

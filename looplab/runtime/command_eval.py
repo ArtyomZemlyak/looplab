@@ -449,16 +449,16 @@ def _confined(workdir, rel) -> Optional[Path]:
         return None
 
 
-def _read_stdout_json(stdout, workdir, spec, wrap, since) -> Optional[float]:
+def _read_stdout_json(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     return json_line_metric(stdout, spec.get("key", "metric"))
 
 
-def _read_stdout_regex(stdout, workdir, spec, wrap, since) -> Optional[float]:
+def _read_stdout_regex(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     pat = spec.get("pattern") or spec.get("key")   # key = tolerant fallback (composable authoring)
     return _regex_metric(stdout, pat, spec.get("group", 1)) if pat else None
 
 
-def _read_file(stdout, workdir, spec, wrap, since) -> Optional[float]:
+def _read_file(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     """`file_json` / `file_regex`: parse a file the candidate wrote into its own workdir."""
     fp = spec.get("path")
     if not fp:
@@ -480,7 +480,7 @@ def _read_file(stdout, workdir, spec, wrap, since) -> Optional[float]:
         return None
 
 
-def _read_host_score(stdout, workdir, spec, wrap, since) -> Optional[float]:
+def _read_host_score(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     # B1 host-side scoring (trust): the candidate WRITES predictions into its workdir; the HOST
     # scores them against held-out labels it holds at a path OUTSIDE the candidate's workspace
     # (never mounted under the untrusted tier, never writable by the candidate). The metric is
@@ -551,7 +551,7 @@ def _read_host_score(stdout, workdir, spec, wrap, since) -> Optional[float]:
     return _to_float(host_score(spec.get("scorer", "rmse"), preds, labels, key=spec.get("key")))
 
 
-def _read_adapter(stdout, workdir, spec, wrap, since) -> Optional[float]:
+def _read_adapter(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     # A (human-ratified, frozen) agent-written module exposing read_metric(workdir)->
     # float, for an arbitrary tracker (TensorBoard/ClearML/custom). Run as a SUBPROCESS
     # in the workdir (not in-process) so it inherits the same timeout/tree-kill harness
@@ -571,14 +571,21 @@ def _read_adapter(stdout, workdir, spec, wrap, since) -> Optional[float]:
     argv = (["python", "-c", runner] if wrap else [sys.executable, "-c", runner])
     if wrap:
         argv = wrap(argv, str(workdir))
-    # OPEN[adapter-reader-runs-outside-the-eval-boundary] the reader signature has no env slot, so the one
-    # reader that EXECs candidate-lineage code runs in the ENGINE's environment minus secret-named vars:
-    # no fence marker, no landlock ruleset, no GPU pin and none of the operator's declared eval env, which
-    # `EvalSpec.env` promises reaches every stage. `run_argv`'s own comment lists the metric adapter among
-    # what passes through the fence; it passes through the function, not the fence.
-    # proof:`present:rc, out, _, to = run_argv(argv, str(workdir),@looplab/runtime/command_eval.py`
+    # INSIDE THE EVAL'S OWN ENVIRONMENT. This is the one reader that EXECs candidate-lineage code,
+    # and it used to pass `env=None` — so it ran in the ENGINE's environment minus secret-named
+    # vars: no fence marker, no GPU pin, and none of the operator's declared eval env, which
+    # `EvalSpec.env` promises reaches every stage. `run_argv`'s own comment listed the metric
+    # adapter among what passes through the fence; it passed through the FUNCTION, not the fence.
+    #
+    # One parameter buys all three, because `run_argv` derives them from this dict: it reads
+    # `FENCE_DIR_ENV` out of it to prepend the fence directory to `PYTHONPATH`, and
+    # `CUDA_VISIBLE_DEVICES` out of it for the device pin. `None` still means what it always did
+    # (build the default environment), so an eval that declares nothing is byte-identical.
+    #
+    # The eval-level env, not a stage's: a stage's declared `env` is stage-scoped by declaration and
+    # this exec happens after every stage, in the workdir, to read what the eval as a whole produced.
     rc, out, _, to = run_argv(argv, str(workdir),
-                               finite_timeout(spec.get("timeout", 120), 120), None, 64_000)
+                               finite_timeout(spec.get("timeout", 120), 120), env, 64_000)
     return json_line_metric(out, "metric") if (rc == 0 and not to) else None
 
 
@@ -793,7 +800,7 @@ def host_score_labels_error(spec, *, workspace_root=None) -> Optional[str]:
 
 
 def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
-                since: Optional[float] = None) -> Optional[float]:
+                since: Optional[float] = None, env: Optional[dict] = None) -> Optional[float]:
     """Read the metric for one eval according to `spec` (an eval_spec['metric']). Built-in
     readers parse host files/stdout in-process (data, never code). The `adapter` reader EXECS
     agent-authored code, so under the untrusted tier it must run in the same sandbox as the
@@ -816,7 +823,7 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
     if _nonstring_path_slot(spec) is not None:
         return None
     reader = METRIC_READERS.get(spec_kind(spec))
-    return reader(stdout, workdir, spec, wrap, since) if reader is not None else None
+    return reader(stdout, workdir, spec, wrap, since, env) if reader is not None else None
 
 
 def _is_within(child: Path, parent: Path) -> bool:
@@ -1834,7 +1841,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
     return _build(env)
 
 
-def _violations(out, wd, constraints, wrap, since=None) -> list[dict]:
+def _violations(out, wd, constraints, wrap, since=None, env=None) -> list[dict]:
     """Read each constraint (a reader spec + a `max`/`min` bound) and return the ones not
     satisfied (incl. a value that couldn't be read — an unverifiable constraint is a
     violation, never a silent pass). Multi-objective gate (#2/#5): a violating node is still
@@ -1842,7 +1849,7 @@ def _violations(out, wd, constraints, wrap, since=None) -> list[dict]:
     primary read — a stale constraint file reads as unverifiable -> violation (fail-closed)."""
     out_list = []
     for c in (constraints or []):
-        val = read_metric(out, wd, c, wrap=wrap, since=since)
+        val = read_metric(out, wd, c, wrap=wrap, since=since, env=env)
         bad = (val is None
                or (c.get("max") is not None and val > c["max"])
                or (c.get("min") is not None and val < c["min"]))
@@ -2687,7 +2694,8 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             # salvage, and the read is only attempted when it wasn't a hard timeout, via the call-site
             # `not to` gate below (the same gate the single-command path uses). A plain crash reads a
             # value too but stays unsalvaged (stalled False, exit!=0), exactly as in single-command mode.
-            _salvaged = (read_metric(run.out, str(ex.wd), metric, wrap=ex.wrap, since=eval_started)
+            _salvaged = (read_metric(run.out, str(ex.wd), metric, wrap=ex.wrap,
+                                     since=eval_started, env=ex.env)
                          if (_i == len(stages) - 1 and not run.timed_out) else None)
             run.early = RunResult(
                 exit_code=run.rc, stdout=run.out, stderr=f"stage '{_sname}' failed:\n{run.err}",
@@ -2996,7 +3004,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     rc, out, err, to, _sig = _run.rc, _run.out, _run.err, _run.timed_out, _run.signals
     stage_results = _run.stage_results
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):
-        m = read_metric(out, str(wd), metric, wrap=wrap, since=_eval_started) if not to else None
+        m = (read_metric(out, str(wd), metric, wrap=wrap, since=_eval_started, env=env)
+             if not to else None)
     # F13 stage-reuse: on a stage-scoped re-run (`start_stage`), the earlier stages are DELIBERATELY
     # reused — their on-disk artifacts keep their prior-eval mtime — so a constraint / extra / cross-check
     # reader that points at a reused stage's file is legitimately "old" and the `_eval_started` gate would
@@ -3040,12 +3049,13 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                          metric=None, timed_out=to)
     drift = None
     if enforce_drift and cross_check and m is not None:
-        cross = read_metric(out, str(wd), cross_check, wrap=wrap, since=_reader_since)
+        cross = read_metric(out, str(wd), cross_check, wrap=wrap, since=_reader_since, env=env)
         if _drift(m, cross, drift_tolerance):
             drift = {"primary": m, "cross": cross, "tolerance": drift_tolerance}
             m = None                                   # uncorroborated -> not trusted
     declared = ({name: v for name, spec in metrics.items()
-                 if (v := read_metric(out, str(wd), spec, wrap=wrap, since=_reader_since)) is not None}
+                 if (v := read_metric(out, str(wd), spec, wrap=wrap, since=_reader_since,
+                                      env=env)) is not None}
                 if (metrics and not to) else {})   # a MISSED reader (None) must not erase a
     #                                                successfully auto-captured value of the same name
     # Auto-capture: every other numeric key on the metric's own JSON line is also reported (no config
@@ -3086,7 +3096,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     extra_directions = ({name: d for name in declared
                          if (d := (metrics.get(name) or {}).get("direction")) in DIRECTIONS}
                         or None)
-    viol = (_violations(out, str(wd), constraints, wrap, since=_reader_since)
+    viol = (_violations(out, str(wd), constraints, wrap, since=_reader_since, env=env)
             if (constraints and not to and m is not None) else None)
     # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
     # it so the engine can collapse it to the node's best metric (no eval_spec change required).

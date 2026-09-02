@@ -305,6 +305,13 @@ environment, because the comparison the existing nodes belong to no longer holds
 get it: the subprocess tier merges it into the child's environment, the Docker tier forwards it as
 `-e` pairs.
 
+**And the metric readers get it too, since 2026-09-02.** One reader EXECs — `kind: "adapter"` runs
+your ratified `read_metric` module in a subprocess — and it used to run in the ENGINE's environment
+rather than the eval's: none of this declaration, no GPU pin, and no `LOOPLAB_READ_FENCE_DIR`, so
+the one reader that runs code was the one place the [source-tree read
+fence](generating-code.md) did not reach. It now runs under the same environment the eval's own
+commands did. Nothing changes for an eval that declares no `env`.
+
 Three things it refuses, all at declaration time:
 
 * **The Developer may not declare it.** `env` is operator-only — on `cmd.stages[].env`, `cmd.env` or
