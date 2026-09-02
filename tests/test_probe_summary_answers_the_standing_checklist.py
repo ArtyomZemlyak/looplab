@@ -1094,3 +1094,35 @@ def test_the_signal_NAME_is_carried_not_just_the_count(tmp_path):
     (run / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     out = _run(tmp_path)
     assert "critic:params_ignored" in out and "grader_import" in out, out
+
+
+def test_the_proposer_repeating_itself_is_counted_on_the_probe_line(tmp_path):
+    """43 novelty rejections sat in the event logs and in no summary.
+
+    Every one names `near_node` 0 or 1: the proposer, having produced the first node, proposed it
+    again. 35 of 46 probes hit it at least once, and those spend a median 10.2 % of their dollar on
+    `repropose` against 2.0 % for the eleven that did not. Not a defect -- the novelty check catches
+    it every time, which is what it is for -- but a per-probe number nobody could see.
+    """
+    probe = _mk_probe(tmp_path, "repeats", "t", nodes=[5.0], costs_before=[0.2],
+                      costs_after=[0.1], test=5.0)
+    run = probe / "runs" / "t" / "run"
+    rows = [json.loads(l) for l in open(run / "events.jsonl")]
+    for _ in range(2):
+        rows.append({"type": "novelty_rejected", "ts": 1500.0,
+                     "data": {"near_node": "0", "reason": "Same approach as node 0",
+                              "action": "reproposed"}})
+    (run / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = _run(tmp_path)
+    line = [l for l in out.splitlines() if l.strip().startswith("repeats (")]
+    assert line, out
+    assert "proposer repeated itself 2x" in line[0], line[0]
+
+
+def test_a_probe_that_never_repeated_says_nothing(tmp_path):
+    """Eleven of forty-six never did, and a "0x" on every one of their lines is the noise that
+    makes a reader stop reading the line."""
+    _mk_probe(tmp_path, "clean", "t", nodes=[5.0], costs_before=[0.2], costs_after=[0.1], test=5.0)
+    out = _run(tmp_path)
+    line = [l for l in out.splitlines() if l.strip().startswith("clean (")]
+    assert line and "repeated itself" not in line[0], line

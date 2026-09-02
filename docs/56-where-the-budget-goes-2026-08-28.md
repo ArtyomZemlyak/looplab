@@ -4423,3 +4423,43 @@ wrong; measuring what the field means came before concluding, and the second rea
 
 Also: 43 `novelty_rejected`, 155 `research_attempted`, 117 `card_build_attempted`, 44 event types and
 16,782 events in total. Of those 44 types, this document has ever discussed about six.
+
+## 97. The proposer's commonest second move is to propose its first move again
+
+Continuing §96's census into the event types this document had never opened. `novelty_rejected`
+fires **43 times across 35 of the 46 probes** — three quarters of every run this bench has done.
+
+Every single one names `near_node` 0 or 1. The reasons are the loop's own words:
+
+* *"Same experiment as node 0: identical algorithm (PH+BSGS discrete log), identical target (41-bit
+  graded split), identical operator/params/space/eval pr…"*
+* *"Node #0's graded submission is already an AOT-built Cython rho_dlog.pyx (setup.py build_ext,
+  build ok, 3.2x) for discrete log in subgroup <g>; the pro…"*
+* *"Same exact DST-I spectral solve as node 0; only delta is a m…"*
+
+So: having produced a first node, the Researcher's next proposal is the first node again — a
+reworded, re-parameterised, or differently-imported version of what it just did. The novelty check
+catches it every time and returns `action: reproposed`.
+
+**What it costs, measured.** Over $45.5997 of corpus spend: `propose` 22.4 % ($10.19), `repropose`
+8.2 % ($3.75). Split by whether a run ever tripped the check:
+
+| | n | median share of the run's dollar spent on `repropose` |
+|---|---|---|
+| probes that repeated themselves | 35 | **10.2 %** |
+| probes that never did | 11 | **2.0 %** |
+
+A factor of five, and about a twelfth of every dollar on the bench overall.
+
+**This is not a defect and the distinction matters.** The novelty check exists for exactly this and
+works every time it fires; nothing broken is being reported. What is being reported is a
+characterisation nobody had written down: the loop's default second move is repetition, and the
+guard against it is a recurring 8 % tax rather than a rare correction.
+
+It also joins up with §84. After the first node the proposer either repeats it — 43 times, caught —
+or produces something worse: 27 of 33 evaluated nodes that scored below the best so far were the
+LAST node of their run. Repetition and regression are the two things that happen after node 0, and
+the champion rule is what stands between the second one and the score.
+
+`probe_summary.py` now prints the count on each probe's line, and only where it is non-zero: eleven
+runs never did it, and a `0x` on every clean line is the noise that stops a line being read.

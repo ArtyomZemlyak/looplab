@@ -346,6 +346,13 @@ def summarise(run_dir: Path) -> dict | None:
         "build_min": build_min,
         "age_s": age_s,
         "probe_dir": str(probe_dir),
+        # HOW OFTEN THE PROPOSER REPEATED ITSELF. Every one of the 43 rejections in the corpus
+        # names `near_node` 0 or 1 -- the proposer, having produced the first node, proposed it
+        # again. Measured 2026-09-02: 35 of 46 probes hit this at least once, and those probes
+        # spend a median 10.2 % of their dollar on `repropose` against 2.0 % for the eleven that
+        # did not. Not a defect -- the novelty check catches it every time, which is what it is
+        # for -- but a per-probe number nobody could see.
+        "novelty_rejected": sum(1 for r in events if r.get("type") == "novelty_rejected"),
         "trust_flags": sum(1 for r in events if r.get("type") == "reward_hack_suspected"),
         "trust_signals": [str((sig or {}).get("signal") or "")
                           for r in events if r.get("type") == "reward_hack_suspected"
@@ -603,9 +610,10 @@ def main(argv: list[str]) -> int:
     for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):
         pct = ("—" if s["ref_pct"] is None
                else f"{s['ref_pct']:.1f}% import / {s['ref_call_pct']:.1f}% is_solution")
+        nov = f"; proposer repeated itself {s['novelty_rejected']}x" if s.get("novelty_rejected") else ""
         print(f"  {s['probe']} ({s['task']}) nodes(train)={s['nodes']}  "
               f"reference over {s['run_probe']} run_probe calls: {pct}   "
-              f"(§69.1 baseline 4.9-8.3 %)")
+              f"(§69.1 baseline 4.9-8.3 %){nov}")
         for ph, cost in s["phases"]:
             share = 100 * cost / s["spent"] if s["spent"] else 0
             print(f"      {ph:16s}{s['calls'][ph]:>5} calls  ${cost:.4f}  {share:4.1f}%")
