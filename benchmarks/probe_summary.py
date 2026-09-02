@@ -651,9 +651,15 @@ def main(argv: list[str]) -> int:
 
     # TRUST FLAGS, which no sweep had ever looked at. The event log carries `reward_hack_suspected`
     # and it appears in no summary: found 2026-09-02 by counting event types rather than reading the
-    # ones already named. Four in the corpus, all `critic:params_ignored` -- "none of the proposed
-    # params are referenced in the code" -- and all on `discrete_log`: BOTH nodes of remDL2 and BOTH
-    # nodes of remDL7, and remDL7's 16.7799 is the best discrete_log number this bench has.
+    # ones already named. THE COUNT IS NOT WRITTEN DOWN HERE, deliberately: this comment said "Four
+    # in the corpus" and was stale within a day, when remDL9 and remDL11 finished and made it six.
+    # A number that the block below already prints does not need a second copy that cannot be
+    # re-measured. What is worth stating is the SHAPE, which has held while the count moved:
+    # every flag is `critic:params_ignored` ("none of the proposed params are referenced in the
+    # code") and every one is on `discrete_log` -- 4 of its 12 runs, against 0 of the 27
+    # `edge_expansion` runs and 0 of the 11 `pde_heat1d` ones. Exact one-sided Fisher p = 0.0022.
+    # It is a property of the TASK, not of a node, and remDL7's 16.7799 -- the best discrete_log
+    # number this bench has -- is one of the flagged ones.
     #
     # NOT a defect: those runs carry `trust_gate: audit`, the shipped default, under which a flag is
     # advisory and the node stays eligible to win. The engine did what it was configured to do. What
@@ -669,6 +675,16 @@ def main(argv: list[str]) -> int:
               "the node still competes):")
         for probe, (n, sigs) in sorted(flagged.items()):
             print(f"  {probe:10s} {n} flag(s): {', '.join(sorted(set(sigs))) or '(unnamed)'}")
+        # THE DENOMINATOR, per task. A list of flagged probes cannot show a concentration; the
+        # concentration IS the finding here, and it survived the count changing from four to six.
+        by_task: dict[str, list[int]] = {}
+        for s2 in seen.values():
+            row = by_task.setdefault(s2["task"], [0, 0])
+            row[1] += 1
+            if s2.get("trust_flags"):
+                row[0] += 1
+        print("  by task, runs with at least one flag: "
+              + ", ".join(f"{t} {a}/{b}" for t, (a, b) in sorted(by_task.items())))
 
     print("\nper-probe detail:")
     for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):
