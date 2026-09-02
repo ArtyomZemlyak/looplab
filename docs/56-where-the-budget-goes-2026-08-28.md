@@ -5814,3 +5814,40 @@ which is what the previous four sweeps could not do.
 *Also:* the `$0.5554` here and the `$0.5656` a throughput detector claimed in §120 are the same
 population. That detector was fitting the right rows for the wrong reason, and its own arithmetic
 contradicted it because it was measured against a gap the echoes were never in.
+
+## 125. §114 at eleven first nodes, and §124's echo rate holds on fresh traffic
+
+Two standing numbers re-measured as the data arrived, both of them mine to be wrong about.
+
+**§114's first-node shift, now n = 11.** Today's first evaluated nodes on `edge_expansion`, sorted:
+
+```
+269, 259, 250, 250, 213, 199, 173, 167, 165, 160, 21
+```
+
+Ten of eleven at or above 150, against **5 of 27** in the corpus (median 27.7). One-sided
+permutation test on ranks: **p = 0.0000187**.
+
+The p has moved 0.000127 (n=4) → 0.005673 (n=6) → **0.0000187** (n=11). §118 recorded the middle
+value as the honest weakening a fifth point forced; the seventh through eleventh have pushed it back
+the other way, which is what a real effect does and a fluke does not.
+
+And the highest first node of the entire batch — **258.73** — belongs to `ctlEEd`, a CONTROL. That
+is the third independent way this has said the same thing: the node-0 shift is not `--exploit-best`,
+it is the harness (§99, §102, §103), and §115's confound — that these are different days on a shared
+endpoint — is still the one thing that would explain it away and still unresolved.
+
+**§124's echo rate, on traffic the corpus never saw.** The four probes launched after the meter
+restart, measured the same way off their own spans:
+
+| | generations | echoes | money |
+|---|---|---|---|
+| corpus (§124) | 16,800 | 262 = **1.56 %** | $0.5554 = 0.96 % |
+| the four live probes | 657 | 11 = **1.67 %** | $0.0245 = 1.14 % |
+
+Same rate, fresh traffic, a restarted meter and a code path that now stamps `req_sha`. The engine
+re-asking a question it has already had answered is a steady one-and-a-half per cent of everything
+this bench runs, not an artefact of the batch it was found in.
+
+*Arm standing, unchanged at seven finished:* treatment 268.25 / 252.56 / 251.35 / 236.76, control
+197.85 / 179.14 / 156.91, p = 1/35 = 0.0286. The four running take it to 6 v 5.
