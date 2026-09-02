@@ -2275,13 +2275,18 @@ class RunState(BaseModel):
     #
     # Bounded on purpose (`_REPAIR_LEDGER_MAX`): a long run repairs many times, and a ledger that
     # grows without limit becomes a prompt that crowds out the code it is meant to annotate.
-    # OPEN[repair-ledger-drops-rows-without-a-receipt] the fold caps this at 200 first-come rows with no
-    # omission receipt, so on a run whose node recorded 2,345 repairs it describes the beginning and the
-    # CLI prints the cap as a total; `lessons_reconcile` then reads a dropped row as `no cause recorded`
-    # and mints a cross-run lesson over a population the fold silently truncated. Bound per node and
-    # publish the omission the way the card-enrichment journal does.
-    # proof:absent:repair_ledger_omitted@looplab/core/models.py
     repair_ledger: list[dict] = Field(default_factory=list)
+    # WHAT THE BOUND ABOVE DROPPED. The ledger is a first-come cap, so on a run where one node
+    # repairs thousands of times it describes the beginning of that node and nothing else — and
+    # without this the CLI printed the cap as a total ("repair rows: 200") while
+    # `lessons_reconcile` read a dropped row as `no cause recorded` and generalized over a
+    # population the fold had silently truncated.
+    #
+    # `{"rows": <total dropped>, "nodes": {<node id>: <dropped for that node>}}`, absent keys
+    # meaning zero. Additive and reader-defaulted (invariant #5): an old log folds to `{}` and
+    # every consumer reads that as "nothing was dropped", which for a log written under the old
+    # cap is the honest answer — nobody counted, and inventing a number would be worse.
+    repair_ledger_omitted: dict = Field(default_factory=dict)
 
     @field_serializer("run_setup_done")
     def _ser_run_setup_done(self, v: set) -> list:

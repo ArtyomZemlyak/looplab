@@ -1098,6 +1098,12 @@ _SALVAGE_CAUSE_TRIAGE_ACTION = "salvage_cause_fix"
 
 
 _REPAIR_LEDGER_MAX = 200
+# ...and no single node may take more than this share of it. The global cap alone is first-come, so
+# ONE node that repairs pathologically often consumes the whole ledger: measured, a node with 2,345
+# repair rows would fill all 200 slots before any other node recorded one, and the ledger's entire
+# purpose is telling a LATER node what a SIBLING had to fix. A per-node bound is what keeps it a
+# cross-node channel rather than a transcript of the worst node's first two hundred attempts.
+_REPAIR_LEDGER_MAX_PER_NODE = 20
 _REPAIR_LEDGER_RATIONALE_CAP = 400
 
 
@@ -1118,7 +1124,18 @@ def _record_repair_ledger(st: RunState, d: dict) -> None:
     for row in st.repair_ledger:
         if (row.get("node_id"), row.get("attempt"), row.get("generation")) == key:
             return
-    if len(st.repair_ledger) >= _REPAIR_LEDGER_MAX:
+    # BOTH bounds, and each records what it dropped. A silent cap made the CLI print 200 as a total
+    # and let `lessons_reconcile` generalize over a truncated population — see
+    # `RunState.repair_ledger_omitted`.
+    per_node = sum(1 for row in st.repair_ledger if row.get("node_id") == node_id)
+    if per_node >= _REPAIR_LEDGER_MAX_PER_NODE or len(st.repair_ledger) >= _REPAIR_LEDGER_MAX:
+        omitted = st.repair_ledger_omitted
+        omitted["rows"] = int(omitted.get("rows", 0)) + 1
+        nodes = omitted.setdefault("nodes", {})
+        # Keyed by the node's STRING id: this dict is serialized to JSON in every projection, where
+        # an integer key becomes a string anyway — so folding to one spelling here keeps a replayed
+        # state equal to a round-tripped one.
+        nodes[str(node_id)] = int(nodes.get(str(node_id), 0)) + 1
         return
     # `changed` is the path list the repair itself declared; fall back to the keys of `files` so a
     # row written before that column existed still names what it touched.

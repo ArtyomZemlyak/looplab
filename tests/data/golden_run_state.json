@@ -819,6 +819,7 @@
   "proxy_scores": {},
   "proxy_skipped": [],
   "repair_ledger": [],
+  "repair_ledger_omitted": {},
   "report": null,
   "research": [
     {

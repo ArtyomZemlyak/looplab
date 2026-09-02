@@ -972,7 +972,20 @@ def repair_candidates(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
                    + ("." if state.repair_ledger else
                       " (and the repair ledger is empty — a pre-ledger log records none)."))
         return
-    typer.echo(f"repaired files: {len(rows)}  repair rows: {len(state.repair_ledger)}")
+    # The ledger is BOUNDED, so its length is what was kept and never what happened. Printing it
+    # bare made the cap read as a total; a reader deciding whether a repair pattern is real needs to
+    # know the sample was cut and by how much.
+    omitted = getattr(state, "repair_ledger_omitted", None) or {}
+    dropped = int(omitted.get("rows", 0) or 0)
+    typer.echo(f"repaired files: {len(rows)}  repair rows: {len(state.repair_ledger)}"
+               + (f"  (+{dropped} not recorded — the ledger is bounded per node and per run)"
+                  if dropped else ""))
+    if dropped:
+        worst = sorted(((int(n or 0), str(k)) for k, n in (omitted.get("nodes") or {}).items()),
+                       reverse=True)[:3]
+        if worst:
+            typer.echo("  most truncated: "
+                       + ", ".join(f"#{nid} (+{count})" for count, nid in worst))
     for row in rows:
         reasons = ", ".join(f"{k}x{v}" for k, v in row["reasons"].items())
         typer.echo(f"  {row['node_count']:>2} node(s)  {row['path']}"
