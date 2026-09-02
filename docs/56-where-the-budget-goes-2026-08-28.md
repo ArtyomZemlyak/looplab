@@ -4816,9 +4816,14 @@ cwd.
 
 **This one is not just wasted turns.** Reference use is a MEASURED quantity in this campaign —
 §69.1's 4.9–8.3 % baseline, and the nine-probe control arm of §94 that removed the affordance to see
-what it was worth. A harness that refuses the import suppresses the very number the arm was built to
-move, in 39 of 46 probes. Every reference-use figure in this notebook was measured against a tool
-that could not do it.
+what it was worth.
+
+*Correction, measured the same day — see §105.* The sentence that stood here said the broken import
+"suppresses the very number the arm was built to move". It does not. `probe_summary.py:316` counts
+`(?:from|import)\s+reference_\w+` in the span text, i.e. ATTEMPTS, so a failed import is counted
+exactly like a successful one and the 4.9–8.3 % band is intact. What the harness destroyed is not
+the measurement but the VALUE of what it measured: 100 of the 104 in-probe imports returned nothing.
+And the channel that dominates the affordance was never broken at all. §105 has the split.
 
 `_replicate_given` now copies the task's protected files into the probe's disposable cwd under the
 same caps, with **staged winning any name collision** — the model's own version is the truth for its
@@ -4881,3 +4886,44 @@ nodes graded on code written AFTER their last `check` (12 across 12 probes; ...)
 Five falsifiers in `tests/test_the_summary_says_which_nodes_were_graded_unchecked.py`, and both
 mutations redden: dropping the window (any write, any time) reddens three, and folding
 "never checked at all" into the count reddens the test that keeps those two facts apart.
+
+## 105. The reference affordance by channel: reading it always worked, running against it almost never did
+
+§103 closed with a claim that does not survive its own instrument, and the instrument is one line:
+
+```python
+ref_imports = len(re.findall(r"(?:from|import)\s+reference_\w+", blob))   # probe_summary.py:316
+```
+
+It counts import STATEMENTS in the span text. A statement that raised `ModuleNotFoundError` is
+counted exactly like one that worked, so §69.1's 4.9–8.3 % band and §94's control-arm comparison
+measure **intent**, and the broken import did not move them by one point. The sentence claiming it
+"suppresses the very number the arm was built to move" is wrong and is corrected in place above.
+
+What is true is narrower and more interesting. Split the affordance by the channel the model
+actually used:
+
+| channel | uses | did it work? |
+|---|---|---|
+| `repo_read` / `read_file` of `reference_*.py` | **2,478** in 50 probes | always |
+| `import reference_*` inside a `run_probe` script | 104 | **100 failed — 96 %** |
+| `import reference_*` inside the graded `solver.py` | 3 of 112 nodes | yes (the file is in the node's own dir) |
+
+**Reading the reference is the affordance; executing against it was a rounding error that mostly
+failed.** Twenty-four uses of the working channel for every attempt at the broken one.
+
+That is why §94 still stands: its arm removed the clause and watched reference use fall from a
+median of 8.4 % to 0.0 % with the score untouched (p = 0.4811), and the traffic it was counting was
+overwhelmingly the channel that works.
+
+**And the model did not take the hint.** Of the 39 probes whose import failed, **31 kept trying** —
+64 further attempts after the first failure, only 8 gave up. An affordance that fails silently is
+tried again; it is `(unknown tool: write_file)` in another costume (§102), and the same fix applies:
+say what is reachable. §103's `_replicate_given` now makes it reachable instead.
+
+### The correction that matters more than the number
+
+Yesterday I wrote a sentence about a metric without reading the line that computes it, and it read
+as the strongest form of the finding. Both halves of this sweep's method note apply at once: the
+measurement was right and the sentence around it was not, and the only thing that caught it was
+opening `probe_summary.py:316` to ask what `ref_imports` actually counts.
