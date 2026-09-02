@@ -5360,6 +5360,10 @@ Against the corpus's 27 `edge_expansion` first nodes:
 Median **27.7**, and exactly one of the 27 reaches today's lowest. All four of today's land above
 it. One-sided permutation test on ranks: **p = 0.000127**.
 
+*Updated the same evening, at six first nodes — see §118.* `ctlEEc` came in at **20.57**, squarely
+in the low cluster, so it is 5 of 6 above 150 rather than 4 of 4, and the permutation p moves to
+**0.005673**. The effect survives and is smaller than four points made it look.
+
 **It is not the clause under test.** Both control probes show it, and §109's clause is about the
 SECOND proposal — there is nothing to make a variant OF when node 0 is proposed. Whatever moved,
 moved for both arms.
@@ -5508,3 +5512,37 @@ One against two is not a comparison. Three more launched on the freed lanes — 
 unstreamed, 51 hours ago), **2 × 503** and **1 × 400**. The three non-504s are instant rejections
 with no tokens, retried by the client and invisible in the outcome — `expEEb` carried one 132
 minutes ago and is still running normally. Three events in fifteen thousand calls is not a rate.
+
+## 118. The treatment arm walks away from its winner too
+
+**expEEb** (treatment) finished: TEST **268.2484**, the second-best `edge_expansion` this bench has
+produced, against a best train of 269.3112 (ratio 0.996). 40-line Cython champion, $1.0137, 26 % of
+the dollar before the first node and 0 % after the last, 17 `eval_train`, reference 14.3 % import /
+14.3 % `is_solution`. Money: `propose` 27.6 %, `plan_step` 24.0 %, `repropose` 22.6 %,
+`deep_research` 13.7 %.
+
+Its nodes are **[269.31, 161.17, 27.69]**. Best over last: **9.72×**.
+
+That is the behaviour `--exploit-best` exists to prevent, in the arm that carries the clause. §116
+had four sequences that looked like the clause working; the fifth is the clause's own arm dropping
+from 269 to 28 in two moves. Nothing was claimed there and there is less to claim now.
+
+### Standing at four finished
+
+| arm | TEST |
+|---|---|
+| `--exploit-best` | **268.25**, **251.35** |
+| shipped card | 179.14, 156.91 |
+
+Both treatment runs above both control runs — and with two per arm the smallest one-sided rank-sum p
+attainable is 1/6 = 0.167. The ordering is what it is; it is not evidence yet. Three probes are
+running (`expEEc`, `expEEd`, `ctlEEc`).
+
+### §114 is weaker than four points made it look
+
+`ctlEEc`'s first node came in at **20.57** — the low cluster. Today's first nodes are now
+`250.1, 269.3, 250.0, 172.9, 159.8, 20.6`: **5 of 6 above 150 against 5 of 27 in the corpus**, and
+the one-sided permutation p moves from 0.000127 to **0.005673**. The shift is still there and it is
+not the clean sweep the first four suggested. The lesson is the arithmetic one — a fifth point can
+only move a p that was computed on four — and it is the reason §114 was written as an observation
+with a named confound rather than as a result.
