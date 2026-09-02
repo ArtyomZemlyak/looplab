@@ -274,6 +274,18 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   set from the claim path's own `ast.Return` constants in BOTH directions — and it EXCLUDES the
   registry's own definition from the reachability scan, without which a registered-but-never-emitted
   word was found inside the tuple itself and counted as its own evidence);
+  span-exporter worker stops `core/tracing.py::TRACE_WORKER_STOP_REASONS` (WHY the async export
+  worker last retired, published in `metrics()` and therefore on the engine's `trace_export_health`
+  row. Deliberately NOT the same table as `_TRACE_EXPORT_DROP_REASONS`, which says which SPAN was
+  lost: `runs/e5small-dr-unified-v12` wrote its last span at 18:20 and kept appending events for
+  ten and a half hours with `worker_alive: false` and every drop counter at ZERO, because the
+  worker had already returned before a row could be dropped. Five terminal paths were byte-identical
+  from the outside; `crashed` is the sixth and is the one that had no record at all — an exception
+  escaping `_worker_main` killed the thread with `self._worker` still pointing at it, so the only
+  evidence was an `is_alive()` that had silently turned False. All six go through
+  `_retire_worker_locked`, so a sixth terminal cannot ship with two of a retirement's three
+  statements, and `tests/test_trace_worker_stop_reason.py` re-derives the emitted set from real
+  `ast.Call` nodes in BOTH directions and DRIVES the crash path rather than pinning it);
   metric-reader path slots `runtime/command_eval.py::READER_PATH_KEYS` (which spec keys each reader
   turns into a filesystem path — deliberately NOT the same table as `READERS_REQUIRING_PATH`, since
   "needs a path" and "names a path" are different facts: `_read_adapter` DEFAULTS its path and still

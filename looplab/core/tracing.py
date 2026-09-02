@@ -124,6 +124,30 @@ _TRACE_EXPORT_DROP_REASONS = (
     "shutdown_timeout",
 )
 
+# WHY the export worker last stopped.  A drop reason says which SPAN was lost; this says which
+# CONDITION retired the thread that would have written it, and the two answer different questions:
+# `runs/e5small-dr-unified-v12` wrote its last span at 18:20 and kept appending events for ten and a
+# half hours with no exporter thread alive and ZERO drops recorded, because the worker had already
+# returned before any row could be dropped.  `worker_alive: false` names the symptom; without this
+# the condition behind it is unrecoverable after the fact.
+#
+# `crashed` is the member that could not be observed at all: an exception escaping `_worker_main`
+# killed the thread with `self._worker` still pointing at it, so the only trace was an
+# `is_alive()` that had silently turned False.  It is not hypothetical bookkeeping — it is the one
+# stop this class had no record of, and the reason the registry exists rather than a bare flag.
+#
+# Registry-guarded in BOTH directions by `tests/test_trace_worker_stop_reason.py`: a stop recorded
+# with an unregistered word reads as a diagnosis nobody can look up, and a registered word nothing
+# emits is a decoy — the same rule `engine/speculation.py::CARD_BUILD_SKIP_REASONS` states.
+TRACE_WORKER_STOP_REASONS = (
+    "abandoned",        # terminal ownership released: this process may no longer write spans
+    "shutdown",         # `shutdown()` — one-shot, the exporter is finished
+    "retired",          # `_retire_requested`: hand the file off, a later submit restarts the worker
+    "idle",             # nothing queued for `_worker_idle_s` and no loss delta outstanding
+    "receipt_failed",   # the loss receipt itself could not be written and the queue was empty
+    "crashed",          # an exception escaped the worker loop
+)
+
 
 def _otel_sdk_disabled(env: Optional[Mapping[str, str]] = None) -> bool:
     """Return whether the process explicitly disabled the OTel SDK.
@@ -1417,6 +1441,9 @@ class AsyncJsonlSpanExporter:
         self._loss_receipt_failures = 0
         self._receipt_requested = False
         self._next_receipt_at = 0.0
+        self._worker_stop_reason = ""
+        self._worker_stop_detail = ""
+        self._worker_stops = {reason: 0 for reason in TRACE_WORKER_STOP_REASONS}
 
     def _ensure_process(self) -> None:
         """A fork child starts empty; parent-owned queued rows must never be exported twice."""
@@ -1567,7 +1594,48 @@ class AsyncJsonlSpanExporter:
             "duration_s": 0.0,
         }
 
+    def _retire_worker_locked(self, reason: str, detail: str = "") -> None:
+        """Retire the worker thread, recording WHICH condition did it. Caller holds `_condition`.
+
+        The three statements of a retirement — drop the handle, record the reason, wake the
+        waiters — used to be spelled out at each terminal, and the reason was spelled nowhere.  One
+        helper is what keeps a sixth terminal from shipping with two of the three.
+        """
+        assert reason in TRACE_WORKER_STOP_REASONS, reason  # registry, not a free-form word
+        self._worker = None
+        self._worker_stop_reason = reason
+        self._worker_stop_detail = detail[:200]
+        self._worker_stops[reason] = self._worker_stops.get(reason, 0) + 1
+        self._condition.notify_all()
+
     def _worker_main(self) -> None:
+        """Run the export loop and record the condition that retired it — a crash included.
+
+        THE ONE STOP THIS CLASS HAD NO RECORD OF. An exception escaping the loop killed the thread
+        with `self._worker` still pointing at it, so the only evidence was an `is_alive()` that had
+        silently turned False: `worker_alive: false` with every drop counter at zero, which is
+        byte-identical to an idle retirement. A submit does restart a dead worker
+        (`_start_worker_locked`), so a crash is recoverable — but a crash that RECURS is a
+        different fault from a worker that went idle, and neither the exporter nor the engine's
+        `trace_export_health` row could tell them apart.
+
+        The exception is re-raised after it is recorded: `threading.excepthook` printing the
+        traceback is the second, louder half, and swallowing it here would put this method back in
+        the business of hiding the thing it exists to surface.
+        """
+        try:
+            self._worker_loop()
+        except BaseException as exc:  # noqa: BLE001 - recorded and re-raised, never swallowed
+            with self._condition:
+                self._retire_worker_locked("crashed", f"{type(exc).__name__}: {exc}")
+            # `_LOG` is independent of `self._writer`, so this survives whatever stopped the worker
+            # — the same reason the loss-receipt warning below is emitted through it.
+            _LOG.warning(
+                "trace export worker crashed and stopped: %s: %s — spans are dropped until a "
+                "later submit restarts it", type(exc).__name__, exc)
+            raise
+
+    def _worker_loop(self) -> None:
         while True:
             item: Optional[bytes] = None
             loss: Optional[tuple[dict[str, int], int]] = None
@@ -1585,8 +1653,7 @@ class AsyncJsonlSpanExporter:
                             reason: 0 for reason in _TRACE_EXPORT_DROP_REASONS}
                         self._unreported_export_failures = 0
                         self._receipt_requested = False
-                        self._worker = None
-                        self._condition.notify_all()
+                        self._retire_worker_locked("abandoned")
                         return
                     pending_loss = (
                         any(self._unreported_drops.values())
@@ -1604,8 +1671,8 @@ class AsyncJsonlSpanExporter:
                         self._active = True
                         break
                     if self._shutdown or self._retire_requested:
-                        self._worker = None
-                        self._condition.notify_all()
+                        self._retire_worker_locked(
+                            "shutdown" if self._shutdown else "retired")
                         return
                     if pending_loss:
                         self._condition.wait(max(
@@ -1614,8 +1681,7 @@ class AsyncJsonlSpanExporter:
                     self._condition.wait(self._worker_idle_s)
                     if not self._queue and not any(self._unreported_drops.values()) \
                             and self._unreported_export_failures == 0:
-                        self._worker = None
-                        self._condition.notify_all()
+                        self._retire_worker_locked("idle")
                         return
 
             if loss is not None:
@@ -1672,22 +1738,8 @@ class AsyncJsonlSpanExporter:
                             time.monotonic() + self._loss_receipt_interval_s)
                         # Do not leave a daemon retrying forever on a dead filesystem. New deltas can
                         # trigger a new receipt later; this ambiguous delta is never attempted twice.
-                        #
-                        # OPEN[trace-export-worker-stops-without-a-reason] the worker returns here
-                        # (and at every other terminal path) recording WHICH condition retired it
-                        # nowhere, so a stopped exporter cannot be diagnosed after the fact.
-                        # proof:absent:_worker_stop_reason@looplab/core/tracing.py
-                        # STILL OPEN: e5small-dr-unified-v12 wrote its last span at 18:20 and kept
-                        # appending events for 10.5 hours with no exporter thread alive (`py-spy
-                        # dump`) and zero loss receipts. `trace_export_health` (engine-side) now
-                        # PUBLISHES that the exporter is dead, which is what made the outage
-                        # findable at all — but the counters it carries name the symptom, not the
-                        # condition that retired the worker. Closing this means recording the
-                        # reason at the stop, in the registry shape this repo uses for every other
-                        # duck-typed word.
                         if not self._queue:
-                            self._worker = None
-                            self._condition.notify_all()
+                            self._retire_worker_locked("receipt_failed")
                             return
                     self._condition.notify_all()
                 continue
@@ -1756,6 +1808,15 @@ class AsyncJsonlSpanExporter:
                 "loss_receipts": self._loss_receipts,
                 "loss_receipt_failures": self._loss_receipt_failures,
                 "worker_alive": bool(self._worker is not None and self._worker.is_alive()),
+                # WHY it is not alive. `worker_alive: false` alone cannot tell an idle retirement
+                # from a crash, and those have opposite remedies; the engine's
+                # `trace_export_health` row publishes this whole dict, so the reason travels with
+                # the symptom it explains. Empty means the worker has never stopped in this
+                # process — never "stopped for no reason".
+                "worker_stop_reason": self._worker_stop_reason,
+                "worker_stop_detail": self._worker_stop_detail,
+                **{f"stopped_{reason}": self._worker_stops.get(reason, 0)
+                   for reason in TRACE_WORKER_STOP_REASONS},
                 "shutdown": self._shutdown,
             }
 
