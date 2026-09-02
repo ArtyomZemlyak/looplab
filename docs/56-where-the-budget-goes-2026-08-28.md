@@ -5729,3 +5729,34 @@ Four against three, and every treatment run still above every control run. Exact
 floor is necessary, not sufficient: it asked for nine per arm against a 1.25× effect, this is four
 and three, and the ratio here is 1.2–1.7×. The honest statement is that the arm is now worth
 finishing, not that it has finished.
+
+## 123. The fingerprint is in force, and it answered a question in its first twenty rows
+
+With every probe finished there was no cheaper moment, so the meter was restarted by pid (never
+`pkill -f`): old counter `{"calls": 16018, "cost_usd": 54.829011, "errors": 38}` and 16,552 ledger
+lines recorded first, `kill -TERM 1138773`, same argv back up as **121069**, `/healthz` answering
+zeroes. §120's `$0.055312` now sits in rows older than the counter's start; it is written down here
+and in §121 and it is no longer reconcilable, which is the price of getting the instrument.
+
+**It paid inside twenty rows.** Among the first 21 fingerprinted calls:
+
+| | |
+|---|---|
+| repeats within ONE arm | **0** |
+| fingerprints appearing in more than one arm | 7 |
+
+`c52cce89ef6eb93e` appears four times — once per probe, ten prompt tokens, the preflight. And
+`9d82ac1ff0073c03`, `553c14b0c9e819eb`, `2be8a5fdd3c014c9` each appear **twice, in `expEEe` and
+`expEEf`**, at 7,990 / 8,195 / 9,681 prompt tokens: two probes on the same card and the same task
+sending byte-identical requests early in their runs.
+
+That is the correction §120 needed and could not make. Two rows with identical token counts are the
+NORMAL case across arms — same card, same task, deterministic opening prompts — so the corpus
+duplicates chased there were very likely cross-arm twins rather than re-sends. The detector has to
+be `(arm, req_sha)`, not `req_sha`, and now it can be.
+
+### The arm, continued
+
+Four more launched to take §109 toward §83's nine: `expEEe`, `expEEf` (treatment) and `ctlEEd`,
+`ctlEEe` (control), fingerprints verified distinct (`fd23da29` against `16426855`), streaming on.
+That will make it **6 treatment against 5 control**, from the current 4 v 3 at p = 1/35 = 0.0286.
