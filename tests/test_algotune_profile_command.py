@@ -16,6 +16,7 @@ on the REAL instance from the REAL split, it profiles the candidate's OWN helper
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -208,6 +209,47 @@ def test_it_profiles_the_real_instance_at_the_graded_size(tmp_path):
     assert done.returncode == 0, done.stdout + done.stderr
     assert "(267021, 2)" in done.stdout, f"not the graded size:\n{done.stdout[:600]}"
     assert "ConvexHull(pts)" in done.stdout, done.stdout
+
+
+def _graded_n(task: str) -> int:
+    """The graded instance size for a cached task, read from a source the profiler never touches.
+
+    AlgoTune names its splits `<task>_T100ms_n<N>_size100_train.jsonl`, and `looplab_profile.py`
+    parses no filename at all (it hands the path to the arena's loader and calls `len()` on the
+    object that comes back). So the digits in that name are an INDEPENDENT oracle for the size the
+    profiler claims to have loaded, which is the whole point: a number the tool derives cannot
+    falsify the tool.
+    """
+    names = [f.name for f in sorted(_task_data(task).iterdir()) if f.name.endswith("_train.jsonl")]
+    assert len(names) == 1, f"expected one train split for {task}, found {names}"
+    m = re.search(r"_n(\d+)_", names[0])
+    assert m, f"no _n<N>_ in {names[0]}"
+    return int(m.group(1))
+
+
+@needs_task("pagerank")
+def test_the_graded_size_is_still_checked_where_the_data_is_cached(tmp_path):
+    """THE CONVEX_HULL TEST ABOVE IS THE ONLY OTHER PLACE THIS CLAIM LIVES, AND IT SKIPS HERE.
+
+    `convex_hull`'s 202 instance files never downloaded and cannot now, so `needs_task` skips it --
+    correctly, but the effect is that "the profiler feeds the REAL instance, not a toy" went from
+    red to silent, defended by nothing on the box the scores are actually computed on. A skip that
+    removes the last live copy of a claim is not free.
+
+    `pagerank` IS cached, is one of the four tasks this campaign scores, and its graded instance is
+    a list of 4798 -- big enough that a quiet shrink would show. Measured 2026-09-02: the profiler
+    prints `input: adjacency_list: list of 4798`, matching `..._n4798_..._train.jsonl`.
+    """
+    n = _graded_n("pagerank")
+    (tmp_path / "solver.py").write_text(
+        "class Solver:\n"
+        "    def solve(self, problem, **kw):\n"
+        "        n = len(problem[\"adjacency_list\"])\n"
+        "        return {\"pagerank_scores\": [1.0 / n] * n}\n", encoding="utf-8")
+    done = _profile(tmp_path, "pagerank")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert f"list of {n}" in done.stdout, (
+        f"the profiler did not report the graded size {n}:\n{done.stdout[:600]}")
 
 
 @needs_algotune

@@ -4463,3 +4463,80 @@ the champion rule is what stands between the second one and the score.
 
 `probe_summary.py` now prints the count on each probe's line, and only where it is non-zero: eleven
 runs never did it, and a `0x` on every clean line is the noise that stops a line being read.
+
+## 98. A skip took the last live copy of a claim, and the profiler kept saying the sentence anyway
+
+`tests/test_algotune_profile_command.py::test_it_profiles_the_real_instance_at_the_graded_size` was
+red on every sweep from 2026-08-30 and was closed on 09-01 by `needs_task("convex_hull")`, which is
+the honest verdict: the task's 202 instance files never downloaded and the box is offline, so the
+profiler cannot be exercised on it at all. The guard is right. What it did, though, is not neutral.
+
+That test was the ONLY place asserting that the profile command feeds the REAL graded instance
+rather than a toy — before this section `grep -rn 'graded size' tests/` returned two hits, and the
+other one is a docstring in `test_algotune_correctness_check.py` about a different failure. So on the box where every score is computed, a
+claim that went from RED to SILENT is now defended by nothing. **A skip that removes the last live
+copy of a claim buys quiet, not safety.**
+
+Four of the five tasks this campaign scores are cached here, with their sizes in the filenames:
+`pagerank_T100ms_n4798_size100_train.jsonl`. `looplab_profile.py` parses no filename — it hands the
+path to the arena's loader and calls `len()` on what comes back (`_describe`, line 90) — so those
+digits are an oracle the tool cannot influence. That is the whole trick, and the reason to prefer
+them over the profiler's own header:
+
+```
+profile: pagerank / train split / instance 0, the real graded size (loaded in 0.62s)
+input: adjacency_list: list of 4798
+```
+
+**Mutation, 2026-09-02.** One line into `looplab_profile.py` — `problem["adjacency_list"][:100]` —
+and the header still printed *"the real graded size"* while the instance was 48× smaller. Only the
+`input:` line moved. The header is a claim; the length is evidence; a test that read the header
+would have passed through the shrink it exists to catch.
+
+`test_the_graded_size_is_still_checked_where_the_data_is_cached` asserts the `input:` line names the
+number in the filename. It reddens under that mutation and passes clean. Commit below.
+
+### The three snapshot claims I had only READ, now run
+
+The standing list carried three items as *"НЕ ПРОВЕРЕНО мной"*. Reading the script is not measuring
+it, so all three were executed:
+
+| claim | measured |
+|---|---|
+| a snapshot whose destination vanished reports success | `SNAPSHOT_DEST=/no/such/mount/…` → **exit 1**, refuses before writing |
+| nothing separates two concurrent snapshots | two launched together: **B done at 14 s, A at 36 s** — A waited on the `flock`; two distinct dirs, both `.complete`, 13 files and ~121 MB each, no interleaving |
+| `.env` is neither copied nor named | `ENVIRONMENT.txt`, 32 lines, present in both, and it says so in as many words |
+
+All three are closed. The first two were closed by earlier commits I had not exercised; that is
+exactly the gap this table was for.
+
+### And the money hint, measured live on the arm that ran after the fix
+
+§67's table said the five roles that choose what to try next had never once been told the budget.
+`plan` was closed on 08-31 through the Developer's own `_budget_note()`. The nine `remEEref` probes
+of 09-01 are the first evidence, resolved through `span_input.py`:
+
+| phase | prompts naming a money figure |
+|---|---|
+| `plan` | **210 / 210 = 100 %** |
+| `plan_step` | 991 / 997 = 99.4 % |
+| `deep_research` | 474 / 575 = 82.4 % |
+| `propose` | 636 / 694 = 91.6 % |
+| `repropose` | 154 / 169 = 91.1 % |
+| `foresight_rank` | 0 / 87 — declined, 1.5 % of spend |
+| `hyp_prioritize` | 0 / 75 — declined, 0.9 % of spend |
+
+**The first version of that table was wrong, and the error was mine, in the instrument.** My
+throwaway counter joined each message as `str(content)[:20000]`; the card is ~12 kB and the cue is
+appended after it, so on `propose` and `repropose` the truncation cut off exactly the line being
+counted. It printed `propose 22.9 %` and `repropose 0.0 %` — a clean, plausible, entirely false
+story about a cue that had regressed. The committed tooling (`tests/test_the_proposer_sees_the_money.py`,
+`plot_corpus.py`) does not truncate; nothing in the repo needed fixing. The lesson is the standing
+one, one layer further in: **the instrument that checks the loop is itself an instrument, and a
+number small enough to be believed is the one to re-derive with a second reading.**
+
+The two card rules the list carries as unshipped — the 10× per-instance ceiling and "the best
+EVALUATED solver is what gets submitted" — are both in the delivered card of every probe (`10x` twice
+in the composed text, `KEEP_BEST` once), gated behind `--one-card --unteachable-rules`, which
+`run_probe.sh:242` passes. Composing a card WITHOUT `--one-card`, as I first did, shows neither: the
+absence was in my command line, not in the arm.
