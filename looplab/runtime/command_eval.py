@@ -1677,6 +1677,31 @@ def validate_cross_check(spec: Optional[dict]) -> Optional[dict]:
     return spec
 
 
+def _gate_reader_refusal(metrics, constraints, cross_check) -> Optional[str]:
+    """The gate-reader trust rule as a MESSAGE rather than a raise: None when every gate reader is a
+    declarative built-in, else the sentence explaining which one is not.
+
+    A gate decides whether a measured node counts, so it must never execute the agent's own module —
+    the same trust rule `validate_cross_check` states, asked of all three gate slots instead of one.
+    The PRIMARY `metric` is deliberately not among them: an adapter there is the
+    `eval_trust_mode="ratify_freeze"` design (see `adapters/repo_task.py::_GATE_READER_SLOTS`).
+
+    Returns instead of raising because its caller runs inside the eval worker after the evaluation
+    has already run; see the block that calls it for what a raise there cost.
+    """
+    slots = (("metrics", (metrics or {}).values()),
+             ("constraints", constraints or ()),
+             ("cross_check", (cross_check,) if cross_check else ()))
+    for slot, specs in slots:
+        for spec in specs:
+            if isinstance(spec, dict) and spec.get("kind") == "adapter":
+                return (f"eval.{slot} declares an `adapter` reader. A gate reader must be a "
+                        "declarative built-in, never agent-authored code — an adapter gate defeats "
+                        "the scorer freeze. This node is failed rather than scored; fix the task "
+                        "spec and resume.")
+    return None
+
+
 def _drift(primary: Optional[float], cross: Optional[float], tol: float) -> bool:
     """True if the frozen adapter's `primary` metric is not corroborated by the independent
     `cross` reader: either the cross reader produced nothing (can't confirm) or the two
@@ -2969,26 +2994,35 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # `start_stage` naming no stage in the list reuses NOTHING, and the old truthiness test dropped
     # the gate anyway.
     _reader_since = attempt_freshness_floor(_eval_started, stages, start_stage)
+    # THE GATE-READER TRUST RULE, RE-ASKED HERE — and it FAILS THE NODE rather than raising.
+    #
+    # `EvalSpec` refuses an `adapter` in all three gate slots at submit (`_GATE_READER_SLOTS`), so on
+    # any spec authored through a submit surface this is unreachable. What still reaches it is a
+    # `task.snapshot.json` recorded before that refusal existed — `_grandfathered` deliberately keeps
+    # such a run resumable — and a library caller building the dict directly, since
+    # `run_command_eval(metrics=...)` is public.
+    #
+    # It used to `raise`, from inside the eval worker, AFTER the evaluation had already run. A plain
+    # `ValueError` is not the `GpuPinUnenforceable` the dispatcher terminalizes, so per that
+    # handler's own comment it escaped "with no node terminal", cancelled "every in-flight sibling
+    # eval in the batch" and re-crashed "deterministically on every resume". Returning is the trade
+    # this tree has already made for exactly this class: `_readers_usable`' docstring records that
+    # `host_score`'s reader "used to RAISE there, which killed the run outright with no terminal
+    # event for the node, so the check had to move somewhere it can refuse instead of crash".
+    #
+    # So the NODE fails with no metric and the RUN survives to report it. If the spec is broken every
+    # node fails the same way and the run finishes with no best node, which is loud, bounded, and
+    # recoverable — unlike a run that dies without a terminal and dies again on resume.
+    bad_gate = _gate_reader_refusal(metrics, constraints, cross_check if enforce_drift else None)
+    if bad_gate is not None:
+        return RunResult(exit_code=rc, stdout=out, stderr=(err or "") + "\n" + bad_gate,
+                         metric=None, timed_out=to)
     drift = None
     if enforce_drift and cross_check and m is not None:
-        validate_cross_check(cross_check)
         cross = read_metric(out, str(wd), cross_check, wrap=wrap, since=_reader_since)
         if _drift(m, cross, drift_tolerance):
             drift = {"primary": m, "cross": cross, "tolerance": drift_tolerance}
             m = None                                   # uncorroborated -> not trusted
-    # Multi-objective (#5): extra reported metrics (audit) + hard constraints (gate selection).
-    # These reader specs are operator-owned gates, so they must NOT be agent-authored `adapter`
-    # code (same trust rule as cross_check) — reject loudly rather than exec the agent's module.
-    for spec in list((metrics or {}).values()) + list(constraints or []):
-        if spec.get("kind") == "adapter":
-            # OPEN[adapter-reader-can-kill-the-run] an `adapter` reader in `metrics`/`constraints` passes submit
-            # (probed) and raises HERE, inside the eval worker, after the evaluation has already run: the raise
-            # escapes with no node terminal, cancels the sibling evals and re-dies on every resume — the one
-            # failure this module's comments name repeatedly. `EvalSpec` accepts `{"kind": "adapter"}` at
-            # construction, and NO test covers this raise at all. Refuse it at submit, fail the NODE here.
-            # proof:`present:raise ValueError("metrics/constraints readers must be built-in@looplab/runtime/command_eval.py`
-            raise ValueError("metrics/constraints readers must be built-in, not 'adapter' "
-                             "(an agent-authored gate reader defeats the trust boundary).")
     declared = ({name: v for name, spec in metrics.items()
                  if (v := read_metric(out, str(wd), spec, wrap=wrap, since=_reader_since)) is not None}
                 if (metrics and not to) else {})   # a MISSED reader (None) must not erase a

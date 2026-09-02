@@ -205,6 +205,17 @@ _PATHLESS_COST = {
 }
 
 
+# The reader slots that are operator-owned GATES, and therefore may never run agent-authored
+# `adapter` code. Deliberately NOT every slot in `EvalSpec.readers()`: the PRIMARY `metric` may be an
+# adapter and that is the whole `eval_trust_mode="ratify_freeze"` design — the operator freezes the
+# repo's own scorer and ratifies it, and `cross_check` exists to corroborate exactly that frozen
+# adapter. Refusing `metric` here would refuse the shipped onboarding path
+# (`tests/test_repo_onboarding.py` declares one). The distinction is not "which slot" but "who the
+# reader answers to": a gate decides whether a measured node counts, so a candidate that authored it
+# has a route around the scorer freeze.
+_GATE_READER_SLOTS = frozenset({"metrics", "constraints", "cross_check"})
+
+
 def eval_reader_path_errors(task_or_spec) -> list[str]:
     """Every "this reader can never read anything" problem in an EvalSpec, one message per reader.
 
@@ -239,6 +250,26 @@ def eval_reader_path_errors(task_or_spec) -> list[str]:
         labels_err = host_score_labels_error(reader)
         if labels_err:
             out.append(f"{label}: {labels_err}")
+        # An `adapter` reader is agent-authored code, so an operator-owned GATE must never be one.
+        # `cross_check` has refused it since it shipped, through a predicate whose docstring says it
+        # is "used by both EvalSpec validation and the runtime guard" — and the rule reached exactly
+        # that one slot. `readers()` exists precisely so a reader rule is "applied to all four slots
+        # or to none", and this was the rule applied to one.
+        #
+        # WHAT THE MISSING THREE COST, and it is this function's own reason for existing one
+        # paragraph up: `run_command_eval` re-checks `metrics`/`constraints` for `adapter` and
+        # RAISES on it, from inside the eval worker, AFTER the evaluation has already run. That
+        # raise is a `ValueError`, so it is not the `GpuPinUnenforceable` the dispatcher terminalizes
+        # — it escapes with no node terminal, cancels every in-flight sibling eval in the batch, and
+        # re-crashes deterministically on every resume. Probed: `EvalSpec(metrics={"m": {"kind":
+        # "adapter"}})` constructed cleanly, and no test covered that raise at all.
+        if slot in _GATE_READER_SLOTS and reader.get("kind") == "adapter":
+            out.append(
+                f"{label}: a `metrics`/`constraints`/`cross_check` reader must be a declarative "
+                "built-in, never `adapter`. An adapter reader executes the AGENT's own module, and "
+                "these slots are the operator's gates — a candidate that writes its own grader has "
+                "a route around the scorer freeze. Use a built-in reader (`stdout_regex`, "
+                "`file_json`, `file_regex`) that reads the artifact your eval produces.")
     return out
 
 

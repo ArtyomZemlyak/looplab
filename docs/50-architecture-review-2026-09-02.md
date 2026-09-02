@@ -1178,7 +1178,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `claim-receipts-group-by-run-name` | `engine/claims_health.py` | key on the run uid |
 | `auto-skill-body-leaves-a-run-unredacted` | `engine/memory.py` | redact the body at both ends |
 | `stage-row-statuses-unregistered` | `runtime/command_eval.py` | a status registry + two-way scan |
-| `adapter-reader-can-kill-the-run` | `runtime/command_eval.py` | refuse at submit, fail the node here |
 | `adapter-reader-runs-outside-the-eval-boundary` | `runtime/command_eval.py` | thread the eval env through |
 | `task-spec-models-ignore-unknown-keys` | `adapters/repo_task.py` | forbid extras, grandfathered |
 | `replay-archive-has-no-unique-destination` | `serve/reset_route.py` | unique destination + an abandon path |

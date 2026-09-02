@@ -217,11 +217,27 @@ def test_freshness_gate_rejects_stale_metric_file_end_to_end(tmp_path):
 
 # #54 — a constraint/metric reader may not be an agent-authored adapter
 def test_constraints_adapter_reader_rejected(tmp_path):
+    """The RULE is unchanged; what changed is that the refusal no longer takes the run with it.
+
+    This asserted a `raise`, from inside the eval worker, after the evaluation had already run. A
+    plain `ValueError` there is not the `GpuPinUnenforceable` the dispatcher terminalizes, so per
+    that handler's own comment it escaped with no node terminal, cancelled every in-flight sibling
+    eval in the batch, and re-crashed deterministically on every resume. The node now FAILS
+    (`metric is None`, the reason on the terminal) and the run survives to report it — the same
+    trade `_readers_usable` records for `host_score`'s reader.
+
+    The submit-time refusal is `adapters/repo_task.py::_GATE_READER_SLOTS`, so this path is now only
+    reachable by a `task.snapshot.json` predating it or a direct library call; see
+    `tests/test_gate_readers_refuse_adapter.py` for both halves.
+    """
     from looplab.runtime.command_eval import run_command_eval
     (tmp_path / "p.py").write_text('print("{\\"metric\\": 1.0}")', encoding="utf-8")
-    with pytest.raises(ValueError, match="built-in, not 'adapter'"):
-        run_command_eval([sys.executable, "p.py"], str(tmp_path), 60, _M,
-                         constraints=[{"kind": "adapter", "path": "x.py", "max": 1}])
+
+    res = run_command_eval([sys.executable, "p.py"], str(tmp_path), 60, _M,
+                           constraints=[{"kind": "adapter", "path": "x.py", "max": 1}])
+
+    assert res.metric is None, "an untrustworthy gate must not yield a metric"
+    assert "adapter" in res.stderr, "and the node's terminal must carry why"
 
 
 # #8 — setup runs at its own cwd (repo root), separate from the eval command's cwd (a subdir)

@@ -70,10 +70,24 @@ def test_drift_when_cross_reader_finds_nothing(tmp_path):
 
 
 def test_cross_check_adapter_kind_rejected(tmp_path):
+    """The RULE is unchanged — an adapter cross-check is refused — but the refusal no longer takes
+    the whole run with it.
+
+    `cross_check` was the ONE gate slot that already had this rule, and it enforced it by raising
+    from inside the eval worker after the evaluation had run. That raise is a plain `ValueError`,
+    not the `GpuPinUnenforceable` the dispatcher terminalizes, so it escaped with no node terminal
+    and cancelled every in-flight sibling eval. The three gate slots now answer the same way: the
+    NODE fails with its reason on the terminal and the run survives to report it. The submit-time
+    refusal (`test_evalspec_rejects_adapter_cross_check` below) is what actually stops this
+    configuration; this is the backstop for a snapshot recorded before it existed.
+    """
     (tmp_path / "p.py").write_text(_HONEST, encoding="utf-8")
-    with pytest.raises(ValueError, match="independent built-in reader"):
-        run_command_eval([sys.executable, "p.py"], str(tmp_path), 60, _FILE,
-                         cross_check={"kind": "adapter", "path": "x.py"}, enforce_drift=True)
+
+    res = run_command_eval([sys.executable, "p.py"], str(tmp_path), 60, _FILE,
+                           cross_check={"kind": "adapter", "path": "x.py"}, enforce_drift=True)
+
+    assert res.metric is None, "an untrustworthy corroborator must not leave a metric standing"
+    assert "adapter" in res.stderr
 
 
 def test_evalspec_rejects_adapter_cross_check():
