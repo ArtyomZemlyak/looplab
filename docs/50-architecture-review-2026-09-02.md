@@ -1124,10 +1124,16 @@ is fixed or refuted, delete it from this document's successor rather than annota
 
 ## 8. The markers this review minted
 
-Forty-four items were tagged, each at the site it is about, each with a predicate evaluated
-against the tree before it was written. Forty sit in the file the finding is about; the four below
-are whole-tree items whose home is this document. **A red `tests/test_open_item_index.py` on one of
-these is not a defect — it means the item shipped, and the fix is to delete the marker.**
+Forty-four items were tagged when this review landed, each at the site it is about, each with a
+predicate evaluated against the tree before it was written. Forty sat in the file the finding is
+about; the four below are whole-tree items whose home is this document. **A red
+`tests/test_open_item_index.py` on one of these is not a defect — it means the item shipped, and the
+fix is to delete the marker.**
+
+Those two counts are HISTORICAL and are not maintained. Closing an item deletes its marker and its
+row below, so the table shrinks as work lands and the live index is `grep -rn 'OPEN\['` — never a
+number written here. A count in this section that someone kept up to date would be the fifth status
+vocabulary CLAUDE.md's open-item rules exist to abolish.
 
 OPEN[containment-is-unmeasured] 743 handlers catch `Exception`/`BaseException` in production and
 458 of them neither re-raise, log, record nor assign; 636 `# noqa: BLE001` annotations decorate

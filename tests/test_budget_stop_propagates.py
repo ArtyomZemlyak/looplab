@@ -28,6 +28,8 @@ import pathlib
 
 import pytest
 
+from _source_scan import iter_sources
+
 from looplab.core.errors import BudgetExceeded
 
 TRUST = pathlib.Path(__file__).resolve().parents[1] / "looplab" / "trust"
@@ -55,8 +57,8 @@ def _catches_budget(handler: ast.ExceptHandler) -> bool:
 
 def _paid_tries():
     """Every `ast.Try` in `trust/` whose body calls the shared judge funnel."""
-    for path in sorted(TRUST.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for path, source in iter_sources(TRUST):
+        tree = ast.parse(source)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Try):
                 continue

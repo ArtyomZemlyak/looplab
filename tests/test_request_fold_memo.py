@@ -22,6 +22,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from _source_scan import iter_sources
+
 from looplab.events.eventstore import EventStore
 from looplab.serve import appstate as appstate_mod
 from looplab.serve.appstate import request_fold_scope
@@ -249,10 +251,8 @@ def test_no_serve_route_mutates_a_folded_state():
     substring scan, because a commented-out mutation is not an `ast.Assign`.
     """
     offenders: list[str] = []
-    for path in sorted(SERVE.rglob("*.py")):
-        if "__pycache__" in path.parts or ".ipynb_checkpoints" in path.parts:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8-sig", errors="replace"))
+    for path, source in iter_sources(SERVE):
+        tree = ast.parse(source)
         folded: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):

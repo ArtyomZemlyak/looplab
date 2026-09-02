@@ -22,6 +22,8 @@ import pathlib
 
 import pytest
 
+from _source_scan import iter_sources
+
 from looplab.core.models import (BENIGN_TERMINAL_REASONS, ENGINE_TERMINAL_REASONS,
                                  FAILURE_REASONS)
 
@@ -45,9 +47,9 @@ def _minted_literals() -> set[str]:
             registry_lines.update(range(node.lineno, node.end_lineno + 1))
 
     found: set[str] = set()
-    for path in sorted(LOOPLAB.rglob("*.py")):
+    for path, source in iter_sources(LOOPLAB):
         try:
-            file_tree = ast.parse(path.read_text(encoding="utf-8"))
+            file_tree = ast.parse(source)
         except (SyntaxError, UnicodeDecodeError):
             continue
         for node in ast.walk(file_tree):

@@ -43,7 +43,6 @@ from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_pr
     install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
 from looplab.serve.owner_token import (
     log_owner_token_decision, on_shared_origin, resolve_owner_token)
-from looplab.serve.appstate import request_fold_scope
 from looplab.serve.projects import ProjectStore
 from looplab.serve.reviews import REVIEW_HEADER, ReviewError, ReviewStore, review_request_allowed
 from looplab.serve.schemas import _GenesisSpec  # noqa: F401 — historical pure-model re-export
@@ -149,12 +148,20 @@ class _RequestFoldMemoMiddleware:
 
     def __init__(self, app):
         self.app = app
+        # DEFERRED, like `make_app`'s own `AppState` import and for the same reason: `server.py` must
+        # stay importable WITHOUT the `[ui]` extra — the CLI imports it for its re-exports, and
+        # `appstate` imports `fastapi` at module scope. `tests/test_event_types.py::
+        # test_server_reexports_and_cli_stay_friendly_without_ui_extra` is what says so, and a
+        # top-level import here failed it. Once per app rather than once per request: this class is
+        # constructed inside `make_app`, where the extra is present by definition.
+        from looplab.serve.appstate import request_fold_scope
+        self._scope = request_fold_scope
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
-        with request_fold_scope() as memo:
+        with self._scope() as memo:
             async def _send(message):
                 if message.get("type") == "http.response.body" and message.get("more_body"):
                     memo.clear()
