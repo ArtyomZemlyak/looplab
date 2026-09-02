@@ -52,24 +52,56 @@ _TASK_MAX_BYTES = 16 * 1024 * 1024
 _CONFIG_MAX_BYTES = 8 * 1024 * 1024
 
 
-def _durable_archive_move(source: Path, destination: Path) -> None:
+def _archive_is_operation_unique(record: dict[str, Any], operation_id: str) -> bool:
+    """Whether THIS receipt's archive names are the operation-derived ones.
+
+    Read off the receipt rather than assumed from the current code, because the receipt is the
+    durable record of how its own files were named: a run prepared before archives carried the
+    operation id still owns `<name>.reset-<ms stamp>` files, and resuming it must keep the
+    fail-closed rename it was created under. The id is compared rather than merely present, so a
+    receipt whose suffix names a DIFFERENT operation is treated as not-unique — the conservative
+    direction, and unreachable anyway since `_identity` has already refused a mismatched id.
+    """
+    return record.get("archive_suffix") == f"reset-{operation_id}"
+
+
+def _durable_archive_move(source: Path, destination: Path, *, operation_unique: bool) -> None:
     """Move one sibling artifact durably without ever replacing an archive name.
 
     The rename contract (no-replace, fsync'd parent, loud ENOTSUP rather than a silent downgrade)
     lives in `core/atomicio.py`; the run-directory sibling rule is this route's own.
+
+    `operation_unique` is the caller's assertion that `destination` is a name NO OTHER OPERATION CAN
+    CONSTRUCT, and it is what decides whether the kernel-flag fallback may be taken.
+
+    WHY THAT MATTERS HERE. `durable_no_replace_rename`'s docstring records the measurement: on the
+    `fuse.geesefs` mounts every run on this deployment lives under, the no-replace rename returns
+    EINVAL while the same rename unflagged succeeds — FUSE does not implement the flag, so the
+    kernel refuses the CALL, not the operation. (The syscall and the FFI module are named
+    indirectly on purpose: two negative pins in `tests/test_durable_no_replace_rename.py` grep this
+    wrapper's source for those spellings, deliberately as substrings, so that a private copy of the
+    rename mechanics cannot come back here even commented out.) Run deletion had "never once worked on this
+    deployment" for that reason and was given the fallback; replay archiving was deliberately left
+    failing closed, on the stated ground that its `<name>.reset-<ms stamp>` was a probe-then-use
+    name two resets in one millisecond could collide on. Both halves were true, and together they
+    meant replay archiving could not succeed here AT ALL: the marker and the `archiving` receipt are
+    published BEFORE this move, so the caller landed on `_pending` -> 425 "retry this exact
+    operation", which failed identically every time, and the run was then un-resumable,
+    un-replayable AND un-deletable.
+
+    The stamp was the whole problem, and it did not have to be a stamp. Archives are now named after
+    the `operation_id` — a strict lowercase-hex UUID — so the TOCTOU the flag closes cannot arise:
+    the only writer that can produce this name is another attempt at the same operation, arriving at
+    the same destination, which is the idempotent outcome the receipt machinery already expects.
+
+    A receipt written BEFORE that change still owns stamp-named files and passes
+    `operation_unique=False`, keeping exactly the fail-closed behaviour it was created under. The
+    flag is never granted blanket: it is granted to a name that has earned it.
     """
     if source.parent != destination.parent:
         raise ValueError("Replay archives must remain in the run directory")
-    # OPEN[replay-archive-has-no-unique-destination] `durable_no_replace_rename`'s docstring records
-    # that on the geesefs mounts every run here lives under, `RENAME_NOREPLACE` answers EINVAL — which
-    # is why the DELETION caller got the unique-destination opt-in. This one keeps failing closed
-    # because its `<name>.reset-<ms stamp>` is a probe-then-use name. So replay archiving cannot succeed
-    # here: it lands on `_pending` -> 425 "retry this exact operation", forever, leaving the run
-    # un-resumable, un-replayable AND un-deletable. The `archiving -> superseded` edge is guarded on the
-    # destination already existing, which a refused primitive never produces. `operation_id` is already
-    # on this receipt: name the archive after it and the stamp's TOCTOU argument dissolves.
-    # proof:absent:unique_destination@looplab/serve/reset_route.py
-    durable_no_replace_rename(source, destination, label="replay archive")
+    durable_no_replace_rename(source, destination, label="replay archive",
+                              unique_destination=operation_unique)
 
 
 def _retire_archived_trace_append_journal(rd: Path) -> None:
@@ -284,14 +316,16 @@ def _prepare_receipt(
 
     stage_suffix = task_source.suffix or ".json"
     task_stage = rd / f".looplab-reset-task-{operation_id}{stage_suffix}"
-    stamp = int(time.time() * 1000)
-    while any(
-            os.path.lexists(rd / f"{name}.reset-{stamp}")
-            for name in RESET_ARTIFACT_NAMES):
-        stamp += 1
+    # NAMED AFTER THE OPERATION, NOT THE CLOCK — see `_durable_archive_move` for what the clock
+    # cost. `operation_id` is a strict lowercase-hex UUID (`RUN_RESET_OPERATION_RE`), so it carries
+    # no path separator and no `..`, and no OTHER operation can construct this name; the only writer
+    # that can is another attempt at the SAME operation, for which arriving at the same destination
+    # is the idempotent outcome the receipt machinery already expects. That is precisely the
+    # deletion quarantine's argument, and it is what makes the no-replace fallback legitimate here.
+    archive_suffix = f"reset-{operation_id}"
     artifacts = [{
         "source": name,
-        "archive": f"{name}.reset-{stamp}",
+        "archive": f"{name}.{archive_suffix}",
         "existed": os.path.lexists(rd / name),
     } for name in RESET_ARTIFACT_NAMES]
     now = time.time()
@@ -303,7 +337,10 @@ def _prepare_receipt(
         "expected_generation": expected_generation,
         "status": "pending",
         "phase": "prepared",
-        "archive_stamp": stamp,
+        # Supersedes the `archive_stamp` a receipt written before this change carries; both are read
+        # on the way back in, because such a run must stay resumable and still owns files named from
+        # its stamp. Exactly one of the two is required — see `_OPTIONAL_RECEIPT_KEYS`.
+        "archive_suffix": archive_suffix,
         "artifacts": artifacts,
         "task_stage": task_stage.name,
         "task_digest": hashlib.sha256(task_bytes).hexdigest(),
@@ -385,15 +422,22 @@ def _validate_archived_manifest(
         rd: Path, receipt_path: Path, record: dict[str, Any], *, operation_id: str
         ) -> None:
     """Confirm the exact receipt-owned archive state and its POSIX directory durability."""
-    stamp = record.get("archive_stamp")
+    # TWO SPELLINGS, and the older one is not legacy cruft: a receipt written before archives were
+    # named after their operation still owns files named from its millisecond stamp, and such a run
+    # must stay resumable. `archive_suffix` is the current form; `archive_stamp` is what a receipt
+    # from before it carries. A receipt with neither is not canonical.
+    suffix = record.get("archive_suffix")
+    if not isinstance(suffix, str) or not suffix:
+        stamp = record.get("archive_stamp")
+        suffix = f"reset-{stamp}" if isinstance(stamp, int) else None
     artifacts = record.get("artifacts")
     canonical = bool(
-        isinstance(stamp, int)
+        suffix
         and isinstance(artifacts, list)
         and len(artifacts) == len(RESET_ARTIFACT_NAMES)
         and all(
             row.get("source") == source
-            and row.get("archive") == f"{source}.reset-{stamp}"
+            and row.get("archive") == f"{source}.{suffix}"
             for row, source in zip(artifacts, RESET_ARTIFACT_NAMES)
         )
     )
@@ -447,7 +491,9 @@ def _archive_forward(
         if row["existed"]:
             if source_exists and not archive_exists:
                 try:
-                    _durable_archive_move(source, archived)
+                    _durable_archive_move(
+                        source, archived,
+                        operation_unique=_archive_is_operation_unique(record, operation_id))
                 except OSError as exc:
                     if os.path.lexists(source) and os.path.lexists(archived):
                         _supersede_archive(

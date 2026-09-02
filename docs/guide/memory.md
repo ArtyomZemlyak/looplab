@@ -742,9 +742,19 @@ are the design (`serve/service_reaper.py`):
 | `.looplab-reset-receipt-*` | the reset **succeeded** and the receipt is cold | the reset is unfinished and re-enterable |
 | `.looplab-delete-fence-*` | never | it is live ownership of a run identity |
 | `.looplab-delete-quarantine-*` | never | it holds the run's own bytes |
+| `<artifact>.reset-<operation id>` | never | it is the pre-Replay copy of an artifact the run replaced |
 
 The grace period is what keeps a *succeeded* receipt answering a retry idempotently instead of
 turning the operator's second click into a `404` about a run they deliberately deleted.
+
+Replay archives are named after their **operation id**, not a timestamp — `events.jsonl.reset-<uuid>`
+— and that is not cosmetic. A no-replace rename is what stops one operation overwriting another's
+archive, and on the `fuse.geesefs` mounts these runs live under the kernel refuses that flag
+outright. A clock-derived name could not be given the fallback (two Replays in one millisecond could
+genuinely collide), so archiving could not succeed at all there: the reset stopped at its `archiving`
+phase and answered *"retry this exact operation"* forever, leaving the run un-resumable,
+un-replayable **and** un-deletable behind its own marker. An operation-derived name cannot be
+constructed by any other operation, so the fallback is sound and the flag is still tried first.
 
 Note that `save_deletion_identity` runs **before** the transaction can refuse, so a deletion that is
 refused — a run that is not quiescent, say — still leaves a sidecar, and re-pressing the button

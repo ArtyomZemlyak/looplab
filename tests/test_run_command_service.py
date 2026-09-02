@@ -2676,10 +2676,14 @@ def test_reset_archive_failure_leaves_the_run_readable_and_never_spawns(monkeypa
     monkeypatch.setattr(control_router, "_spawn_engine", lambda *a, **k: spawns.append((a, k)))
     real_move = reset_route._durable_archive_move
 
-    def fail_spans_archive(source, destination):
+    def fail_spans_archive(source, destination, **kw):
+        # `**kw` forwards whatever the real signature grows (today `operation_unique`, the assertion
+        # that decides whether the no-replace fallback may be taken). A double that enumerates the
+        # kwargs raises TypeError inside the reset worker the moment one is added, and the failure
+        # reads as a broken reset rather than a stale test.
         if source.name == "spans.jsonl":
             raise OSError("simulated archive failure")
-        return real_move(source, destination)
+        return real_move(source, destination, **kw)
 
     monkeypatch.setattr(reset_route, "_durable_archive_move", fail_spans_archive)
     response = client.post("/api/runs/demo/reset")

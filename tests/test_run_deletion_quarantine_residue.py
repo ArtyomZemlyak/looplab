@@ -522,3 +522,4 @@ def test_the_absorbing_phase_stops_claiming_a_retry_can_move_it(tmp_path, monkey
     again = client.post(f"/api/runs/{RUN}/deletions", json=body).json()
     assert again["retryable"] is False and again["phase"] == "quarantine_ambiguous", (
         "the same answer twice is what makes the retryable claim checkable")
+
