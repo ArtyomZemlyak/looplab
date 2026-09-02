@@ -229,6 +229,33 @@ def summarise(run_dir: Path) -> dict | None:
     before = spend(lambda t: first is not None and t < first)
     after = spend(lambda t: last is not None and t > last)
 
+    # WAS THE GRADED CODE THE CHECKED CODE? Reconstructed from the tool spans, per evaluated node:
+    # the last `check` before that node's evaluation, and whether any file WRITE landed after it.
+    # See docs/56 §104 for the measurement this counts (33 % of such nodes score zero, against
+    # 3.0 % of the rest, p = 0.0024) and for why this is reported rather than acted on.
+    tool_spans = [r for r in spans if r.get("kind") == "tool"]
+    checks, writes = [], []
+    for r in tool_spans:
+        attrs = r.get("attributes") or {}
+        tool = attrs.get("tool")
+        start = float(r.get("start") or 0)
+        if tool == "run_dev_command":
+            try:
+                named = json.loads(attrs.get("input") or "{}").get("name")
+            except (ValueError, TypeError):
+                named = None
+            if named == "check":
+                checks.append(start)
+        elif tool in ("write_file", "edit_surface", "apply_patch", "write"):
+            writes.append(start)
+    graded_unchecked = 0
+    for ts in stamps:
+        prior_check = max((c for c in checks if c < ts), default=None)
+        if prior_check is None:
+            continue                      # never checked at all is a different fact, not this one
+        if any(prior_check < w < ts for w in writes):
+            graded_unchecked += 1
+
     by_phase: dict[str, float] = defaultdict(float)
     calls: Counter = Counter()
     for r in gens:
@@ -332,6 +359,8 @@ def summarise(run_dir: Path) -> dict | None:
         # "measure early" clause is about, and excluding it censors the comparison in the direction
         # that flatters whichever arm fails to evaluate. See docs/56 §87.
         "reached_a_node": bool(nodes),
+        "graded_unchecked": graded_unchecked,
+        "graded_nodes": len(nodes),
         "after_pct": (100 * after / total) if total else 0.0,
         "eval_train": eval_train,
         "dev_commands": len(dev),
@@ -584,6 +613,24 @@ def main(argv: list[str]) -> int:
         print("  NOTE: this is the rule's PROTECTIVE value given the nodes these runs produced.")
         print("        Whether STATING the rule changes which nodes appear is a different question")
         print("        and needs the --no-unteachable-rules control arm; see docs/56 §83, §84.")
+
+    # WAS THE GRADED CODE THE CHECKED CODE? Measured 2026-09-02 over 111 evaluated nodes whose
+    # tool order could be reconstructed from the spans: a node whose last file WRITE came after its
+    # last `check` scores ZERO four times in twelve; a node whose last write came before it scores
+    # zero three times in ninety-nine. 33 % against 3.0 %, exact one-sided Fisher p = 0.0024.
+    #
+    # This is REPORTED, not acted on. Telling the Developer "you have edited since your last check"
+    # is a behaviour change, and §92 is the standing answer to behaviour changes proposed off an
+    # observational split: its effect is unmeasurable without an arm that lacks it. What a sweep can
+    # do without an arm is make the quantity visible, so the next reader is not counting it by hand.
+    unchecked = [(s2["probe"], s2["graded_unchecked"], s2["graded_nodes"])
+                 for s2 in seen.values() if s2.get("graded_unchecked")]
+    if unchecked:
+        tot_u = sum(u for _, u, _ in unchecked)
+        print(f"\nnodes graded on code written AFTER their last `check` ({tot_u} across "
+              f"{len(unchecked)} probes; those nodes score zero 11x more often -- docs/56 §104):")
+        for name, u, tot in sorted(unchecked, key=lambda r: -r[1]):
+            print(f"  {name:11} {u} of {tot} evaluated node(s)")
 
     # TRUST FLAGS, which no sweep had ever looked at. The event log carries `reward_hack_suspected`
     # and it appears in no summary: found 2026-09-02 by counting event types rather than reading the

@@ -4834,3 +4834,50 @@ write landed in a third place, `editable_path/outside/`, which neither assertion
 version that holds snapshots every path under `tmp_path` before the call and asserts the only new
 ones are inside the disposable directory. A containment test that names the places it checks tests
 the places it names; the mutation is what told me which those were.
+
+## 104. A node graded on code written after its last `check` scores zero eleven times more often
+
+§99 fixed what `check` measures. This is the other half: **whether the thing it measured is the
+thing that got graded.**
+
+Reconstructed from the tool spans of every evaluated node in the corpus — for each node, the last
+`check` before its evaluation, and whether any file WRITE landed in the window between them:
+
+| | nodes | scored zero | |
+|---|---|---|---|
+| a write landed after the last `check` | 12 | **4** | **33 %** |
+| no write after it | 99 | 3 | **3.0 %** |
+
+Exact one-sided Fisher **p = 0.0024**, over 111 nodes with a reconstructable order. Read the other
+way: 4 of the 7 zero-scoring nodes were graded on code their own `check` had never seen, against 8 %
+of the 104 non-zero ones.
+
+The mechanism is not exotic and does not need one: the model checks, then edits once more — a
+tidy-up, a rename, a "small" optimisation — and the evaluation grades the edit, not the checked
+version. `remEEctl3`, `remEEref3`, `remEEref6` and `remPde4` are the four.
+
+### Reported, not acted on
+
+The obvious intervention is a line in the Developer's prompt: *you have edited since your last
+`check`*. It is cheap — §100 priced `check` at 3.6–9.1 s against 111.8 hours of generation — and it
+would plausibly convert some of those four into scores.
+
+§92 is this notebook's standing answer to exactly that move. A behaviour change proposed off an
+observational split has an unmeasurable effect until an arm exists that lacks it; the card-batch arm
+closed at n=8 with p = 0.1185 and taught that lesson at the cost of eight probes. And the split here
+is observational in a way worth naming: a model that edits after checking may be a model that is
+already in trouble, in which case the edit is a symptom and removing it changes nothing.
+
+So the quantity is now VISIBLE instead of acted on. `probe_summary.py` counts, per probe, how many
+of its evaluated nodes were graded after a post-check write, and names them:
+
+```
+nodes graded on code written AFTER their last `check` (12 across 12 probes; ...):
+  remDL4      1 of 2 evaluated node(s)
+  remDL5      1 of 2 evaluated node(s)
+  ...
+```
+
+Five falsifiers in `tests/test_the_summary_says_which_nodes_were_graded_unchecked.py`, and both
+mutations redden: dropping the window (any write, any time) reddens three, and folding
+"never checked at all" into the count reddens the test that keeps those two facts apart.
