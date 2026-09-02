@@ -43,6 +43,7 @@ from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_pr
     install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
 from looplab.serve.owner_token import (
     log_owner_token_decision, on_shared_origin, resolve_owner_token)
+from looplab.serve.appstate import request_fold_scope
 from looplab.serve.projects import ProjectStore
 from looplab.serve.reviews import REVIEW_HEADER, ReviewError, ReviewStore, review_request_allowed
 from looplab.serve.schemas import _GenesisSpec  # noqa: F401 — historical pure-model re-export
@@ -121,6 +122,45 @@ class _SSESafeGZipMiddleware:
             await self.app(scope, receive, send)
             return
         await self.compressed(scope, receive, send)
+
+
+class _RequestFoldMemoMiddleware:
+    """One `fold(events.jsonl)` per (run, file identity) for the duration of one request.
+
+    Measured on the routers: two folds per `GET .../config`, three plus a full read per PUT, two per
+    artifact read and two per 4 s metrics poll — each re-reading and re-folding a whole log whose
+    `node_created` rows embed full file sets. The memo itself and the argument for its safety live in
+    `appstate.py::AppState.state`; this class is only where the scope is installed.
+
+    PURE ASGI, deliberately NOT `@app.middleware("http")`. That decorator is Starlette's
+    `BaseHTTPMiddleware`, which spawns a task group and a memory-stream pair PER REQUEST — a real
+    cost, and a documented hazard around streaming responses, which this app serves (SSE). A read
+    optimization must not add either. The plain ASGI shape wraps the handler with a `ContextVar`
+    set/reset and nothing else; `anyio`/Starlette copy the context into the threadpool, so a sync
+    route handler sees the memo, and the value is a dict MUTATED IN PLACE for that reason — a
+    `set()` inside the worker thread would not propagate back.
+
+    RELEASED WHEN A RESPONSE STARTS STREAMING. Unlike the decorator form, a pure-ASGI wrapper stays
+    active for the whole response body, so an SSE connection open for hours would otherwise hold up
+    to `_REQUEST_FOLD_MEMO_MAX` folded states for that long. Clearing at the first chunk keeps the
+    win where the repeat folds actually are (the handler, before it answers) and gives the generator
+    the uncached behaviour it had.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        with request_fold_scope() as memo:
+            async def _send(message):
+                if message.get("type") == "http.response.body" and message.get("more_body"):
+                    memo.clear()
+                await send(message)
+
+            await self.app(scope, receive, _send)
 
 
 class _APIRequestBodyLimitMiddleware:
@@ -391,6 +431,11 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"],
                        allow_headers=["*"])
     app.add_middleware(_APIRequestBodyLimitMiddleware, max_bytes=_API_REQUEST_BODY_MAX)
+    # Added AFTER the body limit, so it wraps it: Starlette applies middleware in reverse order of
+    # registration. Nothing about the memo depends on where in the stack it sits — only that it
+    # wraps the route handler — but wrapping the body limit means a rejected oversized request never
+    # installs one.
+    app.add_middleware(_RequestFoldMemoMiddleware)
     # Enforce the same compressed-transfer contract the manifest bundle gate measures while keeping live
     # EventSource and assistant token streams unbuffered across every supported Starlette version.
     app.add_middleware(_SSESafeGZipMiddleware, minimum_size=500, compresslevel=6)

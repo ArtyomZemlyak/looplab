@@ -217,6 +217,24 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    (`fork_done`, `inject_done`, `confirm_done`, `<x>_requests`/`<x>s_done` counter pairs).
 4. **State is only observed via `fold(store.read_all())`** — never cache derived state across
    loop iterations without re-folding.
+   *This is about the ENGINE's loop and the SERVER read it as a ban on caching anything*:
+   `serve/appstate.py::AppState.state` carried a comment calling itself "DELIBERATELY uncached:
+   engine invariant #4" and folded the whole `events.jsonl` afresh at ~29 call sites — two per
+   `GET .../config`, three plus a full read per PUT, two per artifact read, two per 4 s metrics
+   poll — on logs whose `node_created` rows embed full file sets. The engine is a different process
+   and never reaches that method. Since 2026-09-02 it memoizes per REQUEST (`request_fold_scope`, a
+   ContextVar installed by `server.py::_RequestFoldMemoMiddleware` and inherited across the
+   threadpool hop): the key is `file_identity`, the same one `state_payload`'s cache uses, so a
+   writer that appends inside its own request MISSES and gets the new state. That middleware is
+   PURE ASGI and deliberately not `@app.middleware("http")` — the decorator is
+   `BaseHTTPMiddleware`, which spawns a task group and a memory-stream pair per request and is a
+   documented hazard around the SSE this app serves; a read optimization must not add either. Its
+   one cost is that a plain ASGI wrapper stays active for the whole response BODY, so the memo is
+   released at the first chunk of a streaming response rather than held for an SSE connection's
+   lifetime. Not across requests, and the reason is not this
+   invariant: a folded `RunState` is MUTABLE, and a cross-request cache would make "no route mutates
+   one" a property every future route has to preserve silently, with the failure landing in another
+   request's state. Outside a request there is no memo and the behaviour is byte-identical.
 5. **`fold` must stay deterministic and order-tolerant**: no I/O, no LLM calls, unknown event
    types are ignored (forward compat), new event data fields are additive-only with reader-side
    defaults for old logs.

@@ -1171,10 +1171,8 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `serial-node-build-holds-the-loop` | `engine/orchestrator.py` | one offload helper for four sites |
 | `paid-cadences-hold-the-engine-loop` | `engine/orchestrator.py` | offload under a capture sink |
 | `adapter-reader-runs-outside-the-eval-boundary` | `runtime/command_eval.py` | thread the eval env through |
-| `task-spec-models-ignore-unknown-keys` | `adapters/repo_task.py` | forbid extras, grandfathered |
-| `assistant-has-no-untrusted-evidence-boundary` | `serve/assistant.py` | one envelope, used by both agents |
+| `assistant-tool-results-are-unlabelled` | `serve/assistant.py` | stamp the label on each tool result |
 | `read-fence-takes-the-command-sequencer` | `serve/routers/runs.py` | one lock-free generation fence |
-| `no-per-request-fold-budget` | `serve/appstate.py` | one fold per (identity, request) |
 | `repeated-sweep-refolds-the-whole-corpus` | `tools/_runcache.py` | a bound that covers the corpus, or a cheaper per-run projection — after measuring |
 | `knowledge-index-re-embeds-every-record` | `tools/knowledge_tools.py` | memoize by content digest — after measuring |
 | `card-lane-fills-outside-the-policy-population` | `search/card_selection.py` | a legal-action set per policy |

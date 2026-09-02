@@ -29,7 +29,81 @@ from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher
 
 
+# HOISTED ABOVE THE MODELS (2026-09-02), not because the placement reads better but because
+# `refuse_unknown_task_keys` is referenced by a decorator on `ReferenceSpec` below and a
+# decorator resolves its names at CLASS-DEFINITION time. Both helpers moved together: the
+# refusal cannot answer without `_grandfathered`.
+def _grandfathered(info: ValidationInfo) -> bool:
+    """True when this task document is being RE-loaded for a run that ALREADY EXISTS.
+
+    `resume`/`finalize` rebuild the task by re-validating the verbatim `task.snapshot.json` the run
+    was started with, so a validator that raises retroactively makes every pre-existing run
+    unresumable — the same trap that made `DataSpec._mount_edit_consistent` coerce instead of reject.
+    A new refusal therefore has to distinguish "someone is submitting this spec" from "this spec is
+    already the recorded truth of a run in progress", and the pydantic validation CONTEXT is that
+    signal: `adapters/tasks.py::validate_task(..., existing_run=True)` sets it, direct construction
+    (`EvalSpec(...)`, `RepoTask(**d)`) never does, so the strict path is the DEFAULT and only the
+    reload sites opt out. CLAUDE.md invariant #6 is the same principle for settings: what the run
+    recorded when it started wins on resume.
+    """
+    ctx = getattr(info, "context", None)
+    return bool(isinstance(ctx, dict) and ctx.get("existing_run"))
+
+
+def refuse_unknown_task_keys(cls, data, info: ValidationInfo):
+    """ONE definition of "is this the name of a real field", for every task-spec model here.
+
+    THE DEFECT. Every model in this file but `DeveloperCommandSpec` took pydantic's default
+    `extra="ignore"`, so a mistyped or MISPLACED key validated and the field took its default —
+    silently, and then the run's own `task.snapshot.json` recorded the operator's intent as that
+    default. Probed: `EvalSpec(command=[...], tiemout=5, subject=[...], stage=[...])` dropped all
+    three; the `_stages_valid` comment already records this mechanism making `cmd.stages` vanish
+    once. It is `core/appconfig.py::refuse_unknown_settings_keys` one layer over, and the argument
+    is the same one `parse_sets` has carried since it shipped: a typo must error loudly rather than
+    be dropped by `extra="ignore"`.
+
+    `extra="forbid"` would be the obvious spelling and it is the WRONG one here, for the reason
+    `_grandfathered` exists: `resume`/`finalize` rebuild the task by re-validating the verbatim
+    `task.snapshot.json` the run was started with, so an unconditional refusal makes every run whose
+    snapshot carries an unknown key unresumable — retroactively, and for a key that has already done
+    whatever it was going to do. So this refuses on SUBMIT and grandfathers on RELOAD, which is the
+    same asymmetry `refuse_unknown_settings_keys` draws between launch and resume, for the same
+    reason: the operator is present for one and absent for the other.
+
+    A `mode="before"` validator, because by `mode="after"` the extra keys are already gone.
+
+    A KEY BEGINNING WITH `_` IS A COMMENT and is skipped. JSON has no comment syntax, an
+    underscore prefix is the usual workaround, and this repo's own `examples/repo_drift_task.json`
+    ships a `_note` explaining what the example demonstrates — found by this validator refusing it.
+    Refusing a convention the project itself uses would be strictness aimed at the wrong thing, and
+    the exemption cannot mask a real typo: no field here starts with an underscore, and pydantic
+    would not accept one that did.
+
+    `ConfigRefusal` rather than a bare `ValueError` — it is `OperatorRefusal` AND `ValueError`, so
+    every existing `except ValueError` still catches it while the CLI's refusal boundary prints one
+    line at exit 2 instead of a traceback (CLAUDE.md: a deliberate refusal is a TYPE). Pydantic
+    wraps whatever a validator raises, so the type survives in the chain rather than the message.
+    """
+    if not isinstance(data, dict) or _grandfathered(info):
+        return data
+    unknown = sorted(k for k in data
+                     if isinstance(k, str) and not k.startswith("_") and k not in cls.model_fields)
+    if unknown:
+        from looplab.core.errors import ConfigRefusal
+        known = ", ".join(sorted(cls.model_fields))
+        raise ConfigRefusal(
+            f"unknown key{'' if len(unknown) == 1 else 's'} in {cls.__name__}: "
+            + ", ".join(repr(k) for k in unknown)
+            + f"; known keys are {known}. A key this model does not declare is dropped rather than "
+            "applied, so it would have been recorded in task.snapshot.json as the default.")
+    return data
+
+
 class ReferenceSpec(BaseModel):
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
     name: str
     path: str
     # NOT a copy: a mounted reference is exposed as a read-only symlink in the local tier
@@ -43,6 +117,10 @@ class EditableSpec(BaseModel):
     eval workdir; the agent may edit files matching `surface` (globs, relative to the repo)
     and must not overwrite `protect`. The single-repo shorthand `RepoTask.editable_path`
     desugars to one of these mounted at the workspace root (name=".")."""
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
     name: str                  # subdir under the workspace, e.g. "model" / "data_pipeline"
     path: str                  # the repo to mount + let the agent edit
     surface: list[str] = Field(default_factory=lambda: ["**/*.py"])
@@ -61,6 +139,10 @@ class DataSpec(BaseModel):
     by default (the agent may always read it and produce DERIVED data in its own workdir); the flags
     relax or restrict that. A bare string path in `data`/`dataset` desugars to `DataSpec(path=…)` with
     all defaults (everything allowed EXCEPT editing the original)."""
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
     path: str
     mount: bool = True         # (1) read-only symlink at ./<name> (default) | False = copy INTO the workdir
     edit: bool = False         # (2) may the agent modify the ORIGINAL in place (through its mount)?
@@ -709,31 +791,12 @@ def eval_entrypoint_unprotected(task) -> list[str]:
         "executing — list those files in `protect` if the scoring code must be frozen."]
 
 
-def _grandfathered(info: ValidationInfo) -> bool:
-    """True when this task document is being RE-loaded for a run that ALREADY EXISTS.
-
-    `resume`/`finalize` rebuild the task by re-validating the verbatim `task.snapshot.json` the run
-    was started with, so a validator that raises retroactively makes every pre-existing run
-    unresumable — the same trap that made `DataSpec._mount_edit_consistent` coerce instead of reject.
-    A new refusal therefore has to distinguish "someone is submitting this spec" from "this spec is
-    already the recorded truth of a run in progress", and the pydantic validation CONTEXT is that
-    signal: `adapters/tasks.py::validate_task(..., existing_run=True)` sets it, direct construction
-    (`EvalSpec(...)`, `RepoTask(**d)`) never does, so the strict path is the DEFAULT and only the
-    reload sites opt out. CLAUDE.md invariant #6 is the same principle for settings: what the run
-    recorded when it started wins on resume.
-    """
-    ctx = getattr(info, "context", None)
-    return bool(isinstance(ctx, dict) and ctx.get("existing_run"))
-
-
-# OPEN[task-spec-models-ignore-unknown-keys] every model here but `DeveloperCommandSpec` takes
-# pydantic's default `extra=ignore`, so a mistyped or misplaced key validates and takes the default:
-# probed, `EvalSpec(command=[...], tiemout=5, subject=[...], stage=[...])` drops all three, and the
-# run's own `task.snapshot.json` then records the operator's intent as the default. The `_stages_valid`
-# comment records this mechanism making `cmd.stages` vanish once already.
-# proof:absent:refuse_unknown_task_keys@looplab/adapters/repo_task.py
 class EvalSpec(BaseModel):
     """The operator's trusted evaluation (the agent does not author this)."""
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
     command: list[str] = Field(default_factory=list)   # argv, no shell; carries env activation
     # Operator-declared ordered pipeline (data_prep → train → …); when set these ARE the canonical
     # stages the engine runs — the Developer implements the scripts, not the structure, and its
@@ -1246,6 +1309,10 @@ class NoOpRepoDeveloper:
 
 
 class RepoTask(BaseModel):
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
     kind: str = "repo"
     id: str = "repo_task"
     goal: str = ""

@@ -73,6 +73,26 @@ Every task shares these:
 | `direction` | `min` \| `max` | Whether lower or higher metric is better |
 | `seed` | int | Random seed for reproducible data generation. **Not universal** — the built-in synthetic kinds and `repo` carry it; `mlebench_real` has none (the competition owns the split) |
 
+### A key the spec does not declare is REFUSED
+
+A mistyped or misplaced key used to validate and let the field take its default — silently, and
+then the run's own `task.snapshot.json` recorded that default as your intent. `eval.tiemout: 5`
+ran on the default timeout; `eval.stage:` (singular) ran with no pipeline at all.
+
+Submitting a task now refuses it by name and lists the keys the model does declare, so the nearest
+correct spelling is visible in the error. This is the same rule `--set` and the `settings:` block
+already apply (`docs/guide/configuration.md`), and it fails the same way: one line, exit code 2.
+
+A key beginning with `_` is a **comment** and is allowed — JSON has no comment syntax, and
+`examples/repo_drift_task.json` ships a `_note` explaining what the example demonstrates. It cannot
+hide a typo: no task field starts with an underscore.
+
+**Resume and finalize are grandfathered.** They rebuild the task by re-validating the verbatim
+`task.snapshot.json` the run was started with, so a run whose snapshot carries an unknown key stays
+resumable — refusing there would invalidate an existing run retroactively, over a key that already
+had no effect. The operator is present when a task is submitted and absent when a run resumes; the
+strictness follows that, not the document.
+
 ## The composable schema (recommended)
 
 You don't have to pick a `kind` — describe **what you have**, and the engine infers the task from
