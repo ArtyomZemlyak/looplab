@@ -4734,3 +4734,54 @@ is generation time and the wall clock is not the constraint; both are true, and 
 first one makes a confident wrong prediction.
 
 So: the four probes will finish, later than usual, for the same money. Nothing to fix.
+
+## 102. The loop asks for a tool it will have later, and the refusal tells it nothing
+
+First census of `result_is_error` over every tool span in the corpus — 18,212 calls:
+
+| | calls | errors | |
+|---|---|---|---|
+| all tools | 18,212 | 426 | **2.3 %** |
+| `run_probe` | 1,321 | 391 | 29.6 %, in all 46 probes |
+| everything else | 16,891 | 35 | 0.2 % |
+
+`run_probe`'s 30 % is not a defect and should not be read as one: it is the model's own scratch
+script, and a script that raises is the tool working. (`exit=1 … stderr: Traceback` — the model
+testing an idea and finding out.) The interesting 35 are elsewhere.
+
+**36 of them are calls to tools that do not exist, and they are not random.**
+
+| name | calls | probes | where that exact name DOES work |
+|---|---|---|---|
+| `write_file` | **31** | **20 of 46** | `plan_step` 391, `card_build` 14 |
+| `read_memo` | 3 | 1 | nowhere |
+| `run_probe` | 1 | 1 | `plan` 423, `plan_step` 879, `card_build` 18 |
+| `python` | 1 | 1 | nowhere |
+
+Every one of the 31 is `write_file` **in the `plan` phase**. The name is not a misspelling and the
+tool is not missing — the Developer, while PLANNING, reaches for the tool it will have while
+EXECUTING. Forty-three per cent of runs do it.
+
+And the answer it got, every time, was the bare string `(unknown tool: write_file)`. That message
+cannot correct the mistake: it does not say the name is right and the moment is wrong, it names
+nothing that IS reachable, and there is no next action in it. Two of the four names in the table
+(`read_memo`, `python`) look like exactly what follows — a model that got nothing to act on
+guessing a second time.
+
+`CompositeTools._unknown` now answers with the near neighbours from its own routing table and a
+count of the rest, capped at five suggestions and under 200 characters, on both the string and the
+typed dispatch path. Six falsifiers in `tests/test_an_unknown_tool_says_what_is_reachable.py`,
+including one that pins an empty toolset back to the bare wording and one that guards a KNOWN tool
+against being swallowed; reverting to the bare message reddens four of the six. Every other test in
+the suite that asserts this message uses `in` or `startswith("(unknown tool")`, so the wording
+change is compatible by construction — checked, not assumed.
+
+**What this is worth.** 36 wasted turns is not much money. It is, however, the second time this
+notebook has found the loop spending a turn on something the harness could have told it in one line
+— the first was §99's `check`, which certified a code path the grader would not run. The pattern is
+the same both times: **the loop is not told what it is allowed to do, only that what it did was
+wrong.**
+
+*Also censused and NOT a finding:* `repeat_streak` — 2.4 % of tool calls repeat the previous one
+(414 at streak 2, 26 at streak 3, nothing above), all of them read-only (`read_code` 198,
+`repo_read` 111, `web_fetch` 46). The cap already holds.

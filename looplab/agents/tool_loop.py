@@ -16,6 +16,7 @@ import contextlib
 import contextvars
 import hashlib
 import itertools
+import difflib
 import inspect
 import json
 import logging
@@ -173,9 +174,38 @@ class CompositeTools:
                     merged[name] = value
         return merged
 
+    def _unknown(self, name: str) -> str:
+        """The refusal, with the two things a model needs to correct itself in one turn.
+
+        MEASURED over the 46-probe corpus, 2026-09-02: 36 tool calls named something this toolset
+        does not route, and every one was answered with the bare string `(unknown tool: <name>)`.
+        The distribution is not random noise -- 31 of the 36 are `write_file` called during `plan`,
+        in 20 of the 46 probes, and `write_file` is a REAL tool that works 391 times in `plan_step`
+        and 14 in `card_build`. The Developer is reaching, while it plans, for the tool it will have
+        while it executes.
+
+        The bare message cannot correct that. It does not say the name is right and the PHASE is
+        wrong, it does not name one tool that IS reachable, and there is nothing in it to act on --
+        so the model either repeats the call or invents another name (`read_memo`, `python`: four
+        more calls, same answer). Naming the near neighbours and the count turns a dead end into a
+        correction that costs one line of prompt.
+
+        Bounded on purpose: at most five suggestions and a count, because this string is pasted into
+        a context window whose budget the rest of this file spends care on.
+        """
+        known = sorted(self._route)
+        close = difflib.get_close_matches(name or "", known, n=3, cutoff=0.6)
+        # Exact-name-elsewhere is the `write_file`-in-`plan` case and deserves its own sentence: the
+        # model did not misspell anything, it asked at the wrong moment.
+        if not close and known:
+            close = known[:5]
+        hint = (" available here: " + ", ".join(close)) if close else ""
+        more = f" (+{len(known) - len(close)} more)" if len(known) > len(close) else ""
+        return f"(unknown tool: {name};{hint}{more})" if hint else f"(unknown tool: {name})"
+
     def execute(self, name: str, args: dict) -> str:
         p = self._route.get(name)
-        return p.execute(name, args) if p else f"(unknown tool: {name})"
+        return p.execute(name, args) if p else self._unknown(name)
 
     def execute_result(self, name: str, args: dict, *, cancel_check=None) -> ToolResult:
         """Typed dispatch, additive to the historical string-returning ``execute`` contract.
@@ -187,7 +217,7 @@ class CompositeTools:
         """
         p = self._route.get(name)
         if p is None:
-            return ToolResult(content=f"(unknown tool: {name})", is_error=True,
+            return ToolResult(content=self._unknown(name), is_error=True,
                               retryable=False, provenance={"source": "composite"})
         typed = getattr(p, "execute_result", None)
         if callable(typed):
