@@ -863,7 +863,9 @@ class MachineRunsTools(ForeignRunReader):
         """Structured per-run summary for EVERY run (used by the tool AND by @run-mention expansion)."""
         out = []
         for rid in self._run_ids():
-            st = self._state(rid)
+            # A SWEEP over every run under the root — its folds must not evict the runs the turn is
+            # actually working with (`tools/_runcache.py::_cache_max`).
+            st = self._state(rid, scan=True)
             if st is None:
                 continue
             live = self._alive(rid)

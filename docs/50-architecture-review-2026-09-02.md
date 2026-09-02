@@ -457,7 +457,7 @@ Tracked: `asha-inert-on-this-task-family`, `f1i-b-serial-deep-research-gate`,
 `first-propose-runs-with-every-gpu-idle`, `monitor-fault-has-no-outcome-label`,
 `judge-bench-covers-two-judges-of-four`, `strategist-developer-field`,
 `concept-skeleton-matches-no-run`, `classifier-rewrites-authored-membership`, `overrun-grace-bar`,
-`crash-predictability-unmeasured`, `next-experiments-never-reach-proposal`.
+`crash-predictability-unmeasured`.
 
 **Top moves.** (1) Cadence offload behind a capture sink (EM-01). (2) Split `train_monitor.py`
 along its importer map (EM-06). (3) One watchdog tick helper (EM-05) so EM-04/08/12 land once.
@@ -1175,7 +1175,7 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `assistant-has-no-untrusted-evidence-boundary` | `serve/assistant.py` | one envelope, used by both agents |
 | `read-fence-takes-the-command-sequencer` | `serve/routers/runs.py` | one lock-free generation fence |
 | `no-per-request-fold-budget` | `serve/appstate.py` | one fold per (identity, request) |
-| `foreign-run-fold-cache-thrashes` | `tools/_runcache.py` | one cache per root, bounded by bytes |
+| `repeated-sweep-refolds-the-whole-corpus` | `tools/_runcache.py` | a bound that covers the corpus, or a cheaper per-run projection — after measuring |
 | `knowledge-index-re-embeds-every-record` | `tools/knowledge_tools.py` | memoize by content digest — after measuring |
 | `card-lane-fills-outside-the-policy-population` | `search/card_selection.py` | a legal-action set per policy |
 | `tagger-item-has-no-untrusted-envelope` | `search/concept_tagging.py` | the envelope the comment promises |

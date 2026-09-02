@@ -1103,8 +1103,8 @@ class ForeignRunReader:
         self._contracts: dict[str, object] = {}
         self._self_contract_cached: tuple = ()
 
-    def _state(self, run_id: Optional[str]) -> Optional[RunState]:
-        return self._runs.state(run_id)
+    def _state(self, run_id: Optional[str], *, scan: bool = False) -> Optional[RunState]:
+        return self._runs.state(run_id, scan=scan)
 
     # --- evaluation-contract receipt -----------------------------------------
     #
@@ -1288,8 +1288,8 @@ class SiblingRunTools(ForeignRunReader):
             return f"(tool error: {e})"
 
     # --- internals -----------------------------------------------------------
-    def _state(self, run_id: Optional[str]) -> Optional[RunState]:
-        return self._runs.state(run_id)
+    def _state(self, run_id: Optional[str], *, scan: bool = False) -> Optional[RunState]:
+        return self._runs.state(run_id, scan=scan)
 
     def _sibling_ids(self) -> list[str]:
         """Run ids under run_root, excluding self, restricted to our task_id.
@@ -1307,7 +1307,10 @@ class SiblingRunTools(ForeignRunReader):
         for rid in cand:
             if rid == self.self_run_id:
                 continue
-            st = self._state(rid)
+            # A SWEEP, not a working read: this walks every run under the root to answer "which are
+            # my siblings", so its folds must not evict the runs the turn is actually reasoning
+            # about (`_runcache.py::_cache_max`).
+            st = self._state(rid, scan=True)
             if st is None or st.task_id != self.task_id:
                 continue
             out.append(rid)
@@ -1436,7 +1439,7 @@ class AllRunsTools(ForeignRunReader):
     def _list_runs(self) -> str:
         lines = []
         for rid in self._all_ids():
-            st = self._state(rid)
+            st = self._state(rid, scan=True)          # a sweep — see `_sibling_ids` above
             if st is None:
                 continue
             best = st.best()

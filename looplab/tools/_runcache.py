@@ -30,12 +30,23 @@ class RunStateCache:
         # Small on purpose: cross-run tools reason over a handful of runs per turn (a sibling, the
         # best few), while `list_runs` sweeps every run once and must not evict what the turn is
         # actually working with — 32 covers the working set without pinning a whole run-root.
-        # OPEN[foreign-run-fold-cache-thrashes] every listing tool walks the run ids in sorted order folding
-        # each, so above this bound the LRU evicts the head while the tail is still being folded and the next
-        # call misses on every run again — the classic sequential-scan thrash, on a corpus of 46-59 runs. The
-        # sibling reader's `~2,500 ms warm` figure is that thrash measured without being recognised as one,
-        # and on the assistant the instance is rebuilt per turn, so it starts empty every time.
+        # OPEN[repeated-sweep-refolds-the-whole-corpus] a SECOND sweep in one turn still misses on
+        # every run, because 32 slots cannot hold a 46-59 run corpus and `scan=True` deliberately
+        # does not try to. Closing it means either a bound that covers the corpus or a cheaper
+        # per-run projection, and BOTH need a number this box cannot produce: how often a turn
+        # sweeps twice, and what a fold costs at this corpus size (`runs/` is empty here, and the
+        # sibling reader's `~2,500 ms warm` figure is the OTHER defect — the working-set eviction
+        # fixed below — measured without being recognised as one).
         # proof:`present:_cache_max = 32@looplab/tools/_runcache.py`
+        #
+        # WHAT WAS FIXED, and why it needed no measurement: this comment ALREADY stated the policy
+        # ("`list_runs` sweeps every run once and must not evict what the turn is actually working
+        # with") and the code did the opposite. A sweep promoted every hit and inserted every miss
+        # at the HOT end, so a 46-run walk evicted all 32 warm entries and kept the sweep's last 32
+        # — the working set gone, replaced by runs the turn was not asking about. `state(scan=True)`
+        # is the standard scan-resistant read: no promotion on a hit (a sweep visits each run once,
+        # so promoting can never help the sweep and demotes the working set), and a miss lands at
+        # the COLD end, so a sweep churns roughly one slot instead of the whole cache.
         self._cache_max = 32
         # Divergence receipts live OUTSIDE the LRU, deliberately. `_list_runs` folds every run under
         # the root and only then asks each one whether its log was complete, so an evicted receipt
@@ -70,14 +81,28 @@ class RunStateCache:
         except OSError:
             return (0, 0)
 
-    def state(self, run_id: Optional[str]) -> Optional[RunState]:
+    def state(self, run_id: Optional[str], *, scan: bool = False) -> Optional[RunState]:
+        """The folded `RunState` for one run, or None.
+
+        `scan=True` marks a read that is part of a SWEEP over every run id — what every listing
+        tool does. Such a read is deliberately not recency-bearing: see `_cache_max` above for what
+        the promotion cost. The default is byte-identical to the historical behaviour, so every
+        single-run reader is unchanged.
+
+        THE RULE FOR A CALLER, stated once because "is this a sweep?" is otherwise a judgement each
+        site makes differently: a read is a SCAN when its population is `run_ids()`, i.e. every run
+        under the root. A loop over an already-scoped subset (`RunTools._sibling_ids`' task-filtered
+        result) is an ordinary read — those runs ARE what the turn is reasoning about, and demoting
+        them is the eviction this flag exists to prevent, pointed the wrong way.
+        """
         rd = self.safe_dir(run_id)
         if rd is None:
             return None
         sig = self.sig(rd)
         hit = self._cache.get(str(run_id))
         if hit and hit[0] == sig:
-            self._cache.move_to_end(str(run_id))     # recency: survive the next eviction
+            if not scan:
+                self._cache.move_to_end(str(run_id))  # recency: survive the next eviction
             return hit[1]
         from looplab.events.eventstore import iter_event_jsonl, log_divergence
         from looplab.core.models import Event
@@ -98,7 +123,10 @@ class RunStateCache:
             divergence = {"unreadable": True}
         self._partial[str(run_id)] = divergence
         self._cache[str(run_id)] = (sig, st)
-        self._cache.move_to_end(str(run_id))
+        # A SWEEP'S MISS LANDS COLD. `move_to_end(last=False)` makes it the next thing evicted, so a
+        # 46-run walk over 32 slots churns one slot instead of replacing the whole working set with
+        # runs the turn never asked about. A single-run read still lands hot, unchanged.
+        self._cache.move_to_end(str(run_id), last=not scan)
         while len(self._cache) > self._cache_max:
             self._cache.popitem(last=False)          # drop the least recently used run state
         return st

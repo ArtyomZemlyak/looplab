@@ -788,17 +788,16 @@ class ResearchCadenceMixin:
         # It is explicitly model-generated advisory data, not operator authority; prompt rendering
         # filters this source while the research memo/open-hypothesis channels carry the signal.
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
-        # OPEN[next-experiments-never-reach-proposal] the concrete half of the new memo split has no
-        # production reader, so an experiments-only memo steers no later work.
-        # proof:absent:memo_d.get("next_experiments")@looplab/engine/research_cadence.py
-        # REVIEW 2026-08-27 (P1 delivery): the durable model says these entries are left to be
-        # proposed as real work, but this writer reads only the legacy union and open questions. A
-        # schema-valid memo that omits the optional compatibility field therefore appends its paid
-        # `research_completed` row yet emits no hint, card or executable proposal for its concrete
-        # list.
-        # AMENDED 2026-08-29 — THIS REVIEW'S OWN PARENTHETICAL REMEDY IS SPENT, and re-deriving it
-        # is what the next reader must not repeat. It said "route that list through the real
-        # proposal intake (or a dedicated bounded hint)"; the second half cannot work.
+        # WHERE `next_experiments` IS DELIVERED, and it is deliberately NOT from here. This writer
+        # reads only the legacy union and open questions; the concrete half of the memo split
+        # reaches a Researcher through `tools/run_tools.py::_research_memo`, which renders
+        # `open_questions + next_experiments` as the memo's directions when
+        # `recommended_directions` is empty. The reasoning below is kept because every alternative
+        # route was tried on paper and each fails for a reason a later reader would otherwise
+        # re-derive.
+        # THE PARENTHETICAL REMEDY THIS ONCE CARRIED IS SPENT, and re-deriving it is what the next
+        # reader must not repeat. It said "route that list through the real proposal intake (or a
+        # dedicated bounded hint)"; the second half cannot work.
         # `agents/hints.py::render_hint_directives` is the ONLY renderer of `state.hints`, and it
         # FILTERS deep-research rows out on BOTH keys — `source == "deep_research"` and the
         # `DEEP_RESEARCH_HINT_PREFIX` text, the second catching rows folded from logs older than the
@@ -834,9 +833,12 @@ class ResearchCadenceMixin:
         # filled `next_experiments`, and memo 4 is `(next 7, directions 0, questions 0)` — a
         # schema-valid memo whose ONLY content is the concrete list, which steered nothing in that
         # run because the reader did not exist yet, not because the design lacks one.
-        # SO THIS IS NOT CODE WORK. It is unexercised delivery: the next run launched from master
-        # is what turns 11-of-18 memos from unreadable into read, and the marker stays only until a
-        # run carrying `899f6244` shows a `next_experiments` entry reaching a proposal.
+        # SO THIS IS NOT CODE WORK, and it carries no open-item marker for exactly that reason: a
+        # marker's proof must be RE-DERIVABLE FROM THE TREE, and this one's could never go green —
+        # the reader is one package over and invariant #1 forbids this background task from ever
+        # becoming it, so an `absent:` proof pointed at this file would hold forever. What remains
+        # is unexercised delivery, which is the ordinary state of a recently shipped change: the
+        # next run launched from master is what turns 11-of-18 memos from unreadable into read.
         # WHAT BECOMES A BOARD ROW is now what the memo itself called a QUESTION, not everything it
         # would try next. `recommended_directions` was described to the model as "specific next
         # experiments to try", so it correctly returned experiments and every one of them landed as
