@@ -115,6 +115,7 @@ the two in one total -- a task whose log spans the change has both shapes, and t
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -270,6 +271,30 @@ class Pricing:
             float(self.default.get("output_per_token", 0.0)),
             self.basis + "-default-fallback",
         )
+
+
+def _request_sha(body: bytes) -> str:
+    """A short fingerprint of the request BODY, so a re-send is identifiable as one.
+
+    WHY. Measured 2026-09-02 (docs/56 §120, §121): `expEEc` carried two meter rows 0.20 s apart with
+    identical 22,313/25,966 token counts and identical cost, the second reporting 907,902 tok/s over
+    28.6 ms -- and the engine's `spans.jsonl` held ONE generation, 182.1 s long, spanning both. One
+    call by the engine's accounting, two requests through this proxy, both priced. Across the four
+    probes it came to $0.055.
+
+    Four hypotheses died before this one: the reconciler's read order, a double `record()` (there is
+    exactly one write site and four mutually exclusive callers), end-of-run flushing (no rows land
+    after the last generation span), and corpus-wide double metering (the whole meter-minus-spans
+    gap is $0.079, so the $0.57 a throughput detector claimed cannot exist). What none of them could
+    do is tell a RE-SEND from two honest calls that happen to have the same token counts -- because
+    nothing in the row describes the request.
+
+    This does. Same bytes up, same `req_sha`; a repeat is then a fact in the ledger rather than an
+    inference from timing. Sixteen hex characters of SHA-256 over the raw body: enough to separate
+    requests, short enough not to bloat a row written per call, and never the body itself, which
+    carries the prompt.
+    """
+    return hashlib.sha256(body or b"").hexdigest()[:16] if body else ""
 
 
 def _prompt_chars(body: bytes) -> int:
@@ -699,6 +724,7 @@ class Handler(BaseHTTPRequestHandler):
             "ts": time.time(), "arm": arm, "task": task, "attempt": attempt, "path": tail,
             "model": model, "status": status, "latency_ms": latency_ms, "stream": streaming,
             "attempts": attempts, "queued_s": round(queued_s, 2),
+            "req_sha": _request_sha(req.data or b""),
         }
 
         out = raw
@@ -838,7 +864,7 @@ class Handler(BaseHTTPRequestHandler):
         liveness signal in the run a property of this file.
         """
         row = {"ts": time.time(), "arm": arm, "task": task, "attempt": attempt, "path": tail,
-               "model": model, "stream": True}
+               "model": model, "stream": True, "req_sha": _request_sha(req.data or b"")}
         # Counted from the request the proxy is HOLDING, before anything upstream can go wrong with
         # it. This is the only prompt-side evidence that survives a cut, so it is taken up front
         # rather than looked for later among objects the abort path may not have.

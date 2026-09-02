@@ -5685,3 +5685,47 @@ node is its best.
 156.91**. Four against two, every treatment run above every control run. Exact one-sided rank-sum
 over that split is **p = 1/15 = 0.0667** — below nothing conventional, and the first time this arm
 has been able to produce a p at all. `ctlEEc` is finishing and will make it 4 v 3.
+
+## 122. The ledger now describes the request, so the next re-send is a fact instead of an inference
+
+§121 ended by naming the one thing that would settle §120's residue, and this ships it: every meter
+row carries `req_sha`, sixteen hex characters of SHA-256 over the raw request body, stamped by BOTH
+row builders — the streaming path and the non-streaming one.
+
+The reason it is the right next step rather than a fifth detector: nothing in a meter row described
+the REQUEST. Two rows with the same tokens and cost can be a re-send or two honest calls, and every
+detector tried in §120–§121 was really a guess about which — the throughput one claimed $0.566
+against a total gap of $0.079, and the nesting one claimed $27.76 when nesting is just what
+concurrency looks like (§100). With a fingerprint the question stops being statistical: same bytes
+up, same `req_sha`, and a repeat is visible in one `sort | uniq -d`.
+
+Five falsifiers. Two mutations redden: hashing an empty body (which would give every bodyless
+request one shared non-empty fingerprint, reading in the ledger as "all the same request"), and
+stamping only one of the two row builders — the streamed and non-streamed paths build rows
+separately, so half a ledger would be unable to answer the question the field was added for.
+
+**Not yet in force.** The running meter is 1138773, started 2026-08-31, and restarting it would zero
+the counter — which would make §120's $0.055312 fall outside `--since` and vanish unexplained rather
+than explained. The field takes effect at the next restart, and the residue stays on the books until
+then. It stopped growing the moment the last probe finished, which is itself consistent with a
+re-send while a call is in flight.
+
+### `ctlEEc`, the last probe of the batch
+
+TEST **197.8487** against a best train of 199.944 (ratio 0.990). 45-line kernel, $1.0069, 20 % of
+the dollar before the first node and 12 % after the last, 20 `eval_train`, reference 12.5 % / 12.5 %.
+Nodes **[20.57, 199.94, 24.32]** — the run that started without a kernel (§119's single exception),
+found one on its second draw, and left it again on its third. Best over last: 8.22×.
+
+**§109's arm, all seven finished:**
+
+| arm | TEST |
+|---|---|
+| `--exploit-best` | 268.25, 252.56, 251.35, 236.76 |
+| shipped card | 197.85, 179.14, 156.91 |
+
+Four against three, and every treatment run still above every control run. Exact one-sided rank-sum:
+**p = 1/35 = 0.0286**. That crosses §83's floor for the first time — and §83's own rule is that the
+floor is necessary, not sufficient: it asked for nine per arm against a 1.25× effect, this is four
+and three, and the ratio here is 1.2–1.7×. The honest statement is that the arm is now worth
+finishing, not that it has finished.
