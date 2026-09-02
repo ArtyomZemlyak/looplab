@@ -818,6 +818,18 @@ MEASURE = (
 # The consequence for the model is what the clause states: a risky rewrite late in the run cannot
 # LOSE anything already measured, so the timid move -- leaving a good solver alone and running out
 # the clock -- buys nothing it did not already have.
+EXPLOIT_BEST = (
+    " AND WHEN SOMETHING WORKS, THE NEXT THING YOU TRY SHOULD BE A VARIANT OF IT. Measured over "
+    "this bench's own corpus (docs/56 §108): on `edge_expansion` a solver with a compiled Cython "
+    "kernel scores a median 166x and everything else -- numba, pure Python -- a median 26x, so the "
+    "whole spread is one choice. Of the 28 times a run stood on a kernel node and proposed again, "
+    "14 proposed a kernel and 14 proposed something else, walking off a 166x median onto a 26x one. "
+    "A second idea that shares nothing with the first is a fresh draw from the same distribution, "
+    "not progress. If a version scored well, the cheapest next version is THAT ONE with one thing "
+    "changed. "
+)
+
+
 KEEP_BEST = (
     " THE BEST EVALUATED SOLVER IS WHAT GETS SUBMITTED, NOT YOUR LAST ONE. Every version you "
     "evaluate is kept and scored; at the end this run submits the highest-scoring one, and a "
@@ -1176,6 +1188,15 @@ def main() -> int:
                          "CONTROL arm for those two clauses and nothing else -- every other "
                          "clause the same flags produce is byte-identical, which is what "
                          "makes the two arms comparable.")
+    ap.add_argument("--exploit-best", action=argparse.BooleanOptionalAction, default=False,
+                    help="State §108's finding: when a version scored well, the next one should be "
+                         "a VARIANT of it. OFF by default, and that is deliberate -- every probe in "
+                         "the corpus was collected without this clause, so leaving it off keeps the "
+                         "shipped card byte-identical to the one those 49 runs ran on. "
+                         "`--exploit-best` builds the TREATMENT arm; the control arm is the "
+                         "shipped card, which already exists. §92 is why the clause is not simply "
+                         "switched on: a clause whose effect nobody measured is a clause nobody "
+                         "knows the sign of.")
     ap.add_argument("--reference-affordance", action=argparse.BooleanOptionalAction,
                     default=True,
                     help="State that `reference_<task>.py` is an importable module the "
@@ -1255,6 +1276,11 @@ def main() -> int:
                  # what you produce, and both are rules the run itself never demonstrates. See
                  # KEEP_BEST -- it is the reason "commit to one card" is not a reason to be timid.
                  + (KEEP_BEST if args.one_card and args.unteachable_rules else "")
+                 # The TREATMENT clause of §108's arm, and the only clause in this card that is OFF
+                 # by default. It sits beside KEEP_BEST because they are the same subject from two
+                 # sides: KEEP_BEST says a worse attempt costs nothing, this says an UNRELATED
+                 # attempt costs a draw.
+                 + (EXPLOIT_BEST if args.one_card and args.exploit_best else "")
                  # BANS then PERMISSIONS, in that order and both under the same flag: they are one
                  # statement of what this arena allows, and the half that was missing is the half
                  # that costs score. See `solution_space_clause`.

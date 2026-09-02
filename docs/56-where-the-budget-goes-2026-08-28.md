@@ -5102,3 +5102,41 @@ a dollar proposing either the same node again or a 25× one.
 Both halves are testable with arms this bench can already build, and neither is shipped on the
 strength of this section — §92 is the standing rule. The queue entry that follows from it is a
 control arm on ONE clause: *when a node scored well, propose a variant OF IT.*
+
+## 109. §108's finding, built as an arm instead of switched on
+
+The clause §108 ends on — *when a version scored well, the next one should be a variant of it* — is
+the most obviously right thing this notebook has proposed all week, which is exactly why it is not
+shipped on.
+
+`make_task.py --exploit-best`, **OFF by default**, and the default is the whole point:
+
+| arm | card | n |
+|---|---|---|
+| control | the shipped card, unchanged | **49 runs, already paid for** |
+| treatment | `--exploit-best` | to be run |
+
+Leaving it off keeps the shipped card byte-identical to the one those 49 probes ran on, which makes
+the corpus the control group at zero cost. A clause that arrived ON by default would have retired
+all forty-nine in one commit — the mistake §78 records the corpus already paying for once.
+
+The clause carries the measurement rather than the advice:
+
+> AND WHEN SOMETHING WORKS, THE NEXT THING YOU TRY SHOULD BE A VARIANT OF IT. […] on
+> `edge_expansion` a solver with a compiled Cython kernel scores a median 166x and everything else
+> — numba, pure Python — a median 26x […] Of the 28 times a run stood on a kernel node and proposed
+> again, 14 proposed a kernel and 14 proposed something else […] A second idea that shares nothing
+> with the first is a fresh draw from the same distribution, not progress.
+
+It sits under `--one-card` beside `KEEP_BEST` because the two are one subject from two sides:
+`KEEP_BEST` says a WORSE attempt costs nothing, this says an UNRELATED attempt costs a draw.
+
+Four falsifiers, and both mutations redden: flipping the default to ON reddens the test that keeps
+the shipped card clean, and making the flag also suppress `KEEP_BEST` reddens the test that the two
+arms differ in exactly one clause — the property that made §92 and §94 readable at all.
+
+**What it would cost to answer.** §83's power table: n = 6 per arm gives 50 % power against a 1.25×
+effect, n = 9 is what the reference arm needed to close. The control side is free. So the price of
+the answer is **9 probes ≈ $10.35** at the measured $1.1504 — and `edge_expansion` is the task to
+run it on, because it is the only one of the three where later nodes beat the first at all (§108),
+i.e. the only one where "propose a variant" has anything to act on.
