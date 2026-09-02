@@ -1159,16 +1159,38 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # model saying "the check was wrong" must not thereby score the node (docs/36). What it buys is the
 # record and the DIRECTIVE: `crash_repair._repair_error_context` points the repair at the check
 # instead of asking a Developer to rewrite an experiment it has just been told is correct.
-# OPEN[engine-terminal-reasons-unregistered] the ten reasons the ENGINE mints on a terminal
-# (gpu_unavailable, gpu_unpinnable, proxy_skipped, superseded, card_dropped, aborted, developer_crash,
-# idea_rejected, monitor_broken, asha_underperforming) are bare literals at every write and read site;
-# `replay.py` and `attention.py` spell the ignore-set twice and both list a reason no writer mints.
-# Same seam shape as TRIAGE_ACTIONS, with no registry and no AST guard.
-# proof:absent:ENGINE_TERMINAL_REASONS@looplab/core/models.py
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
                                     "unclassified",
                                     "expect_failed", "check_failed", "diverged", "stalled",
                                     "needs_failed", "not_learning", "check_false_positive")
+
+
+# THE REASONS THE ENGINE ITSELF MINTS ON A TERMINAL, as opposed to `FAILURE_REASONS` above, which
+# are the ways an EVALUATION can fail. A node can also end without its evaluation having failed —
+# because the box had no GPU, because the operator aborted it, because the Card behind it was
+# dropped — and those words were bare literals at every write and read site across ~18 modules.
+#
+# WHAT THAT COST is small and exact, which is why this is a registry rather than a refactor: two
+# readers spell the benign subset independently (`events/replay.py`'s failure-spike filter and
+# `serve/attention.py`'s owner alert), and BOTH list `cancelled`, which no terminal writer mints —
+# so each carries one word that can never match, and neither could tell. Same seam shape as
+# `TRIAGE_ACTIONS`, which has a registry and a two-way scan; this had neither.
+#
+# NOT merged with `FAILURE_REASONS`: that tuple gates `Settings.inline_repair_reasons` and the
+# repair loop, and a node the engine superseded is not a node whose code can be repaired.
+ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
+    "gpu_unavailable", "gpu_unpinnable", "proxy_skipped", "superseded", "card_dropped",
+    "aborted", "developer_crash", "idea_rejected", "monitor_broken", "asha_underperforming",
+    "frozen",
+)
+
+# The subset that is BENIGN — a node that ended for a reason saying nothing about the experiment.
+# Both readers of it derive from here instead of spelling their own, which is what let one word
+# rot in two places at once. `attention.py` adds nothing and `replay.py` adds nothing; a reader
+# that needs a different set says so at its own site and explains why.
+BENIGN_TERMINAL_REASONS: frozenset[str] = frozenset({
+    "aborted", "card_dropped", "proxy_skipped", "superseded", "frozen",
+})
 
 
 def is_developer_error(code) -> bool:

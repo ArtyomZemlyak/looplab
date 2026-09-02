@@ -41,7 +41,7 @@ from looplab.core.models import (CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_REPLAY_S
                      EXTRA_METRIC_DECLARED, normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
                      normalize_researcher_footprint,
                      normalize_steering_context,
-                     run_setup_key)
+                     run_setup_key, BENIGN_TERMINAL_REASONS)
 # The derived Card ledger (doc 25 EV-01). ONLY the names this module's own handlers call are
 # imported: a re-export of a helper `card_ledger` then calls internally would look like a patch seam
 # while a monkeypatch through it silently missed the fold, which is the exact failure the flat-import
@@ -986,9 +986,11 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             _charge_terminal_cost(st, n, d, ctx)
 
 
-_FAILURE_SPIKE_IGNORED_REASONS = {
-    "aborted", "cancelled", "card_dropped", "proxy_skipped", "superseded",
-}
+# DERIVED, not spelled. This set and `serve/attention.py`'s owner-alert filter are the same
+# judgement — "this node ended for a reason that says nothing about the experiment" — and were
+# hand-written twice; both carried `cancelled`, which no terminal writer mints, so each held one
+# word that could never match and neither could tell. See `core/models.py::BENIGN_TERMINAL_REASONS`.
+_FAILURE_SPIKE_IGNORED_REASONS = set(BENIGN_TERMINAL_REASONS)
 
 
 def _counts_as_current_failure(st: RunState, n: Node) -> bool:

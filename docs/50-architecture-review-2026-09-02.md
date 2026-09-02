@@ -1171,7 +1171,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `eval-attempt-is-one-giant-method` | `engine/evaluate.py` | the `EvalAttempt` phase object |
 | `serial-node-build-holds-the-loop` | `engine/orchestrator.py` | one offload helper for four sites |
 | `paid-cadences-hold-the-engine-loop` | `engine/orchestrator.py` | offload under a capture sink |
-| `engine-terminal-reasons-unregistered` | `core/models.py` | a registry + AST guard |
 | `repair-ledger-drops-rows-without-a-receipt` | `core/models.py` | per-node bound + omission receipt |
 | `auto-skill-body-leaves-a-run-unredacted` | `engine/memory.py` | redact the body at both ends |
 | `stage-row-statuses-unregistered` | `runtime/command_eval.py` | a status registry + two-way scan |
