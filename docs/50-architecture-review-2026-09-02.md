@@ -530,7 +530,7 @@ real 4-process race test. `replay.py` is five handler families in one file shari
 | EV-11 | L | C | `digest.py::trust_reflection`/`watchdog_reflection` (lazy `replay` import "to avoid a cycle"), `replay.py::_on_research_completed`/`_on_report_generated` (lazy `advisory_payloads`) | No cycle is possible under the layering rule (`replay` does not import `digest`; `core` imports `events` in 0 files); the stated reason is false. | Hoist, or state the real reason (import weight). |
 | EV-12 | L | P | `traceview.py::TRACE_PROJECTION_SCHEMA` (= 2, "bump together with `span_index._SCHEMA`") and `span_index.py::_SCHEMA` (= 12) | Two schema numbers kept in step by a comment; the persisted index header is stated only in code. | Derive `_SCHEMA` from `(TRACE_PROJECTION_SCHEMA, INDEX_LAYOUT_VERSION)`; document the header in doc 08. |
 
-Tracked: `score-backfill-fold-drops-backfilled-marker`; doc 25 EV-04's scalar-guard residue.
+Tracked: doc 25 EV-04's scalar-guard residue.
 
 **Top moves.** (1) Make the payload contract statable (EV-03). (2) Split `replay.py` by handler
 family (EV-02). (3) Bounded journals with omission receipts (EV-04, EV-01).
