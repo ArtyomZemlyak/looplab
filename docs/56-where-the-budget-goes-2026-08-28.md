@@ -5851,3 +5851,34 @@ this bench runs, not an artefact of the batch it was found in.
 
 *Arm standing, unchanged at seven finished:* treatment 268.25 / 252.56 / 251.35 / 236.76, control
 197.85 / 179.14 / 156.91, p = 1/35 = 0.0286. The four running take it to 6 v 5.
+
+## 126. §85's cutoff instrumentation has never fired, and now there is a reason rather than a wait
+
+Shipped on 2026-08-30 with tests and a falsifier, `cutoff_seconds` / `cutoff_spend` record what a
+`plan_step` was cut BY when the wall takes it. Every sweep since has reported the same thing: it has
+never recorded live data. That has been sitting as "wait for a run that cuts" for four days.
+
+Measured across the whole corpus — **22,237 events, 0 with either field** — and then the reason,
+which took one more query:
+
+| how a finished run ends | runs |
+|---|---|
+| `budget_exhausted` | **48 of 48** |
+| the wall | **0** |
+
+`run_finished reason=budget_exhausted` in all 48, and `finalize_step` agreeing in all 48. There is
+no wall cut anywhere in this bench's history, so the field that records one cannot appear. §85's
+"twelve cut sessions, all cut by time" is a fact about a DIFFERENT corpus — repo tasks with hour-long
+trainings — and does not transfer to a $1 AlgoTune probe, which runs out of money first every single
+time.
+
+So the item closes as **not applicable here** rather than as unverified. The instrumentation is
+correct, tested, and dead on this bench; it stays because repo tasks are what it was written for. And
+the fact underneath it is one this notebook already leans on — §101 used "50 of 50 end on
+`budget_exhausted`" to explain why a third slower endpoint buys no fewer nodes. That number is now 48
+of 48 on the current corpus and it has never had an exception.
+
+*Arm, second nodes in:* `expEEe` 198.58 → **21.83** (treatment, collapsed), `expEEf` 167.21 →
+**212.91** (treatment, improved), `ctlEEd` 258.73 → **235.75**, `ctlEEe` 213.06 → **260.11** (both
+controls held). Two of each direction in each arm; nothing to read, and it is worth writing down that
+there is nothing to read.
