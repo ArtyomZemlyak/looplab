@@ -5882,3 +5882,45 @@ of 48 on the current corpus and it has never had an exception.
 **212.91** (treatment, improved), `ctlEEd` 258.73 → **235.75**, `ctlEEe` 213.06 → **260.11** (both
 controls held). Two of each direction in each arm; nothing to read, and it is worth writing down that
 there is nothing to read.
+
+## 127. The arm's p moved the wrong way, which is what §83 said it would do
+
+Three more finished, and the ranking is no longer clean:
+
+```
+268.2 T   259.8 C   252.6 T   251.4 T   236.8 T   221.6 T   198.4 T   197.8 C   179.1 C   156.9 C
+```
+
+`ctlEEe` — a CONTROL — came in at **259.7561**, second overall. Exact one-sided rank test at
+6 v 4: **p = 0.08571** (18 of 210), against **0.0286** at 4 v 3 two sweeps ago. Median ratio
+244.05 / 188.50 = **1.295**.
+
+**That is the predicted behaviour, not a surprise.** §83's power table sized this bench against a
+1.25× effect and said six per arm gives 50 % power; the observed ratio is 1.295 and the arm is at
+six and four. A p that crosses 0.05 at n = 7 and retreats at n = 10 is what an underpowered
+comparison does whichever way the truth lies. The 0.0286 in §122 was recorded with "necessary, not
+sufficient" attached to it, and this is why.
+
+Nothing is claimed. The arm continues.
+
+### The three probes
+
+**ctlEEe** (control) — TEST **259.7561** against best train 260.1077 (ratio 0.999). 58-line kernel,
+$1.0137, 42 % of the dollar before the first node and 0 % after the last, 23 `eval_train`, reference
+2.9 % / 2.9 % — the lowest reference use of the batch. Nodes **[213.06, 260.11, 26.79]**, best over
+last **9.71×**.
+
+**expEEf** (treatment) — TEST **221.5792** against 218.66 (ratio 1.013). 38-line kernel, $1.0078,
+24 % before / 0 % after, 27 `eval_train`, reference 9.1 % / 4.5 %. **Four evaluated nodes**, the only
+four-node run of the batch: **[167.21, 212.91, 218.66, 211.40]** — up, up, and then a hold within
+3 % of the peak. Best over last **1.03×**, the tightest ending in the corpus.
+
+**expEEe** (treatment) — TEST **198.3876** against 198.5776 (ratio 0.999). 46-line kernel, $1.0138,
+35 % before / 0 % after, 29 `eval_train`, reference 9.5 % / 9.5 %. Nodes **[198.58, 21.83, 131.82]**
+— a collapse to the low cluster and a partial recovery. Best over last 1.51×.
+
+So within the treatment arm this sweep: one run that held its peak across four nodes, and one that
+fell to 21.8 and climbed back. The clause is not doing one thing.
+
+*Champion rule, again:* `ctlEEe` reports 259.76 instead of 26.79 because the best evaluated node is
+what gets submitted. That is three of the batch's ten runs it has now carried.
