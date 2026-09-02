@@ -5473,3 +5473,38 @@ So: nothing is claimed. The arm needs the rest of its nine. What this entry reco
 the near-miss — four sequences that looked like the hypothesis, a matched comparison that says
 `p = 0.45`, and a decision not to write the exciting version. §108 and §112 both had to be corrected
 by a later sweep; this one gets corrected before it is written.
+
+## 117. §109's arm at three finished probes, and the two runs the champion rule carried
+
+**expEEa** (treatment) — TEST **251.3522**, third-best `edge_expansion` this bench has produced,
+against a best train of 250.1131 (ratio 1.005, inside the band). 51-line Cython champion. $1.0182,
+33 % of it before the first node and 5 % after the last. 26 `eval_train`. Reference 11.1 % import /
+11.1 % `is_solution`. Money: `plan_step` 33.8 %, `propose` 28.2 %, `deep_research` 21.8 %,
+`plan` 8.6 %. Nodes **[250.11, 240.17, 203.53]** — best over last 1.23×.
+
+**ctlEEa** (control) — TEST **179.1429** against best train 178.8763 (ratio 1.001). 32-line kernel.
+$1.0104, 34 % before / 0 % after, 17 `eval_train`, reference 10.7 % / 7.1 %. Nodes
+**[172.93, 178.88, 0.00]** — the last node scored ZERO with `build_ext ok` and 41.8 s of evaluation,
+so the extension compiled and the solver then failed validation. Not a ruler failure (§2's 0.1 s
+signature is absent); a real zero, and the champion rule is the only reason this run reports 179
+instead of nothing.
+
+That is two of the three finished runs saved by the rule — `ctlEEb` at 17.69× last sweep and now
+`ctlEEa` at infinity. §84 measured the rule's protective value at p = 7.45e-09 and it keeps earning
+it.
+
+### Standing, and nothing claimed
+
+| arm | finished | TEST |
+|---|---|---|
+| `--exploit-best` | 1 (+1 running) | 251.35 |
+| shipped card | 2 | 179.14, 156.91 |
+
+One against two is not a comparison. Three more launched on the freed lanes — `expEEc`, `expEEd`
+(treatment) and `ctlEEc` (control), card fingerprints verified distinct (`fd23da29` against
+`16426855`), streaming on, no timings warning in any probe log. That takes the arm toward §83's nine.
+
+*Also checked and not a defect:* the whole 15,492-call ledger holds **21 × 504** (all from `remEE`,
+unstreamed, 51 hours ago), **2 × 503** and **1 × 400**. The three non-504s are instant rejections
+with no tokens, retried by the client and invisible in the outcome — `expEEb` carried one 132
+minutes ago and is still running normally. Three events in fifteen thousand calls is not a rate.
