@@ -2418,11 +2418,32 @@ def _stage_cursor(ex: _EvalExec, name: str, index: int, total: int):
         _stage_beacon(ex, name, index, total, "finished")
 
 
-# OPEN[stage-row-statuses-unregistered] the eight statuses this mints (reused/ok/fail/timeout/
-# needs_failed/env_unsupported/expect_failed/check_failed) are literals spelled across 13 files, with
-# `RunResult.stages` documenting three of them; the only named subset lives in metric_salvage. A
-# typo'd literal does not fail, it reads as an unknown status in the salvage veto and the UI strip.
-# proof:`absent:STAGE_STATUSES = @looplab/runtime/command_eval.py`
+# WHAT A STAGE ROW'S `status` MAY SAY. `_run_stages` below is the only writer of these; every other
+# module in the tree READS them, and until this registry existed they were bare literals spelled
+# across thirteen files, with `RunResult.stages` documenting three of the eight and
+# `metric_salvage.VETO_STAGE_STATUSES` naming one.
+#
+# A typo does not fail anywhere. It rides onto the durable `stage_finished` row and then reads as an
+# unknown status at every consumer: the salvage veto stops vetoing, the UI strip draws no glyph, and
+# the reuse predicate sees a stage that neither succeeded nor failed. That is the same shape as
+# `TRIAGE_ACTIONS` and `CARD_BUILD_SKIP_REASONS`, both of which have a registry and a two-way scan.
+#
+# Ordered by lifecycle rather than alphabetically, because the ORDER is the story a row tells: a
+# stage is skipped, or it runs and exits, and then its declared contract is checked.
+STAGE_STATUSES: tuple[str, ...] = (
+    # never ran — its inputs were reused or refused before the command was spawned
+    "reused", "needs_failed", "env_unsupported",
+    # ran, and this is how the process ended
+    "ok", "fail", "timeout",
+    # ran and exited 0, and then its own DECLARED contract refused it
+    "expect_failed", "check_failed",
+)
+
+# The subset meaning "this stage did not do its job". `ok` and `reused` are the complement, and
+# `reused` belongs there because a reuse is a previous run of this stage whose result still stands.
+STAGE_FAILED_STATUSES: frozenset[str] = frozenset(set(STAGE_STATUSES) - {"ok", "reused"})
+
+
 def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Optional[str],
                 metric: dict, eval_started: float, check_fn,
                 subject: Optional[list] = None,

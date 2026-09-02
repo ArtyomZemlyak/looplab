@@ -1173,7 +1173,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `paid-cadences-hold-the-engine-loop` | `engine/orchestrator.py` | offload under a capture sink |
 | `repair-ledger-drops-rows-without-a-receipt` | `core/models.py` | per-node bound + omission receipt |
 | `auto-skill-body-leaves-a-run-unredacted` | `engine/memory.py` | redact the body at both ends |
-| `stage-row-statuses-unregistered` | `runtime/command_eval.py` | a status registry + two-way scan |
 | `adapter-reader-runs-outside-the-eval-boundary` | `runtime/command_eval.py` | thread the eval env through |
 | `task-spec-models-ignore-unknown-keys` | `adapters/repo_task.py` | forbid extras, grandfathered |
 | `trace-clear-receipts-are-never-reaped` | `serve/service_reaper.py` | a fifth reaper rule |
