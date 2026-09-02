@@ -2,6 +2,14 @@
 // font-size fitter. Split out of util.js (mega-refactor P5.2 — bodies verbatim); util.js re-exports
 // everything, so importers are unchanged.
 
+// OPEN[ranked-metrics-print-fewer-digits-than-they-rank] the cross-run table ranks at full precision
+// and renders through this four-significant-figure formatter, so the two best numbers on the corpus
+// (0.793426 and 0.793411) both print 0.7934 under ranks 1 and 2 with no tie marker, while the claim
+// sentence beside the table prints the unrounded value. Driven: `Number(v.toPrecision(4)).toString()`
+// returns the same string for both. No caller anywhere in `ui/src` asks for more than 4, so the
+// remedy is a formatter that widens until the ranked values it is given render distinctly, used
+// wherever a rank is shown.
+// proof:absent:distinctMetricFormatter@ui/src/format.js
 export function fmt(v, p = 4) {
   if (v === null || v === undefined || Number.isNaN(v)) return '—'
   if (typeof v !== 'number') return String(v)

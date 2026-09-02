@@ -164,6 +164,11 @@ def apply_task_flags(task: dict, *, kind: Optional[str], goal: Optional[str],
     return task
 
 
+# OPEN[config-file-keys-are-silently-ignored] `--set` validates its keys against `Settings.model_fields`
+# and the FILE layer validates nothing: probed, a `settings:` block carrying `max_node: 30` yields the
+# default 8 with no diagnostic. The YAML file is the documented primary launch surface, so a renamed
+# or mistyped knob is the run-looks-configured failure the enum table exists to stop, one layer up.
+# proof:absent:refuse_unknown_settings_keys@looplab/core/appconfig.py
 def build_settings(file_settings: dict, typed_overrides: dict, sets: dict) -> Settings:
     """Merge settings in precedence order (file < typed flags < --set) and build a validated
     ``Settings``. Unspecified fields fall back to env/.env/defaults because pydantic-settings ranks

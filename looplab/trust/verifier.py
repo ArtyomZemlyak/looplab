@@ -252,6 +252,12 @@ def verify(subject: str, evidence: str, criteria: list[Criterion], *, client=Non
             # judge-call contract `verify_memo` uses, now written once (doc 25 CT-09).
             from looplab.trust.judge import structured_judge
             return structured_judge(client, msgs, _Verdicts, parser=parser, tools=tools)
+        # OPEN[verifier-swallows-the-budget-stop] `BudgetExceeded` subclasses Exception, so a tripped ceiling
+        # is reported here as `n_samples=0, score=None` — indistinguishable from an endpoint failure — and the
+        # loop keeps issuing the remaining samples. This is a SELECTION site (the calibrated tie-break reads
+        # it) and the sibling `memo_verify` re-raises, so the package's own containment rule is inverted in
+        # exactly the place it costs money. Re-raise first, and make the polarity an AST guard.
+        # proof:`absent:except BudgetExceeded@looplab/trust/verifier.py`
         except Exception:  # noqa: BLE001 — a bad sample is dropped, never crashes the verifier
             return None
 

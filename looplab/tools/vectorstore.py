@@ -75,6 +75,11 @@ def hash_embed(text: str, dim: int = 64) -> Vector:
     return v
 
 
+# OPEN[embedding-spend-is-unbilled] this posts to the embeddings endpoint with a bearer key and
+# carries no cost accountant, so the spend is invisible to the durable usage ledger `looplab tokens`
+# reconciles against — while `engine/costs.py` describes this child as having one. The knowledge
+# index rebuilds (and re-embeds) whenever the case store is appended to, so the residual is not small.
+# proof:absent:CostAccountant@looplab/tools/vectorstore.py
 class LLMEmbedder:
     """Real semantic embeddings over any OpenAI-compatible `/embeddings` endpoint (Ollama
     `nomic-embed-text`, vLLM/SGLang, OpenAI…), replacing the lexical `hash_embed` bag-of-words when a

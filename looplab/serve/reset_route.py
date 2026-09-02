@@ -60,6 +60,15 @@ def _durable_archive_move(source: Path, destination: Path) -> None:
     """
     if source.parent != destination.parent:
         raise ValueError("Replay archives must remain in the run directory")
+    # OPEN[replay-archive-has-no-unique-destination] `durable_no_replace_rename`'s docstring records
+    # that on the geesefs mounts every run here lives under, `RENAME_NOREPLACE` answers EINVAL — which
+    # is why the DELETION caller got the unique-destination opt-in. This one keeps failing closed
+    # because its `<name>.reset-<ms stamp>` is a probe-then-use name. So replay archiving cannot succeed
+    # here: it lands on `_pending` -> 425 "retry this exact operation", forever, leaving the run
+    # un-resumable, un-replayable AND un-deletable. The `archiving -> superseded` edge is guarded on the
+    # destination already existing, which a refused primitive never produces. `operation_id` is already
+    # on this receipt: name the archive after it and the stamp's TOCTOU argument dissolves.
+    # proof:absent:unique_destination@looplab/serve/reset_route.py
     durable_no_replace_rename(source, destination, label="replay archive")
 
 

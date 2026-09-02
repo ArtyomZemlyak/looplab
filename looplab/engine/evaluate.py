@@ -196,6 +196,12 @@ def _effective_repair_cap(inline_repair_attempts: int) -> int:
     return int(inline_repair_attempts) or _UNLIMITED_REPAIR_CEILING
 
 
+# OPEN[eval-attempt-is-one-giant-method] `_evaluate` is 1,898 lines reading 51 engine attributes,
+# with 20 appends, 15 `_write_lock` blocks and 4 folds; six test files `inspect.getsource` it, at
+# seven sites, to find things.
+# The phases its own comments name (admit / run_attempt / settle_outcome / salvage / decide_repair /
+# apply_repair / write_terminal) are the split, with every append and lock staying where it is.
+# proof:`absent:class EvalAttempt@looplab/engine/evaluate.py`
 def _repair_attempts_left(attempt: int, cap: int) -> int:
     """How many repairs this node may still make — against the bound that will actually stop it.
 
@@ -1706,6 +1712,13 @@ class EvaluateMixin:
                     repaired_footprint["gpu_mem_mib"], min(held_mem))
         return repaired_footprint
 
+    # OPEN[eval-child-raise-cancels-every-sibling] every raise here except `GpuPinUnenforceable` escapes
+    # into the run-scoped task group: the three callers are `try/finally` with no `except`, so an OSError
+    # from `_materialize`/`_write_node_files` or an ENOSPC from a `store.append` cancels every sibling
+    # eval mid-training with no terminal, re-spends the GPU hours on resume and exits the run with a
+    # traceback. Generalise the `gpu_unpinnable` shape: a shielded `node_failed` terminal under
+    # `_write_lock` plus a run pause naming the exception.
+    # proof:absent:engine_error@looplab/engine/evaluate.py
     async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter,
                         max_es: Optional[float] = None) -> None:
         async with limiter:
@@ -2530,6 +2543,14 @@ class EvaluateMixin:
 
                 _repair_tools, _monitor_verdicts = await anyio.to_thread.run_sync(
                     _repair_inputs, abandon_on_cancel=True)
+                # OPEN[repair-path-holds-the-engine-loop] the three paid repair-path calls (`_triage_crash`,
+                # `_repair`, `_repair_critic`) are plain sync calls on the engine loop: driven with a 5 ms ticker,
+                # ZERO loop ticks pass during one, so watchdog kills, operator aborts and sibling terminals wait out
+                # a 116-276 s median (one recorded case 88.3 min). The propose lanes were offloaded 2026-08-30; this
+                # path was not, and the ContextVar reason given for the direct call is false (a worker thread
+                # inherits the caller's context). Offload with `to_thread.run_sync`, but make the Developer's
+                # per-call outputs a RETURN value first: today the freeze is what serialises concurrent repairs on
+                # the shared instance. proof:`present:triage = self._triage_crash(state, node, err@looplab/engine/evaluate.py`
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
                                             depth=_depth,

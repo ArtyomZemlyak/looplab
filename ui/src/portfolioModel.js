@@ -195,6 +195,12 @@ const metricObservation = run => {
   return { runId: run?.run_id, phase: 'missing', value: null }
 }
 
+// OPEN[compare-view-has-its-own-comparability-rule] this elects a best run from one task id and one
+// direction by raw min/max, without the source-integrity and comparability rungs the cross-run panel
+// documents as load-bearing (a run folded from a 20-of-1,624-record prefix holds NO rank there). Two
+// screens can therefore crown two different winners, and this is the screen an operator picks a
+// configuration to reuse from. One rule: read the grouping the ranking model already produces.
+// proof:absent:metricComparable@ui/src/portfolioModel.js
 export function comparableRunRanking(runs = []) {
   const task = runs[0]?.task_id
   const direction = runs[0]?.direction

@@ -143,6 +143,12 @@ def tag_text_llm(text: str, graph: ConceptGraph, client, *, parser: str = "tool_
         # instructions. Raw interpolation lets an idea/hypothesis command known ids and manipulate F2
         # novelty admission while also expanding or leaking the external-provider payload.
         msgs = [{"role": "system", "content": system},
+                # OPEN[tagger-item-has-no-untrusted-envelope] the comment above promises this text is bounded,
+                # secret-redacted and serialized as an explicitly untrusted data envelope with embedded instructions
+                # forbidden; the code interpolates it raw and unbounded. The live path is an ADMISSION input — the
+                # graded-novelty pre-check tags the proposer's own theme/rationale, and a level-4 grade short-circuits
+                # the flat dedup gate — so implement the envelope or delete the claim.
+                # proof:absent:tagger_item@looplab/search/concept_tagging.py
                 {"role": "user", "content": f"ITEM:\n{text}\n\nWhich KNOWN concepts does it touch? "
                                             "Emit their ids."}]
         out = parse_structured(client, msgs, TagOut, parser)

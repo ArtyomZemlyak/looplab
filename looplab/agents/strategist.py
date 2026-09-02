@@ -480,6 +480,11 @@ class RuleStrategist:
                     "source": "rule"}
 
         # Many cheap candidates to race + ASHA available -> successive-halving over fidelities.
+        # OPEN[rule-fallback-picks-a-serialising-policy] this arm is the fallback for EVERY LLM failure and
+        # reads no width, so an endpoint hiccup at width >= 2 selects the schedule this module's own brief
+        # tells the model cannot keep the slots busy — and the repo's measurement of that shape is 5.94 of
+        # 8.03 starved GPU-hours. `policy_fills_width` is the conjunct; the existing test pins width 1 only.
+        # proof:`present:"asha" in avail and ctx.phase == "explore"@looplab/agents/strategist.py`
         if "asha" in avail and ctx.phase == "explore":
             return {"policy": "asha", "policy_params": {"eta": 3}, "fidelity": "adaptive",
                     "rationale": "exploring breadth: race candidates with ASHA "

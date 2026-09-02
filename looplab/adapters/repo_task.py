@@ -695,6 +695,12 @@ def _grandfathered(info: ValidationInfo) -> bool:
     return bool(isinstance(ctx, dict) and ctx.get("existing_run"))
 
 
+# OPEN[task-spec-models-ignore-unknown-keys] every model here but `DeveloperCommandSpec` takes
+# pydantic's default `extra=ignore`, so a mistyped or misplaced key validates and takes the default:
+# probed, `EvalSpec(command=[...], tiemout=5, subject=[...], stage=[...])` drops all three, and the
+# run's own `task.snapshot.json` then records the operator's intent as the default. The `_stages_valid`
+# comment records this mechanism making `cmd.stages` vanish once already.
+# proof:absent:refuse_unknown_task_keys@looplab/adapters/repo_task.py
 class EvalSpec(BaseModel):
     """The operator's trusted evaluation (the agent does not author this)."""
     command: list[str] = Field(default_factory=list)   # argv, no shell; carries env activation

@@ -418,6 +418,13 @@ function saveCommandTransport(source, runId, state, storage) {
   } catch { return false }
 }
 
+// OPEN[command-envelopes-are-unversioned] this refuses any payload carrying a key outside the five
+// hand-written key sets and answers `protocol invalid, cannot resubmit`, and the envelope carries no
+// version of its own — so a deploy adding one envelope key turns every in-flight command in an open
+// tab into a dead chip,
+// which is the outcome-unknown state the machine exists to avoid, produced by the client's own key
+// set. Two sibling stores in this tree already version theirs.
+// proof:absent:ENVELOPE_SCHEMA@ui/src/commandStorage.js
 function loadCommandTransport(source, runId, storage) {
   const target = transportStorage(storage)
   if (!target || !runId) return null

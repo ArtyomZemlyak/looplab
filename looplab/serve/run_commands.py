@@ -310,6 +310,12 @@ class RunCommandService:
         self.poll_interval = max(0.01, float(poll_interval))
         self.lock_acquire_timeout = max(0.05, float(lock_acquire_timeout))
         self._local_lock = threading.RLock()
+        # OPEN[command-sequencer-is-not-reentrant] the in-process guard is re-entrant and the interprocess
+        # half is not: a nested `sequence()` on one thread passes the RLock, then contends with its own first
+        # descriptor and spins to the full acquire timeout before a 503 (measured). No production nesting
+        # exists today, which is exactly why the RLock is a decoy — make the rule statable by raising on
+        # re-entry instead of inviting it.
+        # proof:present:threading.RLock()@looplab/serve/run_commands.py
         self._run_locks: dict[str, threading.RLock] = {}
         self._command_observations = CommandObservationIndex(max_indexed_runs=8)
 

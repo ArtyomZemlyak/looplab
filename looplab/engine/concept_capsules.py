@@ -313,6 +313,12 @@ def _dedup_valid_capsules(capsules) -> _CapsuleRows:
             invalid_capsules += 1
             continue
         valid_rows += 1
+        # OPEN[capsule-readers-collapse-run-incarnations] the store replaces by `run_uid` and every reader
+        # de-duplicates by run NAME, so two incarnations of one name are counted as a duplicate: driven, the
+        # portfolio reports one run and `source_complete: False`, which withholds the profit tendencies,
+        # forbids the steward's splits and purges, and prints PARTIAL on every surface — from a directory
+        # name. The reader's duplicate rule has to be the same expression the writer's is.
+        # proof:`present:rid = capsule["run_id"]@looplab/engine/concept_capsules.py`
         rid = capsule["run_id"]
         prev = by_run.get(rid)
         if prev is None or json.dumps(capsule, sort_keys=True) > json.dumps(prev, sort_keys=True):

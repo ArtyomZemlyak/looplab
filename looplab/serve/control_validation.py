@@ -965,6 +965,12 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     data["deleted"] = [_relative_file_name(name, "deleted") for name in deleted]
     origin = data.get("origin")
     if origin is not None and not isinstance(origin, dict):
+        # OPEN[inject-origin-is-client-supplied-provenance] this normalizer refuses a client that supplies any
+        # of the fork receipt's server-stamped fields and then accepts an arbitrary `origin` dict, which the
+        # fold keeps verbatim and the DAG renders as a verified cross-run seed carrying a metric — the same
+        # provenance the reviewer projection scrubs as portfolio-disclosing. Mint it only where the server
+        # derives it, as `_import_cross_run_source` does.
+        # proof:`present:HTTPException(400, "origin must be a JSON object@looplab/serve/control_validation.py`
         raise HTTPException(400, "origin must be a JSON object or null")
     # `forked_from` is deliberately its OWN key and not a corner of `origin`: `origin` means
     # CROSS-RUN seeding ({"run_id","node_id","metric"}) and `routers/reviews.py::_SUMMARY_OMIT_KEYS`

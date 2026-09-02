@@ -2242,6 +2242,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return [action for action in lane
                 if action.get("kind") in ("draft", "improve", "merge")][:free]
 
+    # OPEN[serial-node-build-holds-the-loop] the 2026-08-29/31 offloads moved only the two propose lanes:
+    # the Developer call in this serial lane, and the fork/inject/rerun proposes, still run on the loop
+    # with no in-flight guard — while `_occupancy_paced_creates` delivers work here precisely when an
+    # eval is burning. Driven: a fork served with an adopted eval, and a width-2 Card claim with node 0
+    # in flight, each ran the paid call on the loop thread with ZERO ticks. One helper on the proposal
+    # pool covers all four sites; the own-node worker seam already licenses their appends.
+    # proof:absent:_offload_node_build@looplab/engine/orchestrator.py
     async def _handle_create_actions(self, creates, state, *, created_no_terminal,
                                      no_mint_turns, decision_seq, max_es, max_s, start):
         """The `creates` branch of the run loop, lifted verbatim (doc 25 ES-05).
@@ -4186,6 +4193,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return True
         return False
 
+    # OPEN[paid-cadences-hold-the-engine-loop] every paid cadence below executes as one event-loop
+    # callback: the Strategist consult (unbounded turns under the shipped `agent_max_turns=0`), the
+    # concept re-tag/consolidation pass (`_RETAG_CAP` 20 + `_HYP_TAG_CAP` 60 sequential tag calls),
+    # the verifier tie-break and the report refresh. `at_creation_boundary` made these gates due WHILE evaluations run, so the hold
+    # now lands on top of a live GPU. They write FOLDED rows, so the fix is the offload-under-a-capture-
+    # sink discipline `novelty.py` already uses, not a bare `to_thread`.
+    # proof:absent:_offload_cadence@looplab/engine/orchestrator.py
     def _run_cadences(self, state: RunState) -> RunState:
         # Breadth read-model: record the run's narrowing curve at the strategist cadence BEFORE the
         # Strategist decides, so the same snapshot both (a) feeds the meta-controller's decision

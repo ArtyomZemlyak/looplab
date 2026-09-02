@@ -30,6 +30,12 @@ class RunStateCache:
         # Small on purpose: cross-run tools reason over a handful of runs per turn (a sibling, the
         # best few), while `list_runs` sweeps every run once and must not evict what the turn is
         # actually working with — 32 covers the working set without pinning a whole run-root.
+        # OPEN[foreign-run-fold-cache-thrashes] every listing tool walks the run ids in sorted order folding
+        # each, so above this bound the LRU evicts the head while the tail is still being folded and the next
+        # call misses on every run again — the classic sequential-scan thrash, on a corpus of 46-59 runs. The
+        # sibling reader's `~2,500 ms warm` figure is that thrash measured without being recognised as one,
+        # and on the assistant the instance is rebuilt per turn, so it starts empty every time.
+        # proof:`present:_cache_max = 32@looplab/tools/_runcache.py`
         self._cache_max = 32
         # Divergence receipts live OUTSIDE the LRU, deliberately. `_list_runs` folds every run under
         # the root and only then asks each one whether its log was complete, so an evicted receipt

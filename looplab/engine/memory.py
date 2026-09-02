@@ -808,6 +808,12 @@ def skill_source_digest(statement) -> str:
     return hashlib.sha256(str(statement or "").encode("utf-8")).hexdigest()
 
 
+# OPEN[auto-skill-body-leaves-a-run-unredacted] this is the one cross-run sink written from unredacted
+# candidate code and read back verbatim: `node_created.code` is deliberately outside the engine's
+# redactor because the code is the record of what ran, but a skill card is a SHARED artifact mounted
+# into every later Researcher's toolset, and neither this write nor `use_skill`'s read applies the
+# persisted-text redactor. A hard-coded token in a winning snippet ships to every future run.
+# proof:absent:redacted_skill_body@looplab/engine/memory.py
 def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                      fingerprint: list[str], task_id: str, *, identity_claim: Optional[str] = None,
                      classifier_version: str = "", source_statement: str = "") -> Optional[Path]:

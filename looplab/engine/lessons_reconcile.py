@@ -366,6 +366,12 @@ class LessonReconcileMixin:
         stale_pairs: list[tuple] = []
         reflect_stale = False
         for idx, o in enumerate(rows):
+            # OPEN[reconcile-retires-another-incarnations-lessons] `this run's lessons` is decided by the run
+            # DIRECTORY NAME while every writer keys on `run_uid`, and `memory_cascade` documents that names are
+            # reused on half the corpus. Driven: a lesson from a previous incarnation of the same name cannot
+            # match the new run's evidence signature, is judged stale, is RETIRED under the lock, and the reflect
+            # batch is re-bought. `LessonScope.is_current_run` already spells the correct rule.
+            # proof:`present:o.get("run_id") != state.run_id@looplab/engine/lessons_reconcile.py`
             if not isinstance(o, dict) or o.get("run_id") != state.run_id:
                 continue
             if not self._lesson_evidence_stale(state, o):

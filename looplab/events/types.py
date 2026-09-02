@@ -822,6 +822,11 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # `replay._HANDLERS` (folded) OR in this set (diagnostic), never both and never neither — so adding a
 # new event type FORCES a conscious "does the fold read this?" decision (arch-review §5 P2: the old
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
+# OPEN[event-payloads-have-no-registry] the registry states the envelope and the evolution rules and
+# nothing about what any type CARRIES: 65 of the constants have no describing comment, the fold reads
+# 205 distinct (handler, key) pairs, and 15 types are named in no document. Invariant #5's
+# additive-only rule cannot be checked against a contract that exists only as handler code.
+# proof:absent:EVENT_PAYLOAD_KEYS@looplab/events/types.py
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
     EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,

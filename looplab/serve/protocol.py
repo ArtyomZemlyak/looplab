@@ -63,6 +63,12 @@ EXPECTED_RUN_GENERATION_FIELD = "expected_generation"
 # control_validation asserts a ControlSpec for. As a plain set, any imported module — or a test doing
 # `CONTROL_EVENTS.add(...)` — could widen it process-wide and authorize a new appendable type with
 # no failing assertion and no spec review. Adding a type must be an edit to THIS literal.
+# OPEN[command-status-vocabulary-has-no-home] this module's docstring calls itself the home of the
+# string contracts the server, the terminal client and the React UI share, and the command statuses
+# are not here: accepted/executing/succeeded/noop/failed/rejected/timed_out are spelled six times
+# across run_commands, the control router, both TUI halves, the run-control tool and commandModel.js,
+# with no test pinning any copy against another.
+# proof:absent:COMMAND_TERMINAL_STATUSES@looplab/serve/protocol.py
 CONTROL_EVENTS = frozenset({
     EV_RUN_ABORT, EV_PAUSE, EV_RESTART, EV_RESUME, EV_NODE_ABORT, EV_NODE_RESET, EV_BUDGET_EXTEND, EV_HINT,
     EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_FORK, EV_ANNOTATION, EV_PROMOTE,

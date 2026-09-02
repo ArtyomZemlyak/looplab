@@ -307,6 +307,12 @@ class AppState:
                 self._integrity_cache.pop(next(iter(self._integrity_cache)))
         return dict(receipt)
 
+    # OPEN[no-per-request-fold-budget] this is deliberately uncached, but engine invariant #4 forbids
+    # caching derived state across ENGINE loop iterations, not within one HTTP request — and the server
+    # already caches the state payload by file identity. Measured on the routers: two folds per
+    # `GET .../config`, three plus a full read per PUT, two per artifact read and two per 4 s metrics
+    # poll. One fold per (file identity, request), keyed exactly as the payload cache already is.
+    # proof:`absent:def folded@looplab/serve/appstate.py`
     def state(self, rd: Path):
         """`fold(self.events(rd))` — the routers' one-line state hydration (previously spelled out
         at ~16 call sites). DELIBERATELY uncached: engine invariant #4 (state is only observed via

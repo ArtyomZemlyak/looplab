@@ -1464,6 +1464,12 @@ class ShareStore:
 
 
 # --------------------------------------------------------------------------- system prompt + toolset
+# OPEN[assistant-has-no-untrusted-evidence-boundary] the Boss route wraps the same bytes in a labelled
+# untrusted-evidence envelope with a guard sentence; this prompt has neither, while the assistant
+# returns candidate-authored stdout and traces as bare tool results, splices run summaries into the
+# user turn, and in `auto` mode holds finalize/stop/resume/extend-budget/write/commit with no
+# approval — including on unattended standing-watch wake-ups. One envelope, used by both.
+# proof:absent:UNTRUSTED_RUN_EVIDENCE@looplab/serve/assistant.py
 def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str | None = None,
                   cross_run_tools: bool = False, taxonomy_tools: bool = False,
                   work_cycle: bool = False, standing_work: bool = False) -> str:

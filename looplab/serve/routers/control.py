@@ -176,6 +176,12 @@ def build_router(srv) -> APIRouter:
     # reverted: it is the correct end state but breaks the contract this route exists to preserve
     # (41 call sites in the suite alone append here unfenced), so it needs a deprecation window with a
     # warning header and a migration note — not a silent 409.
+    # OPEN[legacy-control-route-has-no-retry-identity] the comment above states the end state and
+    # nothing schedules it: there is no sunset header, no migration note on the response and no
+    # counter saying who still calls this. A lost-response retry therefore still re-appends an
+    # additive intent, and the 41 unfenced suite call sites are the reason a silent 409 is not the
+    # fix. Emit the RFC 8594 header pair here, port the suite to `/commands`, then delete the route.
+    # proof:`absent:"Deprecation"@looplab/serve/routers/control.py`
     @router.post("/api/runs/{run_id}/control")
     async def control(run_id: str, request: Request):
         rd = _run_dir(run_id)

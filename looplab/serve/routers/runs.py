@@ -1803,6 +1803,15 @@ def build_router(srv) -> APIRouter:
         return _concept_lens_terminal_response(
             terminal, core, lens_pack, request_id)
 
+    # OPEN[read-fence-takes-the-command-sequencer] the read-side generation fence is spelled twice, and
+    # this spelling takes the EXCLUSIVE cross-process per-run command sequencer to serve a GET. Derived
+    # over `serve/` by transitive reach: 34 `commands.sequence(` sites, and SEVENTEEN GET handlers reach
+    # one — every `reviews.py` read, `artifact`/`artifacts`, `get_state`, and the whole node family.
+    # `sequence()` fails closed with 503 on its acquire timeout, so those reads are refused whenever a
+    # writer holds the run. The node-log family one screen down proves the cheaper spelling is enough:
+    # `before_generation` … read … `after_generation`, 409 on change, no lock. One shared fence,
+    # sequenced only where a ledger really needs it.
+    # proof:absent:generation_fence@looplab/serve/run_commands.py
     def _assert_historical_generation(rd: Path, expected: Optional[str]) -> str:
         if expected is None:
             raise HTTPException(400, {

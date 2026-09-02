@@ -6,8 +6,10 @@
 > control plane under `ui/src` with 189 `node --test` files, 49 numbered design records plus the
 > guide, 137 registered event types, 218 `Settings` fields, 52 CLI commands, ~140 HTTP routes.
 
-**Status: OPEN — a findings ledger, not a record of fixes.** Nothing in this document has been
-acted on. It is the review the user asked for on 2026-09-02: every level, every surface, with
+**Status: OPEN — a findings ledger, not a record of fixes.** No finding here has been fixed; what
+the review DID do is mint the 44 `OPEN[…]` markers listed in §8, each at the site it is about and
+each carrying a falsifier `tests/test_open_item_index.py` re-derives from the tree on every run —
+so a row that ships goes red instead of sitting here. It is the review the user asked for on 2026-09-02: every level, every surface, with
 proposals. Where a finding is already tracked by an `OPEN[…]`/`DECLINED[…]` marker in the tree it
 says so and does not re-open it. Line numbers are never cited (the claim-pin guard refuses them);
 every site is `path::symbol` and was resolved against the baseline. Counts carry the command that
@@ -231,7 +233,7 @@ in `Engine.__init__`, **91** assigned only elsewhere (lazily minted state such a
 strategy, `_pending_batch_dropped` from three files), 214 `getattr(self, "…")` reads with
 defaults. No `__slots__`, no typed state, and 143 silent `except Exception` handlers in the same
 package that would absorb the AttributeError a typo produces — the documented `_AshaStub`
-incident. `evaluate.py::_evaluate` alone is a **1,890-line method** reading 45 engine attributes
+incident. `evaluate.py::_evaluate` alone is a **1,898-line method** reading 51 engine attributes
 (ES2-10); four test files `inspect.getsource(_evaluate)` to find things in it. **Proposal**: per-
 cluster typed state records (`EvalState`, `CardState`, `WatchdogState`, …) declared once, plus an
 AST guard "every `self._x` read in `engine/` has exactly one declaring site" — cheaper than a
@@ -375,7 +377,7 @@ constrains only the callers of the module global, and these three clusters fold 
 ### 3.2 ES2 — engine evaluation/repair side
 
 **Shape.** 17 files, 15,155 lines; `evaluate.py` is 3,598 lines of which 64 % is prose, and
-`EvaluateMixin._evaluate` is **one 1,890-line method** (23 appends, 19 `_write_lock` blocks, 6
+`EvaluateMixin._evaluate` is **one 1,898-line method** (20 appends, 15 `_write_lock` blocks, 4
 folds, 45 engine attributes) holding admission, the attempt loop, salvage, the repair ladder,
 reuse/rollback and the terminal write. Around it the pure rule libraries doc 25 ES-03 extracted
 (`repair_judgment`, `repair_verify`, `failure_diagnosis`, `triage`, `metric_salvage` — every one
@@ -395,7 +397,7 @@ correctly — three suspected findings refuted.
 | ES2-04 | M | C | `evaluate.py::_evaluate` → `_materialize`, `_write_node_files` ×2, `snapshot_training_logs`, `_resolved_stages` ×4/attempt, salvage readers, `_safe_reuse_start`/`_rollback_start`, and `_trust_scan_signals` → `_audit_workdir_writes` INSIDE the terminal's `_write_lock` | Synchronous filesystem work on the loop (the repo measured a missed lookup at 105–950 ms and the largest workdir at 1,017 MB/144 files; `_repair_inputs` at 1.5 ms was offloaded, the seed copy was not); the audit walk under the lock stalls every writer in the process. | Offload the four FS-heavy steps; move the trust scan OUT of the lock (it commits by digest, so the appends can follow under a second acquisition). |
 | ES2-05 | M | C | `crash_repair.py::_repair_error_context` (`not_learning` branch) reached with the DIAGNOSED reason | The directive tells the Developer "the live watchdog KILLED this stage … the live judge named the IMPLEMENTATION" — false on both counts when the reason came from the diagnostician on a `check_failed` stage (nothing killed; the head sentence is the diagnosis lead). | A new sentence keyed on `_reason_source == REASON_SOURCE_TRIAGE` (prompt strings are contracts); pin both variants. |
 | ES2-06 | M | C | `eval_dispatch.py::_do_run_setup` (`raise RuntimeError("run_setup failed …")`) | A failed `-r requirements.txt` is the textbook `EnvironmentRefusal`, so the operator gets the 42-frame traceback the marker type exists to remove. | `raise EnvironmentRefusal(...)` (subclasses `RuntimeError`); add to `test_cli_refusals.py`. |
-| ES2-10 | M | C | `evaluate.py::EvaluateMixin._evaluate` (1,890 lines) | Doc 25 extracted the pure rules; the DRIVER kept growing by 50–150-line blocks inside the `while True`; four test files `inspect.getsource(_evaluate)` to find things in it. | An `EvalAttempt` object along the phases the comments already name: `admit` → `run_attempt` → `settle_outcome` → `salvage` → `decide_repair` → `apply_repair` → `write_terminal`; every append and lock stays where it is (AST-asserted). |
+| ES2-10 | M | C | `evaluate.py::EvaluateMixin._evaluate` (1,898 lines) | Doc 25 extracted the pure rules; the DRIVER kept growing by 50–150-line blocks inside the `while True`; six test files `inspect.getsource(_evaluate)` at seven sites to find things in it. | An `EvalAttempt` object along the phases the comments already name: `admit` → `run_attempt` → `settle_outcome` → `salvage` → `decide_repair` → `apply_repair` → `write_terminal`; every append and lock stays where it is (AST-asserted). |
 | ES2-12 | M | C | `costs.py::_ROOT_ATTRS`/`_CHILD_ATTRS`/`find_cost_accountants` | Billing reachability is a hand-maintained attribute list; the docstring records three "spent and unbilled" incidents; the only guard is a one-way positive pin. | Derive the accountant-bearing attributes from a fully-built default engine and assert `find_cost_accountants` finds them all. |
 | ES2-07 | L | C | `evaluate.py::_auto_pause_provider_failure` (the only concurrent-task writer of `EV_PAUSE`) | A run-global folded latch written from an eval child, outside every registry and invariant clause; defended by a site docstring and one test. | Register it (a `RUN_LATCH_APPENDABLE` singleton or a sentence in invariant #1). |
 | ES2-08 | L | C | `evaluate.py::_eval_intervention_seen` vs `replay.py::_control_generation_matches` | A third spelling of the generation rule with different semantics from the fold (unstamped controls bind to generation 0 only; raw `!=` on `node_id`). No live divergence for stamped int controls. | Call `coerce_node_id` + the fold's rule; delete the inline parse. |
@@ -828,7 +830,7 @@ found**. What the review adds is at the rule level.
 | ID | Sev | Conf | Site | Finding | Proposal |
 |---|---|---|---|---|---|
 | SR-01 | H | C | `routers/control.py::control` ("KNOWN GAP (needs a deprecation, not a patch)") | = SC-09: no request identity, `expected_seq` optional, a lost-response retry re-appends paid/additive intents; outside the marker index; 41 suite call sites; first-party clients already use `/commands`. | Mint the marker; `deprecated=True` + `Deprecation` header; migrate the suite. |
-| SR-02 | H | C (sites) / P (cost) | `runs.py::_assert_historical_generation` (4× per historical `node_detail`), `::_assert_artifact_generation` (3× per `artifacts`/`artifact`), `::recover_concept_lens_receipt` (holds the sequencer across `read_all`), `reviews.py::_bound_run`, `control.py::start_status` — vs the lock-free before/after CAS in `_begin_trace_read`/`_finish_trace_read`, `node_logs`, `collaboration.py::_assert_still_current` | Two spellings of the read-side generation fence; one takes the EXCLUSIVE per-run command sequencer (RLock + flock, 503 on timeout) for a GET — 21 `commands.sequence(` sites in routers, 11 reachable from GET handlers — so a Files click or a reviewer poll contends with the command worker while it folds the log twice. | One `generation_fence(srv, rd, expected, *, sequenced=False)`; an AST test that no GET handler's call tree reaches `sequence(`, with the lens-recovery routes as named exceptions. |
+| SR-02 | H | C (sites) / P (cost) | `runs.py::_assert_historical_generation` (4× per historical `node_detail`), `::_assert_artifact_generation` (3× per `artifacts`/`artifact`), `::recover_concept_lens_receipt` (holds the sequencer across `read_all`), `reviews.py::_bound_run`, `control.py::start_status` — vs the lock-free before/after CAS in `_begin_trace_read`/`_finish_trace_read`, `node_logs`, `collaboration.py::_assert_still_current` | Two spellings of the read-side generation fence; one takes the EXCLUSIVE per-run command sequencer (RLock + flock, 503 on timeout) for a GET — 34 `commands.sequence(` sites in `serve/`, 17 GET handlers reaching one transitively — so a Files click or a reviewer poll contends with the command worker while it folds the log twice. | One `generation_fence(srv, rd, expected, *, sequenced=False)`; an AST test that no GET handler's call tree reaches `sequence(`, with the lens-recovery routes as named exceptions. |
 | SR-03 | M | C (probed) | `server.py::make_app` (`_reject_untrusted_host`, `_require_token`) | = SC-12, plus: `_require_token` resolves a review header before `_unauth_api_ok`, so `GET /api/health` with a bogus/expired `X-LoopLab-Review` → 401, defeating the "zero-model liveness for an untokened monitor" contract in `misc.py::health`. | Register the host guard outermost; check `_unauth_api_ok` before the review branch; pin the order. |
 | SR-04 | M | C | `routers/misc.py` — the authoring operation store (~800 of 2,172 lines: receipts, an interprocess lock, a 4,096-receipt quota, a v1 schema), the paid LLM-health probe registry (~385 lines — a SIXTH hand-rolled paid-work protocol), the memory-tier projection (~225) | Two durable-protocol subsystems and a read model in the grab-bag router, while `scope_actions.py`/`trace_clear.py`/`reset_route.py` are the house pattern for exactly this and cannot be tested without building the app. | `serve/authoring_store.py`, `serve/llm_probe.py`, `serve/memory_projection.py`; an AST guard that `misc.py` defines no `RuntimeError` subclass and calls `_interprocess_lock` only inside route bodies. |
 | SR-05 | M | C (tally + probe) | all routers: 409 ×107, 400 ×71, 404 ×48, 503 ×21, 422 ×7, 500 ×6, 413 ×4, 410 ×3, 428 ×2 | Three malformed-body answers coexist (`http.py::json_object` → 400 on 39 hand-parsed routes, pydantic → 422 on 9, `/api/start` → structured 400); six `HTTPException(500)` sites answer an UNREADABLE snapshot where every sibling answers 503 with a `code`, and `run_config` reflects an `OSError` text carrying a host path; no doc states the rule. | A status table in `serve/http.py` + `tests/test_refusal_vocabulary.py` (no `HTTPException(500` in routers; the pydantic-body set = the 422 set). |
@@ -836,7 +838,7 @@ found**. What the review adds is at the rule level.
 | SR-07 | M | C (counts) / P (wall-clock) | `runs.py::_run_config_payload` (2 folds per `GET …/config`), `_put_run_config_locked` + `_repair_trust_gate_event` (3 folds + 1 `read_all` per PUT), `artifacts`/`artifact` (2 folds + 3 sequencer acquisitions), `node_metrics` (2 folds per 4 s Inspector poll); 13 `srv.state(` sites in runs.py | Uncached full folds per request are not a stated budget; `AppState.state`'s "DELIBERATELY uncached: engine invariant #4" over-reads #4 (which forbids caching across ENGINE loop iterations) while the server already caches `state_payload` by `file_identity`. | `AppState.folded(rd)` LRU keyed by `file_identity(events.jsonl)`; rule: one fold per (identity, request). |
 | SR-08 | L | C | `control.py::resolve_start_claim` (inlines `(root / run_id).resolve()` + partial prefix checks) | A seventh, weakest spelling of the run-id validator: accepts names `launch.py::safe_run_dir` refuses and, by pre-resolving, defeats `resolve_spawn_claim`'s own symlink check. A new member of the tracked `run-path-validators-not-unified`. | `safe_run_dir(root, run_id, check_conflict=False)` as `start_status` does. |
 | SR-09 | L | C/P | `GET …/cards/{card_id}/trace` (0 test hits for `cards/`), `GET …/deletions/{operation_id}` (0), `GET …/sessions/{sid}/fork/{action_id}` (P) | Three routes with no HTTP test; nothing asserts the route SET is covered, so a new route lands green. | Derive the inventory from `app.routes` in a test and assert each `(method, path)` appears in a recorded `TestClient` manifest. |
-| SR-10 | L | C | `server.py::make_app` (`version="0.1.0"`), every router | Unversioned; `response_model` on 22/140; 39 hand-parsed bodies publish a schema only where `openapi_extra` is used (4); `docs/guide/ui.md` names 30 of 140 templates; no `Deprecation`/`Sunset` headers. | A generated `docs/guide/api-reference.md` from `app.openapi()` under `mkdocs --strict`; pin `(method, path, deprecated)`. |
+| SR-10 | L | C | `server.py::make_app` (`version="0.1.0"`), every router | Unversioned; `response_model` on 22/140; 38 hand-parsed bodies publish a schema only where `openapi_extra` is used (4); `docs/guide/ui.md` names 30 of 140 templates; no `Deprecation`/`Sunset` headers. | A generated `docs/guide/api-reference.md` from `app.openapi()` under `mkdocs --strict`; pin `(method, path, deprecated)`. |
 | SR-11 | L | C | `server.py::_volatile_api_no_store` (12 path predicates) vs `Cache-Control` set in 28 handler sites | Cache policy spelled twice with no registry; in tokenless mode the polled routes in neither list carry no cache header. | A `NO_STORE_ROUTES` registry in `protocol.py` with a two-way scan. |
 | SR-12 | L | C | `server.py::_RAW_GET_SUFFIX`/`_RAW_GET_EXACT` (0 readers, describe a surface that has grown), `router_wiring.py::router_builders` docstring (12 mounts listed, 13 mounted — `cross_run` missing), `appstate.py::_PUBLIC_STATE_RAW_KEYS` ("served WITHOUT the UI token") vs `server.py::_unauth_api_ok` (SSE is not exempt) | Documentation-as-code that predates deny-by-default. | Delete the constants; fix the docstring; reword the appstate comments as defence in depth. |
 
@@ -977,8 +979,8 @@ Delete the second comparability rule (U3-01) and hoist the precision-widening fo
 turn; 75 % is the package map, the `engine/` row alone 61,165 B; read by 2 tests); the user
 contract (README + 16 guide pages, 1.04 MB; the data-driven diagram, 163 KB of which 137 KB is
 narrative string literal); the design record (49 numbered docs ≈ 3.7 MB, four over 400 KB;
-`BACKLOG.md` 590 KB / 6,783 lines / 64 headings); and the greppable index (103 `OPEN[…]` / 18
-`DECLINED[…]` / 7 `CLAIM[…]` real markers in 26 files). Seven guard files / 46 tests, 45 green.
+`BACKLOG.md` 590 KB / 6,783 lines / 64 headings); and the greppable index (at review time, before
+this document's own 44: 103 `OPEN[…]` / 18 `DECLINED[…]` / 7 `CLAIM[…]` real markers in 26 files). Seven guard files / 46 tests, 45 green.
 `mkdocs build --strict` passes in 11 s. Confirmed good: the quickstart runs offline as written
 (6 nodes in 2.35 s; without `--backend toy` a clean exit-2 refusal naming the remedy); the
 JupyterHub path is documented end to end; all 25 infographic numbers checked hold; all 100
@@ -1068,7 +1070,7 @@ review found the contract weakest. Counts at the baseline.
 | `Settings` (env `LOOPLAB_<FIELD>`) | 218 fields; 67 legacy rows; 127 `EngineOptions` twins | per-field comments; the configuration table (all 218 named, 0 wrong defaults by hand) | `test_config_docs_sync` (names only; RED on the catalogue sentence), `test_options_divergence`, `test_engine_options` | file-layer unknown keys ignored (CO-01); two unvalidated enums (CO-02); the legacy-row rule is prose (CO-05) |
 | Event log (`events.jsonl`) | 137 types (107 folded / 30 diagnostic); 205 `(handler, key)` reads | envelope + evolution rules in `types.py`; per-type payload NOT stated | `test_event_types` (partition, emitted literals — not `append_many`), splice tests | no payload contract (EV-03); 18 handlers alias raw data onto the wire (EV-04); the tools layer writes two folded types outside `CONTROL_EVENTS` (TO-03) |
 | Control intents | 31 `CONTROL_EVENTS` + 10 collaboration; 44 rule slots | `protocol.py` + five registries asserted at import | `test_control_registry`, `test_run_command_service` (104) | the legacy `/control` route (SR-01/SC-09); client-supplied `origin` (SC-05); the command-status vocabulary absent from `protocol.py` (SC-06) |
-| HTTP API | 140 routes (76 GET / 49 POST / 7 DELETE / 5 PUT / 3 PATCH); 22 `response_model`; 39 hand-parsed bodies | per-route docstrings; no version; no API reference (30 of 140 in `ui.md`) | `test_server` (144) + siblings; `test_router_wiring`; `test_serve_module_seams` | unstated refusal codes with 6 `500`s (SR-05); 11 GETs through the exclusive sequencer (SR-02); 9 client-less routes (SR-06); 3 untested (SR-09) |
+| HTTP API | 140 routes (76 GET / 49 POST / 7 DELETE / 5 PUT / 3 PATCH); 22 `response_model`; 38 hand-parsed bodies | per-route docstrings; no version; no API reference (30 of 140 in `ui.md`) | `test_server` (144) + siblings; `test_router_wiring`; `test_serve_module_seams` | unstated refusal codes with 6 `500`s (SR-05); 17 GETs through the exclusive sequencer (SR-02); 9 client-less routes (SR-06); 3 untested (SR-09) |
 | Task document | 5 spec models; 6 reader kinds; the stage manifest with 8 keys | pydantic + `validate_task`; `validate_stages` as the ONE definition (8 callers) | `test_repo_task`, `test_stage_contract` (32), `test_metric_reader_confinement` (23) | three open key sets (RA-02/03/04); `adapter` accepted where it crashes the run (RA-01); the adapter reader outside the fence (RA-05) |
 | CLI | 52 commands in 8 groups; exit codes 0/1/2/3/4 | Typer help; `cli-reference.md` (50 of 52); the exit-code table (contradicted by 24 `Exit(1)` sites) | `test_cli_refusals`, `test_cli_command_groups` (5 of 8 groups) | 21 help strings cite dead `§` sections (XP-11); `harden` in the wrong group (AG-04); 2 destructive commands undocumented (AG-13) |
 | Agent tools | 103 specs / 98 names across 28 providers; 33 writing tools; 3 network tools + MCP | per-tool docstrings; `ToolProvider` protocol; `perm_modes._ACTION_RISK` | `test_tool_provider_contract` (3), `test_bounded_tool_results`, `test_tool_collisions` (fakes) | two permission vocabularies unguarded (TO-10); 5 name collisions (TO-11); the MCP config surface (TO-07); `_mcp_transport` untested (TO-14) |
@@ -1109,10 +1111,103 @@ SC-01's exploit reach, TO-05 (torch absent here).
 
 ## 7. How to work this document
 
-This is a ledger, not a plan. Nothing here is an `OPEN[…]` marker: the CLAUDE.md rule is that a
-marker carries a falsifier somebody re-derived, and the falsifiers above were derived once, by
-this review, at the baseline. The intended path is: pick a row, re-derive its evidence against the
-tree (every finding names its symbol and, where it was driven, the reproduction), then either fix
-it in one change or mint the marker at the site with the proof the row already states. When a row
+This is a ledger, not a plan. Forty-four rows carry an `OPEN[…]` marker at their site (§8); the
+rest do not, and that is deliberate — the CLAUDE.md rule is that a marker carries a falsifier
+somebody re-derived, and minting one for a row whose predicate nobody can state is the unverified
+glyph the convention exists to abolish. For an untagged row the path is: re-derive its evidence
+against the tree (every finding names its symbol and, where it was driven, the reproduction), then
+either fix it in one change or mint the marker at the site with the proof the row already states. When a row
 is fixed or refuted, delete it from this document's successor rather than annotating it — the
 2026-08-13 mega-review (doc 40) is the precedent for a CLOSED ledger whose sites became the code.
+
+---
+
+## 8. The markers this review minted
+
+Forty-four items were tagged, each at the site it is about, each with a predicate evaluated
+against the tree before it was written. Forty sit in the file the finding is about; the four below
+are whole-tree items whose home is this document. **A red `tests/test_open_item_index.py` on one of
+these is not a defect — it means the item shipped, and the fix is to delete the marker.**
+
+OPEN[containment-is-unmeasured] 743 handlers catch `Exception`/`BaseException` in production and
+458 of them neither re-raise, log, record nor assign; 636 `# noqa: BLE001` annotations decorate
+them while no linter is configured anywhere in the tree, so the annotations document nothing and
+nothing counts a containment. The review found the cost at the seams (a swallowed budget stop at a
+selection site, a run dropped from the run list on a fold error, an outage that reads as a clean
+verdict, a refused case the finalize step still marks done). Adopt the linter with that rule and
+turn the existing annotations into a reviewed allow-list; then a `contain(span, reason)` helper so
+a containment is countable rather than invisible. proof:missing:.ruff.toml
+
+OPEN[claude-md-has-no-size-budget] the agent guide is 232,919 bytes — about 58k tokens on every
+turn, roughly 29 % of a 200k window before a single file is read — and 75 % of it is the package
+map, whose engine row alone is 61 KB. Re-deriving 28 of its named counts: 15 hold and 11 do not.
+The rules an agent needs every turn are a small fraction of it and the dated measurements are also
+recorded in the numbered docs and the module docstrings they came from. Guard the budget, and let
+the narratives live where they are already written down.
+proof:absent:CLAUDE_MD_MAX_BYTES@tests/test_documentation_contracts.py
+
+OPEN[http-surface-has-no-generated-reference] 140 routes, 22 with a response model, 39 hand-parsed
+bodies, no version, no deprecation headers, and 110 of the 140 templates named in no guide page;
+three routes have no HTTP test and nothing asserts the route SET is covered, so a new route lands
+green and undocumented. Generate the reference from the app's own schema under the strict docs
+build and pin `(method, path, deprecated)`, the way the settings and CLI tables should also be
+generated. proof:missing:docs/guide/api-reference.md
+
+OPEN[largest-ui-components-are-never-mounted] AssistantBar, RunView and RunList's default export —
+10,595 lines, 55 % of the six largest components — are named by 54 test files and mounted by none
+(`jsdom` is already a devDependency, so the harness is cheap);
+their coverage is a compile check plus source-text pins, which cannot see a `disabled` gate flip,
+and the suite's own history records a dropped brace passing 767 tests. Seven hub panels are
+rendered by no test at all. One shared jsdom harness (fetch stub keyed by path, fake timers) and
+one gate-flip test per component. proof:missing:ui/test/_mount.js
+
+### The forty site markers
+
+| slug | home | the fix it is waiting for |
+|---|---|---|
+| `repair-path-holds-the-engine-loop` | `engine/evaluate.py` | offload the three paid repair calls |
+| `eval-child-raise-cancels-every-sibling` | `engine/evaluate.py` | a shielded `engine_error` terminal |
+| `eval-attempt-is-one-giant-method` | `engine/evaluate.py` | the `EvalAttempt` phase object |
+| `serial-node-build-holds-the-loop` | `engine/orchestrator.py` | one offload helper for four sites |
+| `paid-cadences-hold-the-engine-loop` | `engine/orchestrator.py` | offload under a capture sink |
+| `engine-terminal-reasons-unregistered` | `core/models.py` | a registry + AST guard |
+| `repair-ledger-drops-rows-without-a-receipt` | `core/models.py` | per-node bound + omission receipt |
+| `reconcile-retires-another-incarnations-lessons` | `engine/lessons_reconcile.py` | key on the run uid |
+| `capsule-readers-collapse-run-incarnations` | `engine/concept_capsules.py` | key on the run uid |
+| `claim-receipts-group-by-run-name` | `engine/claims_health.py` | key on the run uid |
+| `auto-skill-body-leaves-a-run-unredacted` | `engine/memory.py` | redact the body at both ends |
+| `verifier-swallows-the-budget-stop` | `trust/verifier.py` | re-raise, then guard the polarity |
+| `stage-manifest-keys-are-open` | `runtime/command_eval.py` | a closed stage key set |
+| `stage-row-statuses-unregistered` | `runtime/command_eval.py` | a status registry + two-way scan |
+| `adapter-reader-can-kill-the-run` | `runtime/command_eval.py` | refuse at submit, fail the node here |
+| `adapter-reader-runs-outside-the-eval-boundary` | `runtime/command_eval.py` | thread the eval env through |
+| `task-spec-models-ignore-unknown-keys` | `adapters/repo_task.py` | forbid extras, grandfathered |
+| `config-file-keys-are-silently-ignored` | `core/appconfig.py` | refuse unknown keys per layer |
+| `llm-reasoning-vocabularies-unvalidated` | `core/config.py` | two rows in the enum table |
+| `replay-archive-has-no-unique-destination` | `serve/reset_route.py` | unique destination + an abandon path |
+| `trace-clear-receipts-are-never-reaped` | `serve/service_reaper.py` | a fifth reaper rule |
+| `absorbing-quarantine-answers-retryable` | `serve/deletion_service.py` | answer through the wedged form |
+| `assistant-has-no-untrusted-evidence-boundary` | `serve/assistant.py` | one envelope, used by both agents |
+| `command-sequencer-is-not-reentrant` | `serve/run_commands.py` | a plain lock that raises on re-entry |
+| `command-status-vocabulary-has-no-home` | `serve/protocol.py` | the vocabulary, plus a JS pin |
+| `inject-origin-is-client-supplied-provenance` | `serve/control_validation.py` | mint it server-side only |
+| `read-fence-takes-the-command-sequencer` | `serve/routers/runs.py` | one lock-free generation fence |
+| `no-per-request-fold-budget` | `serve/appstate.py` | one fold per (identity, request) |
+| `tools-layer-writes-two-folded-events` | `tools/machine_runs_tools.py` | register both as control events |
+| `foreign-run-fold-cache-thrashes` | `tools/_runcache.py` | one cache per root, bounded by bytes |
+| `embedding-spend-is-unbilled` | `tools/vectorstore.py` | an accountant + an embedding cache |
+| `card-lane-fills-outside-the-policy-population` | `search/card_selection.py` | a legal-action set per policy |
+| `tagger-item-has-no-untrusted-envelope` | `search/concept_tagging.py` | the envelope the comment promises |
+| `rule-fallback-picks-a-serialising-policy` | `agents/strategist.py` | a width conjunct |
+| `event-payloads-have-no-registry` | `events/types.py` | a payload-key registry + generated page |
+| `probe-tests-assume-a-landlock-kernel` | `tests/test_dev_probe.py` | a skip keyed on the kernel probe |
+| `compare-view-has-its-own-comparability-rule` | `ui/src/portfolioModel.js` | read the ranking model |
+| `ranked-metrics-print-fewer-digits-than-they-rank` | `ui/src/format.js` | hoist the widening formatter |
+| `command-envelopes-are-unversioned` | `ui/src/commandStorage.js` | a version field + a migration step |
+| `legacy-control-route-has-no-retry-identity` | `serve/routers/control.py` | sunset headers, then port the 41 call sites |
+
+**What was deliberately NOT tagged**, so the index does not fill with rows nobody can falsify: the
+structural proposals whose shape is a judgement call rather than a missing symbol (the package
+splits, the god-module decompositions, the duplication clusters), every finding whose cost this
+environment could not measure (§6), and the four red tests that are their own signal — a failing
+guard is louder than a marker, and three of them are the Landlock item above.

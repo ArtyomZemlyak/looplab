@@ -2286,6 +2286,11 @@ class Settings(BaseSettings):
     #     out of core).
     #   * `llm_parser` is validated against the parser registry itself, imported inside the callable
     #     to keep `config` import-light.
+    # OPEN[llm-reasoning-vocabularies-unvalidated] `llm_reasoning` and `llm_reasoning_style` are closed
+    # vocabularies that are not in this table: probed, a mis-cased value is accepted, the provider 400s,
+    # the reject classifier matches and reasoning flips OFF for that client's lifetime — the exact
+    # no-op-fall-through this table exists for, on a field whose shipped default is `high`.
+    # proof:absent:("llm_reasoning"@looplab/core/config.py
     _ENUM_FIELDS: typing.ClassVar[tuple] = (
         ("trust_gate", ("audit", "gate", "block")),
         ("metric_salvage", ("off", "audit", "select")),

@@ -1782,6 +1782,12 @@ class RunControlTools:
                     return f"(run {rid} changed while awaiting permission — refresh and retry)"
                 try:
                     store.append(
+                        # OPEN[tools-layer-writes-two-folded-events] this provider is a second writer of two FOLDED types
+                        # outside `CONTROL_EVENTS` — the trust-gate change (whose router twin appends under a tail CAS with
+                        # retries, while this one appends bare) and the node tombstone, whose only writer in the tree is here.
+                        # Invariant #1 says UI/CLI append only allow-listed control intents; register both and make the two
+                        # tools command-backed like their eight siblings.
+                        # proof:`present:EV_NODE_TOMBSTONED, {"node_ids"@looplab/tools/machine_runs_tools.py`
                         EV_NODE_TOMBSTONED, {"node_ids": sorted(subtree)},
                         expected_last_seq=expected_tail)
                 except EventStoreConcurrencyError:

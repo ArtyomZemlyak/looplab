@@ -617,6 +617,11 @@ def begin_or_resume_run_deletion(
                     "delete_operation_superseded",
                     "This unfenced deletion intent was retired after its inspected run changed.",
                     operation_id=operation_id))
+            # OPEN[absorbing-quarantine-answers-retryable] this phase is absorbing by the transaction's own
+            # transition check (`requires manual storage recovery`), yet it answers through `_pending`, whose
+            # `retryable: true` is documented as the promise that pressing again can move the operation — the
+            # precise lie `_wedged` was added to end, on the one state that can never resume.
+            # proof:`absent:_wedged(receipt, "delete_quarantine_outcome_unknown"@looplab/serve/deletion_service.py`
             if receipt is not None and receipt["phase"] == "quarantine_ambiguous":
                 return _pending(
                     receipt, "delete_quarantine_outcome_unknown",

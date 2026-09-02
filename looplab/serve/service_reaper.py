@@ -205,6 +205,12 @@ def _plan_reset_receipt(path: Path, now: float, grace_s: float) -> dict[str, Any
                   age, run_id=receipt.get("run_id"), phase=receipt.get("phase"), status=status)
 
 
+# OPEN[trace-clear-receipts-are-never-reaped] the planner classifies four root-level populations and
+# not the trace-clear receipts, so every successful clear leaves one in the run root forever — in the
+# directory the run list stats on every poll — and each NEW clear strict-loads all of them, so one
+# malformed sibling 503s every future clear of that run. A fifth rule plus a registry of the prefixes
+# derived from their writers.
+# proof:absent:_TRACE_CLEAR_RECEIPT_PREFIX@looplab/serve/service_reaper.py
 def plan_service_file_reap(runs_root: str | Path, *, now: Optional[float] = None,
                            grace_s: float = DEFAULT_GRACE_S) -> dict[str, Any]:
     """Name every service file under `runs_root` and the rule that decides its fate. Read-only.

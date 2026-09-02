@@ -555,6 +555,12 @@ def _read_adapter(stdout, workdir, spec, wrap, since) -> Optional[float]:
     argv = (["python", "-c", runner] if wrap else [sys.executable, "-c", runner])
     if wrap:
         argv = wrap(argv, str(workdir))
+    # OPEN[adapter-reader-runs-outside-the-eval-boundary] the reader signature has no env slot, so the one
+    # reader that EXECs candidate-lineage code runs in the ENGINE's environment minus secret-named vars:
+    # no fence marker, no landlock ruleset, no GPU pin and none of the operator's declared eval env, which
+    # `EvalSpec.env` promises reaches every stage. `run_argv`'s own comment lists the metric adapter among
+    # what passes through the fence; it passes through the function, not the fence.
+    # proof:`present:rc, out, _, to = run_argv(argv, str(workdir),@looplab/runtime/command_eval.py`
     rc, out, _, to = run_argv(argv, str(workdir),
                                finite_timeout(spec.get("timeout", 120), 120), None, 64_000)
     return json_line_metric(out, "metric") if (rc == 0 and not to) else None
@@ -973,6 +979,12 @@ def cap_gpu_flags(argv: list) -> list:
     return out
 
 
+# OPEN[stage-manifest-keys-are-open] this builds the stage from the keys it knows and never inspects
+# the rest, so a model-authored `needs_files`/`expects`/`time_out`/`roles` validates with err=None and
+# the declared inputs, outputs, wall and kill-eligibility all vanish (probed). `_validate_expect`
+# argues the closed-key rule one level down — a silently dropped typo leaves a stage advertising a
+# contract nothing enforces — and the same argument applies here.
+# proof:absent:STAGE_KEYS@looplab/runtime/command_eval.py
 def validate_stages(stages, *, reserved: tuple = (),
                     allow_env: bool = False) -> tuple[Optional[list], Optional[str]]:
     """Validate a stage list ({name, command:[argv...], timeout?, check?, role?}) into its canonical clean
@@ -2363,6 +2375,11 @@ def _stage_cursor(ex: _EvalExec, name: str, index: int, total: int):
         _stage_beacon(ex, name, index, total, "finished")
 
 
+# OPEN[stage-row-statuses-unregistered] the eight statuses this mints (reused/ok/fail/timeout/
+# needs_failed/env_unsupported/expect_failed/check_failed) are literals spelled across 13 files, with
+# `RunResult.stages` documenting three of them; the only named subset lives in metric_salvage. A
+# typo'd literal does not fail, it reads as an unknown status in the salvage veto and the UI strip.
+# proof:`absent:STAGE_STATUSES = @looplab/runtime/command_eval.py`
 def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Optional[str],
                 metric: dict, eval_started: float, check_fn,
                 subject: Optional[list] = None,
@@ -2946,6 +2963,12 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # code (same trust rule as cross_check) — reject loudly rather than exec the agent's module.
     for spec in list((metrics or {}).values()) + list(constraints or []):
         if spec.get("kind") == "adapter":
+            # OPEN[adapter-reader-can-kill-the-run] an `adapter` reader in `metrics`/`constraints` passes submit
+            # (probed) and raises HERE, inside the eval worker, after the evaluation has already run: the raise
+            # escapes with no node terminal, cancels the sibling evals and re-dies on every resume — the one
+            # failure this module's comments name repeatedly. `EvalSpec` accepts `{"kind": "adapter"}` at
+            # construction, and NO test covers this raise at all. Refuse it at submit, fail the NODE here.
+            # proof:`present:raise ValueError("metrics/constraints readers must be built-in@looplab/runtime/command_eval.py`
             raise ValueError("metrics/constraints readers must be built-in, not 'adapter' "
                              "(an agent-authored gate reader defeats the trust boundary).")
     declared = ({name: v for name, spec in metrics.items()

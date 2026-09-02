@@ -666,6 +666,12 @@ def _research_source_summary(rows) -> dict:
     groups: dict[str, list[dict]] = {}
     for row in source:
         run_id = _identity_text(row.get("run_id"), _MAX_SOURCE_ID)
+        # OPEN[claim-receipts-group-by-run-name] same identity defect one layer up: two incarnations of one
+        # directory name each write a complete v3 row set, the summary sees one group whose retained count
+        # cannot match, and `producer_receipt_known` goes False — which demotes every one-sided verdict to
+        # `inconclusive` and refuses every ratification portfolio-wide. `run_uid` appears in no line of
+        # tests/test_claims.py.
+        # proof:`present:groups.setdefault(run_id or@looplab/engine/claims_health.py`
         groups.setdefault(run_id or "<unknown-run>", []).append(row)
 
     partial = unknown = known_total = known_omitted = 0

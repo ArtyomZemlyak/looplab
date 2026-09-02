@@ -1159,6 +1159,12 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # model saying "the check was wrong" must not thereby score the node (docs/36). What it buys is the
 # record and the DIRECTIVE: `crash_repair._repair_error_context` points the repair at the check
 # instead of asking a Developer to rewrite an experiment it has just been told is correct.
+# OPEN[engine-terminal-reasons-unregistered] the ten reasons the ENGINE mints on a terminal
+# (gpu_unavailable, gpu_unpinnable, proxy_skipped, superseded, card_dropped, aborted, developer_crash,
+# idea_rejected, monitor_broken, asha_underperforming) are bare literals at every write and read site;
+# `replay.py` and `attention.py` spell the ignore-set twice and both list a reason no writer mints.
+# Same seam shape as TRIAGE_ACTIONS, with no registry and no AST guard.
+# proof:absent:ENGINE_TERMINAL_REASONS@looplab/core/models.py
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
                                     "unclassified",
                                     "expect_failed", "check_failed", "diverged", "stalled",
@@ -2240,6 +2246,12 @@ class RunState(BaseModel):
     #
     # Bounded on purpose (`_REPAIR_LEDGER_MAX`): a long run repairs many times, and a ledger that
     # grows without limit becomes a prompt that crowds out the code it is meant to annotate.
+    # OPEN[repair-ledger-drops-rows-without-a-receipt] the fold caps this at 200 first-come rows with no
+    # omission receipt, so on a run whose node recorded 2,345 repairs it describes the beginning and the
+    # CLI prints the cap as a total; `lessons_reconcile` then reads a dropped row as `no cause recorded`
+    # and mints a cross-run lesson over a population the fold silently truncated. Bound per node and
+    # publish the omission the way the card-enrichment journal does.
+    # proof:absent:repair_ledger_omitted@looplab/core/models.py
     repair_ledger: list[dict] = Field(default_factory=list)
 
     @field_serializer("run_setup_done")

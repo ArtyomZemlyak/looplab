@@ -251,6 +251,12 @@ def test_the_refusal_for_an_unaudited_mutator_is_not_an_oserror(outside):
     ("pyarrow", "import pyarrow as pa, pyarrow.parquet as pq; "
                 "pq.write_table(pa.table({'a': [1]}), T)"),
 ])
+# OPEN[probe-tests-assume-a-landlock-kernel] this test and its two native-writer siblings assert the
+# probe's no-write-anywhere guarantee for writers CPython does not audit, which only the kernel rung
+# provides — and Landlock ships off and is simply absent below Linux 5.13. On such a box all three
+# fail rather than skip, so the suite is red for an environment the launcher deliberately supports
+# (it prints one line naming the reduced guarantee). A shared skip keyed on the kernel probe.
+# proof:absent:_needs_landlock@tests/test_dev_probe.py
 def test_a_native_writer_cannot_create_a_file_either(outside, mod, code):
     """THE test that says why the fix is a kernel boundary and not a list of names.
 
