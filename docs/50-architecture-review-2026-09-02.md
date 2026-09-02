@@ -1172,7 +1172,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `serial-node-build-holds-the-loop` | `engine/orchestrator.py` | one offload helper for four sites |
 | `paid-cadences-hold-the-engine-loop` | `engine/orchestrator.py` | offload under a capture sink |
 | `repair-ledger-drops-rows-without-a-receipt` | `core/models.py` | per-node bound + omission receipt |
-| `auto-skill-body-leaves-a-run-unredacted` | `engine/memory.py` | redact the body at both ends |
 | `adapter-reader-runs-outside-the-eval-boundary` | `runtime/command_eval.py` | thread the eval env through |
 | `task-spec-models-ignore-unknown-keys` | `adapters/repo_task.py` | forbid extras, grandfathered |
 | `assistant-has-no-untrusted-evidence-boundary` | `serve/assistant.py` | one envelope, used by both agents |

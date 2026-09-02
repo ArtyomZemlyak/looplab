@@ -808,12 +808,43 @@ def skill_source_digest(statement) -> str:
     return hashlib.sha256(str(statement or "").encode("utf-8")).hexdigest()
 
 
-# OPEN[auto-skill-body-leaves-a-run-unredacted] this is the one cross-run sink written from unredacted
-# candidate code and read back verbatim: `node_created.code` is deliberately outside the engine's
-# redactor because the code is the record of what ran, but a skill card is a SHARED artifact mounted
-# into every later Researcher's toolset, and neither this write nor `use_skill`'s read applies the
-# persisted-text redactor. A hard-coded token in a winning snippet ships to every future run.
-# proof:absent:redacted_skill_body@looplab/engine/memory.py
+# A skill body is distilled from `node_created.code` — the candidate's own source. That code is
+# deliberately OUTSIDE `Engine._redact` because it is the record of what ran, and inside its own run
+# that is right. A SKILL CARD is the opposite kind of object: it leaves the run, lands in the shared
+# skills directory, and is mounted into every later Researcher's toolset. So a hard-coded token in a
+# winning snippet shipped, verbatim, to every future run on the box.
+#
+# REDACTED AT THE WRITE, not at the read. `use_skill` reads these files back verbatim, and so does
+# anyone with a shell; redacting on the way out would leave the secret on disk and merely hide it
+# from one reader.
+#
+# The cap is generous and DISCLOSED. `redact_persisted_text` truncates, and a silently shortened
+# code snippet is a skill that teaches a technique with its ending removed — so the body is clipped
+# only if it exceeds this, and the card says so where a reader will see it.
+_MAX_SKILL_BODY_CHARS = 20_000
+
+
+def redacted_skill_body(body: str) -> str:
+    """The skill body as it may be persisted: credential shapes and this box's own env values gone.
+
+    `entropy=False` deliberately. The entropy pass was measured to zero false positives on 1,652
+    persisted LOG TAILS, and a skill body is not a log tail — it is CODE, where a long mixed-case
+    alphanumeric literal is as likely to be a legitimate constant, a model id or a checksum as a
+    credential. The two authenticated rungs (known credential shapes, and the values of this box's
+    own secret-shaped environment variables) carry no such ambiguity and are what actually catch a
+    pasted token.
+    """
+    from looplab.core.redact import redact_persisted_text
+
+    text = str(body or "")
+    clipped = redact_persisted_text(text, max_chars=_MAX_SKILL_BODY_CHARS, entropy=False)
+    if len(text) > _MAX_SKILL_BODY_CHARS:
+        clipped = (clipped.rstrip()
+                   + f"\n\n<!-- clipped: the distilled body was {len(text)} characters, over the "
+                     f"{_MAX_SKILL_BODY_CHARS}-character skill-card limit -->")
+    return clipped
+
+
 def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                      fingerprint: list[str], task_id: str, *, identity_claim: Optional[str] = None,
                      classifier_version: str = "", source_statement: str = "") -> Optional[Path]:
@@ -918,7 +949,7 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                     f"source_task: {source_task}\n"
                     f"fingerprints: {json.dumps(fps)}\n"
                     "---\n\n"
-                    f"# {statement.strip()}\n\n{body.strip()}\n")
+                    f"# {statement.strip()}\n\n{redacted_skill_body(body).strip()}\n")
             atomic_write_text(p, text)
         return p
     except Exception:  # noqa: BLE001 — skill distillation is best-effort, never fails a run
