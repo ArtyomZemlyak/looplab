@@ -1186,7 +1186,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `llm-reasoning-vocabularies-unvalidated` | `core/config.py` | two rows in the enum table |
 | `replay-archive-has-no-unique-destination` | `serve/reset_route.py` | unique destination + an abandon path |
 | `trace-clear-receipts-are-never-reaped` | `serve/service_reaper.py` | a fifth reaper rule |
-| `absorbing-quarantine-answers-retryable` | `serve/deletion_service.py` | answer through the wedged form |
 | `assistant-has-no-untrusted-evidence-boundary` | `serve/assistant.py` | one envelope, used by both agents |
 | `command-sequencer-is-not-reentrant` | `serve/run_commands.py` | a plain lock that raises on re-entry |
 | `command-status-vocabulary-has-no-home` | `serve/protocol.py` | the vocabulary, plus a JS pin |
