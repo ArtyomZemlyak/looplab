@@ -132,6 +132,22 @@ MAX_STAGE_ASSERT_CHARS = 300
 # advertising a contract nothing enforces — which is the failure this field exists to end.
 STAGE_EXPECT_KEYS = ("files", "assert")
 
+# The SAME closed-key rule one level UP, and the argument is `STAGE_EXPECT_KEYS`' own. `expect`
+# refuses an unknown key because a dropped `"assets"` typo leaves a stage advertising a contract
+# nothing enforces; the STAGE object was open, so the identical typo one level out dropped the
+# contract entirely. Probed: a stage spelling `needs_files` / `expects` / `time_out` / `roles`
+# validated with `err=None` and came back holding only `name` and `command` — declared inputs,
+# declared outputs, the wall clock and kill-eligibility all silently gone.
+#
+# This module already argues the rule twice for individual keys: `env` and `role` are REFUSED rather
+# than dropped when unusable, "because a manifest that reads as if the stage carries a role nothing
+# applies is the failure the closed key sets exist to end". An unknown key is the same failure with
+# no key to hang the refusal on.
+#
+# `check` is here even though it is read as a bare truthiness flag: the set is what a stage MAY
+# carry, not what `validate_stages` happens to canonicalize.
+STAGE_KEYS = ("name", "command", "timeout", "check", "role", "expect", "needs", "env")
+
 
 def normalize_declared_path(path) -> str:
     """The ONE canonical spelling of a workdir-relative declared path.
@@ -979,12 +995,6 @@ def cap_gpu_flags(argv: list) -> list:
     return out
 
 
-# OPEN[stage-manifest-keys-are-open] this builds the stage from the keys it knows and never inspects
-# the rest, so a model-authored `needs_files`/`expects`/`time_out`/`roles` validates with err=None and
-# the declared inputs, outputs, wall and kill-eligibility all vanish (probed). `_validate_expect`
-# argues the closed-key rule one level down — a silently dropped typo leaves a stage advertising a
-# contract nothing enforces — and the same argument applies here.
-# proof:absent:STAGE_KEYS@looplab/runtime/command_eval.py
 def validate_stages(stages, *, reserved: tuple = (),
                     allow_env: bool = False) -> tuple[Optional[list], Optional[str]]:
     """Validate a stage list ({name, command:[argv...], timeout?, check?, role?}) into its canonical clean
@@ -1023,6 +1033,14 @@ def validate_stages(stages, *, reserved: tuple = (),
         if nm in seen:
             return None, f"duplicate stage name {nm!r}."
         seen.add(nm)
+        unknown = [k for k in s if k not in STAGE_KEYS]
+        if unknown:
+            # BEFORE the `command` check, so `commands: [...]` is reported as the unknown key it is
+            # rather than as a missing `command` — the two have different fixes and the declarer
+            # reads this string straight out of the `declare_stages` bounce.
+            return None, (f"stage {nm!r} has unknown key(s) {sorted(unknown)!r}; only "
+                          f"{list(STAGE_KEYS)!r} are read. A key nothing reads would declare "
+                          "inputs, outputs, a wall clock or a role that is never applied.")
         cmd = s.get("command")
         if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
             return None, (f"stage {nm!r} needs a `command` as a non-empty list of string argv "
