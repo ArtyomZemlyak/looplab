@@ -4993,6 +4993,11 @@ score, every finished probe that has both:
 | pde_heat1d | 10 | 1.022 | 0.991 – 1.054 |
 | discrete_log | 7 | 1.007 | 0.980 – 1.260 |
 
+*Correction, one sweep later — see §111.* Pooling these three was wrong. Four more `discrete_log`
+runs finished on 2026-09-02 and took THAT task's band to 37 percentage points (0.890 to 1.260),
+while `edge_expansion` stayed inside 5.2 and `pde_heat1d` inside 6.3. The pooled figure below is a
+median of three different questions; the per-task table is now what `probe_summary` prints.
+
 **Forty-two of the forty-four land inside ±3.5 %.** The worst loss in the whole corpus is
 `remEEctl4` at 0.963 — 3.7 % — and the one figure above 1.06 is `remDL6`, whose absolutes are small
 (3.201 → 4.033) and where a single instance moves the ratio. Twenty-four of 44 land below 1.0, all
@@ -5189,3 +5194,36 @@ already sorted by score is not a pattern; it is the column being sorted.
 **Nothing follows for §109's arm.** That clause is about proposing a VARIANT of what worked, and its
 evidence is the transition count — 14 of 28 proposals from a kernel node walk away from the kernel
 — which is a fact about `edge_expansion`, the task §109 already names as the one to run it on.
+
+## 111. The train number predicts the graded one on two tasks out of three
+
+§107 read one band off 44 probes. The four `discrete_log` runs that finished today take that task to
+n = 11 and break the band:
+
+| task | n | median | low | high | spread |
+|---|---|---|---|---|---|
+| edge_expansion | 27 | 0.993 | 0.963 (remEEctl4) | 1.015 (accEE) | **5.2 pp** |
+| pde_heat1d | 10 | 1.023 | 0.991 (remPde6) | 1.054 (remPde3) | **6.3 pp** |
+| **discrete_log** | **11** | 1.001 | **0.890** (remDL10) | **1.260** (remDL6) | **37.0 pp** |
+
+`discrete_log` sorted: 0.890, 0.980, 0.983, 0.993, 0.998, 1.001, 1.007, 1.008, 1.018, 1.054, 1.260.
+The middle nine are as tight as the other tasks; both ends are far outside them, and both ends are
+`discrete_log`.
+
+**This matters for what the corpus is used to argue.** The standing brief calls `discrete_log` "the
+corpus's finest load-bearing number", and it now carries two independent sources of noise, not one:
+a between-run spread of 4.2× (§101) AND a train-to-test disagreement of up to 37 points on the SAME
+solver. A conclusion drawn on `discrete_log` needs both.
+
+§107's headline survives where it was measured — on `edge_expansion`, 27 runs inside 5.2 points, no
+run gains on train and collapses on test. It does not generalise, and the pooled band was hiding
+which task it came from. Corrected in place; `probe_summary.py` prints the band per task now.
+
+### The test I wrote to pin it picked the wrong line
+
+The first version selected the band's rows with `startswith("discrete_log")` — and the by-card spend
+block prints lines starting with `discrete_log` too, so the assertion read
+`discrete_log unrecorded (pre-INSTRUMENT.txt) n= 5 median $0.0000`. The fix anchors on the block's
+HEADER and stops at the blank line. That is the same substring-anchor mistake this notebook has now
+recorded four times, and the only reason it did not survive is that the fixture made the wrong line
+obviously wrong.

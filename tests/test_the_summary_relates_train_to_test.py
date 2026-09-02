@@ -37,14 +37,45 @@ def _run(root: Path) -> str:
     return done.stdout
 
 
+def _band(out: str) -> dict[str, str]:
+    """The band block, selected by its HEADER rather than by a line prefix.
+
+    `discrete_log` also starts a line in the by-card spend block, so a
+    `startswith("discrete_log")` filter picked that one instead -- the substring-anchor mistake this
+    notebook keeps recording. Anchoring on the header and stopping at the blank line cannot.
+    """
+    lines = out.splitlines()
+    head = next(i for i, l in enumerate(lines) if l.startswith("TEST / best train"))
+    rows = {}
+    for l in lines[head + 1:]:
+        if not l.strip():
+            break
+        rows[l.split()[0]] = l
+    return rows
+
+
 def test_the_band_is_printed_with_both_ends_named(tmp_path):
     for i, (tr, te) in enumerate([(10.0, 10.0), (10.0, 9.9), (10.0, 10.1),
                                   (10.0, 5.0), (10.0, 10.05), (10.0, 9.95)]):
         _probe(tmp_path, f"p{i}", "discrete_log", [tr], te)
     out = _run(tmp_path)
     assert "TEST / best train" in out, out
-    line = [l for l in out.splitlines() if "TEST / best train" in l][0]
+    line = _band(out)["discrete_log"]
     assert "0.500 (p3)" in line, f"the overfitted run is not named at the low end: {line}"
+
+
+def test_the_band_is_per_task_and_not_pooled(tmp_path):
+    """§111: pooling hid that `discrete_log` disagrees train-to-test by 37 percentage points while
+    `edge_expansion` stays inside 5.2. MUTATION: pool them and this reddens, because one band
+    cannot carry two spreads."""
+    for i in range(5):
+        _probe(tmp_path, f"d{i}", "discrete_log", [10.0], 10.0 + i)      # 1.0 .. 1.4
+    for i in range(5):
+        _probe(tmp_path, f"e{i}", "edge_expansion", [100.0], 100.0)      # all 1.000
+    out = _run(tmp_path)
+    rows = _band(out)
+    assert "spread 40.0 pp" in rows["discrete_log"], rows["discrete_log"]
+    assert "spread 0.0 pp" in rows["edge_expansion"], rows["edge_expansion"]
 
 
 def test_a_run_without_a_test_score_is_left_out(tmp_path):
@@ -58,9 +89,8 @@ def test_a_run_without_a_test_score_is_left_out(tmp_path):
         json.dumps({"type": "node_evaluated", "ts": 1.0, "data": {"node_id": 0, "metric": 7.0}})
         + "\n", encoding="utf-8")
     (run / "spans.jsonl").write_text("", encoding="utf-8")
-    out = _run(tmp_path)
-    line = [l for l in out.splitlines() if "TEST / best train" in l][0]
-    assert "over 5 probes" in line, line
+    line = _band(_run(tmp_path))["discrete_log"]
+    assert "n= 5" in line, line
 
 
 def test_too_few_probes_print_nothing(tmp_path):

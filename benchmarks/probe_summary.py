@@ -620,16 +620,24 @@ def main(argv: list[str]) -> int:
     # TEST/train 0.998, worst loss 3.7 %. See docs/56 §107. Printed as a SPREAD, not one number,
     # because the claim is the spread: a run that had overfitted would sit far below the band and
     # a median alone would hide it.
-    ratios = sorted((s2["test"] / max(s2["nodes"]), s2["probe"])
-                    for s2 in seen.values()
-                    if s2.get("test") and s2.get("nodes") and max(s2["nodes"]) > 0)
-    if len(ratios) >= 5:
-        mid = ratios[len(ratios) // 2][0]
-        lo, hi = ratios[0], ratios[-1]
-        print(f"\nTEST / best train, over {len(ratios)} probes with both: median {mid:.3f}, "
-              f"{lo[0]:.3f} ({lo[1]}) to {hi[0]:.3f} ({hi[1]})")
-        print("  a run that fitted the train instances specifically would sit far below this "
-              "band; none does (docs/56 §107)")
+    # PER TASK, not pooled. §107 read one band off 44 probes and called it "a few per cent"; the
+    # four discrete_log runs that finished on 2026-09-02 widened THAT task to 37 percentage points
+    # (0.890 to 1.260) while edge_expansion stayed inside 5.2 and pde_heat1d inside 6.3. A pooled
+    # band is a median of three different questions. See docs/56 §111.
+    by_task_ratio: dict[str, list[tuple[float, str]]] = {}
+    for s2 in seen.values():
+        if s2.get("test") and s2.get("nodes") and max(s2["nodes"]) > 0:
+            by_task_ratio.setdefault(s2["task"], []).append(
+                (s2["test"] / max(s2["nodes"]), s2["probe"]))
+    shown = {t: sorted(v) for t, v in by_task_ratio.items() if len(v) >= 5}
+    if shown:
+        print("\nTEST / best train, per task (a run that fitted the train instances specifically "
+              "would sit far below its band):")
+        for task, v in sorted(shown.items()):
+            mid = v[len(v) // 2][0]
+            print(f"  {task:15} n={len(v):2}  median {mid:.3f}  "
+                  f"{v[0][0]:.3f} ({v[0][1]}) to {v[-1][0]:.3f} ({v[-1][1]})  "
+                  f"spread {100 * (v[-1][0] - v[0][0]):.1f} pp")
 
     # WAS THE GRADED CODE THE CHECKED CODE? Measured 2026-09-02 over 111 evaluated nodes whose
     # tool order could be reconstructed from the spans: a node whose last file WRITE came after its
