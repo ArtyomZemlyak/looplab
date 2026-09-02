@@ -833,6 +833,36 @@ SETUP_THREAD_APPENDABLE: frozenset[str] = frozenset({
     EV_RUN_SETUP_STARTED, EV_RUN_SETUP_FINISHED,
 })
 
+# Invariant #1's FOURTH writer, and the one it did not name. The invariant says "UI/CLI append only
+# control intents (allow-listed in `serve/protocol.py::CONTROL_EVENTS`)" — the ASSISTANT'S TOOL
+# LAYER is neither, and `tools/machine_runs_tools.py::MachineRunsTools` appends these two FOLDED
+# types directly. Neither is in `CONTROL_EVENTS`; `node_tombstoned` has no other writer in the tree
+# at all. So the seam existed, was reachable by an LLM, and was declared nowhere.
+#
+# Registering it is NOT a promotion to a control intent. It is the same move `BACKGROUND_APPENDABLE`
+# and `SETUP_THREAD_APPENDABLE` make for the engine's own thread-side seams: state the exception, at
+# the site, with a guard, so a FIFTH folded type cannot join it silently. Making these two tools
+# command-backed (the `submit` path their eight siblings already take, with an idempotency key and
+# an observed generation) is the larger correct end state and is a separate change: it needs a
+# `ControlSpec` row in each of `control_validation.py`'s five tables, a worker phase for the
+# `config.snapshot.json` mirror the gate write also owes, and a purge path for the tombstone's
+# irreversible sibling.
+#
+# What membership REQUIRES, and both members satisfy: the write goes through the tool layer's
+# `_mutation_intent` + `commands.mutation_guard` generation fence (so it cannot land on a
+# post-reset replacement run), and it appends under the tail CAS its own read formed against —
+# `node_tombstoned` with `expected_last_seq=expected_tail`, `trust_gate_changed` through
+# `events/trust_gate.py::apply_trust_gate`, which is also the config PUT's writer. That second one
+# is the reason this registry is worth having: until it landed, the tool appended BARE while its
+# router twin CASed, retried and refolded for idempotence — one rule, two implementations, and the
+# weaker one was the LLM-driven one.
+#
+# Guarded in both directions by `tests/test_assistant_appendable.py`, which re-derives the appended
+# types from the provider's own `ast.Call` nodes.
+ASSISTANT_APPENDABLE: frozenset[str] = frozenset({
+    EV_TRUST_GATE_CHANGED, EV_NODE_TOMBSTONED,
+})
+
 # Conditional extension for legacy Hypothesis/Policy selection only. ``hypothesis_merged`` became a
 # Card ownership/lifecycle input when native Card selection landed, so it is not universally neutral.
 # The overlap call site must prove Card-driven selection is off; Card mode performs consolidation only

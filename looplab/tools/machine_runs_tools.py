@@ -1547,12 +1547,22 @@ class RunControlTools:
         `config.snapshot.json` directly, so a later RESUME re-enters with the new gate and the
         settings panel does not show a stale value. It stays this way until the trust gate joins the
         server's control registry, at which point it becomes a submit like the other two.
+
+        The WRITE is `events/trust_gate.py::apply_trust_gate`, the same one the config PUT uses.
+        This path used to spell its own and had drifted on all three of its properties — it appended
+        unconditionally (so confirming a gate that already held grew the log by a row claiming a
+        change nobody made), with no tail CAS and no writer lock. Only the refusal is phrased here.
         """
-        from looplab.events.eventstore import EventStore
-        from looplab.events.types import EV_TRUST_GATE_CHANGED
+        from looplab.events.trust_gate import (
+            GATE_WRITE_ALREADY_SET, GATE_WRITE_CONTENDED, TRUST_GATE_VALUES, apply_trust_gate,
+        )
+        from looplab.events.types import ASSISTANT_APPENDABLE, EV_TRUST_GATE_CHANGED
+
+        # Invariant #1's assistant seam, declared at the site like its two thread-side siblings.
+        assert EV_TRUST_GATE_CHANGED in ASSISTANT_APPENDABLE
 
         tg = str(args.get("trust_gate") or "").strip().lower()
-        if tg not in ("audit", "gate", "block"):
+        if tg not in TRUST_GATE_VALUES:
             return "(trust_gate must be audit | gate | block)"
         blocked, formed_generation = self._gate(
             name, rid, rd, f"set trust_gate={tg} for {rid}",
@@ -1564,7 +1574,6 @@ class RunControlTools:
                 expected_generation=formed_generation) as (_key, generation):
             with self._commands.mutation_guard(
                     rd, "set the trust gate", expected_generation=generation) as rd:
-                store = EventStore(rd / "events.jsonl")
                 # Mirror the UI PUT /config path: the fold already applies the event, but also update
                 # config.snapshot.json so a later RESUME re-enters with the new gate and the settings panel
                 # doesn't show a stale value (the two mutation paths must not drift). Best-effort.
@@ -1574,21 +1583,27 @@ class RunControlTools:
                     # preventing an event->config/config->event deadlock while also closing the
                     # reset-marker race for this dual write.
                     with self.lifecycle().run_config_write_lock(snap):
-                        store.append(
-                            EV_TRUST_GATE_CHANGED,
-                            {"trust_gate": tg, "source": "assistant"})
-                        try:
-                            import json as _json
-                            from looplab.core.atomicio import atomic_write_text
-                            cfg = _json.loads(snap.read_text(encoding="utf-8"))
-                            cfg["trust_gate"] = tg
-                            atomic_write_text(snap, _json.dumps(cfg, indent=2))
-                        except (OSError, ValueError):
-                            pass
+                        outcome = apply_trust_gate(rd, tg, source="assistant")
+                        if outcome != GATE_WRITE_CONTENDED:
+                            try:
+                                import json as _json
+                                from looplab.core.atomicio import atomic_write_text
+                                cfg = _json.loads(snap.read_text(encoding="utf-8"))
+                                cfg["trust_gate"] = tg
+                                atomic_write_text(snap, _json.dumps(cfg, indent=2))
+                            except (OSError, ValueError):
+                                pass
                 else:
-                    store.append(
-                        EV_TRUST_GATE_CHANGED,
-                        {"trust_gate": tg, "source": "assistant"})
+                    outcome = apply_trust_gate(rd, tg, source="assistant")
+                if outcome == GATE_WRITE_CONTENDED:
+                    # The refusal is phrased here, not in the shared writer: this surface answers an
+                    # LLM, so it says what to do next rather than returning a status code.
+                    return (f"(run {rid} changed while the trust gate was being saved — "
+                            f"refresh and retry)")
+                if outcome == GATE_WRITE_ALREADY_SET:
+                    # Say it, rather than reporting a change that did not happen. The row is what a
+                    # later audit reads; claiming one nobody made is the defect this closes.
+                    return f"(trust_gate was already {tg} for {rid} — nothing recorded)"
                 return f"(trust_gate set to {tg} for {rid})"
 
     def _reset_node(self, rid: str, rd: Path, args: dict) -> str:
@@ -1752,7 +1767,7 @@ class RunControlTools:
                                      subtree: set[int], expected_tail: int, *, purge: bool) -> str:
         from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, _interprocess_lock
         from looplab.events.replay import fold
-        from looplab.events.types import EV_NODE_TOMBSTONED
+        from looplab.events.types import ASSISTANT_APPENDABLE, EV_NODE_TOMBSTONED
         lifecycle = self.lifecycle()
 
         evp = rd / "events.jsonl"
@@ -1780,14 +1795,12 @@ class RunControlTools:
                 if (tail != expected_tail or nid not in state.nodes
                         or (state.nodes[nid].tombstoned and not purge)):
                     return f"(run {rid} changed while awaiting permission — refresh and retry)"
+                # Invariant #1's assistant seam, declared. This provider is neither the engine nor
+                # a control intent, and `node_tombstoned` has no other writer in the tree — so the
+                # exception is stated at the site, exactly as the two thread-side seams state theirs.
+                assert EV_NODE_TOMBSTONED in ASSISTANT_APPENDABLE
                 try:
                     store.append(
-                        # OPEN[tools-layer-writes-two-folded-events] this provider is a second writer of two FOLDED types
-                        # outside `CONTROL_EVENTS` — the trust-gate change (whose router twin appends under a tail CAS with
-                        # retries, while this one appends bare) and the node tombstone, whose only writer in the tree is here.
-                        # Invariant #1 says UI/CLI append only allow-listed control intents; register both and make the two
-                        # tools command-backed like their eight siblings.
-                        # proof:`present:EV_NODE_TOMBSTONED, {"node_ids"@looplab/tools/machine_runs_tools.py`
                         EV_NODE_TOMBSTONED, {"node_ids": sorted(subtree)},
                         expected_last_seq=expected_tail)
                 except EventStoreConcurrencyError:

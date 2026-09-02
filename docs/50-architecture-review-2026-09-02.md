@@ -1176,7 +1176,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `assistant-has-no-untrusted-evidence-boundary` | `serve/assistant.py` | one envelope, used by both agents |
 | `read-fence-takes-the-command-sequencer` | `serve/routers/runs.py` | one lock-free generation fence |
 | `no-per-request-fold-budget` | `serve/appstate.py` | one fold per (identity, request) |
-| `tools-layer-writes-two-folded-events` | `tools/machine_runs_tools.py` | register both as control events |
 | `foreign-run-fold-cache-thrashes` | `tools/_runcache.py` | one cache per root, bounded by bytes |
 | `embedding-spend-is-unbilled` | `tools/vectorstore.py` | an accountant + an embedding cache |
 | `card-lane-fills-outside-the-policy-population` | `search/card_selection.py` | a legal-action set per policy |

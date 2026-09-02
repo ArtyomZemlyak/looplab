@@ -35,15 +35,17 @@ from looplab.core.run_reset import (
     load_run_reset_marker)
 from looplab.serve.http import if_none_match, json_object, json_object_bytes, request_body_contract
 from looplab.events.eventstore import (
-    EventStore, EventStoreConcurrencyError, EventStoreLockError, JsonlRecordInvalid,
+    EventStore, EventStoreLockError, JsonlRecordInvalid,
     _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
 from looplab.events.replay import FoldCursor, fold
+from looplab.events.trust_gate import (
+    GATE_WRITE_APPENDED, GATE_WRITE_CONTENDED, apply_trust_gate,
+)
 from looplab.events.traceview import (
     TRACE_NODE_EPISODE_CAP, TRACE_PROJECTION_SCHEMA, TraceEpisodeCursorUnknown,
     trace_file_revision, trace_projection_json_bytes, unavailable_projection)
 from looplab.events.types import (
     EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED, EV_CONCEPT_LENS_STARTED,
-    EV_TRUST_GATE_CHANGED,
 )
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
@@ -3540,26 +3542,17 @@ def build_router(srv) -> APIRouter:
         return effective
 
     def _repair_trust_gate_event(rd: Path, requested: str) -> bool:
-        """Make snapshot/event dual-write retryable without appending duplicate gate events."""
-        store = EventStore(rd / "events.jsonl")
-        for _attempt in range(4):
-            events = store.read_all()
-            if fold(events).trust_gate == requested:
-                return False
-            expected = events[-1].seq if events else -1
-            try:
-                store.append(
-                    EV_TRUST_GATE_CHANGED,
-                    {"trust_gate": requested, "source": "config_edit"},
-                    expected_last_seq=expected,
-                    require_lock=True,
-                )
-                return True
-            except EventStoreConcurrencyError:
-                # Another writer advanced the log. Refold under a fresh CAS: it may already have
-                # applied this exact gate, in which case the retry becomes a no-op.
-                continue
-        raise HTTPException(409, "the run changed while trust_gate was being saved; retry the edit")
+        """Make snapshot/event dual-write retryable without appending duplicate gate events.
+
+        The idempotence/CAS/lock policy is `events/trust_gate.py::apply_trust_gate`, shared with the
+        assistant's settings tool, which had drifted on all three. Only the REFUSAL stays here: a
+        409 in the config editor's own words, which the shared writer must not spell for it.
+        """
+        outcome = apply_trust_gate(rd, requested, source="config_edit")
+        if outcome == GATE_WRITE_CONTENDED:
+            raise HTTPException(
+                409, "the run changed while trust_gate was being saved; retry the edit")
+        return outcome == GATE_WRITE_APPENDED
 
     def _put_run_config_locked(
             rd: Path, snap: Path, incoming: dict, expected_revision: Optional[str],

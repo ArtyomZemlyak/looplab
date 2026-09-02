@@ -152,6 +152,24 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    `tests/test_setup_thread_appendable.py` proves splice-position neutrality. UI/CLI append
    only *control intents* (allow-listed in `serve/protocol.py::CONTROL_EVENTS`, enforced by
    `serve/routers/control.py`).
+   *The ASSISTANT TOOL LAYER is a FOURTH writer and this invariant did not name it*:
+   `tools/machine_runs_tools.py::MachineRunsTools` appends two FOLDED types directly — neither is
+   in `CONTROL_EVENTS`, and `node_tombstoned` has no other writer in the tree at all. It is now
+   `events/types.py::ASSISTANT_APPENDABLE`, asserted at both append sites and guarded in both
+   directions by `tests/test_assistant_appendable.py` (which FOLLOWS the one delegating call rather
+   than scanning the provider's text, since the gate write no longer lives there). Registering it
+   is NOT a promotion to a control intent — the guard asserts the two sets stay disjoint, because a
+   type in both would mean two authorization stories for one write. Both members are fenced by
+   `_mutation_intent` + `commands.mutation_guard` and append under the tail CAS their own read
+   formed against; making them command-backed like their eight siblings is the larger correct end
+   state and needs a `ControlSpec` row in each of `control_validation.py`'s five tables. What the
+   registry already bought: `trust_gate_changed` had TWO implementations of one write and they had
+   drifted on every property that matters — the router refolded for idempotence, CASed on the tail
+   and passed `require_lock=True`; the tool appended BARE, so an assistant confirming a gate that
+   already held grew the durable log by a row claiming a change nobody made. Both now call
+   `events/trust_gate.py::apply_trust_gate`, which returns an outcome and deliberately phrases NO
+   refusal — `serve/durable_op.py::refuse_unless_quiescent`'s rule, share the probe and its order,
+   never the words.
    *The offloaded PROPOSAL is not a seam at all, and that is the point* (2026-08-29):
    `card_reservation.py` runs `_prepare_node_idea` on `anyio.to_thread.run_sync` because it is a
    paid Researcher call with no `await` in it, and `aaef33d3` justified that with "it writes
