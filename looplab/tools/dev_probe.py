@@ -1008,10 +1008,66 @@ class DevProbeTools:
             dest.write_text(body, encoding="utf-8")
             written += 1
             used += len(body)
+        given, gskipped = self._replicate_given(work, set(files), used, written)
         note = f"\n(workspace: {written} staged file(s) replicated here"
-        if skipped:
-            note += f"; {skipped} omitted to stay under the replica cap — read them with read_file"
+        if given:
+            note += f"; {given} operator-given file(s) too, importable by name"
+        if skipped or gskipped:
+            note += (f"; {skipped + gskipped} omitted to stay under the replica cap — "
+                     "read them with read_file")
         return note + ")"
+
+    def _replicate_given(self, work: Path, staged_names: set, used: int, written: int):
+        """Also replicate what the task GAVE the model, not only what the model wrote.
+
+        MEASURED over the 46-probe corpus, 2026-09-02. `run_probe` fails 399 times; the largest
+        single class is `ModuleNotFoundError`, 100 of them, and **94 name the reference module** --
+        `reference_edge_expansion` 43x in 21 probes, `reference_pde_heat1d` 40x in 11,
+        `reference_discrete_log` 11x in 7. Thirty-nine of the forty-six probes hit it.
+
+        The cause is this function's scope. It replicated `staged.files`, which is what the model
+        HAS WRITTEN; `reference_*.py` is operator-planted and deliberately NOT part of any
+        submission (`repo_spec["protected_names"]`, and `campaign.sh` passes the same list to the
+        scorer as `--protect`). So the one file the card tells the model to consult was the one file
+        its scratch tool could not import -- and `sys.path.insert(0, os.getcwd())` in the launcher
+        cannot help a file that is not in the cwd.
+
+        That matters beyond the wasted turns: reference use is a MEASURED quantity in this campaign
+        (§69.1's 4.9-8.3 %, and the nine-probe control arm of §94), and a harness that refuses the
+        import suppresses the very number the arm was built to move.
+
+        STAGED WINS ON A NAME COLLISION. If the model has written a file of the same name, its own
+        version is the truth for its own build; the given copy must never shadow it. Same caps as
+        the staged loop, and the probe still cannot write, so this stays one-way.
+        """
+        names = [str(n) for n in (self.repo_spec.get("protected_names") or [])]
+        root = str(self.repo_spec.get("editable_path") or "")
+        if not names or not root:
+            return 0, 0
+        base = Path(root)
+        copied, skipped = 0, 0
+        for rel in sorted(names):
+            if rel in staged_names or rel.endswith("/") or "*" in rel:
+                continue
+            src = (base / rel)
+            try:
+                if not src.is_file():
+                    continue
+                body = src.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if written + copied >= _MAX_REPLICA_FILES or used + len(body) > _MAX_REPLICA_BYTES:
+                skipped += 1
+                continue
+            dest = (work / rel).resolve()
+            if not str(dest).startswith(str(work.resolve()) + os.sep):
+                skipped += 1
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
+            copied += 1
+            used += len(body)
+        return copied, skipped
 
     def _project(self, rc, out, err, timed_out, to: float, note: str, *, cancelled=False) -> str:
         """The bounded output projection: exit status, then each stream as a TAIL.

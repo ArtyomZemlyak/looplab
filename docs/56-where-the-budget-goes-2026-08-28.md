@@ -4785,3 +4785,52 @@ wrong.**
 *Also censused and NOT a finding:* `repeat_streak` — 2.4 % of tool calls repeat the previous one
 (414 at streak 2, 26 at streak 3, nothing above), all of them read-only (`read_code` 198,
 `repo_read` 111, `web_fetch` 46). The cap already holds.
+
+## 103. The one file the card tells the model to read is the one file its scratch tool could not import
+
+Classified all 399 `run_probe` failures in the corpus by exception:
+
+| | calls | share | probes |
+|---|---|---|---|
+| `ModuleNotFoundError` | **100** | 25.1 % | **39 of 46** |
+| `TypeError` | 85 | 21.3 % | 28 |
+| no exception (mostly `exit=-9`, the 60 s probe timeout) | 59 | 14.8 % | 32 |
+| `IndexError` | 38 | 9.5 % | 18 |
+| `ValueError` / `numba TypingError` | 30 / 30 | 7.5 % each | 17 / 19 |
+
+Most of these are the tool working: a scratch script is a question, and a question that raises has
+been answered. The top bucket is not. **94 of the 100 missing modules are the reference:**
+
+| module | calls | probes |
+|---|---|---|
+| `reference_edge_expansion` | 43 | 21 |
+| `reference_pde_heat1d` | 40 | 11 |
+| `reference_discrete_log` | 11 | 7 |
+
+`dev_probe.py::_replicate` materialised `staged.files` — what the model has WRITTEN. `reference_*.py`
+is operator-planted and deliberately excluded from every submission: it is in
+`repo_spec["protected_names"]`, and `campaign.sh` hands the scorer the same list as `--protect`. So
+the file the card names as the thing to consult was precisely the file the scratch tool could not
+see, and the launcher's own `sys.path.insert(0, os.getcwd())` cannot help a file that is not in the
+cwd.
+
+**This one is not just wasted turns.** Reference use is a MEASURED quantity in this campaign —
+§69.1's 4.9–8.3 % baseline, and the nine-probe control arm of §94 that removed the affordance to see
+what it was worth. A harness that refuses the import suppresses the very number the arm was built to
+move, in 39 of 46 probes. Every reference-use figure in this notebook was measured against a tool
+that could not do it.
+
+`_replicate_given` now copies the task's protected files into the probe's disposable cwd under the
+same caps, with **staged winning any name collision** — the model's own version is the truth for its
+own build. The probe still cannot write, so this stays one-way.
+
+Five falsifiers in `tests/test_the_probe_can_import_what_the_task_gave_it.py`. Three mutations, all
+verified to redden: removing the call (the corpus failure, reproduced), letting the given file
+shadow the staged one, and dropping the containment guard.
+
+**The containment test caught me first.** Its initial version passed WITH the guard removed — I had
+asserted that nothing appeared in `work/` and that the file outside was unmodified, and the escaping
+write landed in a third place, `editable_path/outside/`, which neither assertion looked at. The
+version that holds snapshots every path under `tmp_path` before the call and asserts the only new
+ones are inside the disposable directory. A containment test that names the places it checks tests
+the places it names; the mutation is what told me which those were.
