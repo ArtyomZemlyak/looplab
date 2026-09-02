@@ -5434,3 +5434,42 @@ work rather than about the loop's.
 
 Not run now: all four lanes are on §109's arm, and taking one down mid-arm to answer a different
 question is how §112 already cost $0.06.
+
+## 116. The first probe of §109's arm to finish, and an impression that did not survive being measured
+
+`ctlEEb` (control card) finished: **TEST 156.9089** against a best train of 159.7902 — ratio 0.982,
+inside `edge_expansion`'s 0.963–1.015 band (§111). Champion is a 48-line Cython kernel; $1.0108;
+24 % of the dollar before the first node and 0 % after the last; 28 `eval_train` calls; reference
+use 9.5 % import / 9.5 % `is_solution`, above §69.1's 4.9–8.3 % band. Money: `propose` 31.3 %,
+`plan_step` 29.0 %, `repropose` 16.3 %, `deep_research` 12.2 %. Its nodes were
+**[159.79, 39.21, 9.03]** — best over last is **17.69×**, the largest save the champion rule has
+made on this task.
+
+Beside the two treatment probes still running, that reads like a result:
+
+```
+expEEa  [250.1, 240.2, 203.5]      ctlEEa  [172.9, 178.9]
+expEEb  [269.3, 161.2]             ctlEEb  [159.8,  39.2, 9.0]
+```
+
+Three later nodes in the treatment arm all stay within 0.6–0.96 of the first; the control arm has
+one that holds and two that fall to a quarter and a twentieth. It is exactly the behaviour
+`--exploit-best` is written to produce.
+
+**It does not survive the test.** The comparison has to be matched — today's runs start in the good
+regime (§114), so their later nodes can only stay or fall, while a corpus run that started at 25 can
+only rise. Restricted to runs whose node 0 was already ≥ 150:
+
+| | runs | later nodes | held ≥ 0.5 of node 0 |
+|---|---|---|---|
+| corpus | 5 | 10 | 5 |
+| today, both arms | 4 | 6 | 4 |
+
+Exact one-sided Fisher **p = 0.451**. And within today, treatment 3/3 against control 1/3 is three
+observations per arm — §83's table says a 1.25× effect needs six per arm for even 50 % power, and
+this is not that.
+
+So: nothing is claimed. The arm needs the rest of its nine. What this entry records is the shape of
+the near-miss — four sequences that looked like the hypothesis, a matched comparison that says
+`p = 0.45`, and a decision not to write the exciting version. §108 and §112 both had to be corrected
+by a later sweep; this one gets corrected before it is written.
