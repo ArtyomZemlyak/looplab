@@ -614,6 +614,23 @@ def main(argv: list[str]) -> int:
         print("        Whether STATING the rule changes which nodes appear is a different question")
         print("        and needs the --no-unteachable-rules control arm; see docs/56 §83, §84.")
 
+    # DOES THE TRAIN NUMBER PREDICT THE GRADED ONE? The card warns hard about the hidden split --
+    # "anything that fits the train instances SPECIFICALLY ... scores zero where it counts" -- and
+    # over 44 finished probes the warning describes something that does not happen: median
+    # TEST/train 0.998, worst loss 3.7 %. See docs/56 §107. Printed as a SPREAD, not one number,
+    # because the claim is the spread: a run that had overfitted would sit far below the band and
+    # a median alone would hide it.
+    ratios = sorted((s2["test"] / max(s2["nodes"]), s2["probe"])
+                    for s2 in seen.values()
+                    if s2.get("test") and s2.get("nodes") and max(s2["nodes"]) > 0)
+    if len(ratios) >= 5:
+        mid = ratios[len(ratios) // 2][0]
+        lo, hi = ratios[0], ratios[-1]
+        print(f"\nTEST / best train, over {len(ratios)} probes with both: median {mid:.3f}, "
+              f"{lo[0]:.3f} ({lo[1]}) to {hi[0]:.3f} ({hi[1]})")
+        print("  a run that fitted the train instances specifically would sit far below this "
+              "band; none does (docs/56 §107)")
+
     # WAS THE GRADED CODE THE CHECKED CODE? Measured 2026-09-02 over 111 evaluated nodes whose
     # tool order could be reconstructed from the spans: a node whose last file WRITE came after its
     # last `check` scores ZERO four times in twelve; a node whose last write came before it scores

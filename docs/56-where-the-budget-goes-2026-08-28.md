@@ -4973,3 +4973,43 @@ three-tuple reddens two.
 run, §103's probe could not import the file its card names, and now the reconciler samples its two
 sides in an order its own docstring forbids. None of these is a broken component. Each is a
 component that measured something adjacent to what it claimed.
+
+## 107. The train number predicts the graded number to within a few per cent, over 44 probes
+
+The card's sharpest warning is about the hidden split:
+
+> THE REPORTED SCORE IS ON A SPLIT YOU CANNOT SEE. Train is what you tune against; the champion is
+> finally scored on held-out instances from the same generator. So anything that fits the train
+> instances SPECIFICALLY -- a lookup table, a hard-coded answer, a threshold tuned to one of them --
+> scores zero where it counts.
+
+Nobody had ever asked the corpus whether that happens. Best train metric against the graded TEST
+score, every finished probe that has both:
+
+| | n | median TEST/train | range |
+|---|---|---|---|
+| **all** | **44** | **0.998** | 0.963 – 1.260 |
+| edge_expansion | 27 | 0.993 | 0.963 – 1.015 |
+| pde_heat1d | 10 | 1.022 | 0.991 – 1.054 |
+| discrete_log | 7 | 1.007 | 0.980 – 1.260 |
+
+**Forty-two of the forty-four land inside ±3.5 %.** The worst loss in the whole corpus is
+`remEEctl4` at 0.963 — 3.7 % — and the one figure above 1.06 is `remDL6`, whose absolutes are small
+(3.201 → 4.033) and where a single instance moves the ratio. Twenty-four of 44 land below 1.0, all
+by tenths of a per cent: a small, systematic, task-shaped offset, not a cliff.
+
+**So the warning describes something this corpus does not do.** Not one run gained on train and
+collapsed on test, which is what train-specific fitting would look like and is exactly what the
+per-task band would expose. `eval_train` is a trustworthy proxy for the number the campaign reports.
+
+That is worth stating plainly because it removes a candidate explanation for the thing this
+programme is actually stuck on. The spread between runs on one task is 2.7× on `edge_expansion` and
+4.2× on `discrete_log` (§101, §83). It is not measurement noise: the ruler agrees with itself to
+1.6 % (the reference-against-itself checks) and now the train half agrees with the graded half to a
+few per cent. **The variance is in which solver the loop writes, not in how it is scored** — which
+is where §84's champion rule and §97's repeating proposer already pointed.
+
+`probe_summary.py` prints the band with both endpoints NAMED on every sweep, because the claim is
+the spread and a median alone would hide the one run that broke it. Three falsifiers; printing only
+the median reddens the test that plants an overfitted run at 0.500 and demands it be named, and
+lowering the five-probe floor reddens the test that refuses to call four points a band.
