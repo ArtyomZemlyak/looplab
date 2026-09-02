@@ -4620,3 +4620,58 @@ argued.
 **The standing list still carries this as open** — "closes only by versioning the archive per
 attempt". Driven here, it is closed: `.superseded-N` IS that versioning, one layer down from where
 the list looked for it.
+
+## 100. The run's wall clock IS generation time, and the 300-second ceiling has now been measured on both sides
+
+Two questions this corpus could always have answered and nobody had asked it. Both come off the
+meter's `latency_ms`, which is stamped on all 13,329 metered generations.
+
+### Where the clock goes
+
+Sum every generation's latency inside one probe, divide by that probe's wall span:
+
+| | |
+|---|---|
+| probes with a real span (>10 min, >20 calls) | 47 |
+| **median share of wall clock spent inside LLM calls** | **103.2 %** |
+| range | 87.9 % – 113.6 % |
+
+Over 100 % is not an error: the loop overlaps some calls. But 103 % means the overlap is slight and
+**the run is, to within measurement, doing nothing but waiting on the model.** Total across the
+corpus: **111.8 hours inside generations.**
+
+That is the missing half of §85, where twelve cut sessions were all cut by "time" and none by money
+or nodes. The clock those sessions ran out of is generation time; nothing else is in it.
+
+**And it re-prices every dev command.** `check` is 3.6–9.1 s, its new build gate 0.4–1.3 s (§99),
+`eval_train` about 40 s. Against 111.8 hours of generation, the measuring commands are free — the
+model is not trading clock for certainty when it runs one, it is trading a rounding error. `KEEP_BEST`
+already tells it to "measure early, measure often"; this is the number behind that sentence, and it
+argues for MORE measurement, not less.
+
+### The ceiling, from both sides at once
+
+The standing rule is that nginx's `proxy_read_timeout` measures the gap BETWEEN BYTES, so it only
+fires on an unstreamed call. Split the whole ledger by `stream`:
+
+| | calls | longer than 300 s | killed (504) | hours inside |
+|---|---|---|---|---|
+| streamed | 12,386 | 143 | **0** | 103.6 |
+| unstreamed | 944 | 21 | **21** | 8.4 |
+
+**Every unstreamed call that crossed the ceiling died — 21 of 21. Not one streamed call did, out of
+143 that crossed it.** The longest surviving generation in the corpus is 1,820 s, six times the
+ceiling. p99 of all generations is 303.3 s, sitting exactly on it.
+
+Those 143 long streamed calls are 1.22 % of the traffic and **16.8 % of all generation time**. Since
+the clock is generation time (above), that is 16.8 % of the campaign's wall clock riding on one
+environment variable — the one I once switched off myself by handing the run someone else's `.env`.
+
+### A note on the instrument, again
+
+While checking the four live probes I read "no metered call for 652 s" off the ledger and nearly
+wrote it up as a stall. The meter writes a row when a call RETURNS, so a generation in flight is
+invisible to it by construction — and generations of 314 s, 500 s and 639 s completed in these same
+four probes while I was looking. The second instrument settled it: `/proc/PID/wchan` said
+`do_epoll_wait`, `state=S`, no children — waiting on a socket, which is what a long stream looks
+like. Silence in a completion-stamped log is not evidence of a stall.
