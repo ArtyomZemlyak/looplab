@@ -5338,3 +5338,63 @@ down.** A script is not a pure function of its source: `make_task.py` reads a di
 itself, so a copy of it is a different program. I checked what the code said and not what the
 program did, and it took a $10 decision with it. What caught it was the boring version of the same
 measurement — rebuilding all 24 commits instead of one, and seeing every single one agree.
+
+## 114. Every probe launched today wrote a compiled kernel as its FIRST node, and neither arm explains it
+
+The §109 arm's four probes reached their first evaluated node. Both arms, side by side:
+
+| probe | arm | node 0 |
+|---|---|---|
+| expEEb | `--exploit-best` | **269.31** |
+| expEEa | `--exploit-best` | **250.11** |
+| ctlEEa | shipped card | **172.93** |
+| ctlEEb | shipped card | **159.79** |
+
+Against the corpus's 27 `edge_expansion` first nodes:
+
+```
+20.5 20.8 21.6 22.6 22.8 22.8 22.9 22.9 23.7 25.2 25.4 27.2 27.5 27.7 27.8 28.1
+31.9 35.0 52.6 59.8 | 132.7 141.7 150.7 154.4 154.4 159.5 178.9
+```
+
+Median **27.7**, and exactly one of the 27 reaches today's lowest. All four of today's land above
+it. One-sided permutation test on ranks: **p = 0.000127**.
+
+**It is not the clause under test.** Both control probes show it, and §109's clause is about the
+SECOND proposal — there is nothing to make a variant OF when node 0 is proposed. Whatever moved,
+moved for both arms.
+
+### The mechanism is visible in the probes
+
+| | corpus | today |
+|---|---|---|
+| node 0 carries a Cython kernel | 9 of 27 | **4 of 4** (Fisher one-sided p = 0.023) |
+| `check` calls whose answer mentions `build_ext` | **0** | 10 of 17 |
+| reference imports inside `run_probe` that worked | 4 of 104 | 2 of 3 |
+
+In the corpus the kernel arrives at node 1 in 15 runs and node 2 in 2 more — the loop got there on
+its second or third draw. Today it starts there. And the three harness repairs shipped this week are
+exactly the ones that would do that:
+
+* **§99** — `check` now runs the evaluator's own `build_ext` and puts the submission's directory on
+  `sys.path`. Before, a Cython solver's guarded import fell through to pure Python and `check`
+  certified the fallback; a multi-file solver came back `ModuleNotFoundError` and read as INVALID.
+  The cheap command could not validate a kernel at all. Now it does, in 0.4–1.3 s.
+* **§103** — `run_probe` replicates the operator-given `reference_*.py`, so a scratch script can
+  import it. 94 of the corpus's 100 `ModuleNotFoundError`s were exactly that import.
+* **§102** — an unknown tool name is answered with what IS reachable.
+
+**This is the first thing in this programme that plausibly moves the score, and it is not a card
+clause.** It is the pre-flight tool being able to see the code path the grader runs.
+
+### What it does to the arm
+
+`n = 4`, two per arm, so nothing here is a result about `--exploit-best` and nothing is claimed.
+What it does mean is that **the 27-run corpus is no longer background for this arm**: those runs
+carry the old `check`, and today's carry the new one. §109's design already had the answer — its
+control runs concurrently, on the same box, on the same harness — so the arm is still readable
+within itself. The historical comparison is not.
+
+And the same fact is the strongest available argument for a proper measurement of the harness
+repairs themselves: this is `n = 4` with `p = 0.000127` on ranks and a mechanism visible in three
+independent counters, which is exactly the shape that deserves an arm rather than a paragraph.
