@@ -5582,3 +5582,51 @@ silence mean two things, "no kernel" and "no node at all".
 
 *Standing, unchanged:* four probes finished, treatment 268.25 / 251.35 against control 179.14 /
 156.91, and two per arm cannot produce a one-sided rank-sum p below 1/6. Three running.
+
+## 120. A metered call with no generation behind it, and a corpus-wide claim that did not survive its own arithmetic
+
+`check_money` exited 1 this sweep: **`UNEXPLAINED: $+0.020898`**, the first residue since §106 made
+the sign meaningful. Positive means the METER holds money the spans do not.
+
+**It is not the read race.** §106's ordering was supposed to make positive residues possible by
+construction, so that was the first suspect. Measured: the span glob takes **1.9 s** and the counter
+was byte-identical before and after it — `$54.106762`, 15,770 calls, both times. Nothing flowed
+through the window.
+
+**It localises to one live probe.** Per-probe meter-minus-spans:
+
+```
+expEEc   +0.020908  (5 calls)      ← the whole residue
+expEE1-4 +0.057933  (38 calls)     ← the abandoned probes, already named (§112)
+every other probe   +0.000002  (1 call)   ← the preflight, already named
+```
+
+**And inside it there is a call metered twice.** Two rows, 0.20 s apart:
+
+```
+ts 1788376992.936  latency 181831.4 ms  prompt 22313  completion 25966  cost 0.0103943  tok/s     142.8
+ts 1788376993.141  latency     28.6 ms  prompt 22313  completion 25966  cost 0.0103943  tok/s  907902.1
+```
+
+Nine hundred thousand tokens per second. `expEEc`'s `spans.jsonl` holds **one** generation for that
+call — 182.1 s, the same 22,313/25,966 usage, the same $0.0103943. One call, one span, two meter
+rows, both counted: `meter.jsonl` summed over the counter's window is `$54.216969` and `/healthz`
+reports `$54.216969` to the cent.
+
+### The part I could not stand up
+
+A detector for "impossible throughput" — `tok_per_s > 10000` — flags **254 rows (1.55 %) worth
+$0.5656**, median latency 20.5 ms, and 249 of them have a same-token twin. That reads like a
+corpus-wide double-metering worth half a dollar.
+
+**It cannot be.** If $0.57 of the counter were phantom, the meter-minus-spans gap would be $0.57;
+the whole gap is $0.079 and all but $0.021 of it is already named. So most of those 254 are not
+duplicates — a repeated prompt with a cached or trivially short answer produces the same token
+counts honestly, and my key (arm, prompt, completion) cannot tell those apart from a double-log.
+
+What is measured is narrower and stands: **one live probe, five metered calls with no generation
+span, $0.0209, at least one of them a proven duplicate.** What is not measured is how often that
+happens — and no fix ships on a detector whose own arithmetic contradicts it.
+
+`check_money` behaved correctly throughout: it named the parts it could, refused to call the rest
+explained, and exited 1. That refusal is the reason any of this was looked at.
