@@ -32,6 +32,7 @@ import math
 from pathlib import Path
 from typing import Any, Optional
 
+from looplab.core.errors import ConfigRefusal
 from looplab.core.config import (Settings, canonicalize_parallelism_source,
                                  flatten_parallelism_layers)
 
@@ -112,20 +113,48 @@ def coerce_scalar(raw: str) -> Any:
     return val
 
 
+def refuse_unknown_settings_keys(source, *, layer: str) -> None:
+    """ONE definition of "is this the name of a real setting", for every launch-time layer.
+
+    `--set` has validated its keys since it shipped, and its docstring says exactly why: a typo
+    "errors loudly instead of being silently dropped by `extra=\"ignore\"`". The FILE layer — the
+    documented primary launch surface, the one `looplab init` scaffolds — validated nothing, so the
+    identical typo took the opposite path. Probed: a `settings:` block carrying `max_node: 30` built
+    a `Settings` with `max_nodes = 8` and printed no diagnostic, and the run then did eight nodes
+    while its config file said thirty.
+
+    LAUNCH ONLY, and that boundary is the whole reason this is safe to make strict. `build_settings`
+    has exactly one caller (`cli/run_cmds.py::run`); resume reads `config.snapshot.json` through
+    `_settings_for_run`, which must keep `extra="ignore"` so an older binary can still load a
+    snapshot written by a newer one. Refusing at launch and ignoring on resume is not an
+    inconsistency — the operator is present for one and absent for the other.
+
+    The legacy parallelism aliases need no exception: `max_parallel` and `parallel_build` are both
+    DECLARED fields, so the canonicalizer's promoted keys and the legacy spellings are all real.
+
+    `ConfigRefusal` rather than a bare `ValueError` — it is `OperatorRefusal` AND `ValueError`, so
+    every existing `except ValueError` still catches it while `cli/__init__.py`'s refusal boundary
+    prints one line at exit 2 instead of a traceback (CLAUDE.md: a deliberate refusal is a TYPE).
+    """
+    unknown = sorted(k for k in (source or {}) if k not in Settings.model_fields)
+    if unknown:
+        raise ConfigRefusal(
+            f"unknown setting{'' if len(unknown) == 1 else 's'} in {layer}: "
+            + ", ".join(repr(k) for k in unknown)
+            + "; see `looplab init` or docs/guide/configuration.md for the full list")
+
+
 def parse_sets(pairs: list[str]) -> dict:
     """Parse repeatable ``--set key=value`` pairs into a dict, validating each key against the real
     ``Settings`` fields so a typo (``--set max_node=9``) errors loudly instead of being silently
     dropped by ``extra="ignore"``."""
-    valid = set(Settings.model_fields)
     out: dict = {}
     for pair in pairs:
         if "=" not in pair:
             raise ValueError(f"--set expects key=value, got {pair!r}")
         key, _, value = pair.partition("=")
         key = key.strip()
-        if key not in valid:
-            raise ValueError(f"unknown setting {key!r}; see `looplab init` or "
-                             f"docs/guide/configuration.md for the full list")
+        refuse_unknown_settings_keys({key: None}, layer="--set")
         if key in _RUNTIME_CREDENTIAL_FIELDS:
             raise ValueError(
                 f"{key} is runtime-only; configure one key+endpoint pair through environment")
@@ -164,22 +193,23 @@ def apply_task_flags(task: dict, *, kind: Optional[str], goal: Optional[str],
     return task
 
 
-# OPEN[config-file-keys-are-silently-ignored] `--set` validates its keys against `Settings.model_fields`
-# and the FILE layer validates nothing: probed, a `settings:` block carrying `max_node: 30` yields the
-# default 8 with no diagnostic. The YAML file is the documented primary launch surface, so a renamed
-# or mistyped knob is the run-looks-configured failure the enum table exists to stop, one layer up.
-# proof:absent:refuse_unknown_settings_keys@looplab/core/appconfig.py
 def build_settings(file_settings: dict, typed_overrides: dict, sets: dict) -> Settings:
     """Merge settings in precedence order (file < typed flags < --set) and build a validated
     ``Settings``. Unspecified fields fall back to env/.env/defaults because pydantic-settings ranks
     ``__init__`` kwargs above env, so the merged dict wins only where it actually sets a value."""
     # These layers all become one Pydantic "init" source. Promote aliases BEFORE flattening them,
     # otherwise a file canonical value can shadow a higher-priority CLI legacy override.
-    for source in (file_settings, typed_overrides, sets):
+    for layer, source in (("the config file's `settings:` block", file_settings),
+                          ("the command-line flags", typed_overrides),
+                          ("--set", sets)):
         forbidden = sorted(_RUNTIME_CREDENTIAL_FIELDS.intersection(source or {}))
         if forbidden:
             raise ValueError(
                 "runtime credentials cannot be set in a run config/flag: " + ", ".join(forbidden))
+        # Per SOURCE and before the merge, so the refusal can name WHICH layer holds the typo —
+        # after flattening, the operator would be told a key is unknown without being told where
+        # they wrote it.
+        refuse_unknown_settings_keys(source, layer=layer)
     merged = flatten_parallelism_layers([
         canonicalize_parallelism_source(file_settings),
         canonicalize_parallelism_source(typed_overrides),

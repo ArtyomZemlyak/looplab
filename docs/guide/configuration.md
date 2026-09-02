@@ -70,6 +70,13 @@ document therefore has no task and is rejected by `run`. The file is **input onl
 snapshots, so `resume`/`replay` are unchanged. Precedence within one run: `--set`/flags **>** the
 file's `settings:` **>** env/`.env` **>** defaults.
 
+An unknown key in any LAUNCH layer is refused by name — the config file's `settings:` block, the
+command-line flags and `--set` all go through one rule — so a renamed or mistyped knob stops the run
+instead of silently taking the default. `--set` has always done this; the file layer did not, and a
+`settings:` block carrying `max_node: 30` used to build a `Settings` with `max_nodes = 8` and print
+nothing. RESUME is deliberately the other way: `config.snapshot.json` keeps `extra="ignore"` so an
+older binary can still load a snapshot a newer one wrote.
+
 ---
 
 ## Web editors, schema and concurrent saves

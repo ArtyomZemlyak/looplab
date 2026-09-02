@@ -1182,7 +1182,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `adapter-reader-can-kill-the-run` | `runtime/command_eval.py` | refuse at submit, fail the node here |
 | `adapter-reader-runs-outside-the-eval-boundary` | `runtime/command_eval.py` | thread the eval env through |
 | `task-spec-models-ignore-unknown-keys` | `adapters/repo_task.py` | forbid extras, grandfathered |
-| `config-file-keys-are-silently-ignored` | `core/appconfig.py` | refuse unknown keys per layer |
 | `replay-archive-has-no-unique-destination` | `serve/reset_route.py` | unique destination + an abandon path |
 | `trace-clear-receipts-are-never-reaped` | `serve/service_reaper.py` | a fifth reaper rule |
 | `assistant-has-no-untrusted-evidence-boundary` | `serve/assistant.py` | one envelope, used by both agents |
