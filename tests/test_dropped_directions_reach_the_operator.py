@@ -71,6 +71,22 @@ _LOGGER = rc._LOG.name
 # directly is what `test_direction_board_cap.py` already does.
 # --------------------------------------------------------------------------------------------
 
+def _stub_engine():
+    """A cadence stand-in that carries the REAL `_record_belief_admission`.
+
+    `_admissible_beliefs` gained a collaborator (the durable admission receipt, 86d30e41), and a
+    bare namespace no longer satisfies it. Binding the real method rather than stubbing a no-op
+    keeps these tests exercising the receipt's own try/except: a store that cannot append must
+    cost a diagnostic row and never the memo's directions, which is exactly what this file is
+    here to protect.
+    """
+    engine = types.SimpleNamespace(
+        store=types.SimpleNamespace(read_all=lambda: [], append=lambda *a, **k: None))
+    engine._record_belief_admission = (
+        rc.ResearchCadenceMixin._record_belief_admission.__get__(engine))
+    return engine
+
+
 def _direction(cid: str, statement: str) -> Card:
     return Card(id=cid, statement=statement, seed_statement=statement,
                 selection_provenance=CardSelectionProvenance())
@@ -101,8 +117,7 @@ def _emit(monkeypatch, caplog, cards, directions, *, fold_raises: bool = False,
         return state
 
     monkeypatch.setattr(rc, "fold", _fold)
-    engine = engine or types.SimpleNamespace(
-        store=types.SimpleNamespace(read_all=lambda: []))
+    engine = engine or _stub_engine()
     kw = {} if channel is None else {"channel": channel}
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
         admitted = rc.ResearchCadenceMixin._admissible_beliefs(engine, directions, **kw)
@@ -223,7 +238,7 @@ def test_the_SAME_sentence_is_not_repeated_for_the_life_of_the_run(monkeypatch, 
     degradations. Bounded on the rendered CONTENT and not on the call site, which is what keeps it
     from hiding anything: any number that moves is a different sentence and speaks."""
     board = [_direction(f"d{i}", f"direction {i}") for i in range(DEEP_RESEARCH_OPEN_BELIEF_CAP)]
-    engine = types.SimpleNamespace(store=types.SimpleNamespace(read_all=lambda: []))
+    engine = _stub_engine()
     said = []
     for _ in range(3):
         caplog.clear()
