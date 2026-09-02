@@ -5760,3 +5760,57 @@ be `(arm, req_sha)`, not `req_sha`, and now it can be.
 Four more launched to take §109 toward §83's nine: `expEEe`, `expEEf` (treatment) and `ctlEEd`,
 `ctlEEe` (control), fingerprints verified distinct (`fd23da29` against `16426855`), streaming on.
 That will make it **6 treatment against 5 control**, from the current 4 v 3 at p = 1/35 = 0.0286.
+
+## 124. The re-send is real, the engine makes it, and it is not a metering defect
+
+`req_sha` settled §120 on its first working day. Eight repeats within a single arm appeared in the
+new ledger, in two clearly different shapes:
+
+**Legitimately re-asked** — same body minutes apart, *different* cost and thousands of deltas:
+`expEEf c30de582 ×2, 98.85 s apart, $0.002208 then $0.002203`. Two real calls.
+
+**The §120 shape** — four cases, all identical:
+
+```
+ts …789.24  deltas 13478  latency 118097.1 ms  932/13783 tok  $0.00398972
+ts …907.39  deltas     1  latency     16.2 ms  932/13783 tok  $0.00398972
+ts …907.41  deltas     1  latency     18.5 ms  932/13783 tok  $0.00398972
+```
+
+Same `req_sha`, same tokens, same cost to the cent, arriving **16 and 18 milliseconds after** the
+118-second stream that produced them. One forwarded delta carrying a usage frame that restates the
+whole completion.
+
+**And the engine records all three.** `expEEf`'s `spans.jsonl` holds three generations for that
+request — 118.14 s, 0.022 s, 0.064 s — each stamped `cost 0.00398972`. Meter and spans agree
+exactly. So this is **not** a metering defect and never was: the ENGINE issues the same request
+three times, gets a cached echo twice, and charges its own budget full price for both.
+
+That is the correction this section exists to make. I had a `check_money` category written and
+subtracting these as meter-side noise; the subtraction drove the residue to **$-0.020559**, exactly
+the echo total, which is what happens when you remove from one side of a balance that already had
+them on both. Reverted before commit — the arithmetic said no.
+
+### Size, measured off the engine's own spans
+
+The spans are authoritative and exist for every probe, so the question can be asked retroactively
+without `req_sha`. A generation whose (prompt, completion, cost) repeats an earlier one in the same
+run and lasts under 0.5 s:
+
+| | |
+|---|---|
+| generations in the corpus | 16,800, $57.9251 |
+| **echoes** | **262 = 1.56 %, $0.5554 = 0.96 %** |
+
+About one per cent of everything this campaign has spent went on answers it had already received.
+Six or seven per probe, spread evenly across every task and both arms — `remEE2` 7, `remEEref8` 7,
+`accPde` 6, `remDL3` 6, and so on down.
+
+**Not fixed here.** The right place is the engine's client, not the meter, and touching retry
+behaviour while an arm is running changes the thing being measured. What this sweep establishes is
+that the phenomenon is real, is the engine's, costs about 1 %, and is now identifiable in one line —
+which is what the previous four sweeps could not do.
+
+*Also:* the `$0.5554` here and the `$0.5656` a throughput detector claimed in §120 are the same
+population. That detector was fitting the right rows for the wrong reason, and its own arithmetic
+contradicted it because it was measured against a gap the echoes were never in.
