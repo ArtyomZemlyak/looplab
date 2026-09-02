@@ -894,6 +894,21 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # 205 distinct (handler, key) pairs, and 15 types are named in no document. Invariant #5's
 # additive-only rule cannot be checked against a contract that exists only as handler code.
 # proof:absent:EVENT_PAYLOAD_KEYS@looplab/events/types.py
+#
+# THE CHEAP MECHANICAL VERSION WAS TRIED 2026-09-02 AND DOES NOT ANSWER THIS, so the next reader
+# does not have to re-derive it. Joining "keys the fold READS" (per handler, `d.get`/`d[...]` by AST)
+# against "keys a writer WRITES" would make the dead-reader defect checkable — the shape
+# `RunTools._research_memo` carried for six weeks, keyed on a `summary` no writer produced. Run over
+# the tree it reports FOUR types whose handler reads a key no writer writes, and all four are
+# artifacts of the scan rather than findings: `hint`/`replace` and `pause`/`node_id` are CONTROL
+# INTENTS whose payload `serve/control_validation.py` normalizes rather than spelling as a literal,
+# and `node_failed`/`node_repaired` build their payload in a variable. The write side is only
+# enumerable for literal `append(EV_X, {...})` calls — 77 of the types — so a join over it is too
+# weak to convict, and a join strong enough would have to follow a dict through the function that
+# builds it.
+#
+# So this is a DOCUMENTATION job of real size, not a mechanical one, and that is why it is still
+# open: the 65 undescribed constants and the 15 undocumented types are the actual work.
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
     EV_TRACE_EXPORT_HEALTH,
