@@ -1177,7 +1177,7 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `read-fence-takes-the-command-sequencer` | `serve/routers/runs.py` | one lock-free generation fence |
 | `no-per-request-fold-budget` | `serve/appstate.py` | one fold per (identity, request) |
 | `foreign-run-fold-cache-thrashes` | `tools/_runcache.py` | one cache per root, bounded by bytes |
-| `embedding-spend-is-unbilled` | `tools/vectorstore.py` | an accountant + an embedding cache |
+| `knowledge-index-re-embeds-every-record` | `tools/knowledge_tools.py` | memoize by content digest — after measuring |
 | `card-lane-fills-outside-the-policy-population` | `search/card_selection.py` | a legal-action set per policy |
 | `tagger-item-has-no-untrusted-envelope` | `search/concept_tagging.py` | the envelope the comment promises |
 | `event-payloads-have-no-registry` | `events/types.py` | a payload-key registry + generated page |

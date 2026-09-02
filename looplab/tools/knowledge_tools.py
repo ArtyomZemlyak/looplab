@@ -385,6 +385,19 @@ class KnowledgeTools:
         return recs
 
     def _build_index(self) -> None:
+        # OPEN[knowledge-index-re-embeds-every-record] this re-embeds every KB doc and case from
+        # scratch on each rebuild, and a rebuild fires whenever `_source_revision` changes — i.e.
+        # every append to the case store — so an unchanged record is paid for again on every write.
+        # proof:absent:_vector_memo@looplab/tools/knowledge_tools.py
+        # The spend became VISIBLE on 2026-09-02 (`LLMEmbedder` now carries a `CostAccountant`, so
+        # these calls reach `llm_usage` and `looplab tokens`); what is still open is not paying it.
+        # `InMemoryVectorStore` has no persistence by design, but the embeddings are a pure function
+        # of (model, text) and could be memoized by content digest across rebuilds within a process
+        # — the same shape `make_abstractor`'s content-hash cache already uses one layer over.
+        # CLOSE IT WITH A NUMBER, not with the cache: nobody has measured records-per-rebuild or
+        # rebuilds-per-run on a real corpus (`runs/` is empty on the box this was written on), and a
+        # cache sized without that is the unmeasured policy this repo refuses elsewhere. The meter
+        # to read it off now exists.
         self._index = InMemoryVectorStore()
         self._index_revision = self._source_revision()
         recs = self._records()
