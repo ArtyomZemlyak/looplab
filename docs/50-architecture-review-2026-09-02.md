@@ -1182,7 +1182,6 @@ one gate-flip test per component. proof:missing:ui/test/_mount.js
 | `embedding-spend-is-unbilled` | `tools/vectorstore.py` | an accountant + an embedding cache |
 | `card-lane-fills-outside-the-policy-population` | `search/card_selection.py` | a legal-action set per policy |
 | `tagger-item-has-no-untrusted-envelope` | `search/concept_tagging.py` | the envelope the comment promises |
-| `rule-fallback-picks-a-serialising-policy` | `agents/strategist.py` | a width conjunct |
 | `event-payloads-have-no-registry` | `events/types.py` | a payload-key registry + generated page |
 | `legacy-control-route-has-no-retry-identity` | `serve/routers/control.py` | sunset headers, then port the 41 call sites |
 
