@@ -7102,3 +7102,46 @@ the top of a block and used after several minutes of work inside it (negative fi
 `/proc` scan whose "swarm of a hundred short-lived processes" was my own shell's children,
 disappearing between the listing and the read. The first one at least announced itself by printing
 a negative number. The second did not, and would have become a section.
+
+## 156. The budget gate the audit recommended would have destroyed the best node in the corpus
+
+Audit finding #9 re-derived on my own numbers: **$5.91 of $76.73 (7.7 %) lands after the last node a
+run ever evaluates**, and the price of one completed node cycle is median **$0.3370**, p75
+**$0.4481**, p90 **$0.5432** over n=195 — the agent's medians to four decimals. (Its 6.9 % becomes
+my 7.7 % only because the four live probes have no last node yet; excluding them and the abandoned
+`remDL` gives 6.5 %. §148.1's mistake, avoided this time by excluding them up front.)
+
+Its proposed repair is the interesting part: *"refuse to open a new node when `limit - spent` <
+p75(node cycle) ≈ $0.45, and finalize instead."* That is the right shape of fix — §152 showed the
+prompt-side cue reaches 99 % of the deciding generations and prevents nothing — and **the threshold
+is wrong by a factor of four and a half.** Counterfactual over the 76-run corpus, every cycle
+replayed against every threshold:
+
+| gate | empty cycles cut | $ redirected | REAL nodes lost | best node lost |
+|---|---|---|---|---|
+| $0.05 | 49 | 0.5816 | **0** | — |
+| **$0.10** | **61** | **1.5354** | **1** | **0.00** |
+| $0.15 | 67 | 2.2990 | 3 | 211.40 |
+| $0.25 | 70 | 2.9389 | 23 | 277.23 |
+| **$0.4481 (p75)** | 74 | 4.4743 | **54** | **277.23** |
+
+At p75 the gate buys $4.47 by refusing fifty-four cycles that produced a real node — among them the
+**277.23 that is the best `edge_expansion` node in the corpus**. At $0.10 it buys $1.54 and the only
+real node it costs scored **0**. The knee is between $0.10 and $0.15, and it is sharp: three nodes
+and a 211.40 appear in one five-cent step.
+
+`benchmarks/budget_gate_curve.py` computes the whole curve, because the threshold has to be
+re-derived as the corpus grows and a number in a comment goes stale in silence.
+`tests/test_the_budget_gate_curve_counts_what_it_would_break.py` pins that the tool reports the
+node it would have killed — a version scoring only the savings recommends p75 — and four mutations
+redden it (stop reporting the killed node, never count a real loss, count zero-spend trailing
+cycles, and the boundary).
+
+**The boundary mutation is worth its own line.** `remaining >= gate` mutated to `remaining > gate`
+survived every test I had written; the assertion I added to catch it then failed against CORRECT
+code, because `1.00 - 0.92` is `0.07999999999999996` and sits below a $0.08 gate by 4e-17. So the
+real code now compares with a 1e-9 tolerance and the fixture uses binary-exact amounts. A cent of
+float error at this boundary is one 277.23.
+
+Not wired into the engine, for the same reason as §153: this changes what every probe does, and
+§115's arm is eight probes into twenty-four.
