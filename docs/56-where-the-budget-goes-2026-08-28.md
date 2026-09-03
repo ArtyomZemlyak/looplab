@@ -6033,3 +6033,57 @@ the reference affordance, where use fell to zero and the score did not move.
 
 So: the arm now has one thing worth finishing for, and it is not the number I have been reporting
 each sweep. **Nothing is claimed until the ninth probe of each arm lands.**
+
+## 131. A third of everything this campaign has spent went after the answer was already in hand
+
+Not "after the last node" — §108 measured that at 3.6 % and it is small. This is the money spent
+after the node that ENDS UP BEING THE CHAMPION has already been evaluated: the run has its answer,
+and keeps going.
+
+| | |
+|---|---|
+| corpus total | **$20.57 of $63.11 = 32.6 %** |
+| median per run (n = 49) | **26.0 %**, range 0–67 % |
+| `discrete_log` | 36.3 % | 
+| `edge_expansion` | 26.0 % |
+| `pde_heat1d` | 33.2 % |
+
+Every task, every arm, a quarter to a third of the dollar. §108 established that a dollar buys two
+to three draws and that the first costs 38 % of it; this says that of the remainder, most is spent
+after the winner is already on disk. The champion rule (§84) is what makes that survivable rather
+than fatal — it is also what makes it invisible.
+
+### By arm, descriptively
+
+| | median share spent after the champion |
+|---|---|
+| corpus | 26.0 % |
+| control | 27.3 % |
+| **treatment (`--exploit-best`)** | **65.6 %** |
+
+That fits §130 exactly: the treatment keeps making kernel variants (92 % of transitions against
+51 %) which hold their score (83 % against 38 %) — and it finds its champion early, so nearly
+two-thirds of its dollar goes on nodes that neither beat it nor fall far from it.
+
+### The reading I did not take
+
+Multi-node runs where a LATER node beat the first: corpus **25/27 = 93 %**, control 5/7, treatment
+**2/6 = 33 %** — Fisher one-sided p = 0.0095, which reads as "the clause stops the loop improving on
+its first draw".
+
+**Matched, it disappears.** Restricted to runs whose node 0 was ALREADY ≥ 150 — the only fair
+comparison, because a run that starts at 25 has nowhere to go but up and the treatment's node 0 is a
+kernel 7 times out of 7 (§129):
+
+| | later node beat the first |
+|---|---|
+| corpus | 4/5 |
+| control | 2/4 |
+| treatment | 2/6 |
+
+Fisher **p = 0.2308**. The 93 % was the corpus climbing out of the low cluster, not the corpus
+improving on a good start. Third time this month a striking split has dissolved under matching
+(§116, §129, this) — and third time it was checked before it was written rather than after.
+
+What stands unconditioned is the headline: **a third of the campaign's money is spent after the
+answer is already found**, and no arm of this experiment has changed that.
