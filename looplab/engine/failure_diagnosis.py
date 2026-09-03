@@ -175,6 +175,8 @@ to spend them.
 """
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 
 # `FAILURE_REASONS` is the closed vocabulary every tuple below partitions or draws from. It is
@@ -394,6 +396,89 @@ DIAGNOSIS_SUMMARY_CAP = 1200
 # ADDITIVE and only over a FINITE budget, for `_pilot_emit`'s stated reason: `max_turns=0` means
 # unlimited and `0 + n` would silently turn an operator's "no turn cap" into a cap of n.
 DIAGNOSIS_CODE_LOOK_TURNS = 3
+
+
+
+# How far back into `res.stderr` the headline scan looks, and how much of one line it keeps. The
+# reach is generous because the evidence is measured at 1,659-14,192 characters from EOF on the
+# corpus and `res.stderr` is already clamped to 64 KB upstream; the keep is tight because this text
+# is PREPENDED to a 500-character window and a headline that crowds out the tail has traded one
+# missing fact for another.
+_HEADLINE_REACH = 64_000
+_HEADLINE_KEEP = 400
+_HEADLINE_LINES = 2
+_HEADLINE_TOTAL = 600
+# The last line of a Python traceback: `<dotted.Name>Error: message`. Three things the anchor has to
+# tolerate, each measured on the corpus rather than guessed:
+#   * LEADING WHITESPACE — a launcher indents each child's traceback inside its own report block;
+#   * a BRACKETED STREAM TAG — `torchrun` prefixes every line with `[rank0]: `, which put the OOM
+#     line outside a left-margin anchor entirely (0 of 2 DDP corpus entries matched with one);
+#   * a DOTTED module path, so `torch.OutOfMemoryError` and a bare `ValueError` both match.
+# It is still ANCHORED, so a message that merely mentions an error name ("retrying after ValueError")
+# is not mistaken for a terminal line.
+_HEADLINE_RE = re.compile(
+    r"^[ \t]*(?:\[[^\]]{1,32}\]:[ \t]*)?"
+    r"(?P<line>(?:[A-Za-z_][\w.]*\.)?[A-Za-z_]\w*(?:Error|Exception|Interrupt)\b.*)$", re.M)
+
+
+def failure_headline(stderr: str) -> str:
+    """The exception line(s) a failed process ended on, or `""`.
+
+    WHY IT IS PUSHED. `engine/evaluate.py::_eval_failure_text` hands the repair path — the Developer's
+    prompt, the durable `node_repaired.error_in`, the judge's history rows and the terminal's `error`
+    — the LAST 500 CHARACTERS of stderr, and the fact that says what died is routinely outside it.
+    Measured on `runs/e5small-dr-unified-v4` node 4, `torch.OutOfMemoryError` is 952 characters from
+    EOF and 329 of the 500-character window is a tqdm bar's trailing whitespace; the three corpus
+    entries in `tests/test_torch_oom_is_an_oom.py` put it 1,659 / 12,991 / 14,192 characters out. So
+    the Developer was asked to fix an out-of-memory failure without the allocation size, the device
+    or the free memory — all of which its own process printed.
+
+    IT DECIDES NOTHING, and that is what separates it from the marker scan this module deleted. The
+    OOM markers went because they were TEXT WITH THE LAST WORD: nothing downstream re-checked the
+    reason they minted. This mints no reason, moves no gate and reaches no vocabulary — the failure
+    is still `crash`, the diagnostician is still asked, and `_failure_reason` never sees this string.
+    Its failure mode is correspondingly benign: an exception shape the pattern misses means no
+    headline, i.e. exactly the previous behaviour, so incompleteness costs context and can never cost
+    a wrong answer. A classifier has no such asymmetry, which is why one may not be written from a
+    pattern list and this may.
+
+    THE LONGEST MESSAGE FIRST, NOT THE LAST LINE. "Last" is the obvious rule and the corpus refutes
+    it: a `torchrun` launcher prints every rank's traceback and then its own
+    `ChildFailedError:` — a line with an EMPTY message body — and `subprocess.CalledProcessError`
+    reports a child's exit status after the child has already said why. Both are wrappers, and both
+    are last. Ranking by message length puts the line that explains the failure first, and it is a
+    property of wrappers rather than a list of their names: a wrapper's whole content is "something
+    below me failed". Ties break by lastness.
+
+    UP TO `_HEADLINE_LINES`, because the wrapper is not worthless — "this died under torchrun across
+    two ranks" is real context — it is just not the headline. The total is bounded because this text
+    is PREPENDED to a 500-character tail, and a headline that crowds out the tail has traded one
+    missing fact for another.
+    """
+    if not isinstance(stderr, str) or not stderr:
+        return ""
+    seen: list[str] = []
+    for line in _HEADLINE_RE.findall(stderr[-_HEADLINE_REACH:]):
+        text = line.strip()
+        if text and text not in seen:
+            seen.append(text)
+    if not seen:
+        return ""
+    # Longest message body first; a later line wins a tie, which keeps the historical "the line the
+    # process ended on" preference wherever two lines say equally much.
+    ranked = sorted(enumerate(seen), key=lambda pair: (len(pair[1]), pair[0]), reverse=True)
+    out: list[str] = []
+    budget = _HEADLINE_TOTAL
+    for _index, text in ranked[:_HEADLINE_LINES]:
+        piece = text[:min(_HEADLINE_KEEP, budget)]
+        if not piece:
+            break
+        out.append(piece)
+        budget -= len(piece) + 1
+        if budget <= 0:
+            break
+    return " | ".join(out)
+
 
 
 def coerce_failure_kind(value, fallback: str) -> str:

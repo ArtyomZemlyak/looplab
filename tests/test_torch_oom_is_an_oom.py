@@ -87,11 +87,38 @@ What tonight's node adds is the DISTANCE, which no corpus header states: the mar
 absent from the tail, it begins 952 characters from EOF against a 500-character window whose last
 329 are padding. A fix needs a number to clear, and this is it.
 
-    OPEN[oom-evidence-not-in-repair-text] a torch OOM's allocation numbers are still not PUSHED to
-    the Developer: the repair text is a 500-char stderr tail that a DDP wrapper — or, measured
-    above, a tqdm bar's 329-char pad — fills entirely, while the numbers sit 908+ chars from EOF.
-    The diagnostician can now PULL them (`repair_log_tools`), which is a remedy and not a fix.
-    proof:present:res.stderr[-500:]@looplab/engine/evaluate.py
+    CLOSED 2026-09-03. `engine/failure_diagnosis.py::failure_headline` scans the whole stderr (up to
+    64 KB, which is what it is clamped to anyway) and `_eval_failure_text` PREPENDS what it finds —
+    the same shape as the `[failed stage: X]` marker beside it, attached AFTER the slice so the tail
+    keeps its whole budget and only when the tail does not already carry the line. All three corpus
+    entries above now put "Tried to allocate 1.12 GiB" and the free-memory figure in front of the
+    Developer.
+
+    TWO RULES, and the corpus refuted the obvious one for each:
+      * NOT "the last exception line". `torchrun` prints every rank's traceback and then its own
+        `ChildFailedError:` with an EMPTY message body, and `subprocess.CalledProcessError` reports a
+        child's exit status after the child has already said why. Both are wrappers and both are
+        last. Ranking by message LENGTH puts the explaining line first, and that is a property of
+        wrappers rather than a list of their names — a wrapper's whole content is "something below me
+        failed". The wrapper still rides second when it fits, because "this died under torchrun
+        across two ranks" is real context.
+      * NOT a left-margin anchor. `torchrun` prefixes every line with `[rank0]: `, which put the OOM
+        line outside one entirely — 0 of the 2 DDP entries matched.
+
+    IT DECIDES NOTHING, which is the licence for a text rule here at all. The reason stays `crash`,
+    the diagnostician is still asked, and `_failure_reason` never sees this string — so an exception
+    shape the pattern misses means no headline, i.e. exactly the previous behaviour. Incompleteness
+    costs context and can never cost a wrong answer; the marker scan this module deleted had no such
+    asymmetry, which is precisely why it went.
+
+    AND IT IS PUSHED TO THE DEVELOPER ONLY. The two readers of a failure string are not in the same
+    position: the diagnostician holds `repair_log_tools` and can PULL the line out of the stage log,
+    while the Developer gets the string and nothing else. docs/44 measured the diagnostician's prompt
+    as byte-identical and argued that trade from ~8.8 provider calls per failure, pinned as an
+    EQUALITY in `tests/test_diagnosis_record.py` — so the first cut of this, which prepended inside
+    `_eval_failure_text`, broke a measured contract to hand a fact to a reader that could already
+    fetch it. It is prepended in `crash_repair.py::_repair_error_context` instead, and both
+    positions hold. `tests/test_failure_headline_push.py` drives it.
 """
 from __future__ import annotations
 

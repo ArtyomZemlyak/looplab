@@ -95,6 +95,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
 # measurement behind the line, and for why the diagnostician IS the triage call rather than a second
 # agent (8.7 provider calls per failure, already paid).
 from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagnosis_summary,
+                                             failure_headline,
                                               diagnosis_repair_lead,
                                               coerce_evidence, coerce_findings,
                                               diagnosed_failure_reason, diagnosis_tools,
@@ -2962,7 +2963,9 @@ class EvaluateMixin:
                         # what went wrong and what to do about it" then "…and here is how to say you
                         # cannot", never the other way round.
                         new_code = self._repair(
-                            node, self._repair_error_context(reason, _err_in, state=state, node=node)
+                            node, self._repair_error_context(
+                                reason, _err_in, state=state, node=node,
+                                headline=failure_headline(getattr(res, "stderr", "") or ""))
                             + developer_stuck_contract(DEVELOPER_STUCK_PREFIX),
                             state)
                     except BudgetExceeded:
