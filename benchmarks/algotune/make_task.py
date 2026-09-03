@@ -1205,6 +1205,15 @@ def main() -> int:
                          "CONTROL arm for those two clauses and nothing else -- every other "
                          "clause the same flags produce is byte-identical, which is what "
                          "makes the two arms comparable.")
+    ap.add_argument("--checker", type=Path, default=None,
+                    help="Path to the script the pinned `check` command runs. Default: this "
+                         "directory's `looplab_check.py`. The point of the switch is §115's "
+                         "confound: §114 measured the first node moving after §99/§103 repaired "
+                         "`check`, and §134/§135 then showed the same harness producing 11-of-14 "
+                         "and 1-of-4 four hours apart, so the endpoint moves too. Running "
+                         "`looplab_check_pre99.py` (extracted from 103c4b1e^) against the shipped "
+                         "one, concurrently, is the only way to separate them. The two cards "
+                         "differ in this path and in nothing else.")
     ap.add_argument("--exploit-best", action=argparse.BooleanOptionalAction, default=False,
                     help="State §108's finding: when a version scored well, the next one should be "
                          "a VARIANT of it. OFF by default, and that is deliberate -- every probe in "
@@ -1431,7 +1440,7 @@ def main() -> int:
         }, {
             "name": "check",
             "command": [
-                interpreter, str(CHECKER),
+                interpreter, str(args.checker or CHECKER),
                 "--reference", f"reference_{args.task}.py",
                 "--solver", "solver.py",
                 "--n", "3",
