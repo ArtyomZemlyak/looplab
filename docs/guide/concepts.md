@@ -1985,3 +1985,54 @@ Where each concept lives in the code:
 | Static HTML lineage tree | `events/htmlview.py` |
 | Task adapters + loader | `adapters/tasks.py`, `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
 | Strategist / Deep-Research / report | `agents/strategist.py`, `agents/deep_research.py`, `serve/report.py` |
+
+
+## A question's SHAPE, and why it is recorded rather than refused
+
+The operator's complaint, four runs running: *"the questions are huge — that is more hypothesis than
+question; I need broader directions."* It was an impression nobody could check, because nothing in
+the run said how big a question was. Measured on `runs/e5small-dr-unified-v12` on 2026-09-03:
+
+| | n | min | median | max |
+|---|---|---|---|---|
+| questions (`card_kind: direction`) | 12 | 195 | **311** | 469 |
+| work cards | 23 | 23 | **164** | 347 |
+| the emit prompt's own example of a good question | 1 | — | **49** | — |
+
+The questions are LONGER than the work cards they are supposed to be broader than, and 6.3x the
+example. They are not mis-typed — the unambiguous experiment-brief shape, a question carrying the
+arms of its own sweep (`512x32 vs 2048x8 vs 4096x4`), is **1 of 21** across v11 and v12. They are
+OVER-QUALIFIED: each embeds the evidence that motivated it.
+
+A first predicate — "the question names an exact value" — flagged 13 of 21 and was **refuted**:
+v11's hits cite the champion score as grounding, which is legitimate. That refutation is kept
+executable in `tests/test_question_shape_is_recorded.py::test_grounding_is_not_a_sweep`.
+
+```
+  WHERE THE SHAPE RULE LIVES  (the fix is the arrow that was missing)
+
+   emit prompt prose  ──────────────────────────────► the model
+   "broad questions a FAMILY of experiments would        ▲   reads the tool signature, ~100 lines
+    answer"  … says BROAD, never says SHORT              │   away from the prose
+                                                         │
+   _MemoOut.question_concepts  ── description ───────────┤   had one
+   _MemoOut.question_parents   ── description ───────────┤   had one
+   _MemoOut.open_questions     ── (nothing) ─────────────X   HAD NONE — and it is the field
+                                    │                        that governs the shape
+                                    └── now carries: one clause, SHORT, no scores, no node ids,
+                                        no footprints, no "given that …", no candidate settings
+
+  AND THE FALSIFIER, so the next run reports on itself instead of needing an operator's eye:
+
+   memo ─► classify_research_beliefs ─► BeliefAdmission{admitted, blank, repeated, restated, capped}
+                                             │
+                                             └─► belief_admission row
+                                                 {proposed, admitted, capped, restated, repeated,
+                                                  blank, board_read,
+                                                  shape: {n, chars_median, chars_max,
+                                                          with_sweep_arms}}   <- NEW
+
+   Reported, never enforced: a long question is not automatically a bad one, and a refusal here
+   would drop a real direction over a style rule. `chars_median` on the next run against 311 is the
+   whole experiment.
+```

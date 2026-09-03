@@ -301,7 +301,31 @@ class _MemoOut(_StringifiedListTolerant):
     # A prompt that names a field and a schema that lacks it is a feature shipped INERT. The guard
     # in `tests/test_memo_question_experiment_split.py` now re-derives the prompt's field names from
     # the text and asserts each one exists here, so the two cannot move apart again.
-    open_questions: list[str] = Field(default_factory=list)
+    # THE SHAPE RULE LIVES HERE, not only in the prose ~100 lines below, and that is the whole fix.
+    # The prose has asked for "broad questions a FAMILY of experiments would answer" since v5 and
+    # the model has obeyed the TYPE while ignoring the SIZE: measured on the live board, v12's
+    # twelve questions run 195-469 characters, median 311 — LONGER than the 23 work cards they are
+    # supposed to be broader than (median 164) — against the prose's own example of 49. They are not
+    # mis-typed; only 1 of 21 questions across v11+v12 carries the arms of its own sweep. They are
+    # OVER-QUALIFIED: each embeds its own evidence and caveats ("given the DCL denominator is
+    # currently capped at the local batch", "(0.7681, node 2)", "at recorded-identical footprints"),
+    # which is exactly what makes an operator read a direction as a hypothesis.
+    #
+    # A field description is the only channel in front of the model at the moment the emit call is
+    # constructed — the same measured reason `question_concepts` and `question_parents` carry one.
+    # This field, which governs the shape, was the one of the three with no description at all.
+    open_questions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Broad open questions a FAMILY of experiments would answer, which cannot be run as they "
+            "stand. ONE clause each, and SHORT — 'does distilling from a stronger teacher help "
+            "here' is the target shape and length. Do NOT carry the evidence that motivated the "
+            "question: no scores, no node ids, no footprints, no 'given that ...' caveats, and no "
+            "list of the candidate settings you would try. All of that belongs in `reasoning`, in "
+            "`findings`, or — if you already know the exact change — in `next_experiments`. A "
+            "question the reader must parse for two lines to see what it is about is a hypothesis, "
+            "not a direction, and it will head a branch of the board for the rest of the run."),
+    )
     next_experiments: list[str] = Field(default_factory=list)
     # WHAT EACH QUESTION IS ABOUT, as concept ids, positionally aligned with `open_questions`.
     # A list-of-lists rather than objects because the emit schema is what a provider renders into a

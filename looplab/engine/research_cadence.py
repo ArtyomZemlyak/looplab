@@ -17,6 +17,8 @@ events and stdlib (the trust/search deps are lazy, method-local imports)."""
 from __future__ import annotations
 
 import logging
+import re
+import statistics
 import uuid
 from typing import Iterable, NamedTuple, Optional
 
@@ -202,6 +204,46 @@ def classify_research_beliefs(open_statements: Iterable[str], directions: Iterab
         occupied.add(key)      # …a newly admitted direction is unanswered, so it holds one
         admitted.append(text)
     return BeliefAdmission(admitted, blank, repeated, restated, capped)
+
+
+# The arms of a sweep, written into the question itself: "512x32 vs 2048x8 vs 4096x4". This is the
+# ONE shape that is unambiguously an experiment brief rather than a direction, and it is deliberately
+# narrow. The obvious wider predicate — "the question names an exact value" — was written first and
+# REFUTED against the corpus: it flagged 13 of 21 questions across v11 and v12, but v11's hits are
+# the champion score cited as EVIDENCE (`0.79`), which is legitimate grounding, not a proposed
+# setting. Narrowed to this, it is 1 of 21. A count that conflates grounding with over-specification
+# would make the shape row unreadable in exactly the direction that matters.
+_SWEEP_ARMS = re.compile(r"\d[\d.,\u00d7x]*\s*(?:vs\.?|versus)\s*\d")
+
+
+def question_shape(statements: list[str]) -> dict:
+    """How BIG the admitted questions are — the operator's complaint, as a number the run records.
+
+    "The questions are huge, more hypothesis than question" was an operator impression for four
+    runs and could not be checked without reading the board by hand. Measured when it finally was:
+    v12's twelve questions run 195-469 characters, median 311, against the emit prompt's own example
+    of 49 — and LONGER than the work cards they are supposed to be broader than (median 164).
+
+    LENGTH IS THE HONEST MEASURE HERE, and it is reported rather than enforced. A long question is
+    not automatically a bad one, so nothing refuses on this; it is the falsifier for whether the
+    field description added beside `_MemoOut.open_questions` actually changed the shape on the next
+    run. Cheap by construction: a `len()` and one regex per admitted statement, on a path that
+    already walks the same list.
+    """
+    lengths = sorted(len(text) for text in statements if isinstance(text, str) and text.strip())
+    if not lengths:
+        return {"n": 0, "chars_median": 0, "chars_max": 0, "with_sweep_arms": 0}
+    return {
+        "n": len(lengths),
+        # The median of an even-length list is the mean of the two middle values, which is not an
+        # integer; rounding keeps the wire integral rather than shipping 311.5 to a reader that
+        # only ever compares it against another median.
+        "chars_median": int(round(statistics.median(lengths))),
+        "chars_max": lengths[-1],
+        "with_sweep_arms": sum(
+            1 for text in statements
+            if isinstance(text, str) and _SWEEP_ARMS.search(text)),
+    }
 
 
 def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[str], *,
@@ -1016,7 +1058,12 @@ class ResearchCadenceMixin:
                 # Whether these counts describe the LIVE board or the degraded path: when the board
                 # read failed the classifier saw no open statements, so `restated`/`capped` cannot
                 # be read as facts about what was already open.
-                "board_read": bool(board_read)})
+                "board_read": bool(board_read),
+                # HOW BIG the questions this memo actually put on the board are. The counts above
+                # say how many survived; this says what shape they are, which is the half the
+                # operator has been reading by eye. See `question_shape` for why length rather than
+                # a specificity predicate.
+                "shape": question_shape(verdict.admitted)})
         except Exception:  # noqa: BLE001 - a receipt may never cost the memo its directions
             pass
 
