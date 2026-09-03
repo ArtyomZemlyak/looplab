@@ -7455,3 +7455,66 @@ scored 151. Across all 57 `edge_expansion` probes that carry both numbers this d
 **Pearson r = −0.123**, median split at 7.7 % gives 223.22 (n=29) against 195.76 (n=28), two-sided
 permutation **p = 0.312**. The batch-3 impression is a four-point pattern in a corpus that does not
 have it.
+
+## 164. A probe spent its whole dollar reading one file, one line at a time
+
+`oldCK8`, batch 4, launched 14:39:32, dead at 15:01:45 — **rc=2, no champion, `abandoned /
+error_terminal`, $1.0052 spent, ZERO evaluated nodes.** Its three siblings, launched in the same
+command, had spent $0.08–$0.10 in the same twenty-two minutes.
+
+Where the dollar went, from the probe's own spans:
+
+| phase | calls | $ | share | median duration |
+|---|---|---|---|---|
+| **propose** | **193** | **0.9574** | **95.2 %** | **1.4 s** |
+| deep_research | 16 | 0.0401 | 4.0 % | 16.9 s |
+| hyp_prioritize | 5 | 0.0067 | 0.7 % | 9.7 s |
+
+193 generations at 1.4 s each, and 189 of the 194 tool calls were `repo_read` of one file. Not a
+tree walk — **four distinct paths in a three-file workspace**, and 189 of the reads are the same
+248-line `reference_edge_expansion.py`, walked ONE LINE AT A TIME:
+
+```
+{"lines":1,"path":"reference_edge_expansion.py","start_line":25}
+{"lines":1,"path":"reference_edge_expansion.py","start_line":26}
+{"lines":1,"path":"reference_edge_expansion.py","start_line":27}
+```
+
+Each returned 72–102 characters. Each cost a turn, and a turn's price is the whole conversation
+re-sent — §152's 84.7 %. The spend by five-minute bucket: 0.025, 0.015, 0.025, **0.472, 0.469**. It
+found the pattern at minute fifteen and it never stopped.
+
+**Every existing net misses this shape, and each for a different reason.**
+
+* `tool_loop.py`'s repeat note keys on identical `(tool, canonical-args)`. The arguments increment,
+  so `repeat_streak` was **1 on 192 of 194 reads**.
+* The identical-result note keys on identical results. Every read returned a different line.
+* `agent_max_turns = 0` in every probe's `config.snapshot.json` — no cap at all.
+* The "read a file ONCE, don't re-read" sentence exists, in the `plan` user message. This was
+  `propose`.
+
+So the signature cannot be the arguments; it has to be the PATH. `benchmarks/read_loops.py` counts
+`(run, phase, path)` triples and ignores the ranges entirely. Over the corpus at a threshold of 25:
+
+| reads | run | phase | $ of that phase | path |
+|---|---|---|---|---|
+| **186** | **oldCK8** | **propose** | **0.9574** | reference_edge_expansion.py |
+| 38 | oldCK5 | plan_step | 0.4762 | reference_edge_expansion.py |
+| 36 | remEEref4 | plan_step | 0.4386 | reference_edge_expansion.py |
+| 35 | oldCK4 | plan_step | 0.3878 | reference_edge_expansion.py |
+
+Eighteen more rows between 25 and 33, all `plan_step`, all the same file. **Re-reading the reference
+twenty-five to thirty-eight times is the corpus's normal behaviour**; oldCK8 is five times the
+next-worst and the only one that did it in `propose` and did nothing else.
+`tests/test_one_file_read_to_death_is_visible.py` pins the path-keyed count, the per-phase split,
+the threshold that keeps the ordinary case out, and that a write or a grep is not a read; four
+mutations redden it (key on arguments, count every tool, drop the phase cost, ignore the threshold).
+
+**Arm bookkeeping.** `oldCK8` produced no score, so it cannot enter the analysis; a batch of three
+is not a stratum. `oldCK8b` was relaunched on the freed lane with the identical card
+(`164268558e1a0469`), the pre-§99 checker and streaming on, restoring batch 4 to 2v2. The dead
+probe's $1.0052 stays in the ledger and is reported here rather than netted out — it is the second
+run in the corpus to end with a full budget and no node, after `remPde4`.
+
+No governor was added. A turn cap or a per-path read cap changes what every probe does, and §115's
+arm is twelve probes into twenty-four; the detector runs on data that already exists.
