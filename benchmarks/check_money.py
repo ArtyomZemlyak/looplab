@@ -110,10 +110,32 @@ def spans_by_probe(root: str, since: float) -> tuple[dict, dict]:
     return cost, calls
 
 
+def _failure_kind(row) -> str:
+    """Which failure a non-200 ledger row is, by its own signature.
+
+    `nginx-300s` is the one that matters and the one that is OURS: an UNSTREAMED request whose
+    latency is the proxy_read_timeout to the millisecond. `upstream-503` is the gateway declining;
+    the engine retries and the run continues. Anything else is reported by its status rather than
+    guessed at.
+    """
+    status = str(row.get("status") or "?")
+    try:
+        latency = float(row.get("latency_ms") or 0.0) / 1000.0
+    except (TypeError, ValueError):
+        latency = 0.0
+    streamed = bool(row.get("stream"))
+    if status == "504" and not streamed and 295.0 <= latency <= 305.0:
+        return "nginx-300s"
+    if status == "503":
+        return "upstream-503"
+    return f"http-{status}"
+
+
 def meter_by_probe(root: str, since: float) -> tuple[dict, dict, dict, dict]:
     cost: dict[str, float] = collections.defaultdict(float)
     calls: dict[str, int] = collections.Counter()
     killed: dict[str, int] = collections.Counter()
+    status_kind: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     empty: dict[str, int] = collections.Counter()
     path = os.path.join(root, "meter", "meter.jsonl")
     if not os.path.exists(path):
@@ -144,7 +166,13 @@ def meter_by_probe(root: str, since: float) -> tuple[dict, dict, dict, dict]:
         except (TypeError, ValueError):
             pass
         if str(j.get("status") or "") not in ("200", ""):
+            # NOT ALL NON-200s ARE THE SAME FAILURE, and calling them all "killed by the gateway"
+            # cost a sweep on 2026-09-03: six new non-200s appeared inside eight minutes and read
+            # as the unstreamed-era catastrophe. They were 503s refused in 1.3-15.3 s with
+            # streaming ON, from which the engine recovered; the 21 real kills are 504s at exactly
+            # 300.0 s with `stream=False`, all from 2026-08-31. One line, two different worlds.
             killed[arm] += 1
+            status_kind[arm][_failure_kind(j)] += 1
         else:
             # AN EMPTY 200. Found 2026-09-02 by asking what the four surplus calls this tool could
             # not name actually were: status 200, streamed, `attempts: 2`, ZERO prompt and zero
@@ -159,6 +187,7 @@ def meter_by_probe(root: str, since: float) -> tuple[dict, dict, dict, dict]:
                     empty[arm] += 1
             except (TypeError, ValueError):
                 pass
+    killed["__by_kind__"] = dict(status_kind)
     return cost, calls, killed, empty
 
 
@@ -219,9 +248,14 @@ def main(argv: list[str]) -> int:
     if extra:
         print(f"         {sum(extra.values())} further call(s) with no generation span: "
               + ", ".join(f"{p}+{n}" for p, n in sorted(extra.items())))
+        by_kind = m_killed.get("__by_kind__") or {}
         k = sum(m_killed.get(p, 0) for p in extra)
+        kinds: collections.Counter = collections.Counter()
+        for p in extra:
+            kinds.update(by_kind.get(p) or {})
         e = sum(m_empty.get(p, 0) for p in extra)
-        print(f"         of those: {k} killed by the gateway, {e} EMPTY 200s "
+        named = ", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items())) or "none"
+        print(f"         of those: {k} non-200 ({named}), {e} EMPTY 200s "
               f"(streamed, zero tokens both ways, ~60 s)")
         unnamed = sum(extra.values()) - k - e
         if unnamed:

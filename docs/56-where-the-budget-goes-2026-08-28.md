@@ -7573,3 +7573,42 @@ and buys the reads in the phases that most often make them. That is a targeted v
 building when the arm is over; the blanket version is a wash.
 
 Not shipped: the system prompt is what every probe reads, and §115's arm is twelve of twenty-four.
+
+## 166. Six non-200s in eight minutes, and the word that would have made them a catastrophe
+
+The counter's `errors` went 7 → 13 between sweeps and `check_money` reported **"7 killed by the
+gateway"** where it had said 1. That phrase names the 2026-08-31 disaster — unstreamed requests cut
+by nginx's `proxy_read_timeout`, 28 % of one task's calls dying five minutes at a time — and it is
+the failure this stand is most afraid of.
+
+It is not what happened. Every non-200 in the ledger, by signature:
+
+| when | n | status | latency | streamed |
+|---|---|---|---|---|
+| 08-31 | 21 | 504 | **exactly 300.0 s** | **False** |
+| 09-01 → 09-03 08:57 | 5 | 503 / 400 | 0.0–0.1 s | True |
+| **09-03 15:41 and 15:49** | **6** | **503** | **1.3–15.3 s** | **True** |
+
+Two bursts eight minutes apart, streaming ON, no tokens, no cost, `attempts=1` at the meter — the
+upstream declining service, not a timeout. All four probes carried on and gained nodes afterwards
+(`oldCK7` went on to a **268.1326** node 1). The 300.0-second rows are all from one day and one
+configuration, and none is new.
+
+**The defect is in the instrument, and it is one word.** `check_money.py` called every non-200
+"killed by the gateway" — the label for our own streaming bug — so a recoverable upstream refusal
+read as the catastrophe. `_failure_kind` now decides by signature, not by status:
+
+* `nginx-300s` — status 504, **unstreamed**, latency within 5 s of the 300 s ceiling. Ours.
+* `upstream-503` — the gateway declining; the engine retries and the run continues.
+* `http-<status>` — anything else, reported rather than guessed at.
+
+The line now reads `8 non-200 (8 upstream-503)` and explains itself. `test_a_503_refused_in_seconds
+_is_not_the_nginx_ceiling` builds a ledger with one of each and pins that a 504 which is NOT at the
+ceiling stays `http-504`; `test_the_failure_kinds_are_decided_by_signature_not_by_status_alone`
+pins the six cases directly. Four mutations redden them: status alone deciding the ceiling, the 503
+losing its own name, the report collapsing back to one phrase, and ignoring the stream flag.
+
+*One of those mutations did not apply the first time* — a quoting error left the file untouched and
+the suite green, which I read for a moment as "the mutation survived". A mutation that never
+reached the file proves nothing, and the tell was that the run was byte-identical to the unmutated
+one. Same shape as §164's first try, three sweeps apart.

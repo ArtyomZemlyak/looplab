@@ -19,7 +19,10 @@ import sys
 import threading
 from pathlib import Path
 
+import sys as _sys
 REPO = Path(__file__).resolve().parents[1]
+_sys.path.insert(0, str(REPO / "benchmarks"))
+import check_money as cm
 TOOL = REPO / "benchmarks" / "check_money.py"
 
 
@@ -287,3 +290,47 @@ def test_an_abandoned_arm_is_not_also_billed_a_preflight_call(tmp_path):
     assert "1 ABANDONED probe(s)" in r.stdout and "gone $0.0100" in r.stdout, r.stdout
     assert "RESIDUE $+0.000000" in r.stdout, r.stdout
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_a_503_refused_in_seconds_is_not_the_nginx_ceiling(tmp_path):
+    """Two non-200s that mean opposite things must not share one word.
+
+    On 2026-09-03 six new non-200s appeared inside eight minutes and the tool called all of them
+    "killed by the gateway" -- the phrase it uses for the 2026-08-31 catastrophe, when 21 UNSTREAMED
+    requests were cut at exactly 300.0 s by nginx's `proxy_read_timeout` and a quarter of one task's
+    calls died five minutes at a time. The six were 503s refused in 1.3-15.3 s with streaming ON,
+    which the engine retried through without losing a run. The signature separates them: an
+    unstreamed 504 at the timeout to the millisecond, against anything else.
+    """
+    probes = {"p1": [1.0]}
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200"},
+            {"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200"},
+            # the real thing: unstreamed, cut at the ceiling
+            {"ts": "3000", "arm": "p1", "status": "504", "latency_ms": 300000.0, "stream": False},
+            # today's: the gateway declining, fast, while streaming
+            {"ts": "3000", "arm": "p1", "status": "503", "latency_ms": 5800.0, "stream": True},
+            # a 504 that is NOT at the ceiling is not the ceiling either
+            {"ts": "3000", "arm": "p1", "status": "504", "latency_ms": 12000.0, "stream": True}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.00000196, "calls": 5})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "3 non-200" in r.stdout, r.stdout + r.stderr
+    assert "1 nginx-300s" in r.stdout, r.stdout
+    assert "1 upstream-503" in r.stdout, r.stdout
+    assert "1 http-504" in r.stdout, (
+        "a 504 that is not at the timeout was folded into the ceiling bucket")
+    assert "killed by the gateway" not in r.stdout, (
+        "the phrase that made six recoverable refusals read as the catastrophe")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_the_failure_kinds_are_decided_by_signature_not_by_status_alone():
+    assert cm._failure_kind({"status": "504", "latency_ms": 300000.0, "stream": False}) == "nginx-300s"
+    # streaming on: whatever this is, it is not the unstreamed ceiling
+    assert cm._failure_kind({"status": "504", "latency_ms": 300000.0, "stream": True}) == "http-504"
+    # right status, wrong clock
+    assert cm._failure_kind({"status": "504", "latency_ms": 60000.0, "stream": False}) == "http-504"
+    assert cm._failure_kind({"status": "503", "latency_ms": 1300.0, "stream": True}) == "upstream-503"
+    assert cm._failure_kind({"status": "400", "latency_ms": 100.0, "stream": True}) == "http-400"
+    assert cm._failure_kind({}) == "http-?"
