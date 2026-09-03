@@ -6204,7 +6204,41 @@ state a prediction rather than wait for one:
 the answer — the endpoint moved, not our repairs.** If they come in high, batch 3 was a run of bad
 luck at 2.3 %.
 
+*Resolved one sweep later — see §135.* The fourth came in at **155.36**, above the line. Batch 3 is
+1 of 4, not 0 of 4, and neither branch of the prediction fires cleanly.
+
 Written before the fourth probe of the batch has an evaluated node, for the same reason §133 was.
 
 *Everything else clean:* four probes live, residue $0.000000, zombies 0, seven baselines, no
 `PermissionError`.
+
+## 135. The fourth first node came in at 155, and the prediction lands between its two branches
+
+§134 wrote the prediction before the fourth probe of batch 3 had a node. It arrived: `expEEh`,
+**155.3557**, above the 150 line. Batch 3 is **155, 28, 23, 9** — one of four, not zero of four.
+
+| | first nodes | ≥ 150 | median |
+|---|---|---|---|
+| batches 1–2 | 14 | **11** | 185.8 |
+| batch 3 | 4 | **1** | — |
+| corpus | 27 | 5 | 27.7 |
+
+Batch 3 against batches 1–2: exact one-sided Fisher **p = 0.0833**. Not a break, not a continuation.
+
+And §114 over all eighteen of today's probes against the corpus: **12 of 18 above 150 against 5 of
+27**, Fisher **p = 0.0015**, Monte-Carlo permutation on the values **p = 0.00066** (200,000 draws;
+the exact enumeration is C(45,18) and does not finish, which is its own small lesson about reaching
+for the same tool at every n).
+
+So the effect §114 measured survives, weaker than the 0.0000187 it showed at n = 11 and now resting
+on a sample whose most recent quarter behaved like the corpus. **Neither branch of §134's prediction
+fires**, and that is the honest outcome: the natural experiment that was supposed to separate "our
+repairs" from "the endpoint" gave four points, one of them high, and separated nothing.
+
+What it did do is bound the claim. Whatever moved the first node is **not stable across four hours
+on the same harness** — batches 1–2 ran at 11 of 14 and batch 3 at 1 of 4 with identical code and
+card fingerprints. A repair does not come and go. Something else in the loop's environment does, and
+§115's confound is now not merely unresolved but demonstrated to be live.
+
+*The arm itself is untouched by this:* its control is concurrent within every batch, so a batch
+effect hits both arms equally. `expEEi`'s recovery is the illustration — 8.91, then **138.31**.
