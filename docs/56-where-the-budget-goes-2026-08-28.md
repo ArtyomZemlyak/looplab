@@ -6783,7 +6783,13 @@ That paragraph is the leak I was about to report, and it is wrong. What happens 
 The rejection is a redirect, not a discard: the loop reproposes and the node lands. Of the ten
 terminal cases, seven had **less than $0.01 left** — the rejection is simply the last event before
 the run stops. Only three had real money on the table: accPde $0.2347, remEE $0.2034,
-newCK4 $0.1273. **Corpus cost of the whole phenomenon: $0.6569.** The runs that end this way have a
+newCK4 $0.1273. **Corpus cost of the whole phenomenon: $0.6569.**
+
+*Corrected an hour later, by the run itself.* `newCK4` does not belong in that list. It was still
+running when I measured it, and it went on to evaluate node 2 at 22.101 — its rejection was a
+redirect like the other 87 %, and it read as terminal only because the file ended where the clock
+was, not where the run did. The true figures are **9 runs and $0.5296**, and the lesson is the
+narrow one: a live run cannot be scored on "what happened after", because nothing has. The runs that end this way have a
 median of **1** evaluated node against 3 for the rest, so a terminal rejection marks a starved run
 rather than causing one.
 
@@ -6891,3 +6897,32 @@ The remaining 25 findings are unvalidated. The largest by size is #1 — 84.7 % 
 byte-identical re-send priced at a flat tier, $47.39 of $75.87 — and it is the next one to check,
 because if the gateway does cache and the proxy's imputation is blind to it, every dollar figure in
 this document is wrong in the other direction.
+
+## 151. newCK4 closes batch 2 four-for-four on the same arc, at a fifth of the height
+
+| | |
+|---|---|
+| TEST | **106.3578** |
+| nodes (train) | **[22.769, 106.686, 22.101]** |
+| train→test ratio | 106.3578 / 106.686 = **0.997** |
+| best over last | 4.83× |
+| champion | 50-line Cython kernel, node 1 |
+| spend | $1.0080 — plan_step 36.6 %, propose 27.1 %, plan 12.5 % |
+| `eval_train` | 21 calls |
+| reference use | **15.0 % import / 12.5 % `is_solution`** over 40 `run_probe` calls |
+| node 0 | carried a kernel |
+
+Low, high, low — a fourth time, in the same batch, and again the champion rule is the only reason
+this is a 106 and not a 22. But it is the batch's runt: 106.36 against 221.71, 225.86 and 244.32,
+on the same task, in the same batch, on the same checker as newCK3. It is also the batch's slowest
+(183 min against 121-147) and the only one whose node 0 already carried a kernel — it started where
+the others ended up and then found less.
+
+Two numbers stand out. Its reference use, 15.0 % import and 12.5 % `is_solution`, is **two to three
+times §69.1's 4.9-8.3 % band** — the highest in the batch by a wide margin (the others: 0.0 %,
+4.8 %, 6.7 %). And 1 of its 3 evaluated nodes is graded-unchecked. Whether leaning on the reference
+module is what cost it the other 120 points is not answerable from one probe, but it is the first
+time the two have moved together this visibly, and it is worth a column in the arm's table.
+
+Batch 2 final: shipped checker {225.86, 106.36}, pre-§99 {221.71, 244.32}. Eight of twenty-four
+probes; still no test, because a two-per-arm batch is a stratum with a variance and not an answer.
