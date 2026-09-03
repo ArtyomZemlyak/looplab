@@ -6134,3 +6134,39 @@ precedent for exactly this shape — an affordance whose use went to zero with t
 
 Two more probes per arm would reach §83's nine. That is the first time in this programme that
 finishing a measurement is a smaller decision than starting one.
+
+## 133. Written before the last four land: what this arm will be allowed to conclude
+
+`expEEh`, `expEEi` (treatment) and `ctlEEh`, `ctlEEi` (control) are running, fingerprints verified
+(`fd23da29` against `16426855`). When they finish the arm is **nine against nine**, which is what
+§83 asked for and where it stops.
+
+This section is written NOW, with those four still running and their scores unknown, because the
+score p has already been 0.0286, 0.0857, 0.2143 and 0.0487 on the same growing sample. A statistic
+that has crossed 0.05 in both directions three times is one I could report either way once the data
+lands, and the only defence against that is to say beforehand which reading counts.
+
+**Primary, decided in §109 before any probe ran:** the clause claims that when a version scores
+well, the next should be a variant of it. That is the transition statistic — from a node carrying a
+compiled kernel, does the next node carry one, and does it hold at least half the score. At 7 v 7
+it is 12/13 against 20/40 (p = 0.0060) and 11/13 against 15/40 (p = 0.0035).
+
+**Secondary:** the TEST score, exact one-sided rank test. At 7 v 7, p = 0.0487, median ratio 1.270.
+
+**What each outcome will be allowed to say at 9 v 9:**
+
+| transitions | scores | conclusion |
+|---|---|---|
+| holds | holds | the clause changes behaviour AND the behaviour pays; ship it on by default |
+| holds | does not | the clause changes behaviour and the score does not follow — §94's shape; **do not ship**, and record that a behavioural win is not a score |
+| does not hold | either | the 7 v 7 transition result was n, not signal; the clause goes back in the drawer |
+
+**And the confound that survives either way:** §115. Every probe of both arms ran on days when the
+shared endpoint was measurably different from the corpus's (§101: a third of its throughput), and
+§114/§129 could not separate "our harness repairs moved the first node" from "the endpoint moved".
+That does not touch the arm — its control is concurrent — but it does mean **nothing here transfers
+to the corpus's numbers**, and any comparison of these fourteen (soon eighteen) runs against the
+older forty-nine has to say so.
+
+No result is claimed in this section. It exists so that the next one cannot quietly pick its
+statistic.
