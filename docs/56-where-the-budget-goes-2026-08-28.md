@@ -7285,3 +7285,33 @@ hypergeometric tail from 0 to the observed count instead of from the observed co
 probability that the OLD checker did better, which is the answer to a question nobody asked. The
 tell was that a 5× rate difference cannot sit at p = 0.98 in either direction. A one-sided test has
 two sides, and the wrong one is silent about being wrong.
+
+## 160. The suite is green, and the line that says so has been suppressed by my own flag for weeks
+
+`PYTEST EXIT=0`, `[100%]`, **0 `FAILED` lines, 0 `ERROR` lines** in a run measured without a pipe.
+The suite is green, including the four new files this sweep added.
+
+But the log has no `N passed` line at the end, and chasing that turned up something about every
+suite reading in this notebook. `pyproject.toml` carries `addopts = "-q"`. Every sweep has then
+typed `-q` as well — and **two `-q` flags suppress pytest's final summary line entirely**:
+
+```
+pytest tests/test_suite_health.py -q      →  -- Docs: https://docs.pytest.org/...    (last line)
+pytest tests/test_suite_health.py         →  3 passed, 1 warning in 1.59s
+```
+
+Same exit code, same tests, one line of evidence present or absent. Nothing was ever hidden that
+mattered — `FAILED` lines print at any verbosity, which is how §158's duplicate slug was caught —
+but the COUNTS were gone, and "13,327 passed" is a claim I have been making from a summary line
+that a differently-invoked run produced. The instrument that says "the suite is green" was one
+redundant flag away from saying nothing at all, and it said nothing quietly.
+
+The fix is to stop passing `-q`: the config already supplies it, and the second one is what costs
+the summary. The `Fatal Python error: Segmentation fault` blocks at the top of the log are not a
+problem either — they are the child process of
+`test_a_solver_that_kills_its_process_is_one_failed_row_not_an_empty_report`, which exists to prove
+that a solver killing itself becomes one failed row rather than an empty report.
+
+Three instrument failures in three sweeps, all mine and all the same shape: `cmd | tail` returning
+tail's status (§158), a Fisher tail summed from the wrong end (§159), and now a doubled `-q`. None
+of them broke anything. Each of them removed a number I was about to quote.
