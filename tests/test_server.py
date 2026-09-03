@@ -1179,10 +1179,14 @@ def test_reset_archive_failure_keeps_the_source_of_truth_and_never_spawns(tmp_pa
     before = (rd / "events.jsonl").read_bytes()
     real_move = reset_route._durable_archive_move
 
-    def _fail_source_of_truth(source, destination):
+    def _fail_source_of_truth(source, destination, **kw):
+        # `**kw` forwards whatever the real signature grows (today `operation_unique`, the
+        # assertion that decides whether the no-replace fallback may be taken). A double that
+        # enumerates the kwargs raises TypeError inside the reset worker the moment one is added,
+        # and the failure reads as a broken reset rather than a stale test.
         if source.name == "events.jsonl":
             raise OSError("injected event-log archive failure")
-        return real_move(source, destination)
+        return real_move(source, destination, **kw)
 
     spawns = []
     with monkeypatch.context() as patch:
@@ -4353,3 +4357,125 @@ def test_a_fresh_app_answers_concurrent_first_requests_on_every_route(tmp_path):
             f"{method} {path} hit a half-built route table: {response.status_code} "
             f"(allow={response.headers.get('allow')}). The lazy include cache was not warmed "
             "before the first concurrent requests.")
+
+
+# ------------------------------------------------------------------------------------------------
+# REPLAY ON A FILESYSTEM THAT CANNOT PROVIDE THE NO-REPLACE FLAG.
+#
+# `durable_no_replace_rename`'s docstring records the measurement: on the `fuse.geesefs` mounts every
+# run on this deployment lives under, the flagged rename answers EINVAL while the same rename
+# unflagged succeeds. Deletion was given the fallback after "run deletion had never once worked on
+# this deployment". Replay was left failing closed, on the stated ground that its
+# `<name>.reset-<millisecond stamp>` was a probe-then-use name two resets in one millisecond could
+# collide on.
+#
+# Both were true, and together they meant replay archiving could not succeed HERE AT ALL: the reset
+# marker and the `archiving` receipt are published BEFORE the move, so the route answered 425 "retry
+# this exact operation" — a remedy that failed identically every time — and the run was then
+# un-resumable, un-replayable AND un-deletable, because the marker fences every writer and no route
+# clears it.
+#
+# The stamp was the whole problem and it did not have to be a stamp. Archives are named after the
+# `operation_id` now, so the flag's TOCTOU argument dissolves and the fallback is legitimate.
+
+def test_replay_completes_where_the_kernel_refuses_the_flag(tmp_path, monkeypatch):
+    """The wedge, driven: a libc that refuses the flag exactly as geesefs does.
+
+    MUTATION: name archives from a stamp again (or pass `operation_unique=False`) -> the move fails
+    closed, the route answers 425 forever, and the run is stuck behind its own marker.
+    """
+    import ctypes as _ctypes
+    import errno as _errno
+    import os as _os
+
+    from looplab.serve.routers import control as control_router
+
+    class _FlagRefusingLibc:
+        """Refuses any FLAGGED rename with EINVAL; performs a real rename when given flags=0."""
+
+        def __getattr__(self, name):
+            if name != "renameat2":
+                raise AttributeError(name)
+
+            def _call(_olddirfd, oldname, _newdirfd, newname, flags):
+                if flags:
+                    _ctypes.set_errno(_errno.EINVAL)
+                    return -1
+                _os.rename(_os.fsdecode(oldname), _os.fsdecode(newname))
+                return 0
+
+            _call.argtypes = None
+            _call.restype = None
+            return _call
+
+    _build_run(tmp_path)
+    run_dir = tmp_path / "demo"
+    _make_resumable(run_dir)
+    (run_dir / "spans.jsonl").write_text('{"span":1}\n', encoding="utf-8")
+
+    spawns: list = []
+    with monkeypatch.context() as patch:
+        patch.setattr(_ctypes, "CDLL", lambda *a, **k: _FlagRefusingLibc())
+        patch.setattr(control_router, "_spawn_engine", lambda *a, **kw: spawns.append((a, kw)))
+        with TestClient(make_app(tmp_path)) as client:
+            response = client.post("/api/runs/demo/reset")
+
+    # THE WEDGE IS A PHASE, NOT A STATUS CODE, and the distinction is the whole point. A stubbed
+    # spawn legitimately leaves the operation at `popen_returned` with a 425 that says the
+    # replacement generation is not visible yet — a retry really does resolve that one. The wedge was
+    # a receipt stuck at `archiving`, where a retry re-attempts a rename the filesystem will refuse
+    # again, forever, behind a marker no route clears.
+    detail = response.json().get("detail")
+    phase = detail.get("phase") if isinstance(detail, dict) else None
+    assert phase not in ("prepared", "archiving"), (
+        "the reset is wedged at the archive step: retrying re-attempts a rename this filesystem "
+        f"refuses every time, and the run is left un-resumable, un-replayable AND un-deletable. {detail}")
+
+    # And the move really happened, to a name derived from the operation rather than a clock reading.
+    archived = sorted(entry.name for entry in run_dir.iterdir() if ".reset-" in entry.name)
+    assert archived, "nothing was archived, so the move did not actually happen"
+    assert all(len(name.split(".reset-")[-1]) == 36 for name in archived), (
+        f"archives must be named after the operation UUID, not a stamp: {archived}")
+
+
+def test_the_flag_is_still_TRIED_before_any_fallback(tmp_path, monkeypatch):
+    """The fallback is a degradation, never a first choice: a filesystem that CAN give the guarantee
+    must still be asked for it.
+
+    MUTATION: pass flags=0 straight away -> the flagged call disappears from `seen` and a real
+    no-replace guarantee is silently traded away on every box that could have provided it.
+    """
+    import ctypes as _ctypes
+    import errno as _errno
+    import os as _os
+
+    from looplab.serve.routers import control as control_router
+
+    seen: list = []
+
+    class _RecordingLibc:
+        def __getattr__(self, name):
+            if name != "renameat2":
+                raise AttributeError(name)
+
+            def _call(_olddirfd, oldname, _newdirfd, newname, flags):
+                seen.append(flags)
+                _os.rename(_os.fsdecode(oldname), _os.fsdecode(newname))
+                return 0
+
+            _call.argtypes = None
+            _call.restype = None
+            return _call
+
+    _build_run(tmp_path)
+    run_dir = tmp_path / "demo"
+    _make_resumable(run_dir)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_ctypes, "CDLL", lambda *a, **k: _RecordingLibc())
+        patch.setattr(control_router, "_spawn_engine", lambda *a, **kw: None)
+        with TestClient(make_app(tmp_path)) as client:
+            client.post("/api/runs/demo/reset")
+
+    assert seen, "no rename reached libc at all"
+    assert seen[0] != 0, "the FLAGGED call must be tried first, never skipped"

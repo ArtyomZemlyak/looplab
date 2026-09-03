@@ -84,7 +84,26 @@ class LLMEmbedder:
     `hash_embed` fallback PADDED to that same dimension, and if the very first call fails it degrades
     to pure `hash_embed` at `dim_fallback`. So retrieval is never crashed by a flaky endpoint; it just
     quietly loses semantic quality. A single embedder instance must build AND query one index (same
-    dim)."""
+    dim).
+
+    **IT CARRIES A `CostAccountant`, and until 2026-09-02 it did not.** This posts to a paid
+    endpoint with a bearer key, and `engine/costs.py::_CHILD_ATTRS` already walks `embed` — its own
+    comment says both the abstractor and the embedder are "LIVE chat/embedding clients under the
+    shipped defaults, each with its own `CostAccountant`". The abstractor had one; this did not, so
+    the walk reached the object, found no `accountant`, and every embed call was spent and unbilled
+    — invisible to the durable `llm_usage` ledger that `looplab tokens` reconciles against. The
+    knowledge index re-embeds whenever the case store is appended to, so the residual is not small.
+    Giving it the attribute is the whole wiring: no call site changes, because the walk was already
+    looking for it.
+
+    WHAT IS BILLED IS THE PROVIDER CALL, not a usable answer. `add` runs on any response that came
+    back and parsed as JSON, before the body is validated — a batch whose rows disagree on dimension
+    is discarded HERE and was still charged THERE, and `CostAccountant.add` already states this rule
+    for the chat path ("a successful response with missing/malformed usage still increments it
+    once"). A transport failure raises and is not billed; neither is the `hash_embed` fallback,
+    which spends nothing. An endpoint that reports no `usage.cost` — most embedding endpoints —
+    lands as an UNPRICED call, which `cost_is_reported` exists to keep distinguishable from free.
+    """
 
     # Consecutive `_call` failures tolerated before this embedder stops trying the endpoint at all.
     # >1 so a single blip doesn't cost the whole run its semantic retrieval; small enough that a dead
@@ -93,7 +112,19 @@ class LLMEmbedder:
 
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  api_key: str = "x", timeout: float = 30.0, dim_fallback: int = 64,
-                 trust_env: bool = False):
+                 trust_env: bool = False, accountant=None):
+        # Imported here rather than at module scope for the reason `make_embedder` gives below: this
+        # module is the dependency-free half of retrieval and is imported by offline paths that must
+        # not pull the LLM client in. A failure to import it is not a reason to refuse to embed —
+        # it costs the BILLING, not the retrieval — so the attribute degrades to None and the
+        # accounting walk finds nothing, which is exactly the state this fixed.
+        if accountant is None:
+            try:
+                from looplab.core.llm import CostAccountant
+                accountant = CostAccountant()
+            except Exception:  # noqa: BLE001 - telemetry construction never breaks retrieval
+                accountant = None
+        self.accountant = accountant
         self.model = model
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key or "x"
@@ -122,6 +153,10 @@ class LLMEmbedder:
             # HTTPException covers IncompleteRead/BadStatusLine — a server dying mid-response
             # must degrade to the hash fallback, not crash role construction.
             return None
+        # BILLED BEFORE THE BODY IS VALIDATED. Every `return None` below discards an answer the
+        # provider already produced and charged for; billing at the bottom would make a malformed
+        # batch read as a call that never happened. Same rule `CostAccountant.add` states for chat.
+        self._bill(body)
         data = body.get("data") if isinstance(body, dict) else None
         if not isinstance(data, list) or len(data) != len(texts):
             return None
@@ -135,6 +170,29 @@ class LLMEmbedder:
         except (TypeError, ValueError):    # non-numeric entries in a malformed body
             return None
         return vecs
+
+    def _bill(self, body) -> None:
+        """Commit one provider call to the accountant. Never raises.
+
+        An embeddings response carries `usage.prompt_tokens`/`total_tokens` and no completion half;
+        a gateway may add `cost`. Absent or malformed fields are simply not forwarded — `add` still
+        counts the CALL, which is what makes an unpriced provider distinguishable from a free one
+        (`core/llm.py::cost_is_reported`) instead of rolling up as zero spend.
+        """
+        accountant = getattr(self, "accountant", None)
+        if accountant is None:
+            return
+        usage = body.get("usage") if isinstance(body, dict) else None
+        payload: dict = {}
+        if isinstance(usage, dict):
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cost"):
+                value = usage.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    payload[key] = value
+        try:
+            accountant.add(payload.get("cost"), usage=payload or None)
+        except Exception:  # noqa: BLE001 - the call already succeeded; telemetry never breaks it
+            pass
 
     def _fallback(self, texts: list[str]) -> list[Vector]:
         d = self._dim or self.dim_fallback

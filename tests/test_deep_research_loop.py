@@ -620,8 +620,12 @@ def test_durable_memo_writer_sanitizes_before_verify_and_resanitizes_output(monk
     assert secret not in rendered and "https://u:p@" not in rendered
     assert "\x00" not in rendered and "\x1b" not in rendered
     assert "***" in rendered and "DIRECTION" in rendered
+    # `belief_admission` joined this sequence when the board started writing down what it refused.
+    # It sits between the memo and the board rows because `_admissible_beliefs` classifies the
+    # directions before any of them becomes a hypothesis — the ORDER is the contract, so it is
+    # asserted rather than filtered out.
     assert [event_type for event_type, _ in eng.store.events] == [
-        "research_completed", "hint", "hypothesis_added"]
+        "research_completed", "hint", "belief_admission", "hypothesis_added"]
     assert observed["memo"]["claims_receipt"]["total"] == 65
     assert eng.store.events[0][1]["memo"]["claims_receipt"] == {
         "v": 1, "total": 65, "retained": 64, "omitted": 1, "complete": False,

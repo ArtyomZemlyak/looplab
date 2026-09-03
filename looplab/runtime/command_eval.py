@@ -132,6 +132,22 @@ MAX_STAGE_ASSERT_CHARS = 300
 # advertising a contract nothing enforces — which is the failure this field exists to end.
 STAGE_EXPECT_KEYS = ("files", "assert")
 
+# The SAME closed-key rule one level UP, and the argument is `STAGE_EXPECT_KEYS`' own. `expect`
+# refuses an unknown key because a dropped `"assets"` typo leaves a stage advertising a contract
+# nothing enforces; the STAGE object was open, so the identical typo one level out dropped the
+# contract entirely. Probed: a stage spelling `needs_files` / `expects` / `time_out` / `roles`
+# validated with `err=None` and came back holding only `name` and `command` — declared inputs,
+# declared outputs, the wall clock and kill-eligibility all silently gone.
+#
+# This module already argues the rule twice for individual keys: `env` and `role` are REFUSED rather
+# than dropped when unusable, "because a manifest that reads as if the stage carries a role nothing
+# applies is the failure the closed key sets exist to end". An unknown key is the same failure with
+# no key to hang the refusal on.
+#
+# `check` is here even though it is read as a bare truthiness flag: the set is what a stage MAY
+# carry, not what `validate_stages` happens to canonicalize.
+STAGE_KEYS = ("name", "command", "timeout", "check", "role", "expect", "needs", "env")
+
 
 def normalize_declared_path(path) -> str:
     """The ONE canonical spelling of a workdir-relative declared path.
@@ -433,16 +449,16 @@ def _confined(workdir, rel) -> Optional[Path]:
         return None
 
 
-def _read_stdout_json(stdout, workdir, spec, wrap, since) -> Optional[float]:
+def _read_stdout_json(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     return json_line_metric(stdout, spec.get("key", "metric"))
 
 
-def _read_stdout_regex(stdout, workdir, spec, wrap, since) -> Optional[float]:
+def _read_stdout_regex(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     pat = spec.get("pattern") or spec.get("key")   # key = tolerant fallback (composable authoring)
     return _regex_metric(stdout, pat, spec.get("group", 1)) if pat else None
 
 
-def _read_file(stdout, workdir, spec, wrap, since) -> Optional[float]:
+def _read_file(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     """`file_json` / `file_regex`: parse a file the candidate wrote into its own workdir."""
     fp = spec.get("path")
     if not fp:
@@ -464,7 +480,7 @@ def _read_file(stdout, workdir, spec, wrap, since) -> Optional[float]:
         return None
 
 
-def _read_host_score(stdout, workdir, spec, wrap, since) -> Optional[float]:
+def _read_host_score(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     # B1 host-side scoring (trust): the candidate WRITES predictions into its workdir; the HOST
     # scores them against held-out labels it holds at a path OUTSIDE the candidate's workspace
     # (never mounted under the untrusted tier, never writable by the candidate). The metric is
@@ -535,7 +551,7 @@ def _read_host_score(stdout, workdir, spec, wrap, since) -> Optional[float]:
     return _to_float(host_score(spec.get("scorer", "rmse"), preds, labels, key=spec.get("key")))
 
 
-def _read_adapter(stdout, workdir, spec, wrap, since) -> Optional[float]:
+def _read_adapter(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     # A (human-ratified, frozen) agent-written module exposing read_metric(workdir)->
     # float, for an arbitrary tracker (TensorBoard/ClearML/custom). Run as a SUBPROCESS
     # in the workdir (not in-process) so it inherits the same timeout/tree-kill harness
@@ -555,8 +571,21 @@ def _read_adapter(stdout, workdir, spec, wrap, since) -> Optional[float]:
     argv = (["python", "-c", runner] if wrap else [sys.executable, "-c", runner])
     if wrap:
         argv = wrap(argv, str(workdir))
+    # INSIDE THE EVAL'S OWN ENVIRONMENT. This is the one reader that EXECs candidate-lineage code,
+    # and it used to pass `env=None` — so it ran in the ENGINE's environment minus secret-named
+    # vars: no fence marker, no GPU pin, and none of the operator's declared eval env, which
+    # `EvalSpec.env` promises reaches every stage. `run_argv`'s own comment listed the metric
+    # adapter among what passes through the fence; it passed through the FUNCTION, not the fence.
+    #
+    # One parameter buys all three, because `run_argv` derives them from this dict: it reads
+    # `FENCE_DIR_ENV` out of it to prepend the fence directory to `PYTHONPATH`, and
+    # `CUDA_VISIBLE_DEVICES` out of it for the device pin. `None` still means what it always did
+    # (build the default environment), so an eval that declares nothing is byte-identical.
+    #
+    # The eval-level env, not a stage's: a stage's declared `env` is stage-scoped by declaration and
+    # this exec happens after every stage, in the workdir, to read what the eval as a whole produced.
     rc, out, _, to = run_argv(argv, str(workdir),
-                               finite_timeout(spec.get("timeout", 120), 120), None, 64_000)
+                               finite_timeout(spec.get("timeout", 120), 120), env, 64_000)
     return json_line_metric(out, "metric") if (rc == 0 and not to) else None
 
 
@@ -771,7 +800,7 @@ def host_score_labels_error(spec, *, workspace_root=None) -> Optional[str]:
 
 
 def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
-                since: Optional[float] = None) -> Optional[float]:
+                since: Optional[float] = None, env: Optional[dict] = None) -> Optional[float]:
     """Read the metric for one eval according to `spec` (an eval_spec['metric']). Built-in
     readers parse host files/stdout in-process (data, never code). The `adapter` reader EXECS
     agent-authored code, so under the untrusted tier it must run in the same sandbox as the
@@ -794,7 +823,7 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
     if _nonstring_path_slot(spec) is not None:
         return None
     reader = METRIC_READERS.get(spec_kind(spec))
-    return reader(stdout, workdir, spec, wrap, since) if reader is not None else None
+    return reader(stdout, workdir, spec, wrap, since, env) if reader is not None else None
 
 
 def _is_within(child: Path, parent: Path) -> bool:
@@ -1011,6 +1040,14 @@ def validate_stages(stages, *, reserved: tuple = (),
         if nm in seen:
             return None, f"duplicate stage name {nm!r}."
         seen.add(nm)
+        unknown = [k for k in s if k not in STAGE_KEYS]
+        if unknown:
+            # BEFORE the `command` check, so `commands: [...]` is reported as the unknown key it is
+            # rather than as a missing `command` — the two have different fixes and the declarer
+            # reads this string straight out of the `declare_stages` bounce.
+            return None, (f"stage {nm!r} has unknown key(s) {sorted(unknown)!r}; only "
+                          f"{list(STAGE_KEYS)!r} are read. A key nothing reads would declare "
+                          "inputs, outputs, a wall clock or a role that is never applied.")
         cmd = s.get("command")
         if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
             return None, (f"stage {nm!r} needs a `command` as a non-empty list of string argv "
@@ -1647,6 +1684,31 @@ def validate_cross_check(spec: Optional[dict]) -> Optional[dict]:
     return spec
 
 
+def _gate_reader_refusal(metrics, constraints, cross_check) -> Optional[str]:
+    """The gate-reader trust rule as a MESSAGE rather than a raise: None when every gate reader is a
+    declarative built-in, else the sentence explaining which one is not.
+
+    A gate decides whether a measured node counts, so it must never execute the agent's own module —
+    the same trust rule `validate_cross_check` states, asked of all three gate slots instead of one.
+    The PRIMARY `metric` is deliberately not among them: an adapter there is the
+    `eval_trust_mode="ratify_freeze"` design (see `adapters/repo_task.py::_GATE_READER_SLOTS`).
+
+    Returns instead of raising because its caller runs inside the eval worker after the evaluation
+    has already run; see the block that calls it for what a raise there cost.
+    """
+    slots = (("metrics", (metrics or {}).values()),
+             ("constraints", constraints or ()),
+             ("cross_check", (cross_check,) if cross_check else ()))
+    for slot, specs in slots:
+        for spec in specs:
+            if isinstance(spec, dict) and spec.get("kind") == "adapter":
+                return (f"eval.{slot} declares an `adapter` reader. A gate reader must be a "
+                        "declarative built-in, never agent-authored code — an adapter gate defeats "
+                        "the scorer freeze. This node is failed rather than scored; fix the task "
+                        "spec and resume.")
+    return None
+
+
 def _drift(primary: Optional[float], cross: Optional[float], tol: float) -> bool:
     """True if the frozen adapter's `primary` metric is not corroborated by the independent
     `cross` reader: either the cross reader produced nothing (can't confirm) or the two
@@ -1779,7 +1841,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
     return _build(env)
 
 
-def _violations(out, wd, constraints, wrap, since=None) -> list[dict]:
+def _violations(out, wd, constraints, wrap, since=None, env=None) -> list[dict]:
     """Read each constraint (a reader spec + a `max`/`min` bound) and return the ones not
     satisfied (incl. a value that couldn't be read — an unverifiable constraint is a
     violation, never a silent pass). Multi-objective gate (#2/#5): a violating node is still
@@ -1787,7 +1849,7 @@ def _violations(out, wd, constraints, wrap, since=None) -> list[dict]:
     primary read — a stale constraint file reads as unverifiable -> violation (fail-closed)."""
     out_list = []
     for c in (constraints or []):
-        val = read_metric(out, wd, c, wrap=wrap, since=since)
+        val = read_metric(out, wd, c, wrap=wrap, since=since, env=env)
         bad = (val is None
                or (c.get("max") is not None and val > c["max"])
                or (c.get("min") is not None and val < c["min"]))
@@ -2363,6 +2425,32 @@ def _stage_cursor(ex: _EvalExec, name: str, index: int, total: int):
         _stage_beacon(ex, name, index, total, "finished")
 
 
+# WHAT A STAGE ROW'S `status` MAY SAY. `_run_stages` below is the only writer of these; every other
+# module in the tree READS them, and until this registry existed they were bare literals spelled
+# across thirteen files, with `RunResult.stages` documenting three of the eight and
+# `metric_salvage.VETO_STAGE_STATUSES` naming one.
+#
+# A typo does not fail anywhere. It rides onto the durable `stage_finished` row and then reads as an
+# unknown status at every consumer: the salvage veto stops vetoing, the UI strip draws no glyph, and
+# the reuse predicate sees a stage that neither succeeded nor failed. That is the same shape as
+# `TRIAGE_ACTIONS` and `CARD_BUILD_SKIP_REASONS`, both of which have a registry and a two-way scan.
+#
+# Ordered by lifecycle rather than alphabetically, because the ORDER is the story a row tells: a
+# stage is skipped, or it runs and exits, and then its declared contract is checked.
+STAGE_STATUSES: tuple[str, ...] = (
+    # never ran — its inputs were reused or refused before the command was spawned
+    "reused", "needs_failed", "env_unsupported",
+    # ran, and this is how the process ended
+    "ok", "fail", "timeout",
+    # ran and exited 0, and then its own DECLARED contract refused it
+    "expect_failed", "check_failed",
+)
+
+# The subset meaning "this stage did not do its job". `ok` and `reused` are the complement, and
+# `reused` belongs there because a reuse is a previous run of this stage whose result still stands.
+STAGE_FAILED_STATUSES: frozenset[str] = frozenset(set(STAGE_STATUSES) - {"ok", "reused"})
+
+
 def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Optional[str],
                 metric: dict, eval_started: float, check_fn,
                 subject: Optional[list] = None,
@@ -2606,7 +2694,8 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             # salvage, and the read is only attempted when it wasn't a hard timeout, via the call-site
             # `not to` gate below (the same gate the single-command path uses). A plain crash reads a
             # value too but stays unsalvaged (stalled False, exit!=0), exactly as in single-command mode.
-            _salvaged = (read_metric(run.out, str(ex.wd), metric, wrap=ex.wrap, since=eval_started)
+            _salvaged = (read_metric(run.out, str(ex.wd), metric, wrap=ex.wrap,
+                                     since=eval_started, env=ex.env)
                          if (_i == len(stages) - 1 and not run.timed_out) else None)
             run.early = RunResult(
                 exit_code=run.rc, stdout=run.out, stderr=f"stage '{_sname}' failed:\n{run.err}",
@@ -2915,7 +3004,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     rc, out, err, to, _sig = _run.rc, _run.out, _run.err, _run.timed_out, _run.signals
     stage_results = _run.stage_results
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):
-        m = read_metric(out, str(wd), metric, wrap=wrap, since=_eval_started) if not to else None
+        m = (read_metric(out, str(wd), metric, wrap=wrap, since=_eval_started, env=env)
+             if not to else None)
     # F13 stage-reuse: on a stage-scoped re-run (`start_stage`), the earlier stages are DELIBERATELY
     # reused — their on-disk artifacts keep their prior-eval mtime — so a constraint / extra / cross-check
     # reader that points at a reused stage's file is legitimately "old" and the `_eval_started` gate would
@@ -2934,22 +3024,38 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # `start_stage` naming no stage in the list reuses NOTHING, and the old truthiness test dropped
     # the gate anyway.
     _reader_since = attempt_freshness_floor(_eval_started, stages, start_stage)
+    # THE GATE-READER TRUST RULE, RE-ASKED HERE — and it FAILS THE NODE rather than raising.
+    #
+    # `EvalSpec` refuses an `adapter` in all three gate slots at submit (`_GATE_READER_SLOTS`), so on
+    # any spec authored through a submit surface this is unreachable. What still reaches it is a
+    # `task.snapshot.json` recorded before that refusal existed — `_grandfathered` deliberately keeps
+    # such a run resumable — and a library caller building the dict directly, since
+    # `run_command_eval(metrics=...)` is public.
+    #
+    # It used to `raise`, from inside the eval worker, AFTER the evaluation had already run. A plain
+    # `ValueError` is not the `GpuPinUnenforceable` the dispatcher terminalizes, so per that
+    # handler's own comment it escaped "with no node terminal", cancelled "every in-flight sibling
+    # eval in the batch" and re-crashed "deterministically on every resume". Returning is the trade
+    # this tree has already made for exactly this class: `_readers_usable`' docstring records that
+    # `host_score`'s reader "used to RAISE there, which killed the run outright with no terminal
+    # event for the node, so the check had to move somewhere it can refuse instead of crash".
+    #
+    # So the NODE fails with no metric and the RUN survives to report it. If the spec is broken every
+    # node fails the same way and the run finishes with no best node, which is loud, bounded, and
+    # recoverable — unlike a run that dies without a terminal and dies again on resume.
+    bad_gate = _gate_reader_refusal(metrics, constraints, cross_check if enforce_drift else None)
+    if bad_gate is not None:
+        return RunResult(exit_code=rc, stdout=out, stderr=(err or "") + "\n" + bad_gate,
+                         metric=None, timed_out=to)
     drift = None
     if enforce_drift and cross_check and m is not None:
-        validate_cross_check(cross_check)
-        cross = read_metric(out, str(wd), cross_check, wrap=wrap, since=_reader_since)
+        cross = read_metric(out, str(wd), cross_check, wrap=wrap, since=_reader_since, env=env)
         if _drift(m, cross, drift_tolerance):
             drift = {"primary": m, "cross": cross, "tolerance": drift_tolerance}
             m = None                                   # uncorroborated -> not trusted
-    # Multi-objective (#5): extra reported metrics (audit) + hard constraints (gate selection).
-    # These reader specs are operator-owned gates, so they must NOT be agent-authored `adapter`
-    # code (same trust rule as cross_check) — reject loudly rather than exec the agent's module.
-    for spec in list((metrics or {}).values()) + list(constraints or []):
-        if spec.get("kind") == "adapter":
-            raise ValueError("metrics/constraints readers must be built-in, not 'adapter' "
-                             "(an agent-authored gate reader defeats the trust boundary).")
     declared = ({name: v for name, spec in metrics.items()
-                 if (v := read_metric(out, str(wd), spec, wrap=wrap, since=_reader_since)) is not None}
+                 if (v := read_metric(out, str(wd), spec, wrap=wrap, since=_reader_since,
+                                      env=env)) is not None}
                 if (metrics and not to) else {})   # a MISSED reader (None) must not erase a
     #                                                successfully auto-captured value of the same name
     # Auto-capture: every other numeric key on the metric's own JSON line is also reported (no config
@@ -2990,7 +3096,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     extra_directions = ({name: d for name in declared
                          if (d := (metrics.get(name) or {}).get("direction")) in DIRECTIONS}
                         or None)
-    viol = (_violations(out, str(wd), constraints, wrap, since=_reader_since)
+    viol = (_violations(out, str(wd), constraints, wrap, since=_reader_since, env=env)
             if (constraints and not to and m is not None) else None)
     # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
     # it so the engine can collapse it to the node's best metric (no eval_spec change required).

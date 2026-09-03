@@ -14,8 +14,9 @@ import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus, isSalvagedMetricViolation,
   OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceCaveated,
   objectiveSourceHelp } from './trustSemantics.js'
-import { EXTRA_METRIC_CHANNEL_HELP, EXTRA_METRIC_CHANNEL_LABEL,
-  extraMetricChannel } from './extraMetrics.js'
+import {
+  extraMetricChannel, extraMetricCaveated, extraMetricSourceHelp,
+  extraMetricSourceLabel, extraMetricIsBackfilled } from './extraMetrics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { nodeAppliedParams, appliedParamsDivergences, appliedParamsChecked,
   appliedParamsNotice, appliedParamsConflicts,
@@ -2776,10 +2777,13 @@ export function Metrics({ n, detail, state, runId }) {
   // also fed `anyUnverified`, so a phantom row could summon the whole self-reported footnote.
   //
   // `channel` is therefore `null` when this node holds no value, and the source cell renders
-  // nothing at all rather than a word about nothing. `bestChannel` is the same read against the
-  // CHAMPION's own record: the `best #N` column is a different node's number, and until now only
-  // the ★ row consulted `champObjective`, so a self-reported champion extra sat unlabelled beside
-  // this node's labelled one — the by-contrast misread the ★ cell's own comment warns about.
+  // nothing at all rather than a word about nothing. `bestCaveated` is the same read against the
+  // CHAMPION's own record: the `best #N` column is a different node's number, and until 2026-08-29
+  // only the ★ row consulted `champObjective`, so a self-reported champion extra sat unlabelled
+  // beside this node's labelled one — the by-contrast misread the ★ cell's own comment warns about.
+  // It carries the presence check that the old `bestChannel` did (it is false when the champion
+  // holds no value for this key), so the two columns still cannot invent a caveat about an empty
+  // cell.
   const rows = [
     { k: 'objective', mine: n.confirmed_mean ?? n.metric, best: champ ? (champ.confirmed_mean ?? champ.metric) : null, star: true },
     ...extraKeys.map(k => {
@@ -2788,15 +2792,21 @@ export function Metrics({ n, detail, state, runId }) {
       return {
         k, mine, best,
         channel: mine == null ? null : extraMetricChannel(n, k),
-        bestChannel: (champ && best != null) ? extraMetricChannel(champ, k) : null,
+        // A RECONSTRUCTION IS A CAVEAT EVEN THOUGH ITS CHANNEL IS THE GUARDED ONE. The score
+        // backfill writes recovered values as `declared` — correctly, the operator's own scoring
+        // program printed them — so a cell keyed on the channel alone rendered a value recovered
+        // from a log after the fact identically to one measured while the run was happening, at a
+        // precision two decimals coarser than the objective. `extraMetricCaveated` is the OR of the
+        // two questions; the label and its tooltip come from one call each so they cannot drift.
+        caveated: mine == null ? false : extraMetricCaveated(n, k),
+        bestCaveated: (champ && best != null) ? extraMetricCaveated(champ, k) : false,
       }
     }),
   ]
-  // A row with no value on EITHER side can no longer summon this footnote: `channel` and
-  // `bestChannel` are both null there, so the sentence is printed only when some cell it describes
-  // is actually on screen.
-  const anyUnverified = rows.some(r => (r.channel && r.channel !== 'declared')
-    || (r.bestChannel && r.bestChannel !== 'declared'))
+  // A row with no value on EITHER side can no longer summon this footnote: `caveated` and
+  // `bestCaveated` are both false there, so the sentence is printed only when some cell it
+  // describes is actually on screen.
+  const anyUnverified = rows.some(r => r.caveated || r.bestCaveated)
   return <>
     <div className="section-h">Reported metrics{champ ? ` · best = #${champ.id}` : ''}</div>
     <DataTable caption="Node metric comparison" card={false}><table className="tbl"><thead><tr><th>metric</th><th>source</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
@@ -2806,16 +2816,16 @@ export function Metrics({ n, detail, state, runId }) {
           ? <span className={objectiveCaveated ? 'warn' : ''}
             title={objectiveSourceHelp(objective)}>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>
           : r.channel
-            ? <span className={r.channel === 'declared' ? '' : 'warn'}
-              title={EXTRA_METRIC_CHANNEL_HELP[r.channel]}>{EXTRA_METRIC_CHANNEL_LABEL[r.channel]}</span>
+            ? <span className={r.caveated ? 'warn' : ''}
+              title={extraMetricSourceHelp(n, r.k)}>{extraMetricSourceLabel(n, r.k)}</span>
             : null}</td>
         <td>{fmt(r.mine)}</td>
         {showChamp && <td>{r.star && objectiveSourceCaveated(champObjective)
           ? <span className="warn" title={objectiveSourceHelp(champObjective)}>
             {fmt(r.best)} · {OBJECTIVE_SOURCE_LABEL[champObjective.channel]}</span>
-          : r.bestChannel && r.bestChannel !== 'declared'
-            ? <span className="warn" title={EXTRA_METRIC_CHANNEL_HELP[r.bestChannel]}>
-              {fmt(r.best)} · {EXTRA_METRIC_CHANNEL_LABEL[r.bestChannel]}</span>
+          : r.bestCaveated
+            ? <span className="warn" title={extraMetricSourceHelp(champ, r.k)}>
+              {fmt(r.best)} · {extraMetricSourceLabel(champ, r.k)}</span>
             : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
     {/* The extras' footnote below exists because a tooltip is not discoverable — an operator
         scanning a table does not hover every cell. That argument is STRONGER for the ★ row, which
@@ -2882,6 +2892,20 @@ export function Metrics({ n, detail, state, runId }) {
       are audit-only and never drive selection. <b>provenance unknown</b> means the run predates this
       record; treat it as self-reported.
     </div>}
+    {/* PRINTED, not the footnote's job to hover. The argument above the ★ footnote — "a tooltip is
+        not discoverable, an operator scanning a table does not hover every cell" — is STRONGER
+        here, because the harm is a silent tie: the recovered suite is printed to two decimals while
+        the objective is read at six, so two nodes that differ can render identical on every
+        recovered row. `extraMetricIsBackfilled` is per NODE (the fold declines a node that already
+        carries any extra metric, so a backfilled map is backfilled entirely) and the champion's
+        record is read separately, because the `best #N` column is a different node's number. */}
+    {(extraMetricIsBackfilled(n) || (champ && extraMetricIsBackfilled(champ))) && (
+      <div className="muted">
+        Rows marked <b>reconstructed</b> were recovered from the preserved score log after the run,
+        not recorded while it was happening — at the precision the scoring program chose to print,
+        which is coarser than the objective. Two nodes equal on a reconstructed row are not known to
+        be equal.
+      </div>)}
     {n.confirmed_mean != null && <div className="kv confirmed-metric">
       {/* Same rule as the `|| 'Multiple'` above: `||` falls through on a real 0 and would quietly
           substitute the sample length for a recorded count of zero — a different number presented as

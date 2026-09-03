@@ -155,6 +155,7 @@ nav:
       - MLE-bench runbook: MLEBENCH.md
   - Design records:
       - Index: 00-INDEX.md
+      - Whole-tree architecture review (2026-09-02): 50-architecture-review-2026-09-02.md
       - Operator list audit (2026-08-19): 43-operator-list-audit-2026-08-19.md
       - Claim surfaces root cause (2026-08-20): 45-claim-surfaces-2026-08-20.md
       - Early-stop blind classes (2026-08-20): 48-early-stop-blind-classes-2026-08-20.md

@@ -59,9 +59,12 @@ from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
     _spawn_engine)
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
+from looplab.serve.protocol import COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES
 
 
-TERMINAL_STATUSES = frozenset({"succeeded", "noop", "failed", "rejected", "timed_out"})
+# Kept under this name — its call sites read well — but DERIVED from `serve/protocol.py`, the
+# module whose docstring owns the string contracts the server, the TUI and the React UI share.
+TERMINAL_STATUSES = COMMAND_TERMINAL_STATUSES
 _RETRY_GUARDED_EVENTS = frozenset(CONTROL_EVENTS)
 _COMMAND_ID_RE = re.compile(r"^cmd_[0-9a-f]{32}$")
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -310,7 +313,19 @@ class RunCommandService:
         self.poll_interval = max(0.01, float(poll_interval))
         self.lock_acquire_timeout = max(0.05, float(lock_acquire_timeout))
         self._local_lock = threading.RLock()
-        self._run_locks: dict[str, threading.RLock] = {}
+        self._run_locks: dict[str, threading.Lock] = {}
+        # WHICH RUNS THIS THREAD IS ALREADY SEQUENCING. The in-process guard used to be an `RLock`
+        # while the interprocess half is not re-entrant at all, so a nested `sequence()` on one
+        # thread passed the RLock and then contended with ITS OWN first descriptor: POSIX `flock` is
+        # per open-file-description, and this opens a fresh one per call, so the second acquire spun
+        # to the full timeout and answered 503 "timed out waiting for the run command sequencer" —
+        # a message describing contention with another process, about a thread blocked on itself.
+        #
+        # No production path nests today, which is exactly why the `RLock` was a decoy: it read as
+        # permission for something the layer below cannot do. A plain `Lock` states the rule, and
+        # this set makes re-entry a NAMED refusal rather than a deadlock against a plain lock —
+        # which would have been a worse answer to the same mistake.
+        self._sequenced_by_thread: dict[int, set[str]] = {}
         self._command_observations = CommandObservationIndex(max_indexed_runs=8)
 
     def _engine_state(self, rd: Path) -> Optional[bool]:
@@ -1052,12 +1067,23 @@ class RunCommandService:
         giving up early is the safe direction there. Every ordinary caller omits it.
         """
         key = _lock_identity(rd)
+        thread_id = threading.get_ident()
         with self._local_lock:
-            local = self._run_locks.setdefault(key, threading.RLock())
+            if key in self._sequenced_by_thread.get(thread_id, ()):
+                # Raised rather than allowed: the interprocess half cannot be re-entered, so
+                # "allowing" it means blocking on this thread's own descriptor until the acquire
+                # budget runs out and then reporting cross-process contention that never happened.
+                raise RuntimeError(
+                    "run command sequencer re-entered on one thread: the interprocess half is not "
+                    "re-entrant, so a nested `sequence()` would block on its own lock. Hoist the "
+                    "inner call out of the outer `sequence()` block.")
+            local = self._run_locks.setdefault(key, threading.Lock())
         budget = self.lock_acquire_timeout if timeout is None else max(0.0, float(timeout))
         deadline = time.monotonic() + budget
         if not local.acquire(timeout=max(0.0, deadline - time.monotonic())):
             raise HTTPException(503, "timed out waiting for the in-process run command sequencer")
+        with self._local_lock:
+            self._sequenced_by_thread.setdefault(thread_id, set()).add(key)
         try:
             lock_path = self._sequence_path(rd)
             handle = open(lock_path, "a+")
@@ -1116,6 +1142,14 @@ class RunCommandService:
                         pass
                 handle.close()
         finally:
+            with self._local_lock:
+                held = self._sequenced_by_thread.get(thread_id)
+                if held is not None:
+                    held.discard(key)
+                    # Dropped when empty: a long-lived worker pool would otherwise accumulate one
+                    # empty set per thread that ever sequenced anything.
+                    if not held:
+                        self._sequenced_by_thread.pop(thread_id, None)
             local.release()
 
     def validate_paths(self, rd: Path) -> Path:
@@ -1304,7 +1338,7 @@ class RunCommandService:
             if record_semantic != semantic_payload_digest:
                 continue
             status = record.get("status")
-            if status not in {"accepted", "executing", "failed", "timed_out"}:
+            if status not in (COMMAND_ACTIVE_STATUSES | {"failed", "timed_out"}):
                 continue
             if status in {"failed", "timed_out"}:
                 # RECONCILE before blocking, exactly as `_unresolved_terminal_record` does — the
@@ -1321,7 +1355,7 @@ class RunCommandService:
             # accepted/executing is already one reserved logical command even in the tiny
             # reserve→append window. Failed/timed-out only block a new key if their intent became
             # durable; a pre-append validation/spawn failure is safe to correct under a new payload.
-            if status in {"accepted", "executing"} or record.get("event_seq") is not None \
+            if status in COMMAND_ACTIVE_STATUSES or record.get("event_seq") is not None \
                     or self._find_intent(rd, str(record.get("id") or ""), record):
                 # …and a durable intent whose EFFECT is already gone blocks nothing. This is the last
                 # rung of the 2026-08-11 wedge, and the one `_intent_spent` did not reach: a fresh
@@ -1399,7 +1433,7 @@ class RunCommandService:
                     and record.get("semantic_payload_digest", record.get("payload_digest"))
                     != semantic_payload_digest):
                 continue
-            if record.get("status") not in {"accepted", "executing", "failed", "timed_out"}:
+            if record.get("status") not in (COMMAND_ACTIVE_STATUSES | {"failed", "timed_out"}):
                 continue
             status = record.get("status")
             # accepted/executing is already the authoritative logical finalize even before its
@@ -1424,7 +1458,7 @@ class RunCommandService:
             if record is None:
                 # A malformed/half-reserved record is an active unknown, so submission fails closed.
                 record = {"id": path.stem, "status": "executing", "created_at": 0}
-            if record.get("status") not in {"accepted", "executing"}:
+            if record.get("status") not in COMMAND_ACTIVE_STATUSES:
                 continue
             candidates.append((float(record.get("created_at") or 0), path.name, path, record))
         if not candidates:

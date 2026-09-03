@@ -2315,6 +2315,7 @@ class Settings(BaseSettings):
             value = getattr(self, field)
             if value not in allowed:
                 raise ValueError(f"{field} must be {'|'.join(allowed)}, got {value!r}")
+        self._check_case_insensitive_enum_fields()
         self._check_member_fields()
         self._check_llm_profiles()
         return self
@@ -2331,6 +2332,40 @@ class Settings(BaseSettings):
     _MEMBER_FIELDS: typing.ClassVar[tuple] = (
         ("inline_repair_reasons", lambda: FAILURE_REASONS),
     )
+
+    # The CASE-INSENSITIVE sibling of `_ENUM_FIELDS`, and it is separate for a reason that would be
+    # a regression if it were folded in. `llm.reasoning_body` does `(mode or "").strip().lower()` and
+    # `(style or "auto").lower()` before reading either value, so `llm_reasoning="High"` works today
+    # and refusing it here would break a config that is doing nothing wrong. The vocabulary is
+    # therefore matched the way the READER matches it, not the way the table above does.
+    #
+    # WHY THEY BELONG IN A VOCABULARY AT ALL — two different failures, and the second is the quiet
+    # one this whole mechanism exists for. Probed against the real `reasoning_body`:
+    #   * `llm_reasoning="banana"` -> `{"reasoning_effort": "banana"}` on an effort-style provider,
+    #     which 400s. Loud, but only at the provider, and the reject classifier then flips reasoning
+    #     OFF for that client's lifetime — so a typo degrades every later call silently.
+    #   * `llm_reasoning_style="banana"` -> `{}`. The `if/elif` chain shapes NOTHING and returns an
+    #     empty body, so reasoning is simply never requested and no error is raised anywhere. That is
+    #     the no-op fall-through `_ENUM_FIELDS` was built for, on a field whose default is `high`.
+    #
+    # Spelled out rather than imported from `core/llm.py` for the read_fence reason one table up:
+    # `config` stays import-light, and `tests/test_reasoning_vocabulary.py` pins these against the
+    # reader's own branches so the two cannot drift.
+    _CASE_INSENSITIVE_ENUM_FIELDS: typing.ClassVar[tuple] = (
+        # "" = send nothing (server default); off|none|false|0 = disable; on = default depth;
+        # low|medium|high = that effort.
+        ("llm_reasoning", ("", "off", "none", "false", "0", "on", "low", "medium", "high")),
+        # auto picks qwen for qwen* models else effort; none shapes nothing and relies on
+        # `llm_reasoning_extra` alone, which is a legitimate choice rather than a typo.
+        ("llm_reasoning_style", ("auto", "qwen", "effort", "none")),
+    )
+
+    def _check_case_insensitive_enum_fields(self) -> None:
+        for field, allowed in self._CASE_INSENSITIVE_ENUM_FIELDS:
+            value = getattr(self, field)
+            if str(value or "").strip().lower() not in allowed:
+                raise ValueError(
+                    f"{field} must be {'|'.join(a or '(empty)' for a in allowed)}, got {value!r}")
 
     def _check_member_fields(self) -> None:
         for field, vocabulary in self._MEMBER_FIELDS:

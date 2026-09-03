@@ -263,6 +263,95 @@ def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str,
     return out
 
 
+# WAS THIS VALUE MEASURED, OR RECONSTRUCTED AFTERWARDS — the THIRD subject question, and the one
+# the record could not answer at all until 2026-09-02.
+#
+# `maintenance/backfill_score_metrics.py` recovers objectives the score stage printed and the run
+# threw away (36 numbers computed, one kept). It writes them through the `declared` channel, and
+# that is the honest choice of the three: the operator's own scoring program printed them, so
+# `auto` ("the candidate scraped its own stdout") and `engine` ("LoopLab wrote the print statement")
+# are both false. Its docstring then argues that "the `backfilled` marker beside it is what stops
+# any surface calling this a live measurement" — and there was no such marker in folded state. The
+# values landed with a bare `declared` channel, so `extraMetricIsDeclared` answered TRUE and a
+# reconstruction rendered on the extras table, the exports and `read_experiment` exactly like a
+# measurement taken while the run was happening.
+#
+# THE COST IS NOT ABSTRACT and it is about PRECISION. The recovered suite is printed to TWO
+# decimals while the primary is read at six, so neighbouring nodes tie: `e5small-dr-unified-v4`
+# nodes 0 and 1 differ by 0.006 on recall@100 and are identical on every recovered metric. "These
+# two nodes are equal on nDCG" and "the print statement cannot tell them apart" are different
+# claims, and the writer records `precision_decimals` on every row precisely so a reader does not
+# have to guess which one they are reading — then the fold dropped it.
+#
+# ONE FIELD RATHER THAN TWO, and it is NOT per-key like its two siblings: the handler declines a
+# node that already carries ANY extra metric (`if node.extra_metrics: return` — a live record is
+# never overwritten), so a backfilled node's map is backfilled ENTIRELY. A per-key marker would
+# describe a state the writer cannot produce, and a reader would have to decide what a half-present
+# one means.
+#
+# Reader-side default `{}` = MEASURED (invariant #5). That is the safe direction here and the
+# opposite of the channel map's: an absent channel means "nobody wrote down where this came from",
+# which must not read as the guarded channel, while an absent backfill marker means the fold never
+# applied a reconstruction to this node — which it demonstrably did not, since no log written
+# before the backfill tool existed can contain its event.
+EXTRA_METRIC_BACKFILL_KEYS = ("backfilled", "backfilled_at", "precision_decimals")
+
+
+def normalize_extra_metric_backfill(value, *, max_items: int = 256) -> dict:
+    """Normalize the reconstruction marker to `{backfilled, backfilled_at, precision_decimals}`.
+
+    Same untrusted-input discipline as its two siblings — this arrives from an old or hand-edited
+    event log and assignment validation is off. A record that does not assert `backfilled` is
+    dropped WHOLE rather than kept as a marker asserting nothing: the field's only meaning is "this
+    map is a reconstruction", so a falsy one is the absence of the claim, not a different claim.
+    """
+    if not isinstance(value, dict) or not value.get("backfilled"):
+        return {}
+    out: dict = {"backfilled": True}
+    at = value.get("backfilled_at")
+    if isinstance(at, (int, float)) and not isinstance(at, bool):
+        out["backfilled_at"] = float(at)
+    decimals = value.get("precision_decimals")
+    if isinstance(decimals, dict):
+        kept: dict[str, int] = {}
+        for key, raw in decimals.items():
+            if len(kept) >= max_items or not isinstance(key, str):
+                continue
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                continue          # a non-integral or negative decimal count is not a precision
+            kept[key[:200]] = int(raw)
+        if kept:
+            out["precision_decimals"] = kept
+    return out
+
+
+def extra_metric_is_backfilled(node) -> bool:
+    """Is this node's `extra_metrics` map a reconstruction rather than a live measurement?
+
+    Total, and NOT per key: see `EXTRA_METRIC_BACKFILL_KEYS` above for why the writer cannot produce
+    a partially-backfilled node.
+    """
+    record = getattr(node, "extra_metrics_backfill", None)
+    return bool(isinstance(record, dict) and record.get("backfilled"))
+
+
+def extra_metric_precision(node, key: str):
+    """How many decimals this value was PRINTED to, or None when that is not recorded.
+
+    `None` is not "full precision" — it is "nobody wrote it down", which is the answer for every
+    live measurement and for a reconstruction whose log did not say. A caller that renders a tie
+    must say which of the three it is looking at.
+    """
+    record = getattr(node, "extra_metrics_backfill", None)
+    if not isinstance(record, dict):
+        return None
+    decimals = record.get("precision_decimals")
+    if not isinstance(decimals, dict):
+        return None
+    found = decimals.get(key)
+    return found if isinstance(found, int) and not isinstance(found, bool) else None
+
+
 # WHICH WAY IS BETTER on an extra metric — the second SUBJECT question about a value, beside the
 # channel question one block up, and recorded the same way for the same reason.
 #
@@ -1165,6 +1254,34 @@ FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metr
                                     "needs_failed", "not_learning", "check_false_positive")
 
 
+# THE REASONS THE ENGINE ITSELF MINTS ON A TERMINAL, as opposed to `FAILURE_REASONS` above, which
+# are the ways an EVALUATION can fail. A node can also end without its evaluation having failed —
+# because the box had no GPU, because the operator aborted it, because the Card behind it was
+# dropped — and those words were bare literals at every write and read site across ~18 modules.
+#
+# WHAT THAT COST is small and exact, which is why this is a registry rather than a refactor: two
+# readers spell the benign subset independently (`events/replay.py`'s failure-spike filter and
+# `serve/attention.py`'s owner alert), and BOTH list `cancelled`, which no terminal writer mints —
+# so each carries one word that can never match, and neither could tell. Same seam shape as
+# `TRIAGE_ACTIONS`, which has a registry and a two-way scan; this had neither.
+#
+# NOT merged with `FAILURE_REASONS`: that tuple gates `Settings.inline_repair_reasons` and the
+# repair loop, and a node the engine superseded is not a node whose code can be repaired.
+ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
+    "gpu_unavailable", "gpu_unpinnable", "proxy_skipped", "superseded", "card_dropped",
+    "aborted", "developer_crash", "idea_rejected", "monitor_broken", "asha_underperforming",
+    "frozen",
+)
+
+# The subset that is BENIGN — a node that ended for a reason saying nothing about the experiment.
+# Both readers of it derive from here instead of spelling their own, which is what let one word
+# rot in two places at once. `attention.py` adds nothing and `replay.py` adds nothing; a reader
+# that needs a different set says so at its own site and explains why.
+BENIGN_TERMINAL_REASONS: frozenset[str] = frozenset({
+    "aborted", "card_dropped", "proxy_skipped", "superseded", "frozen",
+})
+
+
 def is_developer_error(code) -> bool:
     """True when `code` is the in-band Developer-crash sentinel rather than real solution code."""
     return isinstance(code, str) and code.startswith(DEVELOPER_ERROR_PREFIX)
@@ -1323,6 +1440,10 @@ class Node(BaseModel):
     # and no consumer may order on it. A key missing from a PRESENT map reads `unknown` for the same
     # reason its channel does.
     extra_metrics_direction: dict[str, str] = Field(default_factory=dict)
+    # WHETHER THE WHOLE `extra_metrics` MAP IS A RECONSTRUCTION — see
+    # `normalize_extra_metric_backfill` for the shape, the argument for one field rather than a
+    # per-key map, and why the reader-side default is MEASURED rather than unknown.
+    extra_metrics_backfill: dict = Field(default_factory=dict)
     violations: list[dict] = Field(default_factory=list)
     feasible: bool = True
     # WHERE THIS NODE'S METRIC CAME FROM, when it was not simply measured. `None` for every ordinary
@@ -1349,6 +1470,11 @@ class Node(BaseModel):
     @classmethod
     def _normalize_extra_metrics_direction(cls, value):
         return normalize_extra_metric_directions(value)
+
+    @field_validator("extra_metrics_backfill", mode="before")
+    @classmethod
+    def _normalize_extra_metrics_backfill(cls, value):
+        return normalize_extra_metric_backfill(value)
     # Transient re-run marker (node_reset): "propose" | "implement" set it so the engine RE-RUNS this
     # existing node in place from that stage; cleared once the re-run's node_created lands. ("eval" resets
     # just clear the terminal — the node becomes pending-with-code and the normal eval loop re-scores it,
@@ -2248,6 +2374,17 @@ class RunState(BaseModel):
     # Bounded on purpose (`_REPAIR_LEDGER_MAX`): a long run repairs many times, and a ledger that
     # grows without limit becomes a prompt that crowds out the code it is meant to annotate.
     repair_ledger: list[dict] = Field(default_factory=list)
+    # WHAT THE BOUND ABOVE DROPPED. The ledger is a first-come cap, so on a run where one node
+    # repairs thousands of times it describes the beginning of that node and nothing else — and
+    # without this the CLI printed the cap as a total ("repair rows: 200") while
+    # `lessons_reconcile` read a dropped row as `no cause recorded` and generalized over a
+    # population the fold had silently truncated.
+    #
+    # `{"rows": <total dropped>, "nodes": {<node id>: <dropped for that node>}}`, absent keys
+    # meaning zero. Additive and reader-defaulted (invariant #5): an old log folds to `{}` and
+    # every consumer reads that as "nothing was dropped", which for a log written under the old
+    # cap is the honest answer — nobody counted, and inventing a number would be worse.
+    repair_ledger_omitted: dict = Field(default_factory=dict)
 
     @field_serializer("run_setup_done")
     def _ser_run_setup_done(self, v: set) -> list:

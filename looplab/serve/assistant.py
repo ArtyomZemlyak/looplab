@@ -31,6 +31,7 @@ from typing import Callable, Optional
 from looplab.core.atomicio import atomic_write_text, best_effort_fsync, strict_atomic_write_text
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.events.eventstore import iter_jsonl
+from looplab.serve.llm_context import ASSISTANT_EVIDENCE_GUARD
 
 # Permission modes mirror Claude Code. `plan` is the safe read-only default; mutating modes are
 # enforced by the write/shell/git providers. Re-export the shared source of truth so session and
@@ -1464,6 +1465,18 @@ class ShareStore:
 
 
 # --------------------------------------------------------------------------- system prompt + toolset
+# OPEN[assistant-tool-results-are-unlabelled] the guard below names the CHANNEL, and no individual
+# tool result carries the label it names: the Boss's evidence arrives as one message the server
+# stamped, while `read_run_logs`/`read_run_trace`/`read_run_experiment` hand back candidate-authored
+# bytes bare, so a model that loses track of which string came from where has nothing in the text to
+# re-anchor on. Stamping them is a tool-output contract change and several suites pin those shapes.
+# proof:absent:BOSS_EVIDENCE_LABEL@looplab/tools/run_tools.py
+#
+# The OTHER half of the original finding is a POLICY question and is deliberately not decided here:
+# in `auto` mode this role holds finalize/stop/resume/extend-budget/write/commit with no approval,
+# including on unattended standing-watch wake-ups. The guard now tells the model that only the
+# operator's own message can authorize an action, which is the prompt-side half; whether `auto`
+# should hold those verbs at all is the operator's call, not a defect to patch.
 def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str | None = None,
                   cross_run_tools: bool = False, taxonomy_tools: bool = False,
                   work_cycle: bool = False, standing_work: bool = False) -> str:
@@ -1541,7 +1554,16 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
            "`stop_watch`.\n" if standing_work else "")
         + "Be concise and concrete; use Markdown. Your final reply answers only the CURRENT request "
         "and reports only work performed in this turn; earlier conversation is context, not work to "
-        "recap. When you have the answer, call `final_answer` exactly once with your reply.")
+        "recap. When you have the answer, call `final_answer` exactly once with your reply."
+        # THE UNTRUSTED-EVIDENCE BOUNDARY, at system authority and shared with the Boss
+        # (`llm_context.py::untrusted_evidence_guard`). This role had none while the Boss's own
+        # docstring argued for one on grounds that are all true here too: it reads candidate-authored
+        # stdout and agent traces through tools, expands `@run:`/`@file:` blocks straight into the
+        # user turn, and can finalize, stop, extend the budget of or DELETE a run. LAST, so it is the
+        # final thing the system message says, and UNCONDITIONAL, because untrusted text can arrive
+        # at any point in a turn — including an unattended standing-watch wake-up with no operator
+        # present to notice.
+        + ASSISTANT_EVIDENCE_GUARD)
 
 
 # @-mentions: `@run:<id>` and `@file:<path>` in the user's message are expanded (server-side, before

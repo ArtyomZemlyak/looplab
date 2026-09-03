@@ -53,6 +53,7 @@ before anything goes. `apply_service_file_reap` removes only what a plan listed.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import time
@@ -60,7 +61,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX, RUN_DELETION_OPERATION_RE
-from looplab.serve.appstate import _LIFECYCLE_LOCK_PREFIX, _RESET_RECEIPT_PREFIX
+from looplab.serve.appstate import (_LIFECYCLE_LOCK_PREFIX, _RESET_RECEIPT_PREFIX,
+                                    _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.deletion_transaction import (
     DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX,
     load_deletion_receipt)
@@ -205,6 +207,49 @@ def _plan_reset_receipt(path: Path, now: float, grace_s: float) -> dict[str, Any
                   age, run_id=receipt.get("run_id"), phase=receipt.get("phase"), status=status)
 
 
+_TRACE_CLEAR_OPERATION_RE = re.compile(r"^tc_[0-9a-f]{32}$")
+
+
+def _plan_trace_clear_receipt(path: Path, now: float, grace_s: float) -> dict[str, Any]:
+    """The FIFTH root-level population, and it was classified by nothing.
+
+    A trace clear publishes `.trace-clear.<run key>.<tc_…>.json` beside the run — in the directory
+    the run list stats on every poll — and nothing ever removed one. Worse than clutter: every NEW
+    clear of that run globs its siblings and strict-loads each, raising 503 on any that will not
+    parse, so ONE malformed leftover refuses every future clear of that run forever.
+
+    Same shape as the deletion and reset receipts, and the refusals are the same too. `pending` is
+    live state a retry resumes from; `superseded` is the record that an operator's clear was
+    overtaken and is the only place that fact survives. Only a SUCCEEDED, cold receipt goes — and a
+    succeeded one still answers a retry idempotently until it does, which is what the grace buys.
+
+    An unreadable receipt is KEPT and said so, never removed to tidy the directory: it is exactly
+    the file that is breaking this run's clears, so an operator needs to find it rather than have
+    the sweep quietly make the symptom go away.
+    """
+    cold, age = _age_ok(path, now, grace_s)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return _entry(path, "trace_clear_receipt", False,
+                      f"unreadable receipt ({type(exc).__name__}); it is what breaks this run's "
+                      "clears, so it is left for inspection", age)
+    if not isinstance(value, dict):
+        return _entry(path, "trace_clear_receipt", False, "receipt is not an object", age)
+    status = value.get("status")
+    node_id = value.get("node_id") if isinstance(value.get("node_id"), int) else None
+    if status != "succeeded":
+        return _entry(path, "trace_clear_receipt", False,
+                      f"status is {status!r}, not succeeded — a retry resumes from it",
+                      age, node_id=node_id, status=status)
+    if not cold:
+        return _entry(path, "trace_clear_receipt", False,
+                      f"succeeded but only {age:.0f}s old", age, node_id=node_id, status=status)
+    return _entry(path, "trace_clear_receipt", True,
+                  "the trace clear succeeded and the receipt is cold",
+                  age, node_id=node_id, status=status)
+
+
 def plan_service_file_reap(runs_root: str | Path, *, now: Optional[float] = None,
                            grace_s: float = DEFAULT_GRACE_S) -> dict[str, Any]:
     """Name every service file under `runs_root` and the rule that decides its fate. Read-only.
@@ -267,6 +312,20 @@ def plan_service_file_reap(runs_root: str | Path, *, now: Optional[float] = None
 
         if name.startswith(_RESET_RECEIPT_PREFIX):
             entries.append(_plan_reset_receipt(path, now, grace_s))
+            continue
+
+        if name.startswith(_TRACE_CLEAR_RECEIPT_PREFIX) and name.endswith(".json"):
+            # The operation half is validated with the WRITER's own regex, for `_split_operation`'s
+            # reason: a parser that accepts more shapes than the writer can emit hands unrelated
+            # files to a sweep with an `unlink` in it.
+            operation = name[:-len(".json")].rsplit(".", 1)[-1]
+            if _TRACE_CLEAR_OPERATION_RE.fullmatch(operation) is None:
+                entries.append(_entry(path, "trace_clear_receipt", False,
+                                      "unrecognised trace-clear receipt name",
+                                      _age_ok(path, now, grace_s)[1]))
+            else:
+                entries.append({**_plan_trace_clear_receipt(path, now, grace_s),
+                                "operation_id": operation})
             continue
 
         if name.startswith(_LIFECYCLE_LOCK_PREFIX):

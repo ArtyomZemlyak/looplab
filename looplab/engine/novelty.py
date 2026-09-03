@@ -28,6 +28,7 @@ from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState,
                                   idea_proposal_digest, idea_proposal_ref)
+from looplab.engine.card_reservation import discarded_proposal_receipt
 from looplab.engine.shared import effective_researcher_eval_timeout
 from looplab.core.tracing import current_ids
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
@@ -746,21 +747,22 @@ class NoveltyGateMixin:
                     "reason": "proposal cannot form a bounded native Card action",
                     "action": "dropped",
                 })
-            # OPEN[duplicate-receipt-lands-on-one-lane-of-three] bd182357's discarded-proposal
-            # receipt reaches the log from the per-action funnel only; this batch lane and the
-            # speculative producer both still lose a paid refused proposal in silence.
-            # proof:absent:card_duplicate@looplab/engine/novelty.py
-            # REVIEW 2026-08-29 (P2 durability): a batch draft planning `duplicate` (a busy board's
-            # ordinary answer) falls through the return below with nothing written — byte-for-byte
-            # the v8 loss bd182357 measured (24.1 min / 81 calls / 4.27M tokens -> NOTHING), one
-            # lane over — because the receipt lives only in `_prepare_node_idea._link`, whose
-            # "THE ONLY PLACE ... and nowhere else" comment overstates its own coverage. The third
-            # lane is worse: the Layer-5 producer DOES emit the receipt under its buffered-intents
-            # sink, and `speculation.py::_serve_raw_card_stage` drops `result.audit_events` on the
-            # `not result.success` early return, so the receipt is captured and then discarded.
-            # Fix direction: emit the same duplicate-kind `novelty_rejected` row from this branch
-            # (it too runs right after a paid propose and holds the hypothesis), and publish the
-            # buffered intents on the spec lane's failure path; then delete this marker.
+            elif plan.disposition not in {"mint", "reuse"}:
+                # THE BATCH LANE RECEIPTS ITS DISCARDS TOO, since 2026-09-02. A batch draft
+                # planning `duplicate` — a busy board's ordinary answer — used to fall through the
+                # return below with nothing written: byte-for-byte the loss bd182357 measured on
+                # `runs/e5small-dr-unified-v8` (24.1 min / 81 provider calls / 4.27M tokens ->
+                # NOTHING), one lane over, because the receipt lived only in the per-action funnel
+                # whose own comment claimed it was "THE ONLY PLACE ... and nowhere else".
+                #
+                # This branch qualifies for exactly the funnel's reason: it runs immediately after
+                # a paid propose and holds the `linked` Idea, so it is a pass that can know a PAID
+                # proposal was refused. `attach` is deliberately absent from the accepting set here
+                # (the batch planner passes no `retry_attach`), so it is receipted like any other
+                # non-accepting disposition rather than silently treated as a handoff this lane
+                # cannot perform.
+                self._append_proposal_event(EV_NOVELTY_REJECTED, discarded_proposal_receipt(
+                    plan.disposition, prospective_base + slot, linked, lane="batch_planner"))
             return plan.idea if plan.disposition in {"mint", "reuse"} else None
 
         if callable(native):

@@ -38,10 +38,11 @@ from looplab.core.models import (CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_REPLAY_S
                      Event, Idea, Node, NodeStatus, RunState, Trial,
                      coerce_node_id as _coerce_node_id,
                      hypothesis_id,
-                     EXTRA_METRIC_DECLARED, normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
+                     EXTRA_METRIC_DECLARED, normalize_extra_metric_backfill,
+                     normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
                      normalize_researcher_footprint,
                      normalize_steering_context,
-                     run_setup_key)
+                     run_setup_key, BENIGN_TERMINAL_REASONS)
 # The derived Card ledger (doc 25 EV-01). ONLY the names this module's own handlers call are
 # imported: a re-export of a helper `card_ledger` then calls internally would look like a patch seam
 # while a monkeypatch through it silently missed the fold, which is the exact failure the flat-import
@@ -986,9 +987,11 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             _charge_terminal_cost(st, n, d, ctx)
 
 
-_FAILURE_SPIKE_IGNORED_REASONS = {
-    "aborted", "cancelled", "card_dropped", "proxy_skipped", "superseded",
-}
+# DERIVED, not spelled. This set and `serve/attention.py`'s owner-alert filter are the same
+# judgement — "this node ended for a reason that says nothing about the experiment" — and were
+# hand-written twice; both carried `cancelled`, which no terminal writer mints, so each held one
+# word that could never match and neither could tell. See `core/models.py::BENIGN_TERMINAL_REASONS`.
+_FAILURE_SPIKE_IGNORED_REASONS = set(BENIGN_TERMINAL_REASONS)
 
 
 def _counts_as_current_failure(st: RunState, n: Node) -> bool:
@@ -1096,6 +1099,12 @@ _SALVAGE_CAUSE_TRIAGE_ACTION = "salvage_cause_fix"
 
 
 _REPAIR_LEDGER_MAX = 200
+# ...and no single node may take more than this share of it. The global cap alone is first-come, so
+# ONE node that repairs pathologically often consumes the whole ledger: measured, a node with 2,345
+# repair rows would fill all 200 slots before any other node recorded one, and the ledger's entire
+# purpose is telling a LATER node what a SIBLING had to fix. A per-node bound is what keeps it a
+# cross-node channel rather than a transcript of the worst node's first two hundred attempts.
+_REPAIR_LEDGER_MAX_PER_NODE = 20
 _REPAIR_LEDGER_RATIONALE_CAP = 400
 
 
@@ -1116,7 +1125,18 @@ def _record_repair_ledger(st: RunState, d: dict) -> None:
     for row in st.repair_ledger:
         if (row.get("node_id"), row.get("attempt"), row.get("generation")) == key:
             return
-    if len(st.repair_ledger) >= _REPAIR_LEDGER_MAX:
+    # BOTH bounds, and each records what it dropped. A silent cap made the CLI print 200 as a total
+    # and let `lessons_reconcile` generalize over a truncated population — see
+    # `RunState.repair_ledger_omitted`.
+    per_node = sum(1 for row in st.repair_ledger if row.get("node_id") == node_id)
+    if per_node >= _REPAIR_LEDGER_MAX_PER_NODE or len(st.repair_ledger) >= _REPAIR_LEDGER_MAX:
+        omitted = st.repair_ledger_omitted
+        omitted["rows"] = int(omitted.get("rows", 0)) + 1
+        nodes = omitted.setdefault("nodes", {})
+        # Keyed by the node's STRING id: this dict is serialized to JSON in every projection, where
+        # an integer key becomes a string anyway — so folding to one spelling here keeps a replayed
+        # state equal to a round-tripped one.
+        nodes[str(node_id)] = int(nodes.get(str(node_id), 0)) + 1
         return
     # `changed` is the path list the repair itself declared; fall back to the keys of `files` so a
     # row written before that column existed still names what it touched.
@@ -1233,6 +1253,10 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.extra_metrics_provenance = {}
         # ...and so did the DIRECTION map saying which way was better on them.
         n.extra_metrics_direction = {}
+        # ...and so did the RECONSTRUCTION marker. It describes the map this reset just cleared, and
+        # a stale one would mark a later LIVE measurement as backfilled — the exact inversion, with
+        # the sign flipped.
+        n.extra_metrics_backfill = {}
         n.violations = []
         n.feasible = True
         # WHERE THE OLD METRIC CAME FROM described the old metric, which this epoch just cleared.
@@ -1366,25 +1390,28 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     if not isinstance(found, dict) or not found:
         return
     node.extra_metrics = normalize_extra_metrics(found)
-    # OPEN[score-backfill-fold-drops-backfilled-marker] the docstring's "backfilled marker beside
-    # it" never reaches folded state, and neither does `precision_decimals`.
-    # proof:line:EXTRA_METRIC_DECLARED&&node.extra_metrics})@looplab/events/replay.py
-    # REVIEW 2026-08-25 (correctness): the sibling handler below stamps `backfilled: true` into the
-    # record it folds, so a reconstruction is legible as one on every surface; THIS handler folds
-    # only values + a bare `declared` channel, and the marker plus the per-key decimals the writer
-    # argues a reader "must not have to guess" (`maintenance/backfill_score_metrics.py`) live only
-    # on the raw event row — which no surface reads. So a recovered 2-decimal nDCG@100 renders on
-    # the extras table, the exports and `read_experiment` exactly like a live operator-declared
-    # measurement (`extraMetricIsDeclared` answers true for it), and v4's nodes 0 and 1 — equal on
-    # every recovered row only because the print statement cannot separate them — read as MEASURED
-    # ties. That is the reconstruction-presented-as-measurement inversion both backfill docstrings
-    # exist to refuse, committed by the one handler of the pair that promises otherwise. Fix
-    # direction: carry the marker + decimals somewhere the fold keeps (the sibling stamps its
-    # record inside `metric_provenance`, which is a plain dict) and teach the extras readers the
-    # absent-means-live default; or stop the docstring claiming a marker exists. Delete this
-    # marker with either.
     node.extra_metrics_provenance = normalize_extra_metric_channels(
         {k: EXTRA_METRIC_DECLARED for k in node.extra_metrics})
+    # THE MARKER THE DOCSTRING PROMISES, and it did not exist in folded state until 2026-09-02.
+    # The sibling handler below stamps `backfilled: true` into the record it folds, so a
+    # reconstruction is legible as one on every surface; this one folded values plus a bare
+    # `declared` channel, and the marker — with the per-key decimals the writer argues a reader
+    # "must not have to guess" — lived only on the raw event row, which no surface reads. A
+    # recovered 2-decimal nDCG@100 therefore rendered on the extras table, the exports and
+    # `read_experiment` exactly like a live operator-declared measurement, and v4's nodes 0 and 1
+    # — equal on every recovered row ONLY because the print statement cannot separate them — read
+    # as MEASURED ties. That is the reconstruction-presented-as-measurement inversion both backfill
+    # docstrings exist to refuse, committed by the one handler of the pair that promised otherwise.
+    #
+    # The channel STAYS `declared` and that is deliberate: the operator's own scoring program
+    # printed these numbers, so `auto` and `engine` are both false about them. What was missing was
+    # never the channel — it was the second, orthogonal fact that the value was recovered from a log
+    # afterwards rather than recorded while the run was happening.
+    node.extra_metrics_backfill = normalize_extra_metric_backfill({
+        "backfilled": True,
+        "backfilled_at": d.get("read_at"),
+        "precision_decimals": d.get("precision_decimals"),
+    })
     # ...and NOT `extra_metrics_direction`. See the docstring: the axis stays unorientable because
     # nothing in this run ever said which way is better about it.
 
@@ -1538,6 +1565,10 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.extra_metrics_provenance = {}
         # ...and so did the DIRECTION map saying which way was better on them.
         n.extra_metrics_direction = {}
+        # ...and so did the RECONSTRUCTION marker. It describes the map this reset just cleared, and
+        # a stale one would mark a later LIVE measurement as backfilled — the exact inversion, with
+        # the sign flipped.
+        n.extra_metrics_backfill = {}
         n.violations = []
         n.feasible = True
         # See the same line in `_requeue_partition_bound_results`: the provenance describes the metric this

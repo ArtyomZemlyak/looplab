@@ -58,7 +58,7 @@ from looplab.engine.audit import AuditMixin
 from looplab.engine.cadence import occupancy_due
 from looplab.engine.card_reservation import (CardReservationMixin, _BuildReservation,
                                              scored_anchor,
-                                            _discarded_proposal_text)
+                                            discarded_proposal_receipt)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
 from looplab.engine.costs import bind_cost_accountants
@@ -2279,6 +2279,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return [action for action in lane
                 if action.get("kind") in ("draft", "improve", "merge")][:free]
 
+    # OPEN[serial-node-build-holds-the-loop] the 2026-08-29/31 offloads moved only the two propose lanes:
+    # the Developer call in this serial lane, and the fork/inject/rerun proposes, still run on the loop
+    # with no in-flight guard — while `_occupancy_paced_creates` delivers work here precisely when an
+    # eval is burning. Driven: a fork served with an adopted eval, and a width-2 Card claim with node 0
+    # in flight, each ran the paid call on the loop thread with ZERO ticks. One helper on the proposal
+    # pool covers all four sites; the own-node worker seam already licenses their appends.
+    # proof:absent:_offload_node_build@looplab/engine/orchestrator.py
     async def _handle_create_actions(self, creates, state, *, created_no_terminal,
                                      no_mint_turns, decision_seq, max_es, max_s, start):
         """The `creates` branch of the run loop, lifted verbatim (doc 25 ES-05).
@@ -4223,6 +4230,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return True
         return False
 
+    # OPEN[paid-cadences-hold-the-engine-loop] every paid cadence below executes as one event-loop
+    # callback: the Strategist consult (unbounded turns under the shipped `agent_max_turns=0`), the
+    # concept re-tag/consolidation pass (`_RETAG_CAP` 20 + `_HYP_TAG_CAP` 60 sequential tag calls),
+    # the verifier tie-break and the report refresh. `at_creation_boundary` made these gates due WHILE evaluations run, so the hold
+    # now lands on top of a live GPU. They write FOLDED rows, so the fix is the offload-under-a-capture-
+    # sink discipline `novelty.py` already uses, not a bare `to_thread`.
+    # proof:absent:_offload_cadence@looplab/engine/orchestrator.py
     def _run_cadences(self, state: RunState) -> RunState:
         # Breadth read-model: record the run's narrowing curve at the strategist cadence BEFORE the
         # Strategist decides, so the same snapshot both (a) feeds the meta-controller's decision
@@ -5506,9 +5520,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     "action": "dropped",
                 })
             elif plan.disposition not in {"mint", "reuse", "attach"}:
-                # THE ONLY PLACE A DISCARDED PROPOSAL IS RECEIPTED, and the placement is the
-                # decision. This branch runs immediately after the proposal call and nowhere else,
-                # so it is the one pass that can know a PAID proposal was refused. It returned None
+                # A DISCARDED PROPOSAL IS RECEIPTED HERE, and the placement is the decision. This
+                # branch runs immediately after the proposal call, so it is a pass that can know a
+                # PAID proposal was refused. (It said "THE ONLY PLACE ... and nowhere else" until
+                # 2026-09-02, and that overstated its coverage: the batch draft lane in
+                # `novelty.py::_link_card` and the Layer-5 speculative producer each run a paid
+                # propose and refuse one too, and both lost it in silence. All three now emit
+                # `card_reservation.py::discarded_proposal_receipt`, which is why the payload moved
+                # out of this branch — three hand-written copies of one row is how they came to
+                # disagree about whether the row exists at all.) It returned None
                 # on a non-accepting disposition and the caller (`_create_node_scoped`) then unwound
                 # through `_discard_node_build_telemetry`, which despite its name appends nothing —
                 # its body only nulls the per-role prediction attributes so a later build cannot
@@ -5528,18 +5548,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 #
                 # REFUSING THE MINT IS UNCHANGED — a card whose owner is in flight must not be
                 # minted twice. What is fixed is refusing in SILENCE.
-                self._append_proposal_event(EV_NOVELTY_REJECTED, {
-                    "node_id": prospective_node_id, "generation": 0,
-                    "kind": "card_duplicate" if plan.disposition == "duplicate"
-                            else "card_unplannable",
-                    "reason": ("an existing card already owns this action"
-                               if plan.disposition == "duplicate"
-                               else "the card plan named no bounded action"),
-                    "action": "dropped",
-                    "disposition": str(plan.disposition),
-                    "pass": "planner",
-                    "hypothesis": _discarded_proposal_text(linked),
-                })
+                self._append_proposal_event(EV_NOVELTY_REJECTED, discarded_proposal_receipt(
+                    plan.disposition, prospective_node_id, linked, lane="planner"))
             return plan.idea if plan.disposition in {"mint", "reuse", "attach"} else None
 
         if preproposed is not None:

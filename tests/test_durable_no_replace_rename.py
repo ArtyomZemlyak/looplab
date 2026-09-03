@@ -233,8 +233,20 @@ def test_a_unique_destination_still_moves_when_the_flag_is_unsupported(tmp_path,
 
 @pytest.mark.parametrize("code", [_errno.EINVAL, _errno.ENOSYS, _errno.EOPNOTSUPP])
 def test_a_PREDICTABLE_destination_still_fails_closed(tmp_path, monkeypatch, code):
-    """The replay archive names itself `<name>.reset-<millisecond stamp>` from a probe-then-use loop
-    over `lexists` — exactly the TOCTOU the kernel flag closes. It does not get the fallback."""
+    """A caller that cannot promise its destination is unforgeable does not get the fallback.
+
+    The replay archive USED to be the live example: it named itself `<name>.reset-<millisecond
+    stamp>` from a probe-then-use loop over `lexists` — exactly the TOCTOU the kernel flag closes —
+    and it therefore failed closed here. On the geesefs mounts this deployment runs on, where the
+    flag itself is refused, that meant replay archiving could not succeed at all, and the run was
+    left un-resumable, un-replayable and un-deletable behind its own marker.
+
+    It names archives after its `operation_id` now (`reset_route::_archive_is_operation_unique`), so
+    it passes `unique_destination=True` and is covered by the test above. The RULE this pins is
+    unchanged and is the reason that change had to move the NAME rather than pass the flag: a
+    destination anyone else could construct still fails closed, and no caller gets the fallback by
+    asserting it without earning it.
+    """
     monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: _FlagRefusingLibc(code))
     src = tmp_path / "events.jsonl"
     src.write_text("{}\n")

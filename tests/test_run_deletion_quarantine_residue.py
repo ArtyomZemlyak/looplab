@@ -476,3 +476,50 @@ def test_every_residue_reason_declares_whether_a_retry_could_move_it(tmp_path):
     # …and one racy reason is enough to keep the retry promise.
     assert deletion_service._residue_is_wedged(
         [*blocked, deletion_service._Residue("a mount hiccup", permanent=False)]) is False
+
+
+def test_the_absorbing_phase_stops_claiming_a_retry_can_move_it(tmp_path, monkeypatch):
+    """`quarantine_ambiguous` is the ONE state where `retryable: true` is unconditionally false.
+
+    It is absorbing by the transaction's own transition check — the test above pins that the lattice
+    has no edge out of it — and it still answered through `_pending`, which is documented as the
+    promise that pressing again can make progress. So the operator was told to retry a state whose
+    definition is "a human must reconcile the filesystem".
+
+    MUTATION: put `_pending` back -> `retryable` is True and the operator keeps pressing a button
+    that cannot ever change the answer, which is the incident in this module's header with a
+    different cause.
+    """
+    run_dir = _run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    body = _identity(run_dir)
+    _interrupted_geesefs_move(monkeypatch)
+    client.post(f"/api/runs/{RUN}/deletions", json=body)
+
+    # Plant the absorbing phase the Windows durable-move failure writes. Reached by editing the
+    # receipt rather than by simulating that failure, because the phase is what this is about and
+    # the platform-specific path that produces it is `deletion_transaction`'s to own.
+    from looplab.serve import deletion_transaction as dt
+    hits = [p for p in tmp_path.iterdir()
+            if p.name.startswith(dt.DELETE_RECEIPT_PREFIX) and p.name.endswith(".json")]
+    assert len(hits) == 1, f"expected exactly one receipt, found {[p.name for p in hits]}"
+    receipt_path = hits[0]
+    receipt = dt.load_deletion_receipt(receipt_path)
+    assert receipt is not None, "the first POST must have left a receipt to move"
+    dt.save_deletion_receipt(receipt_path, {**receipt, "phase": "quarantine_ambiguous"})
+
+    answer = client.post(f"/api/runs/{RUN}/deletions", json=body).json()
+
+    assert answer["code"] == "delete_quarantine_outcome_unknown"
+    assert answer["retryable"] is False, (
+        "an absorbing phase must not promise that pressing again can move the operation")
+    assert answer["phase"] == "quarantine_ambiguous", (
+        "the phase itself does not move — only what the answer claims about it")
+    assert "no retry can resolve it" in answer["message"]
+    assert answer["remediation"] and "by hand" in answer["remediation"], (
+        "a wedged answer owes the operator the manual step, not just a refusal")
+
+    again = client.post(f"/api/runs/{RUN}/deletions", json=body).json()
+    assert again["retryable"] is False and again["phase"] == "quarantine_ambiguous", (
+        "the same answer twice is what makes the retryable claim checkable")
+

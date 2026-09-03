@@ -388,7 +388,15 @@ class RuleStrategist:
         return strat or None
 
     def _decide_machinery(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
+        # Imported at CALL time for the reason every other `search` import in this module is:
+        # `search` imports `agents` at module scope, so a module-level import here would close the
+        # cycle into an ImportError at startup (`tests/test_agents_search_direction.py`).
+        from looplab.search.policy import policy_fills_width
+
         avail = ctx.available_policies
+        # The live eval width this run settles to. Read once here because the racing-schedule arm
+        # below must not select a policy that cannot fill it.
+        width = getattr(ctx, "eval_parallel", None)
         # Seed phase: cheap broad drafts at smoke fidelity (greedy is fine; nothing to exploit yet).
         if ctx.phase == "seed":
             return {"policy": "greedy", "fidelity": "smoke",
@@ -480,7 +488,18 @@ class RuleStrategist:
                     "source": "rule"}
 
         # Many cheap candidates to race + ASHA available -> successive-halving over fidelities.
-        if "asha" in avail and ctx.phase == "explore":
+        # ...AND ONLY IF IT CAN KEEP THE SLOTS BUSY. `RuleStrategist` is the fallback for EVERY LLM
+        # failure ("RuleStrategist on any parse/transport failure, so a flaky model never crashes the
+        # run"), so an endpoint hiccup at width >= 2 used to select, without reading the width, the
+        # very schedule this module's own brief tells the model about: "a racing schedule
+        # (`asha`/`bohb`) fills one slot once its seed target is met… an unresolved arm blocks both
+        # seeding and promotion", measured at 5.94 of 8.03 starved GPU-hours across the corpus and
+        # 0.00 in every GreedyTree and EvolutionaryPolicy run.
+        #
+        # `policy_fills_width` is the predicate that brief already cites, asked here rather than
+        # re-derived: it is False ONLY for a racing schedule asked to fill more than one slot, and
+        # answers True for an unknown name, so this arm keeps exactly the behaviour it had at width 1.
+        if "asha" in avail and ctx.phase == "explore" and policy_fills_width("asha", width):
             return {"policy": "asha", "policy_params": {"eta": 3}, "fidelity": "adaptive",
                     "rationale": "exploring breadth: race candidates with ASHA "
                                  "(smoke rung -> promote survivors to full)",

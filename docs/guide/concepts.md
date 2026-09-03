@@ -541,7 +541,16 @@ once or rejectable but cannot expose persistent approval.
 
 The older `POST .../control` and `POST .../resume` routes remain compatibility surfaces. Legacy
 mutation events cannot overtake an active/retryable command or incomplete finalize; the mutation-free,
-stop-aware `/resume` route remains available specifically to attach a recovery driver. Current Web,
+stop-aware `/resume` route remains available specifically to attach a recovery driver.
+`/control` now ANNOUNCES its deprecation on every successful append — `Deprecation: true`, a `Link`
+naming `/commands` as the successor version, and a `Warning` stating the exact hazard: it has no
+durable request identity, so a lost-response retry re-appends an ADDITIVE intent instead of
+resolving to the record it already created. There is deliberately **no `Sunset`**, because RFC 8594's
+field carries a date and no removal date has been agreed; the header pair is `Deprecation` + `Link`
+until one is. The server also tallies who still calls it, by event type and User-Agent
+(`routers/control.py::legacy_control_callers`), so the migration is a number rather than an
+intention. Behaviour is otherwise unchanged: requiring `expected_seq` here was tried and reverted,
+because a silent 409 breaks the compatibility this route exists to provide. Current Web,
 boss, and TUI controls use the command lifecycle above. Report regeneration remains a background job,
 but its run-generation lease and cost events share the same destructive boundary.
 Standalone legacy CLI `stop`, `finalize`, `resume`, and `approve` commands are not yet participants in

@@ -617,12 +617,25 @@ def begin_or_resume_run_deletion(
                     "delete_operation_superseded",
                     "This unfenced deletion intent was retired after its inspected run changed.",
                     operation_id=operation_id))
+            # THE ONE PHASE A RETRY CAN NEVER MOVE, so it is the one that must not promise otherwise.
+            # `quarantine_ambiguous` is ABSORBING by `deletion_transaction`'s own transition check —
+            # it leaves the monotonic index and answers "requires manual storage recovery" — and it
+            # still replied through `_pending`, whose `retryable: true` is documented as the promise
+            # that pressing again can make progress. That is precisely the lie `_wedged` was added
+            # to end, left standing on the single state where it is unconditionally false.
+            #
+            # The PHASE does not move (see `_wedged`): where the operation is has not changed, only
+            # what the answer claims about it. There are no `blocking_entries` to name here, and
+            # that asymmetry is real rather than an omission — the residue wedge knows which paths
+            # block it, while this one is wedged precisely BECAUSE the move's outcome is unknown.
             if receipt is not None and receipt["phase"] == "quarantine_ambiguous":
-                return _pending(
+                return _wedged(
                     receipt, "delete_quarantine_outcome_unknown",
                     "Windows reported a failed durable move after the exact quarantine became "
-                    "visible. The operation is fenced and requires storage repair before it can "
-                    "continue.")
+                    "visible, so whether the run was moved is unknown. The operation is fenced and "
+                    "no retry can resolve it.",
+                    remediation="Inspect the quarantine and the run root, reconcile them by hand, "
+                                "then retire this operation's receipt and fence.")
 
             needs_fresh_preflight = receipt is None or (
                 receipt["phase"] == "prepared" and fence is None)

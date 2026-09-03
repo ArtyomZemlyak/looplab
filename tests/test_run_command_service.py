@@ -1879,8 +1879,10 @@ def test_cross_service_os_sequencer_excludes_the_same_run(tmp_path):
         assert not entered.is_set()
         assert errors and getattr(errors[0], "status_code", None) == 503
 
-    # Production uses one service instance. Its in-process RLock must honor the same acquisition
-    # ceiling instead of blocking forever before the bounded OS-lock loop is even reached.
+    # Production uses one service instance. Its in-process lock must honor the same acquisition
+    # ceiling instead of blocking forever before the bounded OS-lock loop is even reached. (It is a
+    # plain `Lock`, not an `RLock`: see `tests/test_sequencer_reentry.py` for why re-entry on one
+    # thread is a named refusal rather than something the guard lets through.)
     same = RunCommandService(srv, lock_acquire_timeout=0.08, poll_interval=0.01)
     attempting = threading.Event()
     errors = []
@@ -2676,10 +2678,14 @@ def test_reset_archive_failure_leaves_the_run_readable_and_never_spawns(monkeypa
     monkeypatch.setattr(control_router, "_spawn_engine", lambda *a, **k: spawns.append((a, k)))
     real_move = reset_route._durable_archive_move
 
-    def fail_spans_archive(source, destination):
+    def fail_spans_archive(source, destination, **kw):
+        # `**kw` forwards whatever the real signature grows (today `operation_unique`, the assertion
+        # that decides whether the no-replace fallback may be taken). A double that enumerates the
+        # kwargs raises TypeError inside the reset worker the moment one is added, and the failure
+        # reads as a broken reset rather than a stale test.
         if source.name == "spans.jsonl":
             raise OSError("simulated archive failure")
-        return real_move(source, destination)
+        return real_move(source, destination, **kw)
 
     monkeypatch.setattr(reset_route, "_durable_archive_move", fail_spans_archive)
     response = client.post("/api/runs/demo/reset")

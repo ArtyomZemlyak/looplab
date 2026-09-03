@@ -46,6 +46,7 @@ export {
   submitCommand, validRunGeneration,
 } from './commandModel.js'
 export {
+  COMMAND_ENVELOPE_VERSION,
   clearAssistantRunTransport, clearDamagedLaunchTransport, clearLaunchTransport, clearRunCommandLock,
   clearRunTransport, commandRecordMatchesAction, listLaunchTransports, loadAssistantRunTransport,
   loadLaunchTransport, loadRunCommandLock, loadRunTransport, peekReportRefreshIntent,

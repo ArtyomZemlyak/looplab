@@ -860,6 +860,36 @@ SETUP_THREAD_APPENDABLE: frozenset[str] = frozenset({
     EV_RUN_SETUP_STARTED, EV_RUN_SETUP_FINISHED,
 })
 
+# Invariant #1's FOURTH writer, and the one it did not name. The invariant says "UI/CLI append only
+# control intents (allow-listed in `serve/protocol.py::CONTROL_EVENTS`)" — the ASSISTANT'S TOOL
+# LAYER is neither, and `tools/machine_runs_tools.py::MachineRunsTools` appends these two FOLDED
+# types directly. Neither is in `CONTROL_EVENTS`; `node_tombstoned` has no other writer in the tree
+# at all. So the seam existed, was reachable by an LLM, and was declared nowhere.
+#
+# Registering it is NOT a promotion to a control intent. It is the same move `BACKGROUND_APPENDABLE`
+# and `SETUP_THREAD_APPENDABLE` make for the engine's own thread-side seams: state the exception, at
+# the site, with a guard, so a FIFTH folded type cannot join it silently. Making these two tools
+# command-backed (the `submit` path their eight siblings already take, with an idempotency key and
+# an observed generation) is the larger correct end state and is a separate change: it needs a
+# `ControlSpec` row in each of `control_validation.py`'s five tables, a worker phase for the
+# `config.snapshot.json` mirror the gate write also owes, and a purge path for the tombstone's
+# irreversible sibling.
+#
+# What membership REQUIRES, and both members satisfy: the write goes through the tool layer's
+# `_mutation_intent` + `commands.mutation_guard` generation fence (so it cannot land on a
+# post-reset replacement run), and it appends under the tail CAS its own read formed against —
+# `node_tombstoned` with `expected_last_seq=expected_tail`, `trust_gate_changed` through
+# `events/trust_gate.py::apply_trust_gate`, which is also the config PUT's writer. That second one
+# is the reason this registry is worth having: until it landed, the tool appended BARE while its
+# router twin CASed, retried and refolded for idempotence — one rule, two implementations, and the
+# weaker one was the LLM-driven one.
+#
+# Guarded in both directions by `tests/test_assistant_appendable.py`, which re-derives the appended
+# types from the provider's own `ast.Call` nodes.
+ASSISTANT_APPENDABLE: frozenset[str] = frozenset({
+    EV_TRUST_GATE_CHANGED, EV_NODE_TOMBSTONED,
+})
+
 # Conditional extension for legacy Hypothesis/Policy selection only. ``hypothesis_merged`` became a
 # Card ownership/lifecycle input when native Card selection landed, so it is not universally neutral.
 # The overlap call site must prove Card-driven selection is off; Card mode performs consolidation only
@@ -886,6 +916,26 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # `replay._HANDLERS` (folded) OR in this set (diagnostic), never both and never neither — so adding a
 # new event type FORCES a conscious "does the fold read this?" decision (arch-review §5 P2: the old
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
+# OPEN[event-payloads-have-no-registry] the registry states the envelope and the evolution rules and
+# nothing about what any type CARRIES: 65 of the constants have no describing comment, the fold reads
+# 205 distinct (handler, key) pairs, and 15 types are named in no document. Invariant #5's
+# additive-only rule cannot be checked against a contract that exists only as handler code.
+# proof:absent:EVENT_PAYLOAD_KEYS@looplab/events/types.py
+#
+# THE CHEAP MECHANICAL VERSION WAS TRIED 2026-09-02 AND DOES NOT ANSWER THIS, so the next reader
+# does not have to re-derive it. Joining "keys the fold READS" (per handler, `d.get`/`d[...]` by AST)
+# against "keys a writer WRITES" would make the dead-reader defect checkable — the shape
+# `RunTools._research_memo` carried for six weeks, keyed on a `summary` no writer produced. Run over
+# the tree it reports FOUR types whose handler reads a key no writer writes, and all four are
+# artifacts of the scan rather than findings: `hint`/`replace` and `pause`/`node_id` are CONTROL
+# INTENTS whose payload `serve/control_validation.py` normalizes rather than spelling as a literal,
+# and `node_failed`/`node_repaired` build their payload in a variable. The write side is only
+# enumerable for literal `append(EV_X, {...})` calls — 77 of the types — so a join over it is too
+# weak to convict, and a join strong enough would have to follow a dict through the function that
+# builds it.
+#
+# So this is a DOCUMENTATION job of real size, not a mechanical one, and that is why it is still
+# open: the 65 undescribed constants and the 15 undocumented types are the actual work.
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
     EV_TRACE_EXPORT_HEALTH, EV_BELIEF_ADMISSION, EV_NODE_BUILD_DELTA,

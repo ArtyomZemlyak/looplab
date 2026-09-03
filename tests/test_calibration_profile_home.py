@@ -93,7 +93,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
-_EXPECTED_DIGEST = "sha256:d7b686b8ba554c8a0c167d990b11cf54f72190721516c7b0217b0d90abf167ef"
+_EXPECTED_DIGEST = "sha256:61cb98285ab687e8551c6729afec7a5ef98c97daaa1ed624c263eefe3d7df4ed"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -401,7 +401,23 @@ _EXPECTED_DIGEST = "sha256:d7b686b8ba554c8a0c167d990b11cf54f72190721516c7b0217b0
 #               the knob puts a 20-minute wall-clock ceiling on a crash-triage call that had none,
 #               and a speculation receipt measured while one failure could hold the eval thread for
 #               88 minutes was measured in a different envelope.
-_EXPECTED_FIELD_COUNT = 214
+#   2026-09-02  + single_command_divergence_watch (214 -> 215). The "field set changed too" branch,
+#               and verified by DIFFING THE FIELD SET rather than reading the count, as the
+#               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated assignments
+#               between the commit that last pinned 214 (`cc6a64e`) and HEAD reports exactly
+#               [single_command_divergence_watch] added and [] removed, so no +1/-1 pair is hiding
+#               behind the new integer. Old receipts SHOULD stop verifying, and this one is as far
+#               from inert as the list gets: it gives the SINGLE-COMMAND eval path a deterministic
+#               divergence stop it never had — the one path with no early stop at all, even though
+#               its own branch comment says the command IS the training and `eval_log_plan` grants
+#               it LOG_ROLE_TRAINING for that reason. It ships ON (measured: the shipped
+#               `_StageHealthMonitor` replayed over every preserved log fires on 0 of 110 scoring
+#               phases and 2 of 133 `train.log`, both true positives), so a replicate calibrated
+#               after it can have a stage stopped and REPAIRED — `diverged` is in `FAILURE_REASONS`
+#               — where a replicate calibrated before it would have run that stage to its wall.
+#               That is a different number of evaluations on the same failing node, which is
+#               precisely what a speculation receipt asserts about.
+_EXPECTED_FIELD_COUNT = 215
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

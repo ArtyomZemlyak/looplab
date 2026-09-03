@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.core.models import RunState
+from looplab.core.run_identity import row_belongs_to_run
 from looplab.engine.lessons_priors import LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER
 from looplab.events.eventstore import read_jsonl_lenient
 from looplab.events.replay import fold
@@ -366,7 +367,15 @@ class LessonReconcileMixin:
         stale_pairs: list[tuple] = []
         reflect_stale = False
         for idx, o in enumerate(rows):
-            if not isinstance(o, dict) or o.get("run_id") != state.run_id:
+            # "THIS RUN'S LESSONS" IS AN INCARNATION, NOT A DIRECTORY NAME. Keyed on the name alone,
+            # a lesson written by a PREVIOUS run of the same name could not match the new run's
+            # evidence signature, was judged stale, and was RETIRED here under the lock — and the
+            # reflect batch re-bought. Names are reused the moment a run is deleted and re-created
+            # and are `demo`/`baseline` on half the corpus (`serve/memory_cascade.py`), while every
+            # writer already records `run_uid`. `row_belongs_to_run` keeps the legacy fallback for a
+            # row that names no incarnation, which would otherwise become unreachable forever.
+            if not row_belongs_to_run(o, run_uid=getattr(state, "run_uid", ""),
+                                      run_id=state.run_id):
                 continue
             if not self._lesson_evidence_stale(state, o):
                 continue

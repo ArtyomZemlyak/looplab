@@ -70,19 +70,20 @@ document therefore has no task and is rejected by `run`. The file is **input onl
 snapshots, so `resume`/`replay` are unchanged. Precedence within one run: `--set`/flags **>** the
 file's `settings:` **>** env/`.env` **>** defaults.
 
+An unknown key in any LAUNCH layer is refused by name — the config file's `settings:` block, the
+command-line flags and `--set` all go through one rule — so a renamed or mistyped knob stops the run
+instead of silently taking the default. `--set` has always done this; the file layer did not, and a
+`settings:` block carrying `max_node: 30` used to build a `Settings` with `max_nodes = 8` and print
+nothing. RESUME is deliberately the other way: `config.snapshot.json` keeps `extra="ignore"` so an
+older binary can still load a snapshot a newer one wrote.
+
 ---
 
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **184 of the 217 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 176 catalogued keys.
-server-owned curated catalogue with **184 of the 217 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 176 catalogued keys.
-server-owned curated catalogue with **184 of the 217 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 176 catalogued keys.
-server-owned curated catalogue with **184 of the 217 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 176 catalogued keys.
+server-owned curated catalogue with **185 of the 218 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 185 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,
@@ -675,8 +676,8 @@ These are no-ops unless `backend=llm`.
 | `llm_temperature` | `LOOPLAB_LLM_TEMPERATURE` | `0.6` | Sampling temperature |
 | `llm_parser` | `LOOPLAB_LLM_PARSER` | `tool_call` | Structured-output strategy (`tool_call`, with text fallback) |
 | `llm_guided_json` | `LOOPLAB_LLM_GUIDED_JSON` | `false` | Use the endpoint's constrained decoding (vLLM/SGLang `guided_json`) |
-| `llm_reasoning` | `LOOPLAB_LLM_REASONING` | `high` | Thinking depth: `""` (server default) / `off` / `on` / `low` / `medium` / `high` |
-| `llm_reasoning_style` | `LOOPLAB_LLM_REASONING_STYLE` | `auto` | How to shape the request: `auto` / `qwen` / `effort` / `none` |
+| `llm_reasoning` | `LOOPLAB_LLM_REASONING` | `high` | Thinking depth: `""` (server default) / `off` (or its synonyms `none` / `false` / `0`) / `on` / `low` / `medium` / `high`. Case-insensitive, and refused at construction if it is none of these — an unknown value used to be forwarded to the provider verbatim as `reasoning_effort` |
+| `llm_reasoning_style` | `LOOPLAB_LLM_REASONING_STYLE` | `auto` | How to shape the request: `auto` / `qwen` / `effort` / `none`. Case-insensitive, and refused at construction if it is none of these — an unknown style shaped an EMPTY body, so reasoning was silently never requested |
 | `llm_reasoning_extra` | `LOOPLAB_LLM_REASONING_EXTRA` | `{}` | Raw fields merged into the request body (escape hatch) |
 | `llm_stream` | `LOOPLAB_LLM_STREAM` | `True` | Stream the response (SSE) and reassemble it — bounds a stalled generation via an idle-guard watchdog; off = one blocking request |
 | `llm_timeout` | `LOOPLAB_LLM_TIMEOUT` | `180.0` | Per-request inter-token idle limit (s): a stream with no new token for this long is aborted + retried |
