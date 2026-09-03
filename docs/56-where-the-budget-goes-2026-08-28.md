@@ -6242,3 +6242,39 @@ card fingerprints. A repair does not come and go. Something else in the loop's e
 
 *The arm itself is untouched by this:* its control is concurrent within every batch, so a batch
 effect hits both arms equally. `expEEi`'s recovery is the illustration — 8.91, then **138.31**.
+
+## 136. The durability chain, checked against live data rather than against its own tests
+
+§98 verified the snapshot machinery by driving it — vanished destination, two concurrent writers,
+`.env` named. What it did not do is ask whether the archive actually HOLDS the corpus that has been
+produced since. Asked now, of every run on disk:
+
+| | |
+|---|---|
+| live runs | **68** |
+| archived at full length | **64** |
+| archived SHORTER than live | **4** |
+| missing from the archive | **0** |
+| `.superseded-*` files | 0 |
+
+The four short ones are `expEEh`, `ctlEEh`, `expEEi`, `ctlEEi` — **exactly the four probes running
+right now**, whose `events.jsonl` grows between snapshots. That is the distinction §98's repair loop
+was built to make and it is making it: a growing file is not a truncated one, and the archive is
+short of it only until the next cycle. Zero `.superseded-*` is consistent with no task having been
+re-run, which matches the attempt ledger.
+
+The newest snapshot, `20260903-032011`, restores:
+
+* `looplab.bundle` 30.6 MB — cloned to a bare repo, **3,702 commits**, `looplab-HEAD.txt` reads
+  `f893ef9a`, which is the working tree's HEAD to the character
+* `AlgoTune.bundle` 84.2 MB, `AlgoTune-dirty.txt` 150 kB — the ruler and its local modifications
+* `.complete` present, written last, past the shortfall check
+* `ENVIRONMENT.txt` 1,961 bytes — the redacted settings, naming the `.env` it deliberately does not copy
+
+So the loss of 2026-08-29 — 37 unpushed commits and 69 probe runs gone with `/var/tmp` — is covered
+on all three axes now: git history in a bundle that clones, the ruler beside it, and the run trees in
+a sibling archive that this sweep verified holds 64 of 64 finished runs whole.
+
+*Nothing else moved:* four probes live, residue $0.000000, zombies 0, seven baselines, no
+`PermissionError`. `expEEi` continues its climb off the corpus's lowest-ever first node — 8.91, then
+138.31, now **229.14**.
