@@ -7518,3 +7518,58 @@ run in the corpus to end with a full budget and no node, after `remPde4`.
 
 No governor was added. A turn cap or a per-path read cap changes what every probe does, and §115's
 arm is twelve probes into twenty-four; the detector runs on data that already exists.
+
+## 165. The one audit remedy that nearly pays: the reference file in the prompt is a wash
+
+Findings #7 and #11 point at the same repair — "make the system prompt carry `reference_<task>.py`
+in full, so the model has no reason to open it" — and it is the first one whose counterfactual does
+not sink it. It also does not float it.
+
+**The reads.** 4,935 fetches of `reference_<task>.py` across 85 runs (the agent's 4,326 across 76 —
+same population). The turns that requested them carry a **median 16,812 prompt tokens**, against
+18,304 for a generation at large: read turns happen early, where the prefix is only slightly
+smaller. Of those 4,935 turns, **2,940 fetched the reference and nothing else** — those are the
+turns that would disappear — and 2,118 fetched it alongside other work and would not.
+
+| | |
+|---|---|
+| turns that only fetched the reference | 2,940 |
+| their prompt tokens | 53.3 M |
+| **saved at $0.14/Mtok** | **$7.46** |
+
+**The carrying.** 7,122 fresh chains in the corpus, 3.4 generations each. Only **1,532 chains ever
+read the reference**, a median 1.0 and mean 1.5 turns in — and after that turn the content is in
+the prompt anyway. So the ADDITIONAL cost of shipping it in the system prompt is the generations
+where it would be present and currently is not: ~2,300 turns ahead of the read in reading chains,
+plus every generation of the 4,340 chains that never wanted it. At 9,881 bytes ≈ 2,470 tokens:
+
+| | |
+|---|---|
+| additional generations carrying it | ~18,300 |
+| tokens | 45.2 M |
+| **cost** | **$6.33** |
+
+**Net +$1.13 on a $76 corpus** — one and a half per cent, and thinner than my own assumptions
+(four chars per token, mean 1.5 turns before the read, 3.7 generations per chain in the affected
+phases). The honest verdict is *break-even*, not the $8.31 the finding claims. It is still the best
+any audit remedy has done: §156's gate, §161's deadline and §162's bigger page were all clearly
+negative.
+
+**And the lever is visible.** The cost is dominated by chains that never wanted the file. Per phase,
+the share of chains that read the reference at all:
+
+| phase | chains | read it | share | generations |
+|---|---|---|---|---|
+| repropose | 243 | 122 | **50 %** | 1,713 |
+| plan | 556 | 220 | **40 %** | 2,109 |
+| propose | 989 | 340 | 34 % | 5,263 |
+| deep_research | 906 | 253 | 28 % | 4,248 |
+| plan_step | 3,178 | 597 | **19 %** | 8,346 |
+| novelty / foresight_rank / hyp_prioritize / … | 776 | **0** | 0 % | 2,270 |
+
+`plan_step` is the expensive one to seed (8,346 generations) and the least likely to want it (19 %).
+Seeding `repropose` and `plan` — where half and two-fifths of chains fetch it — costs $0.59 + $0.73
+and buys the reads in the phases that most often make them. That is a targeted version worth
+building when the arm is over; the blanket version is a wash.
+
+Not shipped: the system prompt is what every probe reads, and §115's arm is twelve of twenty-four.
