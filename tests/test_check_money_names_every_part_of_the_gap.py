@@ -425,3 +425,85 @@ def test_an_unqueued_empty_200_says_so(tmp_path):
     r = _run(root, port, "--max-residue", "0.01")
     srv.close()
     assert "1 EMPTY 200s" in r.stdout and "none of them queued" in r.stdout, r.stdout
+
+
+def test_a_call_in_flight_is_not_a_leak(tmp_path):
+    """The residue that fired on 2026-09-03 was three calls whose spans were not written yet.
+
+    `RESIDUE $+0.019402` with `3 call(s) STILL UNNAMED` beside it, and `$+0.000000` on each of the
+    next three runs seconds later. The meter writes its row when the upstream request completes and
+    the engine writes the `generation` span afterwards; this tool reads spans first and the counter
+    second, so anything landing in between is in one and not the other. The tolerance is now the
+    unnamed count times the ledger's own p99 call price.
+    """
+    probes = {"p1": [0.10]}                                  # one generation recorded
+    rows = ([{"ts": "3000", "arm": "p1", "cost": 0.10, "status": "200",
+              "prompt_tokens": 900, "completion_tokens": 9}]
+            + [{"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200",
+                "prompt_tokens": 10, "completion_tokens": 2}]
+            # three more metered calls whose spans have not been written
+            + [{"ts": "3000", "arm": "p1", "cost": 0.10, "status": "200",
+                "prompt_tokens": 900, "completion_tokens": 9} for _ in range(3)])
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 0.40000196, "calls": 5})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "3 call(s) STILL UNNAMED" in r.stdout, r.stdout + r.stderr
+    assert "unnamed call(s) at the p99 price" in r.stdout, r.stdout
+    assert "UNEXPLAINED" not in r.stdout, r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_a_leak_with_nothing_in_flight_still_fires(tmp_path):
+    """The allowance is per unnamed call, so with none the old one-cent rule stands."""
+    probes = {"p1": [1.0]}
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200",
+             "prompt_tokens": 900, "completion_tokens": 9}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.75, "calls": 1})     # $0.75 nobody can account for
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "UNEXPLAINED" in r.stdout, r.stdout
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_a_residue_far_past_the_allowance_still_fires(tmp_path):
+    probes = {"p1": [0.10]}
+    rows = ([{"ts": "3000", "arm": "p1", "cost": 0.10, "status": "200",
+              "prompt_tokens": 900, "completion_tokens": 9}]
+            + [{"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200",
+                "prompt_tokens": 10, "completion_tokens": 2}]
+            + [{"ts": "3000", "arm": "p1", "cost": 0.10, "status": "200",
+                "prompt_tokens": 900, "completion_tokens": 9} for _ in range(3)])
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 5.00000196, "calls": 5})   # far past 3 calls' worth
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "UNEXPLAINED" in r.stdout, r.stdout
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_the_allowance_uses_the_p99_not_the_median(tmp_path):
+    """A call caught in flight is not a typical call, and a skewed ledger is where that shows.
+
+    The first version of the test above used uniform prices, where median and p99 are the same
+    number, so mutating the percentile survived it — the test could not tell which statistic the
+    code used. Here 100 calls cost $0.001 and three cost $0.10: the median is a tenth of a cent and
+    the p99 is ten cents, and the three unnamed calls are the expensive kind, which is exactly the
+    case that produced $0.019402 over three calls when the corpus median was $0.00282.
+    """
+    probes = {"p1": [0.001] * 100}
+    rows = ([{"ts": "3000", "arm": "p1", "cost": 0.001, "status": "200",
+              "prompt_tokens": 90, "completion_tokens": 2} for _ in range(100)]
+            + [{"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200",
+                "prompt_tokens": 10, "completion_tokens": 2}]
+            + [{"ts": "3000", "arm": "p1", "cost": 0.10, "status": "200",
+                "prompt_tokens": 9000, "completion_tokens": 90} for _ in range(3)])
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 0.40000196, "calls": 104})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "3 call(s) STILL UNNAMED" in r.stdout, r.stdout + r.stderr
+    assert "UNEXPLAINED" not in r.stdout, (
+        "a median-priced allowance is $0.003 against a $0.30 residue and would fire here")
+    assert r.returncode == 0, r.stdout + r.stderr

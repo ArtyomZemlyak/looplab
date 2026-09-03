@@ -7845,3 +7845,41 @@ finding said, and the only audit remedy so far whose two columns do not have to 
 each other. Gating those paragraphs on the task actually declaring a train stage or a GPU footprint
 is a change to what every probe is told, so it waits for the arm, and it is now the top of that
 queue rather than a $5.41 estimate resting on a classifier that counted the split.
+
+## 172. The first UNEXPLAINED residue of the campaign was three calls that had not finished being written down
+
+`check_money` exited 1 for the first time on live data:
+
+```
+3 call(s) STILL UNNAMED -- neither killed nor empty
+RESIDUE $+0.019402 after the named parts
+UNEXPLAINED: $+0.019402 exceeds --max-residue $0.0100
+```
+
+Three runs seconds later: **`$+0.000000`, `$+0.000000`, `$+0.000000`.**
+
+The cause is in the tool's own ordering, and it is not a leak. The meter writes its row when the
+upstream request completes; the engine writes the `generation` span afterwards. `check_money` reads
+the spans first (3.0 s over 26,381 generations) and the counter second, so any call that lands in
+between is in the counter and not in the spans — **the residue is positive by exactly the price of
+the calls in flight.** Three unnamed calls at ~$0.0065 each is $0.0194, and the `3 call(s) STILL
+UNNAMED` line was sitting directly above the number the whole time.
+
+So the tolerance is now per unnamed call rather than a flat cent: `allowance = max(--max-residue,
+p99_call_price × unnamed_calls)`. A leak with nothing in flight still fires on one cent; a live
+campaign stops crying wolf.
+
+**The percentile is the part that had to be measured.** Over 26,528 priced rows: median $0.00282,
+mean $0.00332, p90 $0.00573, **p99 $0.01155**. Three calls at the median is $0.0085 and at the mean
+$0.0100 — both fail to cover the $0.0194 this was written for. p99 gives $0.0347 and does. A call
+caught mid-flight is not a typical call: the expensive ones run longest, so they are the ones most
+likely to be caught.
+
+**And the first mutation test of the percentile passed, because my fixture could not tell the
+statistics apart.** Uniform $0.10 calls make median and p99 the same number. The added fixture is
+skewed the way the ledger is — a hundred calls at $0.001 and three at $0.10 — where a median-priced
+allowance is $0.003 against a $0.30 residue and fires. Mutating p99 → median now reddens it.
+
+Four tests hold the behaviour: in-flight calls forgiven, a $0.75 leak with nothing in flight still
+fatal, a residue far past the allowance still fatal, and the percentile pinned. Three mutations
+redden them (unbounded allowance, allowance ignoring the unnamed count, median instead of p99).
