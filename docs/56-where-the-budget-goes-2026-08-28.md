@@ -6573,3 +6573,18 @@ one.
 
 *Batch 2 of 6 is 30 minutes in with no nodes yet;* residue $0.000000, zombies 0, seven baselines, no
 `PermissionError`.
+
+### §143.1 — the mutation guard in §143 guarded nothing, and I pushed it that way
+
+The test named `test_a_probe_with_no_node_is_not_counted_as_a_no` was written to redden if the tally
+counted runs that have not evaluated yet. Run against that mutation, it stayed **green**.
+
+The fixture built its no-node probe with an EMPTY `events.jsonl`, and `summarise()` returns `None`
+for one — so the probe never entered the group, the mutated line never saw it, and the assertion
+`2/2 = 100%` held for the wrong reason. A run that has STARTED and not yet evaluated is the real
+case, and it needs at least one event; with a `run_started` row in the fixture the mutation reddens
+as intended.
+
+Committed and pushed before the mutation was checked, which is the process failure underneath the
+test failure — this notebook's own rule is that a hole is only closed once the mutation reddens, and
+§143's commit message asserted it had. Both are corrected here rather than quietly.

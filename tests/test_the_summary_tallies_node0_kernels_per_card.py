@@ -56,9 +56,14 @@ def test_a_probe_with_no_node_is_not_counted_as_a_no(tmp_path):
     look worse the earlier it is read — the censoring the by-card block already names for spend."""
     _probe(tmp_path, "a0", "--exploit-best", kernel=True)
     _probe(tmp_path, "a1", "--exploit-best", kernel=True)
+    # NOT an empty events.jsonl: `summarise` returns None for one, so such a probe never reaches
+    # the group and a test built on it guards nothing. The first version of this test did exactly
+    # that -- the mutation it names ran green. A run that STARTED and has not evaluated is the real
+    # case, and it needs at least one event.
     run = tmp_path / "a2" / "runs" / "edge_expansion" / "run"
     run.mkdir(parents=True)
-    (run / "events.jsonl").write_text("", encoding="utf-8")
+    (run / "events.jsonl").write_text(
+        json.dumps({"type": "run_started", "ts": 1.0, "data": {}}) + "\n", encoding="utf-8")
     (run / "spans.jsonl").write_text("", encoding="utf-8")
     (tmp_path / "a2" / "INSTRUMENT.txt").write_text(
         "probe:          a2\ncard_args:      --exploit-best\n", encoding="utf-8")
@@ -70,7 +75,8 @@ def test_a_probe_with_no_node_is_not_counted_as_a_no(tmp_path):
 def test_nothing_is_printed_for_a_card_whose_probes_have_no_nodes(tmp_path):
     run = tmp_path / "a0" / "runs" / "edge_expansion" / "run"
     run.mkdir(parents=True)
-    (run / "events.jsonl").write_text("", encoding="utf-8")
+    (run / "events.jsonl").write_text(
+        json.dumps({"type": "run_started", "ts": 1.0, "data": {}}) + "\n", encoding="utf-8")
     (run / "spans.jsonl").write_text("", encoding="utf-8")
     (tmp_path / "a0" / "INSTRUMENT.txt").write_text(
         "probe:          a0\ncard_args:      --exploit-best\n", encoding="utf-8")
