@@ -7741,3 +7741,55 @@ reading is still "inside the noise", and the noise is exactly why eight more pro
 at 4/76 before and 1/90 after, p = 0.1355. Both numbers point the same way as this one: the repair
 does what it was built to do to `check`'s verdicts, and the runs that get it do not score better.
 Those are compatible facts, and the second is the one the arm was designed to settle.
+
+## 170. The empty 200s are made by our own rate limiter, not by the upstream
+
+The EMPTY-200 tally kept climbing — 4 historic, then 6, 10, 13 — so I asked what they are. All 27 in
+the ledger, and the signature is one thing repeated: **latency ≈ 60.2 s, `attempts=2`,
+`deltas_seen=0`, streamed, `metered=false`, cost 0**, arriving in bursts across several arms within
+seconds of each other (09-02 21:04:32–52 across four arms; 09-03 17:54:59–17:55:36 across three).
+
+The minute is not the stream. It is `queued_s`:
+
+```
+17:54:59 oldCK9   lat=60.4s queued=60.0 attempts=2 metered=False cost=0.0
+17:55:04 newCK10  lat=60.2s queued=60.0 attempts=2 metered=False cost=0.0
+17:55:36 newCK9   lat=60.2s queued=60.0 attempts=2 metered=False cost=0.0
+```
+
+`benchmarks/meter/proxy.py::RateLimiter.acquire` is a 60-second sliding window at `--rpm 45`
+(the running proxy's own command line), and it BLOCKS before the upstream request is opened. The
+association is not subtle:
+
+| | rows | of them EMPTY 200s |
+|---|---|---|
+| waited > 0.5 s in the RPM queue | 39 | **23 (59 %)** |
+| did not wait | 25,968 | **4 (0.0154 %)** |
+
+A queued request is **3,800 times** more likely to come back empty, and **23 of the 27 empty 200s in
+the corpus had queued**. The limiter almost never engages — 39 rows in 26,004, 0.1 %, costing 0.44 h
+of wall clock in total — but when it does, more than half the time the call is lost.
+
+**The mechanism is a candidate, not a measurement, and it is labelled as one.** `llm_header_timeout`
+is 45.0 s in every probe's `config.snapshot.json`, which is less than the 60 s the queue can hold a
+request; a client that gives up at 45 s while the proxy is still waiting for its slot would produce
+exactly this row. I have not reproduced that, and the ledger cannot show it — the proxy writes its
+row after its own work finishes, so a client that left early is invisible there.
+
+**What shipped is the instrument, not the fix.** `check_money` said `EMPTY 200s (streamed, zero
+tokens both ways, ~60 s)` — attributing the minute to the stream, which would send the next reader
+after the wrong process. It now says:
+
+```
+13 EMPTY 200s (streamed, zero tokens both ways; 13 of them after a >0.5 s wait in THIS proxy's RPM queue)
+```
+
+Two tests pin it — one ledger with a queued empty and an unqueued one, one with neither — and three
+mutations redden them (never count a queued empty, count every empty as queued, revert the wording).
+The first run of those tests failed against correct code because my fixture omitted `prompt_tokens`
+on the ordinary rows, so `int(None or 0) == 0` counted them as empty: a fixture that does not look
+like the real thing tests something else. Real rows always carry token counts.
+
+The limiter itself is untouched. Capping the queue wait below the client's header timeout is the
+obvious repair and it changes what every probe experiences; §115's arm is sixteen probes into
+twenty-four, and both arms share this proxy equally, so the loss is symmetric and can wait.

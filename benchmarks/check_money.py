@@ -174,6 +174,7 @@ def meter_by_probe(root: str, since: float) -> tuple[dict, dict, dict, dict]:
     calls: dict[str, int] = collections.Counter()
     killed: dict[str, int] = collections.Counter()
     status_kind: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    empty_queued: dict[str, int] = collections.Counter()
     empty: dict[str, int] = collections.Counter()
     path = os.path.join(root, "meter", "meter.jsonl")
     if not os.path.exists(path):
@@ -223,9 +224,21 @@ def meter_by_probe(root: str, since: float) -> tuple[dict, dict, dict, dict]:
                 if (int(j.get("prompt_tokens") or 0) == 0
                         and int(j.get("completion_tokens") or 0) == 0):
                     empty[arm] += 1
+                    # THE MINUTE IS OURS, NOT THE STREAM'S. Measured 2026-09-03 over 26,004 ledger
+                    # rows: 39 requests waited in THIS proxy's own RPM queue (`RateLimiter.acquire`,
+                    # a 60 s sliding window at --rpm 45) and 23 of them came back an empty 200 --
+                    # 59 %, against 0.0154 % of the 25,968 that did not wait. 23 of the 27 empty
+                    # 200s in the whole corpus had queued. The old wording, "~60 s", read as a
+                    # stream that hung for a minute; the minute is the queue in front of it.
+                    try:
+                        if float(j.get("queued_s") or 0.0) > 0.5:
+                            empty_queued[arm] += 1
+                    except (TypeError, ValueError):
+                        pass
             except (TypeError, ValueError):
                 pass
     killed["__by_kind__"] = dict(status_kind)
+    empty["__queued__"] = dict(empty_queued)
     return cost, calls, killed, empty
 
 
@@ -291,10 +304,13 @@ def main(argv: list[str]) -> int:
         kinds: collections.Counter = collections.Counter()
         for p in extra:
             kinds.update(by_kind.get(p) or {})
-        e = sum(m_empty.get(p, 0) for p in extra)
+        e = sum(m_empty.get(p, 0) for p in extra if p != "__queued__")
+        eq = sum((m_empty.get("__queued__") or {}).get(p, 0) for p in extra)
         named = ", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items())) or "none"
         print(f"         of those: {k} non-200 ({named}), {e} EMPTY 200s "
-              f"(streamed, zero tokens both ways, ~60 s)")
+              f"(streamed, zero tokens both ways"
+              + (f"; {eq} of them after a >0.5 s wait in THIS proxy's RPM queue)" if eq
+                 else ", none of them queued)"))
         unnamed = sum(extra.values()) - k - e
         if unnamed:
             print(f"         {unnamed} call(s) STILL UNNAMED -- neither killed nor empty")

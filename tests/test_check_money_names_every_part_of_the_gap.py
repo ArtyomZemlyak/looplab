@@ -378,3 +378,50 @@ def test_the_endpoint_line_is_printed_with_the_age(tmp_path):
     assert "endpoint:" in r.stdout, r.stdout + r.stderr
     assert "p1 (401," in r.stdout and "s ago)" in r.stdout, (
         "the refusal is reported without its status or its age")
+
+
+def test_an_empty_200_says_whether_it_had_queued(tmp_path):
+    """The minute in "~60 s" was this proxy's own RPM queue, not a hung stream.
+
+    Measured 2026-09-03 over 26,004 ledger rows: 39 requests waited in `RateLimiter.acquire` (a 60 s
+    sliding window at `--rpm 45`) and 23 of them came back an empty 200 — **59 %**, against
+    **0.0154 %** of the 25,968 that did not wait. 23 of the 27 empty 200s in the corpus had queued.
+    The old wording attributed the minute to the stream; a reader chasing a hung upstream would have
+    been chasing the wrong process.
+    """
+    probes = {"p1": [1.0]}
+    # Real rows carry token counts; a fixture that omits them reads as empty and inflates the tally.
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200",
+             "prompt_tokens": 1000, "completion_tokens": 10},
+            {"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200",
+             "prompt_tokens": 10, "completion_tokens": 2},
+            # queued a minute, came back empty
+            {"ts": "3000", "arm": "p1", "status": "200", "prompt_tokens": 0,
+             "completion_tokens": 0, "queued_s": 60.0, "latency_ms": 60200.0},
+            # empty but never queued -- a different animal, and it must not be counted as one
+            {"ts": "3000", "arm": "p1", "status": "200", "prompt_tokens": 0,
+             "completion_tokens": 0, "queued_s": 0.0, "latency_ms": 4900.0}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.00000196, "calls": 4})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "2 EMPTY 200s" in r.stdout, r.stdout + r.stderr
+    assert "1 of them after a >0.5 s wait in THIS proxy's RPM queue" in r.stdout, r.stdout
+    assert "~60 s" not in r.stdout, (
+        "the wording still blames the stream for a minute the proxy spent queueing")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_an_unqueued_empty_200_says_so(tmp_path):
+    probes = {"p1": [1.0]}
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200",
+             "prompt_tokens": 1000, "completion_tokens": 10},
+            {"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200",
+             "prompt_tokens": 10, "completion_tokens": 2},
+            {"ts": "3000", "arm": "p1", "status": "200", "prompt_tokens": 0,
+             "completion_tokens": 0, "queued_s": 0.0}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.00000196, "calls": 3})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "1 EMPTY 200s" in r.stdout and "none of them queued" in r.stdout, r.stdout
