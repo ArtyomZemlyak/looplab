@@ -231,9 +231,18 @@ Research only.
 > - **OPEN[three-new-run-planners-no-shared-schema]** CLI, TUI and Web still plan a new run three
 >   ways; no `RunProposal` service or shared schema exists anywhere in `serve/`, and
 >   `engine/genesis.py` says so in production source. proof:absent:RunProposal@looplab/serve
-> - **OPEN[mcp-tool-cache-not-principal-keyed]** typed results, cancellation and the authz binding all
->   shipped in `cb3433b3`; the residue is that the adapter cache is still one process-global
->   `_CACHED`, not keyed by principal. proof:present:_CACHED@looplab/tools/mcp_tools.py
+> - **[closed 2026-09-03 — `McpTools.cached()` is keyed on a digest of the config `load_config`
+>   resolves, which is what actually determines the server set: an operator who edits `.mcp.json` no
+>   longer keeps talking to the old servers, and a per-principal config source would key itself.
+>   Deliberately NOT keyed on "the principal", because no per-principal config source exists — see
+>   the item below — so that key would spawn N identical subprocess sets and buy nothing. Nothing is
+>   evicted (a handle owns a thread, a loop and a subprocess and exposes no close), so the number of
+>   distinct configurations one process connects for is bounded instead.
+>   `tests/test_mcp_cache_key.py`.]**
+> - **OPEN[mcp-config-has-no-per-principal-source]** the residue the cache key cannot supply: MCP
+>   servers are resolved from `LOOPLAB_MCP_CONFIG` / `LOOPLAB_MCP_SERVERS` / `.mcp.json`, all
+>   process-wide, so every session on a shared server gets the same server set whatever principal is
+>   driving it. proof:absent:principal_mcp_config@looplab/tools/mcp_tools.py
 > - **OPEN[prompt-governance-has-no-typed-registry]** repo onboarding joined the store, but the
 >   additive typed registry the row asks for does not exist, so Genesis, assistants, reports, monitors
 >   and stewards keep separate prompt families. proof:absent:PromptDefinition@looplab/core/prompts.py

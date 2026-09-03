@@ -170,6 +170,11 @@ EXPLICIT_ONLY_LOOP_ARGS: tuple[str, ...] = (
     # and a settings bundle that could turn it on for the stages caller would silently
     # disable the operator's wall-budget and manifest-collision checks.
     "terminal_salvage",
+    # The evidence FENCE stamped on every tool result (`tool_loop.py::fence_untrusted`). Explicit-only
+    # for `nudge_prompt`'s exact reason: the label is the wording of a security statement the system
+    # prompt already makes, so it belongs at the site that makes it — `serve/assistant.py`, beside
+    # `ASSISTANT_EVIDENCE_GUARD` — and not in a bundle a settings file could reword or switch off.
+    "tool_result_label",
 )
 
 
