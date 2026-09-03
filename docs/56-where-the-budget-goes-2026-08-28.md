@@ -7645,3 +7645,55 @@ and the age are now in the line.
 whose 401 was followed by a 200 is not refusing — and `test_the_endpoint_line_is_printed_with_the
 _age` pins that the printed line carries both. Three mutations redden them: keeping the first row
 instead of the newest, dropping the status and the age, and treating every arm as refusing.
+
+## 168. oldCK7 is the corpus's second-best score, and the summary was calling it a 503
+
+### 168.1 The two probes that finished
+
+| probe | arm | TEST | nodes (train) | best/last | before/after | `eval_train` | reference | node 0 | champion |
+|---|---|---|---|---|---|---|---|---|---|
+| **oldCK7** | pre-§99 | **273.6279** | [23.06, **268.13**, 27.56, **273.06**] | **1.00×** | 30 % / 1 % | 32 | **13.3 %** | no kernel | 45L kernel |
+| newCK8 | shipped | **96.9161** | [**98.63**, 15.16, 28.20] | 3.50× | 32 % / 0 % | 30 | 6.5 % / 9.7 % | kernel | 47L kernel |
+
+Train→test 1.002 and 0.983. Money: `oldCK7` plan_step 40.5 %, propose 24.7 %, deep_research 16.6 %,
+plan 12.1 %; `newCK8` plan_step 36.6 %, propose 25.6 %, deep_research 15.1 %, repropose 10.7 %.
+
+**`oldCK7` is the second-best TEST score in 59 scored `edge_expansion` probes** (corpus median
+205.58, best `remEE8` at 276.7268), and it is the rare run whose LAST node is also its best —
+23.06 → 268.13 → 27.56 → **273.06**, a collapse at node 2 that it climbed back out of. Its
+reference use, 13.3 %, is well above §69.1's 4.9–8.3 % band; §163.2's null (r = −0.123, p = 0.312
+over 57 probes) says not to read anything into that.
+
+`newCK8` is its mirror: the best node is node 0 and everything after it fell — 98.63 → 15.16 →
+28.20. Without §84's champion rule it would report **28.20** instead of 96.92.
+
+### 168.2 The instrument was announcing a two-hour-old refusal as the current state
+
+`probe_summary`'s "probes with NO test score, and why" read:
+
+```
+newCK7   -- STILL RUNNING http://…/newCK7/… answered HTTP 503 (overloaded) — waiting 2s before attempt 2 of 9
+oldCK8b  -- STILL RUNNING http://…/oldCK8b/… answered HTTP 503 (overloaded) — waiting 2s before attempt 2 of 9
+```
+
+Both were healthy, two hours and three evaluated nodes past that line, `newCK7` holding a 264.0272.
+`_why_no_test` returned the **first** matching log line, whenever it happened. That is §167's shape
+again — a stale event presented as current state — and this file already carries two comments about
+having been burned by it ("A FRESH EVENT LOG IS NOT A RUNNING PROBE").
+
+The first match also understated the one case where the needle was right: `remDL`, which really did
+die that way, was reported at `attempt 2 of 9` while its log reaches **`attempt 7 of 9`** — nine
+attempts of exponential backoff, which is a diagnosis, reported as a hiccup.
+
+Two changes. The reason is now the LAST occurrence and carries how much log came after it; and a
+running probe prints what it has evaluated, because the log is sparse enough that "+2 lines since"
+is a weak denial while "3 node(s) so far, best 264.0272" is not:
+
+```
+newCK7   -- STILL RUNNING (3 node(s) so far, best 264.0272) … attempt 2 of 9  (+2 log lines since)
+remDL    … answered HTTP 504 (overloaded) — waiting 30s before attempt 7 of 9
+```
+
+`tests/test_the_reason_a_probe_has_no_score_is_dated.py` pins the last-match rule, the distance, the
+no-distance case at the end of a log, and the node line. Three mutations redden it (first match,
+drop the distance, distance always zero). 259 existing summary tests still pass.

@@ -182,9 +182,18 @@ def _why_no_test(probe_dir: Path) -> str:
             continue
         lines = f.read_text(errors="replace").splitlines()
         for needle in hunt:
-            for line in lines:
-                if needle in line:
-                    return line.strip()[:120]
+            # THE FIRST MATCH IS THE WRONG MATCH, and it was the first match for a long time.
+            # `newCK7` and `oldCK8b` were reported as "STILL RUNNING ... answered HTTP 503
+            # (overloaded) -- waiting 2s before attempt 2 of 9" while both were healthy, four
+            # evaluated nodes and two hours past that line: a transient refusal from the start of
+            # the run, printed as the current state. Take the LAST occurrence and say how much log
+            # came after it, so a reason that was overtaken cannot pose as a reason that stands.
+            hits = [i for i, line in enumerate(lines) if needle in line]
+            if not hits:
+                continue
+            i = hits[-1]
+            since = len(lines) - 1 - i
+            return lines[i].strip()[:120] + (f"  (+{since} log lines since)" if since else "")
     return ""
 
 
@@ -485,9 +494,15 @@ def main(argv: list[str]) -> int:
             # ended. The age of events.jsonl says only that something happened recently, and a
             # probe that has produced a champion has by definition stopped producing nodes.
             finished = (Path(s["probe_dir"]) / "champion_solver.py").is_file()
+            # AND SAY WHAT IT HAS DONE SINCE. The reason above is the last matching LOG line, and
+            # a sparse log makes "+N lines since" a weak denial: `newCK7` carried "answered HTTP
+            # 503 ... attempt 2 of 9" with two lines after it while holding two evaluated nodes,
+            # one of them 264.0272. Nodes are the fact that contradicts the alarm.
             live = ("" if finished
                     else " -- STILL RUNNING" if s["age_s"] is not None and s["age_s"] < 2400
                     else "")
+            if live and s["nodes"]:
+                live += f" ({len(s['nodes'])} node(s) so far, best {max(s['nodes']):.4f})"
             print(f"  {s['probe']:10s}{live} {why}")
             # RECOVERABLE FOR FREE, and say so with the command. A run that spent its budget and
             # reached an evaluated node has already paid for everything expensive; extraction and
