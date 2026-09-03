@@ -665,17 +665,72 @@ def session_budget_s() -> float | None:
     return budget if budget > 0 else None
 
 
-def eval_cost_sentence() -> str:
-    """What one `eval_train` call actually costs, and what follows from that."""
+def measured_eval_timings(*roots) -> dict | None:
+    """`eval_train` wall clock over the probe corpus under `roots`, or None if there is none.
+
+    WHY THIS IS OPTIONAL AND OFF BY DEFAULT. The sentence below is frozen at a 2026-08-27
+    measurement of 54 calls; the corpus now holds 791, whose median is 42.1 s (close) but whose
+    fastest is 3.6 s and slowest 117.3 s -- the min is off by 8x and the max by 47 %, and the
+    derived "3 % of your session" is 10 % at the true maximum. That is worth fixing and it is NOT
+    worth fixing silently: the card's sha is the unit of comparison for every running arm
+    (§113 cost a probe to exactly this mistake), so a card that changes when the corpus grows is a
+    ruler that changes under the experiment. Pass `--eval-timings-from` to opt in; without it the
+    card is byte-identical to the one every probe in the corpus was given.
+    """
+    import statistics as _stats
+    secs: list[float] = []
+    for root in roots:
+        root = Path(root)
+        for log in ([root] if root.is_file() else sorted(root.rglob("spans.jsonl"))):
+            try:
+                lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                if '"run_dev_command"' not in line or "eval_train" not in line:
+                    continue
+                try:
+                    span = json.loads(line)
+                except ValueError:
+                    continue
+                attrs = span.get("attributes") or {}
+                if attrs.get("tool") != "run_dev_command":
+                    continue
+                # The command name sits inside the tool's JSON argument blob; matching the whole
+                # line would also catch a `check` call whose OUTPUT mentions eval_train.
+                if '"eval_train"' not in str(attrs.get("input", "")):
+                    continue
+                dur = span.get("duration_s")
+                if isinstance(dur, (int, float)) and dur > 0:
+                    secs.append(float(dur))
+    if not secs:
+        return None
+    return {"n": len(secs), "median": _stats.median(secs),
+            "fastest": min(secs), "slowest": max(secs)}
+
+
+def eval_cost_sentence(timings: dict | None = None) -> str:
+    """What one `eval_train` call actually costs, and what follows from that.
+
+    With no `timings` this returns the frozen 2026-08-27 wording, character for character, because
+    every probe in the corpus was scored against a card containing it.
+    """
     budget = session_budget_s()
-    share = (f", so one call is about {round(100 * 40.0 / budget):.0f} % of your session and not a "
+    typical = float(timings["median"]) if timings else 40.0
+    share = (f", so one call is about {round(100 * typical / budget):.0f} % of your session and not a "
              f"third of it" if budget else "")
     bounded = (f"against a Developer session bounded at {budget:.0f} s of wall clock"
                if budget else "against a Developer session bounded by a wall clock nobody shows you")
+    if timings:
+        measured = (f"{timings['n']} completed `eval_train` calls this harness has on record on this "
+                    f"box: {timings['median']:.0f} s median, {timings['fastest']:.0f} s "
+                    f"fastest, {timings['slowest']:.0f} s slowest")
+    else:
+        measured = ("54 completed `eval_train` calls this harness has on record on this box: 40 s "
+                    "median, 29 s fastest, 80 s slowest")
     return (
-        "IT COSTS ABOUT 40 SECONDS, AND IT IS CHARGED TO A CLOCK YOU CANNOT SEE. Measured over the "
-        "54 completed `eval_train` calls this harness has on record on this box: 40 s median, 29 s "
-        f"fastest, 80 s slowest, {bounded}{share}. MEASURING IS THE CHEAPEST INFORMATION HERE -- the "
+        f"IT COSTS ABOUT {typical:.0f} SECONDS, AND IT IS CHARGED TO A CLOCK YOU CANNOT SEE. "
+        f"Measured over the {measured}, {bounded}{share}. MEASURING IS THE CHEAPEST INFORMATION HERE -- the "
         "agent this arm is compared against is handed the same number automatically after EVERY "
         "edit it makes, 57 times on one task, and that is the loop you are up against. So: write "
         "the solver FIRST -- the simplest correct one -- then measure, change ONE thing, measure "
@@ -1223,6 +1278,12 @@ def main() -> int:
                          "shipped card, which already exists. §92 is why the clause is not simply "
                          "switched on: a clause whose effect nobody measured is a clause nobody "
                          "knows the sign of.")
+    ap.add_argument("--eval-timings-from", type=Path, action="append", default=None,
+                    metavar="DIR",
+                    help="Recompute the `eval_train` cost sentence from the `spans.jsonl` under "
+                         "DIR (repeatable). OFF by default: the frozen wording is what every probe "
+                         "in the corpus was given, and a card that moves with the corpus is a "
+                         "ruler that moves under the experiment.")
     ap.add_argument("--reference-affordance", action=argparse.BooleanOptionalAction,
                     default=True,
                     help="State that `reference_<task>.py` is an importable module the "
@@ -1260,6 +1321,13 @@ def main() -> int:
     # Read once, here, so the failure to read it is visible at build time rather than as a
     # silently-too-small check inside a run.
     _graded_n = graded_instance_size(root, args.task)
+    # None unless the operator asked; see `measured_eval_timings` for why the default is
+    # the frozen sentence rather than the freshest number.
+    _eval_timings = measured_eval_timings(*args.eval_timings_from) if args.eval_timings_from else None
+    if args.eval_timings_from and _eval_timings is None:
+        print('make_task: --eval-timings-from found no completed eval_train spans under '
+              + ', '.join(str(d) for d in args.eval_timings_from)
+              + ' -- keeping the frozen wording', file=sys.stderr)
     train_path = train_dataset(root, args.task) if args.full_context else None
     if args.full_context and train_path is None:
         # REFUSE when it was ASKED FOR, WARN when it is merely the default. A flag that degrades
@@ -1293,7 +1361,7 @@ def main() -> int:
                  # starts. See `timing_clause`.
                  + (timing_clause(root, args.unteachable_rules) if args.full_context else "")
                  + ((_DELIVER_WRITE if args.full_context else DELIVER) if args.deliver else "")
-                 + (MEASURE.format(cost=eval_cost_sentence(),
+                 + (MEASURE.format(cost=eval_cost_sentence(_eval_timings),
                                   reference_affordance=(REFERENCE_AFFORDANCE
                                                         if args.reference_affordance else ""))
                     if args.full_context else "")
