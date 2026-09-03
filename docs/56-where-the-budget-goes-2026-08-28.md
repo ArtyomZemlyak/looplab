@@ -6845,3 +6845,49 @@ one wording, `glob` instead of `rglob` — and each mutation reddens a different
 The default pattern being a union of three wordings is the second trap, independent of the first:
 one regex per repo would have reported the Developer and the Researcher blind. The test pins that
 too, by asserting the narrow pattern is visibly narrower.
+
+## 149. The ruler still reads 0.98, and the way I nearly mis-read it
+
+`edge_expansion`, reference wrapped in a `Solver` and scored against itself on the TEST split,
+regime `__w22x1r3`: **speedup 0.9796, eval_seconds 43.0**, against 0.9847 on the standing card. The
+ruler holds.
+
+Getting there took four wrong readings, all mine, and the first two are the exact signature point 2
+of the sweep list warns about — a zero with a tiny `eval_seconds`:
+
+| attempt | result | what was actually wrong |
+|---|---|---|
+| `/opt/conda` python, no env | 0.0, `eval_seconds` **1.7** | `DATA_DIR` unset; regime came out `__lane22r3`, not `__w22x1r3` |
+| `/opt/conda`, campaign env | 0.0, 1.7 | `solver_unloadable` — the reference file defines a Task, not a `Solver` |
+| shim, wrong import path | 0.0, 1.7 | `AlgoTuneTasks.edge_expansion` is a package; the module is one level down |
+| **AlgoTune's own `.venv`** | **0.9796, 43.0** | — |
+
+The pinned `eval_train` command in every card names `/var/tmp/looplab-bench/AlgoTune/.venv/bin/python`.
+Under `/opt/conda` the evaluator loses `huggingface_hub`, skips dataset generation and reports a
+clean `speedup: 0.0` — a full ruler refusal that looks exactly like a solver scoring nothing.
+`eval_seconds` is the tell and it is the only tell: 1.7 s against 43.0 s.
+
+## 150. The audit agent's thirty findings: first five re-derived by hand
+
+The agent finished with 30 numbered findings. Re-deriving each with my own command, not its script;
+what has survived so far:
+
+| # | claim | agent | mine | verdict |
+|---|---|---|---|---|
+| 26 | the card's `eval_train` timings are stale | n=791, 42.1 / 3.6 / 117.3 s | **identical** | CONFIRMED, fixed in `846e8f74` |
+| 13 | probes fetch published solutions to their own graded task | 52 of 76 (68 %), all 52 with solver source | **52 of 76, 52 with source** | CONFIRMED |
+| 5 | more `run_probe`, worse score | r = −0.36 (n=53) | r = **−0.41** (n=53), median split 228.94 vs 177.60 | CONFIRMED in direction; my probe count is inflated (I matched `run_probe` anywhere in the span, so my split point 47 is not its 23) |
+| 15a | the probe cannot import `reference_<task>.py` because its first import is `AlgoTuneTasks` | 11 failures name it | the file's line 11 is `from AlgoTuneTasks.base import register_task, Task`, and my own ruler shim hit it | CONFIRMED |
+| 20 | the money cue now reaches every deciding role and changed nothing | plan_step 96.2 %, plan 86.0 % | **99.3 % / 100 %** (§148, different run subset) | CONFIRMED |
+
+Finding 13 is the one that matters beyond its dollar figure. **68 % of the corpus read published
+AlgoTune solver source for the task it was being scored on**, and the card's fence — "the evaluator
+and the timer are fenced and are not yours to look at" — is prose, while `web_fetch` is a hole. The
+measured effect on score is NEGATIVE in my data too (fetched median 209.71, n=46; not fetched
+238.40, n=7), so this is a validity hazard rather than score inflation, and n=7 makes even that a
+weak statement. No result in this document has been stratified on it.
+
+The remaining 25 findings are unvalidated. The largest by size is #1 — 84.7 % of prompt tokens are a
+byte-identical re-send priced at a flat tier, $47.39 of $75.87 — and it is the next one to check,
+because if the gateway does cache and the proxy's imputation is blind to it, every dollar figure in
+this document is wrong in the other direction.
