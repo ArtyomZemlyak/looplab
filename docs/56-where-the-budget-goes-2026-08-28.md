@@ -7035,3 +7035,70 @@ store is structurally empty** on a single-run, no-dataset benchmark (`list_sibli
 returns a body; my emptiness test is a length heuristic and disagrees on three tools, so I am
 recording the call counts, which we agree on, and not the emptiness claim, which I have not
 measured properly.
+
+## 154. The four snapshot items that were "not checked by me" — driven, and all four refuted
+
+Three of them the standing list marks unverified, one it marks open. All four are closed in the
+script already; the point of this section is that I drove them rather than read the comment above
+them, because a comment claiming a repair is the thing this notebook has most often found wrong.
+
+**(1) "a snapshot whose destination has vanished reports success."** It does not. Two gates fire
+before anything is written:
+
+```
+FATAL: …/.persistent-store-id is missing but … is not empty.
+       The persistent volume is probably NOT mounted. … Refusing.        exit 1
+```
+```
+FATAL: cannot create …/snapshots/.snapshot.lock -- the destination is not writable.   exit 1
+```
+
+Driven twice — destination under a regular file, and a store whose directory is mode 555 with the
+marker present. Exit 1 both times, nothing written.
+
+**(2) "nothing separates two simultaneous snapshots."** `flock` does. Two runs launched into one
+destination in the same command: **exit 0 and exit 0, two directories, 53 files each** —
+`20260903-110546` and `20260903-110610`, 24 s apart because the second waited for the lock. Then the
+harder case, which that run did not reach: five directories pre-created with the next five stamps,
+each holding a `PREEXISTING` marker. The snapshot took **`20260903-110714-2`** and every
+pre-existing directory still holds exactly its one marker file. No merge, no clobber. (`N` starts
+at 2 on purpose — the second snapshot of a second is `-2`.)
+
+**(3) "`.env` does not reach the snapshot and is not named."** Half right, and the wrong half.
+`find` over the newest snapshot returns **0** `.env` files — and `ENVIRONMENT.txt` inside it names
+the file it left behind, with its size and age:
+
+```
+## /home/jovyan/data/looplab/.env  (89 lines, mtime 2026-08-06T02:44:45)
+```
+
+**(4) The item marked OPEN — `campaign.sh` `rm -rf`s the task directory, then `cp -ru` overwrites
+attempt 1's evidence with attempt 2's shorter log.** The list says this "closes only by versioning
+the archive by attempt", and that is exactly what shipped: a `.superseded-N` loop that copies aside
+anything the source is not a continuation of, BEFORE any copy runs. Both named tests pass here:
+`test_a_restart_does_not_take_the_previous_attempt_with_it` and
+`test_every_restart_gets_its_own_layer`.
+
+One honest qualification, which is the only new thing in this section. The live archive holds **80
+`events.jsonl` and exactly four `.superseded-1` files, and all four are `memora_cache.json`** (211–
+236 bytes). The mechanism has never fired on a run log in production — no retry has needed it since
+it landed. It is verified by its tests and by four firings on a JSON cache, and not yet by the case
+it was built for.
+
+## 155. A correction to the last sweep, and the anomaly that was my own clock
+
+I reported batch 3 as "50 minutes in". It was 18. This sweep I then measured it against batch 2 at
+"85 minutes" and found batch 3 spending **four times less** with zero evaluated nodes — a clean,
+alarming, entirely false result: the probes started at 10:42 and it was 11:04.
+
+The true comparison, once the elapsed time came from `INSTRUMENT.txt` and the ledger instead of
+from my own memory of when I launched them: batch 3 is 22 minutes in, $0.12–$0.16 spent, calls
+running at 1.98–2.76 per minute against batch 2's 1.54–2.76, median latency **3,220 ms against
+batch 2's 5,197 ms**, and no errors. The endpoint is if anything faster. Batch 2's first evaluated
+node arrived at 31, 32, 46 and 62 minutes, so zero nodes at 22 minutes is on schedule.
+
+Two instruments lied in the same five minutes and both were mine: a `now=$(date +%s)` captured at
+the top of a block and used after several minutes of work inside it (negative file ages), and a
+`/proc` scan whose "swarm of a hundred short-lived processes" was my own shell's children,
+disappearing between the listing and the read. The first one at least announced itself by printing
+a negative number. The second did not, and would have become a section.
