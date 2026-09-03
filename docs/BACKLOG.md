@@ -220,14 +220,32 @@ site that proves it is open.
    `readmodel_is_current` before trusting a row.
 5. **The `agentless` Developer is DECLINED on our own corpus; what stays open is the Strategist's
    ability to ask for a backend at all (P2, S).**
-   OPEN[strategist-developer-field] the LLM Strategist cannot propose a `developer` — the field is
-   absent from `_StrategyOut` and `_normalize_set_strategy` rejects one, so the switch machinery
-   below it has no live producer. proof:absent:"developer"@looplab/serve/control_validation.py
+   **[CLOSED 2026-09-03 — both producers shipped, and the invisible drop with them.]** Everything
+   BELOW the switch already existed: `validate_strategy` had whitelisted `developer` all along,
+   `_prepare_strategy_developer` has four refusal arms and `developer_application` is a durable
+   receipt shape. Nothing could reach any of it. `_StrategyOut` declares `extra="forbid"`, so a model
+   naming a backend lost its ENTIRE decision — policy, widths, rationale — and
+   `_normalize_set_strategy`'s closed key set answered an operator's `developer` with a 400.
 
-   The proof is the OPERATOR half, and it is the quoted ALLOW-LIST key rather than the bare word:
-   `_normalize_set_strategy`'s closed key set is what a settable field must join, so the quoted key
-   appearing there is what shipping looks like and nothing else writes it. The bare word was the
-   first spelling and it FALSELY fired on 2026-08-19 — an unrelated comment naming
+   The two ends REFUSE DIFFERENTLY, and that asymmetry is `core/appconfig.py`'s: the operator is
+   present at the HTTP boundary and can fix a typo, so an unknown name is a 400 naming
+   `developer_switch_names()` (the one home, so the operator and the model cannot be told different
+   things are switchable); the model is not present, and a hallucinated name must not take a decision
+   or a run down, so `validate_strategy` still drops.
+
+   What the drop now also does is SAY SO — the defect that comment already described and that adding
+   a producer made reachable. A refused name rides in its own `developer_refused` key (never in
+   `developer`, which would be the very claim it refuses) and `_prepare_strategy_developer` lifts it
+   into the SAME `developer_application` receipt the factory refusal uses, under `reason_code:
+   "unknown_backend"`. Before, the decision kept its rationale ("switch developer to agentless") with
+   no `developer` and no receipt of any kind: a history that read as a switch that happened.
+   `tests/test_strategist_developer_switch.py` drives all of it; `test_strategy_field_registry.py`
+   caught the two halves this change had to move — `_assemble_strategy` must copy the field, and
+   `developer` had to leave `NOT_LLM_PROPOSABLE`.
+
+   The old proof was the OPERATOR half, as the quoted ALLOW-LIST key rather than the bare word:
+   `_normalize_set_strategy`'s closed key set is what a settable field must join. The bare word was
+   the first spelling and it FALSELY fired on 2026-08-19 — an unrelated comment naming
    `_finalize_developer_footprint` satisfied it within the hour. That is the substring-pin failure
    mode this repo already tracks under the slug `review-guard-substring-pin`, reaching the index
    itself: a proof whose literal is a common word is satisfiable by PROSE, so an `absent:` proof
@@ -4591,8 +4609,26 @@ idea it rejects is never run, so nothing on disk says whether it would have work
 `score.py`'s consistency field can ever exist for it.
 proof:absent:extract_critic@looplab/judgebench/__main__.py
 
-OPEN[torch-oom-markers-miss-the-allocator-body]
-proof:absent:PYTORCH_CUDA_ALLOC_CONF@looplab/engine/triage.py — `_TORCH_OOM_MARKERS` lists the
+**[CLOSED 2026-09-03 — the marker was STALE, and the way it was stale is worth keeping.]** Its
+subject no longer exists: `_TORCH_OOM_MARKERS` and `_is_torch_oom` were DELETED on 2026-08-20 (see
+the note that stands in their place at `engine/triage.py`, kept so nobody reinstates them from the
+corpus win they really did produce), and `oom` became answer-only — no engine path mints it and the
+diagnostician, which reads the whole stage log and must cite what it stood on, decides. So
+"lengthen the marker list with the allocator body" was no longer a fix for anything.
+
+Note HOW the marker survived that. Its falsifier was `absent:PYTORCH_CUDA_ALLOC_CONF@triage.py`, and
+that literal is absent — not because the item is open, but because the entire rung it describes was
+removed. An `absent:` proof cannot tell "not implemented yet" from "the subject was deleted", which
+is the one blind spot of the ladder in CLAUDE.md: prefer a predicate over the FIX'S OWN SYMBOL, and
+where the honest fix might be a DELETION, expect to re-derive rather than trust the green.
+
+What the item measured is not lost and is tracked where it belongs: not one of the 122 recorded
+tails carries a marker at all, i.e. the whole win of any text rule is the WINDOW it is handed, and
+the durable 500-char tail is `oom-evidence-not-in-repair-text`'s subject. `judgebench/triage_score.py`
+keeps `_FROZEN_TORCH_OOM_MARKERS` as a deliberately frozen 2026-08-20 snapshot for the bench's
+incumbent arm; it is evidence about a deleted rule and must not be edited.
+
+The original text, for the record: `_TORCH_OOM_MARKERS` listed the
 EXCEPTION NAMES (`torch.OutOfMemoryError`, `CUDA out of memory`) and none of the allocator's message
 BODY, so a capture truncated past the exception line — the common shape when a chatty stage pushes
 the diagnosis out of the clamp — is invisible to it. Measured on `failure_triage.v1`:

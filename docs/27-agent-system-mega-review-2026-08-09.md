@@ -246,10 +246,14 @@ Research only.
 > - **OPEN[prompt-governance-has-no-typed-registry]** repo onboarding joined the store, but the
 >   additive typed registry the row asks for does not exist, so Genesis, assistants, reports, monitors
 >   and stewards keep separate prompt families. proof:absent:PromptDefinition@looplab/core/prompts.py
-> - **OPEN[developer-backend-switch-not-exposed-to-the-operator]** the P2 product choice, re-derived:
->   the operational gap is fixed, but nothing in `serve/` names the developer-switch vocabulary, so the
->   capability is still neither exposed through governance nor retired.
->   proof:absent:developer_switch_names@looplab/serve
+> - **[closed 2026-09-03 — `serve/control_validation.py::_normalize_set_strategy` accepts
+>   `strategy.developer` and validates it against `core/config.py::developer_switch_names()`, the one
+>   home the Strategist's own `available_developers` is derived from, so the operator and the model
+>   cannot be told different things are switchable. An unknown name is a 400 NAMING the valid set
+>   rather than a silent drop: the operator is present here and can fix a typo, which is the
+>   asymmetry `core/appconfig.py` already draws. The model half shipped in the same change
+>   (`strategist-developer-field`) — `_StrategyOut.developer` plus a durable receipt for the drop
+>   `validate_strategy` makes. `tests/test_strategist_developer_switch.py` drives both ends.]**
 > - **OPEN[auto-distilled-skills-outside-authoring]** the P2 remaining product gap: the Authoring
 >   surface's roots are `prompts`/`skills`/`knowledge` off `Settings`, so auto-distilled
 >   `<memory_dir>/skills/` candidates stay hidden until cross-task promotion with no first-party

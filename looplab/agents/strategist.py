@@ -267,6 +267,19 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     dev = strat.get("developer")
     if isinstance(dev, str) and dev in ctx.available_developers:
         out["developer"] = dev
+    elif isinstance(dev, str) and dev:
+        # SAY THAT IT WAS DROPPED (2026-09-03). Everything above is the reason: the drop happens
+        # before `_prepare_strategy_developer` runs, so its `refused` receipt cannot fire for a name
+        # it never receives, and the durable decision then carries the rationale ("switch developer
+        # to agentless") with no `developer` and no receipt of any kind — a history that reads as a
+        # switch that happened. That was tolerable while nothing could PRODUCE the field; adding the
+        # producer above makes it reachable, so the refusal is recorded in the same breath.
+        #
+        # A separate key, not `developer`: writing the requested name into the field would be the
+        # very claim this refuses. `_record_strategy` lifts it into the same `developer_application`
+        # receipt shape the factory refusal uses, so one reader answers "what happened to the
+        # developer this decision asked for" for every arm.
+        out["developer_refused"] = dev
     ops = strat.get("operators")
     if isinstance(ops, dict):
         clean: dict = {}
@@ -601,6 +614,18 @@ class _StrategyOut(BaseModel):
 
     policy: Optional[str] = None
     fidelity: Optional[str] = None
+    # The DEVELOPER BACKEND this decision asks for. The switch machinery below it — `validate_strategy`
+    # (which has whitelisted this key all along), `_prepare_strategy_developer`'s four refusal arms and
+    # its `developer_application` receipt — had no live producer at all: `extra="forbid"` meant a model
+    # naming one had its whole tool call rejected, and the operator's `/control` validator refused the
+    # key too. So the capability existed and could not be reached from either end.
+    #
+    # The vocabulary has ONE home (`core/config.py::developer_switch_names`) and the value is NOT
+    # constrained here: this is the model's proposal, and `validate_strategy` is the paranoid
+    # whitelist over it (`ctx.available_developers`, derived from that same home). Constraining it at
+    # the schema would make a hallucinated name reject the ENTIRE decision — its policy, its widths,
+    # its rationale — where dropping one field is the behaviour every other field here already has.
+    developer: Optional[str] = None
     novelty_stance: Optional[str] = None    # explore|balanced|exploit — novelty pressure downstream
     ablate_every: Optional[int] = None
     merge_mode: Optional[str] = None
@@ -757,6 +782,11 @@ def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
         strat["policy"] = out.policy
     if out.fidelity:
         strat["fidelity"] = out.fidelity
+    if out.developer:
+        # Copied VERBATIM: `validate_strategy` is the whitelist and the only thing entitled to
+        # refuse a name, so filtering here would hide a hallucinated backend from the receipt that
+        # exists to record exactly that.
+        strat["developer"] = out.developer
     if out.novelty_stance:
         strat["novelty_stance"] = out.novelty_stance
     if out.request_research:
