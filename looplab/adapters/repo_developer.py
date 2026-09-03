@@ -62,6 +62,39 @@ _REPO_DEV_SYSTEM_INTRO = (
     "implementation: the researcher proposed the experiment CONCEPT and "
     "hyperparameters; YOU decide how to realise it in code — which existing scripts to "
     "orchestrate, the stage structure, and how to compute + read the metric. ")
+
+# THE PLAN PHASE IS READ-ONLY AND ITS SYSTEM PROMPT SAYS THE OPPOSITE.
+#
+# `_propose_plan` builds a CompositeTools with no writer, and its user message says so in words --
+# "you CANNOT write code yet". The SYSTEM prompt above it opens with "You improve an existing
+# experiment repository by WRITING code with the write_file and edit_file tools", and the system
+# prompt is the one the model believes.
+#
+# MEASURED over the 76-run probe corpus on 2026-09-03: `write_file` is called 51 times from the
+# `plan` phase and ALL 51 error, against 716 calls from `plan_step` (which does have the tool) and
+# 15 from `card_build`. 504 of the 528 `plan` chain-roots (95.5 %) carry a system prompt naming
+# `write_file`. So one run in ten spends a turn discovering a contradiction the prompt put there.
+#
+# NOT WIRED IN YET, ON PURPOSE. The call site is one line -- `_propose_plan` would pass
+# `read_only_intro(system)` instead of `system` -- and it is left unmade because §115's arm is
+# eight probes into twenty-four and this changes what every probe is told. It ships when that arm
+# closes. Until then this function exists, is tested, and changes nothing.
+def read_only_intro(system: str) -> str:
+    """`system` with the write-tools promise replaced by the truth for a read-only phase.
+
+    Returns the string unchanged when the sentence is not there, so an operator who has overridden
+    `repo_developer_system_intro` through the prompt store gets their own text back untouched
+    rather than a silently half-rewritten one.
+    """
+    promise = ("You improve an existing experiment repository by WRITING code with the write_file "
+               "and edit_file tools (edit_file for changes to existing files, write_file for new "
+               "ones).")
+    truth = ("You improve an existing experiment repository by writing code -- but NOT in this "
+             "phase: here you can only READ, and write_file and edit_file are not available to "
+             "you. They come back in the stage after this one.")
+    return system.replace(promise, truth, 1)
+
+
 # 2026-08-07: the "THAT FILE MUST EXIST in the workspace after your edits" rule below carries exactly
 # one carve-out — "unless the operator PROTECTED an existing scorer, which you must NOT rewrite" — and
 # that sentence is only TRUE because `engine/workspace.py::seed_protected_files` materializes the

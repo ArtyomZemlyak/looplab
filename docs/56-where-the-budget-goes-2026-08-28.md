@@ -6996,3 +6996,42 @@ attention error is a red line on a clean ledger, and §112 is the record of what
 Fixed by computing `abandoned` first and excluding it from `probes`. Residue is $+0.000000 again
 and the UNNAMED line is gone. The falsifier builds an abandoned arm with TWO calls, so the old code
 would read it as one preflight plus one extra; mutating the exclusion away reddens it.
+
+## 153. The planning phase is promised a writer it does not have, in 95 % of runs, and every attempt fails
+
+Audit finding #14, re-derived with my own census over all 76 probe trees:
+
+| phase | `write_file` calls | errored |
+|---|---|---|
+| `plan_step` | 716 | 0 |
+| `card_build` | 15 | 0 |
+| **`plan`** | **51** | **51** |
+
+And **504 of the 528 `plan` chain-roots (95.5 %)** carry a system prompt that names `write_file`.
+The agent reported 51 refusals and 495 of 519; the difference is corpus drift over the four probes
+that finished between its census and mine. The contradiction is between two adjacent strings:
+
+* system — "You improve an existing experiment repository by WRITING code with the write_file and
+  edit_file tools (edit_file for changes to existing files, write_file for new ones)."
+* user, immediately below it — "This is the PLANNING stage. You can READ and inspect the repo …
+  but you CANNOT write code yet."
+
+The system prompt wins about one run in ten, and the run pays a turn to find out.
+
+`read_only_intro()` in `adapters/repo_developer.py` is the repair: it swaps that one sentence for
+the truth and returns foreign text unchanged, so an operator's own intro is never half-rewritten.
+
+**It is not wired in.** The call site is one line inside `_propose_plan`, and it is deliberately
+left unmade: §115's arm is eight probes into twenty-four and this changes what every probe is told.
+`tests/test_the_plan_phase_is_not_promised_a_writer.py` pins the function's behaviour (mutated
+three ways — blunt token swap, replace-everywhere, discard-the-rest — each reddens) and carries a
+fourth test that FAILS the day the call site is made, so the held-back repair cannot be quietly
+forgotten and cannot be quietly shipped either.
+
+Also re-derived this sweep, without a conclusion attached: **1,891 calls to fifteen tools whose
+store is structurally empty** on a single-run, no-dataset benchmark (`list_sibling_runs` 397,
+`cross_run_search` 325, `data_schema` 315, `list_all_runs` 252, `data_profile` 174, `read_asset`
+155 …). The agent's count is 1,869 — the same population. It also claims only one of them ever
+returns a body; my emptiness test is a length heuristic and disagrees on three tools, so I am
+recording the call counts, which we agree on, and not the emptiness claim, which I have not
+measured properly.
