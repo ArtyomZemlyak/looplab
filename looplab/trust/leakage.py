@@ -215,9 +215,26 @@ def temporal_leakage(train_timestamps: list[float], test_timestamps: list[float]
         return {"detector": "temporal_leakage", "leak": False, "overlap": 0, "checked": False,
                 "reason": "no finite timestamps to compare"}
     cutoff = min(test_finite)
-    overlap = sum(1 for t in train_finite if t >= cutoff)
+    # STRICTLY AFTER the cutoff, not at it. `t >= cutoff` flags a train row whose stamp EQUALS the
+    # first test stamp, and on a coarse clock that is the ordinary case rather than a leak: a daily
+    # or hourly stamp puts the last train row and the first test row in the same bucket for every
+    # split made on a real calendar boundary. This detector is WIRED — `engine/audit.py::_leakage_
+    # verdicts` returns `leak=True` on it and the trust gate aborts — so the equality made a coarse
+    # split unrunnable while the split it describes is correct: nothing in a same-bucket train row is
+    # information from the future, because the bucket is the resolution of the clock, not an ordering.
+    #
+    # A GENUINE overlap survives: a train row strictly after the first test stamp is still counted,
+    # which is every case where the split really interleaves. The direction of the change is the safe
+    # one for the one thing this cannot know — whether the stamps are exact instants or buckets —
+    # because the alternative it replaces reported a leak it could not distinguish from a tie.
+    #
+    # `ties` is recorded rather than dropped: a split whose boundary bucket holds train rows is worth
+    # SAYING, and an operator on an exact-instant clock reading `ties: 4000` is looking at a split
+    # that really does share instants. It is a fact on the verdict, never a leak.
+    overlap = sum(1 for t in train_finite if t > cutoff)
+    ties = sum(1 for t in train_finite if t == cutoff)
     return {"detector": "temporal_leakage", "leak": overlap > 0,
-            "cutoff": cutoff, "overlap": overlap}
+            "cutoff": cutoff, "overlap": overlap, "ties": ties}
 
 
 def code_leakage_findings(src: str) -> list[dict]:

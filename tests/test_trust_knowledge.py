@@ -34,6 +34,45 @@ def test_temporal_leakage():
     assert not clean["leak"]
 
 
+def test_a_train_row_AT_the_cutoff_is_a_tie_and_not_a_leak():
+    """THE OFF-BY-ONE. `t >= cutoff` flagged a train row whose stamp EQUALS the first test stamp, and
+    on a coarse clock that is the ordinary case: a daily or hourly stamp puts the last train row and
+    the first test row in the same bucket for every split made on a real calendar boundary.
+
+    This detector is WIRED — `engine/audit.py::Engine._leakage_verdicts` returns True on it and the
+    trust gate aborts the run — so the equality made a correct coarse split unrunnable.
+
+    MUTATION: restore `>=` -> this reports leak=True and the run aborts.
+    """
+    boundary = temporal_leakage(train_timestamps=[1, 2, 5], test_timestamps=[5, 6, 7])
+    assert boundary["leak"] is False
+    assert boundary["overlap"] == 0
+    assert boundary["ties"] == 1, "the tie is RECORDED, not dropped — it is a fact worth saying"
+
+
+def test_a_real_overlap_past_the_cutoff_is_still_a_leak():
+    """The strictness that had to survive: a train row STRICTLY after the first test stamp is
+    information from the future however coarse the clock is.
+
+    MUTATION: relax to `t > max(test)` or drop the check -> a genuinely interleaved split scans
+    clean, which is the dangerous direction for a trust gate.
+    """
+    interleaved = temporal_leakage(train_timestamps=[1, 5, 6, 9], test_timestamps=[5, 6, 7])
+    assert interleaved["leak"] is True
+    assert interleaved["overlap"] == 2, "6 and 9 are past the cutoff; the 5 is the tie"
+    assert interleaved["ties"] == 1
+
+
+def test_a_whole_day_bucket_split_runs():
+    """The shape the fix is for, at realistic scale: day-resolution stamps split on a day boundary,
+    where every row of the last training day ties the first test day."""
+    day = 86_400.0
+    train = [day * 10 + i for i in (0, 0, 0)] + [day * 11] * 4
+    test = [day * 11] * 3 + [day * 12]
+    verdict = temporal_leakage(train_timestamps=train, test_timestamps=test)
+    assert verdict["leak"] is False and verdict["ties"] == 4
+
+
 def test_a_nan_timestamp_cannot_hide_a_real_temporal_leak():
     """NaN comparisons are all False, so a LEADING NaN keeps `min()` at NaN and then every
     `t >= cutoff` is False — the detector reports leak=False on data that genuinely overlaps. A

@@ -415,12 +415,34 @@ def load_run_settings(run_dir, *, strict: bool) -> Settings:
       diagnostic reaches the endpoint recorded for that run. An absent or unreadable snapshot must
       not stop someone from reading an old or partially-written run, so it degrades to ambient.
 
-    An absent snapshot is ambient Settings under BOTH modes: `strict` is about corruption, not about
-    requiring the file. Callers that need the file to exist check for it themselves and say why
-    (`_finalization_recovery_inputs` names both snapshots in one message).
+    An ABSENT snapshot is ambient Settings for a run that does not exist yet, and a REFUSAL under
+    `strict` for one that does. That asymmetry is the 2026-09-03 fix and the paragraph it replaces
+    ("an absent snapshot is ambient Settings under BOTH modes: `strict` is about corruption, not
+    about requiring the file") was the defect its own bullet above describes: all three `strict=True`
+    callers — `resume`, `finalize` and the finalization recovery — reach this only AFTER
+    `_require_run_dir` has proved `events.jsonl` exists, so for them the file is not optional. With
+    it absent they took a fresh `Settings()`, whose `require_approval` is `False` and is read LIVE
+    (`engine/orchestrator.py::Engine.__init__` -> the approval gate in the spine), so a paused
+    approval-pending run could be finished with no approval — by deleting one file. `trust_mode`,
+    `eval_trust_mode`, `confirm_*` and `backend` degrade the same way, silently.
+
+    The discriminator is the run's own EVENT LOG, not the run directory: a bare `--out` path with no
+    log is a fresh run whose snapshot has not been written yet (this function is called before the
+    engine writes one), and refusing there would break `run` itself. `run_dir=None` is the same case.
+
+    Callers that need the file to exist for a REASON OF THEIR OWN still check and say so
+    (`_finalization_recovery_inputs` names both snapshots in one message); this refusal is about the
+    settings, so it names the settings that would have been lost.
     """
     snap = Path(run_dir) / "config.snapshot.json" if run_dir is not None else None
     if snap is None or not snap.exists():
+        if strict and snap is not None and (Path(run_dir) / "events.jsonl").exists():
+            raise typer.BadParameter(
+                f"{snap} is missing, but {run_dir} holds an events.jsonl — this run was started with "
+                "settings that are no longer on disk. Continuing would silently run it on defaults "
+                "(require_approval, trust_mode, eval_trust_mode, confirm_*, backend, ...), which can "
+                "finish an approval-pending run with no approval. Restore the snapshot from a backup, "
+                "or copy one from another run of the same task and edit it.")
         return Settings()
     if strict:
         return _settings_from_config_snapshot(snap)
