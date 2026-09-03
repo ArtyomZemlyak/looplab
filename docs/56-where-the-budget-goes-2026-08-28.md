@@ -7932,3 +7932,65 @@ call, never count a ceiling death, count every unstreamed call as one).
 Nothing in the engine is touched. Raising `proxy_read_timeout` or refusing the unstreamed fallback
 are both real repairs and both change what every probe experiences; §115's arm is twenty probes into
 twenty-four.
+
+## 174. All four ceiling deaths are one probe, and the reason the engine gives for them is wrong
+
+### 174.1 The two probes that finished
+
+| probe | arm | TEST | nodes (train) | best/last | before/after | `eval_train` | reference | node 0 | champion |
+|---|---|---|---|---|---|---|---|---|---|
+| oldCK10 | pre-§99 | **216.0164** | [27.12, **216.29**, 20.07] | 10.78× | 39 % / 0 % | 38 | **3.0 %** | no kernel | 57L kernel |
+| newCK10 | shipped | **195.2931** | [21.14, 31.58, **193.87**] | 1.00× | 18 % / **18 %** | 22 | **18.5 %** | no kernel | 63L kernel |
+
+Train→test 0.999 and 1.007. `oldCK10` put **53.1 %** of its dollar into `plan_step` — the highest
+share of the arm — and made 38 `eval_train` calls, also the most. `newCK10` is the opposite shape:
+22 `eval_train`, only 18 % spent before its first node, and **18 % spent after its last**, because
+node 3 died on the spend ceiling (`$1.0044 of the $1.0000`) — the tenth run in the corpus to end
+that way, and the second in this arm.
+
+Their reference use brackets the whole corpus: **3.0 %** against **18.5 %**, the lowest and (with
+`newCK7`'s 15.8 % import / 21.1 % `is_solution`) among the highest ever measured, in the same batch,
+on the same task. §163.2's null holds — over 57 probes r = −0.123, p = 0.312 — and this pair is a
+clean illustration of why: the run that barely touched the reference scored 216, the one that leaned
+on it hardest scored 195.
+
+### 174.2 The ceiling deaths are one probe, and the engine's explanation does not survive
+
+`nginx-300s` went 2 → **4** since the last sweep. All four are **`oldCK9`**, at 19:20:53, 19:28:11,
+19:44:11 and 19:50:36 — twenty minutes of wall clock lost inside one run, roughly one every seven
+minutes.
+
+`oldCK9` is not like its batch-mates:
+
+| probe | calls | unstreamed | share |
+|---|---|---|---|
+| **oldCK9** | 301 | **58** | **19.3 %** |
+| oldCK10 | 327 | 13 | 4.0 % |
+| newCK10 | 341 | 6 | 1.8 % |
+| newCK9 | 275 | 2 | 0.7 % |
+
+Four probes launched in one command, on one endpoint, in the same hour, and one of them takes the
+non-streaming fallback **twenty-eight times more often** than another.
+
+**The engine's stated reason for the fallback is that big requests stall**: `core/llm.py` says a
+proxied endpoint "can stall MID-STREAM on big (code-gen) requests while answering the same request
+fine without SSE". That is testable and it fails here. Completion tokens on unstreamed calls:
+
+* corpus streamed median **458**, unstreamed median **396** — the unstreamed calls are *shorter*;
+* `oldCK9`'s 54 priced unstreamed calls have a median completion of **486**, against its own overall
+  median of 424 — ordinary, nowhere near its p90 of 10,029.
+
+So whatever is stalling `oldCK9`'s streams, it is not the size of what it was generating. I have no
+measurement of what it is, and I am not going to name one.
+
+**What shipped is attribution.** The line said `4 of them cut at the 300 s nginx ceiling` — a count,
+which reads as four runs losing five minutes each. It now says:
+
+```
+streaming: 138 of 10332 calls went out UNSTREAMED (1.3 %) -- 4 of them cut at the 300 s nginx ceiling (oldCK9 x4)
+  unstreamed by arm: oldCK9 58/301 (19 %), oldCK8b 22/359 (6 %), oldCK10 13/327 (4 %)
+```
+
+The test now requires the arm in both halves, and two mutations redden it (drop either attribution).
+A concentration in one run is a different fact from a rate across four, and only one of them points
+at a probe worth looking at.

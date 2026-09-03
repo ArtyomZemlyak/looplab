@@ -531,7 +531,10 @@ def test_the_unstreamed_share_and_its_ceiling_deaths_are_reported(tmp_path):
     r = _run(root, port, "--max-residue", "0.01")
     srv.close()
     assert "2 of 4 calls went out UNSTREAMED (50.0 %)" in r.stdout, r.stdout + r.stderr
-    assert "1 of them cut at the 300 s nginx ceiling" in r.stdout, r.stdout
+    assert "1 of them cut at the 300 s nginx ceiling (p1 x1)" in r.stdout, (
+        "the ceiling deaths are counted but not attributed; four in one run and one each in four "
+        "runs are different facts")
+    assert "unstreamed by arm: p1 2/" in r.stdout, r.stdout
 
 
 def test_an_all_streamed_ledger_says_so(tmp_path):

@@ -163,10 +163,13 @@ def unstreamed_exposure(ledger_path: str, since: float = 0.0) -> dict:
     so this is the per-call fallback, not the client-lifetime disable in the same comment.
     """
     total = unstreamed = ceiling = 0
+    by_arm: collections.Counter = collections.Counter()
+    ceiling_arm: collections.Counter = collections.Counter()
     try:
         fh = open(ledger_path, encoding="utf-8", errors="replace")
     except OSError:
-        return {"total": 0, "unstreamed": 0, "ceiling": 0}
+        return {"total": 0, "unstreamed": 0, "ceiling": 0,
+                "by_arm": collections.Counter(), "ceiling_arm": collections.Counter()}
     with fh:
         for line in fh:
             line = line.strip()
@@ -181,9 +184,12 @@ def unstreamed_exposure(ledger_path: str, since: float = 0.0) -> dict:
             total += 1
             if not row.get("stream"):
                 unstreamed += 1
+                by_arm[str(row.get("arm") or "?")] += 1
                 if _failure_kind(row) == "nginx-300s":
                     ceiling += 1
-    return {"total": total, "unstreamed": unstreamed, "ceiling": ceiling}
+                    ceiling_arm[str(row.get("arm") or "?")] += 1
+    return {"total": total, "unstreamed": unstreamed, "ceiling": ceiling,
+            "by_arm": by_arm, "ceiling_arm": ceiling_arm}
 
 
 def endpoint_health(ledger_path: str, since: float = 0.0) -> dict:
@@ -423,12 +429,23 @@ def main(argv: list[str]) -> int:
               + (("arms whose LAST call was refused: "
                   + ", ".join(f"{a} ({st}, {ag:.0f} s ago)" for a, ag, st in bad)) if bad
                  else "every arm's last call was a 200"))
+    calls_by_arm = m_calls
     ex = unstreamed_exposure(os.path.join(a.bench_root, "meter", "meter.jsonl"), since)
     if ex["total"]:
         print(f"  streaming: {ex['unstreamed']} of {ex['total']} calls went out UNSTREAMED "
               f"({100 * ex['unstreamed'] / ex['total']:.1f} %)"
-              + (f" -- {ex['ceiling']} of them cut at the 300 s nginx ceiling" if ex["ceiling"]
-                 else "; none cut at the 300 s ceiling"))
+              + (f" -- {ex['ceiling']} of them cut at the 300 s nginx ceiling ("
+                 + ", ".join(f"{a} x{n}" for a, n in ex["ceiling_arm"].most_common()) + ")"
+                 if ex["ceiling"] else "; none cut at the 300 s ceiling"))
+        # WHOSE, NOT HOW MANY. All four ceiling deaths of 2026-09-03 were `oldCK9`, whose 58 of 301
+        # calls (19.3 %) went out unstreamed against 0.7 %, 1.8 % and 4.0 % for the three probes
+        # launched beside it. A count hides a concentration, and a concentration is a different
+        # fact: one run losing twenty minutes, not four runs losing five.
+        worst = [f"{a} {n}/{by} ({100 * n / by:.0f} %)"
+                 for a, n in ex["by_arm"].most_common(3)
+                 for by in (calls_by_arm.get(a, 0) or 0,) if by]
+        if worst:
+            print(f"    unstreamed by arm: {', '.join(worst)}")
     residue = gap - preflight * 0.00000196 - sum(abandoned.values())
     print(f"  RESIDUE ${residue:+.6f} after the named parts")
     # A CALL IN FLIGHT IS NOT A LEAK. The meter writes its row when the upstream request completes;
