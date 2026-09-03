@@ -7357,3 +7357,50 @@ best. Here: "cap the call" would have killed 265 productive generations. Both fi
 waste correctly and neither measured the counterfactual — what the proposed rule would have cut
 that was not waste. That is the question to put to each of the remaining findings before acting on
 any of them, and it is cheap: every one of these replays took a single pass over the corpus.
+
+## 162. The read page is small on purpose, and enlarging it loses about $24
+
+Audit finding #6 says the 4,000-char tool-result cap "turns every file read into a paginated
+conversation" and that 17.1 % of turns exist only to fetch the next page. The pagination is real —
+**9,356 file-read calls over 80 runs, 43.4 % of them carrying a `start_line`, and 92 % of them on
+`(run, file)` pairs read three or more times** — but the mechanism in the finding is not the one in
+the code, and the remedy loses money.
+
+**Mechanism.** No file read is ever truncated by the loop cap. `reposcout.py:41` sets
+`_MAX_READ = RESULT_CAP - 400`, and `_paginate`'s docstring says why, in its own words: the marker
+"must always fit UNDER the agent loop's RESULT_CAP". So `read_file` pages itself at 3,600 chars and
+ends each page with a resume marker naming the next `start_line`. The largest read result in the
+corpus is 3,672 chars. There is no `…[truncated by the tool-result cap]` note on any of them — the
+642 truncations the audit found are all `web_fetch` HTML, exactly as its finding #22 says. The
+constant is the same; the route is a designed page, not a severed result.
+
+*(And the size I measured is itself preview-capped: spans record `_trace_preview(result)`, which
+caps at `RESULT_CAP` before the real cap is applied — finding #27a. Measuring "how many results hit
+the cap" from spans returns 0 by construction. The `start_line` counts above do not depend on it.)*
+
+**The remedy, with both sides counted.** Replaying every read against a bigger page:
+
+| page | read calls | turns saved | $ of re-send saved | extra content carried | $ to carry it | net |
+|---|---|---|---|---|---|---|
+| ×2 (7,200) | 9,356 → 5,008 | 4,348 | 10.72 | 6.7 MB | 34.52 | **−23.80** |
+| ×4 (14,400) | → 2,877 | 6,479 | 15.97 | 7.7 MB | 39.73 | **−23.76** |
+| ×8 (28,800) | → 1,857 | 7,499 | 18.49 | 8.4 MB | 43.29 | **−24.80** |
+
+A bigger page fetches content the model did not ask for, and §152's measurement is what makes that
+expensive: **84.7 % of prompt tokens are a byte-identical re-send at a flat $0.14/Mtok**, so every
+unrequested byte is paid for again on every following turn. Assumptions, stated so the sign can be
+attacked: file size taken as the most any single run ever read of that path (a LOWER bound, so the
+extra is understated); extra content carried through half a run's generations (mean run: 296); four
+chars per token.
+
+The break-even is the falsifiable part. **×2 pays off only if the extra content is carried through
+fewer than 46 later generations** — about 15 % of an average run. A page enlarged for a file read in
+the last sixth of a run would pay; enlarged in general it does not.
+
+**Third audit recommendation in three sweeps reversed by its own counterfactual** — §156's budget
+gate, §161's call deadline, and now this. All three measured a real cost correctly. None asked what
+the fix would destroy. The pattern is sharp enough now to state as a rule for the remaining
+findings: *a number that names waste is a hypothesis about a change, and the change has two columns.*
+
+Not touched, as before: `RESULT_CAP` is a constant every probe reads, and §115's arm is eight probes
+into twenty-four.
