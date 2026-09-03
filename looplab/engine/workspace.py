@@ -26,6 +26,63 @@ if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestr
     from looplab.engine.orchestrator import Engine
 
 
+# THE NODE'S OWN BUILT SOURCE, and it is deliberately NOT one of the two fingerprints below.
+# `_dir_fingerprint` (triage.py) answers "git HEAD, else (relpath, size, mtime_ns)", and BOTH of its
+# branches are wrong for comparing a built node against the parent it claims to modify:
+#
+#   * a node workspace IS a git repo (`.git`, `.dvc`, `.gitmodules` are seeded into every one), so
+#     the git branch fires and returns HEAD — blind to the uncommitted build edits that ARE the
+#     experiment. `substrate_fingerprint` below says the same thing about the same blindness:
+#     "a record that is confidently wrong, which is worse than one that says nothing".
+#   * the fallback keys on `mtime_ns`, so two separately-created workspaces ALWAYS differ. A guard
+#     built on it fires never.
+#
+# So this reads CONTENT, and only of the files a proposal can change. `experiments/` holds model
+# checkpoints (hundreds of MB per node) and is written by the train, not by the build; the rest of
+# the skip list is caches and editor droppings. MEASURED on e5small-dr-unified-v12: two of forty-
+# seven parent edges across three runs are nodes whose source is byte-identical to their parent's,
+# each having paid a full train to change nothing (#160).
+_SOURCE_DIGEST_SUFFIXES = (".py", ".yaml", ".yml", ".json", ".toml", ".cfg", ".ini", ".sh")
+_SOURCE_DIGEST_SKIP_DIRS = frozenset({
+    "experiments", ".ipynb_checkpoints", "__pycache__", ".git", ".dvc", "node_modules",
+    ".pytest_cache", ".mypy_cache", "wandb", "outputs",
+})
+
+
+def source_tree_digest(root) -> str:
+    """A content digest over a node workspace's SOURCE files, or "" when there is nothing to read.
+
+    Deterministic and order-independent: every eligible file contributes `relpath\0sha256` to one
+    sorted list, which is then hashed. Two workspaces agree iff every source file agrees, so a
+    build that changed nothing is exactly a digest collision with its parent.
+
+    Best-effort by construction — an unreadable file contributes its path and the marker `unread`
+    rather than raising, because this is a diagnostic and may never cost a node its evaluation.
+    """
+    import hashlib
+    from pathlib import Path
+    base = Path(root)
+    if not base.is_dir():
+        return ""
+    rows: list[str] = []
+    for path in base.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(base)
+        if any(part in _SOURCE_DIGEST_SKIP_DIRS for part in rel.parts[:-1]):
+            continue
+        if path.suffix.lower() not in _SOURCE_DIGEST_SUFFIXES:
+            continue
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except Exception:  # noqa: BLE001 - a diagnostic may never raise on a node's behalf
+            digest = "unread"
+        rows.append(f"{rel.as_posix()}\0{digest}")
+    if not rows:
+        return ""
+    return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8")).hexdigest()
+
+
 class WorkspaceSeeder:
     """The engine's workspace seeding / materialization cluster. See the module docstring for
     the `self._e` (engine handle) convention."""

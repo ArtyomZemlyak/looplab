@@ -74,6 +74,54 @@ def test_the_predicate_separates_a_working_exporter_from_a_failing_one(snapshot,
     assert trace_export_unhealthy(snapshot) is unhealthy, why
 
 
+@pytest.mark.parametrize("reason, unhealthy", [
+    ("crashed", True),          # an exception escaped the worker loop
+    ("receipt_failed", True),   # the loss receipt itself could not be written
+    ("abandoned", True),        # terminal ownership released: this process writes no more spans
+    ("idle", False),            # parked with nothing queued; the next submit restarts it
+    ("retired", False),         # handed the file off; the next submit restarts it
+    ("", False),                # never stopped
+])
+def test_a_worker_that_died_badly_is_published_even_with_nothing_dropped(reason, unhealthy):
+    """The case this whole row exists for, and the predicate was SILENT on it until 2026-09-03.
+
+    `core/tracing.py::TRACE_WORKER_STOP_REASONS` landed after the predicate did. Before it, the
+    five terminal paths were byte-identical from the outside, so a crashed worker with an empty
+    queue and zero drops looked exactly like a worker resting between submits — which is v12's
+    shape: no receipts, no drops, no thread, and no row. Splitting routine parking (`idle`,
+    `retired`) from span loss (`crashed`, `receipt_failed`, `abandoned`) is what makes the silence
+    reportable.
+    """
+    snapshot = _snapshot(worker_alive=False, worker_stop_reason=reason)
+    assert trace_export_unhealthy(snapshot) is unhealthy
+
+
+def test_the_stop_reason_is_read_from_the_snapshot_the_exporter_actually_returns():
+    """Non-vacuity against a key that does not exist: `metrics()` must really carry this.
+
+    A predicate keyed on a field the exporter never reports would pass every test above and fire
+    never in production — the exact shape of a guard that cannot fail.
+    """
+    import pathlib
+    import tempfile
+
+    from looplab.core.tracing import AsyncJsonlSpanExporter
+
+    exporter = AsyncJsonlSpanExporter(
+        pathlib.Path(tempfile.mkdtemp()) / "spans.jsonl", run_id="probe")
+    keys = set(exporter.metrics())
+    assert "worker_stop_reason" in keys
+    assert {"stopped_crashed", "stopped_idle"} <= keys
+
+
+def test_the_denylist_names_only_reasons_the_exporter_can_produce():
+    """A word in the denylist that nothing emits is a decoy, the same rule the registry states."""
+    from looplab.core.tracing import TRACE_WORKER_STOP_REASONS
+    from looplab.events.types import _TRACE_WORKER_STOPS_THAT_LOSE_SPANS
+
+    assert _TRACE_WORKER_STOPS_THAT_LOSE_SPANS <= set(TRACE_WORKER_STOP_REASONS)
+
+
 def test_the_predicate_refuses_a_non_snapshot_rather_than_raising():
     # The publisher calls this on whatever `metrics()` returned; a diagnostic read may never
     # take the run loop down with it.
