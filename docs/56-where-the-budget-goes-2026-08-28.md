@@ -6170,3 +6170,41 @@ older forty-nine has to say so.
 
 No result is claimed in this section. It exists so that the next one cannot quietly pick its
 statistic.
+
+## 134. The third batch's first nodes came in at 28, 23 and 9 — same harness, same cards
+
+Same code, same two card fingerprints (`fd23da29` / `16426855`, verified at launch), same box, same
+lanes. Three batches of `edge_expansion` probes, their first evaluated nodes:
+
+| batch | first nodes | median | endpoint tok/s (median) |
+|---|---|---|---|
+| 1 | 269, 250, 250, 173, 165, 160, 21 | **172.9** | 107.2 (n = 2,226) |
+| 2 | 267, 259, 213, 199, 167, 144, 26 | **198.6** | 111.9 (n = 2,209) |
+| **3 (running)** | **28, 23, 9** | **23.1** | 97.0 (n = 393) |
+
+`expEEi`'s 8.91 is the lowest first node this bench has ever recorded, and it is a TREATMENT probe.
+
+**Throughput barely moved.** 97.0 against 107–112 is about 10 % — not the kind of shift §101
+measured between the corpus and today (a third). So whatever is different, it does not show up in
+tokens per second, which is the only endpoint property this bench can see.
+
+### What this does to §114
+
+§114 said the harness repairs moved the first node: 10 of 11 above 150 against 5 of 27 in the
+corpus, p = 0.0000187, and §115 named the unresolvable confound — different days, shared endpoint.
+Batch 3 is the natural experiment that confound asked for, and it is running now. **Same harness,
+first nodes at 23.**
+
+Under batches 1–2's rate (10 of 14 at or above 150), three consecutive low ones have probability
+(4/14)³ ≈ **0.023**. Under the CORPUS's rate (5 of 27), the same three have probability ≈ **0.54** —
+i.e. entirely ordinary. Three points cannot separate those, but the direction is clear enough to
+state a prediction rather than wait for one:
+
+**If batch 3's remaining first nodes stay in the low cluster, §114 is dead and §115's confound was
+the answer — the endpoint moved, not our repairs.** If they come in high, batch 3 was a run of bad
+luck at 2.3 %.
+
+Written before the fourth probe of the batch has an evaluated node, for the same reason §133 was.
+
+*Everything else clean:* four probes live, residue $0.000000, zombies 0, seven baselines, no
+`PermissionError`.
