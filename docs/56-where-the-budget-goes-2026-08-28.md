@@ -7243,3 +7243,45 @@ it; an entry pointing at itself reddens it; removing the skip from `_iter_marker
 original duplicate test. The first attempt at the "hides a live item" mutation used
 `probe_summary.py` and **passed** — that file declares no markers at all, so the check had nothing
 to walk. A mutation that exercises nothing proves nothing; the second one names a file with eight.
+
+## 159. The check fix moved false-GREEN from 5.3 % to 1.1 %, and that is p = 0.14
+
+Two more audit findings re-derived, and the second one changes its own label.
+
+**#30, zeros among evaluated nodes.** My census: **9 of 199 (4.5 %)**, against the agent's 9 of 194
+(4.6 %) — the same nine, my denominator larger by the nodes added since. By task:
+`edge_expansion` 7/161 (4.3 %), `pde_heat1d` 2/17 (11.8 %), `discrete_log` 0/21.
+
+Worth stating against point 2 of the sweep list, which is where a zero has to be triaged: **every
+one of the nine carries `eval_seconds` between 7.6 and 60.7 s.** None is the ~0.1 s signature of a
+ruler refusal. These are nine solvers that ran and scored nothing, not nine evaluations that never
+happened. (The 7.6 s outlier is `remEE6` node 3, the Cython build failure.)
+
+**#18, "the check fix took."** The measurement holds. Splitting every evaluated node by whether its
+probe's `looplab` commit contains `103c4b1e`, and asking whether the last `check` before the
+evaluation said ok while the node then scored 0:
+
+| | nodes | false GREEN | false RED |
+|---|---|---|---|
+| before the fix | 76 | **4 (5.3 %)** | 1 |
+| after the fix | 90 | **1 (1.1 %)** | 1 |
+
+The agent reported 4/73 and 1/83; same nodes, same direction, my denominators larger.
+
+**But the label "VERIFIED" does not survive its own arithmetic.** One-sided Fisher on that table is
+**p = 0.1355**. At these rates the split needs about **210 post-fix nodes** to reach p < 0.05 —
+another ~120 nodes, which at three nodes a probe is roughly forty probes and forty dollars. The
+direction is right, the effect is not established, and the honest line is "consistent with a real
+improvement, not yet distinguishable from noise."
+
+This matters for §115's arm and it does not change it: the arm's primary outcome is the final TEST
+score stratified by batch (§146), not the false-GREEN rate, and it was never powered for the
+latter. What this adds is the number to quote when someone asks whether the checker repair is
+proven — it is not, and 24 probes will not prove it either.
+
+*And a note on how nearly this went the other way.* The first Fisher I computed returned
+**p = 0.98** and I was one keystroke from writing "no effect, possibly harmful": I had summed the
+hypergeometric tail from 0 to the observed count instead of from the observed count up — the
+probability that the OLD checker did better, which is the answer to a question nobody asked. The
+tell was that a 5× rate difference cannot sit at p = 0.98 in either direction. A one-sided test has
+two sides, and the wrong one is silent about being wrong.
