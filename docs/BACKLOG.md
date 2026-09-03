@@ -4320,14 +4320,37 @@ there is proved by comparing `canonical_json(body)` over the same corpus. Adding
 `Settings` field changes no derivation and no measurement; it changes only what a snapshot happens
 to contain. The equality is doing the job of a version check with the tool of an exactness check.
 
-OPEN[calibration-corpus-revoked-by-unrelated-settings] every preserved calibration run refuses because the expected field set is a CURRENT constant, so any new `Settings` field revokes evidence it cannot affect. proof:`present:if set(config) != expected_config_fields@looplab/search/speculation_quality.py`
+**[CLOSED 2026-09-03 — the check is DIRECTIONAL, which is what this entry's prescription reduces
+to once the rest of the protocol is accounted for.]** The entry asked for a VERSION keyed on
+`config_snapshot_schema`, and it does not need one: that marker bumps on a FORMAT change, not on
+every field addition, so it cannot tell a snapshot written before `agent_timeout` from one written
+after. What it CAN do is exactly what the entry's second clause says — "a field added later is
+absent-and-fine while a field the calibration actually READS staying absent is still fatal" — and
+that is a statement about two DIFFERENT sets, not about a version.
 
-  The shape of the fix is a VERSION, not a loosening: the expected set has to be the one that was
-  current when the evidence was written (the snapshot already stamps `config_snapshot_schema`), so a
-  field added later is absent-and-fine while a field the calibration actually READS staying absent is
-  still fatal. Do NOT simply subtract the unknown names — that turns an exactness check into a
-  no-op and the next genuinely-lossy snapshot passes. It is a receipt-protocol revision and belongs
-  with that module's owner; what this entry adds is that the cost of NOT doing it is already paid.
+  So the equality became two one-way checks:
+  * `required_config_fields` — the profile's pinned keys, the variant fields, the runtime-scope
+    document fields, and every key `_analyze_speculation_run` goes on to read by name — missing is
+    still fatal, which is the clause that stops this being the "simply subtract the unknown names"
+    no-op the entry warns against. Intersected with what a snapshot DOCUMENT can carry, because
+    `masked_snapshot()` pops the credential bindings: requiring `llm_api_key_base_url` present
+    refuses every calibration run, which is the original defect with the sign flipped, and is
+    exactly what the first cut of this did.
+  * a key THIS BINARY does not understand, present — still fatal, the same fail-closed rule
+    `core/config.py::settings_from_snapshot` applies on resume.
+
+  **The exactness that matters was never this check**, which is what makes the narrowing safe:
+  `speculation_runtime_scope_digest(config)` digests the whole snapshot document and compares it to
+  the `speculation_runtime_scope_sha256` the RUN stamped at start, consulting no current constant —
+  only the two artifacts. Every profile-pinned value is re-checked one loop down, and each key the
+  protocol reads is validated by name. `tests/test_calibration_field_skew.py` drives it, simulating
+  the skew in the honest direction (the BINARY's set grows) rather than by deleting a key from a
+  snapshot, which would also break that digest and pass for the wrong reason.
+
+  The cost this entry recorded is now spent rather than paid: `agent_timeout`, added the same day,
+  is the clearest instance of the class — a field calibration cannot be affected by (it uses the toy
+  backend and launches no coding agent) that legitimately moves the profile DIGEST, which binds the
+  complete settings map, while it must not revoke a snapshot for merely predating it.
 
 ## Three cadences that looked like defects — measured 2026-08-25, and two of my own claims were wrong
 

@@ -1099,6 +1099,15 @@ def projected_overrun_s(span_s, eta_s, wall_s) -> Optional[float]:
     return overrun if overrun > 0 else None
 
 
+# The bar an attention item must clear, as a fraction of the stage's DECLARED wall and an absolute
+# floor under it. Derived from the corpus in `stamp_projected_overrun`: 1 % admits every true
+# positive on this box (the smallest is 2.7 %) and rejects the stated noise case (40 s on a ten-hour
+# stage, 0.11 %) by an order of magnitude. The absolute floor is what keeps a SHORT stage from
+# waking an operator over a few seconds, where 1 % is not yet a meaningful quantity.
+_OVERRUN_ALERT_FLOOR_FRACTION = 0.01
+_OVERRUN_ALERT_FLOOR_S = 60.0
+
+
 def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan,
                             *, grace_cap=None) -> None:
     """Put the projection beside the verdict on the durable alert row, when there is one to put.
@@ -1122,88 +1131,56 @@ def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan,
     # …AND WHETHER ANYONE SHOULD BE WOKEN, decided HERE because this is the only place that holds
     # both facts. `projected_overrun_s` is deliberately unfiltered — it is the engine's record that
     # it knew — but a 40-second overrun on a ten-hour stage is not a thing to interrupt an operator
-    # about, and "is it big enough" has exactly one principled answer already in the tree: the
-    # deadline GRACE that will actually be granted when the wall arrives. An overrun the grace
-    # absorbs needs no human; one that exceeds it will end the node no matter who is watching.
+    # about, so there is a bar.
     #
-    # Reusing `runtime/sandbox.resolve_deadline_grace` rather than re-deriving is what keeps the two
-    # from drifting: under the AUTO sentinel it is 10% of the wall capped at 30 minutes, and a second
-    # copy of that arithmetic here would decide to wake an operator on a bar the rescue no longer
-    # uses.
+    # THE BAR IS THE PROJECTION'S OWN RESOLUTION, NOT THE DEADLINE GRACE (2026-08-30 measurement,
+    # changed 2026-09-03). It used to be `over - resolve_deadline_grace(...)`, and the argument for
+    # that read well: an overrun the grace absorbs needs no human. Two things are wrong with it and
+    # the corpus settled both.
     #
-    # KNOW WHAT THIS BAR IS, because the sentence here used to get it backwards. It read "it can only
-    # surface a real projection, never suppress one", which is true only of the `except` below — an
-    # unreadable cap resolving to no grace. The BAR ITSELF suppresses, and it suppresses against a
-    # CEILING rather than a grant: `resolve_deadline_grace` answers the most a stage could ever be
-    # given, while the seconds actually granted are `sandbox._granted_grace`, an LLM deadline judge's
-    # one-shot answer clamped by that ceiling — 0.0 for every way of not answering, and asked only
-    # once, AT the wall. So on a ten-hour stage under the shipped AUTO default there is a 30-minute
-    # band in which a real projected overrun opens no attention item, and if the judge then declines
-    # the node dies on its wall with nothing to show and the operator was never told, in the window
-    # where acting was still cheap.
+    # (1) IT SUBTRACTS A RESCUE THAT MAY NEVER BE GRANTED. `resolve_deadline_grace` answers the MOST
+    #     a stage could ever be given; the seconds actually granted are an LLM deadline judge's
+    #     one-shot answer at the wall, clamped by that ceiling, and 0.0 for every way of not
+    #     answering. So a real projected overrun inside the ceiling opened nothing, and if the judge
+    #     then declined, the node died on its wall with the operator never told — in the window where
+    #     acting was still cheap.
     #
-    # OPEN[overrun-grace-bar] the alert bar subtracts a grace CEILING that may never be granted, so a
-    # projected overrun inside it is silently suppressed. The noise it exists to stop is real (a
-    # 40-second overrun on a ten-hour stage is not worth an interrupt), so the fix is a bar keyed on
-    # the PROJECTION's own precision rather than on a discretionary rescue — see the measurement
-    # BELOW the proof line for what the corpus can and cannot say about that precision.
-    # `projected_overrun_s` is stamped unfiltered above either way, so the durable record already
-    # holds what the engine knew.
-    # proof:`present:beyond = over - max(0.0, grace)@looplab/engine/train_monitor.py`
+    # (2) IT SUBTRACTS FROM A NUMBER THAT ALREADY UNDER-STATES. `e5small-dr-unified-v11` node 3 drew
+    #     TWELVE consecutive projections (977.2 -> 1120.6 s over 9h51m) and then died:
+    #     `stage_finished train status=timeout exit=-9 seconds=36008.207` against a declared 36000 s,
+    #     at 2948/3150 steps. The projection was RIGHT that the stage would not fit and its magnitude
+    #     under-reported — at the last tick the true remaining overrun was ~1884 s against a stamped
+    #     1120.6, 59 % of it. Every one of those twelve rows carries `projected_overrun_s` and NOT
+    #     the beyond-bar field: the AUTO ceiling on a 36000 s wall is min(10 %, 30 min) = 1800 s and
+    #     every projection sat under it. The engine knew 9h12m before the kill, wrote it down twelve
+    #     times, and opened nothing. 10.0 GPU-hours.
     #
-    # WHAT THE CORPUS CAN AND CANNOT SAY, measured 2026-08-29 so the next reader starts here.
-    # Across every preserved log on this box there are 179 `train_monitor_alert` rows and exactly
-    # SIX carry a projection — all six on `e5small-dr-unified-v8` node 4's `train` stage, over 3.5
-    # hours (17:57:11 -> 21:31:22). That scarcity is the first finding: a projection needs an ETA,
-    # which needs a progress bar with a total, and 173 of 179 alerts had none.
+    # So the bar is keyed on what the MEASUREMENT can distinguish. `_OVERRUN_ALERT_FLOOR_FRACTION`
+    # (1 % of the declared wall) with `_OVERRUN_ALERT_FLOOR_S` under it admits every true positive
+    # the corpus holds — v11 node 3's projections are 2.7-3.1 % of its wall, v8 node 4's larger
+    # still — and rejects the stated noise case (40 s on a ten-hour stage is 0.11 %) by an order of
+    # magnitude. It is deliberately NOT centred on the projection: a bar keyed on precision must be
+    # keyed on the projection being an UNDER-estimate, which is what (2) measured, so the floor
+    # bounds the SMALLEST overrun worth saying and nothing about the largest.
     #
-    # STABILITY, which IS measurable: 2870.0 / 3586.1 / 3336.0 / 3491.7 / 3427.5 / 3602.7 s — mean
-    # 3385.7, stdev 271.5, spread +/-10.8 % of the mean; dropping only the FIRST reading gives mean
-    # 3488.8, stdev 111.3, spread +/-3.8 % over three hours. The projection does not wander.
+    # The GRACE is still recorded (`stage_grace_s`) and is real information — how much rescue could
+    # exist — but it no longer decides. That asymmetry is the point: the ceiling is a fact about what
+    # MIGHT happen at the wall, and an attention item is a claim about what the engine KNOWS now.
     #
-    # ACCURACY, which is NOT measurable and this is the honest limit: node 4 has NO terminal at all
-    # — no `stage_finished`, no `node_failed`, no `node_evaluated` after 21:31:22, because the run
-    # was retired while it was still training. So the six warnings were never confronted with an
-    # outcome, and nothing here says whether ~3400 s was RIGHT. A bar keyed on precision still needs
-    # a projection that a finished stage later falsified or confirmed, and this box has none.
-    #
-    # THE SUPPRESSION THIS MARKER FEARS HAS NEVER FIRED, and that is checkable rather than assumed:
-    # a suppressed case is exactly an alert carrying `projected_overrun_s` and NOT
-    # `overrun_beyond_grace_s`, and there are ZERO. All six cleared the 1800 s grace outright
-    # (beyond 1070.0-1802.7 s). So the bar has cost this box nothing so far — which lowers the
-    # urgency without answering the question, since one node at one grace is not a rate.
-    #
-    # BOTH PARAGRAPHS ABOVE ARE NOW FALSIFIED, by `e5small-dr-unified-v11` node 3 (2026-08-30). They
-    # were true when written and the population moved under them, which is the drift CLAUDE.md warns
-    # about — so read them as history and this as the state.
-    #
-    # ACCURACY IS NOW MEASURABLE, because for the first time a projection was CONFRONTED WITH AN
-    # OUTCOME. That node's first `train` attempt drew TWELVE consecutive projections (977.2 / 1013.4
-    # / 1056.8 / 1092.3 / 1095.2 / 1098.6 / 1108.3 / 1111.5 / 1118.5 / 1118.6 / 1120.3 / 1120.6 s
-    # over 9h51m, i.e. even steadier than node 4's) and then ENDED: `stage_finished train
-    # status=timeout exit=-9 seconds=36008.207` against the manifest's declared 36000 s, at
-    # 2948/3150 steps. The projection was RIGHT — the stage did not fit — and 10.0 GPU-hours were
-    # spent finding out. Its MAGNITUDE under-reported, in exactly the direction `projected_overrun_s`
-    # promises: at the last tick (08:34:00) the stage had 506 s of wall left and an `eta_s` of
-    # 2390.3, so the true remaining overrun was ~1884 s against a stamped 1120.6 — 59 % of it. A bar
-    # keyed on precision must therefore be keyed on the projection being an UNDER-estimate, never on
-    # it being centred.
-    #
-    # AND THE SUPPRESSION HAS NOW FIRED, twelve times, on that node. Every one of those twelve rows
-    # carries `projected_overrun_s` and NOT `overrun_beyond_grace_s`: the wall is 36000 s, so the
-    # AUTO grace ceiling is min(10 %, 30 min) = 1800 s, and every projection sat under it. The
-    # engine knew from 23:30 on 08-29 — 9h12m before the kill — that the stage would not fit, wrote
-    # that down twelve times, and opened nothing, because a real overrun smaller than a rescue that
-    # was never granted is indistinguishable here from no overrun at all. That is the exact failure
-    # this marker describes, it is no longer hypothetical, and its price on this box is one node.
+    # THE FIELD IS RENAMED with the meaning. `overrun_beyond_grace_s` said what it subtracted, and
+    # keeping the name over a different subtraction is the recorded-fact-pinned-to-the-wrong-site
+    # disease this repo tracks. Additive-only (invariant #5): preserved rows keep the old key with
+    # its old meaning and `serve/attention.py` reads both, so no historical episode changes.
     try:
         from looplab.runtime.sandbox import resolve_deadline_grace
         grace = float(resolve_deadline_grace(grace_cap, wall))
-    except Exception:  # noqa: BLE001 — an unreadable cap means "no grace", never "it fits"
+    except Exception:  # noqa: BLE001 — an unreadable cap is recorded as no grace, never as "it fits"
         grace = 0.0
-    beyond = over - max(0.0, grace)
+    floor = max(_OVERRUN_ALERT_FLOOR_S, float(wall) * _OVERRUN_ALERT_FLOOR_FRACTION)
+    beyond = over - floor
     if beyond > 0:
-        alert["overrun_beyond_grace_s"] = round(beyond, 1)
+        alert["overrun_beyond_noise_s"] = round(beyond, 1)
+        alert["overrun_alert_floor_s"] = round(floor, 1)
         alert["stage_grace_s"] = round(max(0.0, grace), 1)
 
 
