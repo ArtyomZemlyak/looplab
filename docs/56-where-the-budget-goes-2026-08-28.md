@@ -8138,3 +8138,36 @@ tell was the sign: a residue had never been negative by more than a rounding.
 reddened (credit uncapped by the gap, every row counted as a repeat, …) and *"abandoned arms credited
 twice"* passed clean — the exact bug I had just fixed by hand, with no test standing over it.
 `test_an_abandoned_arm_is_not_credited_twice` is that test; it now reddens.
+
+## 178. The retry credit reached for a probe that was still running
+
+§177 shipped `PAID RETRIES` and the very next sweep it printed this:
+
+```
+$0.081524 PAID RETRIES -- oldCK11 $0.004579 of $0.011307 on 6 repeat(s), oldCK9 $0.076945 of $0.101394 on 20 repeat(s)
+```
+
+`oldCK9` is finished and its gap is final. **`oldCK11` was still running.** Its $0.004579 gap is part
+spans the engine has not written yet and part answers it discarded, and this block cannot tell which
+dollars are which — so crediting it claims a cause for money that may simply not be written down,
+and would let a genuine leak on a running probe hide behind a plausible name.
+
+The rule is §176's, applied to the other category: **a gap is only evidence once the arm has stopped
+making it.** Arms still inside the grace window are excluded here; the in-flight allowance already
+covers them, and that allowance is bounded by a call price rather than by a story.
+
+```
+$0.076945 PAID RETRIES -- oldCK9 $0.076945 of $0.101394 on 20 repeat(s)
+RESIDUE $-0.000002
+```
+
+`test_a_running_arm_earns_no_retry_credit` builds one live arm and one finished arm, each with a
+repeated body and a gap, and requires the credit to name only the finished one; removing the
+exclusion reddens it.
+
+**Four sweeps, four corrections to one reconciler** — §172 a flat cent too tight, §175 an allowance
+that never expired, §176 an expiry measured on the wrong unit, §177 a credit that double-counted,
+and now a credit that reached too early. Each was found by the tool being used on the next day's
+data rather than by rereading it. Worth saying plainly: this file has had more defects than anything
+it measures, and every one of them was a *tolerance* — a claim about which failures are possible.
+The measurements it makes have never been wrong; the excuses it accepts have been wrong five times.

@@ -695,3 +695,36 @@ def test_an_abandoned_arm_is_not_credited_twice(tmp_path):
         "the abandoned arm was credited a second time as a paid retry")
     assert "RESIDUE $+0.000000" in r.stdout or "RESIDUE $-0.000000" in r.stdout, r.stdout
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_a_running_arm_earns_no_retry_credit(tmp_path):
+    """A live arm's gap is part unwritten spans and part discarded retries, and this block cannot
+    tell which dollars are which.
+
+    Seen live on 2026-09-03: `oldCK11` was credited `$0.004579 of $0.011307 on 6 repeat(s)` while
+    still running. Crediting that claims a cause for money that may simply not be written down yet,
+    and lets a real leak on a running probe hide behind a plausible name. The in-flight allowance
+    (§172, §176) already covers arms that are still calling; PAID RETRIES is for gaps that are final.
+    """
+    probes = {"live": [0.10], "done": [0.10]}
+    old = "1000000.0"
+    rows = [{"ts": _now(), "arm": "live", "cost": 0.10, "status": "200", "req_sha": "L1",
+             "prompt_tokens": 900, "completion_tokens": 9},
+            {"ts": _now(), "arm": "live", "cost": 0.00000196, "status": "200", "req_sha": "Lp",
+             "prompt_tokens": 10, "completion_tokens": 2},
+            {"ts": _now(), "arm": "live", "cost": 0.10, "status": "200", "req_sha": "L1",
+             "prompt_tokens": 900, "completion_tokens": 9},          # a repeat, but the arm is live
+            {"ts": old, "arm": "done", "cost": 0.10, "status": "200", "req_sha": "D1",
+             "prompt_tokens": 900, "completion_tokens": 9},
+            {"ts": old, "arm": "done", "cost": 0.00000196, "status": "200", "req_sha": "Dp",
+             "prompt_tokens": 10, "completion_tokens": 2},
+            {"ts": old, "arm": "done", "cost": 0.10, "status": "200", "req_sha": "D1",
+             "prompt_tokens": 900, "completion_tokens": 9}]          # a repeat on a finished arm
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 0.40000392, "calls": 6})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "PAID RETRIES" in r.stdout, r.stdout + r.stderr
+    assert "done $0.100000" in r.stdout, r.stdout
+    assert "live $" not in r.stdout.split("PAID RETRIES")[1].split("\n")[0], (
+        "a running arm was credited a retry it may not have made")

@@ -521,7 +521,14 @@ def main(argv: list[str]) -> int:
         # the same dollars twice. The first run of this block did exactly that and left the residue
         # at -$0.000564 -- `svcCacheCheck`'s $0.000562 counted on both sides, which is the same
         # shape as the echo subtraction reverted before §124.
-        if p2 in ("?", "__by_kind__") or p2 in abandoned or spent <= 0:
+        # A LIVE ARM'S GAP IS NOT YET EVIDENCE OF ANYTHING. For an arm still calling, the gap is
+        # part unwritten spans and part discarded retries, and this block cannot tell which dollars
+        # are which -- crediting it would claim a cause for money that may simply not be written
+        # down yet, and would let a real leak on a running probe hide behind a plausible name. The
+        # in-flight allowance already covers those arms; this category is for gaps that are final.
+        # Seen live: `oldCK11` was credited $0.004579 while still running.
+        still_calling = (time.time() - (health["newest"].get(p2) or (0.0, ""))[0]) <= INFLIGHT_GRACE_S
+        if p2 in ("?", "__by_kind__") or p2 in abandoned or spent <= 0 or still_calling:
             continue
         arm_gap = m_cost.get(p2, 0.0) - s_cost.get(p2, 0.0)
         take = min(arm_gap, spent)
