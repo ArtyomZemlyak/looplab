@@ -481,6 +481,14 @@ RUN_EXIT_REASONS: tuple[str, ...] = (
 )
 
 
+# The stop reasons that mean SPANS ARE BEING LOST, as opposed to a worker parking between submits.
+# Deliberately a denylist of the harmful ones rather than an allowlist of the benign: a SIXTH reason
+# added to `TRACE_WORKER_STOP_REASONS` without touching this set reads as routine, which is the safe
+# direction for a diagnostic that must not cry wolf. `tests/test_trace_export_health_is_published.py`
+# pins both halves.
+_TRACE_WORKER_STOPS_THAT_LOSE_SPANS = frozenset({"crashed", "receipt_failed", "abandoned"})
+
+
 def trace_export_unhealthy(snapshot) -> bool:
     """Is this exporter health snapshot worth a durable row?
 
@@ -503,6 +511,17 @@ def trace_export_unhealthy(snapshot) -> bool:
         return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
     if bool(snapshot.get("shutdown")):
+        return True
+    # A WORKER THAT DIED FOR A BAD REASON, and this clause exists because the three tests below
+    # showed the predicate silent on exactly the case the row was written for. `core/tracing.py::
+    # TRACE_WORKER_STOP_REASONS` landed after this predicate did, and it splits the five terminal
+    # paths that used to be byte-identical from the outside: `idle` and `retired` are ROUTINE — the
+    # worker parks and the next submit restarts it — while `crashed` (an exception escaped the
+    # loop), `receipt_failed` (the loss receipt itself could not be written) and `abandoned`
+    # (terminal ownership released; this process may no longer write spans) each mean spans are
+    # being lost NOW. Before this, a crashed worker with an empty queue and no drops published
+    # nothing, which is precisely v12's shape: no receipts, no drops, no thread, no row.
+    if str(snapshot.get("worker_stop_reason") or "") in _TRACE_WORKER_STOPS_THAT_LOSE_SPANS:
         return True
     if not bool(snapshot.get("worker_alive")) and _count("queued_spans") > 0:
         return True

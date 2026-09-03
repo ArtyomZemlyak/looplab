@@ -148,11 +148,33 @@ deduplicated on the snapshot itself so a permanently-dead exporter costs one row
 rather than one per turn. It is published BEFORE the turn's decision prefix is read, so the row is part
 of the fold that turn reasons over and cannot move the tail under the sequence recheck that follows.
 
-`trace_export_unhealthy` fires on three independent symptoms: `shutdown` (the exporter stopped
+`trace_export_unhealthy` fires on FOUR independent symptoms. Three were there from the start:
+`shutdown` (the exporter stopped
 accepting for good), a dead worker with rows still QUEUED (an idle exporter with an empty queue
 legitimately owns no thread), or any recorded loss — a drop, an export failure, or a loss receipt that
-itself failed to write. This surface reports that spans are being lost; it does not diagnose WHY the
-worker stopped, which remains open.
+itself failed to write.
+
+The fourth landed with `TRACE_WORKER_STOP_REASONS` and closes a hole this predicate had from the
+day it shipped: **a worker that died for a harmful reason, with nothing dropped**. Before the
+registry the five terminal paths were byte-identical from the outside, so a CRASHED worker with an
+empty queue and zero drops looked exactly like one resting between submits — and that is v12's
+shape: no receipts, no drops, no thread, and no row. The split is a denylist, not an allowlist:
+
+    routine, no row      idle       parked with nothing queued; the next submit restarts it
+                         retired    handed the file off; the next submit restarts it
+
+    spans are lost       crashed          an exception escaped the worker loop
+                         receipt_failed   the loss receipt itself could not be written
+                         abandoned        terminal ownership released — no more spans from here
+
+A denylist because a SIXTH reason added upstream without touching this set reads as routine, which
+is the safe direction for a diagnostic that must not cry wolf; and
+`test_the_denylist_names_only_reasons_the_exporter_can_produce` refuses a word the exporter cannot
+emit, so the set cannot rot into a decoy.
+
+Together the two halves make the outage reportable: the registry names WHY the worker stopped,
+`metrics()` carries it (`worker_stop_reason`, `worker_stop_detail`, and a counter per reason), and
+this row publishes it on the run's own log — which the exporter itself could never do.
 The receipt receives one delegate attempt as well: an exception may happen after its append committed,
 so retrying the same delta could inflate every postmortem count. On ambiguous failure the process-local
 snapshot remains authoritative for that process, while the durable summary may undercount but never
