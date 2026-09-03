@@ -6680,3 +6680,47 @@ kernel and still landed in the low cluster.
 *The arm so far, by the amended statistic:* two batches have both arms, arm A (shipped checker) 2/4
 against arm B (pre-§99) 1/4, **stratified p = 0.50000**, pooled 0.50000. Four of twenty-four probes
 in, and the two readings agree because neither has anything to disagree about yet.
+
+## 146. The first node is the noisiest thing in the run, and the run recovers from it
+
+Batch 2's second nodes came in: `oldCK3` 27.66 → **230.44**, `newCK3` 22.79 → **221.81**,
+`oldCK4` 23.34 → **245.43**. A batch whose first nodes were all in the low cluster climbed out of it
+on the very next draw, in both arms.
+
+That is worth measuring rather than noting, because it decides whether node 0 is a sensible outcome
+at all. Across the nine `edge_expansion` batches with three or more probes, the median of each
+quantity per batch:
+
+| quantity | per-batch medians | spread | **CV** |
+|---|---|---|---|
+| node 0 score | 23.7, 52.6, 211.5, 165.3, 205.8, 143.5, 25.7, 93.2, 23.1 | 188.5 | **0.747** |
+| best train node | 202.7, 219.4, 214.5, 233.0, 238.7, 216.7, 192.9, 185.9, 226.1 | 52.8 | **0.083** |
+| final TEST | 205.6, 220.4, 215.3, 236.8, 240.7, 218.9, 193.3, 184.2 | 56.4 | **0.091** |
+
+**The batch moves node 0 by eight times as much as it moves the answer.** Whatever differs between
+batches — the shared endpoint, the hour, something invisible from here — it lands almost entirely on
+the first draw, and the run walks it back. Every batch's final score sits between 184 and 241.
+
+### Second amendment to §142, and this one is about the outcome, not the test
+
+§144 amended the statistic (pooled → stratified) because the batch variance was as large as the
+effect. This is worse than that: **the outcome itself was the wrong choice.** Node 0 is where the
+noise lives; it is not where the result lives.
+
+So the primary reading of §115's arm becomes **the final TEST score**, exact one-sided rank test,
+still stratified by batch. Node-0 kernel rate stays as a secondary, descriptive, and clearly labelled
+as measuring an intermediate the run recovers from.
+
+That reframes three earlier sections rather than retracting them. §114 (first nodes moved after the
+repairs, p = 0.0000187), §129 (both low first nodes were controls) and §143 (`--exploit-best` at 8/9
+against 6/11) are all statements about node 0 — which is now measured to be the least stable and
+least consequential thing the run produces. They are still true; they are just about a quantity that
+does not reach the score.
+
+**And the honest consequence for the arm:** the final score's own batch spread is 184–241, a factor
+of 1.31. §83's table sizes this bench against 1.25×, needing nine per arm. The arm is at twelve per
+arm by §142, which is adequate — but only for an effect at least that large, and nothing so far
+suggests the checker produces one.
+
+*Clean:* four probes live, residue $0.002977 (in tolerance), zombies 0, seven baselines, no
+`PermissionError`.
