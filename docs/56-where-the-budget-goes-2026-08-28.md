@@ -6926,3 +6926,73 @@ time the two have moved together this visibly, and it is worth a column in the a
 
 Batch 2 final: shipped checker {225.86, 106.36}, pre-§99 {221.71, 244.32}. Eight of twenty-four
 probes; still no test, because a two-per-arm batch is a stratum with a variance and not an answer.
+
+## 152. Audit finding #1, measured: there is no cache discount to recover, and the gateway is already serving cached bodies at full price
+
+The agent's largest finding says 84.7 % of prompt tokens are a byte-identical re-send priced at a
+flat tier — $47.39 of $75.87 — and offers a remedy: "have the proxy read and record the provider's
+cache-hit token field". It also names the branch that would matter more: if the provider already
+caches and the proxy's imputation is blind to it, every dollar figure in this document is wrong.
+
+Both halves are now measured, and the remedy is the part that does not survive.
+
+**The price is exactly flat.** Least-squares over all 22,757 priced ledger rows, my own fit:
+**$0.1400/Mtok in, $0.2800/Mtok out, max |residual| 1.4e-17.** One tier, no second one hiding in
+the data. This reproduces the agent's fit to four decimals.
+
+**There is no cache-hit field to read.** Two identical requests through the meter, 4,012 prompt
+tokens each, and the `usage` object came back with exactly:
+
+```
+{"completion_tokens": 2, "prompt_tokens": 4012, "total_tokens": 4014,
+ "cost": 0.0005622400000000001, "cost_basis": "imputed", "cost_source": "2026-08-20T10:16:47Z"}
+```
+
+`prompt_tokens`, `completion_tokens`, `total_tokens` — the other three keys are the proxy's own
+additions. No `cached_tokens`, no `prompt_tokens_details`, no `cache_read_input_tokens`. The
+proxy is not blind to a discount; none is reported. **So the campaign's dollar figures stand, and
+finding #1's remedy is unavailable at this endpoint.**
+
+**But the second call took 17.7 ms against the first call's 236.4 ms** — same `req_sha`, same 4,012
+prompt tokens, same $0.00056224. Something upstream served it without generating it, and billed it
+whole. That is not a hypothesis: it is two rows in the ledger, and it is the mechanism behind the
+agent's finding #12.
+
+Corpus-wide, over the 6,240 rows that carry a `req_sha` (§122; **16,552 earlier rows have none and
+are counted out loud rather than dropped**):
+
+| | |
+|---|---|
+| bodies sent more than once | **224 (3.6 %), $0.3932** |
+| median latency of the repeat | **25.1 ms** |
+| median latency of the original | **4,570.1 ms** |
+| repeats too fast to have been generated (<¼ the original) | **145, $0.2409** |
+
+A 182× latency collapse at an unchanged price. `benchmarks/resent_bodies.py` reports it;
+`tests/test_the_ledger_names_the_bodies_it_paid_for_twice.py` pins that only the SECOND send counts,
+that an equally-slow repeat is a real second generation and not a cache hit, and that the
+unstamped rows are named. Mutated three ways — count the first send, drop the skipped tally, treat
+any faster repeat as cached — and each reddens a different assertion.
+
+Nothing in the engine is changed for this: $0.24 is real and the arm is mid-flight.
+
+### 152.1 The measurement broke the reconciler, which is how the reconciler got fixed
+
+The two service calls above entered the ledger as an arm with no probe tree. `check_money.py` then
+reported, on an otherwise clean sweep:
+
+```
+1 call(s) STILL UNNAMED -- neither killed nor empty
+2 call(s) from 1 ABANDONED probe(s) ... svcCacheCheck $0.0011
+RESIDUE $-0.000002
+```
+
+The same arm in two categories, and a residue that had been exactly zero all week. The cause is one
+line: `probes` was built from the union of span arms and meter arms, so an ABANDONED arm — whose
+entire cost is subtracted further down — was first decomposed into a preflight call plus some
+unexplained extras. The dollar error is one preflight estimate per abandoned arm ($0.00000196); the
+attention error is a red line on a clean ledger, and §112 is the record of what that costs.
+
+Fixed by computing `abandoned` first and excluding it from `probes`. Residue is $+0.000000 again
+and the UNNAMED line is gone. The falsifier builds an abandoned arm with TWO calls, so the old code
+would read it as one preflight plus one extra; mutating the exclusion away reddens it.

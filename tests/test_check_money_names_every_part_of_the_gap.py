@@ -259,3 +259,31 @@ def test_a_live_probe_is_never_called_abandoned(tmp_path):
     finally:
         srv.close()
     assert "ABANDONED" not in done.stdout, done.stdout
+
+
+def test_an_abandoned_arm_is_not_also_billed_a_preflight_call(tmp_path):
+    """An arm removed WHOLE must not first be decomposed into parts.
+
+    Measured 2026-09-03: two service calls under `svcCacheCheck` (a live cache test, no probe tree)
+    left the residue at $-0.000002 and printed "1 call STILL UNNAMED" on an otherwise clean sweep.
+    The abandoned arm was being counted twice -- once as a probe owed a preflight call and some
+    unexplained extras, and once where its entire cost is subtracted. The money error is one
+    preflight estimate; the attention error is a red line on a clean ledger, and §112 is what a red
+    line on a clean ledger costs.
+    """
+    probes = {"p1": [1.0]}
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200"},
+            {"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200"},
+            # An arm the meter knows and the probe trees do not, with TWO calls, so it would
+            # otherwise be read as one preflight plus one unexplained extra.
+            {"ts": "3000", "arm": "gone", "cost": 0.004, "status": "200"},
+            {"ts": "3000", "arm": "gone", "cost": 0.006, "status": "200"}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.01000196, "calls": 4})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "1 preflight call(s)" in r.stdout, r.stdout + r.stderr
+    assert "STILL UNNAMED" not in r.stdout, r.stdout
+    assert "1 ABANDONED probe(s)" in r.stdout and "gone $0.0100" in r.stdout, r.stdout
+    assert "RESIDUE $+0.000000" in r.stdout, r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr

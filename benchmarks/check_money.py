@@ -198,7 +198,16 @@ def main(argv: list[str]) -> int:
 
     spans_total = sum(s_cost.values())
     gap = live["cost_usd"] - spans_total
-    probes = sorted(set(s_calls) | set(k for k in m_calls if k != "?"))
+    # AN ABANDONED ARM IS SUBTRACTED WHOLE, SO IT MUST NOT ALSO BE DECOMPOSED.
+    # Measured 2026-09-03: two service calls to `svcCacheCheck` (a live cache test, no probe tree)
+    # put the residue at $-0.000002 and printed "1 call STILL UNNAMED" on an otherwise clean sweep.
+    # Both came from counting the same arm twice -- once here, as a probe owed a preflight call and
+    # some unexplained extras, and once below, where its ENTIRE cost is removed. The dollar error is
+    # one preflight estimate per abandoned arm and the attention error is a red line on a clean
+    # ledger, which is the more expensive of the two (§112).
+    abandoned = {p: c for p, c in m_cost.items()
+                 if p != "?" and p not in s_calls and m_calls.get(p, 0) > 0}
+    probes = sorted((set(s_calls) | set(k for k in m_calls if k != "?")) - set(abandoned))
     surplus = {p: m_calls.get(p, 0) - s_calls.get(p, 0) for p in probes}
     preflight = sum(1 for p in probes if surplus.get(p, 0) >= 1)
     extra = {p: n - 1 for p, n in surplus.items() if n > 1}
@@ -230,8 +239,6 @@ def main(argv: list[str]) -> int:
     # probe trees do not. A live probe always has a tree (`run_probe.sh` writes INSTRUMENT.txt
     # before the first call), so "meter rows, no tree" cannot be a running probe -- it is a probe
     # whose tree was deleted, i.e. one abandoned.
-    abandoned = {p: c for p, c in m_cost.items()
-                 if p != "?" and p not in s_calls and m_calls.get(p, 0) > 0}
     if abandoned:
         print(f"         {sum(m_calls[p] for p in abandoned)} call(s) from "
               f"{len(abandoned)} ABANDONED probe(s) -- in the meter, no tree on disk: "
