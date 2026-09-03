@@ -5990,3 +5990,46 @@ harness *alone* without noting that the treatment arm's first nodes sit higher t
 the same day and the same box. Both statements are underpowered; both are now written down.
 
 *Money and lanes:* residue $0.000000, three probes running, no finished runs this sweep.
+
+## 130. Measured on what the clause actually says, the arm has a signal — on transitions, not on scores
+
+Every reading of §109's arm so far has compared SCORES: eleven runs, one number each, a p that walked
+0.0286 → 0.0857 → 0.2143 as n grew. But the clause does not promise a score. It says: *when a version
+scored well, the next one should be a variant of it.* That is a claim about TRANSITIONS, and a run
+with three nodes carries two of them.
+
+Every transition in this corpus that STARTS from a node carrying a compiled kernel:
+
+| group | transitions | next node also has a kernel | held ≥ 0.5 of the previous score |
+|---|---|---|---|
+| corpus (old harness, no clause) | 28 | 14 = **50 %** | 11 = 39 % |
+| control (new harness, no clause) | 9 | 5 = **56 %** | 3 = 33 % |
+| **treatment (`--exploit-best`)** | **12** | **11 = 92 %** | **10 = 83 %** |
+
+**The two no-clause groups agree with each other** — 50 % against 56 %, Fisher p = 0.538 — which is
+what licenses pooling them, and is itself worth stating: the harness repairs of §99/§102/§103 moved
+the FIRST node (§114) and left this statistic alone. Different mechanism, different place.
+
+Against the pooled 19 of 37:
+
+* keeps the kernel: **11/12 against 19/37, exact one-sided Fisher p = 0.0122**
+* holds half the score: **10/12 against 14/37, p = 0.0071**
+
+§108's finding was that of 28 corpus transitions from a kernel node, 14 went back to a kernel and 14
+walked away — a coin flip off a 166× median onto a 26×. The clause was written for exactly that
+number, and in its own arm the coin flip is 11 of 12.
+
+### Why this is stronger than the score comparison and still not a result
+
+It is better powered: 12 and 37 observations instead of 7 and 6, because each run contributes every
+transition it makes. It is pre-registered in the only sense available — §109 named this behaviour as
+what the clause is for, before any of these probes ran, and §108 named the statistic. And it is
+mechanism rather than outcome, which is where a small n has the best chance of seeing anything.
+
+But: the pooling leans on 9 control transitions agreeing with 28 corpus ones, and the score
+comparison the clause was ultimately supposed to move is at p = 0.2143 and drifting the wrong way.
+A clause can change what the loop DOES without changing what it GETS — §94 measured exactly that for
+the reference affordance, where use fell to zero and the score did not move.
+
+So: the arm now has one thing worth finishing for, and it is not the number I have been reporting
+each sweep. **Nothing is claimed until the ninth probe of each arm lands.**
