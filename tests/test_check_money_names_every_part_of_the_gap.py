@@ -457,7 +457,7 @@ def test_a_call_in_flight_is_not_a_leak(tmp_path):
     r = _run(root, port, "--max-residue", "0.01")
     srv.close()
     assert "3 call(s) STILL UNNAMED" in r.stdout, r.stdout + r.stderr
-    assert "unnamed call(s) at the p99 price" in r.stdout, r.stdout
+    assert "unnamed call(s) on arms that are still calling, at the p99 price" in r.stdout, r.stdout
     assert "UNEXPLAINED" not in r.stdout, r.stdout
     assert r.returncode == 0, r.stdout + r.stderr
 
@@ -580,8 +580,41 @@ def test_an_idle_ledger_gets_no_in_flight_allowance(tmp_path):
     port, _, srv = _serve({"cost_usd": 0.40000196, "calls": 5})
     r = _run(root, port, "--max-residue", "0.01")
     srv.close()
-    assert "no allowance: the ledger has been idle" in r.stdout, r.stdout + r.stderr
+    assert "no allowance: of 3 unnamed call(s), 0 are on arms still calling" in r.stdout, r.stdout + r.stderr
     assert "UNEXPLAINED" in r.stdout, r.stdout
     assert "by arm (meter minus spans): p1 $+0.30" in r.stdout, (
         "the red names no arm, so nobody can act on it")
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_a_finished_arm_gets_no_allowance_while_others_are_running(tmp_path):
+    """§175 expired the allowance when the LEDGER went quiet. That was the wrong unit.
+
+    One sweep later batch 6 started, the ledger was fresh again, and `oldCK9`'s $0.076943 -- a probe
+    that had finished ninety minutes earlier -- was forgiven a second time. A call cannot be in
+    flight for an arm that has stopped calling, whatever the other arms are doing.
+    """
+    probes = {"live": [0.10], "done": [0.10]}
+    old = "1000000.0"
+    rows = ([{"ts": _now(), "arm": "live", "cost": 0.10, "status": "200",
+              "prompt_tokens": 900, "completion_tokens": 9},
+             {"ts": _now(), "arm": "live", "cost": 0.00000196, "status": "200",
+              "prompt_tokens": 10, "completion_tokens": 2},
+             {"ts": _now(), "arm": "live", "cost": 0.10, "status": "200",
+              "prompt_tokens": 900, "completion_tokens": 9}]          # in flight: forgiven
+            + [{"ts": old, "arm": "done", "cost": 0.10, "status": "200",
+                "prompt_tokens": 900, "completion_tokens": 9},
+               {"ts": old, "arm": "done", "cost": 0.00000196, "status": "200",
+                "prompt_tokens": 10, "completion_tokens": 2},
+               {"ts": old, "arm": "done", "cost": 0.10, "status": "200",
+                "prompt_tokens": 900, "completion_tokens": 9}])        # finished: NOT forgiven
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 0.40000392, "calls": 6})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    # Two arms hold one unnamed call each; only the live one is forgiven.
+    assert "1 unnamed call(s) on arms that are still calling" in r.stdout, r.stdout + r.stderr
+    assert "UNEXPLAINED" in r.stdout, (
+        "the finished arm's surplus was forgiven because another arm is live")
+    assert "done $+0.10" in r.stdout, r.stdout
     assert r.returncode == 1, r.stdout + r.stderr

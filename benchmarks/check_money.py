@@ -359,6 +359,7 @@ def main(argv: list[str]) -> int:
     s_cost, s_calls = spans_by_probe(a.bench_root, since)
     m_cost, m_calls, m_killed, m_empty = meter_by_probe(a.bench_root, since)
     live = _counter(a.port)
+    health = endpoint_health(os.path.join(a.bench_root, "meter", "meter.jsonl"), since)
 
     spans_total = sum(s_cost.values())
     gap = live["cost_usd"] - spans_total
@@ -380,6 +381,7 @@ def main(argv: list[str]) -> int:
     print(f"spans   ${spans_total:.6f}  over {sum(s_calls.values())} generations")
     print(f"gap     ${gap:+.6f}  over {live['calls'] - sum(s_calls.values())} calls")
     unnamed_calls = 0
+    unnamed_live = 0
     print(f"  named: {preflight} preflight call(s), one per probe, ~$0.000002 each")
     if extra:
         print(f"         {sum(extra.values())} further call(s) with no generation span: "
@@ -398,6 +400,17 @@ def main(argv: list[str]) -> int:
                  else ", none of them queued)"))
         unnamed = sum(extra.values()) - k - e
         unnamed_calls = unnamed
+        # PER ARM, NOT PER LEDGER. §175 expired the in-flight allowance when the LEDGER went quiet,
+        # and one sweep later batch 6 started and the allowance came back -- forgiving `oldCK9`'s
+        # $0.076943 again, an hour and a half after that probe finished. A call cannot be in flight
+        # for an arm that has stopped calling, whatever the other arms are doing. So the allowance
+        # counts only the unnamed calls of arms whose OWN newest ledger row is recent.
+        live_extra = {p2: n for p2, n in extra.items()
+                      if (time.time() - (health["newest"].get(p2) or (0.0, ""))[0])
+                      <= INFLIGHT_GRACE_S}
+        unnamed_live = max(0, sum(live_extra.values())
+                           - sum(m_killed.get(p2, 0) for p2 in live_extra)
+                           - sum(m_empty.get(p2, 0) for p2 in live_extra))
         if unnamed:
             print(f"         {unnamed} call(s) STILL UNNAMED -- neither killed nor empty")
     # AN ABANDONED PROBE IS ITS OWN CATEGORY, not an unexplained dollar.
@@ -417,7 +430,6 @@ def main(argv: list[str]) -> int:
         print(f"         {sum(m_calls[p] for p in abandoned)} call(s) from "
               f"{len(abandoned)} ABANDONED probe(s) -- in the meter, no tree on disk: "
               + ", ".join(f"{p} ${c:.4f}" for p, c in sorted(abandoned.items())))
-    health = endpoint_health(os.path.join(a.bench_root, "meter", "meter.jsonl"), since)
     if health["newest"]:
         newest_ts = max(t for t, _s in health["newest"].values())
         age = max(0.0, time.time() - newest_ts)
@@ -467,16 +479,14 @@ def main(argv: list[str]) -> int:
     idle_s = 0.0
     if health["newest"]:
         idle_s = max(0.0, time.time() - max(t for t, _s in health["newest"].values()))
-    inflight = _inflight_call_cost(a.bench_root, since) * max(0, unnamed_calls)
-    if idle_s > INFLIGHT_GRACE_S:
-        inflight = 0.0
+    inflight = _inflight_call_cost(a.bench_root, since) * max(0, unnamed_live)
     allowance = max(a.max_residue, inflight)
     if inflight > a.max_residue:
-        print(f"  (allowing ${inflight:.6f}: {unnamed_calls} unnamed call(s) at the p99 price -- "
-              f"spans the engine has not written yet)")
-    elif unnamed_calls and idle_s > INFLIGHT_GRACE_S:
-        print(f"  (no allowance: the ledger has been idle {idle_s:.0f} s, so the {unnamed_calls} "
-              f"unnamed call(s) are not in flight)")
+        print(f"  (allowing ${inflight:.6f}: {unnamed_live} unnamed call(s) on arms that are "
+              f"still calling, at the p99 price -- spans the engine has not written yet)")
+    elif unnamed_calls:
+        print(f"  (no allowance: of {unnamed_calls} unnamed call(s), {unnamed_live} are on arms "
+              f"still calling; the rest belong to arms that have stopped)")
     if abs(residue) > allowance:
         print(f"UNEXPLAINED: ${residue:+.6f} exceeds ${allowance:.6f}")
         # WHOSE. A red that names no probe is a red nobody can act on. The gap is per-arm by

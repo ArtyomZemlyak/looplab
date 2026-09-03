@@ -8067,3 +8067,37 @@ Three mutations redden the new test (allowance never expires, grace effectively 
 no arm). **And the change broke two of my own earlier tests, correctly**: they dated their ledgers
 `"ts": "3000"`, which is idle by any clock, so they were asking for an in-flight allowance without
 anything in flight. Their fixtures now use the current time, which is what "in flight" means.
+
+## 176. The excuse I gave an expiry date lasted exactly one sweep
+
+§175 made the in-flight allowance expire when the LEDGER goes quiet. Batch 6 launched, the ledger
+went fresh, and the allowance came straight back:
+
+```
+RESIDUE $+0.076943
+(allowing $0.081088: 8 unnamed call(s) at the p99 price -- spans the engine has not written yet)
+```
+
+That $0.076943 is `oldCK9`'s, and `oldCK9` finished **ninety minutes** earlier. Nothing of its was in
+flight; four other probes being busy is not evidence about a probe that has stopped.
+
+**The unit was wrong.** Idleness is a property of an ARM, not of the ledger. The allowance now counts
+only the unnamed calls of arms whose own newest row is inside the grace window:
+
+```
+RESIDUE $+0.081488
+(allowing $0.020272: 2 unnamed call(s) on arms that are still calling, at the p99 price)
+UNEXPLAINED: $+0.081488 exceeds $0.020272
+  by arm (meter minus spans): oldCK9 $+0.076945, newCK11 $+0.004546, svcCacheCheck $+0.001124
+```
+
+`newCK11`'s $0.004546 is a genuine call in flight and is forgiven; `oldCK9`'s is not, and is named.
+Two mutations redden the new test — treat every arm as live, or take the allowance from the global
+unnamed count — and two older assertions had to be re-worded because the line itself changed.
+
+**Three sweeps, three versions of one rule**, each defeated by the next day's data: a flat cent
+(§172 found it too tight on a live campaign), a per-call allowance (§175 found it never expired), a
+ledger-wide expiry (this sweep found it expires for the wrong thing). The pattern is worth naming
+because it is not carelessness — each version was correct about the case in front of it and silent
+about the case that had not happened yet. A tolerance is a claim about which failures are possible,
+and this stand keeps producing failures the previous claim did not allow for.
