@@ -6588,3 +6588,56 @@ as intended.
 Committed and pushed before the mutation was checked, which is the process failure underneath the
 test failure — this notebook's own rule is that a hole is only closed once the mutation reddens, and
 §143's commit message asserted it had. Both are corrected here rather than quietly.
+
+## 144. The batch effect is as large as the thing being measured, so §142's statistic is the wrong one
+
+Batch 2 of §115's arm has three first nodes so far — `oldCK3` 27.66, `newCK3` 22.79, `oldCK4` 23.34
+— **all in the low cluster, in both arms.** That is the third batch to behave as a batch rather than
+as two arms, so it is time to measure the effect instead of noting it again.
+
+Node-0 kernel rate by LAUNCH HOUR, every `edge_expansion` probe that recorded an instrument:
+
+```
+09-01 04  0/1     09-01 18  0/3     09-02 15  4/4 100%
+09-01 06  1/1     09-01 19  0/1     09-02 18  2/3  67%
+09-01 07  1/1     09-01 20  2/3     09-02 21  4/4 100%
+09-01 10  0/1     09-01 21  1/2     09-02 23  2/3  67%
+09-01 12  0/2                       09-03 02  1/4  25%
+09-01 13  1/2                       09-03 04  2/4  50%
+09-01 16  1/2                       09-03 07  0/3   0%
+```
+
+Overall 22/46 = 48 %. Across the nine batches with n ≥ 3 the rates are
+**0.00, 0.67, 1.00, 0.67, 1.00, 0.67, 0.25, 0.50, 0.00**.
+
+| | |
+|---|---|
+| observed variance of batch rates | **0.1424** |
+| variance expected if the rate were constant at 0.48 | **0.0724** |
+
+**Twice the binomial spread.** There is a real between-batch component, and it is about the size of
+the effect §142 set out to detect (19 % against 67 %).
+
+### The amendment
+
+§142 pre-registered *exact one-sided Fisher, new against old, pooled*. That statistic is wrong for
+this design and I should have seen it when I wrote the design that makes it wrong: the probes are
+**paired within batch** — two per arm, launched together, on the same box — precisely so a batch
+effect hits both sides equally. Pooling throws that pairing away and lets the between-batch variance
+back into the denominator.
+
+**Amended, before any of the outstanding twenty probes finish:** the primary reading becomes the
+**batch-stratified exact test** — each batch contributes its own 2×2, combined conditionally
+(Mantel–Haenszel / exact conditional). The pooled Fisher will still be reported beside it, and if the
+two disagree the stratified one is the one that counts, because the stratification is a fact about how
+the probes were run and not a choice made after seeing them.
+
+`n` stays at 12 per arm. Under pooling, 2× overdispersion would have cost roughly half the effective
+sample and left the design at the power of six a side — which is where §141's post-mortem said this
+programme keeps ending up. Stratifying recovers it, which is why the amendment is worth making rather
+than buying twelve more probes.
+
+*Also true and worth stating plainly:* the same measurement retires the corpus-versus-today
+comparison in §114 for good. Between-batch variance of that size cannot be averaged away by adding
+probes to one side of a comparison whose sides ran on different days. Only the within-batch arm can
+answer it.
