@@ -5960,3 +5960,33 @@ Nothing is claimed, and the earlier 0.0286 is now formally superseded rather tha
 log shows `[23:04:04] ИТОГ` two seconds later. A process seen once is not a process.
 
 Three more launched (`ctlEEf`, `ctlEEg`, `expEEg`) to bring the arm to **7 v 7**.
+
+## 129. Both low first nodes belong to the control arm, and that is not evidence
+
+`ctlEEg`'s first node came in at **26.39** — the second first-node in the low cluster today, after
+`ctlEEc`'s 20.57. Both are controls. The full split, thirteen first nodes:
+
+```
+treatment (n=7):  269  267  250  250  199  167  165      median 250.0
+control   (n=6):  259  213  173  160   26   21           median 166.4
+```
+
+7 of 7 treatment at or above 150, 4 of 6 control. Exact one-sided Fisher **p = 0.1923**; rank test
+on the values **p = 0.0688**.
+
+**Neither crosses, and the question is post-hoc.** §114 stated plainly that `--exploit-best` should
+NOT touch node 0 — there is nothing to make a variant of when the first idea is proposed — and used
+that to argue the node-0 shift was the harness. Going back to the same data to ask whether the
+clause moves node 0 after all is exactly the move that manufactures findings, and §128 has just
+finished demonstrating what small n does to a p that looked good.
+
+There is a mechanism if one wants one: the clause is in the card from the first prompt, and telling
+a model that an unrelated second idea "is a fresh draw from the same distribution, not progress"
+could plausibly make it invest more in the first. That is a hypothesis with a p of 0.07 behind it at
+n = 13, which is a thing to keep counting, not a thing to say.
+
+What it does change is the reading of §114: the node-0 shift can no longer be attributed to the
+harness *alone* without noting that the treatment arm's first nodes sit higher than the control's on
+the same day and the same box. Both statements are underpowered; both are now written down.
+
+*Money and lanes:* residue $0.000000, three probes running, no finished runs this sweep.
