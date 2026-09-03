@@ -76,6 +76,47 @@ Loss is observable in three forms:
 - `trace_export_health` rows, appended to `events.jsonl` **by the engine**, publish that same snapshot
   whenever `trace_export_unhealthy` holds — see below for why the first two are not enough.
 
+### A span's row must not depend on its context bookkeeping
+
+A row is written when a span CLOSES, so an operation that loses its close writes nothing while its
+children write normally. Measured on `runs/e5small-dr-unified-v12/spans.jsonl`: 3618 spans, 31
+distinct parents, and **4 parent ids appear on 268 children while owning no row of their own** —
+`891a4e7216bf6d` alone has 256, and it is the parent of the last six spans that run ever wrote.
+
+The cause is an ordering inside `Tracer.span`'s `finally`, and it is driven rather than reasoned:
+
+    finally:
+        rec["duration_s"] = ...
+        otel_cm.__exit__(...)
+        _stack.reset(token)            ─┐  every one of these is a ContextVar.reset, which RAISES
+        _current_tracer.reset(...)      │  ValueError("... was created in a different Context")
+        _node_ctx.reset(...)            ├─ when a span's enter and exit land in DIFFERENT contexts
+        _generation_ctx.reset(...)      │
+        _phase_ctx.reset(...)          ─┘
+        try: self.exporter.export(rec)  <- was LAST: one raising reset skipped it and the span vanished
+        except: pass
+
+Entering under `contextvars.copy_context().run(cm.__enter__)` and exiting outside it reproduces it
+in three lines: the exit raises `ValueError`, and no row is written.
+
+The fix is the order — export first, then unwind:
+
+    finally:
+        rec["duration_s"] = ...
+        otel_cm.__exit__(...)
+        try: self.exporter.export(rec)   <- the diagnostic is recorded before anything can raise
+        except: pass
+        _stack.reset(token) ... etc      <- bookkeeping, still allowed to raise and propagate
+
+The export stays wrapped, so a failing exporter still cannot mask the in-flight exception; what
+changes is that context bookkeeping no longer decides whether a diagnostic gets recorded. The
+`ValueError` still propagates — it is real information about a span that crossed a context
+boundary — and `tests/test_span_survives_a_failed_context_reset.py` pins both halves.
+
+THIS IS NOT THE WHOLE OF v12's OUTAGE and the tests say so: the tracer SURVIVES a failed reset, a
+later span records normally, so a lost close does not by itself explain a run that stopped writing
+spans for 33 hours. It explains the four orphans, which is what it claims.
+
 ### A dead exporter cannot report that it is dead
 
 Both loss surfaces above are written BY the exporter. The durable receipt is appended from

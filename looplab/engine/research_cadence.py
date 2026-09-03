@@ -29,7 +29,8 @@ from looplab.core.jsonutil import canonical_json_digest
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
 from looplab.engine.cadence import at_creation_boundary, deep_research_window
 from looplab.events.replay import fold
-from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
+from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_BELIEF_ADMISSION,
+                                  EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
                                   EV_REPORT_GENERATED, EV_RESEARCH_ATTEMPTED,
                                   EV_RESEARCH_COMPLETED,
                                   BACKGROUND_APPENDABLE,
@@ -982,6 +983,43 @@ class ResearchCadenceMixin:
         except Exception:  # noqa: BLE001 - a diagnostic read must never cost the memo its questions
             return []
 
+    def _record_belief_admission(self, verdict, proposed: int, board_read: bool) -> None:
+        """Write down what the board did with this memo's directions.
+
+        THE COUNTS EXISTED AND WENT NOWHERE. `classify_research_beliefs` already returns
+        admitted/blank/repeated/restated/capped, and until this row their only consumer was the
+        `_LOG.warning` below. A console line is not a record: it is not in the run directory, it
+        does not survive a restart, and it cannot be counted across runs. Establishing that v12's
+        cap refused 394 of 413 proposals — including all 55 requests for the seed-replicate
+        experiment the run kept asking for — meant reconstructing the board memo by memo and
+        re-running the classifier by hand, because `research_completed` is appended in
+        `_record_deep_research` BEFORE the classification happens and cannot carry the verdict.
+
+        The cap value is an operator decision, and this row is the number that decision needs.
+
+        `EV_BELIEF_ADMISSION` is DIAGNOSTIC, not BACKGROUND_APPENDABLE, and the distinction is
+        load-bearing: the folded events this same task appends (`hint`, `hypothesis_added`) are
+        licensed because they move no reader's position, while a diagnostic row is excluded
+        WHOLESALE from `speculation._proposal_authority_seq` — the stronger form of the same
+        argument. Best-effort by construction: a store that refuses the append costs a diagnostic
+        row and never the memo's steering.
+        """
+        assert EV_BELIEF_ADMISSION in DIAGNOSTIC_EVENTS   # see the type's own note
+        try:
+            self.store.append(EV_BELIEF_ADMISSION, {
+                "proposed": int(proposed),
+                "admitted": len(verdict.admitted),
+                "capped": int(verdict.capped),
+                "restated": int(verdict.restated),
+                "repeated": int(verdict.repeated),
+                "blank": int(verdict.blank),
+                # Whether these counts describe the LIVE board or the degraded path: when the board
+                # read failed the classifier saw no open statements, so `restated`/`capped` cannot
+                # be read as facts about what was already open.
+                "board_read": bool(board_read)})
+        except Exception:  # noqa: BLE001 - a receipt may never cost the memo its directions
+            pass
+
     def _admissible_beliefs(self, directions: list, *,
                             channel: str = "recommended direction") -> list[str]:
         """Read the open belief board and apply `admit_research_beliefs` to this memo's directions.
@@ -1048,6 +1086,7 @@ class ResearchCadenceMixin:
             board_read = False
             open_statements = unanswered = []
         verdict = classify_research_beliefs(open_statements, directions, counted=unanswered)
+        self._record_belief_admission(verdict, len(directions), board_read)
         if verdict.dropped:
             # Not silent: the operator reading the log sees a memo whose directions did not all
             # become cards, and the MEMO BODY still carries every one of them.

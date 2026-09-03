@@ -1447,6 +1447,38 @@ raising on it, so repairing that carrier is exactly what makes this reachable. A
 non-list row still yields no concepts for that question, and a question with none is registered
 exactly as it was before any of this shipped.
 
+**What the board REFUSED is now written down.** `classify_research_beliefs` has always returned
+the four causes — blank, repeated, restated, capped — and until 2026-09-02 their only consumer was
+a `_LOG.warning`. The memo receipt cannot carry them: `research_completed` is appended in
+`_record_deep_research` BEFORE the classification runs. So the run recorded what deep research
+PROPOSED and never what the board DID with it:
+
+    memo returns N directions
+        │
+        ├──▶ research_completed          the proposals, durable
+        │
+        ▼
+    classify_research_beliefs(open board, directions)
+        │
+        ├──▶ admitted ──▶ hypothesis_added rows          durable
+        ├──▶ _LOG.warning("… n no room, m already …")    console only, gone on restart
+        └──▶ belief_admission  {proposed, admitted, capped, restated, repeated, blank,
+                                board_read}              durable  ← this row
+
+Measured on `e5small-dr-unified-v12` and it is why the row exists: 36 memos proposed 413
+directions, **394 were capped**, 2 restated, 0 repeated, 17 admitted. Fifty-five of the capped
+were the same experiment — the run-to-run noise floor, the seed pinning, the replicate of node 2's
+config — refused by the CAP every time, never as a duplicate. Getting those numbers meant
+reconstructing the board memo by memo and re-running the classifier by hand. The cap value is an
+operator decision and this row is the number that decision needs.
+
+`belief_admission` is DIAGNOSTIC, not `BACKGROUND_APPENDABLE`, and the two are not
+interchangeable: the folded events the same task appends (`hint`, `hypothesis_added`) are licensed
+because they move no reader's position, while a diagnostic row is excluded WHOLESALE from
+`speculation._proposal_authority_seq` — the stronger form of that licence. It carries `board_read`
+because a failed board read leaves the classifier with no open statements, and `capped`/`restated`
+then describe nothing real.
+
 **A question may also sit under a BROADER question**, and until 2026-09-02 it could not: every
 `hypothesis_added` row on `e5small-dr-unified-v12` carried exactly `[at_node, concepts, source,
 statement]`, while `Card` had carried `parent_card_id` and `child_card_ids` the whole time. The
