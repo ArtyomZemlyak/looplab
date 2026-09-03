@@ -8196,3 +8196,70 @@ become five of six. The pre-registered read is next sweep, when the twenty-fourt
 I am recording this before that probe finishes, deliberately. The sign of a batch I have already
 seen three quarters of is exactly the kind of thing that gets remembered as "I expected it" once the
 fourth number lands.
+
+## 180. §115's arm, closed: twenty-four probes, six batches, and the repair is on the wrong side of zero
+
+`newCK11` finished at **154.8227** — below its own node 1 (155.94), which is what §179 said it was
+guessing at, and enough to make batch 6 negative like the other five. The pre-registered design
+(§142, primary outcome amended in §146) is complete.
+
+### The read
+
+**Primary outcome: final TEST speedup, stratified by batch, twelve probes a side.**
+
+| batch | shipped | pre-§99 | difference |
+|---|---|---|---|
+| 09-03T04 | 268.5, 25.4 | 223.2, 145.3 | −37.30 |
+| 09-03T07 | 225.9, 106.4 | 221.7, 244.3 | −66.91 |
+| 09-03T10 | 27.3, 243.1 | 172.9, 151.1 | −26.78 |
+| 09-03T14 | 261.4, 96.9 | 273.6, 196.2 | −55.76 |
+| 09-03T17 | 174.6, 195.3 | 183.9, 216.0 | −15.01 |
+| 09-03T21 | 154.8, 275.2 | 227.1, 210.8 | −3.96 |
+| | | **sum** | **−205.71** |
+
+Exact stratified permutation over all **46,656** within-batch relabellings:
+
+* one-sided p (shipped worse) = **0.1341**
+* two-sided p = 0.2681, null sd 180.8
+* **six of six batches negative, p = 0.0156 by signs alone**
+* pooled: shipped mean **171.23** (median 184.97), pre-§99 mean **205.51** (median 213.41)
+
+**The pre-registered statistic does not reach significance.** The sign test does, and it is the
+weaker instrument — it throws away magnitude, and the magnitudes here shrink monotonically across
+the campaign (−66.9, −55.8, −37.3, −26.8, −15.0, −4.0 when sorted by size, and −37, −67, −27, −56,
+−15, −4 in time order). Two readings fit: a real effect that the later batches diluted, or a run of
+six coin flips that had to land somewhere. **On the pre-registered test, this arm did not find an
+effect.**
+
+What it did find is that the repair is **not** the improvement it was built to be. It was shipped to
+make `check` catch build failures, and §159 confirmed it does exactly that — false-GREEN 4/76 → 1/90
+(p = 0.1355). Twenty-four probes later, the runs that get it score, if anything, lower. Those two
+facts are compatible and both are now measured.
+
+**Secondary outcomes**, neither pre-registered as decisive:
+
+| | shipped | pre-§99 |
+|---|---|---|
+| nodes per probe | 2,3,3,3,3,3,3,3,3,3,3,3 | 2,3,3,3,3,3,3,3,3,**4,4,4** |
+| `node_failed` (spend ceiling / stuck) | **4** | 1 |
+
+The pre-§99 side reached a fourth node three times and the shipped side never did, and lost four
+nodes to the ceiling against one. That is the shape a *slower* checker would produce — more time per
+node, fewer nodes — except the direction is backwards: the arm with FEWER failures got MORE nodes.
+
+### What this cost and what it bought
+
+Twenty-five probes at $1 (twenty-four plus `oldCK8`, the one that read a file to death, §164).
+It bought a measured answer to a question that had been argued from four probes: **no, the checker
+repair does not raise the score, and the corpus is not powered to say it lowers it either.**
+
+### What I am not doing
+
+Not extending the arm. §83's power table says a 34-point mean difference against a 181-point null sd
+needs far more than twenty-four probes, and the honest next question is not "more of this arm" but
+"why is a 25–275 spread the normal state of a $1 run on one task" — which is §146's batch variance,
+still the largest single fact in this notebook.
+
+Not shipping the held-back repairs yet either — §153's read-only plan prompt, §156's $0.10 budget
+gate, §171's dead prompt paragraphs. They were held because the arm was running. The arm is over,
+and the next sweep can start landing them one at a time, each with its own before/after.
