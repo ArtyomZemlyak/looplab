@@ -6409,3 +6409,39 @@ repair moved the first node is what the arm is still measuring.
 
 *Clean:* four probes live, residue $0.000000, zombies 0, seven baselines, no `PermissionError`,
 snapshot `20260903-052452` complete.
+
+## 140. The first probe of §115's arm ran the NEW checker and never wrote a kernel at all
+
+`newCK1` finished: TEST **25.3697** against a best train of 24.7567 (ratio 1.025). $1.0035, 40 % of
+the dollar before the first node and 8 % after the last, 26 `eval_train`, reference 9.5 % / 9.5 %
+over 42 `run_probe` calls. Money: `plan_step` **46.7 %** — the highest planning share of the batch —
+`propose` 18.5 %, `deep_research` 18.0 %, `repropose` 6.4 %.
+
+Its champion is **34 lines of plain Python**, and its three nodes are **[20.76, 21.82, 24.76]**: a
+run that never left the low cluster, on the repaired checker.
+
+| node | files | |
+|---|---|---|
+| node_0 | `solver.py` | |
+| node_1 | `solver.py` | |
+| node_2 | `solver.py` | |
+
+Twelve `check` calls, none naming `build_ext` — **because there was never a `.pyx` to build.** The
+repaired checker cannot help a run that does not attempt a kernel, which is exactly the shape §119
+found in `ctlEEc` and §137 in `ctlEEh`.
+
+**This is the first direct evidence against §114's mechanism.** The claim was that repairing `check`
+lets the loop commit to a compiled kernel on its first draw; here is a probe with the repaired
+`check` that wrote pure Python three times and scored 25. The repair is necessary for a kernel to be
+validated, and this run says it is not sufficient to make one be attempted.
+
+*State of the arm at one finished probe of four:*
+
+| | first nodes |
+|---|---|
+| pre-§99 checker | 25.41, 160.95 |
+| shipped checker | **20.76**, 275.22 |
+
+Still one in each cluster on each side. `oldCK2` has meanwhile climbed 160.95 → **221.64** and
+`newCK2` 275.22 → 254.43. Nothing to conclude, and §133's discipline applies here too: the reading
+was fixed before the data and it needs all four.
