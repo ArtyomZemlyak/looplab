@@ -7697,3 +7697,47 @@ remDL    … answered HTTP 504 (overloaded) — waiting 30s before attempt 7 of 
 `tests/test_the_reason_a_probe_has_no_score_is_dated.py` pins the last-match rule, the distance, the
 no-distance case at the end of a log, and the node line. Three mutations redden it (first match,
 drop the distance, distance always zero). 259 existing summary tests still pass.
+
+## 169. Batch 4 closes: four batches, four times the same sign, p = 0.14
+
+### 169.1 The two remaining probes
+
+| probe | arm | TEST | nodes (train) | best/last | before/after | `eval_train` | reference | node 0 | champion |
+|---|---|---|---|---|---|---|---|---|---|
+| newCK7 | shipped | **261.3643** | [111.40, **264.03**, 13.24] | 19.95× | 31 % / 3 % | 27 | **15.8 % / 21.1 %** | kernel | 50L kernel |
+| oldCK8b | pre-§99 | **196.1696** | [27.09, 132.82, 21.75, **200.56**] | 1.00× | 28 % / 1 % | 31 | 9.5 % | no kernel | 36L kernel |
+
+Train→test 0.990 and 0.978. `newCK7`'s **19.95× best-over-last** is the widest gap in the batch and
+the second-widest of the whole arm: it found 264.03 on node 1 and finished on a 13.24. Without
+§84's champion rule it reports thirteen. Its reference use, **15.8 % import and 21.1 %
+`is_solution`** over 19 `run_probe` calls, is the highest in the corpus — two to four times §69.1's
+band — and §163.2's null still says not to read a score into that.
+
+`oldCK8b` is the replacement probe for the one that read a file to death (§164), and it repeats
+`oldCK7`'s shape: a collapse at node 2 and then the best node last. Two of the four pre-§99 probes
+in this batch ended on their best node; neither shipped probe did.
+
+### 169.2 Four batches, and the sign has not changed once
+
+| batch | mean shipped | mean pre-§99 | difference |
+|---|---|---|---|
+| 09-03T04 | 146.94 | 184.24 | −37.30 |
+| 09-03T07 | 166.11 | 233.02 | −66.91 |
+| 09-03T10 | 135.20 | 161.98 | −26.78 |
+| **09-03T14** | **179.14** | **234.90** | **−55.76** |
+| | | **sum** | **−186.74** |
+
+Exact stratified permutation over all **1,296** within-batch relabellings: one-sided
+**p = 0.1427** that the shipped checker is worse, two-sided 0.2855, null sd 172.9. By signs alone,
+four of four in the same direction is p = 0.0625.
+
+Sixteen of twenty-four probes. The pre-registered analysis is at twelve a side (§142) and this
+remains an interim look that changes nothing about the design. What it has changed is what the arm
+is likely to conclude: **the repair this arm was built to validate is, four batches running, on the
+wrong side of zero**, by an average of 46.7 points a batch against a null spread of 173. The honest
+reading is still "inside the noise", and the noise is exactly why eight more probes are owed.
+
+*One caution I owe this table.* §159 measured the checker repair's own target — false-GREEN nodes —
+at 4/76 before and 1/90 after, p = 0.1355. Both numbers point the same way as this one: the repair
+does what it was built to do to `check`'s verdicts, and the runs that get it do not score better.
+Those are compatible facts, and the second is the one the arm was designed to settle.
