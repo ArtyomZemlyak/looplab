@@ -7145,3 +7145,59 @@ float error at this boundary is one 277.23.
 
 Not wired into the engine, for the same reason as §153: this changes what every probe does, and
 §115's arm is eight probes into twenty-four.
+
+## 157. Every node failure this campaign ever recorded was invisible, and the eleven of them qualify §156
+
+Audit finding #27b, re-derived: `events.jsonl` writes a crash-atomic packet whose `type` is
+`__looplab_event_batch_v1__` with the real events under `data.events`. Over the 80 run logs:
+**29,571 physical rows, 11 packets, in 11 different runs, each holding exactly one `node_failed`
+and one `pause`.** So the count of node failures visible to a reader that keys on `type` is
+**0 of 11** — including the `fails=[]` this sweep has printed for weeks, and six of the eight tools
+under `benchmarks/` that read the file. `algotune/plot_corpus_v2.py::iter_events` was the only one
+that handled it.
+
+`benchmarks/events_read.py` is the shared reader; `probe_summary.py` now uses it and reports a
+`node_failed` list per run. Both packet spellings are handled — the corpus writes the sentinel as a
+one-element LIST, the engine's own tests use the bare string — and a row that merely names the
+sentinel without carrying events is kept whole rather than swallowed.
+`tests/test_a_failed_node_is_not_invisible.py` pins all of it; four mutations redden it (list
+spelling only, swallow the named-but-empty row, never expand, and the summary reverting to the
+naive loader).
+
+What the eleven say, now that they can be read:
+
+| cause | n |
+|---|---|
+| `developer error: LLM spend ceiling reached` | **9** |
+| `developer stuck: the implement session ended having written nothing at all` | 2 |
+
+**And they qualify §156's answer rather than confirming it.** For each doomed cycle, what the run
+held when that node opened:
+
+| run | node | $ left when it opened | $ burnt | cause |
+|---|---|---|---|---|
+| accPde | 1 | **0.4792** | 0.4867 | ceiling |
+| accEE | 2 | **0.4165** | 0.4208 | ceiling |
+| remPde6 | 1 | 0.3818 | 0.3858 | ceiling |
+| remEE | 2 | 0.3612 | 0.3627 | ceiling |
+| remDL6 | 1 | 0.3560 | 0.3662 | ceiling |
+| remDL3 | 1 | 0.2288 | 0.2410 | wrote nothing |
+| remEE2 | 2 | 0.1112 | 0.1143 | ceiling |
+| expEEh | 2 | 0.0917 | 0.0955 | ceiling |
+| newCK1 | 3 | 0.0804 | 0.0839 | ceiling |
+| remDL12 | 2 | 0.0717 | 0.0968 | wrote nothing |
+| expEEg | 2 | 0.0486 | 0.0547 | ceiling |
+
+Total burnt in these eleven: **$2.7084**. The $0.10 gate §156 arrived at catches **four** of them,
+worth $0.3309. The p75 gate catches all eleven — and destroys 54 real nodes doing it, including the
+corpus's 277.23.
+
+So the named failures sit ABOVE the safe threshold, and a gate on remaining budget alone cannot
+separate them: `accPde` opened its doomed node holding $0.4792, more than the median completed
+cycle costs, and still produced nothing. The distinguishing feature is not how much was left, it is
+that the session then wrote nothing and ran past the ceiling. That is a MID-session check, not an
+opening gate — the developer session already knows, turn by turn, both what it has spent and
+whether it has written a file, and neither fact currently ends it.
+
+That is the shape of the next repair, and it is not this sweep's: §115's arm is eight probes into
+twenty-four.

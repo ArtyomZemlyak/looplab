@@ -97,6 +97,18 @@ def _roots(argv: list[str]) -> list[Path]:
     return [Path(c) for c in cands if Path(c).is_dir()]
 
 
+def _load_events(path: Path) -> list[dict]:
+    """Events with crash-atomic packets expanded -- see `benchmarks/events_read.py`.
+
+    Every `node_failed` in the corpus lives inside a packet, so `_load` alone reports a run that
+    died as a run with nothing wrong.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import events_read
+    return events_read.read(path)
+
+
 def _load(path: Path) -> list[dict]:
     rows = []
     try:
@@ -208,7 +220,7 @@ def _card_of(probe: str, roots) -> tuple:
 
 
 def summarise(run_dir: Path) -> dict | None:
-    events = _load(run_dir / "events.jsonl")
+    events = _load_events(run_dir / "events.jsonl")
     try:
         age_s = time.time() - (run_dir / "events.jsonl").stat().st_mtime
     except OSError:
@@ -396,6 +408,11 @@ def summarise(run_dir: Path) -> dict | None:
         # spend a median 10.2 % of their dollar on `repropose` against 2.0 % for the eleven that
         # did not. Not a defect -- the novelty check catches it every time, which is what it is
         # for -- but a per-probe number nobody could see.
+        # Packet-wrapped until 2026-09-03, which is why this line did not exist: a run that lost
+        # a node to a developer crash summarised identically to one that lost nothing.
+        "node_failed": [( (r.get("data") or {}).get("node_id"),
+                          str((r.get("data") or {}).get("error") or "")[:60])
+                        for r in events if r.get("type") == "node_failed"],
         "novelty_rejected": sum(1 for r in events if r.get("type") == "novelty_rejected"),
         "trust_flags": sum(1 for r in events if r.get("type") == "reward_hack_suspected"),
         "trust_signals": [str((sig or {}).get("signal") or "")
