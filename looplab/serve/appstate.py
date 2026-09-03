@@ -46,6 +46,7 @@ from looplab.serve.protocol import (
     PHASE_SEARCH, PHASE_SPEC_APPROVAL, RUN_GENERATION_FIELD)
 from looplab.serve.public_cards import (INTERNAL_CARD_STATE_FIELDS,
                                         REVIEW_OMITTED_CARD_FIELDS, public_cards_projection)
+from looplab.serve.code_freshness import cached_code_freshness
 from looplab.serve.reviews import ReviewStore
 from looplab.serve.run_commands import RunCommandService, run_generation_token
 from looplab.serve.settings_store import SettingsStore
@@ -431,9 +432,14 @@ class AppState:
                 # hybrid object that is neither historical nor live.
                 out["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
                 out["source_integrity"] = self.log_integrity(rd)
+                # Present-time, and re-stamped on the hit path for the same reason liveness is: a
+                # server that went stale WHILE this entry sat in the cache would otherwise keep
+                # answering "current" out of a body built before the merge.
+                out["server_code"] = cached_code_freshness()
                 return {"state": out, "seq": last_seq, "max_seq": max_seq,
                         "event_count": event_count,
                         "source_integrity": self.log_integrity(rd),
+                        "server_code": cached_code_freshness(),
                         RUN_GENERATION_FIELD: generation or None}
         all_evs = self.events(rd)
         generation = run_generation_token(all_evs)
@@ -547,6 +553,12 @@ class AppState:
         # cache tuple: the receipt is keyed on the FILE, so a repair must be observed on the next tick
         # rather than inherited from a cached body.
         d["source_integrity"] = self.log_integrity(rd)
+        # WHOSE CODE BUILT THIS PAYLOAD. A `looplab ui` process pins its own modules at import, so a
+        # fold fix merged afterwards is absent from every answer it gives — silently, since a stale
+        # server returns 200 with a smaller truth. Mirrored into `state` as well as onto the envelope
+        # for the same reason `source_integrity` is: `useRunState` publishes the folded snapshot and
+        # not the frame around it. See `serve/code_freshness.py` for the case that produced it.
+        d["server_code"] = cached_code_freshness()
         if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
             with self._state_cache_lock:      # only the dict ops; the fold/trim above ran lock-free
                 self._state_cache[ckey] = (d, last_seq, max_seq, generation, event_count)
@@ -561,6 +573,7 @@ class AppState:
         return {"state": d, "seq": last_seq, "max_seq": max_seq,
                 "event_count": event_count,
                 "source_integrity": self.log_integrity(rd),
+                "server_code": cached_code_freshness(),
                 RUN_GENERATION_FIELD: generation or None}
 
     def state_probe(self, rd: Path) -> dict:

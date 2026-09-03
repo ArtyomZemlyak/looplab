@@ -514,6 +514,45 @@ A single good run is *a hypothesis, not a result* — but **p<0.01 on every prom
   the shared LLM broker bounds configured provider lanes.
 - **Persistence:** canonical inputs are **human-readable files** (`events.jsonl` for replayable run state plus task/config and original sidecars) + a git repo (solutions/lineage); MLflow is an optional export. SQLite/Parquet under `_derived/` is a **rebuildable projection**, never authority. Resume additionally honors the task/config snapshots and the documented command/finalization recovery records; it is not a claim that every external side effect can be recreated from the event log. *([04-file-layout.md](04-file-layout.md))*
 - **Reproducibility:** any reported result ships with `{git_ref, seeds, deps_lock, mlflow_run, exact_command}` so a third party can rerun it (this is also our #2 success metric).
+- **A running process pins its own code, and now SAYS SO.** The engine and the `looplab ui` server
+  each load their modules once, at import. Every fix merged afterwards is absent from that process
+  until it restarts — and a stale *server* does not fail loudly, it answers `200` with an older
+  fold. Measured 2026-09-03: a UI process up 9 days 5 hours published `parent_card_id` on 0 of 34
+  cards where the same log projected through the tree's own code gave 17, and the question ladder
+  drew twelve unattached, "not measured yet" questions from it. `/state` therefore carries
+  `server_code` (`looplab/serve/code_freshness.py`), on the envelope AND mirrored into `state` for
+  the same reason `source_integrity` is, and the run header draws a pill from it
+  (`ui/src/serverCode.js`). It is a NOTICE, never a refusal: a stale server's numbers are still its
+  honest fold, only older than the tree.
+
+```
+              ONE LOG, FOUR LAYERS — and the question ladder was empty at the end of it
+
+  events.jsonl        fold()            public_cards()        bundle              screen
+  ───────────         ──────            ──────────────        ──────              ──────
+  17 parent rows  ->  17 edges kept  ->  17 on the wire   ->  reads the edge  ->  10 rows with
+                      7 questions        7 with children      (dist current)      experiments
+                      with children
+       │                   │                   │                   │                  │
+       └───────────────────┴─────────┬─────────┴───────────────────┴──────────────────┘
+                                     │  all five verified correct, in this order
+                                     │
+                    ┌────────────────┴─────────────────┐
+                    │  the SERVER PROCESS, up 9 days   │  <- the only layer never asked
+                    │  fold() from BEFORE the fix      │
+                    └────────────────┬─────────────────┘
+                                     │
+                            0 edges · 0 rollups · 30-field DTO
+                                     │
+                     restart ────────┴────────> 17 · 7 · 55 fields, no code change
+
+  THE GUARD: /state now carries `server_code` from `code_freshness.py`, computed at boot and
+  re-checked (30 s cache) on both the cache-miss and the cache-HIT path — the hit path is exactly
+  the window in which a server goes stale, since an unmoved log never re-folds.
+      snapshot(*.py at import)  vs  snapshot(*.py now)
+        added ∪ removed ∪ rewritten  ->  {stale, changed_count, changed[:8], complete}
+        __pycache__ excluded: its mtimes move on import alone, including this process's own.
+```
 
 ---
 

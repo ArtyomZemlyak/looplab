@@ -2,6 +2,7 @@ import React, {
   lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
 } from 'react'
 import { useMediaQuery, useRunState, useScopedResource } from './hooks.js'
+import { serverCodeNotice } from './serverCode.js'
 import { useToast } from './useToast.js'
 import { useTimeline } from './useTimeline.js'
 import { takeRunPanelHistoryEntry, useRunRouteState } from './useRunRouteState.js'
@@ -310,6 +311,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     status: runStatus, error: runError, retry: retryRun } =
     useRunState(runId, { pollOnly: reviewMode })
   const retryRunRef = useRef(retryRun)
+  const serverCodeStale = serverCodeNotice(live)
   retryRunRef.current = retryRun
   // The destructive Start-over saga lives in useStartOverRecovery.js (doc 25 UI-03). Its durable
   // state is read here, at the top, because startOverMutationBlocked gates the published run
@@ -2541,6 +2543,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
         </div>
         <span className="pill phase">{displayedPhase}</span>
+        {/* WHOSE CODE DREW THIS. Beside the phase pill because it qualifies every number on the
+            page at once: a server that loaded its modules before the last merge answers 200 with an
+            older fold, and nothing else on this screen can tell you so. See `src/serverCode.js`. */}
+        {serverCodeStale && <span className="pill warn" title={serverCodeStale.detail}>
+          {serverCodeStale.text}
+        </span>}
         {compactWorkspace
           ? <button type="button"
               className={'muted run-goal' + (compactGoalExpanded ? ' expanded' : '')}

@@ -2258,8 +2258,13 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
 
     state_envelope = components["PublicRunStateResponse"]
     assert state_envelope["additionalProperties"] is False
+    # `server_code` joined this set on 2026-09-03 and is REQUIRED for the same reason
+    # `source_integrity` is: "this server is current" and "this server is too old to carry the
+    # field" must not reach a client as the same absence. It is what let a UI process nine days
+    # behind the tree publish 0 of 34 card parent edges and look healthy doing it.
     assert set(state_envelope["required"]) == {
         "state", "seq", "max_seq", "event_count", "generation", "source_integrity",
+        "server_code",
     }
     # REQUIRED, not optional, and typed rather than an additive key inside the extensible `state`
     # body: it qualifies every number in this envelope, and a receipt a client may find missing is

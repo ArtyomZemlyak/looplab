@@ -238,6 +238,30 @@ class RunSourceIntegrity(BaseModel):
     unreadable: Optional[bool] = None
 
 
+class ServerCodeFreshness(BaseModel):
+    """Whether the PROCESS that built this payload is still running the code on disk.
+
+    A `looplab ui` server pins its modules at import, so a fold fix merged afterwards is absent from
+    every answer it gives — and absent SILENTLY, since a stale server returns 200 with a smaller
+    truth. Measured on 2026-09-03: a 9-day-old process published `parent_card_id` on 0 of 34 cards
+    where the tree's own projection published 17, and the question ladder drew twelve unattached
+    questions from it. `serve/code_freshness.py` carries the full case.
+
+    Required, not optional: "this server is current" and "this server is too old to have the field"
+    must not arrive as the same absence — the exact rule `RunSourceIntegrity` above already follows.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    stale: bool
+    changed_count: int = Field(ge=0)
+    changed: list[str]
+    changed_truncated: bool
+    files_at_boot: int = Field(ge=0)
+    files_now: int = Field(ge=0)
+    complete: bool
+
+
 class PublicRunStateResponse(BaseModel):
     """Stable owner-state envelope; ``state`` keeps additive legacy fields discoverable at runtime."""
 
@@ -248,6 +272,7 @@ class PublicRunStateResponse(BaseModel):
     max_seq: int = Field(ge=-1)
     event_count: int = Field(ge=0)
     source_integrity: RunSourceIntegrity
+    server_code: ServerCodeFreshness
     generation: Annotated[Optional[str], Field(pattern=r"^[0-9a-f]{64}$")]
 
 
