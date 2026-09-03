@@ -35,12 +35,12 @@ def _snapshot(rd, **fields):
     (rd / "config.snapshot.json").write_text(json.dumps(fields), encoding="utf-8")
 
 
-def test_an_existing_run_with_no_snapshot_is_REFUSED_under_strict(tmp_path):
+def test_an_existing_run_with_no_snapshot_is_REFUSED_when_the_caller_requires_it(tmp_path):
     """THE DEFECT. MUTATION: return `Settings()` here again -> `resume` continues an
     approval-pending run with `require_approval=False` and finishes it unapproved."""
     rd = _log(tmp_path / "run")
     with pytest.raises(typer.BadParameter) as excinfo:
-        load_run_settings(rd, strict=True)
+        load_run_settings(rd, strict=True, require_snapshot=True)
     message = str(excinfo.value)
     assert "config.snapshot.json" in message
     assert "require_approval" in message, "the refusal must name what would have been lost"
@@ -55,7 +55,7 @@ def test_the_refusal_would_have_hidden_a_REAL_approval_gate(tmp_path):
 
     (rd / "config.snapshot.json").unlink()
     with pytest.raises(typer.BadParameter):
-        load_run_settings(rd, strict=True)
+        load_run_settings(rd, strict=True, require_snapshot=True)
     # ...and the ambient default this used to fall back to is the unsafe one.
     assert Settings().require_approval is False
 
@@ -65,7 +65,41 @@ def test_a_FRESH_run_directory_is_untouched(tmp_path):
     key the refusal on the file's absence alone -> starting any new run refuses."""
     fresh = tmp_path / "brand-new"
     fresh.mkdir()
-    assert load_run_settings(fresh, strict=True).require_approval is False
+    assert load_run_settings(fresh, strict=True, require_snapshot=True).require_approval is False
+
+
+def test_a_LEGACY_run_is_still_FINALIZABLE(tmp_path):
+    """The narrowing, and the regression the first cut caused. A run predating
+    `config.snapshot.json` is a real, supported thing, and `finalize` / the finalization recovery
+    wrap up a run that has already STOPPED — they never run the search spine, so they cannot reach
+    the approval gate this refusal exists for. Refusing them makes an old run permanently
+    unfinishable over a gate it can no longer touch.
+
+    MUTATION: key the refusal on `strict` again -> `looplab finalize` on any pre-snapshot run dies,
+    which `tests/test_finalization_recovery.py` catches by name.
+    """
+    rd = _log(tmp_path / "run")
+    assert load_run_settings(rd, strict=True).require_approval is False
+
+
+def test_only_RESUME_asks_for_it():
+    """The asymmetry, by AST over the real command module rather than by counting strings: a second
+    caller quietly adopting `require_snapshot=True` re-breaks legacy finalize."""
+    import ast
+    from pathlib import Path as _Path
+
+    from looplab.cli import run_cmds
+
+    tree = ast.parse(_Path(run_cmds.__file__).read_text(encoding="utf-8"))
+    asked = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "load_run_settings"
+             and any(kw.arg == "require_snapshot" and getattr(kw.value, "value", False) is True
+                     for kw in node.keywords)]
+    assert len(asked) == 1, "exactly one caller may require the snapshot"
+    enclosing = [fn.name for fn in ast.walk(tree)
+                 if isinstance(fn, ast.FunctionDef)
+                 and any(call is asked[0] for call in ast.walk(fn))]
+    assert "resume" in enclosing, enclosing
 
 
 def test_a_nonexistent_directory_and_None_still_answer(tmp_path):

@@ -3735,6 +3735,14 @@ class EvaluateMixin:
             # failure and pausing would hide the exact thing the invariant exists to make impossible,
             # and would let the next run make the same crossing with a tidier receipt.
             raise
-        except BaseException as exc:                                   # noqa: BLE001 — see above
+        except Exception as exc:                                       # noqa: BLE001 — see above
+            # `Exception`, NOT `BaseException`, and the line is deliberate. Every measured production
+            # shape is an `Exception` — an OSError from `_materialize`/`_write_node_files`, an ENOSPC
+            # from a `store.append`, a KeyError on a hand-edited node — while a bare `BaseException`
+            # outside the three re-raised above means the interpreter is unwinding for a reason no
+            # node terminal should paper over. It is also a seam this repo already documents:
+            # `tests/test_repair_stop_decision.py`'s `_Kill(BaseException)` carries "a BaseException
+            # so `_evaluate`'s containment cannot absorb it", and a test that has to sneak past a
+            # handler is a handler reaching further than its own argument does.
             await self._contain_eval_crash(node_id, _contained_generation[0], exc)
 
