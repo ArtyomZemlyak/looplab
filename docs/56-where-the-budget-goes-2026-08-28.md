@@ -6755,3 +6755,93 @@ inside the corpus's normal band.
 {268.52, 25.37} against pre-§99 {223.22, 145.26}; batch 09-03T07 has shipped {225.86, …} against
 pre-§99 {221.71, 244.32} with one probe still running. Eight of twenty-four probes in; no test is
 computed here because a batch with an incomplete arm is not a stratum yet.
+
+## 148. The money cue reaches 99 % of the spend, and I measured 32 % — the same truncation the tool beside me was written to prevent
+
+Two things were chased this sweep. Both looked like leaks and both shrank on measurement; the
+second one shrank because the FIRST measurement was wrong, in the exact way this repo already had a
+library to prevent.
+
+### 148.1 The novelty gate is not a leak — 87 % of its rejections land the node ten minutes later
+
+`newCK4` spent **25.9 % of its budget and 50.7 minutes after its last evaluated node** — against
+0.3 %, 1.2 % and 3.7 % for the three probes of its own batch (§147). The event stream says why: a
+`propose` that ran 2367 s, a `novelty` stage that ran 1003 s, and then `novelty_rejected` for
+node 2, `near_node 1`.
+
+Corpus-wide that shape is common: **59 of 76 runs (78 %) hold at least one rejection, 77 in all**,
+and the window ending in one costs a median $0.2305 — 22.9 % of a $1 run, $16.43 in total, of which
+$12.23 (74 %) is `propose` + `repropose` + `novelty`.
+
+That paragraph is the leak I was about to report, and it is wrong. What happens after a rejection:
+
+| outcome | n | share |
+|---|---|---|
+| the SAME node id is evaluated later (median **9.9 min**) | 67 | **87 %** |
+| no node evaluated after it | 10 | 13 % |
+
+The rejection is a redirect, not a discard: the loop reproposes and the node lands. Of the ten
+terminal cases, seven had **less than $0.01 left** — the rejection is simply the last event before
+the run stops. Only three had real money on the table: accPde $0.2347, remEE $0.2034,
+newCK4 $0.1273. **Corpus cost of the whole phenomenon: $0.6569.** The runs that end this way have a
+median of **1** evaluated node against 3 for the rest, so a terminal rejection marks a starved run
+rather than causing one.
+
+### 148.2 Item 8(в): closed, and the number that said otherwise was mine
+
+The standing list says the money hint does not reach `plan` / `foresight_rank` / `hyp_prioritize`.
+Grepping the spans for `Spend guidance` agrees loudly — 0 of 1347 `plan_step` spans, 0 of 305
+`plan`, 0 of 741 `deep_research`. Widening the pattern to all three wordings the loop actually
+uses (`Spend guidance`, and the two `BUDGET: $` lines in `repo_developer.py` and
+`deep_research.py`) moved it to 31.7 % / 21.3 % / 83.3 % and put the blind share of spend at
+**65.6 %**.
+
+Both figures are artefacts. `core/tracing.py` stores `input` as the SUFFIX whenever `input_from` is
+set, so a chained prompt reads as blind however well it is served. Resolving the chain with
+`benchmarks/algotune/span_input.py` — a file written on 2026-08-28 after this identical mistake, whose
+own docstring says a naive reader "reported the budget line in 3 of 32 step prompts when the true
+figure is 35 of 35" — gives the real answer over the 12 newest runs (3,922 generations, $12.1123):
+
+| phase | spans | sees the money | share of spend |
+|---|---|---|---|
+| plan_step | 1354 | **99.3 %** | 36.6 % |
+| propose | 797 | 90.5 % | 24.5 % |
+| deep_research | 742 | 83.3 % | 18.2 % |
+| repropose | 268 | 92.5 % | 8.3 % |
+| plan | 305 | **100 %** | 8.1 % |
+| foresight_rank | 96 | 0 % | 1.6 % |
+| hyp_prioritize | 61 | 0 % | 0.8 % |
+| novelty | 146 | 0 % | 0.7 % |
+
+**Blind spend is $0.9862 of $12.1123 = 8.1 %, not 65.6 %.** `plan` was closed on 08-31 by the
+Developer's own `_budget_note()` and the closure holds at 100 %. What is still blind is
+`foresight_rank` + `hyp_prioritize` (2.4 %), left blind on purpose — a ranker choosing among
+candidates it did not generate has no cheaper option to switch to.
+
+Items (а) and (б) are also shipped, checked against the built card word for word, not by paraphrase:
+"AND THERE IS A CEILING ON HOW SLOW YOUR SOLVER MAY BE, PER INSTANCE. The harness gives each
+instance's subprocess `(1 + 5) * reference_time * 10` seconds"; and "THE BEST EVALUATED SOLVER IS
+WHAT GETS SUBMITTED, NOT YOUR LAST ONE."
+
+### 148.3 The fix is an instrument, because the library was not enough
+
+`span_input.py` existed, was correct, and did not stop me repeating the mistake it was written for —
+a library only helps the reader who remembers to import it. So the resolution is now a command:
+`benchmarks/cue_reach.py <probe-dir>… [--pattern REGEX] [--naive]`, which walks a probe tree, scores
+a cue against the RESOLVED prompt, and with `--naive` prints the truncated-read figure in a column
+beside it so the gap is on the page:
+
+```
+phase                   spans   sees      %      cost  share   naive%
+plan_step                 249    249 100.0% $  0.8136  40.2%    33.7%
+propose                   135    123  91.1% $  0.4890  24.2%    10.4%
+```
+
+`tests/test_the_cue_reach_tool_reads_the_whole_prompt.py` holds it: a two-span fixture where the cue
+is stated in the parent and carried by the child, so a resolving reader scores 2 of 2 and a
+truncated one scores 1 of 2. Mutated three ways — drop the resolve, narrow the default pattern to
+one wording, `glob` instead of `rglob` — and each mutation reddens a different assertion.
+
+The default pattern being a union of three wordings is the second trap, independent of the first:
+one regex per repo would have reported the Developer and the Researcher blind. The test pins that
+too, by asserting the narrow pattern is visibly narrower.
