@@ -542,6 +542,19 @@ def atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
             f.flush()
             best_effort_fsync(f.fileno())
         os.replace(tmpname, p)  # atomic on Win + POSIX local FS; best-effort on FUSE
+        # PUBLISH THE NAME, not only the bytes. The `fsync` above puts the temp file's CONTENT on
+        # stable storage; the rename that gives it the destination's name lives in the parent
+        # DIRECTORY, and until that directory is synced a crash can leave the name pointing at the
+        # old inode — or at nothing — with the good bytes on disk under a temp name nobody will ever
+        # look for. That is the whole failure `atomic_write_bytes` exists to prevent, and this tier
+        # did the expensive half and skipped the cheap one.
+        #
+        # BEST-EFFORT, deliberately: this tier's callers write DERIVED artifacts (snapshots, rebuilt
+        # bundles, caches) where an unconfirmed sync must not fail the operation — the reasoning is
+        # in `best_effort_fsync_parent`, and `best_effort_fsync`'s own watchdog already gives up
+        # process-wide once a directory sync BLOCKS, which is the geesefs/S3 case. A caller that
+        # cannot tolerate an unconfirmed publish belongs in `strict_atomic_write_bytes`.
+        best_effort_fsync_parent(p)
     except BaseException:
         try:
             os.unlink(tmpname)   # don't leave a stray temp behind on failure

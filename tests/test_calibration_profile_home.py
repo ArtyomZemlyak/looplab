@@ -93,7 +93,15 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
-_EXPECTED_DIGEST = "sha256:61cb98285ab687e8551c6729afec7a5ef98c97daaa1ed624c263eefe3d7df4ed"
+#   2026-09-03  + agent_timeout               (the wall on ONE external coding-agent invocation).
+#               This is the "field set changed too" branch: 215 -> 216, so the calibration envelope
+#               really is different and old receipts SHOULD stop verifying. It is also the clearest
+#               possible instance of why the SIBLING check had to stop being an equality — a field
+#               that no calibration run can be affected by (calibration uses the toy backend and
+#               never launches a coding agent) legitimately moves THIS pin, which binds the complete
+#               settings map, while it must NOT revoke a preserved snapshot merely for predating it.
+#               See `search/speculation_quality.py`'s directional field check.
+_EXPECTED_DIGEST = "sha256:86efa6effec25bea2a12d2abbd4dbebaf91dcd32ff2d576882ffc2f82d7741aa"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -417,7 +425,7 @@ _EXPECTED_DIGEST = "sha256:61cb98285ab687e8551c6729afec7a5ef98c97daaa1ed624c263e
 #               — where a replicate calibrated before it would have run that stage to its wall.
 #               That is a different number of evaluations on the same failing node, which is
 #               precisely what a speculation receipt asserts about.
-_EXPECTED_FIELD_COUNT = 215
+_EXPECTED_FIELD_COUNT = 216
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

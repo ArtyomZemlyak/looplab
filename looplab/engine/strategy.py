@@ -397,6 +397,21 @@ class StrategyCadenceMixin:
         """
         requested = strat.get("developer")
         current = str(getattr(self, "_developer_name", "default") or "default")
+        # A name `validate_strategy` REFUSED, carried here in its own key so it could never be
+        # mistaken for a switch. It is a refusal like the four below and gets the same receipt — the
+        # difference is only WHERE it was decided, which `reason_code` says. Without this the drop is
+        # invisible: the decision keeps its rationale ("switch developer to agentless") with no
+        # `developer` and no receipt, i.e. a history that reads as a switch that happened.
+        refused_name = strat.get("developer_refused")
+        if isinstance(refused_name, str) and refused_name:
+            effective = {k: v for k, v in strat.items() if k != "developer_refused"}
+            return effective, _NO_PREPARED_DEVELOPER, {
+                "status": "refused",
+                "requested_backend": refused_name,
+                "applied_backend": current,
+                "reason_code": "unknown_backend",
+                "reason": f"{refused_name!r} is not an available Developer backend",
+            }
         if not isinstance(requested, str) or not requested or requested == current:
             return strat, _NO_PREPARED_DEVELOPER, None
 

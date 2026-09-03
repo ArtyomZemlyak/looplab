@@ -63,16 +63,88 @@ def train_test_contamination(train_rows: list, test_rows: list) -> dict:
             "leak": len(dups) > 0, "duplicates": len(dups), "fraction": round(frac, 6)}
 
 
+def _finite_pairs(a: Sequence[float], b: Sequence[float]) -> list[tuple[float, float]]:
+    """The cleaned (x, y) pairs both correlations are computed over — `_pearson`'s own rule, hoisted.
+
+    Extracted rather than re-derived so the two coefficients can never disagree about which ROWS
+    they describe: a leak flagged by one and cleared by the other, on different row sets, is not a
+    comparison an operator can act on.
+    """
+    import math
+    n0 = min(len(a), len(b))
+    pairs: list[tuple[float, float]] = []
+    for x, y in zip(list(a)[:n0], list(b)[:n0]):
+        try:
+            fx, fy = float(x), float(y)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(fx) and math.isfinite(fy):
+            pairs.append((fx, fy))
+    return pairs
+
+
+def _ranks(values: Sequence[float]) -> list[float]:
+    """Fractional (tie-averaged) ranks. Ties MUST share a rank: assigning them arbitrary distinct
+    ranks would make a constant column look perfectly ordered against anything."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    out = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        shared = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            out[order[k]] = shared
+        i = j + 1
+    return out
+
+
+def _spearman(a: Sequence[float], b: Sequence[float]) -> float:
+    """Rank correlation — `_pearson` over the tie-averaged ranks of the same cleaned pairs.
+
+    WHY IT IS HERE AT ALL. `target_leakage` was one Pearson coefficient, so a feature that IS the
+    target under any monotone transform — `y**3`, `log(y)`, `exp(y)`, a rank-preserving rescale,
+    a quantile bucket — measured well below the threshold and the gate reported CLEAN. That is
+    worse than having no detector: this gate can abort a run, so the operator reads silence as
+    assurance, and the whole point of the leakage family is that it is the differentiator.
+
+    This is not a NEW judgment, it is the SAME judgment made robust to a reparameterization. A
+    column ranking ~identically to the target is the answer written in different units, exactly as a
+    column correlating ~1.0 with it is; so it shares the threshold rather than getting one nobody
+    has calibrated. The residue is stated and not guessed at: a NON-MONOTONE leak (`y**2` about a
+    symmetric mean, a categorical id that maps to the label) is invisible to both coefficients, and
+    the rung that would see it has false positives — a binary feature perfectly predicting a binary
+    target is routine and legitimate — so it needs a measurement before it can gate anything.
+    """
+    pairs = _finite_pairs(a, b)
+    if len(pairs) < 3:
+        return 0.0
+    return _pearson(_ranks([p[0] for p in pairs]), _ranks([p[1] for p in pairs]))
+
+
 def target_leakage(features: dict[str, list[float]], target: list[float],
                    threshold: float = 0.98) -> dict:
-    """Flag feature columns near-perfectly correlated with the target (a proxy/leak)."""
-    flagged = {}
+    """Flag feature columns near-perfectly correlated with the target (a proxy/leak).
+
+    BOTH a linear and a RANK coefficient, and either alone flags — see `_spearman` for why the rank
+    rung exists and what it deliberately still cannot see. `flagged` keeps the same
+    `{name: coefficient}` shape every existing reader expects, carrying whichever coefficient is
+    larger in magnitude; `flagged_detail` is additive and says which rung fired, so an operator
+    looking at an abort can tell "this column is the target" from "this column is a monotone
+    function of the target" without re-deriving anything.
+    """
+    flagged: dict[str, float] = {}
+    detail: dict[str, dict] = {}
     for name, col in features.items():
         r = _pearson(col, target)
-        if abs(r) >= threshold:
-            flagged[name] = round(r, 6)
+        rho = _spearman(col, target)
+        if abs(r) >= threshold or abs(rho) >= threshold:
+            flagged[name] = round(r if abs(r) >= abs(rho) else rho, 6)
+            detail[name] = {"pearson": round(r, 6), "spearman": round(rho, 6),
+                            "rung": "linear" if abs(r) >= threshold else "monotone"}
     return {"detector": "target_leakage", "leak": bool(flagged),
-            "threshold": threshold, "flagged": flagged}
+            "threshold": threshold, "flagged": flagged, "flagged_detail": detail}
 
 
 _FIT_RE = re.compile(r"\.(fit|fit_transform)\s*\(([^)]*)\)")
@@ -215,9 +287,26 @@ def temporal_leakage(train_timestamps: list[float], test_timestamps: list[float]
         return {"detector": "temporal_leakage", "leak": False, "overlap": 0, "checked": False,
                 "reason": "no finite timestamps to compare"}
     cutoff = min(test_finite)
-    overlap = sum(1 for t in train_finite if t >= cutoff)
+    # STRICTLY AFTER the cutoff, not at it. `t >= cutoff` flags a train row whose stamp EQUALS the
+    # first test stamp, and on a coarse clock that is the ordinary case rather than a leak: a daily
+    # or hourly stamp puts the last train row and the first test row in the same bucket for every
+    # split made on a real calendar boundary. This detector is WIRED — `engine/audit.py::_leakage_
+    # verdicts` returns `leak=True` on it and the trust gate aborts — so the equality made a coarse
+    # split unrunnable while the split it describes is correct: nothing in a same-bucket train row is
+    # information from the future, because the bucket is the resolution of the clock, not an ordering.
+    #
+    # A GENUINE overlap survives: a train row strictly after the first test stamp is still counted,
+    # which is every case where the split really interleaves. The direction of the change is the safe
+    # one for the one thing this cannot know — whether the stamps are exact instants or buckets —
+    # because the alternative it replaces reported a leak it could not distinguish from a tie.
+    #
+    # `ties` is recorded rather than dropped: a split whose boundary bucket holds train rows is worth
+    # SAYING, and an operator on an exact-instant clock reading `ties: 4000` is looking at a split
+    # that really does share instants. It is a fact on the verdict, never a leak.
+    overlap = sum(1 for t in train_finite if t > cutoff)
+    ties = sum(1 for t in train_finite if t == cutoff)
     return {"detector": "temporal_leakage", "leak": overlap > 0,
-            "cutoff": cutoff, "overlap": overlap}
+            "cutoff": cutoff, "overlap": overlap, "ties": ties}
 
 
 def code_leakage_findings(src: str) -> list[dict]:

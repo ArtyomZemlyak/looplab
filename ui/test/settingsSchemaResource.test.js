@@ -110,7 +110,13 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   184 -> 185 (2026-08-30): `single_command_divergence_watch`, a CORRECTION and not a
   //   feature — the field shipped in `7813032e` with no catalogue row at all, so the
   //   python-side reconciliation was red on master from that merge until now.
-  assert.equal(Object.keys(schema.fieldByKey).length, 185)
+  //   185 -> 186 (2026-09-03): `agent_timeout`, the wall on ONE external coding-agent
+  //   invocation. Also a correction: `CliAgentDeveloper.__init__` carried `timeout=600.0` and
+  //   `agents/factory.py` never passed the argument, so on every composed run that constructor
+  //   default WAS the value and no config, env var or form field could move it. Verified as the
+  //   paragraph prescribes: removing exactly `agent_timeout` from the catalogue gives back 185.
+  //   FIFTEENTH occurrence, and the Python guard caught it first for the eleventh time.
+  assert.equal(Object.keys(schema.fieldByKey).length, 186)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')

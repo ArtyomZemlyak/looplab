@@ -1271,6 +1271,14 @@ ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
     "gpu_unavailable", "gpu_unpinnable", "proxy_skipped", "superseded", "card_dropped",
     "aborted", "developer_crash", "idea_rejected", "monitor_broken", "asha_underperforming",
     "frozen",
+    # THE ENGINE ITSELF RAISED (`engine/evaluate.py::EvaluateMixin._contain_eval_crash`). Deliberately
+    # here and not in `FAILURE_REASONS`: `crash` means the CANDIDATE's process died and is therefore
+    # repairable, so classifying a disk-full or a read-only run directory as one hands the Developer
+    # a fault it cannot fix and spends a paid triage call finding that out. Being outside that tuple
+    # is what makes this terminal by omission — not diagnosed, not repaired, not salvaged — instead
+    # of needing a fourth list to keep in sync. Not BENIGN either: it is evidence about the BOX, the
+    # run is paused beside it, and the owner alert must show it.
+    "engine_error",
 )
 
 # The subset that is BENIGN — a node that ended for a reason saying nothing about the experiment.

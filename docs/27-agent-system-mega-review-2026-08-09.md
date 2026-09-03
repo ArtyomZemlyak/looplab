@@ -207,9 +207,16 @@ Research only.
 >   in-flight provider request (`core/llm.py` has no `cancel_check` at all) and the external CLI is
 >   killed on TIMEOUT rather than on a cancel token. The MCP leg shipped 2026-08-17.
 >   proof:absent:cancel_check@looplab/core/llm.py
-> - **OPEN[external-cli-timeout-not-settings-bound]** still a composition-independent 600-second
->   constructor default that the factory does not override, and no priced/unpriced usage result.
->   proof:present:600.0@looplab/agents/cli_agent.py
+> - **[closed 2026-09-03 for the TIMEOUT half — `Settings.agent_timeout` (default 600.0, the
+>   constructor's own value, bounded 0 < t <= 24 h) is passed by `agents/factory.py`. It was not a
+>   default an operator could override, it was one nobody could REACH: the argument was never passed,
+>   so on every composed run the constructor value WAS the value, and no config, env var or form
+>   field could move it. `tests/test_agent_timeout_is_settings_bound.py` drives it through the real
+>   `make_roles`.]** **OPEN[external-cli-usage-is-unpriced]** the other half of the original row:
+>   `CliAgentDeveloper` returns no usage result, so an external coding agent's spend reaches neither
+>   the `llm_usage` ledger nor `looplab tokens` — a run whose Developer is a CLI agent reports the
+>   cost of everything except the role that writes the code.
+>   proof:absent:CostAccountant@looplab/agents/cli_agent.py
 > - **OPEN[agent-trajectory-eval-ladder-absent]** rungs 2-5 of §4 — curated trajectory cases, frozen
 >   outcome cases, confused-deputy/cross-run-scope, repeated stochastic trials with CIs — have no
 >   corpus. (Rung 1 exists and predates this document; see the correction above.)
@@ -231,16 +238,29 @@ Research only.
 > - **OPEN[three-new-run-planners-no-shared-schema]** CLI, TUI and Web still plan a new run three
 >   ways; no `RunProposal` service or shared schema exists anywhere in `serve/`, and
 >   `engine/genesis.py` says so in production source. proof:absent:RunProposal@looplab/serve
-> - **OPEN[mcp-tool-cache-not-principal-keyed]** typed results, cancellation and the authz binding all
->   shipped in `cb3433b3`; the residue is that the adapter cache is still one process-global
->   `_CACHED`, not keyed by principal. proof:present:_CACHED@looplab/tools/mcp_tools.py
+> - **[closed 2026-09-03 — `McpTools.cached()` is keyed on a digest of the config `load_config`
+>   resolves, which is what actually determines the server set: an operator who edits `.mcp.json` no
+>   longer keeps talking to the old servers, and a per-principal config source would key itself.
+>   Deliberately NOT keyed on "the principal", because no per-principal config source exists — see
+>   the item below — so that key would spawn N identical subprocess sets and buy nothing. Nothing is
+>   evicted (a handle owns a thread, a loop and a subprocess and exposes no close), so the number of
+>   distinct configurations one process connects for is bounded instead.
+>   `tests/test_mcp_cache_key.py`.]**
+> - **OPEN[mcp-config-has-no-per-principal-source]** the residue the cache key cannot supply: MCP
+>   servers are resolved from `LOOPLAB_MCP_CONFIG` / `LOOPLAB_MCP_SERVERS` / `.mcp.json`, all
+>   process-wide, so every session on a shared server gets the same server set whatever principal is
+>   driving it. proof:absent:principal_mcp_config@looplab/tools/mcp_tools.py
 > - **OPEN[prompt-governance-has-no-typed-registry]** repo onboarding joined the store, but the
 >   additive typed registry the row asks for does not exist, so Genesis, assistants, reports, monitors
 >   and stewards keep separate prompt families. proof:absent:PromptDefinition@looplab/core/prompts.py
-> - **OPEN[developer-backend-switch-not-exposed-to-the-operator]** the P2 product choice, re-derived:
->   the operational gap is fixed, but nothing in `serve/` names the developer-switch vocabulary, so the
->   capability is still neither exposed through governance nor retired.
->   proof:absent:developer_switch_names@looplab/serve
+> - **[closed 2026-09-03 — `serve/control_validation.py::_normalize_set_strategy` accepts
+>   `strategy.developer` and validates it against `core/config.py::developer_switch_names()`, the one
+>   home the Strategist's own `available_developers` is derived from, so the operator and the model
+>   cannot be told different things are switchable. An unknown name is a 400 NAMING the valid set
+>   rather than a silent drop: the operator is present here and can fix a typo, which is the
+>   asymmetry `core/appconfig.py` already draws. The model half shipped in the same change
+>   (`strategist-developer-field`) — `_StrategyOut.developer` plus a durable receipt for the drop
+>   `validate_strategy` makes. `tests/test_strategist_developer_switch.py` drives both ends.]**
 > - **OPEN[auto-distilled-skills-outside-authoring]** the P2 remaining product gap: the Authoring
 >   surface's roots are `prompts`/`skills`/`knowledge` off `Settings`, so auto-distilled
 >   `<memory_dir>/skills/` candidates stay hidden until cross-task promotion with no first-party

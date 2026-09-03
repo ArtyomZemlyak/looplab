@@ -961,7 +961,11 @@ def resume(
     # Restore the ORIGINAL run's settings from the snapshot `run` wrote — a fresh Settings()
     # would silently drop run-only flags (require_approval, trust_mode, confirm_*, eval_trust_mode,
     # backend, …), e.g. finishing a paused not-yet-approved run without any approval.
-    settings = load_run_settings(run_dir, strict=True)
+    # `require_snapshot`: THIS caller is the one that continues the search, so it is the one whose
+    # missing snapshot can silently bypass the approval gate. `finalize` and the finalization
+    # recovery below deliberately do not ask — a run predating `config.snapshot.json` must stay
+    # finishable, and they cannot reach the gate anyway.
+    settings = load_run_settings(run_dir, strict=True, require_snapshot=True)
     # Settings.max_nodes carries ge=1, but assignment validation is disabled (flat-settings/snapshot
     # design), so a direct override would silently accept 0/negative and then append resume/reopen work
     # that can only finish immediately. Enforce the field's own floor here, before `_engine` and before

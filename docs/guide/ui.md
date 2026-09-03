@@ -1087,19 +1087,19 @@ number was measured; the third qualifies **what it is a number for**:
   not borrow the divergence heading's "did not run", which would assert the very thing the record
   refuses to claim.
 
-<!-- OPEN[trust-default-flips-missed-diagram-and-ui-guide] the five 2026-08-23 default flips
-(the three trust scans + both search tools, 4aab7350) updated configuration.md and the schema
-only; the sentence below and three spots in the process diagram still describe the old defaults.
-proof:`line:reward_hack_detect&&is off by default@docs/guide/ui.md+present:detector default OFF@docs/infographic/agent-architecture.html`
-REVIEW 2026-08-29 (P2 docs-drift): the reward-hack scan ships ON since 2026-08-23, so "an absent
-pill is silent on most runs" now describes only runs that turned it off or legacy resumes; the
-diagram's t_rh tag/sub-line, the t_lk sub-line and the Deep-Researcher "Literature/Web opt-in"
-clause carry the same stale claim. CLAUDE.md: a default change moves the settings table, the
-guide page AND the diagram in the SAME change; "Stale docs/diagram are treated as a bug." -->
+<!-- [closed 2026-09-03] The five 2026-08-23 default flips (the three trust scans + both search
+tools) had updated configuration.md and the schema only. Re-derived from `core/config.py` and
+brought into line here and in `docs/infographic/agent-architecture.html`: `reward_hack_detect`
+True, `code_leakage_detect` True, `literature_search` True, `web_search` True. The sentence below,
+the diagram's `t_rh` tag and sub-line, its `t_lk` sub-line and the Deep Researcher's
+"Literature/Web opt-in" clause all said OFF/opt-in. CLAUDE.md: a default change moves the settings
+table, the guide page AND the diagram in the SAME change, and "stale docs/diagram are treated as a
+bug" — so the drift is the defect, not the fact that a doc mentions a default. -->
 No pill is a claim that anything is wrong with the run: it is the claim that the number in the `best`
 column is not the same kind of evidence as the one beside it, and none of them moves a rank, a champion
-or a selection. **An absent pill is not a certificate either** — `reward_hack_detect` is off by default,
-so the second caveat is silent on most runs; the third is silent on every task whose space declares its
+or a selection. **An absent pill is not a certificate either** — `reward_hack_detect` ships ON since
+2026-08-23, so the second caveat is silent only on a run that turned it off or a legacy resume that
+pinned the old default; the third is silent on every task whose space declares its
 parameters by bare name (the toy and benchmark spaces), and on a divergence no carrier the engine can
 read states at all. It is NOT silent on a config-file divergence — this page claimed that until
 2026-08-26 and the corpus refutes it, since the two e5small champions above diverge in

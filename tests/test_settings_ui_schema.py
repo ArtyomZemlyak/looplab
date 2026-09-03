@@ -100,7 +100,13 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 185
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 186
+    # 185 -> 186 catalogued rows on 2026-09-03: `agent_timeout`, the wall on ONE external
+    # coding-agent invocation. A ROW because none of the four honest omission clauses holds — the
+    # key set is closed, it is not a legacy alias, it is exactly operator-typed, and its parent
+    # feature (the external coding-agent Developer) already has rows. It is also the shape those
+    # clauses exist to catch from the other side: `CliAgentDeveloper`'s constructor default was the
+    # only value a composed run could have, because `agents/factory.py` never passed the argument.
     # 184 -> 185 catalogued rows on 2026-08-30: `single_command_divergence_watch`, and this one is a
     # CORRECTION rather than a feature. The field shipped in `7813032e` with neither a form row nor
     # an uncurated entry, so `_reconcile_settings_fields` was RED on master from that merge until
@@ -179,7 +185,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # in `7813032e` WITHOUT this pin or a catalogue row, which is why the reconciliation was
     # red from that merge until now — see the catalogue note above for why it gets a form row
     # rather than an uncurated entry.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 218
+    # 218 -> 219 Settings on 2026-09-03: `agent_timeout`. See the catalogue note above for why it
+    # is a form row; the reason it is a Settings field at ALL is that it previously was not, and the
+    # constructor default it replaced was therefore the only value a composed run could ever have.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 219
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

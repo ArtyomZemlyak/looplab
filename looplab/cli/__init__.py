@@ -394,7 +394,7 @@ def log_integrity_from(store: EventStore) -> dict:
             "corrupt_line": div.get("corrupt_line"), "dropped_lines": div.get("dropped_lines")}
 
 
-def load_run_settings(run_dir, *, strict: bool) -> Settings:
+def load_run_settings(run_dir, *, strict: bool, require_snapshot: bool = False) -> Settings:
     """Load a run's `config.snapshot.json` into Settings — the ONE answer to "which settings does
     this command actually run with" (doc 25 CT-08).
 
@@ -415,12 +415,41 @@ def load_run_settings(run_dir, *, strict: bool) -> Settings:
       diagnostic reaches the endpoint recorded for that run. An absent or unreadable snapshot must
       not stop someone from reading an old or partially-written run, so it degrades to ambient.
 
-    An absent snapshot is ambient Settings under BOTH modes: `strict` is about corruption, not about
-    requiring the file. Callers that need the file to exist check for it themselves and say why
-    (`_finalization_recovery_inputs` names both snapshots in one message).
+    `require_snapshot=True` additionally REFUSES an absent snapshot on a run that already has an
+    event log, and exactly one caller asks for it: `resume`. That is the 2026-09-03 fix, and the
+    paragraph it replaces ("an absent snapshot is ambient Settings under BOTH modes: `strict` is
+    about corruption, not about requiring the file") was the defect its own bullet above describes.
+    With the file absent, `resume` took a fresh `Settings()`, whose `require_approval` is `False`
+    and is read LIVE (`engine/orchestrator.py::Engine.__init__`, gated in the search spine), so a
+    paused approval-pending run could be continued to completion with no approval — by deleting one
+    file. `trust_mode`, `eval_trust_mode`, `confirm_*` and `backend` degrade the same way, silently.
+
+    WHY ONLY `resume`, and this is the narrowing that matters: the bypass lives in the SEARCH SPINE,
+    and `finalize` and the finalization recovery do not run it — they wrap up a run that has already
+    stopped. A run predating `config.snapshot.json` is a real, supported thing
+    (`tests/test_finalization_recovery.py::test_cli_finalize_accepts_explicit_task_file_for_legacy_run`
+    is named for it), and refusing to FINALIZE one would make an old run permanently unfinishable
+    over a gate it can no longer reach. Same asymmetry as `adapters/repo_task.py`'s grandfathering:
+    refuse where the operator is about to spend something, grandfather where they are only closing
+    the books.
+
+    The discriminator is the run's own EVENT LOG, not the run directory: a bare `--out` path with no
+    log is a fresh run whose snapshot has not been written yet (this function is called before the
+    engine writes one), and refusing there would break `run` itself. `run_dir=None` is the same case.
+
+    Callers that need the file to exist for a REASON OF THEIR OWN still check and say so
+    (`_finalization_recovery_inputs` names both snapshots in one message); this refusal is about the
+    settings, so it names the settings that would have been lost.
     """
     snap = Path(run_dir) / "config.snapshot.json" if run_dir is not None else None
     if snap is None or not snap.exists():
+        if require_snapshot and snap is not None and (Path(run_dir) / "events.jsonl").exists():
+            raise typer.BadParameter(
+                f"{snap} is missing, but {run_dir} holds an events.jsonl — this run was started with "
+                "settings that are no longer on disk. Continuing would silently run it on defaults "
+                "(require_approval, trust_mode, eval_trust_mode, confirm_*, backend, ...), which can "
+                "finish an approval-pending run with no approval. Restore the snapshot from a backup, "
+                "or copy one from another run of the same task and edit it.")
         return Settings()
     if strict:
         return _settings_from_config_snapshot(snap)

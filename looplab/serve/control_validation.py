@@ -560,7 +560,7 @@ def _normalize_set_strategy(ctx: _ControlIntake) -> dict:
         raise HTTPException(400, "strategy must be a non-empty JSON object")
     unknown_strategy = set(strategy) - {
         "policy", "policy_params", "fidelity", "eval_parallel", "llm_parallel",
-        "llm_lane_limits", "card_scoring",
+        "llm_lane_limits", "card_scoring", "developer",
     }
     if unknown_strategy:
         raise HTTPException(
@@ -577,6 +577,23 @@ def _normalize_set_strategy(ctx: _ControlIntake) -> dict:
         if fidelity not in {"smoke", "full", "adaptive"}:
             raise HTTPException(400, "strategy.fidelity must be smoke, full, or adaptive")
         clean_strategy["fidelity"] = fidelity
+    developer = strategy.get("developer")
+    if developer is not None:
+        # REFUSED here, not dropped, and that asymmetry is `core/appconfig.py`'s: the operator is
+        # present at this boundary and can fix a typo, so a 400 naming the valid set is strictly
+        # better than silently keeping the current backend. `validate_strategy` drops instead
+        # because there the author is a MODEL, and a hallucinated name must not take a whole
+        # decision — or the run — down.
+        #
+        # `developer_switch_names()` is the one home of this vocabulary (`core/config.py`), the same
+        # set `engine/strategy.py::_available_developers` offers the Strategist, so the operator and
+        # the model cannot come to be told different things are switchable.
+        from looplab.core.config import developer_switch_names
+        names = sorted(developer_switch_names())
+        if not isinstance(developer, str) or developer not in names:
+            raise HTTPException(
+                400, f"strategy.developer must be one of: {', '.join(names)}")
+        clean_strategy["developer"] = developer
     for name, upper in (("eval_parallel", 1024), ("llm_parallel", 64)):
         if strategy.get(name) is None:
             continue

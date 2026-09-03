@@ -1130,9 +1130,33 @@ def _score_for_policy(
 # OPEN[card-lane-fills-outside-the-policy-population] for the population policies this widens the
 # COUNT with no legal-action SET: driven on a five-node board, MCTS proposed one improve and the lane
 # executed it AND an improve of the worst node; Evolutionary the same. Only ASHA derives a lane, and
-# the fidelity matrix pins itself greedy-only, so nothing covers it. Give every policy the lane set
-# `_asha_lane` already implements and filter candidates by it before the limit.
+# the fidelity matrix pins itself greedy-only, so nothing covers it.
 # proof:absent:legal_card_keys@looplab/search/card_selection.py
+#
+# THE PRESCRIPTION THAT STOOD HERE — "give every policy the lane set `_asha_lane` already implements
+# and filter candidates by it before the limit" — WAS BUILT AND REVERTED (2026-09-03), because it
+# contradicts a decision this repo has already made explicitly and it is a PRODUCT call, not a fix.
+#
+# What the build showed: on the board `tests/test_card_driven_selection.py::
+# test_mcts_card_lane_keeps_ucb_hot_parent_and_widens_to_seed_count` uses, `MCTSPolicy.next_actions`
+# returns exactly ONE action (parent 0). So filtering candidates to the keys the policy proposed
+# retains exactly one Card per turn for MCTS and for Evolutionary — i.e. it does not narrow the
+# lane, it DELETES it, and `card_lane_width`'s `n_seeds`/`elite` arms become unreachable. That test
+# is named for the behaviour and asserts it, which makes this a disagreement between two designs
+# rather than a defect with a fix.
+#
+# And the finding's own sharpest sentence does not survive the board it was measured on: the lane's
+# picks there are Cards on nodes 0, 1, 2 in METRIC ORDER, with the fourth (`30-overflow`) excluded.
+# "The lane executed an improve of the worst node" is true and is the THIRD pick of three, not a
+# contradiction of the policy's ranking — a card board running the policy's top choice plus the next
+# best hypotheses up to its width is a coherent design, and it is the shipped one.
+#
+# WHAT WOULD SETTLE IT is a measurement nobody has: whether the extra Cards a population lane runs
+# are worth their nodes, which needs runs where the lane was wide and the budget was binding. This
+# box has none — every preserved run is GreedyTree (width 1) or ASHA (which derives its set already).
+# Until then the honest state is that ASHA constrains its lane because its policy NAMES a population
+# (`_promoted`) and the others do not, and inventing a population for them from `next_actions` is a
+# guess dressed as a constraint.
 def card_lane_width(policy: object) -> int:
     """How many Cards ONE selection turn may retain, before the remaining budget narrows it.
 

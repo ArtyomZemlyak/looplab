@@ -1097,6 +1097,13 @@
           "help": "Re-prompts of the agent on an invalid result."
         },
         {
+          "key": "agent_timeout",
+          "label": "Agent timeout (s)",
+          "type": "float",
+          "default": 600.0,
+          "help": "Wall-clock seconds one external coding-agent invocation may run before it is killed. Not the eval clock \u2014 that is Max eval timeout, a different wall on a different process."
+        },
+        {
           "key": "agent_patch_gate",
           "label": "Patch gate",
           "type": "bool",

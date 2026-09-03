@@ -77,6 +77,25 @@ def _integer(value) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def _beyond_bar(data: dict):
+    """The projected overrun that cleared the alert bar, under EITHER key, or None.
+
+    ONE reading in one place, because the two callers below decide different things — whether an
+    episode is `bad`, and how many hours to print — and a row classified by one key and rendered
+    from the other would report an overrun of 0.0 hours on an item it had just called bad.
+
+    `overrun_beyond_noise_s` is what `engine/train_monitor.py` stamps since 2026-09-03 (the bar is
+    the projection's own resolution); `overrun_beyond_grace_s` is what earlier rows carry (the bar
+    was the deadline-grace ceiling). The values are not comparable and are not meant to be — each is
+    "the amount by which this row's own bar was cleared", which is exactly what both callers want.
+    """
+    for key in ("overrun_beyond_noise_s", "overrun_beyond_grace_s"):
+        value = _number(data.get(key), positive=True)
+        if value is not None:
+            return value
+    return None
+
+
 def _number(value, *, positive: bool = False) -> float | None:
     """A finite float off an untrusted event row, or None. `positive=True` also rejects <= 0.
 
@@ -331,10 +350,18 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
         its 28000 s wall discarded 7.78 GPU-hours, and node 9's 42.6 h projection was confirmed to
         the minute when it died on its own 36000 s wall.
 
-        The bar is `overrun_beyond_grace_s`, stamped by `engine/train_monitor.py` where both the
-        projection and the run's `eval_deadline_grace_s` are in hand. An overrun the deadline grace
-        will absorb is not a thing to wake anyone about; one that exceeds it ends the node whoever
-        is watching.
+        The bar is stamped by `engine/train_monitor.py`, which is where the projection and the
+        stage's declared wall are both in hand. TWO KEYS, because the bar's MEANING changed on
+        2026-09-03 and a durable field may not: `overrun_beyond_noise_s` is the current one (the
+        projection cleared the measurement's own resolution) and `overrun_beyond_grace_s` is what
+        rows written before that carry (it cleared the deadline-grace CEILING). Reading both keeps
+        every preserved episode classified exactly as it was; reading only the new one would
+        silently reclassify every historical `bad` row as a `recovery`.
+
+        Why the meaning moved is recorded in full at the stamp site: the grace ceiling is the MOST a
+        stage could ever be given, not what is granted, so a real overrun inside it opened nothing —
+        measured at twelve consecutive suppressed rows on `e5small-dr-unified-v11` node 3, which
+        then died on its wall having burned 10.0 GPU-hours the engine had predicted 9h12m earlier.
 
         `invalid` — not `recovery` — for a row with NO projection: the projection is silent whenever
         any of the span/ETA/stage/wall is unknowable, and `projected_overrun_s`'s own docstring says
@@ -342,7 +369,7 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
         that DID compute a projection which the grace absorbs is a real recovery statement and
         closes the episode.
         """
-        if _number(data.get("overrun_beyond_grace_s"), positive=True) is not None:
+        if _beyond_bar(data) is not None:
             return "bad"
         if _number(data.get("projected_overrun_s")) is not None:
             return "recovery"
@@ -438,7 +465,7 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
         if not rid or len(generation) != 64 or anchor_seq is None:
             continue
         data = anchor.data if isinstance(anchor.data, dict) else {}
-        beyond = _number(data.get("overrun_beyond_grace_s"), positive=True) or 0.0
+        beyond = _beyond_bar(data) or 0.0
         wall = _number(data.get("stage_wall_s"), positive=True)
         # HOURS, because the numbers that matter here are hours and an operator reading "153360 s"
         # has to do arithmetic before they can decide anything.

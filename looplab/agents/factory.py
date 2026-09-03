@@ -415,7 +415,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
             base_url=dev_base_url, brief=brief,
             spec=PRESETS[settings.developer_backend],
             cmd_override=([settings.agent_cmd] if settings.agent_cmd else None),
-            workdir_files=workdir_files,
+            timeout=settings.agent_timeout, workdir_files=workdir_files,
             patch_gate=(settings.agent_patch_gate or bool(repo_spec)),
             surface=surface, seed_dirs=seed_dirs,
             protect=(repo_spec["protected_names"] if repo_spec else None),
