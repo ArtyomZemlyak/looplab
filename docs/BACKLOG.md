@@ -4391,12 +4391,30 @@ What the sweep did find is a real leak on the one long run. `rubertlite-dense-re
 22 firings) re-distilled **three pairs** — `(23,14)`, `(14,7)`, `(24,14)` — each paid for twice, and
 it also has a double firing at `at_node=24`.
 
-OPEN[distilled-pair-ledger-leaks-on-long-runs] three (child, parent) pairs were distilled and paid for twice on the only run long enough to show it. proof:`present:for p in (d.get("pairs") or [])@looplab/engine/lessons_reconcile.py`
+**[CLOSED 2026-09-03 — found, and it is the RECONCILE writer.]** Three pairs of ~60 on one run is
+small, and the SHAPE is what mattered: the ledger is the only thing standing between a cadence and
+unbounded re-spend. The instruction was to find which of the 22 firings admitted a pair an earlier
+one had spent, and the answer is that none of them had to — one of the three writers never recorded
+what it spent.
 
-  Three pairs of ~60 on one run is small, and it is the SHAPE that matters: the ledger is the thing
-  standing between a cadence and unbounded re-spend, and it is the only run with enough firings to
-  test it at all. Find which of the 22 firings admitted a pair an earlier one had spent before
-  changing anything.
+`reconcile_lessons` calls `_comparative_lessons` (one paid provider call over the pairs it selected)
+and then gated its ledger append on `pairs_used`, which the two lines above it CLEAR whenever the
+re-derivation commits nothing:
+
+    fresh = committed_fresh
+    if not fresh:
+        pairs_used = []
+    if pairs_used:            # ...so a paid pass that committed nothing recorded NOTHING
+
+The ledger's contract is `select_comparison_pairs`' own words — "later firings must not re-spend LLM
+budget on the same pair" — so SPENT means PAID, not fruitful, and the mid-run cadence already reads
+it that way in as many words ("even with 0 lessons, so the at_node gate advances"). This was the one
+writer of the three that did not. The pairs are now bound at the provider call into
+`spent_pairs_this_pass` and never cleared; the receipt's `lessons` list still carries only what
+committed, so it can never claim a lesson that is not in the store, and `count` is allowed to be 0.
+A pass that never made the call (offline, no client, a failure before it) records nothing — a ledger
+row for a pair nobody paid for would bar a real lesson forever.
+`tests/test_reconcile_pair_ledger.py` drives it, with both mutations checked.
 
 ## An EMPTY-authority card dies the moment the board stops being empty, and its prefetched node is killed before it ever runs
 

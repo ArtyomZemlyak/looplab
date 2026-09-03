@@ -445,6 +445,32 @@ class RunCommandService:
         """
         return run_generation_token(iter_event_jsonl(self._events_path(rd)))
 
+    def generation_fence(self, rd: Path) -> tuple[Path, str]:
+        """The READ side of a generation CAS: `(validated run dir, current generation)`, NO lock.
+
+        A READ MAY NOT TAKE THE WRITE SEQUENCER, and that is the whole point of this method existing
+        beside `sequence`. `sequence` is the EXCLUSIVE cross-process per-run lock, and it fails
+        CLOSED with a 503 on its acquire timeout — so a GET that takes it is a GET that gets refused
+        whenever a writer holds the run, which on a live run is most of the time. Derived over
+        `serve/` by transitive reach: 34 `commands.sequence(` sites and SEVENTEEN GET handlers reach
+        one, including every `reviews.py` read, `get_state`, `artifact`/`artifacts` and the whole
+        node family.
+
+        WHAT THE LOCK WAS NEVER BUYING for those readers: a read fence is not made correct by
+        exclusivity, it is made correct by a compare-and-swap ACROSS the read — take the generation,
+        read, take it again, 409 if it moved. That is already the spelling the trace-sidecar family
+        uses (`routers/runs.py::_begin_trace_read` / `_finish_trace_read`), and the historical-node
+        route already called its fence before AND after its fold, so holding the lock during the
+        first call bought nothing the second call did not already prove. Holding it ACROSS the read
+        would be a different design, and a much worse one: the fold it protects is the expensive part.
+
+        `validate_paths` is included because a fence over a path the caller has not validated is a
+        fence over the wrong file; it is returned rather than discarded so the caller reads the same
+        canonical directory this generation was taken from.
+        """
+        rd = self.validate_paths(rd)
+        return rd, self.run_generation(rd)
+
     def run_generation_if_present(self, rd: Path) -> str:
         """Observe a generation while a fenced reset may temporarily have no event log.
 

@@ -1515,6 +1515,19 @@ class Settings(BaseSettings):
     # use the raw agent output unchecked.
     validate_agent: bool = True
     agent_max_retries: int = 1    # re-prompts of the agent on an invalid result
+    # How long ONE external coding-agent invocation may run before it is killed.
+    #
+    # IT WAS UNREACHABLE. `CliAgentDeveloper.__init__` carries `timeout: float = 600.0` and
+    # `agents/factory.py` never passed the argument, so on every composed run that constructor
+    # default WAS the value and no config, env var or UI field could move it — a launch-time
+    # constant nobody chose for a repo task, where the agent seeds a whole worktree, reads it and
+    # writes several files. The default here is that same 600.0, so an unset config is
+    # byte-identical to what shipped.
+    #
+    # Bounded like every other wall in this file rather than left open: an agent that never exits is
+    # a build slot held forever. NOT the eval clock — `max_eval_timeout` bounds the Researcher's
+    # per-node evaluation, a different wall on a different process.
+    agent_timeout: float = Field(default=600.0, gt=0, le=24 * 3600.0)
     # Patch-gated multi-file agent (ADR-7 Rule 3): run the CLI agent in a git worktree and
     # accept only edits whose paths match `agent_surface` (reject-not-strip out-of-surface
     # touches). Lets the agent create helper modules, not just solution.py. Degrades to

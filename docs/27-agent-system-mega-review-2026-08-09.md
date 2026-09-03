@@ -207,9 +207,16 @@ Research only.
 >   in-flight provider request (`core/llm.py` has no `cancel_check` at all) and the external CLI is
 >   killed on TIMEOUT rather than on a cancel token. The MCP leg shipped 2026-08-17.
 >   proof:absent:cancel_check@looplab/core/llm.py
-> - **OPEN[external-cli-timeout-not-settings-bound]** still a composition-independent 600-second
->   constructor default that the factory does not override, and no priced/unpriced usage result.
->   proof:present:600.0@looplab/agents/cli_agent.py
+> - **[closed 2026-09-03 for the TIMEOUT half — `Settings.agent_timeout` (default 600.0, the
+>   constructor's own value, bounded 0 < t <= 24 h) is passed by `agents/factory.py`. It was not a
+>   default an operator could override, it was one nobody could REACH: the argument was never passed,
+>   so on every composed run the constructor value WAS the value, and no config, env var or form
+>   field could move it. `tests/test_agent_timeout_is_settings_bound.py` drives it through the real
+>   `make_roles`.]** **OPEN[external-cli-usage-is-unpriced]** the other half of the original row:
+>   `CliAgentDeveloper` returns no usage result, so an external coding agent's spend reaches neither
+>   the `llm_usage` ledger nor `looplab tokens` — a run whose Developer is a CLI agent reports the
+>   cost of everything except the role that writes the code.
+>   proof:absent:CostAccountant@looplab/agents/cli_agent.py
 > - **OPEN[agent-trajectory-eval-ladder-absent]** rungs 2-5 of §4 — curated trajectory cases, frozen
 >   outcome cases, confused-deputy/cross-run-scope, repeated stochastic trials with CIs — have no
 >   corpus. (Rung 1 exists and predates this document; see the correction above.)

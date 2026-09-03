@@ -82,7 +82,7 @@ older binary can still load a snapshot a newer one wrote.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **185 of the 218 direct `Settings` fields in 10 groups**. The default
+server-owned curated catalogue with **186 of the 219 direct `Settings` fields in 10 groups**. The default
 **Essential** disclosure mode contains 18 high-frequency keys; search spans all 185 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
@@ -1029,6 +1029,7 @@ When the Developer is delegated to an external coding agent (`developer_backend`
 |---|---|---|---|
 | `validate_agent` | `LOOPLAB_VALIDATE_AGENT` | `true` | Audit each agent output, retry with feedback, then fall back to the task's original in-process Developer (LLM writer, deterministic/template Developer, or repo baseline) |
 | `agent_max_retries` | `LOOPLAB_AGENT_MAX_RETRIES` | `1` | Re-prompts of the agent on an invalid result |
+| `agent_timeout` | `LOOPLAB_AGENT_TIMEOUT` | `600.0` | Wall-clock seconds one external coding-agent invocation may run before it is killed. Not the eval clock — `max_eval_timeout` bounds a node's evaluation, a different wall on a different process. |
 | `agent_patch_gate` | `LOOPLAB_AGENT_PATCH_GATE` | `true` | Run the agent in a git worktree; accept only edits inside the surface |
 | `agent_surface` | `LOOPLAB_AGENT_SURFACE` | `["*.py"]` | Edit-surface allow-list (globs) |
 | `agent_cmd` | `LOOPLAB_AGENT_CMD` | — | Override the agent's launcher/path |

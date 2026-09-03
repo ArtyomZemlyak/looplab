@@ -1805,33 +1805,38 @@ def build_router(srv) -> APIRouter:
         return _concept_lens_terminal_response(
             terminal, core, lens_pack, request_id)
 
-    # OPEN[read-fence-takes-the-command-sequencer] the read-side generation fence is spelled twice, and
-    # this spelling takes the EXCLUSIVE cross-process per-run command sequencer to serve a GET. Derived
-    # over `serve/` by transitive reach: 34 `commands.sequence(` sites, and SEVENTEEN GET handlers reach
-    # one — every `reviews.py` read, `artifact`/`artifacts`, `get_state`, and the whole node family.
-    # `sequence()` fails closed with 503 on its acquire timeout, so those reads are refused whenever a
-    # writer holds the run. The node-log family one screen down proves the cheaper spelling is enough:
-    # `before_generation` … read … `after_generation`, 409 on change, no lock. One shared fence,
-    # sequenced only where a ledger really needs it.
-    # proof:absent:generation_fence@looplab/serve/run_commands.py
     def _assert_historical_generation(rd: Path, expected: Optional[str]) -> str:
+        """One half of the historical-detail CAS: the generation, or a 409 saying it moved.
+
+        NO COMMAND SEQUENCER (2026-09-03). This took `srv.commands.sequence(rd)` — the EXCLUSIVE
+        cross-process per-run lock, which fails CLOSED with a 503 on its acquire timeout — to serve a
+        GET, so historical node detail was refused whenever a writer held the run, i.e. most of the
+        time on a live one.
+
+        The lock was never what made this correct. A read fence is made correct by a CAS ACROSS the
+        read, and `node_detail` already calls this before AND after its fold — the comment there says
+        so in as many words ("the expensive fold runs without the exclusive command sequencer") — so
+        the first call holding the lock proved nothing the second call did not. Holding it across the
+        fold would be a different and much worse design: the fold is the expensive part.
+
+        `commands.generation_fence` is the shared read-side primitive, so this and the trace family's
+        `_begin_trace_read`/`_finish_trace_read` cannot drift on what a read fence is.
+        """
         if expected is None:
             raise HTTPException(400, {
                 "code": "historical_generation_required",
                 "message": "Historical node detail requires the exact run generation.",
                 "remediation": "Use the generation returned by the historical /state response.",
             })
-        with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            current = srv.commands.run_generation(rd)
-            if expected != current:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected,
-                    "current_generation": current or None,
-                    "message": "The run was reset or replaced before historical detail was read.",
-                    "remediation": "Open the current generation or reload the exact historical view.",
-                })
+        _rd, current = srv.commands.generation_fence(rd)
+        if expected != current:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected,
+                "current_generation": current or None,
+                "message": "The run was reset or replaced before historical detail was read.",
+                "remediation": "Open the current generation or reload the exact historical view.",
+            })
         return current
 
     @router.get("/api/runs/{run_id}/events")

@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 185
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 186
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -141,7 +141,14 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # PARENT FEATURE already has a row", and the deterministic divergence watchdog has no row of its own
 # — `train_monitor_*` is the LLM judge beside it, a different rung. So the parent clause is false
 # here and the field gets the row it should have had.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "f8e0345a83af7e4f2782456332cf079f08812d3c04a90c819c0dbeacee1c243a"
+# 2026-09-03: +`agent_timeout`. It is an operator-typed WALL on an external process, and the
+# row exists because the field does: `CliAgentDeveloper` carried a composition-independent
+# `timeout: float = 600.0` that `agents/factory.py` never passed, so the operator could not
+# reach it at all — a launch-time constant nobody chose for a repo task that seeds a whole
+# worktree. None of the four registered omission clauses applies: the key set is closed, it is
+# not an alias, it is exactly operator-typed, and its parent feature (the external coding-agent
+# Developer) has rows of its own.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "297e7fb64f00ca539108fb5a10b59594f4d1d0a7fc24f956a4e815983ac6f504"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
