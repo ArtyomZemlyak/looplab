@@ -6445,3 +6445,55 @@ validated, and this run says it is not sufficient to make one be attempted.
 Still one in each cluster on each side. `oldCK2` has meanwhile climbed 160.95 → **221.64** and
 `newCK2` 275.22 → 254.43. Nothing to conclude, and §133's discipline applies here too: the reading
 was fixed before the data and it needs all four.
+
+## 141. §115's arm closes without an answer, and the reason is that I built it too small
+
+All four finished. Same task, same box, same hour, cards identical but for the `check` command's
+argv.
+
+| probe | checker | TEST | node 0 kernel | nodes |
+|---|---|---|---|---|
+| newCK2 | shipped | **268.5174** | yes | [275.22, 254.43, 8.43] |
+| oldCK2 | pre-§99 | **223.2247** | yes | [160.95, 221.64, 166.07] |
+| oldCK1 | pre-§99 | **145.2586** | no | [25.41, 150.20, 7.01] |
+| newCK1 | shipped | **25.3697** | no | [20.76, 21.82, 24.76] |
+
+**One of two on each side wrote a kernel at node 0.** Fisher p = 0.8333. TEST by arm: one-sided rank
+test **p = 0.6667**, and the smallest value obtainable at 2 v 2 is 0.1667 — the arm could not have
+produced a significant answer no matter how the scores fell.
+
+### That is my mistake, and it is the same one this notebook keeps recording
+
+§83 built a power table. §133 pre-registered a stopping rule. §137 closed a nine-against-nine arm on
+exactly that discipline. Then I launched a **two-against-two** arm to answer a question about a
+binary outcome whose corpus rate is 5/27 = 19 % and whose recent rate is 12/18 = 67 %. Simulating
+Fisher against those two rates:
+
+| n per arm | power |
+|---|---|
+| 6 | 0.36 |
+| 10 | 0.59 |
+| **12** | **0.74** |
+| 18 | 0.89 |
+
+**Twelve per side**, about $24, is what this question costs. I spent $4 on a design that had roughly
+a one-in-eight chance of showing anything, having written the rule against exactly that four sweeps
+earlier. Four probes' worth of lanes were free, so I filled them — which is how an experiment gets
+sized by the hardware rather than by the question.
+
+### What the four probes do say, descriptively
+
+Node-0 kernel rate today: **2 of 4 = 50 %**, sitting between the corpus's 19 % and the earlier
+batches' 67 %, and consistent with the batch drift §134/§135 measured on identical harnesses. The
+checker made no visible difference to it at this n, and §140 already showed the sharper version: a
+probe with the REPAIRED checker that wrote plain Python three times and scored 25.
+
+**§115's confound stays open.** It is now open with a price attached — 24 probes, about $24 — which
+is more than it was worth before this arm and exactly as much as it was worth after §133.
+
+*The three not yet analysed:* `oldCK2` TEST 223.2247 against best train 221.6356 (ratio 1.007),
+53-line kernel, $1.0145, 30 % before / 6 % after, 37 `eval_train`, reference 0.0 % / 5.9 %.
+`oldCK1` 145.2586 against 150.2013 (0.967), 63-line kernel, $1.0081, 25 % / 8 %, 26 `eval_train`,
+reference 7.4 % / 7.4 %, nodes ending on 7.01 — best over last 21.44×. `newCK2` 268.5174 against
+275.2249 (0.976), 40-line kernel, $1.0099, 33 % / 0 %, 22 `eval_train`, reference 10.7 % / 10.7 %,
+last node 8.43 — best over last **32.64×**, the largest champion-rule save in the corpus.
