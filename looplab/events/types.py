@@ -449,6 +449,19 @@ EV_TRACE_EXPORT_HEALTH = "trace_export_health"
 # from `speculation._proposal_authority_seq`, which is the stronger form of that same licence.
 EV_BELIEF_ADMISSION = "belief_admission"
 
+# A BUILT NODE THAT CHANGED NOTHING. Measured across the three e5small runs with workspaces: 2 of
+# 47 parent edges are nodes whose SOURCE is byte-identical to the parent they claimed to modify —
+# one on a false premise about that parent ("node 10's UNCLIPPED footprint" when node 10 was
+# clipped), one a restatement of an experiment ten nodes earlier. Each paid a full train to
+# re-measure its own parent. Nothing catches it: the novelty gate keys on operator+params and on a
+# repo task the experiment is the code edit, `_intra_batch_dup` compares only siblings of one
+# batch, and none of the thirteen `CARD_BUILD_SKIP_REASONS` is "identical to its parent".
+#
+# RECORDED, NOT REFUSED, on this rung: a refusal would have destroyed both of them, and they are
+# the only replicates this box has produced (they answer the sigma question at |delta| 0.000573 and
+# 0.002519). The operator gets the visibility and keeps the choice.
+EV_NODE_BUILD_DELTA = "node_build_delta"
+
 # The closed vocabulary of run-loop exits, in the registry shape this repo uses for every duck-typed
 # word (`CARD_BUILD_SKIP_REASONS`, `CARD_STAGE_REFUSALS`, `REPAIR_VERDICTS`, `TRIAGE_ACTIONS`): a
 # two-way AST guard keeps the loop's exits and this tuple in step, so a FOURTEENTH exit cannot be
@@ -875,7 +888,7 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
-    EV_TRACE_EXPORT_HEALTH, EV_BELIEF_ADMISSION,
+    EV_TRACE_EXPORT_HEALTH, EV_BELIEF_ADMISSION, EV_NODE_BUILD_DELTA,
     EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
     EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN,

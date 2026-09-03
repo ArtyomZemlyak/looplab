@@ -572,6 +572,7 @@ from looplab.events.replay import fold
 from looplab.events.replay import event_generation_binds
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_INSTALLED,
+                                  EV_NODE_BUILD_DELTA,
                                   EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
@@ -956,6 +957,55 @@ class EvaluateMixin:
             return False
         self.store.append(EV_NODE_EVAL_STARTED, {
             "node_id": node.id, "generation": node.attempt})
+        self._record_node_build_delta(node)
+        return True
+
+    def _record_node_build_delta(self, node) -> bool:
+        """Say whether this node's built SOURCE differs from the parent it claims to modify.
+
+        Placed here on purpose: after the build, before the train. That is where the GPU hours are,
+        and it is the last moment the question is free to ask.
+
+        MEASURED across the three e5small runs with workspaces — 2 of 47 parent edges are nodes
+        whose source is byte-identical to a parent's, each having trained a full recipe to
+        re-measure it. One was proposed on a false premise about that parent ("node 10's UNCLIPPED
+        footprint"; node 10's config.yaml:279 reads `max_grad_norm: 1.0`), the other restated an
+        experiment ten nodes earlier in different words.
+
+        RECORDED, NOT REFUSED. A refusal here would have destroyed both, and they are the only
+        replicates this box has produced — they are what answers the noise question (|delta| 0.000573
+        and 0.002519 against a 0.010945 gap to the champion). Visibility first, the same rung
+        `trace_export_health` and `belief_admission` shipped on.
+
+        Best-effort throughout: a digest that cannot be computed yields no row, never an exception,
+        because a diagnostic may not cost a node its evaluation.
+        """
+        parents = [p for p in (getattr(node, "parent_ids", None) or []) if p is not None]
+        if not parents:
+            return False
+        try:
+            from pathlib import Path as _Path
+            from looplab.engine.workspace import source_tree_digest
+            root = _Path(self.run_dir) / "nodes"
+            mine = source_tree_digest(root / f"node_{node.id}")
+            if not mine:
+                return False
+            same = [p for p in parents
+                    if source_tree_digest(root / f"node_{p}") == mine]
+        except Exception:  # noqa: BLE001 - a diagnostic may never cost a node its evaluation
+            return False
+        try:
+            assert EV_NODE_BUILD_DELTA in DIAGNOSTIC_EVENTS   # see the type's own note
+            self.store.append(EV_NODE_BUILD_DELTA, {
+                "node_id": node.id, "generation": node.attempt,
+                "parent_ids": list(parents),
+                # The parents this build is INDISTINGUISHABLE from. Empty is the healthy case and is
+                # still recorded, so a run where nothing collided differs from a run nobody
+                # instrumented — the same reason `belief_admission` is not gated on `dropped`.
+                "identical_to": same,
+                "source_digest": mine[:16]})
+        except Exception:  # noqa: BLE001
+            return False
         return True
 
     async def _auto_pause_provider_failure(self, what: str) -> None:

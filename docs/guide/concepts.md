@@ -1438,6 +1438,43 @@ raising on it, so repairing that carrier is exactly what makes this reachable. A
 non-list row still yields no concepts for that question, and a question with none is registered
 exactly as it was before any of this shipped.
 
+**A node that trains says whether its build changed anything.** Measured across the three
+e5small runs with workspaces: **2 of 47 parent edges** are nodes whose SOURCE is byte-identical to
+the parent they claimed to modify, each having paid a full train to re-measure that parent —
+`v12 15 -> 10` (proposed as "node 10's UNCLIPPED footprint" when node 10's `config.yaml:279`
+already read `max_grad_norm: 1.0`) and `v11 10 -> 0` (the same 3→6 epoch extension as node 0,
+restated ten nodes later). Nothing caught either: the novelty gate keys on operator + params and
+on a repo task the experiment IS the code edit, `_intra_batch_dup` compares only siblings of ONE
+batch, and none of the thirteen `CARD_BUILD_SKIP_REASONS` is "identical to its parent".
+
+    build finishes
+        │
+        ▼
+    node_eval_started                      <- the last moment the question is free to ask
+        │
+        ├──▶ source_tree_digest(child)      content sha256 over .py/.yaml/... , EXCLUDING
+        │    source_tree_digest(parent)     experiments/ (checkpoints the TRAIN writes), caches
+        │                                   and .ipynb_checkpoints
+        ▼
+    node_build_delta {node_id, parent_ids, identical_to, source_digest}
+        │
+        ├── identical_to == []   the ordinary case, still recorded
+        └── identical_to == [3]  this build changed NOTHING against node 3
+        │
+        ▼
+    train runs either way   <- RECORDED, NOT REFUSED
+
+`source_tree_digest` exists rather than a call to the older `_dir_fingerprint` because both of that
+helper's branches answer a different question: it returns the **git HEAD** for a path inside a repo
+(every node workspace is one), which is blind to the uncommitted build edits that ARE the
+experiment, and its fallback keys on `mtime_ns`, which always differs between two separately-created
+workspaces. A guard on the first fires always-or-never; a guard on the second fires never.
+
+It is a receipt and not a refusal on this rung, deliberately: refusing would have destroyed both
+collisions, and those two accidents are the only replicates this box has ever produced — they are
+what answers the run-to-run noise question (|Δ| 0.000573 and 0.002519, against a 0.010945 gap to
+the champion). The operator gets the visibility and keeps the choice.
+
 **What the board REFUSED is now written down.** `classify_research_beliefs` has always returned
 the four causes — blank, repeated, restated, capped — and until 2026-09-02 their only consumer was
 a `_LOG.warning`. The memo receipt cannot carry them: `research_completed` is appended in
