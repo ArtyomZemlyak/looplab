@@ -95,13 +95,42 @@ def _marker_windows(text: str):
         yield m.group(1), m.group(2), text[m.end():min(m.end() + _WINDOW, nxt)]
 
 
+_FROZEN_MANIFEST = ROOT / "benchmarks" / "algotune" / "FROZEN_COPIES.txt"
+
+
+def _frozen() -> dict:
+    """`{frozen path: live counterpart}` for the verbatim historical extracts in this tree.
+
+    WHY THIS EXISTS. `looplab_check_pre99.py` is the checker as of `103c4b1e^`, extracted rather
+    than reconstructed so §115's arm can run the old gate beside the new one. It therefore carries
+    the same `OPEN[...]` marker its live counterpart does, and this index counted the slug twice --
+    a red suite for a file that is doing exactly what it is supposed to do. It cannot be edited to
+    carry an opt-out without stopping being verbatim, so the opt-out lives outside it.
+    """
+    out = {}
+    try:
+        text = _FROZEN_MANIFEST.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or "<-" not in line:
+            continue
+        frozen, live = (part.strip() for part in line.split("<-", 1))
+        out[frozen] = live
+    return out
+
+
 def _iter_markers():
     # BOTH halves, and they are independent: `_tracked_text_files(ROOT)` is the shared evaluator's
     # rooted walk (one implementation for OPEN and CLAIM), while `_marker_windows` is what stops a
     # window at the NEXT marker. Dropping either one restores a distinct false green — the first a
     # walk that skips by absolute path inside a worktree, the second a marker checked against its
     # neighbour's falsifier.
+    frozen = set(_frozen())
     for path in _tracked_text_files(ROOT):
+        if str(path.relative_to(ROOT)) in frozen:
+            continue
         for kind, slug, window in _marker_windows(_read(path)):
             yield path, kind, slug, window
 
@@ -327,3 +356,32 @@ def test_a_wrong_default_is_now_expressible_and_discriminating():
     closed_then, why = predicate_holds('line:landlock&&"on"@looplab/core/config.py', root=ROOT)
     assert open_now is True, "the item this proves is open must actually be open"
     assert closed_then is False and "belong together" in why
+
+
+def test_the_frozen_manifest_cannot_hide_a_live_open_item():
+    """The escape hatch for verbatim extracts, held to three rules so it stays one.
+
+    `looplab_check_pre99.py` is `looplab_check.py` as of `103c4b1e^`, kept byte-identical so §115's
+    arm can run the old gate beside the new one. It carries its ancestor's `OPEN[...]` marker, and
+    the index counted the slug twice — a red suite for a file behaving correctly. It cannot be
+    edited to opt out without ceasing to be verbatim, so the opt-out is `FROZEN_COPIES.txt`.
+
+    The danger of such a list is obvious: it is a place to make an inconvenient open item disappear.
+    So every entry must name a LIVE counterpart that still exists, must actually differ from it (a
+    line that no longer does is stale, and stale is how a live file ends up excused), and every slug
+    the frozen file declares must still be declared by a file the index does read.
+    """
+    frozen = _frozen()
+    assert frozen, "the manifest parsed to nothing; the exclusion is silently doing something else"
+    live_slugs = {slug for _p, _k, slug, _w in _iter_markers()}
+    for rel, live_rel in frozen.items():
+        path, live = ROOT / rel, ROOT / live_rel
+        assert path.is_file(), f"{rel} is listed as frozen but does not exist"
+        assert live.is_file(), f"{rel} names a live counterpart {live_rel} that does not exist"
+        assert _read(path) != _read(live), (
+            f"{rel} is byte-identical to {live_rel}; the entry is stale and is now excusing a "
+            "file the index should be reading")
+        for _kind, slug, _window in _marker_windows(_read(path)):
+            assert slug in live_slugs, (
+                f"{rel} declares OPEN/CLAIM[{slug}], which NO file the index reads declares. The "
+                "manifest may excuse a duplicate, never the only copy of an open item.")

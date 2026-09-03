@@ -1,0 +1,11 @@
+# Files in this repo that are VERBATIM historical extracts, kept so an experiment can run the old
+# code beside the new one. They must not be edited -- their whole value is being byte-identical to
+# what a past commit shipped -- so anything that scans the tree for source markers has to be told
+# about them from the outside, here.
+#
+# Format:  <frozen path>  <-  <live counterpart>  # why it exists
+#
+# The live counterpart is not decoration: the index test refuses an entry whose frozen file no
+# longer differs from it, which is what a stale line in this file looks like.
+
+benchmarks/algotune/looplab_check_pre99.py <- benchmarks/algotune/looplab_check.py  # the checker as of 103c4b1e^, for §115's arm (§134)

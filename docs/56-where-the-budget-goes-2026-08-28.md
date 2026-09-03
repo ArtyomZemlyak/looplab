@@ -7201,3 +7201,45 @@ whether it has written a file, and neither fact currently ends it.
 
 That is the shape of the next repair, and it is not this sweep's: §115's arm is eight probes into
 twenty-four.
+
+## 158. The suite was red for a file doing exactly what it was told, and `| tail` hid it
+
+The full suite I started at the end of the last sweep reported **exit code 0 and a FAILED line in
+the same output**. Both are true: the command was `pytest … | tail -5`, so the status belonged to
+`tail`. That is the trap the sweep list names in so many words, walked into while checking a fix
+for a different blindness.
+
+The failure is real and mine:
+
+```
+test_open_item_index.py::test_each_slug_is_declared_exactly_once
+  a slug names exactly one item; these are declared more than once:
+  {'solver-check-requires-a-literal-class-statement':
+     ['benchmarks/algotune/looplab_check.py (OPEN)',
+      'benchmarks/algotune/looplab_check_pre99.py (OPEN)']}
+```
+
+`looplab_check_pre99.py` is `looplab_check.py` as of `103c4b1e^`, extracted verbatim so §115's arm
+can run the old gate beside the new one (§134). It therefore carries its ancestor's `OPEN[…]`
+marker, and the index counts the slug twice. The file cannot be edited to opt out — being
+byte-identical to what that commit shipped is its entire purpose — so the opt-out has to come from
+outside it.
+
+`benchmarks/algotune/FROZEN_COPIES.txt` is that outside, one line per verbatim extract:
+
+```
+benchmarks/algotune/looplab_check_pre99.py <- benchmarks/algotune/looplab_check.py  # the checker as of 103c4b1e^, for §115's arm (§134)
+```
+
+A list of files an index is told to skip is an obvious place to make an inconvenient open item
+disappear, so `test_the_frozen_manifest_cannot_hide_a_live_open_item` holds it to three rules: the
+live counterpart must exist, the frozen file must still DIFFER from it (an entry that no longer
+does is stale, and stale is how a live file gets excused), and **every slug the frozen file declares
+must still be declared by a file the index does read** — the manifest may excuse a duplicate, never
+the last copy of an open item.
+
+Mutated four ways. Excusing `meter/proxy.py`, whose eight open items nothing else declares, reddens
+it; an entry pointing at itself reddens it; removing the skip from `_iter_markers` reddens the
+original duplicate test. The first attempt at the "hides a live item" mutation used
+`probe_summary.py` and **passed** — that file declares no markers at all, so the check had nothing
+to walk. A mutation that exercises nothing proves nothing; the second one names a file with eight.
