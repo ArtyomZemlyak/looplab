@@ -507,3 +507,41 @@ def test_the_allowance_uses_the_p99_not_the_median(tmp_path):
     assert "UNEXPLAINED" not in r.stdout, (
         "a median-priced allowance is $0.003 against a $0.30 residue and would fire here")
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_the_unstreamed_share_and_its_ceiling_deaths_are_reported(tmp_path):
+    """`LOOPLAB_LLM_STREAM=1` is a setting; the traffic is the measurement.
+
+    `core/llm.py:1629` degrades a call to non-streaming after a mid-stream stall, and the unstreamed
+    retry is exactly what nginx's `proxy_read_timeout` measures end to end. On 2026-09-03 `oldCK9`
+    ran with streaming on, sent 42 unstreamed calls anyway, and two of them were cut at 300.0 s.
+    """
+    probes = {"p1": [1.0]}
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200", "stream": True,
+             "prompt_tokens": 900, "completion_tokens": 9},
+            {"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200", "stream": True,
+             "prompt_tokens": 10, "completion_tokens": 2},
+            # unstreamed and cut at the ceiling
+            {"ts": "3000", "arm": "p1", "status": "504", "stream": False, "latency_ms": 300000.0},
+            # unstreamed and perfectly fine
+            {"ts": "3000", "arm": "p1", "status": "200", "stream": False, "latency_ms": 1900.0,
+             "cost": 0.002, "prompt_tokens": 500, "completion_tokens": 20}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.00200196, "calls": 4})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "2 of 4 calls went out UNSTREAMED (50.0 %)" in r.stdout, r.stdout + r.stderr
+    assert "1 of them cut at the 300 s nginx ceiling" in r.stdout, r.stdout
+
+
+def test_an_all_streamed_ledger_says_so(tmp_path):
+    probes = {"p1": [1.0]}
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200", "stream": True,
+             "prompt_tokens": 900, "completion_tokens": 9},
+            {"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200", "stream": True,
+             "prompt_tokens": 10, "completion_tokens": 2}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.00000196, "calls": 2})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "0 of 2 calls went out UNSTREAMED (0.0 %); none cut at the 300 s ceiling" in r.stdout, r.stdout

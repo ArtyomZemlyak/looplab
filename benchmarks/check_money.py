@@ -147,6 +147,45 @@ def _inflight_call_cost(root: str, since: float) -> float:
     return costs[min(len(costs) - 1, int(0.99 * len(costs)))]
 
 
+def unstreamed_exposure(ledger_path: str, since: float = 0.0) -> dict:
+    """How many calls went out WITHOUT streaming, and how many of those nginx cut at 300 s.
+
+    WHY THIS IS NOT A SETTLED QUESTION. Every probe is launched with `LOOPLAB_LLM_STREAM=1` and its
+    INSTRUMENT.txt records it, and the standing brief reads "without streaming 28 % of discrete_log
+    calls died five minutes at a time; with streaming, 0 of 28". That is true of the SETTING and not
+    of the traffic: `core/llm.py:1629` degrades a call to non-streaming after a mid-stream stall
+    (`use_stream = self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER`), and the
+    unstreamed retry is precisely what nginx's `proxy_read_timeout` measures end to end.
+
+    MEASURED 2026-09-03: 1,201 of 26,770 ledger rows (4.5 %) went out unstreamed, 111 of them today
+    under `LOOPLAB_LLM_STREAM=1`, and TWO of `oldCK9`'s 42 were cut at exactly 300.0 s. Streaming
+    resumed afterwards -- 227 of the 269 calls after its first unstreamed one were streamed again --
+    so this is the per-call fallback, not the client-lifetime disable in the same comment.
+    """
+    total = unstreamed = ceiling = 0
+    try:
+        fh = open(ledger_path, encoding="utf-8", errors="replace")
+    except OSError:
+        return {"total": 0, "unstreamed": 0, "ceiling": 0}
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+                if float(row.get("ts")) < since:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            total += 1
+            if not row.get("stream"):
+                unstreamed += 1
+                if _failure_kind(row) == "nginx-300s":
+                    ceiling += 1
+    return {"total": total, "unstreamed": unstreamed, "ceiling": ceiling}
+
+
 def endpoint_health(ledger_path: str, since: float = 0.0) -> dict:
     """The NEWEST ledger row per arm, so "is the endpoint answering right now" is one command.
 
@@ -384,6 +423,12 @@ def main(argv: list[str]) -> int:
               + (("arms whose LAST call was refused: "
                   + ", ".join(f"{a} ({st}, {ag:.0f} s ago)" for a, ag, st in bad)) if bad
                  else "every arm's last call was a 200"))
+    ex = unstreamed_exposure(os.path.join(a.bench_root, "meter", "meter.jsonl"), since)
+    if ex["total"]:
+        print(f"  streaming: {ex['unstreamed']} of {ex['total']} calls went out UNSTREAMED "
+              f"({100 * ex['unstreamed'] / ex['total']:.1f} %)"
+              + (f" -- {ex['ceiling']} of them cut at the 300 s nginx ceiling" if ex["ceiling"]
+                 else "; none cut at the 300 s ceiling"))
     residue = gap - preflight * 0.00000196 - sum(abandoned.values())
     print(f"  RESIDUE ${residue:+.6f} after the named parts")
     # A CALL IN FLIGHT IS NOT A LEAK. The meter writes its row when the upstream request completes;

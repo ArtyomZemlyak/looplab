@@ -7883,3 +7883,52 @@ allowance is $0.003 against a $0.30 residue and fires. Mutating p99 → median n
 Four tests hold the behaviour: in-flight calls forgiven, a $0.75 leak with nothing in flight still
 fatal, a residue far past the allowance still fatal, and the percentile pinned. Three mutations
 redden them (unbounded allowance, allowance ignoring the unnamed count, median instead of p99).
+
+## 173. Streaming is on, and 1,201 calls went out without it — the stall recovery walks into the 300 s wall
+
+§166's classifier fired for the first time on something new: `21 non-200 (4 http-401, **2
+nginx-300s**, 15 upstream-503)`. `nginx-300s` is the signature it was built to isolate — an
+UNSTREAMED 504 cut at the `proxy_read_timeout` to the millisecond, the 2026-08-31 catastrophe.
+
+Both are `oldCK9`, at 19:20:53 and 19:28:11, `stream=False`, `latency 300.0 s` exactly. And
+`oldCK9`'s own INSTRUMENT.txt says **`LOOPLAB_LLM_STREAM=1`**, as do all four probes of batch 5.
+
+**The setting is on; the traffic is not.** Over the whole ledger: **1,201 of 26,770 rows (4.5 %)
+went out unstreamed**, 111 of them today under a streaming flag — `oldCK9` 42, `oldCK8b` 22,
+`newCK7` 3. Matching each unstreamed row to the generation whose window contains it: 37 `plan_step`,
+24 `deep_research`, 21 `propose`, 4 `plan` — every major phase, plain `op=chat`. Not one call site.
+
+The mechanism is in the engine and it is deliberate, `core/llm.py:1629`:
+
+```
+use_stream = (self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER …
+```
+
+with the reason stated above it: *"a shared/proxied endpoint can stall MID-STREAM on big (code-gen)
+requests while answering the same request fine without SSE … After a stream stall the NEXT attempt
+of that call goes non-streaming"*. On any other endpoint that is a good trade. **On this stand the
+recovery path is the one nginx kills**: without SSE the 300 s window measures the whole generation.
+
+It is the per-call fallback, not the client-lifetime disable in the same comment — streaming resumes
+straight afterwards: of the 269 calls `oldCK9` made after its first unstreamed one, **227 were
+streamed again**. And the fallback is usually harmless: today's unstreamed calls ran 0.7–44 s, and 2
+of 111 (1.8 %) hit the wall.
+
+**So the brief's "with streaming, 0 of 28" is true of the setting and no longer true of the
+traffic.** That is worth correcting in place, because it is the kind of line a future sweep would
+lean on: streaming is on, and the loop still makes unstreamed calls on its own initiative whenever a
+stream stalls.
+
+`check_money` now prints the exposure on every sweep:
+
+```
+streaming: 122 of 10219 calls went out UNSTREAMED (1.2 %) -- 2 of them cut at the 300 s nginx ceiling
+```
+
+Two tests pin it — a ledger with one unstreamed-and-killed call and one unstreamed-and-fine, and an
+all-streamed ledger that must say so — and three mutations redden them (never count an unstreamed
+call, never count a ceiling death, count every unstreamed call as one).
+
+Nothing in the engine is touched. Raising `proxy_read_timeout` or refusing the unstreamed fallback
+are both real repairs and both change what every probe experiences; §115's arm is twenty probes into
+twenty-four.
