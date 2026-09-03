@@ -111,6 +111,9 @@ def spans_by_probe(root: str, since: float) -> tuple[dict, dict]:
     return cost, calls
 
 
+INFLIGHT_GRACE_S = 300.0   # a call in flight is recent; five minutes is the nginx ceiling itself
+
+
 def _inflight_call_cost(root: str, since: float) -> float:
     """What ONE call in flight may cost: the p99 of the ledger's own prices.
 
@@ -456,13 +459,36 @@ def main(argv: list[str]) -> int:
     # runs seconds later. Three calls at the corpus median price is $0.019 -- the residue WAS the
     # unnamed calls. So the tolerance is the unnamed count times the median call, not a flat cent:
     # a leak with no calls in flight still fires, and a live campaign stops crying wolf.
+    # AN EXCUSE WITH AN EXPIRY DATE. "Calls in flight" only explains a residue while something IS
+    # in flight. On 2026-09-03 at 20:26 the stand had been idle for 1002 s, every probe finished,
+    # and this allowance was still forgiving $0.076944 -- all of it oldCK9's, 18 metered calls with
+    # no generation span, from the retry storm in §175. An idle ledger cannot have calls in flight,
+    # so the allowance expires with the ledger's own last row.
+    idle_s = 0.0
+    if health["newest"]:
+        idle_s = max(0.0, time.time() - max(t for t, _s in health["newest"].values()))
     inflight = _inflight_call_cost(a.bench_root, since) * max(0, unnamed_calls)
+    if idle_s > INFLIGHT_GRACE_S:
+        inflight = 0.0
     allowance = max(a.max_residue, inflight)
     if inflight > a.max_residue:
         print(f"  (allowing ${inflight:.6f}: {unnamed_calls} unnamed call(s) at the p99 price -- "
               f"spans the engine has not written yet)")
+    elif unnamed_calls and idle_s > INFLIGHT_GRACE_S:
+        print(f"  (no allowance: the ledger has been idle {idle_s:.0f} s, so the {unnamed_calls} "
+              f"unnamed call(s) are not in flight)")
     if abs(residue) > allowance:
         print(f"UNEXPLAINED: ${residue:+.6f} exceeds ${allowance:.6f}")
+        # WHOSE. A red that names no probe is a red nobody can act on. The gap is per-arm by
+        # construction -- what the meter charged an arm minus what its spans recorded -- and on
+        # 2026-09-03 the whole $0.076944 was `oldCK9`, whose 18 surplus calls came out of the
+        # unstreamed retry storm in §175. One line turns the alarm into an address.
+        worst = sorted(((m_cost.get(p2, 0.0) - s_cost.get(p2, 0.0), p2)
+                        for p2 in set(m_cost) | set(s_cost) if p2 not in ("?", "__by_kind__")),
+                       key=lambda r: -abs(r[0]))[:3]
+        named2 = ", ".join(f"{p2} ${d:+.6f}" for d, p2 in worst if abs(d) > 1e-6)
+        if named2:
+            print(f"  by arm (meter minus spans): {named2}")
         return 1
     return 0
 

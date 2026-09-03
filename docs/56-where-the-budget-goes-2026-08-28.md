@@ -7994,3 +7994,76 @@ streaming: 138 of 10332 calls went out UNSTREAMED (1.3 %) -- 4 of them cut at th
 The test now requires the arm in both halves, and two mutations redden it (drop either attribution).
 A concentration in one run is a different fact from a rate across four, and only one of them points
 at a probe worth looking at.
+
+## 175. oldCK9 spent a tenth of its dollar re-sending one request eight times, and the money check forgave it
+
+### 175.1 Batch 5 closes; five batches, five times the same sign
+
+| probe | arm | TEST | nodes (train) | before/after | `eval_train` | reference | champion |
+|---|---|---|---|---|---|---|---|
+| oldCK10 | pre-§99 | **216.0164** | [27.12, **216.29**, 20.07] | 39 % / 0 % | 38 | 3.0 % | 57L kernel |
+| newCK10 | shipped | **195.2931** | [21.14, 31.58, **193.87**] | 18 % / 18 % | 22 | 18.5 % | 63L kernel |
+| oldCK9 | pre-§99 | **183.9389** | [**189.13**, 182.16] | 43 % / **18 %** | 24 | 14.3 % | 45L kernel |
+| newCK9 | shipped | **174.6444** | [**176.80**, 24.75, 21.50] | 34 % / 0 % | 22 | 10.0 % | 90L kernel |
+
+| batch | shipped | pre-§99 | difference |
+|---|---|---|---|
+| 09-03T04 | 146.94 | 184.24 | −37.30 |
+| 09-03T07 | 166.11 | 233.02 | −66.91 |
+| 09-03T10 | 135.20 | 161.98 | −26.78 |
+| 09-03T14 | 179.14 | 234.90 | −55.76 |
+| **09-03T17** | **184.97** | **199.98** | **−15.01** |
+| | | **sum** | **−201.75** |
+
+Exact stratified permutation over all **7,776** relabellings: one-sided **p = 0.1277**, two-sided
+0.2554, null sd 173.9. **Five of five batches negative is p = 0.0312 by signs alone.** Twenty of
+twenty-four probes; the pre-registered read is at twelve a side and four probes remain.
+
+`oldCK9` is the batch's oddity twice over: only two evaluated nodes, **18 % of its budget spent
+after the last one**, `deep_research` at 28.2 % (the arm's highest), and **7** `run_probe` calls
+against 27–33 elsewhere. It spent its second half not exploring.
+
+### 175.2 Why: a retry storm on one request
+
+§174 found all six `nginx-300s` deaths in `oldCK9`. The ledger says what they were part of. Grouping
+its 314 rows by `req_sha`, **twenty are repeats of a body already sent**, and after 19:16 one body
+goes out again and again, unstreamed:
+
+```
+19:40:52  200  285.2s  $0.010821      19:44:11  504  300.0s  $0
+19:45:55  200  215.3s  $0.008692      19:50:36  504  300.0s  $0
+19:53:56  200  290.6s  $0.012806      19:55:03  200  147.4s  $0.008562
+```
+
+Eight sends of one request between 19:40 and 19:55, each unstreamed and taking two to five minutes,
+four of them dying at the ceiling. **$0.101394 paid on repeats** — a tenth of the run's dollar — and
+$0.076945 of it never became a `generation` span at all, because the engine discarded those answers
+and asked again.
+
+That is the full cost of §173's fallback in one run: not twenty minutes, but twenty minutes **and**
+ten cents of a hundred, on the probe that then produced the fewest nodes in its batch.
+
+### 175.3 The excuse I shipped three sweeps ago had no expiry date
+
+`check_money` reported this residue as forgiven:
+
+```
+RESIDUE $+0.076944
+(allowing $0.081350: 8 unnamed call(s) at the p99 price -- spans the engine has not written yet)
+```
+
+The stand had been **idle for 1,002 seconds** and every probe had finished. Nothing was in flight;
+§172's allowance was covering a real, permanent gap. The fix is the sentence the allowance always
+needed: it expires with the ledger's own last row (`INFLIGHT_GRACE_S = 300`, the nginx ceiling
+itself), and a red now carries an address rather than a number:
+
+```
+(no allowance: the ledger has been idle 1134 s, so the 8 unnamed call(s) are not in flight)
+UNEXPLAINED: $+0.076944 exceeds $0.010000
+  by arm (meter minus spans): oldCK9 $+0.076945, svcCacheCheck $+0.001124, ctlEEd $+0.000002
+```
+
+Three mutations redden the new test (allowance never expires, grace effectively infinite, red names
+no arm). **And the change broke two of my own earlier tests, correctly**: they dated their ledgers
+`"ts": "3000"`, which is idle by any clock, so they were asking for an in-flight allowance without
+anything in flight. Their fixtures now use the current time, which is what "in flight" means.

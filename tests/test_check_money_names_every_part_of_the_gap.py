@@ -26,6 +26,12 @@ import check_money as cm
 TOOL = REPO / "benchmarks" / "check_money.py"
 
 
+def _now() -> str:
+    """A ledger timestamp that counts as in flight."""
+    import time as _t
+    return str(_t.time())
+
+
 def _serve(payload: dict) -> tuple[int, threading.Thread, socket.socket]:
     """A one-shot /healthz that answers in TWO writes, so a single recv() cannot see the body."""
     srv = socket.socket()
@@ -436,13 +442,15 @@ def test_a_call_in_flight_is_not_a_leak(tmp_path):
     second, so anything landing in between is in one and not the other. The tolerance is now the
     unnamed count times the ledger's own p99 call price.
     """
+    # A call in flight is RECENT by definition -- an ancient ledger is idle and gets no
+    # allowance (see test_an_idle_ledger_gets_no_in_flight_allowance).
     probes = {"p1": [0.10]}                                  # one generation recorded
-    rows = ([{"ts": "3000", "arm": "p1", "cost": 0.10, "status": "200",
+    rows = ([{"ts": _now(), "arm": "p1", "cost": 0.10, "status": "200",
               "prompt_tokens": 900, "completion_tokens": 9}]
-            + [{"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200",
+            + [{"ts": _now(), "arm": "p1", "cost": 0.00000196, "status": "200",
                 "prompt_tokens": 10, "completion_tokens": 2}]
             # three more metered calls whose spans have not been written
-            + [{"ts": "3000", "arm": "p1", "cost": 0.10, "status": "200",
+            + [{"ts": _now(), "arm": "p1", "cost": 0.10, "status": "200",
                 "prompt_tokens": 900, "completion_tokens": 9} for _ in range(3)])
     root = _bench(tmp_path, probes=probes, meter_rows=rows)
     port, _, srv = _serve({"cost_usd": 0.40000196, "calls": 5})
@@ -492,12 +500,14 @@ def test_the_allowance_uses_the_p99_not_the_median(tmp_path):
     the p99 is ten cents, and the three unnamed calls are the expensive kind, which is exactly the
     case that produced $0.019402 over three calls when the corpus median was $0.00282.
     """
+    # A call in flight is RECENT by definition -- an ancient ledger is idle and gets no
+    # allowance (see test_an_idle_ledger_gets_no_in_flight_allowance).
     probes = {"p1": [0.001] * 100}
-    rows = ([{"ts": "3000", "arm": "p1", "cost": 0.001, "status": "200",
+    rows = ([{"ts": _now(), "arm": "p1", "cost": 0.001, "status": "200",
               "prompt_tokens": 90, "completion_tokens": 2} for _ in range(100)]
-            + [{"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200",
+            + [{"ts": _now(), "arm": "p1", "cost": 0.00000196, "status": "200",
                 "prompt_tokens": 10, "completion_tokens": 2}]
-            + [{"ts": "3000", "arm": "p1", "cost": 0.10, "status": "200",
+            + [{"ts": _now(), "arm": "p1", "cost": 0.10, "status": "200",
                 "prompt_tokens": 9000, "completion_tokens": 90} for _ in range(3)])
     root = _bench(tmp_path, probes=probes, meter_rows=rows)
     port, _, srv = _serve({"cost_usd": 0.40000196, "calls": 104})
@@ -548,3 +558,30 @@ def test_an_all_streamed_ledger_says_so(tmp_path):
     r = _run(root, port, "--max-residue", "0.01")
     srv.close()
     assert "0 of 2 calls went out UNSTREAMED (0.0 %); none cut at the 300 s ceiling" in r.stdout, r.stdout
+
+
+def test_an_idle_ledger_gets_no_in_flight_allowance(tmp_path):
+    """"Calls in flight" explains a residue only while something IS in flight.
+
+    On 2026-09-03 at 20:26 every probe had finished, the ledger's newest row was 1002 s old, and
+    §172's allowance was still forgiving $0.076944 — all of it `oldCK9`'s 18 surplus calls from the
+    unstreamed retry storm. An idle ledger cannot have calls in flight, so the allowance expires
+    with the ledger's own last row, and the red names the arm it belongs to.
+    """
+    probes = {"p1": [0.10]}
+    old = "1000000.0"                                    # an ancient timestamp: nothing is in flight
+    rows = ([{"ts": old, "arm": "p1", "cost": 0.10, "status": "200",
+              "prompt_tokens": 900, "completion_tokens": 9}]
+            + [{"ts": old, "arm": "p1", "cost": 0.00000196, "status": "200",
+                "prompt_tokens": 10, "completion_tokens": 2}]
+            + [{"ts": old, "arm": "p1", "cost": 0.10, "status": "200",
+                "prompt_tokens": 900, "completion_tokens": 9} for _ in range(3)])
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 0.40000196, "calls": 5})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "no allowance: the ledger has been idle" in r.stdout, r.stdout + r.stderr
+    assert "UNEXPLAINED" in r.stdout, r.stdout
+    assert "by arm (meter minus spans): p1 $+0.30" in r.stdout, (
+        "the red names no arm, so nobody can act on it")
+    assert r.returncode == 1, r.stdout + r.stderr
