@@ -6497,3 +6497,39 @@ is more than it was worth before this arm and exactly as much as it was worth af
 reference 7.4 % / 7.4 %, nodes ending on 7.01 — best over last 21.44×. `newCK2` 268.5174 against
 275.2249 (0.976), 40-line kernel, $1.0099, 33 % / 0 %, 22 `eval_train`, reference 10.7 % / 10.7 %,
 last node 8.43 — best over last **32.64×**, the largest champion-rule save in the corpus.
+
+## 142. §115's arm, sized by the question this time: twelve per side, in batches, stopping rule first
+
+§141 measured what the question costs — Fisher power against a corpus rate of 19 % and a recent rate
+of 67 % reaches 0.74 at **twelve per arm** — and named the failure that produced a two-against-two
+design: four lanes were free, so four probes ran. This section commits to the size before the first
+probe of the rerun, so that the same thing cannot happen again by increment.
+
+**Design, fixed now:**
+
+* **24 probes total**, 12 on `looplab_check_pre99.py` and 12 on the shipped checker, `edge_expansion`,
+  $1 each, ≈ $24. Cards identical but for the `check` command's argv (`card_sha256`
+  `164268558e1a0469` on both sides, verified in §137's tests and on the live trees in §138).
+* **Run four at a time**, two per arm, one arm per lane pair, so every batch is internally paired and
+  a batch effect — which §134/§135 measured as real — hits both arms equally.
+* **The four probes of §141 count.** They were run under this exact design and nothing about them was
+  selected after the fact: `oldCK1` 145.26, `oldCK2` 223.22, `newCK1` 25.37, `newCK2` 268.52. That
+  makes the rerun 10 more per arm, ≈ $20.
+* **Primary statistic:** does node 0 carry a compiled kernel. Corpus 5/27 = 19 %, recent batches
+  12/18 = 67 %, §141's four 2/4. Exact one-sided Fisher, new against old.
+* **Secondary:** the TEST score, exact one-sided rank test.
+* **Stop at 12 v 12 regardless of what the numbers do in between**, and report whatever is there.
+
+**What each outcome will be allowed to say:**
+
+| node-0 kernel rate | conclusion |
+|---|---|
+| new clearly above old | §114 was our repairs; the endpoint explanation dies |
+| indistinguishable | §114 was the endpoint (or something else that moves between batches); §99/§103 remain correct repairs that did not move the first draw |
+| old above new | the repair costs something; §99 gets re-examined against its own tests |
+
+The third row is written because §140 already contains a run of its shape — the repaired checker,
+three plain-Python nodes, TEST 25.37.
+
+**Batch 1 of 6 launches now.** No result is claimed in this section; it exists so the next five
+cannot be sized by whatever hardware happens to be idle.
