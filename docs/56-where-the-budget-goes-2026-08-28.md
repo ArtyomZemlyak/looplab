@@ -6087,3 +6087,50 @@ improving on a good start. Third time this month a striking split has dissolved 
 
 What stands unconditioned is the headline: **a third of the campaign's money is spent after the
 answer is already found**, and no arm of this experiment has changed that.
+
+## 132. The arm reaches seven against seven: scores p = 0.0487, transitions p = 0.0060
+
+All three finished. `expEEg` (treatment) took TEST **264.9858** against a best train of 267.4695
+(ratio 0.991) — 42-line kernel, $1.0060, 26 % of the dollar before the first node and 5 % after the
+last, 28 `eval_train`, reference 4.2 % / 4.2 %, nodes [267.47, 217.59]. `ctlEEf` (control) took
+**218.8688** against 216.7143 (1.010) — 20-line kernel, $1.0120, 43 % before / 0 % after, 32
+`eval_train`, nodes [143.51, 216.71, **7.90**], best over last **27.42×**, the largest save the
+champion rule has made in the whole corpus. `ctlEEg` (control) took **172.0602** against 169.5875
+(1.015) — 27-line kernel, $1.0083, 29 % / 6 %, 32 `eval_train`, nodes [26.39, 169.59, 31.97], and it
+is the second run of the batch whose node 0 carried no kernel.
+
+**Both arms at seven.**
+
+```
+268.2T 265.0T 260.8C 259.8C 252.6T 251.4T 236.8T 221.6T 218.9C 198.4T 197.8C 179.1C 172.1C 156.9C
+```
+
+| statistic | value |
+|---|---|
+| scores, exact one-sided rank test, 7 v 7 | **p = 0.0487** (167/3432) |
+| median ratio | 251.35 / 197.85 = **1.270** |
+| transitions from a kernel node that keep the kernel | T **12/13** against no-clause **20/40**, **p = 0.0060** |
+| …that hold ≥ 0.5 of the previous score | T **11/13** against **15/40**, **p = 0.0035** |
+
+The two statistics have behaved very differently as n grew:
+
+| n | scores | transitions (keep) |
+|---|---|---|
+| 4 v 3 | 0.0286 | — |
+| 6 v 4 | 0.0857 | — |
+| 6 v 5 | 0.2143 | — |
+| 11 runs | — | 0.0122 |
+| **7 v 7** | **0.0487** | **0.0060** |
+
+**The score p has now been on both sides of 0.05 three times.** It is not a number to act on and it
+was never going to be at this n — §83 asked for nine per arm against a 1.25× effect and the observed
+ratio is 1.270, which is exactly the case that table was built for. The transition statistic has
+moved one way only, on 53 observations rather than 14, and it is measuring what the clause literally
+says.
+
+What can be said after fourteen probes and about $14: **the clause changes the loop's behaviour, and
+whether that behaviour is worth anything to the score is still not established.** §94 is the standing
+precedent for exactly this shape — an affordance whose use went to zero with the score untouched.
+
+Two more probes per arm would reach §83's nine. That is the first time in this programme that
+finishing a measurement is a smaller decision than starting one.
