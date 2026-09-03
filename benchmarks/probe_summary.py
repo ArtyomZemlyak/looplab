@@ -551,6 +551,16 @@ def main(argv: list[str]) -> int:
                 # identical here, and both would otherwise leave the arm looking thriftier.
                 print(f"  {'':16s} {'':34s} + {len(never)} run(s) with NO node yet, excluded "
                       f"and censoring this row: {', '.join(sorted(never))}")
+            # THE NODE-0 KERNEL RATE, PER CARD, because that is the statistic §142 pre-registered
+            # for §115's arm and §141 is the record of what happens when the analysis is hand-rolled
+            # each sweep. §119 put the fact on each probe's line; a per-arm tally is what a
+            # pre-registered comparison actually reads, and computing it here means it cannot be
+            # computed a different way next time. Corpus rate for reference: 5 of 27 on this task.
+            kern = [g for g in group if g.get("first_kernel") is not None]
+            if kern:
+                yes = sum(1 for g in kern if g["first_kernel"])
+                print(f"  {'':16s} {'':34s} node 0 carried a kernel: {yes}/{len(kern)} "
+                      f"= {100 * yes / len(kern):.0f}%")
             # AND THE SAME QUANTITY IN MINUTES. Time to the first BUILD step is the other unit
             # "measure early" comes in, and it is less censored than the dollars: a run that has
             # started building has a number even before it evaluates anything. NOT an independent

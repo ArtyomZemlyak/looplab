@@ -6533,3 +6533,43 @@ three plain-Python nodes, TEST 25.37.
 
 **Batch 1 of 6 launches now.** No result is claimed in this section; it exists so the next five
 cannot be sized by whatever hardware happens to be idle.
+
+## 143. The pre-registered statistic now lives in the summary, and it makes §129 visible
+
+§142 fixed "does node 0 carry a compiled kernel" as the primary reading of §115's arm. §141 is the
+record of what hand-rolling that analysis per sweep costs. §119 put the fact on each probe's line;
+`probe_summary.py` now prints the RATE on each card's row, so the comparison a pre-registered arm
+reads is computed in one place and cannot be computed a different way next sweep.
+
+It immediately shows something no sweep had put side by side — every `edge_expansion` arm, one
+column:
+
+| card | node 0 carried a kernel |
+|---|---|
+| `--exploit-best` | **8/9 = 89 %** |
+| shipped card, today | 6/11 = 55 % |
+| `pre-99 checker` | 1/2 = 50 % |
+| `--no-reference-affordance` | 3/9 = 33 % |
+| `--no-unteachable-rules` | 2/8 = 25 % |
+
+Exact one-sided Fisher:
+
+* `--exploit-best` against today's shipped card: **p = 0.1192**
+* today's shipped card against the two older control arms (5/17): **p = 0.1753**
+* `--exploit-best` against the two older arms: **p = 0.00558**
+
+**This is §129's question with more data and it still does not resolve.** §129 asked whether the
+clause moves node 0 — which §114 said it should not — and found p = 0.0688 on 13 first nodes. Now
+`--exploit-best` sits at 89 % against a shipped card that is itself at 55 %, and the gap between them
+is p = 0.12 while the gap to the OLD arms is p = 0.006. Two candidate stories fit: the clause moves
+node 0, or the harness/endpoint moved everything after §99 and the older arms are simply older. The
+third column above — 1/2 on the pre-99 checker, running right now — is the arm that separates them,
+and it is 4 of 24 probes in.
+
+The tally is deliberately blind to arms with no evaluated node: counting a run that has not evaluated
+yet as "no kernel" would make every arm look worse the earlier it is read, which is the same
+censoring the spend row already names. Three falsifiers; the mutation that counts those runs reddens
+one.
+
+*Batch 2 of 6 is 30 minutes in with no nodes yet;* residue $0.000000, zombies 0, seven baselines, no
+`PermissionError`.
