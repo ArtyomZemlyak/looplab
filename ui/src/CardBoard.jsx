@@ -685,7 +685,7 @@ function _CardKanbanCard({
 
 // The section that exists because the whole board was ambiguous without it. A Card is the
 // research-direction aggregate — `core/cards.py`'s Card docstring is explicit that "The Card IS the
-// research-direction aggregate now (1 card = 1 hypothesis)" — and `cards.py:809` declares
+// research-direction aggregate now (1 card = 1 hypothesis)" — and `cards.py::Card.evidence` declares
 // `evidence: list[int]  # node ids that tested it (== node_ids)`. A LIST. So one Card owns zero or
 // more experiments, and until now the board rendered a Card with exactly the vocabulary of an
 // experiment (its operator, its params, its footprint, its delta) and offered its evidence node ids

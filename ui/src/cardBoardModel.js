@@ -3,11 +3,11 @@
 //
 // Everything here exists to state ONE fact the board's React half could not: **a Card is not a
 // node.** `looplab/core/cards.py`'s class docstring says "The Card IS the research-direction
-// aggregate now (1 card = 1 hypothesis)", and `cards.py:809` declares
+// aggregate now (1 card = 1 hypothesis)", and `cards.py::Card.evidence` declares
 // `evidence: list[int]  # node ids that tested it (== node_ids)` — a LIST. A Card can hold zero
 // nodes (`engine/card_reservation.py::_record_node_less_card` mints and immediately closes a
 // rejected proposal that never gets a Node), and a node can hold no Card (`Idea.card_id` is
-// `Optional[str] = None`, `core/models.py:349`). So the relation is
+// `Optional[str] = None`, `core/models.py::Idea.card_id`). So the relation is
 //
 //     Card 1 ——— 0..N Node        Node 0..1 Card
 //
@@ -277,8 +277,8 @@ export function cardOrder(a, b) {
 // ---------------------------------------------------------------------------------------------
 
 // The node -> card edge as the wire actually carries it. NOTE the nesting: the durable stamp lives
-// on the IDEA (`core/models.py:349` is `Idea.card_id`, inside the `Idea` class that opens at
-// models.py:282) — there is NO top-level `card_id` on the node DTO. Measured against
+// on the IDEA (`core/models.py::Idea.card_id`, a field of the `Idea` model) — there is NO
+// top-level `card_id` on the node DTO. Measured against
 // runs/spec-live-0804 on 2026-08-06: every node dumped `card_id` absent at the top level and
 // `idea.card_id = "card-N"` one level down. Reading `node.card_id` therefore returns `undefined`
 // for every node in every run, which is exactly the kind of join that fails silently — it does not
@@ -294,13 +294,14 @@ export function nodeCardId(node) {
  *
  * The union of TWO sources, because neither is complete on its own:
  *
- *   - `card.evidence` — `cards.py:809`, "node ids that tested it". The fold appends a node here
+ *   - `card.evidence` — `cards.py::Card.evidence`, "node ids that tested it". The fold appends a node here
  *     only from `events/card_ledger.py`'s node-linking pass, and the verdict/`best_delta`/status
  *     roll-ups all read exactly this list. It is the AUDIT set.
  *   - every node whose `idea.card_id` names the card — the durable stamp the engine writes when it
  *     mints the Card's action. A node that is still BUILDING, or that failed before producing
  *     evidence, or whose card was skipped by the ledger's ambiguity gate, carries this and only
- *     this. `card_ledger.py:1757` is explicit that "a build reservation is not evidence yet".
+ *     this. `card_ledger.py::_apply_card_status` is explicit that "a build reservation is not
+ *     evidence yet".
  *
  * Reporting only `evidence` would tell the operator a card has no attempts while a node for it is
  * running in front of them; reporting only the stamp would drop every hash-joined legacy card,
@@ -368,7 +369,8 @@ export function cardAttemptSummary(attempts) {
 // feature that would need a new wire field. These two are the ones with real content behind them.
 // ---------------------------------------------------------------------------------------------
 
-// The 17 structured cue kinds `core/cards.py:193-219` closes over, in the operator's words. This is a
+// The 17 structured cue kinds `core/cards.py::CARD_STEERING_CONTEXT_FIELDS` closes over, in
+// the operator's words. This is a
 // LABEL table, not a validator: an unknown kind renders its own id rather than being dropped, because
 // the vocabulary is versioned server-side and a silently-hidden new cue is worse than an ugly one.
 const STEERING_CUES = {

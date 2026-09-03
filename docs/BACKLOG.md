@@ -4801,11 +4801,19 @@ trained at. It becomes admissible the moment the EFFECTIVE batch is lifted into 
 event — an `extra_metrics`-shaped problem, since the number comes off the candidate's own process.
 proof:absent:effective_train_batch@looplab/events/types.py
 
-OPEN[claim-ui-line-citations] Four dead `file.py:NNN` citations survive in `ui/src/` —
-`cardBoardModel.js` cites `core/models.py:349` (that line is `return int(v.strip())`) and
-`cards.py:809` (blank), and `CardBoard.jsx` cites `card_ledger.py:1757`. `citation_defects()` scans
-`looplab/` only; widening it to `ui/` is one argument away, and the fix is to locate by SYMBOL.
-proof:present:cards.py:809@ui/src/cardBoardModel.js
+**[CLOSED 2026-09-03 — located by SYMBOL, and there were SEVEN, not four.]** A `grep -rn '\.py:[0-9]'`
+over `ui/src/` (which is what the item asked `citation_defects()` to be widened to) found three more
+the hand count missed: a second `core/models.py:349`, a `models.py:282` for the `Idea` class, a
+`core/cards.py:193-219` for the cue-kind table, and two in `derivedMemory.js` — every one of them a
+line number, every one of them already wrong or one edit from it. Each is now a `<mod>.py::<symbol>`
+citation: `Idea.card_id`, `Card.evidence`, `_apply_card_status`, `CARD_STEERING_CONTEXT_FIELDS`,
+`normalize_statement`. `ui/src/` now contains ZERO `file.py:NNN` citations, which is the property
+worth having — CLAUDE.md's rule is that a line citation is falsified by any edit above it, so the
+count of them is the thing to keep at zero rather than the count of DEAD ones.
+
+Widening `citation_defects()` to `ui/` is still one argument away and is deliberately not made here:
+it resolves `<mod>.py::<symbol>` against the Python tree, and a JS file citing Python is a different
+relation from a Python file doing so — worth arguing before it is enforced.
 
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
