@@ -6641,3 +6641,42 @@ than buying twelve more probes.
 comparison in §114 for good. Between-batch variance of that size cannot be averaged away by adding
 probes to one side of a comparison whose sides ran on different days. Only the within-batch arm can
 answer it.
+
+## 145. The stratified statistic is now a file with tests, and it corrected §144's own reading
+
+§144 amended the arm's primary reading to a batch-stratified exact test. §143 is the record of what
+hand-rolling a pre-registered statistic per sweep costs. So it is `benchmarks/stratified_arm.py`:
+each batch contributes a 2×2, the null distribution of the summed cell is the exact convolution of
+the per-batch hypergeometrics, and the pooled Fisher is printed beside it for contrast.
+
+Six falsifiers, and they pin the properties that matter rather than the arithmetic:
+
+* a single stratum reproduces Fisher exactly (2/2 against 0/2 gives 1/6);
+* the same imbalance seen in two batches gives (1/6)² — stratifying rewards repetition;
+* **a batch where both arms did the same thing cannot move the p** — the mutation guard, because an
+  implementation that let ties contribute would shrink a p by adding uninformative probes;
+* pooling and stratifying disagree on a Simpson's-shape input, which is the whole reason §144
+  amended the statistic instead of buying more probes.
+
+Replacing the stratification with a pooled sum reddens three.
+
+### And it caught me on §144's own sentence
+
+§144 said batch 2's first nodes were "all in the low cluster, in both arms", and I wrote it in a
+section about the KERNEL rate — implying none carried a kernel. The tool says otherwise, and the
+files agree with the tool:
+
+| probe | node 0 | files |
+|---|---|---|
+| oldCK3 | 27.66 | `solver.py` |
+| newCK3 | 22.79 | `solver.py` |
+| oldCK4 | 23.34 | `solver.py` |
+| **newCK4** | **22.77** | **`setup.py`, `solver.py`, `solver_kernel.pyx`** |
+
+**A compiled kernel that scored 22.77.** Low score and no kernel are not the same fact, and §108's
+whole finding — kernel median 166 against ~26 — is a median, not a law. One of the four wrote the
+kernel and still landed in the low cluster.
+
+*The arm so far, by the amended statistic:* two batches have both arms, arm A (shipped checker) 2/4
+against arm B (pre-§99) 1/4, **stratified p = 0.50000**, pooled 0.50000. Four of twenty-four probes
+in, and the two readings agree because neither has anything to disagree about yet.
