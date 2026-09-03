@@ -7315,3 +7315,45 @@ that a solver killing itself becomes one failed row rather than an empty report.
 Three instrument failures in three sweeps, all mine and all the same shape: `cmd | tail` returning
 tail's status (§158), a Fisher tail summed from the wrong end (§159), and now a doubled `-q`. None
 of them broke anything. Each of them removed a number I was about to quote.
+
+## 161. The long calls are long because they are working: a whole-call deadline buys 0.2 hours
+
+Audit finding #25 re-derived, and its numbers are exact. Over 23,381 generations and **192.9 h** of
+generation wall clock: **273 calls (1.17 %) run longer than 300 s and account for 34.6 h — 18 % of
+the total.** The agent had 262 (1.16 %), 33.1 h of 184.9 h, 18 %. The two worst are both 1820 s:
+`expEEa`/`deep_research` with 222,905 completion tokens (OK) and `remDL4`/`plan_step` with 241,943
+(ERROR).
+
+Its diagnosis of the mechanism is right and verbatim-checkable — `config.py:391` says
+`llm_timeout` is the "LLM request idle timeout — inter-token stall limit in stream mode", so a
+stream that keeps emitting never trips the 180 s setting, and the 1820 s wall is the gateway's.
+
+Its remedy — "add a whole-call deadline and a `max_tokens` ceiling" — is where it stops working.
+Replaying every generation against every deadline, and asking of each cut call whether it had
+produced a tool call or output text:
+
+| deadline | calls cut | hours reclaimed | of those, calls that DID produce work | $ of that work |
+|---|---|---|---|---|
+| 120 s | 1446 | 45.5 | **1428** | 12.74 |
+| 180 s | 762 | 27.6 | **750** | 8.00 |
+| 300 s | 273 | 11.9 | **265** | 3.52 |
+| 600 s | 41 | 2.4 | 39 | 0.70 |
+| 900 s | 7 | 0.8 | 5 | 0.10 |
+| **1500 s** | **2** | **0.2** | **0** | **0.00** |
+
+At 300 s the deadline destroys 265 productive calls to reclaim 11.9 hours. The only threshold that
+costs nothing is 1500 s, and it removes exactly the two 1820 s pathologies for 0.2 h — 0.1 % of
+generation wall clock. **The 18 % is real and it is 18 % of work**: these calls are slow because
+they think for twenty minutes and then answer.
+
+The other half of the finding dissolves the same way. The 584 generations that produced neither a
+tool call nor output text are **579 ERROR-status calls with a median duration of 2.8 s**, plus five
+OK; their $1.0611 and 3.51 h are the recorded error path plus that one 1820 s outlier, not a hidden
+leak.
+
+**This is the second audit recommendation in three sweeps whose threshold destroys useful work.**
+§156: "refuse a node below the p75 cycle" would have killed 54 real nodes including the corpus's
+best. Here: "cap the call" would have killed 265 productive generations. Both findings MEASURED the
+waste correctly and neither measured the counterfactual — what the proposed rule would have cut
+that was not waste. That is the question to put to each of the remaining findings before acting on
+any of them, and it is cheap: every one of these replays took a single pass over the corpus.
