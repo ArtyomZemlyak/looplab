@@ -6724,3 +6724,34 @@ suggests the checker produces one.
 
 *Clean:* four probes live, residue $0.002977 (in tolerance), zombies 0, seven baselines, no
 `PermissionError`.
+
+## 147. Three runs of the same batch traced the same arc, and the champion rule caught all three
+
+`oldCK3`, `newCK3` and `oldCK4` finished within the hour, on two different checkers, and their node
+sequences are the same shape to within noise:
+
+| probe | checker | nodes (train) | TEST | best over last |
+|---|---|---|---|---|
+| oldCK4 | pre-§99 | **[23.34, 245.43, 24.71]** | **244.3203** | 9.93× |
+| newCK3 | shipped | **[22.79, 221.81, 27.81]** | **225.8641** | 7.98× |
+| oldCK3 | pre-§99 | **[27.66, 230.44, 23.72]** | **221.7132** | 9.71× |
+
+Low, high, low. Three times, in both arms, in one batch. All three champions are Cython kernels
+(40, 53 and 34 lines) found on node 1 and abandoned on node 2, and **all three runs report a number
+only because the best evaluated node is what gets submitted** — without §84's rule they would report
+24.7, 27.8 and 23.7.
+
+Ratios to train: 244.3203/245.4259 = 0.995, 225.8641/221.8094 = 1.018, 221.7132/230.4424 = 0.962 —
+the last one is `edge_expansion`'s new low, just under §111's previous 0.963. Money: `plan_step`
+36–44 %, `propose` 17–26 %, `deep_research` 17–22 %, `repropose` 5–12 %. `eval_train` 24, 34, 24.
+Reference use 0.0 %, 4.8 %, 6.7 % — the first is a run that never touched the reference at all.
+
+**This is §108's running-max shape at its cleanest, and it is what makes node 0 a bad outcome
+(§146).** Every one of these runs would be read as a failure at node 0 and as a success at node 1.
+The batch that looked ruined two sweeps ago finished with three scores between 221 and 244, i.e.
+inside the corpus's normal band.
+
+*Arm state, amended primary (final TEST, stratified by batch):* batch 09-03T04 gave shipped
+{268.52, 25.37} against pre-§99 {223.22, 145.26}; batch 09-03T07 has shipped {225.86, …} against
+pre-§99 {221.71, 244.32} with one probe still running. Eight of twenty-four probes in; no test is
+computed here because a batch with an incomplete arm is not a stratum yet.
