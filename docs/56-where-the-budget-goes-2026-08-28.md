@@ -6340,3 +6340,34 @@ What the arm cost: eighteen probes, about $18, and it answered its question. Wha
 tell us how to make the loop better — and it is worth saying plainly that a correctly executed,
 pre-registered, adequately powered experiment ending in "do not ship" is the outcome this programme
 has been unable to produce until now.
+
+## 138. §115's arm is live, and the manipulation is visible in the runs rather than only in the card
+
+A card that names a different script proves nothing about what the loop experienced. Measured in the
+probes' own spans, `check` calls so far:
+
+| probe | `check` calls | answers naming `build_ext` | `ok: false` |
+|---|---|---|---|
+| oldCK1 (pre-§99 checker) | 4 | **0** | 0 |
+| oldCK2 (pre-§99 checker) | 7 | **0** | 0 |
+| newCK1 (shipped checker) | 5 | 0 | 1 |
+| newCK2 (shipped checker) | 5 | **2** | 1 |
+
+Eleven checks on the old checker, not one of them mentioning a build — which is what
+`looplab_check_pre99.py` does, because it has no `build_gate`. Two on the new one already carry a
+build result. §119 established that column as the mechanism's signature; it is now the arm's
+manipulation check, and it passes.
+
+`card_sha256` is `164268558e1a0469` for all four — identical cards apart from the `check` command's
+argv, verified in §137's tests and again here on the live trees.
+
+**First nodes so far: `oldCK1` 25.41, `oldCK2` 160.95.** One in each cluster, and the new-checker
+pair has not evaluated yet. Nothing to read, which is the expected state two hours in.
+
+The prediction from last sweep stands, unchanged and written before any of these four scores:
+**if the `oldCK*` first nodes come in systematically below `newCK*`, §114 was about our repairs; if
+they do not differ, §114 was about the endpoint and §115's confound closes in the confound's
+favour.**
+
+*Everything else clean:* four probes live, residue $0.002172 (inside tolerance, the in-flight and
+echo noise §124 characterised), zombies 0, seven baselines, no `PermissionError`.
