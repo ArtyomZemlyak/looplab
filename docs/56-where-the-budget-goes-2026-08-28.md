@@ -6278,3 +6278,65 @@ a sibling archive that this sweep verified holds 64 of 64 finished runs whole.
 *Nothing else moved:* four probes live, residue $0.000000, zombies 0, seven baselines, no
 `PermissionError`. `expEEi` continues its climb off the corpus's lowest-ever first node — 8.91, then
 138.31, now **229.14**.
+
+## 137. The arm closes at nine against nine, and §133's rule picks the middle row
+
+All four finished. The arm is complete at the size §83 asked for, and §133 wrote down what each
+outcome would be allowed to say before these scores existed.
+
+### The four
+
+**expEEi** (treatment) — TEST **228.8890** against best train 229.1356 (ratio 0.999). 68-line kernel,
+$1.0150, 27 % before the first node and 0 % after the last, 23 `eval_train`, reference 0.0 % / 0.0 %.
+Four nodes, **[8.91, 138.31, 229.14, 150.64]** — from the lowest first node this bench has recorded
+to its own best, in three moves.
+
+**ctlEEi** (control) — TEST **228.0554** against 228.9432 (0.996). 45-line kernel, $1.0099, 29 % /
+0 %, 31 `eval_train`, reference 0.0 % / 0.0 %. Nodes **[28.25, 228.94, 0.00]** — the last scored
+zero at 45.6 s of evaluation, a real zero, and the champion rule is the whole reason this reports
+228 instead of nothing.
+
+**expEEh** (treatment) — TEST **158.6335** against 156.8733 (1.011). 48-line kernel, $1.0039, 48 %
+before / 9 % after, 27 `eval_train`, reference 12.5 % / 12.5 %. Nodes **[155.36, 156.87]** — two
+nodes, the second a 1 % improvement on the first.
+
+**ctlEEh** (control) — TEST **26.1659** against 26.6076 (0.983). 84-line kernel, $1.0096, 30 % / 3 %,
+27 `eval_train`, reference 12.0 % / 12.0 %. Nodes **[23.06, 26.61, 9.01]** — the lowest score in the
+entire arm, and a run that never left the low cluster.
+
+### The two statistics, at 9 v 9
+
+```
+268T 265T 261C 260C 253T 251T 237T 229T 228C 222T 219C 198T 198C 179C 172C 159T 157C 26C
+```
+
+| | value |
+|---|---|
+| **secondary — TEST score**, exact one-sided rank test | **p = 0.0567**, median ratio 1.197 |
+| **primary — keeps the kernel** after a kernel node | T **15/16** against **20/41**, **p = 0.00130** |
+| **primary — holds ≥ 0.5 of the score** | T **14/16** against **15/41**, **p = 0.00055** |
+| primary, against the CONCURRENT control only | T 15/16 against 6/13, **p = 0.00670** |
+
+The score p across the whole arm: 0.0286 → 0.0857 → 0.2143 → 0.0487 → **0.0567**. It never settled
+and it does not cross.
+
+### §133's rule, applied
+
+> transitions hold, scores do not → the clause changes behaviour and the score does not follow —
+> §94's shape; **do not ship**, and record that a behavioural win is not a score.
+
+**So `--exploit-best` stays OFF by default.** The clause does what it says: after a node with a
+compiled kernel, the treatment arm proposes another kernel 94 % of the time against 49 % without it,
+and keeps at least half the score 88 % against 37 %. Both hold against the concurrent control alone,
+so this is not a batch effect. And the score it was meant to buy is at p = 0.0567 after eighteen
+probes and about $18 — a median ratio of 1.197, which is below the 1.25× §83 sized the bench for.
+
+**This is the second time this programme has measured a real behavioural change worth no score.**
+§94's reference arm moved use from 8.4 % to 0.0 % with the score untouched at p = 0.4811. The pattern
+is now a finding in its own right: *this loop's behaviour is much easier to move than this loop's
+result.*
+
+What the arm cost: eighteen probes, about $18, and it answered its question. What it did not do is
+tell us how to make the loop better — and it is worth saying plainly that a correctly executed,
+pre-registered, adequately powered experiment ending in "do not ship" is the outcome this programme
+has been unable to produce until now.
