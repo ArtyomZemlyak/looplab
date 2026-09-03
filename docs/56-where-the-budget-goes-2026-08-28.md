@@ -7404,3 +7404,54 @@ findings: *a number that names waste is a hypothesis about a change, and the cha
 
 Not touched, as before: `RESULT_CAP` is a constant every probe reads, and §115's arm is eight probes
 into twenty-four.
+
+## 163. Batch 3 closes the arm's first half, and all three batches point the same way — at the OLD checker
+
+| probe | arm | TEST | nodes (train) | best/last | before/after | `eval_train` | reference use | node 0 | champion |
+|---|---|---|---|---|---|---|---|---|---|
+| newCK6 | shipped | **243.0746** | [244.25, 195.13, 199.71] | 1.22× | 31 % / 2 % | 32 | 5.3 % | kernel | 41L kernel |
+| oldCK5 | pre-§99 | **172.8864** | [23.15, 26.56, **172.68**, 26.99] | **6.40×** | 25 % / 1 % | 37 | 8.0 % | no kernel | 39L kernel |
+| oldCK6 | pre-§99 | **151.0797** | [105.86, 106.36, 153.77] | 1.00× | 36 % / 1 % | 34 | **0.0 %** | kernel | 64L kernel |
+| newCK5 | shipped | **27.3236** | [23.74, 27.91] | 1.00× | 35 % / **11 %** | 21 | **12.5 %** | no kernel | 59L kernel |
+
+Train→test ratios 0.995, 1.001, 0.982, 0.979 — the tightest band of any batch so far.
+
+**§147's arc is not a law.** Batch 2 traced low-high-low four times out of four. Batch 3 traces four
+different shapes: `oldCK5` low-low-**high**-low (and its 6.40× best-over-last is the champion rule
+earning its keep again — without §84 it reports 26.99), `newCK6` high-then-down twice, `oldCK6`
+flat-then-up, `newCK5` two nodes and a death.
+
+**`newCK5` is the batch's failure and the first `node_failed` a live sweep has been able to see**
+(§157's reader): node 2 died on `LLM spend ceiling reached: $1.0025 of the $1.0000`, 11 % of its
+budget landed after the last evaluated node, it made the fewest `eval_train` calls (21 against 32–37)
+and had the highest reference use (12.5 %). It built a 59-line Cython kernel that scored 27.32 —
+the biggest kernel in the batch and the worst score.
+
+### 163.1 The interim read, and it is not the direction the repair predicted
+
+Twelve of twenty-four probes are in, three complete paired batches. The pre-registered analysis is
+at n=12 per arm (§142) and this is an unplanned interim look, changing nothing about the design —
+but it is the first time the primary outcome can be computed at all.
+
+| batch | mean shipped | mean pre-§99 | difference |
+|---|---|---|---|
+| 09-03T04 | 146.94 | 184.24 | **−37.30** |
+| 09-03T07 | 166.11 | 233.02 | **−66.91** |
+| 09-03T10 | 135.20 | 161.98 | **−26.78** |
+| | | **sum** | **−130.98** |
+
+Exact stratified permutation over all 216 within-batch relabellings: **one-sided p = 0.1944** that
+the shipped checker is worse, two-sided p = 0.3889, null sd 152.9.
+
+Not significant, and the honest summary is two sentences. **All three batches favour the checker
+from before the repair, and the repair was expected to help or do nothing.** The effect is well
+inside the noise of a task whose per-probe scores run from 25 to 268, which is exactly why the arm
+was sized at twelve a side.
+
+### 163.2 A null worth recording: reference use does not predict the score
+
+`newCK5` had the batch's highest reference-module use and its worst score; `oldCK6` had 0.0 % and
+scored 151. Across all 57 `edge_expansion` probes that carry both numbers this does not survive:
+**Pearson r = −0.123**, median split at 7.7 % gives 223.22 (n=29) against 195.76 (n=28), two-sided
+permutation **p = 0.312**. The batch-3 impression is a four-point pattern in a corpus that does not
+have it.
