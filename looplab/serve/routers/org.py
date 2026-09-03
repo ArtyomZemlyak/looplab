@@ -11,7 +11,8 @@ from fastapi.responses import JSONResponse
 from looplab.serve.deletion_service import (
     begin_or_resume_run_deletion, deletion_cascade_requested, get_run_deletion,
     validate_deletion_request)
-from looplab.serve.deletion_transaction import load_deletion_identity, save_deletion_identity
+from looplab.serve.deletion_transaction import (
+    discard_deletion_identity, load_deletion_identity, save_deletion_identity)
 from looplab.serve.memory_cascade import (MEMORY_CASCADE_SCHEMA, attributable_memory,
                                           known_memory_dirs, memory_dir_is_known,
                                           purge_attributable_memory, run_memory_identity,
@@ -366,9 +367,25 @@ def build_router(srv) -> APIRouter:
             return {**_identity(run_id), "read_from_run": False}
 
         identity = (await anyio.to_thread.run_sync(_identity_before_deletion)) if cascade else {}
-        result = await anyio.to_thread.run_sync(lambda: begin_or_resume_run_deletion(
-            srv, run_id, operation_id=operation_id,
-            expected_generation=generation, expected_seq=expected_seq))
+        try:
+            result = await anyio.to_thread.run_sync(lambda: begin_or_resume_run_deletion(
+                srv, run_id, operation_id=operation_id,
+                expected_generation=generation, expected_seq=expected_seq))
+        except BaseException:
+            # A REFUSED deletion must not leave the identity it parked behind. The sidecar is
+            # written before the transaction can refuse — deliberately, because the facts it carries
+            # live only inside the run directory and parking them is what makes a crash BETWEEN the
+            # read and the deletion recoverable — but a wrong generation, a stale tail or a run
+            # another operation already owns leaves one holding that run's `run_uid` and
+            # `memory_dir` with nothing that will ever read it. Measured by `service_reaper`'s audit:
+            # 10 of 54 parked sidecars belong to two runs that STILL EXIST, and every re-press of a
+            # refused deletion added another. `discard_deletion_identity` keeps any sidecar whose
+            # RECEIPT exists — that one is live state a retry reads — so this can only drop the ones
+            # no operation claimed.
+            if cascade and identity.get("read_from_run"):
+                await anyio.to_thread.run_sync(
+                    lambda: discard_deletion_identity(srv, _plain_run_dir(run_id), operation_id))
+            raise
         # ORDER IS THE POINT: the cross-run purge runs only once the run itself is durably gone. A
         # deletion that fails after its memory was purged would leave the operator with a run whose
         # evidence had been destroyed on its behalf — the one outcome no retry can undo. The purge is

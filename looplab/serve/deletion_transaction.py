@@ -131,6 +131,42 @@ def load_deletion_identity(srv, rd: Path, operation_id: str) -> dict:
             "memory_dir_source": _source("memory_dir_source")}
 
 
+def discard_deletion_identity(srv, rd: Path, operation_id: str) -> bool:
+    """Drop a parked identity that no operation can ever use, and say whether one went.
+
+    THE SIDECAR IS WRITTEN BEFORE THE TRANSACTION CAN REFUSE, and it has to be: the two facts the
+    cross-run purge needs live only inside the run directory, so they are read while it still
+    exists — and parking them is exactly what makes a crash BETWEEN that read and the deletion
+    recoverable. The cost was that a REFUSED deletion parked one too: a wrong generation, a stale
+    tail, a run another operation already owns, all leave a sidecar carrying the run's `run_uid` and
+    `memory_dir` behind, and until 2026-09-03 nothing removed it. Measured by `service_reaper`'s own
+    audit: 10 of the 54 sidecars on that deployment belong to two runs that STILL EXIST, i.e. to
+    deletions that never happened. Every re-press of a refused deletion leaks another.
+
+    THE DISCRIMINATOR IS THE RECEIPT, not the exception. A receipt is what makes an operation
+    resumable, so a sidecar with one beside it is live state a retry will read and must be kept —
+    whatever this attempt failed on. A sidecar with NO receipt can be read by nothing: this
+    operation wrote no durable claim, so a retry re-reads the identity from the run directory (which
+    is still there, since nothing was deleted) or reports it unknown, exactly as it would with no
+    sidecar at all.
+
+    Never raises, for `save_deletion_identity`'s reason inverted: failing to clean up a sidecar must
+    not turn a refusal the operator can act on into a 500 they cannot.
+    """
+    try:
+        if load_deletion_receipt(deletion_receipt_path(srv, rd, operation_id)) is not None:
+            return False                    # a live operation owns it
+    except Exception:                       # noqa: BLE001 — an unreadable receipt is not proof of
+        return False                        # absence, and this may not delete on a maybe
+    try:
+        deletion_identity_path(srv, rd, operation_id).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception:                       # noqa: BLE001 — see the docstring
+        return False
+
+
 def deletion_quarantine_path(srv, rd: Path, operation_id: str) -> Path:
     run_key = run_deletion_key(rd)
     if RUN_DELETION_OPERATION_RE.fullmatch(operation_id) is None:
@@ -308,6 +344,7 @@ __all__ = [
     "DeletionReceiptError", "advance_deletion_receipt", "deletion_identity_path",
     "deletion_quarantine_path",
     "deletion_receipt_path", "deletion_receipts_for_run", "deletion_result",
+    "discard_deletion_identity",
     "load_deletion_identity", "load_deletion_receipt", "mark_deletion_quarantine_ambiguous",
     "prepare_deletion_receipt", "save_deletion_identity", "save_deletion_receipt",
     "supersede_prepared_deletion_receipt",

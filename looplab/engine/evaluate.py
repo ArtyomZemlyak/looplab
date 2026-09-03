@@ -1712,16 +1712,115 @@ class EvaluateMixin:
                     repaired_footprint["gpu_mem_mib"], min(held_mem))
         return repaired_footprint
 
-    # OPEN[eval-child-raise-cancels-every-sibling] every raise here except `GpuPinUnenforceable` escapes
-    # into the run-scoped task group: the three callers are `try/finally` with no `except`, so an OSError
-    # from `_materialize`/`_write_node_files` or an ENOSPC from a `store.append` cancels every sibling
-    # eval mid-training with no terminal, re-spends the GPU hours on resume and exits the run with a
-    # traceback. Generalise the `gpu_unpinnable` shape: a shielded `node_failed` terminal under
-    # `_write_lock` plus a run pause naming the exception.
-    # proof:absent:engine_error@looplab/engine/evaluate.py
+    @staticmethod
+    def _crash_detail(exc: BaseException) -> str:
+        """Name what actually went wrong, through however many `ExceptionGroup`s it arrived in.
+
+        `_evaluate`'s body runs its eval beside a watcher inside a nested `anyio` task group, so an
+        exception from the eval reaches the containment handler wrapped: `str(exc)` is
+        `"unhandled errors in a TaskGroup (1 sub-exception)"`, which names nothing. That string on a
+        durable terminal sends the operator looking for a traceback in a process that has exited —
+        the exact uselessness the terminal exists to avoid — so the group is flattened to the leaves
+        it carries. Bounded, because a nested group is a tree and this runs on the failure path.
+        """
+        leaves: list[str] = []
+        stack: list[BaseException] = [exc]
+        while stack and len(leaves) < 4:
+            current = stack.pop(0)
+            nested = getattr(current, "exceptions", None)
+            if isinstance(nested, (list, tuple)) and nested:
+                stack.extend(e for e in nested if isinstance(e, BaseException))
+                continue
+            leaves.append(f"{type(current).__name__}: {current}")
+        return " | ".join(leaves) or f"{type(exc).__name__}: {exc}"
+
+    async def _contain_eval_crash(self, node_id: int, generation: int, exc: BaseException) -> None:
+        """Close ONE node on an unexpected exception, instead of letting it cancel every sibling.
+
+        `_evaluate` runs as a child of the RUN-SCOPED eval task group and its three callers are
+        `try/finally` with no `except`, so before this existed an `OSError` from `_materialize` or
+        `_write_node_files`, an ENOSPC from a `store.append`, or a `KeyError` on a hand-edited node
+        took the whole group down: every in-flight sibling cancelled mid-training with no terminal of
+        its own, the run exiting on a traceback, and resume finding all of them still `pending` and
+        re-spending their GPU hours. On a two-card box that is one bad node destroying its
+        neighbour's multi-hour training.
+
+        THREE PROPERTIES, each of them the reason a narrower fix would not do.
+
+        * **SHIELDED.** The terminal is appended inside `anyio.CancelScope(shield=True)` for exactly
+          the reason the `gpu_unpinnable` handler states at length: acquiring `_write_lock` is a
+          cancellation checkpoint, so a group already being torn down preempts the append and the
+          promised terminal is silently skipped — leaving the node `pending` after all, which is the
+          state this exists to prevent.
+
+        * **`engine_error` is its own reason, not `crash`.** `crash` means the CANDIDATE's process
+          died and is in `FAILURE_REASONS`, so it is repairable: the Developer would be handed a
+          disk-full or a permissions fault and asked to fix the training script, which cannot work
+          and spends a paid triage call to discover it. This is the ENGINE failing, so it must not
+          be diagnosed, must not be repaired, and must not be salvaged — the reason is deliberately
+          outside every one of those vocabularies, which is what makes it terminal by omission
+          rather than by a fourth list to keep in sync.
+
+        * **IT PAUSES THE RUN.** A node closed this way is evidence about the box, not about the
+          idea: the disk is full, the run directory went read-only, an inode vanished. Continuing to
+          dispatch is how one such fault becomes N failed nodes and a budget spent on nothing. The
+          pause is appended in the SAME locked section as the terminal so a reader can never see one
+          without the other, and it is skipped if the run is already stopping.
+
+        A LAST-RESORT append that itself fails is swallowed, and that is not laxity: this handler
+        exists on the path where the event log may be exactly what is broken, and raising here would
+        re-enter the failure mode it was written to contain, one frame further out.
+        """
+        from looplab.events.types import EV_PAUSE
+
+        detail = self._crash_detail(exc)
+        try:
+            with anyio.CancelScope(shield=True):
+                async with self._write_lock:
+                    state = fold(self.store.read_all())
+                    node = state.nodes.get(node_id)
+                    # Only if this lifecycle is still open. A body that already wrote its own
+                    # terminal and then raised on the way out (a tracer teardown, a span export) must
+                    # not get a second one — the fold is idempotent on duplicates, but the second row
+                    # would carry a reason that contradicts the first.
+                    if (node is not None and node.status is NodeStatus.pending
+                            and generation >= 0 and node.attempt == generation):
+                        self.store.append(EV_NODE_FAILED, {
+                            "node_id": node_id, "generation": generation,
+                            "error": self._redact(detail)[:400], "reason": "engine_error"})
+                    if not (state.paused or state.finished or state.stop_requested):
+                        self.store.append(EV_PAUSE, {
+                            "reason": "engine_error",
+                            "detail": self._redact(
+                                f"evaluation of node {node_id} raised {detail}")[:400]})
+        except BaseException:                          # noqa: BLE001 — see the docstring
+            pass
+        _LOG.exception("evaluation of node %s raised; the node is closed and the run is paused",
+                       node_id)
+
     async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter,
                         max_es: Optional[float] = None) -> None:
-        async with limiter:
+        # CONTAINMENT (2026-09-03). Everything below runs as a CHILD of the run-scoped eval task
+        # group, and its three callers are `try/finally` with no `except`. So an exception that is
+        # not one of the fail-closed terminals handled inside — an OSError from `_materialize` or
+        # `_write_node_files`, an ENOSPC from a `store.append`, a `KeyError` on a hand-edited node —
+        # escaped into the group and CANCELLED EVERY SIBLING EVAL, mid-training, with no terminal for
+        # any of them: the run exits on a traceback, resume finds every one of those nodes still
+        # `pending`, and re-spends their GPU hours. On a two-card box that is one bad node destroying
+        # its neighbour's multi-hour training.
+        #
+        # This is the `gpu_unpinnable` shape generalised. That handler already establishes the whole
+        # rule for one exception type — terminalize THIS node under `_write_lock` rather than let the
+        # raise reach the group — and the argument does not depend on which exception it was; it
+        # depends on the BLAST RADIUS, which is identical for all of them.
+        #
+        # A cancellation is RE-RAISED and never terminalized: it is how a reset, an abort and an
+        # operator stop reach this worker, and answering one with a `node_failed` would invent a
+        # failure out of a deliberate intervention. `KeyboardInterrupt`/`SystemExit` likewise — the
+        # process is going down and a terminal claiming the node failed would be a lie about why.
+        _contained_generation = [-1]
+        try:
+         async with limiter:
           with self.tracer.span("evaluate", new_trace=True, node_id=node_id) as sp:
             events_at_start = self.store.read_all()
             state = fold(events_at_start)
@@ -1745,6 +1844,11 @@ class EvaluateMixin:
             # cross into the sandbox. See `_assert_speculative_selection_confirmed`.
             self._assert_speculative_selection_confirmed(state, node)
             generation = node.attempt       # immutable identity of THIS worker's node lifecycle
+            # ...and published to the containment handler at the top, which has no other way to name
+            # the lifecycle it is closing. Re-folding there would read whatever generation is CURRENT
+            # at failure time, which after a concurrent reset is a different lifecycle than the one
+            # that raised — and a terminal on the wrong generation is worse than none.
+            _contained_generation[0] = generation
             # The trace is opened before the fold above so pre-start exits remain observable. Once
             # this worker has an exact lifecycle, stamp the root; the span index uses that root receipt
             # to keep reset attempts disjoint while every nested generation/tool stays in this trace.
@@ -3617,3 +3721,20 @@ class EvaluateMixin:
                             triage_outcome[0], self._redact(str(triage_outcome[1]))[:300])
                     self.store.append(EV_NODE_FAILED, data)
                 self._maybe_crash()
+        except (anyio.get_cancelled_exc_class(), KeyboardInterrupt, SystemExit,
+                SpeculativeEvaluationInvariantError):
+            # A deliberate stop is not a node failure. Cancellation is how a reset, an operator abort
+            # and a run stop reach this worker; answering one with a `node_failed` would invent a
+            # failure out of an intervention, and swallowing it would break structured concurrency.
+            #
+            # An INVARIANT VIOLATION must stay loud for the opposite reason. The containment below
+            # downgrades an ENVIRONMENT fault — a full disk, a read-only directory — to one node's
+            # terminal, which is right because the engine's reasoning was sound and the box was not.
+            # `SpeculativeEvaluationInvariantError` says the engine's reasoning is WRONG: an
+            # unconfirmed prediction was about to cross into the sandbox. Recording that as a node
+            # failure and pausing would hide the exact thing the invariant exists to make impossible,
+            # and would let the next run make the same crossing with a tidier receipt.
+            raise
+        except BaseException as exc:                                   # noqa: BLE001 — see above
+            await self._contain_eval_crash(node_id, _contained_generation[0], exc)
+

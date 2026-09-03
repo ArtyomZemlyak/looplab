@@ -2918,12 +2918,18 @@ memory-orphans`. Both CLIs report before they write and neither runs automatical
    gone but whose *row* survives for other runs. `memory-orphans` goes back through
    `purge_attributable_memory` once per contributing run so every tier predicate still applies.
 
-**STILL OPEN.** ⬜ The leak's *source* is untouched: `save_deletion_identity` still runs before the
-  OPEN[deletion-identity-leaked-before-refusal] proof:present:save_deletion_identity@looplab/serve/routers/org.py
-transaction can refuse, so a refused deletion still parks a sidecar and the reaper only collects them
-afterwards. Writing it after the fence is taken would end the leak rather than sweep it, but the
-sidecar exists precisely to survive a crash *between* those points, so the honest fix is to write it
-under the fence and not before — a change to the deletion transaction's ordering, not to the reaper.
+**CLOSED 2026-09-03 — and NOT by the ordering change this paragraph prescribed.** The leak's source
+was that `save_deletion_identity` runs before the transaction can refuse; the prescription here was
+to move the write under the fence, and that is wrong for the reason the same sentence gives — the
+sidecar exists precisely to survive a crash BETWEEN the identity read and the deletion, so a write
+that happens later cannot cover the window it was introduced for. What was actually missing was the
+CLEAN-UP: a refusal is a terminal answer, so the sidecar it parked can be read by nothing.
+`routers/org.py`'s deletion route now discards it on any exception out of
+`begin_or_resume_run_deletion`, through `deletion_transaction.py::discard_deletion_identity`, whose
+discriminator is the RECEIPT and not the exception class — a receipt is what makes an operation
+resumable, so a sidecar with one beside it is live state a retry reads and is kept whatever this
+attempt failed on. `tests/test_deletion_identity_leak.py` drives both halves and both mutations. The
+reaper's sweep stays: it is what collects the sidecars already on disk and the ones a crash strands.
 
 
 ### §0.11 "This run can never be deleted" — it could, by one command, and the refusal did not name it (2026-08-17)
