@@ -8101,3 +8101,40 @@ ledger-wide expiry (this sweep found it expires for the wrong thing). The patter
 because it is not carelessness — each version was correct about the case in front of it and silent
 about the case that had not happened yet. A tolerance is a claim about which failures are possible,
 and this stand keeps producing failures the previous claim did not allow for.
+
+## 177. Paid retries become a named part of the gap, and the first version of the naming double-counted
+
+§176's per-arm rule left `oldCK9`'s $0.076945 correctly red — and it would have stayed red on every
+sweep from now on, because the probe is finished and the money is genuinely gone. **A permanent red
+is how §158's duplicate slug taught everyone to stop reading the colour.** So it needs a name, and
+§175 already measured what it is.
+
+Grouping each arm's ledger rows by `req_sha` (§122): `oldCK9` paid **$0.101394 on twenty repeated
+bodies**, which covers its $0.076945 gap. Across every arm with fingerprints, the gap is ≤ the
+paid-repeat cost wherever it can be judged at all:
+
+| arm | meter − spans | paid repeats | n | covered |
+|---|---|---|---|---|
+| **oldCK9** | 0.076945 | **0.101394** | 20 | **yes** |
+| expEE1–4, expEEc, expEEd | 0.011–0.034 | 0.000000 | 0 | no fingerprints (pre-§122) |
+
+So the category is `PAID RETRIES — a body the arm had already sent, charged again and not kept`,
+capped per arm at that arm's own gap so it can never invent credit, and computable only where
+`req_sha` exists. The six pre-§122 arms keep whatever gap they have: better a red that is honestly
+unexplained than a subtraction that cannot be checked.
+
+```
+$0.076945 PAID RETRIES -- oldCK9 $0.076945 of $0.101394 on 20 repeat(s)
+RESIDUE $-0.000002 after the named parts
+```
+
+**The first version of that block was wrong in the way this notebook has been wrong before.** It
+credited `svcCacheCheck` $0.000562 as a paid retry while the ABANDONED category was already
+subtracting that arm whole, and the residue landed at **−$0.000564** — money taken off one side of a
+balance that carried it on both, the same shape as the echo subtraction reverted before §124. The
+tell was the sign: a residue had never been negative by more than a rounding.
+
+**And the mutation that removes the guard survived every test I had written.** Three mutations
+reddened (credit uncapped by the gap, every row counted as a repeat, …) and *"abandoned arms credited
+twice"* passed clean — the exact bug I had just fixed by hand, with no test standing over it.
+`test_an_abandoned_arm_is_not_credited_twice` is that test; it now reddens.

@@ -618,3 +618,80 @@ def test_a_finished_arm_gets_no_allowance_while_others_are_running(tmp_path):
         "the finished arm's surplus was forgiven because another arm is live")
     assert "done $+0.10" in r.stdout, r.stdout
     assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_a_paid_retry_is_a_named_part_of_the_gap(tmp_path):
+    """`oldCK9` ended with $0.076945 of metered money that never became a span, and §175 measured
+    what it was: one body sent eight times unstreamed, the engine keeping one answer and discarding
+    the rest. Grouping by `req_sha` gives $0.101394 on 20 repeats, which covers the gap.
+
+    A gap with a name must stop reddening every sweep — that is how §158's standing red taught
+    everyone to ignore the colour — but the subtraction is capped at the arm's actual gap, so it can
+    never invent credit.
+    """
+    probes = {"p1": [0.10]}
+    old = "1000000.0"
+    rows = [{"ts": old, "arm": "p1", "cost": 0.10, "status": "200", "req_sha": "aaaa",
+             "prompt_tokens": 900, "completion_tokens": 9},
+            {"ts": old, "arm": "p1", "cost": 0.00000196, "status": "200", "req_sha": "pref",
+             "prompt_tokens": 10, "completion_tokens": 2},
+            # the same body twice more: paid, never kept
+            {"ts": old, "arm": "p1", "cost": 0.10, "status": "200", "req_sha": "aaaa",
+             "prompt_tokens": 900, "completion_tokens": 9},
+            {"ts": old, "arm": "p1", "cost": 0.10, "status": "200", "req_sha": "aaaa",
+             "prompt_tokens": 900, "completion_tokens": 9}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 0.30000196, "calls": 4})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "PAID RETRIES" in r.stdout, r.stdout + r.stderr
+    assert "p1 $0.200000 of $0.200000 on 2 repeat(s)" in r.stdout, r.stdout
+    assert "RESIDUE $-0.000002" in r.stdout or "RESIDUE $+0.000000" in r.stdout, r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_the_retry_credit_cannot_exceed_the_arm_s_own_gap(tmp_path):
+    """Capped at the gap, so an arm whose spans DID record its retries earns nothing here."""
+    probes = {"p1": [0.10, 0.10, 0.10]}          # all three generations recorded
+    old = "1000000.0"
+    rows = [{"ts": old, "arm": "p1", "cost": 0.10, "status": "200", "req_sha": "aaaa",
+             "prompt_tokens": 900, "completion_tokens": 9} for _ in range(3)]
+    rows.append({"ts": old, "arm": "p1", "cost": 0.00000196, "status": "200", "req_sha": "pref",
+                 "prompt_tokens": 10, "completion_tokens": 2})
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 0.30000196, "calls": 4})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "PAID RETRIES" not in r.stdout, (
+        "credit was given for retries the span stream already accounts for")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_an_abandoned_arm_is_not_credited_twice(tmp_path):
+    """The abandoned arm is subtracted WHOLE; naming its retries too removes the same dollars twice.
+
+    The first live run of the paid-retry block did exactly that: `svcCacheCheck` was subtracted as an
+    abandoned arm AND credited $0.000562 as a retry, leaving the residue at **-$0.000564** — the same
+    shape as the echo subtraction reverted before §124, where money was taken off one side of a
+    balance that carried it on both. A mutation removing the guard survived every other test here.
+    """
+    probes = {"p1": [1.0]}
+    old = "1000000.0"
+    rows = [{"ts": old, "arm": "p1", "cost": 1.0, "status": "200", "req_sha": "p1a",
+             "prompt_tokens": 900, "completion_tokens": 9},
+            {"ts": old, "arm": "p1", "cost": 0.00000196, "status": "200", "req_sha": "p1pref",
+             "prompt_tokens": 10, "completion_tokens": 2},
+            # an arm the meter knows and the probe trees do not, whose body repeats
+            {"ts": old, "arm": "gone", "cost": 0.05, "status": "200", "req_sha": "gg",
+             "prompt_tokens": 400, "completion_tokens": 4},
+            {"ts": old, "arm": "gone", "cost": 0.05, "status": "200", "req_sha": "gg",
+             "prompt_tokens": 400, "completion_tokens": 4}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.10000196, "calls": 4})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "1 ABANDONED probe(s)" in r.stdout and "gone $0.1000" in r.stdout, r.stdout + r.stderr
+    assert "gone $" not in r.stdout.split("PAID RETRIES")[-1] if "PAID RETRIES" in r.stdout else True, (
+        "the abandoned arm was credited a second time as a paid retry")
+    assert "RESIDUE $+0.000000" in r.stdout or "RESIDUE $-0.000000" in r.stdout, r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr

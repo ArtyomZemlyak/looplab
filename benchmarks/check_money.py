@@ -195,6 +195,55 @@ def unstreamed_exposure(ledger_path: str, since: float = 0.0) -> dict:
             "by_arm": by_arm, "ceiling_arm": ceiling_arm}
 
 
+def paid_retries(ledger_path: str, since: float = 0.0) -> dict:
+    """Per arm, what was PAID for a request body that arm had already sent.
+
+    WHY THIS IS A NAMED PART OF THE GAP. `oldCK9` ended 2026-09-03 with $0.076945 of metered money
+    that never became a `generation` span, and §175 measured what it was: after 19:16 one body went
+    out eight times unstreamed, two to five minutes each, four dying at the 300 s ceiling, and the
+    engine discarded the answers it did get and asked again. The meter charged for all of them; the
+    engine wrote a span only for the one it kept.
+
+    Grouping that arm's rows by `req_sha` (§122) gives **$0.101394 paid on 20 repeated bodies**,
+    which covers the $0.076945 gap. So the gap is nameable, and a named gap must not red every
+    sweep for ever -- that is how §158's standing red taught everyone to ignore the colour.
+
+    Only rows carrying a `req_sha` can be judged, so arms that ran before §122 report 0.0 here and
+    keep whatever gap they have. Better a red that is honestly unexplained than a subtraction that
+    cannot be checked.
+    """
+    seen: dict[str, set] = collections.defaultdict(set)
+    paid: dict[str, float] = collections.Counter()
+    count: dict[str, int] = collections.Counter()
+    try:
+        fh = open(ledger_path, encoding="utf-8", errors="replace")
+    except OSError:
+        return {"paid": paid, "count": count}
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+                if float(row.get("ts")) < since:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            arm, sha = str(row.get("arm") or "?"), row.get("req_sha")
+            if not sha:
+                continue
+            if sha in seen[arm]:
+                try:
+                    paid[arm] += float(row.get("cost") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+                count[arm] += 1
+            else:
+                seen[arm].add(sha)
+    return {"paid": paid, "count": count}
+
+
 def endpoint_health(ledger_path: str, since: float = 0.0) -> dict:
     """The NEWEST ledger row per arm, so "is the endpoint answering right now" is one command.
 
@@ -461,7 +510,28 @@ def main(argv: list[str]) -> int:
                  for by in (calls_by_arm.get(a, 0) or 0,) if by]
         if worst:
             print(f"    unstreamed by arm: {', '.join(worst)}")
-    residue = gap - preflight * 0.00000196 - sum(abandoned.values())
+    # PAID RETRIES ARE A NAMED PART, capped per arm at what that arm's gap actually is: subtracting
+    # more than the gap would invent credit, and subtracting on an arm with no fingerprints would
+    # be a guess.
+    retries = paid_retries(os.path.join(a.bench_root, "meter", "meter.jsonl"), since)
+    retry_named = 0.0
+    retry_arms = []
+    for p2, spent in retries["paid"].items():
+        # An ABANDONED arm is already subtracted WHOLE below; naming its retries too would remove
+        # the same dollars twice. The first run of this block did exactly that and left the residue
+        # at -$0.000564 -- `svcCacheCheck`'s $0.000562 counted on both sides, which is the same
+        # shape as the echo subtraction reverted before §124.
+        if p2 in ("?", "__by_kind__") or p2 in abandoned or spent <= 0:
+            continue
+        arm_gap = m_cost.get(p2, 0.0) - s_cost.get(p2, 0.0)
+        take = min(arm_gap, spent)
+        if take > 0.0005:
+            retry_named += take
+            retry_arms.append(f"{p2} ${take:.6f} of ${spent:.6f} on {retries['count'][p2]} repeat(s)")
+    if retry_arms:
+        print(f"         ${retry_named:.6f} PAID RETRIES -- a body the arm had already sent, charged "
+              f"again and not kept: " + ", ".join(sorted(retry_arms)))
+    residue = gap - preflight * 0.00000196 - sum(abandoned.values()) - retry_named
     print(f"  RESIDUE ${residue:+.6f} after the named parts")
     # A CALL IN FLIGHT IS NOT A LEAK. The meter writes its row when the upstream request completes;
     # the `generation` span is written by the engine afterwards. This tool reads the spans first and
