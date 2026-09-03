@@ -8263,3 +8263,57 @@ still the largest single fact in this notebook.
 Not shipping the held-back repairs yet either — §153's read-only plan prompt, §156's $0.10 budget
 gate, §171's dead prompt paragraphs. They were held because the arm was running. The arm is over,
 and the next sweep can start landing them one at a time, each with its own before/after.
+
+## 181. Arm A, re-timed on the verified ruler: 0.96, 1.03, 1.51 — and on `edge_expansion` it shipped the reference
+
+Point 10's standing queue item — "re-measure arm A's constants on the verified ruler" — has been
+unexecutable since 2026-08-29 because arm A's champions were believed lost with `/var/tmp`. They are
+not. `snapshots-KEEP-campaign-20260829/20260829-191124/campaign-final` holds 135 files, and each
+`A-<task>.log` ends with **the full text of the solver AlgoTuner shipped**, under the line
+`INFO - FILE IN CODE DIR solver.py:`.
+
+Extracted and re-scored through our own bridge, TEST split, regime `__w22x1r3`, the same ruler every
+arm-B number in this notebook was measured on:
+
+| task | arm A, its own campaign | arm A, **re-timed here** | arm B on the same ruler |
+|---|---|---|---|
+| edge_expansion | 1.1087 | **0.9648** | 24 probes, 25.4 – 275.2 (mean 188.4) |
+| pde_heat1d | 1.1010 | **1.0267** | 124.63, 121.85, 99.00 |
+| discrete_log | 1.5419 | **1.5133** | 14.5186, 2.8369 |
+
+The self-reported numbers survive the change of ruler to within noise on two tasks and drop 13 % on
+the third — which is itself the answer to a question this notebook has carried since §78: **arm A's
+constants were not distorted by the old box.** They were always this small.
+
+**And on `edge_expansion` arm A shipped the reference implementation itself**, verbatim, debug print
+included:
+
+```python
+# Print the source of nx.edge_expansion
+import inspect
+print("=== nx.edge_expansion source ===")
+print(inspect.getsource(nx.edge_expansion))
+
+def solve(problem: dict[str, Any]) -> dict[str, float]:
+    """Reference implementation using networkx."""
+    ...
+    expansion = nx.edge_expansion(G, nodes_S)
+```
+
+Its recorded `best_speedup` was 1.1177 and its test speedup 1.1087; re-timed here it is **0.9648**,
+which is the reference against itself (§149 measured the bare reference at 0.9796). The same shape
+appears on three more tasks by inspection of the shipped source — `pde_heat1d`, `rbf_interpolation`,
+`sparse_eigenvectors_complex`, all scoring 1.06–1.11.
+
+Across all fifteen arm-A logs the self-reported test speedups are 1.04, 1.06, 1.10, 1.11, 1.11, 1.22,
+1.54, 4.32, 9.76, 16.43 (five tasks recorded none). **Its median is about 1.2**; its two real wins
+are `kcenters` 16.43 and `integer_factorization` 9.76.
+
+**What this does and does not settle.** It settles the ruler question: arm A's numbers are not an
+artefact of the machine it ran on. It does not settle arm A vs arm B, because these are three tasks
+of ten and the comparison was always task-by-task — but on `edge_expansion`, the task the whole
+§115 arm ran on, the gap is **0.96 against a 188 mean**, and the reason is visible in the source
+rather than inferred from a score: one arm optimised and the other shipped the thing it was meant to
+beat.
+
+Cost of this section: zero dollars, about six minutes of CPU on two free lanes.
