@@ -6371,3 +6371,41 @@ favour.**
 
 *Everything else clean:* four probes live, residue $0.002172 (inside tolerance, the in-flight and
 echo noise §124 characterised), zombies 0, seven baselines, no `PermissionError`.
+
+## 139. Both of §99's defects reproduce live, in the arm built to test them
+
+§99 fixed two things in `check`: a false GREEN (a guarded Cython import falls through to pure Python,
+so the checker certifies a path the grader will not run) and a false RED (`ModuleNotFoundError` on a
+multi-file solver, because the submission's directory was not on `sys.path`). Both were measured off
+the corpus's history and pinned by tests. Neither had ever been watched happening.
+
+Now they have. The four probes of §115's arm, with their node files and their `check` answers:
+
+| probe | checker | node files | `check` calls | naming `build_ext` | `ModuleNotFoundError` |
+|---|---|---|---|---|---|
+| oldCK1 | pre-§99 | `solver.py` | 4 | 0 | 0 |
+| **oldCK2** | **pre-§99** | **`edge_solver.pyx`, `setup.py`, `solver.py`** | **10** | **0** | **1** |
+| newCK1 | shipped | `solver.py` | 9 | 0 | 0 |
+| **newCK2** | **shipped** | **`solver_kernel.pyx`, `setup.py`, `solver.py`** | **5** | **2** | **0** |
+
+`oldCK2` and `newCK2` wrote the same SHAPE of solver — a Cython kernel, a `setup.py`, and a
+`solver.py` that imports it — on the same task, from cards identical but for the checker's path. The
+old checker answered with a `ModuleNotFoundError` and never once mentioned a build; the new one
+carried two build results and no import failure. **Both defects, side by side, in the same hour.**
+
+`oldCK1` and `newCK1` both wrote a single-file pure-Python solver, where neither mechanism can bite,
+and neither shows anything. That is the control within the control, and it is what makes the pair
+above readable rather than anecdotal.
+
+### The arm itself is still uninformative
+
+First nodes: **old {25.41, 160.95}, new {20.76, 275.22}** — one in each cluster, in each arm. At two
+per side this is precisely the state §83's table describes, and the only honest thing to report is
+that there is nothing to report.
+
+What has been established is narrower and worth having: the manipulation is real, it is visible in
+the runs, and it reproduces both of the specific failures the repair was written for. Whether that
+repair moved the first node is what the arm is still measuring.
+
+*Clean:* four probes live, residue $0.000000, zombies 0, seven baselines, no `PermissionError`,
+snapshot `20260903-052452` complete.
