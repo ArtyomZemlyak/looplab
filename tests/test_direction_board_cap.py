@@ -57,13 +57,25 @@ def _admissible(st: RunState, directions):
     same one `test_dropped_directions_reach_the_operator.py` drives the log line through. A helper
     that IS the production expression cannot drift from it.
     """
-    engine = types.SimpleNamespace(store=types.SimpleNamespace(read_all=lambda: []))
+    # The double carries the REAL `_record_belief_admission`, bound to a store that records rather
+    # than a stub that swallows: `_admissible_beliefs` calls it on every pass, and a double that
+    # stubbed it would let this file keep passing while the row it appends stopped being written.
+    # That is what stranded these five tests when the method landed — the double had no such
+    # attribute and the call raised before the cap was ever consulted.
+    appended: list[tuple] = []
+    engine = types.SimpleNamespace(store=types.SimpleNamespace(
+        read_all=lambda: [], append=lambda etype, data, **kw: appended.append((etype, data))))
+    engine._record_belief_admission = types.MethodType(
+        rc.ResearchCadenceMixin._record_belief_admission, engine)
     original = rc.fold
     rc.fold = lambda _events: st
     try:
-        return rc.ResearchCadenceMixin._admissible_beliefs(engine, directions)
+        out = rc.ResearchCadenceMixin._admissible_beliefs(engine, directions)
     finally:
         rc.fold = original
+    assert [etype for etype, _ in appended] == ["belief_admission"], (
+        "every pass records what the board did with the memo's directions")
+    return out
 
 
 def test_a_full_board_of_UNANSWERED_directions_still_refuses_a_new_one():
