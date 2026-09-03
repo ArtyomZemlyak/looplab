@@ -7612,3 +7612,36 @@ losing its own name, the report collapsing back to one phrase, and ignoring the 
 the suite green, which I read for a moment as "the mutation survived". A mutation that never
 reached the file proves nothing, and the tell was that the run was byte-identical to the unmutated
 one. Same shape as §164's first try, three sweeps apart.
+
+## 167. Four 401s in 1.5 seconds, and the flag that could not tell healthy from refused
+
+`errors` went 13 → 25 and §166's new split immediately earned itself: the line read
+`19 non-200 (4 http-401, 15 upstream-503)` rather than nineteen anonymous kills. The **401** is the
+one that matters — an auth status is the failure where "transient" is the dangerous assumption,
+because a genuinely dead credential kills every probe at once.
+
+All four landed inside **1.5 seconds** (16:33:19.775 → 16:33:21.266), on the two arms that happened
+to be calling, and they are four **distinct** requests: four different `req_sha`, 15 ms apart. §122's
+fingerprint answered the double-write question without a second instrument. Forty seconds later
+`oldCK7` was answering 200 at 2,462 and 3,360 prompt tokens; the credential was never the problem.
+
+**The sweep needed two commands and an eyeball to establish that, so it is now one line.**
+`endpoint_health()` reports the newest ledger row per arm and names the arms whose LAST call was
+refused:
+
+```
+endpoint: newest ledger row 80 s ago; arms whose LAST call was refused: oldCK8b (401, 175 s ago)
+```
+
+That output is the second half of this section. **The first version printed the arm name and
+nothing else, and it was wrong within a minute of being written**: `oldCK8b` sat there flagged as
+refused for two and a half minutes while being perfectly healthy — it had taken the 401 and then
+gone into a node evaluation, which makes no LLM calls for ~40 s at a time and produced node 1 at
+**132.8189** while I was reading the flag. A refusal three seconds old and a refusal a hundred and
+seventy-five seconds old are different facts; the bare name cannot tell them apart, so the status
+and the age are now in the line.
+
+`test_the_endpoint_line_dates_every_refusal` pins that only the NEWEST row per arm counts — an arm
+whose 401 was followed by a 200 is not refusing — and `test_the_endpoint_line_is_printed_with_the
+_age` pins that the printed line carries both. Three mutations redden them: keeping the first row
+instead of the newest, dropping the status and the age, and treating every arm as refusing.

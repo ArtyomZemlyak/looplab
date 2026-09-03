@@ -334,3 +334,47 @@ def test_the_failure_kinds_are_decided_by_signature_not_by_status_alone():
     assert cm._failure_kind({"status": "503", "latency_ms": 1300.0, "stream": True}) == "upstream-503"
     assert cm._failure_kind({"status": "400", "latency_ms": 100.0, "stream": True}) == "http-400"
     assert cm._failure_kind({}) == "http-?"
+
+
+def test_the_endpoint_line_dates_every_refusal(tmp_path):
+    """"Last call refused" without an age is an alarm that cannot be read.
+
+    Driven the minute the line was added: `oldCK8b` showed as refused for two and a half minutes
+    while perfectly healthy — it took a 401 at 16:33:19 and then went into a node evaluation, which
+    makes no LLM calls for ~40 s at a time. Meanwhile the other three arms were answering 200. So
+    the line has to carry, per arm, the status AND how long ago.
+    """
+    ledger = tmp_path / "meter" / "meter.jsonl"
+    ledger.parent.mkdir(parents=True)
+    rows = [{"ts": "1000.0", "arm": "alive", "status": "401", "cost": 0},
+            {"ts": "2000.0", "arm": "alive", "status": "200", "cost": 0.5},
+            {"ts": "1500.0", "arm": "quiet", "status": "401", "cost": 0}]
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    got = cm.endpoint_health(str(ledger))
+    assert got["refusing"] == ["quiet"], (
+        "an arm whose 401 was followed by a 200 is not refusing; only the NEWEST row counts")
+    assert got["newest"]["alive"] == (2000.0, "200")
+    assert got["newest"]["quiet"] == (1500.0, "401")
+
+
+def test_endpoint_health_survives_a_missing_or_torn_ledger(tmp_path):
+    assert cm.endpoint_health(str(tmp_path / "nope.jsonl")) == {"newest": {}, "refusing": []}
+    torn = tmp_path / "meter.jsonl"
+    torn.write_text('{"ts": "1.0", "arm": "a", "status": "200"}\nnot json\n{"ts": ',
+                    encoding="utf-8")
+    assert cm.endpoint_health(str(torn))["newest"] == {"a": (1.0, "200")}
+
+
+def test_the_endpoint_line_is_printed_with_the_age(tmp_path):
+    probes = {"p1": [1.0]}
+    rows = [{"ts": "3000", "arm": "p1", "cost": 1.0, "status": "200"},
+            {"ts": "3000", "arm": "p1", "cost": 0.00000196, "status": "200"},
+            {"ts": "3001", "arm": "p1", "status": "401", "latency_ms": 6400.0, "stream": True}]
+    root = _bench(tmp_path, probes=probes, meter_rows=rows)
+    port, _, srv = _serve({"cost_usd": 1.00000196, "calls": 3})
+    r = _run(root, port, "--max-residue", "0.01")
+    srv.close()
+    assert "endpoint:" in r.stdout, r.stdout + r.stderr
+    assert "p1 (401," in r.stdout and "s ago)" in r.stdout, (
+        "the refusal is reported without its status or its age")

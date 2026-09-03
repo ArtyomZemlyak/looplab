@@ -29,6 +29,7 @@ import collections
 import datetime
 import glob
 import json
+import time
 import os
 import socket
 import sys
@@ -108,6 +109,43 @@ def spans_by_probe(root: str, since: float) -> tuple[dict, dict]:
             cost[probe] += c
             calls[probe] += 1
     return cost, calls
+
+
+def endpoint_health(ledger_path: str, since: float = 0.0) -> dict:
+    """The NEWEST ledger row per arm, so "is the endpoint answering right now" is one command.
+
+    WHY. On 2026-09-03 at 16:33:19-16:33:21 four requests came back **401** — an auth status, the
+    one failure where "transient" is the dangerous assumption, because a genuinely expired
+    credential kills every probe at once. They were four DISTINCT requests (four `req_sha`, 15 ms
+    apart, §122) on the two arms that happened to be calling, and 200s resumed forty seconds later.
+    Establishing that took eyeballing the tail of the ledger by hand. This makes it a line.
+
+    Returns `{arm: (ts, status)}` for the newest row of each arm plus `refusing`, the arms whose
+    newest row is not a 200 — if that is EVERY live arm, the endpoint is down and the residue is
+    not the interesting number.
+    """
+    newest: dict[str, tuple[float, str]] = {}
+    try:
+        fh = open(ledger_path, encoding="utf-8", errors="replace")
+    except OSError:
+        return {"newest": {}, "refusing": []}
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+                ts = float(row.get("ts"))
+            except (ValueError, TypeError):
+                continue
+            if ts < since:
+                continue
+            arm = str(row.get("arm") or "?")
+            if arm not in newest or ts > newest[arm][0]:
+                newest[arm] = (ts, str(row.get("status") or "?"))
+    refusing = sorted(a for a, (_t, st) in newest.items() if st not in ("200", ""))
+    return {"newest": newest, "refusing": refusing}
 
 
 def _failure_kind(row) -> str:
@@ -277,6 +315,21 @@ def main(argv: list[str]) -> int:
         print(f"         {sum(m_calls[p] for p in abandoned)} call(s) from "
               f"{len(abandoned)} ABANDONED probe(s) -- in the meter, no tree on disk: "
               + ", ".join(f"{p} ${c:.4f}" for p, c in sorted(abandoned.items())))
+    health = endpoint_health(os.path.join(a.bench_root, "meter", "meter.jsonl"), since)
+    if health["newest"]:
+        newest_ts = max(t for t, _s in health["newest"].values())
+        age = max(0.0, time.time() - newest_ts)
+        # THE AGE IS NOT DECORATION. Driven the minute this line was added: `oldCK8b` showed as
+        # "last call refused" for two and a half minutes while it was perfectly healthy -- it had
+        # taken a 401, then gone into a node evaluation, which makes NO LLM calls for ~40 s at a
+        # time. A refusal 3 s old and a refusal 150 s old are different facts and the bare name
+        # cannot tell them apart.
+        bad = [(x, time.time() - health["newest"][x][0], health["newest"][x][1])
+               for x in health["refusing"] if x != "?"]
+        print(f"  endpoint: newest ledger row {age:.0f} s ago; "
+              + (("arms whose LAST call was refused: "
+                  + ", ".join(f"{a} ({st}, {ag:.0f} s ago)" for a, ag, st in bad)) if bad
+                 else "every arm's last call was a 200"))
     residue = gap - preflight * 0.00000196 - sum(abandoned.values())
     print(f"  RESIDUE ${residue:+.6f} after the named parts")
     if abs(residue) > a.max_residue:
