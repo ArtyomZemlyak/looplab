@@ -8171,3 +8171,28 @@ and now a credit that reached too early. Each was found by the tool being used o
 data rather than by rereading it. Worth saying plainly: this file has had more defects than anything
 it measures, and every one of them was a *tolerance* — a claim about which failures are possible.
 The measurements it makes have never been wrong; the excuses it accepts have been wrong five times.
+
+## 179. Batch 6, three of four: the first batch where the shipped arm is ahead
+
+| probe | arm | TEST | nodes (train) | best/last | before/after | `eval_train` | reference | node 0 | champion |
+|---|---|---|---|---|---|---|---|---|---|
+| **newCK12** | shipped | **275.1993** | [27.63, **276.24**, 253.79] | 1.09× | 28 % / **14 %** | 26 | 16.7 % | no kernel | 36L kernel |
+| oldCK11 | pre-§99 | **227.1367** | [24.21, 161.58, **226.79**] | 1.00× | 25 % / 8 % | 34 | 12.5 % / 16.7 % | no kernel | 49L kernel |
+| oldCK12 | pre-§99 | **210.8044** | [**215.64**, 130.63, 19.13] | 11.27× | 49 % / 0 % | 37 | 13.0 % | kernel | 62L kernel |
+
+Train→test 0.996, 1.002, 0.977. `newCK12`'s **275.1993 is the second-best score in the corpus** —
+`remEE8`'s 276.7268 still stands — and it is the first probe of this arm to lose a node to the spend
+ceiling *and* still finish near the top: node 3 died at `$1.0078`, with 14 % of the budget spent
+after the last evaluated node. `oldCK11` lost node 3 the same way, 8 % after.
+
+`oldCK12` is the batch's `plan_step` outlier at **46.9 %**, and `oldCK11` at 43.0 % — the pre-§99
+side of this batch spent noticeably more on planning than `newCK12`'s 34.4 %, and got less for it.
+
+**Batch 6 is the first with the shipped arm in front**: 275.1993 against 227.1367 and 210.8044, with
+`newCK11` still running. If it lands anywhere near its node 1 (155.94), the batch difference will be
+positive for the first time in six — and the arm's five-of-five sign run (§175, p = 0.0312) will
+become five of six. The pre-registered read is next sweep, when the twenty-fourth probe is in.
+
+I am recording this before that probe finishes, deliberately. The sign of a batch I have already
+seen three quarters of is exactly the kind of thing that gets remembered as "I expected it" once the
+fourth number lands.
