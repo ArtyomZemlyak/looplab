@@ -7793,3 +7793,55 @@ like the real thing tests something else. Real rows always carry token counts.
 The limiter itself is untouched. Capping the queue wait below the client's header timeout is the
 obvious repair and it changes what every probe experiences; §115's arm is sixteen probes into
 twenty-four, and both arms share this proxy equally, so the loss is symmetric and can wait.
+
+## 171. The dead paragraphs are real, they are 15.8 % not 27.3 %, and the word that inflated both counts was "train"
+
+Audit finding #8 says 27 % of the developer's 35 KB system prompt is about training runs, GPUs,
+checkpoints and package installs — none of which exists in this benchmark — and prices it at $5.41.
+It labels its own method honestly: "a keyword-sentence classifier, so ±5 points".
+
+**My first classifier reproduced it almost exactly, at 27.9 %, and it was wrong.** It was matching
+sentences like:
+
+> YOU CAN MEASURE YOUR OWN SCORE, AND YOU SHOULD -- ON THE TRAIN SPLIT, THE SAME ONE EVERY NODE IS
+> SCORED ON.
+
+> Train is what you tune against; the champion is finally scored on held-out instances from the same
+> generator.
+
+The train/test split is not dead text here — **it is the live core of the whole benchmark**. Any
+classifier keyed on `train` counts the card's most important sentences as waste, and both counts had
+one.
+
+Re-measured on the real prompt (41,721 chars, 258 sentences, resolved out of `newCK7`'s spans) with
+`train` deliberately absent and only vocabulary that cannot apply to a task declaring one `score`
+stage, no data assets and no GPU — epochs, checkpoints, GPU/CUDA/L40S, Lightning, TensorBoard,
+dataloader, batch_size, learning rate, pip/conda install, stage manifest, `read_asset`:
+
+| | |
+|---|---|
+| sentences that cannot apply | **30 of 258 (11.6 %)** |
+| their characters | **6,584 of 41,721 (15.8 %)** |
+
+And they are unambiguous, quoted from the prompt the model was actually given:
+
+> **CRITICAL for a TRAINING task: the entrypoint MUST actually TRAIN a model for THIS experiment**
+
+> **Hardware: 22 usable CPU cores; 1 GPU(s): NVIDIA L40S (45 GB).**
+
+> keep … **PyTorch Lightning's TensorBoardLogger) ENABLED** and log SEVERAL metrics
+
+> **A run has already lost 76 minutes of correct GPU training to a one-character path error** in a
+> single-stage manifest
+
+**The counterfactual, and this is the first remedy that is positive by construction.** Removing text
+nobody can act on costs nothing — there is no content the model must fetch later. 6,584 chars ≈
+1,646 tokens, carried on **11,212 developer-phase generations** corpus-wide (plan_step 8,876, plan
+2,223, card_build 113): **18.5 Mtok = $2.58**, against the finding's $5.41. Half the claim, and all
+of it recoverable.
+
+That is 3.4 % of the corpus's $76 — larger than §165's break-even reference remedy, smaller than the
+finding said, and the only audit remedy so far whose two columns do not have to be weighed against
+each other. Gating those paragraphs on the task actually declaring a train stage or a GPU footprint
+is a change to what every probe is told, so it waits for the arm, and it is now the top of that
+queue rather than a $5.41 estimate resting on a classifier that counted the split.
