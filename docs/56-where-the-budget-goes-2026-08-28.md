@@ -9765,3 +9765,54 @@ sweep's 1.0162 by ~7 % twice. Of the three tasks, two carry a stable disagreemen
 noisy to say anything, which is a sharper statement than §214 could make with one sitting.
 
 The stamp is passed in rather than read inside, so a test or a replay owns its own clock.
+
+## §220 — the champion rule picks on train, and on this task train is an excellent proxy
+
+§84 records the champion rule's protective value — the best EVALUATED node is submitted, and three of
+batch 1's four probes needed it — but not whether the CRITERION is right. The rule ranks nodes by
+their TRAIN metric and the score that counts is TEST, so the open question is how much that choice
+costs. It is answerable from the corpus and costs nothing to ask.
+
+Over the 78 `edge_expansion` runs that have both a train champion and a TEST score, the ratio
+**TEST / best-train** is:
+
+| task | n | median | sd | TEST below train | sign test |
+|---|---|---|---|---|---|
+| edge_expansion | 78 | **0.9951** | 0.0140 | 52/78 | **p = 0.0043** |
+| pde_heat1d | 10 | 1.0218 | 0.0179 | 2/10 | p = 0.11 |
+| discrete_log | 11 | 1.0015 | 0.0855 | 5/11 | p = 1.00 |
+
+Two things follow, and they point in opposite directions on the same task.
+
+**The criterion is sound.** With an sd of 1.4 %, a train ranking is a very sharp instrument: only
+**2 of 78** multi-node runs have a runner-up within one sd of their best (`expEEh` 156.87/155.36,
+`remEEctl1` 35.02/34.81). For every other run the train ordering of the top two is not in doubt, so
+picking by train costs essentially nothing. That is worth stating plainly because the alternative —
+evaluating candidates on TEST to choose between them — is the thing the benchmark forbids.
+
+**And there is a small, real train-optimism.** The median is 0.9951, not 1.0000, and 52 of 78 runs
+land below: **p = 0.0043** by sign test alone. Half a percent, consistent, on the task with enough
+runs to see it. `freeB4`, finished this sweep, is one of the 26 that went the other way — TEST
+258.2564 against a best train node of 250.6965. The other two tasks cannot say anything yet (10 and
+11 runs, p = 0.11 and p = 1.00), and `discrete_log`'s sd of **8.6 %** is six times
+`edge_expansion`'s, which is the same "thinnest carrying number" the sweep's own header warns about.
+
+Nothing to fix here; the measurement's value is that it removes a doubt about the rule rather than
+adding one. Where it does bite is comparisons of the form "arm A scored 0.9648": a half-percent
+train-optimism and a 1.4 % spread are the resolution of any single-run claim on this task.
+
+## §221 — batch 2 closed, batch 3 away
+
+`freeB4` finished at **TEST 258.2564** — the best control of the batch — from train nodes
+[250.6965, 218.7641], $1.0156, 24 `eval_train`, 41 % of spend before the first node and 12 % after
+the last, reference use 6.5 % over 31 executed probes, champion a 69-line kernel. Its `repropose`
+share, flagged as elevated last sweep at the 82nd percentile, ended at 19.5 % — inside the corpus's
+p90 of 17.4 % only just, and it produced the second node, so the reproposing was not idle.
+
+Batch 2 as described, no contrast read beyond fidelity: treated `capA3` 210.9271 and `capB3`
+104.0622; control `freeA3` 220.4893 and `freeB4` 258.2564. Fidelity **treat 12.0, control 21.0,
+contrast +9** over four finished probes.
+
+Batch 3 is on all four lanes — `capA4`/`capB4` with `-s developer_probe_max_calls=12`,
+`freeA4`/`freeB5` with the shipped defaults, `LOOPLAB_LLM_STREAM=1`, every INSTRUMENT.txt verified
+and every process pinned to its own lane. Nine batches remain.
