@@ -150,3 +150,60 @@ def test_a_clean_spec_is_untouched_by_the_backstop(tmp_path):
         metrics={"m": {"kind": "stdout_regex", "pattern": r"metric: ([0-9.]+)"}})
 
     assert res.metric == pytest.approx(0.5)
+
+
+def test_the_runtime_refusal_carries_what_the_pipeline_ACTUALLY_DID(tmp_path):
+    """The refusal is about the SPEC, not about the run — so it must not erase the run's record.
+
+    This path is reached by a `task.snapshot.json` predating the submit refusal (`_grandfathered`
+    keeps such a run resumable) or by a direct library call, and by then a full `mine -> train ->
+    score` pipeline may have taken hours. The early return built a five-field `RunResult`, so the
+    node terminalized with `stages=[]`: no `stage_finished` rows folded, the eval-pipeline strip
+    drawing nothing, `eval_stages::_safe_reuse_start` seeing no completed stage and re-running the
+    retry from stage 0, and the score stage's `metric_subject` discarded. All of it was in scope.
+
+    MUTATION: drop `stages=stage_results` from the refusal's return -> this is red."""
+    import sys
+
+    from looplab.runtime.command_eval import run_command_eval
+
+    (tmp_path / "prep.py").write_text("print('prepared')", encoding="utf-8")
+    (tmp_path / "p.py").write_text('print("{\\"metric\\": 1.0}")', encoding="utf-8")
+    res = run_command_eval(
+        [sys.executable, "p.py"], str(tmp_path), 60, {"kind": "stdout_json", "key": "metric"},
+        stages=[{"name": "prep", "command": [sys.executable, "prep.py"]},
+                {"name": "score", "command": [sys.executable, "p.py"]}],
+        constraints=[{"kind": "adapter", "path": "x.py", "max": 1}])
+
+    assert res.metric is None, "an untrustworthy gate must not yield a metric"
+    assert [s["name"] for s in (res.stages or [])] == ["prep", "score"], (
+        "the stages that really ran must still be on the record the node terminalizes from")
+    assert all(s.get("status") in ("ok", "reused") for s in res.stages)
+
+
+def test_a_node_whose_GATES_NEVER_RAN_is_never_salvaged(tmp_path):
+    """The half the return introduced and the reason it needs an out-of-band flag.
+
+    `metric=None` on a clean exit classifies `no_metric`, which is NOT in
+    `NEVER_SALVAGED_REASONS` and satisfies every other precondition of `salvage_condition`. So the
+    salvage rung re-read the operator's PRIMARY reader and recovered a number with the constraint
+    gate and the drift cross-check never evaluated at all — and under `metric_salvage="select"` that
+    node is admitted on an ungated value, which is strictly weaker than the `ValueError` the return
+    replaced.
+
+    MUTATION: drop the `gate_readers_refused` clause from `salvage_condition` -> this is red."""
+    import sys
+
+    from looplab.engine.metric_salvage import salvage_condition
+    from looplab.runtime.command_eval import run_command_eval
+
+    (tmp_path / "p.py").write_text('print("{\\"metric\\": 1.0}")', encoding="utf-8")
+    res = run_command_eval(
+        [sys.executable, "p.py"], str(tmp_path), 60, {"kind": "stdout_json", "key": "metric"},
+        constraints=[{"kind": "adapter", "path": "x.py", "max": 1}])
+
+    assert res.gate_readers_refused is True, "the branch that knows must say so out of band"
+    assert res.exit_code == 0 and not res.timed_out, (
+        "every OTHER salvage precondition holds — which is exactly why the flag is needed")
+    assert salvage_condition(res, "no_metric") is None, (
+        "a metric whose gates were never evaluated may not be recovered")

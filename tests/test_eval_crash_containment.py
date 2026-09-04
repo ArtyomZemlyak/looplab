@@ -18,6 +18,7 @@ from __future__ import annotations
 import anyio
 import pytest
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import BENIGN_TERMINAL_REASONS, ENGINE_TERMINAL_REASONS, NodeStatus
 from looplab.events.replay import fold
 from factories import make_engine
@@ -47,6 +48,15 @@ def _evaluate(engine, node_id, *, boom):
         await engine._evaluate(node_id, anyio.CapacityLimiter(1), None)
 
     anyio.run(_drive)
+
+
+def _leaves(exc: BaseException) -> list:
+    """The exceptions an (arbitrarily nested) group actually carries — `_evaluate` may be unwinding
+    through a task group, which wraps whatever escaped."""
+    inner = getattr(exc, "exceptions", None)
+    if isinstance(inner, (list, tuple)) and isinstance(exc, BaseExceptionGroup):
+        return [leaf for e in inner for leaf in _leaves(e)]
+    return [exc]
 
 
 def test_an_engine_exception_closes_the_node_instead_of_escaping(tmp_path):
@@ -147,6 +157,36 @@ def test_a_CANCELLATION_is_re_raised_and_never_terminalized(tmp_path):
     after = [e for e in engine.store.read_all()[before:]]
     assert not [e for e in after if e.type == "node_failed"], "a cancellation is not a node failure"
     assert _state(engine).paused is False
+
+
+def test_a_BUDGET_STOP_is_re_raised_and_never_terminalized(tmp_path):
+    """A SPEND LIMIT is a fact about the run, not an engine fault in one node.
+
+    `BudgetExceeded` is an `Exception`, so the blanket clause reaches it — and every
+    `except BudgetExceeded: raise` on the paths under `_evaluate` (`_triage_crash`, `_repair`,
+    `crash_repair`) exists precisely to hand it up to `Engine.run`, whose
+    `except BudgetExceeded: raise  # global hard stop` ends the run. Contained instead, the
+    operator's own budget reaches them as `node_failed{reason: "engine_error"}` plus an
+    `engine_error` pause — a reason deliberately outside every failure vocabulary, so the node gets
+    no diagnosis, no repair and no salvage, and the run reports a box fault for a spend limit.
+
+    MUTATION: drop `BudgetExceeded` from the re-raise tuple -> this test sees a contained terminal
+    instead of the exception, which is exactly how it shipped.
+    """
+    engine = make_engine(tmp_path)
+    node_id = _node(engine)
+    before = len(engine.store.read_all())
+
+    with pytest.raises(BaseException) as caught:                 # a group, if a task group is open
+        _evaluate(engine, node_id, boom=BudgetExceeded("llm budget exhausted"))
+    assert _leaves(caught.value) and all(isinstance(e, BudgetExceeded) for e in _leaves(caught.value)), (
+        f"the budget stop must reach the caller, not a terminal: {caught.value!r}")
+
+    after = engine.store.read_all()[before:]
+    assert not [e for e in after if e.type == "node_failed"], (
+        "a budget stop is not a node failure — it must reach Engine.run's global hard stop")
+    assert _state(engine).paused is False, (
+        "and it must not pause the run as an `engine_error`: the run is ENDING, not stalling")
 
 
 def test_a_node_that_already_wrote_its_own_terminal_does_not_get_a_second(tmp_path):

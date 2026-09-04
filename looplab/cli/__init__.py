@@ -32,7 +32,7 @@ from typer.core import TyperGroup
 
 from looplab import __version__
 from looplab.core.config import Settings
-from looplab.core.errors import EnvironmentRefusal, OperatorRefusal
+from looplab.core.errors import EnvironmentRefusal, OperatorRefusal, exception_leaves
 from looplab.core.run_deletion import (
     RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
 from looplab.core.run_reset import (
@@ -174,13 +174,10 @@ def deliberate_refusals(exc: BaseException) -> list[BaseException]:
     return [exc] if isinstance(exc, OperatorRefusal) else []
 
 
-def _exception_leaves(exc: BaseException):
-    """Flatten an (arbitrarily nested) exception group to the exceptions it actually carries."""
-    if isinstance(exc, BaseExceptionGroup):
-        for sub in exc.exceptions:
-            yield from _exception_leaves(sub)
-    else:
-        yield exc
+# Flattening an exception group is `core/errors.py::exception_leaves` — the module every layer that
+# has to ask "what actually failed in there" may import. This name is kept as the local spelling so
+# the existing call sites and their monkeypatch seams read unchanged.
+_exception_leaves = exception_leaves
 
 
 def refusal_report(exc: BaseException) -> str:

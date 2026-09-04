@@ -900,6 +900,25 @@ class StrategyCadenceMixin:
                     if strat.get("request_research"):
                         merged["request_research"] = True
                     merged = validate_strategy(merged, ctx) or strat
+                    # THE REFUSAL RECEIPT SURVIVES THE SECOND PASS, and without this it did not.
+                    # `validate_strategy` rebuilds its output from scratch and mints
+                    # `developer_refused` only from an INPUT `developer` key — which `merged` no
+                    # longer has, because the FIRST pass already dropped the unregistered name. So
+                    # the receipt the first pass minted was stripped by the second, and
+                    # `_prepare_strategy_developer` saw neither a `developer` nor a
+                    # `developer_refused`: the durable `strategy_decision` carried the rationale
+                    # ("switch developer to agentless") with no switch and no receipt of any kind,
+                    # i.e. exactly the invisible drop the refusal was added to end.
+                    #
+                    # Restored HERE and taken only from `strat` — this decision's own validated
+                    # output — never from `prev`, for `request_research`'s reason three lines up: a
+                    # receipt carried forward from `active_strategy` would attribute an earlier
+                    # decision's refusal to this one. Not carried inside `validate_strategy` either,
+                    # because there the key would become model-settable, and a Strategist claiming a
+                    # refusal it never asked for is a false receipt on a durable row.
+                    merged.pop("developer_refused", None)
+                    if strat.get("developer_refused"):
+                        merged["developer_refused"] = strat["developer_refused"]
                     # Carry the CURRENT operator-pinned field set (not the strategist's decision, which
                     # owns no fields) so resume-time _apply_strategy still exempts the operator's knobs
                     # even though this record's top-level source is the strategist's (mega-review).

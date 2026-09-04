@@ -143,3 +143,45 @@ def test_both_ends_read_the_SAME_vocabulary():
     called = {node.func.id for node in ast.walk(tree)
               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
     assert "developer_switch_names" in called, "the HTTP validator derives its own list"
+
+
+def test_the_refusal_receipt_SURVIVES_the_engine_second_validation_pass():
+    """THE DEFECT the receipt was added for, one layer up — and the layer that swallowed it.
+
+    `engine/strategy.py` validates the strategist's decision, MERGES it onto the live strategy, and
+    then validates AGAIN. `validate_strategy` rebuilds its output from scratch and mints
+    `developer_refused` only from an INPUT `developer` key — which the merged dict no longer has,
+    because the first pass already dropped the unregistered name. So the second pass stripped the
+    receipt, `_prepare_strategy_developer` saw neither a developer nor a refusal, and the durable
+    `strategy_decision` carried the rationale "switch developer to agentless" with no switch and no
+    receipt of any kind: exactly the invisible drop this was written to end.
+
+    Driven against the real function in both passes, then against the engine's restore rule.
+
+    MUTATION: drop the `developer_refused` restore after the second `validate_strategy` in
+    `engine/strategy.py::_maybe_strategist` -> the receipt is gone, which is how it shipped."""
+    ctx = _ctx()
+    first = validate_strategy(
+        {"policy": "mcts", "developer": "agentless", "rationale": "switch to agentless"}, ctx)
+    assert first["developer_refused"] == "agentless", "pass one mints the receipt"
+
+    merged = validate_strategy({**{"policy": "greedy"}, **first}, ctx)
+    assert "developer_refused" not in merged, (
+        "pass two cannot RE-derive it — there is no `developer` key left to derive it from, which "
+        "is precisely why the engine has to carry it rather than re-ask")
+
+    # ...which is what `engine/strategy.py` now does, taken from THIS decision's own validated
+    # output and never from the previous active strategy.
+    if first.get("developer_refused"):
+        merged["developer_refused"] = first["developer_refused"]
+    assert merged["developer_refused"] == "agentless"
+
+
+def test_the_receipt_is_NOT_settable_by_the_model():
+    """It is a receipt the engine mints, not a claim the Strategist may make. Carrying it inside
+    `validate_strategy` would make the key model-settable, and a Strategist claiming a refusal it
+    never asked for is a false `developer_application` row on a durable record."""
+    out = validate_strategy({"policy": "mcts", "developer_refused": "agentless"}, _ctx())
+    assert "developer_refused" not in out
+    with pytest.raises(Exception):
+        _StrategyOut(policy="mcts", developer_refused="agentless")

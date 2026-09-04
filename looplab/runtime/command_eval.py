@@ -1002,8 +1002,8 @@ def cap_gpu_flags(argv: list) -> list:
     return out
 
 
-def validate_stages(stages, *, reserved: tuple = (),
-                    allow_env: bool = False) -> tuple[Optional[list], Optional[str]]:
+def validate_stages(stages, *, reserved: tuple = (), allow_env: bool = False,
+                    existing_run: bool = False) -> tuple[Optional[list], Optional[str]]:
     """Validate a stage list ({name, command:[argv...], timeout?, check?, role?}) into its canonical clean
     form: (clean, None) on success, (None, reason) on the first problem. This is the SINGLE
     definition of "a valid stage", shared by the Developer's `declare_stages` tool (authoring time),
@@ -1016,7 +1016,19 @@ def validate_stages(stages, *, reserved: tuple = (),
     `allow_env` is the OTHER half of the same declarer distinction, and it defaults to False for the
     opposite reason `reserved` defaults to empty: a stage `env` is operator-only (see the DECLARED
     ENVIRONMENT block), so the fail-closed direction is to refuse it and let the four operator call
-    sites opt in explicitly. A new call site that forgets gets the refusal, not the smuggle."""
+    sites opt in explicitly. A new call site that forgets gets the refusal, not the smuggle.
+
+    `existing_run` is the RELOAD half of the closed-key rule, and it exists because this validator
+    is re-run on resume against the verbatim `task.snapshot.json` — where a refusal does not reach
+    the operator at all. `engine/eval_stages.py` maps `err is not None` onto "fall back to the bare
+    `eval.command`", a conservative reading written when the only way to be unusable was a MALFORMED
+    stage; against a retroactive refusal it silently discards the operator's whole `mine -> train ->
+    score` pipeline, so later nodes of one run are measured by a different pipeline than earlier
+    ones, with no refusal and no event saying so. It is `adapters/repo_task.py::_grandfathered` and
+    `core/appconfig.py::refuse_unknown_settings_keys` one module over, and only the UNKNOWN-KEY
+    clause softens: the key was never read, which is the refusal's own argument, so dropping it with
+    a warning preserves exactly the behaviour that run already had. Every other clause here refuses
+    on both paths, because a malformed `command` or a duplicate name really is unusable."""
     if not isinstance(stages, list) or not stages:
         return None, "`stages` must be a non-empty array of {name, command:[argv...]} objects."
     if len(stages) > MAX_STAGE_COUNT:
@@ -1041,13 +1053,21 @@ def validate_stages(stages, *, reserved: tuple = (),
             return None, f"duplicate stage name {nm!r}."
         seen.add(nm)
         unknown = [k for k in s if k not in STAGE_KEYS]
-        if unknown:
+        if unknown and not existing_run:
             # BEFORE the `command` check, so `commands: [...]` is reported as the unknown key it is
             # rather than as a missing `command` — the two have different fixes and the declarer
             # reads this string straight out of the `declare_stages` bounce.
             return None, (f"stage {nm!r} has unknown key(s) {sorted(unknown)!r}; only "
                           f"{list(STAGE_KEYS)!r} are read. A key nothing reads would declare "
                           "inputs, outputs, a wall clock or a role that is never applied.")
+        if unknown:
+            # RELOAD: the key was never read, so dropping it resumes the run with the pipeline it
+            # already had. Refusing here reaches nobody — `eval_stages` turns it into a silent
+            # degrade to the bare `eval.command`. See `existing_run` in the docstring.
+            logging.getLogger(__name__).warning(
+                f"stage {nm!r} in this run's recorded pipeline carries unknown key(s) "
+                f"{sorted(unknown)!r}; ignoring them for resume compatibility — nothing reads them, "
+                "and refusing would silently drop the whole declared pipeline")
         cmd = s.get("command")
         if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
             return None, (f"stage {nm!r} needs a `command` as a non-empty list of string argv "
@@ -3045,8 +3065,20 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # recoverable — unlike a run that dies without a terminal and dies again on resume.
     bad_gate = _gate_reader_refusal(metrics, constraints, cross_check if enforce_drift else None)
     if bad_gate is not None:
+        # CARRIES WHAT THE PIPELINE ACTUALLY DID. The refusal is about the SPEC, not about the run:
+        # a full `mine -> train -> score` may have taken hours to get here, and returning a bare
+        # 5-field result folded no `stage_finished` rows at all — so the eval-pipeline strip drew
+        # nothing, `_safe_reuse_start` saw no completed stage and made the retry re-run from stage 0,
+        # the watchdog signals were lost, and the `metric_subject` bound at the score stage was
+        # discarded. Every one of these is already in scope; the normal return below carries them.
+        #
+        # `gate_readers_refused` is the out-of-band half: see `RunResult.gate_readers_refused` for
+        # why salvage must not paper over gates that were never evaluated.
         return RunResult(exit_code=rc, stdout=out, stderr=(err or "") + "\n" + bad_gate,
-                         metric=None, timed_out=to)
+                         metric=None, timed_out=to, gate_readers_refused=True,
+                         trials=(json_line_trials(out) if not to else None),
+                         stages=stage_results, stalled=_salvageable_stall(_sig),
+                         diverged=bool(_sig.get("diverged")), metric_subject=_run.metric_subject)
     drift = None
     if enforce_drift and cross_check and m is not None:
         cross = read_metric(out, str(wd), cross_check, wrap=wrap, since=_reader_since, env=env)

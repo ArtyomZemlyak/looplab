@@ -39,6 +39,7 @@ import anyio
 import orjson
 
 from looplab.core.llm import BudgetExceeded
+from looplab.core.errors import exception_leaves
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
                                  coerce_node_id,
                                  developer_artifact_footprint, developer_stuck_reason,
@@ -784,6 +785,25 @@ class SpeculativeEvaluationInvariantError(AssertionError):
 
 
 _LOG = logging.getLogger(__name__)
+
+
+# THE STOPS `_evaluate`'s CONTAINMENT MAY NEVER ABSORB, named once and read twice — by the `except`
+# clause for the exception it arrives as, and by the leaf test for the exception it arrives INSIDE.
+# Cancellation is not a member because `anyio.get_cancelled_exc_class()` needs a running backend and
+# so cannot be resolved at import; both readers splice it in.
+#
+#   * KeyboardInterrupt / SystemExit — the interpreter is unwinding for a reason no node terminal
+#     should paper over.
+#   * BudgetExceeded — a SPEND LIMIT, a fact about the RUN. Every `except BudgetExceeded: raise` on
+#     the paths beneath `_evaluate` exists to hand it to `Engine.run`'s global hard stop; contained,
+#     it becomes `node_failed{reason: "engine_error"}` plus an `engine_error` pause, i.e. the
+#     operator's own budget reported to them as a fault of the box.
+#   * SpeculativeEvaluationInvariantError — the engine's REASONING is wrong (an unconfirmed
+#     prediction was about to cross into the sandbox). Containment downgrades an ENVIRONMENT fault
+#     to one node's terminal, which is right because the box was at fault and the engine was not;
+#     recording this one that way hides the exact crossing the invariant exists to make impossible.
+_EVAL_DELIBERATE_STOPS = (KeyboardInterrupt, SystemExit, BudgetExceeded,
+                          SpeculativeEvaluationInvariantError)
 
 
 class EvaluateMixin:
@@ -1774,16 +1794,12 @@ class EvaluateMixin:
         the exact uselessness the terminal exists to avoid — so the group is flattened to the leaves
         it carries. Bounded, because a nested group is a tree and this runs on the failure path.
         """
-        leaves: list[str] = []
-        stack: list[BaseException] = [exc]
-        while stack and len(leaves) < 4:
-            current = stack.pop(0)
-            nested = getattr(current, "exceptions", None)
-            if isinstance(nested, (list, tuple)) and nested:
-                stack.extend(e for e in nested if isinstance(e, BaseException))
-                continue
-            leaves.append(f"{type(current).__name__}: {current}")
-        return " | ".join(leaves) or f"{type(exc).__name__}: {exc}"
+        named: list[str] = []
+        for leaf in exception_leaves(exc):
+            if len(named) >= 4:                     # bounded: a nested group is a tree, and this
+                break                               # runs on the failure path
+            named.append(f"{type(leaf).__name__}: {leaf}")
+        return " | ".join(named) or f"{type(exc).__name__}: {exc}"
 
     async def _contain_eval_crash(self, node_id: int, generation: int, exc: BaseException) -> None:
         """Close ONE node on an unexpected exception, instead of letting it cancel every sibling.
@@ -3781,11 +3797,21 @@ class EvaluateMixin:
                             triage_outcome[0], self._redact(str(triage_outcome[1]))[:300])
                     self.store.append(EV_NODE_FAILED, data)
                 self._maybe_crash()
-        except (anyio.get_cancelled_exc_class(), KeyboardInterrupt, SystemExit,
-                SpeculativeEvaluationInvariantError):
+        except (anyio.get_cancelled_exc_class(), *_EVAL_DELIBERATE_STOPS):
             # A deliberate stop is not a node failure. Cancellation is how a reset, an operator abort
             # and a run stop reach this worker; answering one with a `node_failed` would invent a
             # failure out of an intervention, and swallowing it would break structured concurrency.
+            #
+            # `BudgetExceeded` is in this tuple and not the one below, and it is the member the
+            # containment's own argument gets wrong. It is an `Exception` — so the blanket clause
+            # DOES reach it — and every `except BudgetExceeded: raise` on the paths under here
+            # (`_triage_crash`, `_repair`, `crash_repair`) exists to hand it up to `Engine.run`,
+            # whose `except BudgetExceeded: raise  # global hard stop` ends the run. Contained
+            # instead, a SPEND LIMIT is filed as `engine_error` — a reason deliberately outside
+            # every failure vocabulary, so no diagnosis, no repair, no salvage — and the run is
+            # paused with `reason="engine_error"`, i.e. the operator's own budget reaches them as a
+            # box fault. The three below are environment faults about ONE node; this is a fact about
+            # the whole run, and it was never this handler's to absorb.
             #
             # An INVARIANT VIOLATION must stay loud for the opposite reason. The containment below
             # downgrades an ENVIRONMENT fault — a full disk, a read-only directory — to one node's
@@ -3804,5 +3830,21 @@ class EvaluateMixin:
             # `tests/test_repair_stop_decision.py`'s `_Kill(BaseException)` carries "a BaseException
             # so `_evaluate`'s containment cannot absorb it", and a test that has to sneak past a
             # handler is a handler reaching further than its own argument does.
+            #
+            # BUT THE CLAUSE ABOVE IS NOT ENOUGH ON ITS OWN, and this is the half that shipped
+            # wrong. The body runs its eval beside a watcher inside a nested `anyio` task group, so
+            # a deliberate stop raised in there reaches this handler WRAPPED: the object is an
+            # `ExceptionGroup` — itself an `Exception` — and the tuple above never matches it. A
+            # `BudgetExceeded` from the inline repair therefore arrived here as a group and was
+            # filed as `engine_error`, i.e. the operator's own spend limit reported as a box fault,
+            # with the run paused instead of stopped. So the question is asked of the LEAVES.
+            #
+            # ANY leaf, not all of them: a mixed group means the run is ending AND one node also hit
+            # an environment fault, and losing the run-level stop is strictly worse than leaving
+            # that node `pending` for resume — which is what every escape did before this handler
+            # existed anyway.
+            if any(isinstance(leaf, _EVAL_DELIBERATE_STOPS + (anyio.get_cancelled_exc_class(),))
+                   for leaf in exception_leaves(exc)):
+                raise
             await self._contain_eval_crash(node_id, _contained_generation[0], exc)
 

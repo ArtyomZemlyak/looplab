@@ -15,6 +15,26 @@ class BudgetExceeded(Exception):
     pass
 
 
+def exception_leaves(exc: BaseException):
+    """Flatten an (arbitrarily nested) exception group to the exceptions it actually carries.
+
+    ONE spelling, in the module `cli`, `engine` and `core` may all import. There were three, and
+    they disagreed on the test: two used `isinstance(exc, BaseExceptionGroup)` and the third
+    duck-typed on a truthy `exceptions` attribute, which silently DROPS the message of any ordinary
+    exception that happens to carry one — on the path whose whole job is to name what went wrong on
+    a durable terminal.
+
+    It exists because an `anyio` task group wraps whatever escaped it, so "what actually failed" and
+    "may this handler absorb it" are both questions about the LEAVES and never about the object the
+    handler was handed. Non-groups yield themselves, so every caller can walk unconditionally.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        for sub in exc.exceptions:
+            yield from exception_leaves(sub)
+    else:
+        yield exc
+
+
 class OperatorRefusal(Exception):
     """Marker: LoopLab raised this ON PURPOSE, at a boundary the operator controls.
 

@@ -730,12 +730,26 @@ def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
 # absent entrypoint — "the Developer AUTHORS the eval entrypoint" is the designed flow), the
 # `declare_stages` tool (the stages phase runs with READ-ONLY tools, so the file cannot exist yet),
 # and the stage runner (too late: the node exists and the repair cascade is what costs).
-def build_declared_script_never_written(manifest_json: str, written: dict) -> str:
-    """The bounce text for an implement emit whose manifest names a script it did not write, else "".
+def build_declared_script_never_written(manifest_json: str, written: dict, *,
+                                        exists=None) -> str:
+    """The bounce text for an implement emit whose manifest names a script that is NOT THERE, else "".
 
     Pure and total: any input answers, never raises, because it runs inside the emit path of a
-    session that has already cost minutes. `written` is the CALLER's byte fact — the write tool's
-    own file ledger — never anything the model said about itself.
+    session that has already cost minutes. Every byte fact is the CALLER's — the write tool's own
+    ledger and its own view of the workspace — never anything the model said about itself.
+
+    `exists(path) -> bool` IS THE QUESTION, and `written` alone is not it. The write ledger starts
+    EMPTY and holds only what THIS session authored (`RepoWriteTools.files`, whose docstring says
+    writes are "COLLECTED ... rather than applied to disk"), while the node runs in the repo COPY
+    plus that overlay. A Developer that declares `["python", "vectorsearch/train.py"]` against the
+    repo's own committed trainer and edits only `configs/config.yaml` has written no `train.py` —
+    and got told "this session never wrote" it, which is factually wrong, spends the session's one
+    shared bounce, and invites the model to overwrite a working trainer with a stub. `exists` is
+    `RepoWriteTools.exists`, which resolves the staged overlay and then the editable roots on disk,
+    i.e. exactly the filesystem the stage will run against.
+
+    It stays OPTIONAL so the rule can be exercised as a pure function, and a caller that omits it
+    falls back to the ledger — which is the WEAKER reading, so a caller able to answer must pass it.
     """
     try:
         stages = (json.loads(manifest_json or "") or {}).get("stages") or []
@@ -753,12 +767,18 @@ def build_declared_script_never_written(manifest_json: str, written: dict) -> st
         if len(cands) != 1:
             continue
         path = cands[0]
-        if path not in (written or {}) and path not in missing:
+        if path in (written or {}) or path in missing:
+            continue
+        try:
+            present = bool(exists(path)) if exists is not None else False
+        except Exception:  # noqa: BLE001 — an unreadable workspace is not evidence of absence
+            present = True
+        if not present:
             missing.append(path)
     if not missing:
         return ""
     named = ", ".join(missing[:6])
-    return ("Your stage manifest declares a script this session never wrote: " + named +
+    return ("Your stage manifest declares a script that does not exist in the workspace: " + named +
             ". Write the file (or change the stage command to one that exists) before emitting — "
             "a stage whose entry point is absent exits in under a second and costs the node two "
             "repair attempts and then the node itself.")

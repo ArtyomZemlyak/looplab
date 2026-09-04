@@ -1107,6 +1107,33 @@ def projected_overrun_s(span_s, eta_s, wall_s) -> Optional[float]:
 _OVERRUN_ALERT_FLOOR_FRACTION = 0.01
 _OVERRUN_ALERT_FLOOR_S = 60.0
 
+# THE FIELD THE BEYOND-BAR CLEARANCE IS STAMPED UNDER, and the spellings a preserved row may carry.
+# Every reader asks through `wall_unreachable`/`OVERRUN_BEYOND_BAR_KEYS` and never through a literal,
+# because a literal is what broke this: the field was renamed here on 2026-09-03
+# (`overrun_beyond_grace_s` -> `overrun_beyond_noise_s`, the bar moved from the deadline-grace
+# ceiling to the projection's own resolution) and the healthy-verdict gate 1,900 lines below went on
+# testing the OLD name. `_wall_unreachable` was then unconditionally False, which silently reverted
+# the 2026-08-30 fix: a stage judged healthy whose measured ETA cannot fit its declared wall recorded
+# nothing again — the `e5small-dr-unified-v11` node 2 shape, SIGKILLed at 84 % of a 36000 s wall,
+# 10.0 GPU-hours, then charged a full retrain. A NAME is not a rule. The gate reads the predicate,
+# `serve/attention.py::_beyond_bar` reads the tuple, and a fourth rename moves all three at once.
+#
+# The legacy key rides the TUPLE and not the writer (invariant #5 is additive-only): nothing stamps
+# it any more, so a freshly stamped dict can only ever carry the current one, and a preserved row
+# keeps the meaning it was written with.
+OVERRUN_BEYOND_BAR_KEY = "overrun_beyond_noise_s"
+OVERRUN_BEYOND_BAR_KEYS = (OVERRUN_BEYOND_BAR_KEY, "overrun_beyond_grace_s")
+
+
+def wall_unreachable(fields) -> bool:
+    """True when `stamp_projected_overrun` recorded an overrun that CLEARED its own alert bar.
+
+    The gate's question, asked of the scratch dict the stamp filled — never of the raw projection,
+    which would be a second and louder spelling of the noise the bar exists to swallow.
+    """
+    return any(key in (fields or {}) for key in OVERRUN_BEYOND_BAR_KEYS)
+
+
 
 def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan,
                             *, grace_cap=None) -> None:
@@ -1179,7 +1206,7 @@ def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan,
     floor = max(_OVERRUN_ALERT_FLOOR_S, float(wall) * _OVERRUN_ALERT_FLOOR_FRACTION)
     beyond = over - floor
     if beyond > 0:
-        alert["overrun_beyond_noise_s"] = round(beyond, 1)
+        alert[OVERRUN_BEYOND_BAR_KEY] = round(beyond, 1)
         alert["overrun_alert_floor_s"] = round(floor, 1)
         alert["stage_grace_s"] = round(max(0.0, grace), 1)
 
@@ -3097,7 +3124,7 @@ class TrainingMonitorMixin:
                         # stamp and not a decision (its own docstring's rule), so it fills a scratch
                         # dict that the gate consults and the alert then absorbs — one derivation,
                         # so the row's numbers and the reason it was written cannot disagree.
-                        # Only `overrun_beyond_grace_s` opens the gate, never the raw projection: a
+                        # Only the BEYOND-BAR clearance opens the gate, never the raw projection: a
                         # 40-second overrun on a ten-hour stage is the noise the grace bar exists to
                         # swallow, and this must not become a second, louder spelling of it.
                         _overrun_fields: dict = {}
@@ -3105,7 +3132,7 @@ class TrainingMonitorMixin:
                             stamp_projected_overrun(
                                 _overrun_fields, trajectory, resolved, log_plan,
                                 grace_cap=getattr(self, "eval_deadline_grace_s", None))
-                        _wall_unreachable = "overrun_beyond_grace_s" in _overrun_fields
+                        _wall_unreachable = wall_unreachable(_overrun_fields)
                         if (verdict.status != "healthy"
                                 or last_event_status in ("watch", "broken")
                                 or _wall_unreachable):

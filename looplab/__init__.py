@@ -118,6 +118,7 @@ _LAYOUT = {
     "comment_projection": "events",
     "command_eval": "runtime",
     "command_observation": "serve",
+    "code_freshness": "serve",   # is this server process still running the code on disk
     "comparison": "core",
     "concepts": "core",       # canonical concept identity + materialization integrity contracts
     "concept_frame": "serve",   # bounded versioned concept frames served to the UI

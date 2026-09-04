@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import pytest
 
-from looplab.core.config import Settings
+from looplab.core.config import Settings, settings_from_snapshot
 from looplab.core.llm import reasoning_body
 
 _DECLARED = dict(Settings._CASE_INSENSITIVE_ENUM_FIELDS)
@@ -87,3 +87,54 @@ def test_every_declared_value_actually_constructs():
             Settings(**{field: value})
     assert Settings().llm_reasoning == "high", "the shipped default must be in its own vocabulary"
     assert Settings().llm_reasoning_style == "auto"
+
+
+@pytest.mark.parametrize("recorded,resumed_as", [
+    ("true", "on"), ("1", "on"), ("yes", "on"), ("enabled", "on"),
+    ("false", "false"), ("0", "0"),          # already IN the vocabulary; untouched
+    ("high", "high"), ("", ""), ("off", "off"),
+])
+def test_a_run_recorded_with_a_historically_accepted_spelling_still_RESUMES(recorded, resumed_as):
+    """THE ASYMMETRY: strict at submit, canonicalizing on reload.
+
+    The closed vocabulary is narrower than the reader that had been accepting these for months, and
+    asymmetrically so — `reasoning_body` computes `on = mode not in ("off","none","false","0")`, so
+    `false`/`0` are valid OFF spellings AND are in the set, while `true`/`1`/`yes` were equally
+    valid ON spellings against a qwen-style endpoint and are not. Refusing them at
+    `Settings(**snapshot)` made a healthy run unresumable, unfinalizable, and unreadable by the
+    server's own config route, with hand-editing `config.snapshot.json` as the only remedy.
+
+    Mutation: drop `_canonicalize_snapshot_reasoning` from `settings_from_snapshot` -> the four ON
+    spellings raise ValidationError here, which is exactly how it shipped."""
+    assert settings_from_snapshot({"llm_reasoning": recorded}).llm_reasoning == resumed_as
+
+
+def test_the_reload_canonicalization_PRESERVES_WHAT_THE_READER_DID():
+    """It maps onto meaning, not onto a default. A spelling the reader DISABLED on must not come
+    back enabled — that would resume a run under different paid semantics than it recorded, which is
+    the very thing invariant #6 exists to prevent."""
+    for off_spelling in ("false", "0", "none", "off"):
+        resumed = settings_from_snapshot({"llm_reasoning": off_spelling}).llm_reasoning
+        assert reasoning_body("qwen3", resumed) == reasoning_body("qwen3", off_spelling), (
+            f"{off_spelling!r} disabled reasoning; resuming it must still disable reasoning")
+    for on_spelling in ("true", "1", "yes"):
+        resumed = settings_from_snapshot({"llm_reasoning": on_spelling}).llm_reasoning
+        assert reasoning_body("qwen3", resumed) == {"chat_template_kwargs": {"enable_thinking": True}}
+
+
+def test_a_fresh_submit_is_STILL_refused():
+    """The reload path softens; the submit path does not. A typo must still be caught where it is
+    cheap, which is the whole reason the closed vocabulary exists."""
+    with pytest.raises(Exception):
+        Settings(llm_reasoning="banana")
+    with pytest.raises(Exception):
+        Settings(llm_reasoning="true")
+
+
+def test_an_unknown_STYLE_is_not_canonicalized():
+    """`llm_reasoning_style` shapes NOTHING when unknown (`reasoning_body` returns `{}`), so there
+    is no historical behaviour to preserve — only a field whose default is `auto` silently never
+    requesting reasoning. That one resumes with the refusal it deserves."""
+    assert reasoning_body("qwen3", "on", "banana") == {}
+    with pytest.raises(Exception):
+        settings_from_snapshot({"llm_reasoning_style": "banana"})

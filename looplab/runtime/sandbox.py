@@ -541,6 +541,21 @@ class RunResult:
     # The stderr prefix STAYS, because it is what a human reads in the durable row — but nothing
     # DECIDES from it any more. See `engine/failure_diagnosis.py` for the general rule.
     setup_failed: bool = False
+    # THE GATE READERS WERE NEVER RUN. `run_command_eval` refuses an `adapter` in any of the three
+    # gate slots (`metrics`/`constraints`/`cross_check`) and returns instead of raising, because
+    # raising from inside the eval worker killed the run with no node terminal. But `metric=None` on
+    # a clean exit classifies `no_metric`, which is NOT in `metric_salvage.NEVER_SALVAGED_REASONS`
+    # and satisfies every one of its other preconditions — so the salvage rung re-read the operator's
+    # PRIMARY reader and recovered a number with the constraint gate and the drift cross-check never
+    # evaluated at all. Under `metric_salvage="select"` that node is then admitted on an ungated
+    # value: strictly weaker than the `ValueError` the return replaced.
+    #
+    # An OUT-OF-BAND FLAG rather than a reason word, for `setup_failed`'s own reason one field up:
+    # the fact is held by the branch that already knows it, and nothing has to parse it back out of
+    # a stderr string the candidate also writes. `metric_salvage` reads the flag directly, the way
+    # it reads `diverged`, so "a node whose gates were never evaluated is never salvaged" is a
+    # property of the RESULT and not of whichever label the classifier happened to reach for.
+    gate_readers_refused: bool = False
 
 
 # Distinctive sentinels in the killed stage's stderr, so command_eval/the orchestrator (and run_argv's

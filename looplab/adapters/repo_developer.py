@@ -787,7 +787,7 @@ class LLMRepoDeveloper:
         return steps
 
     def _run_step(self, idea: Idea, step: dict, idx: int, total: int, write, system: str,
-                  stage_note: str = "") -> str:
+                  stage_note: str = "", validate=None) -> str:
         """Execute ONE atomic plan step in a FRESH bounded session, on top of the files accumulated so
         far (carried in `write.files`; syntax is validated per write by the write tool). A step's own
         error never aborts the plan — later steps + the eval still run on whatever got written.
@@ -813,6 +813,7 @@ class LLMRepoDeveloper:
             run_phase(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write)),
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
+                      validate=validate,
                       fallback=lambda m: "", on_budget=self._note_session_budget,
                       **self._session_opts())
         except Exception as e:  # noqa: BLE001
@@ -1692,6 +1693,40 @@ class LLMRepoDeveloper:
             # read_installed / grep_installed) so the Developer grounds generated code in the ACTUAL
             # installed API/version instead of guessing (the precision='16-mixed'-on-Lightning-1.5 class).
             tools = CompositeTools([write, EnvInspectTools()] + self._scout_tools(write))
+            # ONE BOUNCE PER SESSION, shared by the build rule and the repair rule below. A second
+            # would spend the session arguing instead of editing, and the model has already been
+            # told exactly what to do; `agent_emit_force` bounds the loop but must not be what stops
+            # this.
+            _bounced: list = []
+
+            def _validate_build(_args):
+                """A manifest declaring a stage whose SCRIPT this session never wrote.
+
+                Such a node exits in under a second and then buys two ~30-minute repairs before
+                dying — measured on v13 nodes 0 and 2. The rule and its whole safety argument
+                (script form only; `-m` is indistinguishable from installed code) live in
+                `engine/repair_verify.py::build_declared_script_never_written`.
+
+                INSTALLED ON THE FRESH-REPO PATH, which is where a repo build actually goes. It
+                first shipped inside `_validate_repair`'s `if not error:` arm — but that validator
+                is only passed on the `else:` of `if is_fresh_repo:`, and
+                `is_fresh_repo = error is None and self._editables`, so the arm needed
+                `error is None AND no editables`: a toy/bare developer with no repo, i.e. never in
+                production. Both fresh-repo sub-paths get it here — the single-session implement and
+                the LAST plan step, which is the one already told to "make sure the eval entrypoint
+                runs end-to-end".
+                """
+                if _bounced:
+                    return None
+                from looplab.engine.repair_verify import build_declared_script_never_written
+                refusal = build_declared_script_never_written(
+                    write.files.get("looplab_stages.json", ""), write.files,
+                    exists=write.exists)
+                if not refusal:
+                    return None
+                _bounced.append(True)
+                return refusal
+
             if is_fresh_repo:
                 # PLAN is the Developer's second sub-phase (its own trace band). IMPLEMENT runs under
                 # the orchestrator's "implement" span (so its generations band there, and non-repo
@@ -1707,7 +1742,9 @@ class LLMRepoDeveloper:
                     # stamp ONE span so the trace says which steps failed and why.
                     step_errors = [note for i, step in enumerate(steps, 1)
                                    if (note := self._run_step(idea, step, i, len(steps), write,
-                                                              system, stage_note=stage_note))]
+                                                              system, stage_note=stage_note,
+                                                              validate=(_validate_build
+                                                                        if i == len(steps) else None)))]
                     if step_errors:
                         with tracing.operation("plan_steps_failed", failed=len(step_errors),
                                                total=len(steps),
@@ -1719,6 +1756,7 @@ class LLMRepoDeveloper:
                     run_phase(self.client, tools, messages, self._emit_spec(),
                               label="Developer·implement", handoff=False,
                               finalize=lambda a: (a or {}).get("summary", ""),
+                              validate=_validate_build,
                               fallback=lambda m: "", on_budget=self._note_session_budget,
                       **self._session_opts())
             else:
@@ -1743,7 +1781,6 @@ class LLMRepoDeveloper:
                 # loop acts on.
                 _files_before = dict(write.files)
                 _deleted_before = list(write.deleted)
-                _bounced = []
 
                 def _validate_repair(args):
                     # ONE-SHOT. A second bounce would spend the session arguing instead of editing,
@@ -1759,21 +1796,11 @@ class LLMRepoDeveloper:
                     if _bounced:
                         return None
                     if not error:
-                        # THE BUILD PATH'S OWN ONE-SHOT, in the slot this validator already owns and
-                        # left empty. A manifest declaring a stage whose SCRIPT this session never
-                        # wrote produces a node that exits in under a second and then buys two
-                        # ~30-minute repairs before dying — measured on v13 nodes 0 and 2. The rule
-                        # and the whole safety argument (script form only; `-m` is indistinguishable
-                        # from installed code) live beside their repair sibling in
-                        # `engine/repair_verify.py`.
-                        from looplab.engine.repair_verify import (
-                            build_declared_script_never_written)
-                        build_refusal = build_declared_script_never_written(
-                            write.files.get("looplab_stages.json", ""), write.files)
-                        if not build_refusal:
-                            return None
-                        _bounced.append(True)
-                        return build_refusal
+                        # The BUILD arm, reached here only by a toy/bare developer with no
+                        # `_editables` (a real repo build takes the `is_fresh_repo` path and is
+                        # validated there). ONE rule, one shot: `_validate_build` owns both, so the
+                        # two paths cannot come to disagree about what a bounce costs.
+                        return _validate_build(args)
                     # ONE place decides "did this session write anything", and it is the `wrote`
                     # parameter the rule's own docstring says owns it. Testing it here and then
                     # passing the literal `False` stated the byte fact twice and left the parameter

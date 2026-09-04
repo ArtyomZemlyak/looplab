@@ -21,7 +21,9 @@ still RECORDED — how much rescue could exist is real information — it just n
 """
 from __future__ import annotations
 
-from looplab.engine.train_monitor import projected_overrun_s, stamp_projected_overrun
+from looplab.engine.train_monitor import (OVERRUN_BEYOND_BAR_KEY, OVERRUN_BEYOND_BAR_KEYS,
+                                          projected_overrun_s, stamp_projected_overrun,
+                                          wall_unreachable)
 from looplab.serve.attention import _number
 
 
@@ -223,3 +225,41 @@ def test_the_server_agrees_with_the_client_about_what_needs_action():
     assert missing == [], (
         f"{missing} are actionable to the browser and unknown to the server's ordering/count table; "
         "each one freezes the whole run feed via normalizeRunPage's active_action_count refusal")
+
+
+def test_the_gate_opens_on_the_key_the_writer_ACTUALLY_WRITES():
+    """The half every other test here missed, and the one that cost a day.
+
+    The healthy-verdict gate in `train_monitor._monitor_training` asked `"overrun_beyond_grace_s" in
+    _overrun_fields` — a LITERAL, and the literal the rename above retired. `_wall_unreachable` was
+    therefore unconditionally False and the 2026-08-30 fix was silently reverted: a stage judged
+    healthy whose measured ETA cannot fit its declared wall recorded nothing again. Its own guard
+    test stayed green because it monkeypatches the stamp with a stub that wrote the OLD key, so the
+    two halves were never asked about each other.
+
+    So ask. Drive the real writer, then the real predicate.
+
+    Mutation: rename either side alone, or re-spell the gate as a literal, and this is red."""
+    alert = _stamp(1000.0, 40640.0, 36000.0, -1.0)
+    assert OVERRUN_BEYOND_BAR_KEY in alert, "the writer stamps the key the vocabulary names"
+    assert wall_unreachable(alert) is True, (
+        "and the gate's own predicate opens on what the writer just wrote — a name is not a rule")
+
+    assert wall_unreachable({}) is False
+    assert wall_unreachable(None) is False
+    assert wall_unreachable(_stamp(1000.0, 35100.0, 36000.0, -1.0)) is False, (
+        "an overrun inside the bar records the projection and opens nothing")
+    assert wall_unreachable({"projected_overrun_s": 4700.0, "stage_wall_s": 36000.0}) is False, (
+        "the raw projection never opens the gate: that is the noise the bar exists to swallow")
+
+
+def test_the_projection_readers_share_ONE_key_vocabulary():
+    """`serve/attention.py::_beyond_bar` reads the durable rows this writer produces, across the
+    rename. It used to keep its own copy of the tuple; a reader that re-spells the writer's
+    vocabulary is the next instance of the defect above, one module further away."""
+    from looplab.serve import attention
+
+    assert attention.OVERRUN_BEYOND_BAR_KEYS is OVERRUN_BEYOND_BAR_KEYS, (
+        "the projection must import the writer's tuple, not re-spell it")
+    assert OVERRUN_BEYOND_BAR_KEYS[0] == OVERRUN_BEYOND_BAR_KEY, (
+        "the current key is read first: a preserved row's legacy bar is a different measurement")

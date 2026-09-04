@@ -228,7 +228,12 @@ class EvalStagesMixin:
             # `allow_env=True`: this branch reads the OPERATOR's own declared pipeline, which is
             # the only declarer allowed a stage `env`. The developer-manifest branch below goes
             # through `materialized_stages`, which keeps the fail-closed default.
-            clean, err = command_eval.validate_stages(task_stages, allow_env=True)
+            # `existing_run=True`: this is the run's OWN recorded pipeline being re-read, not a
+            # submission. A refusal here does not reach the operator — it lands on the fallback
+            # below — so a retroactive clause (the closed stage-key set) would silently discard
+            # the declared pipeline and score later nodes of this run by a different one.
+            clean, err = command_eval.validate_stages(
+                task_stages, allow_env=True, existing_run=True)
             if err is None:
                 return _expand(clean)
             # A BAD operator list falls back to the SINGLE COMMAND, and must not fall THROUGH to the

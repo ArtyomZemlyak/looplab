@@ -361,6 +361,15 @@ def salvage_condition(res, reason: str) -> Optional[str]:
     """
     if reason in NEVER_SALVAGED_REASONS or getattr(res, "timed_out", False):
         return None
+    # THE GATES WERE NEVER RUN. `run_command_eval` refuses an `adapter` gate reader by RETURNING a
+    # metric-less result (it used to raise, which killed the run with no node terminal), and that
+    # result classifies `no_metric` — not in `NEVER_SALVAGED_REASONS`, and it satisfies every other
+    # precondition here. Re-reading the primary reader would then recover a number whose constraint
+    # gate and drift cross-check were never evaluated at all, and under `select` admit it. Read as a
+    # FLAG for the reason `diverged` is one line down: it is a property of the result, not of
+    # whichever label the classifier reached for.
+    if getattr(res, "gate_readers_refused", False):
+        return None
     # `res.diverged` as well as the reason, and deliberately not only through it: the divergence
     # verdict is fail-closed and can land beside ANY classification (the kill/exit race records it
     # next to a natural exit 0, where `_failure_reason` sees a clean completion). Reading the flag

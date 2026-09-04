@@ -330,6 +330,18 @@ class RepoWriteTools:
                 continue
         return None
 
+    def exists(self, p: str) -> bool:
+        """Is this repo-relative path readable in the workspace the node will actually run in?
+
+        The staged overlay first, then the editable roots on disk — `_current`'s own resolution,
+        which is the only one that matches what the sandbox materializes. PUBLIC because a rule in
+        another package has to ask it: `engine/repair_verify.py::build_declared_script_never_written`
+        used to test membership in `self.files`, i.e. "did THIS session write it", and refused a
+        stage naming the repo's own committed trainer. Reaching `_current` across a package would be
+        the cross-package private seam this tree already guards against.
+        """
+        return self._current(p) is not None
+
     @staticmethod
     def _safe_rel(p: str):
         """Canonicalize to a REPO-RELATIVE path or None. Rejects absolute paths and `..` escapes so

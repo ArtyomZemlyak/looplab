@@ -21,6 +21,7 @@ from looplab.core.fitness import finite_metric
 from looplab.core.models import Event, NodeStatus
 from looplab.core.models import BENIGN_TERMINAL_REASONS
 from looplab.engine.finalize import incomplete_finalize_scope
+from looplab.engine.train_monitor import OVERRUN_BEYOND_BAR_KEYS
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_APPROVAL_REQUESTED,
@@ -88,8 +89,12 @@ def _beyond_bar(data: dict):
     the projection's own resolution); `overrun_beyond_grace_s` is what earlier rows carry (the bar
     was the deadline-grace ceiling). The values are not comparable and are not meant to be — each is
     "the amount by which this row's own bar was cleared", which is exactly what both callers want.
+
+    THE TUPLE IS IMPORTED FROM THE WRITER, never re-spelled here. The rename that created the
+    second key also left the engine's own gate reading the first one, dead, for a day; a reader
+    that keeps its own copy of the vocabulary is the next instance of that.
     """
-    for key in ("overrun_beyond_noise_s", "overrun_beyond_grace_s"):
+    for key in OVERRUN_BEYOND_BAR_KEYS:
         value = _number(data.get(key), positive=True)
         if value is not None:
             return value
