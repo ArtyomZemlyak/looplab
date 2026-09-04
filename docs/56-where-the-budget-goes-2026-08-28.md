@@ -8470,3 +8470,55 @@ and this is the price tag on that observation.
 
 *Suite on the settled tree, measured without a pipe: **13,582 passed, 51 skipped, 0 failed**,
 `PYTEST EXIT=0`, 31 min 54 s — 11 more tests than §160's 13,571 and none of §184's phantom failures.*
+
+## 186. A strong first node is worth fifty points, and nothing the loop does before it predicts one
+
+§185 priced the nodes. This asks what makes the early ones good, over the 83 runs with two or more
+evaluated nodes.
+
+**Nothing the run does before node 1 separates the runs whose node 1 improves from those whose does
+not.** Medians, improved against not-improved:
+
+| | improved (n=57) | did not (n=26) |
+|---|---|---|
+| **node 0's score** | **25.41** | **157.11** |
+| spend between node 0 and node 1 | 0.416 | 0.463 |
+| spend before node 0 | 0.309 | 0.352 |
+| `eval_train` calls by node 1 | 8 | 9 |
+| `run_probe` calls by node 1 | 17 | 21.5 |
+| probes touching the reference | 1 | 2 |
+
+Every process variable is flat. The only discriminator is **how much headroom node 0 left** — which
+is close to a tautology: a run that already scored 157 rarely beats itself next draw.
+
+**So the interesting question is whether a weak start is recoverable, and the answer is: partly.**
+Over the 69 `edge_expansion` runs with two or more nodes:
+
+| node 0 | n | champion after two nodes |
+|---|---|---|
+| **≥ 60** | 29 | **216.71** |
+| < 60 | 40 | 166.49 |
+
+Difference **−50.22**, two-sided permutation **p = 0.0155**. Runs do not converge to a common
+ceiling — a strong first node is still worth about fifty points two draws later. The final champion
+across those 69 runs has median 202.70, p10 106.69, p90 267.73, so fifty points is a fifth of the
+usable range.
+
+**Set that beside §185:** every money-recovery remedy in the audit is worth about one point per run.
+A good first node is worth fifty. Whatever is worth working on next is upstream of node 0, not in
+the ledger.
+
+**And the obvious lever does not reach significance.** Whether node 0 shipped a Cython kernel:
+
+| node 0 | n | node 0 median | final champion median |
+|---|---|---|---|
+| kernel | 32 | 163.13 | 218.15 |
+| no kernel | 37 | 23.70 | 194.65 |
+
+The kernel moves node 0 by **139 points** and the final champion by **23.50**, two-sided
+permutation **p = 0.2140**. So the loop recovers most — not all — of a kernel-less start, and this
+corpus cannot say whether forcing a kernel into node 0 would pay. That is a real arm to design
+(a card clause that names the kernel as the FIRST draw rather than a later one), and unlike §115's
+it has a pre-measured effect size to size itself against: 23.5 points on a null spread that §180
+measured at 181 for a four-probe batch — which means it needs far more than four probes, and that
+number should be computed before any money is spent, not after.
