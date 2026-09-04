@@ -484,6 +484,18 @@ def systemic_failure_stop_reason(state, threshold: int) -> Optional[str]:
             "({why})").format(n=len(failed), why=", ".join(reasons[:4]))
 
 
+def _task_declared_env(task) -> bool:
+    """Does the TASK itself declare the environment its eval needs?
+
+    `RepoTask.eval.env` is the durable home (it rides `task.snapshot.json`); a `Settings.eval_env`
+    is the launch-time override that does not. Duck-typed because not every task model has an
+    `eval` section, and a task that declares nothing is the common, correct case for tasks whose
+    eval needs no environment at all — this only ever qualifies a run that IS using one.
+    """
+    eval_spec = getattr(task, "eval", None)
+    return bool(getattr(eval_spec, "env", None))
+
+
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
              ConceptCadenceMixin, VerifierTiebreakMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
@@ -3350,6 +3362,31 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # would revoke every issued calibration receipt, and the calibration
                             # profile declares no environment.
                             **({"eval_env": dict(self._eval_env)} if self._eval_env else {}),
+                            # …AND WHETHER THE TASK ITSELF CARRIES IT. A SETTING rides
+                            # `config.snapshot.json`, so a RESUME reproduces it (invariant #6) — but
+                            # it does NOT ride `task.snapshot.json`, and the documented way to start
+                            # the next run on this box is to COPY that snapshot. So a value that
+                            # lives only in the launch line survives every resume and is lost by the
+                            # one operation an operator actually performs between runs.
+                            #
+                            # MEASURED: `eval.env` is null on EVERY task file on this box (v11, v12,
+                            # v13 and all three snapshots). v12 was launched from such a copy without
+                            # the flag, every node crashed in `botocore ListObjects` on an unset
+                            # `VS_LOCAL_DATA_ROOT`, each paid a triage+repair to rediscover the local
+                            # corpus, and node 14 died of it (#147). `adapters/repo_task.py::eval.env`
+                            # is where the tree already says this fact belongs — "a fact about the
+                            # TASK", "every node inherits it instead of each one spending a repair
+                            # attempt rediscovering it".
+                            #
+                            # PRESENT ONLY WHEN THE SETTING IS CARRYING A FACT THE TASK DOES NOT, so
+                            # a healthy run's payload stays byte-identical and
+                            # `speculation_quality._CALIBRATION_RUN_STARTED_FIELDS` keeps its key-set
+                            # equality — the calibration profile declares no environment, so this key
+                            # can never appear for it, by the same argument the line above makes.
+                            # A NOTICE, NOT A REFUSAL: the run is correct, its successor is the one
+                            # at risk.
+                            **({"eval_env_absent_from_task": True}
+                               if self._eval_env and not _task_declared_env(self.task) else {}),
                             # The SETTLED widths, not their AUTO sentinel: re-entry must never
                             # re-derive this run's execution treatment from a different box.
                             **self._run_start_settled_widths(),

@@ -514,6 +514,28 @@ A single good run is *a hypothesis, not a result* — but **p<0.01 on every prom
   the shared LLM broker bounds configured provider lanes.
 - **Persistence:** canonical inputs are **human-readable files** (`events.jsonl` for replayable run state plus task/config and original sidecars) + a git repo (solutions/lineage); MLflow is an optional export. SQLite/Parquet under `_derived/` is a **rebuildable projection**, never authority. Resume additionally honors the task/config snapshots and the documented command/finalization recovery records; it is not a claim that every external side effect can be recreated from the event log. *([04-file-layout.md](04-file-layout.md))*
 - **Reproducibility:** any reported result ships with `{git_ref, seeds, deps_lock, mlflow_run, exact_command}` so a third party can rerun it (this is also our #2 success metric).
+- **A fact that lives only in the launch line is lost by the one operation between runs.** A
+  `Settings.eval_env` rides `config.snapshot.json`, so a RESUME reproduces the environment
+  (invariant #6). It does NOT ride `task.snapshot.json` — and the documented way to start the next
+  run is to COPY that snapshot. Measured: `eval.env` is null on every task file on this box (v11,
+  v12, v13 and all three snapshots), so the corpus root reached each run only as
+  `-s eval_env=VS_LOCAL_DATA_ROOT=…`. v12 was launched from such a copy without the flag; every
+  node crashed in `botocore ListObjects`, each paid a triage+repair to rediscover the local corpus,
+  and node 14 died of it. `run_started` now carries `eval_env_absent_from_task: true` when the
+  SETTING is carrying a fact the TASK does not — present only in that case, so a healthy payload
+  stays byte-identical and the calibration receipts that compare its key set survive. A notice, not
+  a refusal: the run that trips it is correct; its successor is the one at risk.
+  `adapters/repo_task.py::eval.env` is the durable home.
+
+```
+   SETTING  -s eval_env=…  ──► config.snapshot.json ──► resume reproduces it        ✅
+                            ──► task.snapshot.json                                   ❌ never
+                                       │
+   NEXT_RUN.md: cp runs/<prev>/task.snapshot.json  ──────────────► the value is GONE
+                                       │
+   TASK     eval.env in the task file ─┴──► rides the snapshot ──► the copy carries it ✅
+```
+
 - **A running process pins its own code, and now SAYS SO.** The engine and the `looplab ui` server
   each load their modules once, at import. Every fix merged afterwards is absent from that process
   until it restarts — and a stale *server* does not fail loudly, it answers `200` with an older

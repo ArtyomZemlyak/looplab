@@ -14,6 +14,12 @@ corpus is chosen per-node by a repair is not comparable to the 0.793426 champion
 
     cd /home/jovyan/data/looplab
     cp runs/<previous-run>/task.snapshot.json e5small_vNN.json
+    # THEN PUT THE CORPUS ROOT IN THE TASK FILE, not only in the launch line below:
+    #   "eval": { ..., "env": {"VS_LOCAL_DATA_ROOT": "/home/jovyan/data/dr-local"} }
+    # A SETTING rides config.snapshot.json (so a RESUME reproduces it) but NOT
+    # task.snapshot.json — and the copy above is exactly how the next run starts. That is how
+    # v12 lost it: every node crashed on S3 and node 14 died. `run_started` now records
+    # `eval_env_absent_from_task: true` when the setting is carrying a fact the task does not.
     python -m looplab.core.claimpin e5small_vNN.json          # must report 0 claim defects
     nvidia-smi                                                # both H200s must be free
     setsid nohup python -m looplab.cli run e5small_vNN.json \
