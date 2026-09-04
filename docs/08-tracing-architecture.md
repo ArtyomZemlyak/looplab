@@ -470,3 +470,56 @@ Nested spans with status (OK/ERROR + recorded exception) and attributes:
   `tree.html` remain rebuildable derived artifacts rather than an Inspector data dependency.
 - Browser span forests use one topology-complete logical tree and a globally bounded DOM window;
   disclosure/detail state is retained only for span ids still present in the current projection.
+
+
+## A failure that does not name itself is undiagnosable from inside the product
+
+MEASURED on `runs/e5small-dr-unified-v13`, live. The exporter froze at `exported_spans: 3970` and
+failed every export after it:
+
+| +min | accepted | exported | export_failures | loss_receipt_failures | worker_alive |
+|---|---|---|---|---|---|
+| 233.8 | 5154 | **3970** | 1184 | 858 | true |
+| 296.5 | 6376 | **3970** | 2406 | 1691 | false |
+| 296.6 | 6386 | **3970** | 2416 | 1695 | true |
+| 322.2 | 7419 | **3970** | 3449 | 2246 | false |
+
+`spans.jsonl` and `.spans-append.jsonl` both stopped at the same instant; the run produced spans for
+three more hours. The loop is `export fails → write a loss receipt → the receipt fails →
+_retire_worker_locked("receipt_failed") → the next span restarts the worker → identical failure`,
+which is the `worker_alive` flapping while both counters climb.
+
+SIX CAUSES had to be eliminated from OUTSIDE the process, against the live frozen file — writability
+(an `O_APPEND` open succeeds), ENOSPC (1 PB at 0%), a stale descriptor (`/proc/<pid>/fd` holds
+none), a held flock (`LOCK_NB` acquires immediately), descriptor/path divergence (`fstat == stat`,
+inode stable — the exact post-yield validation the helper performs), and a torn tail (the last
+complete line is 41,646 bytes of valid JSON). None is the cause.
+
+The seventh could not be reached. The console log carried the failure 3,449 times and said only
+`trace export lost spans: none (export failures: 1)`, because the delegate's exception was
+discarded by two `except Exception: pass` handlers. **Retaining the delta for a later attempt is
+right; discarding the reason is what made the class undiagnosable.**
+
+```
+  THE TWO SWALLOW SITES, and what each now records
+
+   worker loop
+     ├─ per-span export ──► _writer._export_line(item)
+     │      except Exception as exc ──► export_error = _bounded_export_error("export", exc)
+     │                                        │   phase-prefixed: the two writers differ and so
+     │                                        │   do their remedies
+     │      with self._condition: ────────────┘   recorded under the SAME lock as the counter it
+     │          self._last_export_error = ...     explains, so the health row reads them together
+     │
+     └─ loss receipt ─────► _writer._export_line(receipt_line)
+            except Exception as exc ──► receipt_error = _bounded_export_error("receipt", exc)
+            failure ──► _retire_worker_locked("receipt_failed")
+
+   metrics() ──► {..., export_failures, last_export_error, worker_stop_reason, ...}
+                                            │
+   engine ──► trace_export_health row ──────┘   and the WARNING line now names it too
+
+   Bounded at 240 chars: an unbounded field on a row emitted once per failure is a second loss
+   mechanism. Empty means nothing has failed in THIS process — it resets in `_reset_process_state`
+   with the counters, because an error carried across a fork would blame a child for its parent.
+```

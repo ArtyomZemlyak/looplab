@@ -111,6 +111,20 @@ _LOG = logging.getLogger(__name__)
 
 TRACE_EXPORT_QUEUE_MAX_SPANS = 256
 TRACE_EXPORT_QUEUE_MAX_BYTES = 16 * 1024 * 1024
+# The failure REASON rides a durable diagnostic row, so it is bounded like every other string on
+# one: a provider message can be arbitrarily long and an unbounded field on a row emitted once per
+# failure is a second loss mechanism. Phase-prefixed because the export and the loss RECEIPT fail
+# through different writers and the remedy differs.
+TRACE_EXPORT_ERROR_MAX_CHARS = 240
+
+
+def _bounded_export_error(phase: str, exc: BaseException) -> str:
+    """`phase: ExcType: message`, bounded — never raises, whatever the exception's __str__ does."""
+    try:
+        detail = str(exc)
+    except Exception:  # noqa: BLE001 - a broken __str__ must not break the diagnostic
+        detail = "<unprintable>"
+    return f"{phase}: {type(exc).__name__}: {detail}"[:TRACE_EXPORT_ERROR_MAX_CHARS]
 TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS = 30_000
 _TRACE_EXPORT_WORKER_IDLE_S = 60.0
 _TRACE_EXPORT_LOSS_RECEIPT_INTERVAL_S = 1.0
@@ -1439,6 +1453,15 @@ class AsyncJsonlSpanExporter:
         self._unreported_export_failures = 0
         self._loss_receipts = 0
         self._loss_receipt_failures = 0
+        # WHAT the last failure WAS, not only that there was one. `export_failures` counts; this
+        # says why, and without it a permanent deterministic failure is unattributable from inside
+        # the product. Measured on v13: the exporter froze at 3,970 spans and logged its loss 3,449
+        # times — "trace export lost spans: none (export failures: 1)" — while the delegate's
+        # exception was swallowed by the two `except Exception: pass` handlers below. Six candidate
+        # causes had to be eliminated from OUTSIDE the process (writability, ENOSPC, a stale
+        # descriptor, a held flock, descriptor/path divergence, a torn tail) because the one thing
+        # that would have named it was discarded. Bounded, phase-prefixed, last-wins.
+        self._last_export_error: str = ""
         self._receipt_requested = False
         self._next_receipt_at = 0.0
         self._worker_stop_reason = ""
@@ -1700,13 +1723,14 @@ class AsyncJsonlSpanExporter:
                 # `_LOG` is independent of `self._writer`, so this line survives whatever stopped it.
                 # It is emitted BEFORE the durable attempt on purpose: the attempt is what may fail.
                 _LOG.warning(
-                    "trace export lost spans: %s (export failures: %d) — this is the exporter "
-                    "reporting its own loss through the logger, because the durable receipt below "
-                    "rides the writer that may be the thing that broke",
+                    "trace export lost spans: %s (export failures: %d; last error: %s) — this is "
+                    "the exporter reporting its own loss through the logger, because the durable "
+                    "receipt below rides the writer that may be the thing that broke",
                     ", ".join(f"{reason}={count}" for reason, count in sorted(drops.items())
                               if count) or "none",
-                    export_failures)
+                    export_failures, self._last_export_error or "none recorded")
                 succeeded = False
+                receipt_error = ""
                 try:
                     # Direct delegate call: a loss receipt cannot be evicted by the queue it reports.
                     receipt_line = _span_jsonl_line(
@@ -1716,9 +1740,11 @@ class AsyncJsonlSpanExporter:
                     succeeded = True
                 except _AsyncExportAbandoned:
                     pass
-                except Exception:  # noqa: BLE001 - retain the delta for a later export/flush attempt
-                    pass
+                except Exception as exc:  # noqa: BLE001 - retain the delta for a later attempt
+                    receipt_error = _bounded_export_error("receipt", exc)
                 with self._condition:
+                    if receipt_error:
+                        self._last_export_error = receipt_error
                     self._active = False
                     # Consume this exact delta after ONE delegate attempt whether it returned or
                     # raised. The write may have committed before a descriptor/path post-validation
@@ -1747,6 +1773,7 @@ class AsyncJsonlSpanExporter:
             assert item is not None
             succeeded = False
             abandoned = False
+            export_error = ""
             try:
                 # Exactly one delegate attempt. Retrying after an exception could duplicate a row
                 # whose bytes committed before a post-write identity/visibility check failed.
@@ -1757,9 +1784,13 @@ class AsyncJsonlSpanExporter:
                 with self._condition:
                     self._record_drop_locked(
                         "shutdown_timeout", durable=False)
-            except Exception:  # noqa: BLE001 - diagnostics never crash the observed operation
-                pass
+            except Exception as exc:  # noqa: BLE001 - diagnostics never crash the observed operation
+                # SWALLOWED, but no longer SILENT. Retaining the delta for a later attempt is right;
+                # discarding the reason is what made this class undiagnosable.
+                export_error = _bounded_export_error("export", exc)
             with self._condition:
+                if export_error:
+                    self._last_export_error = export_error
                 self._buffered_bytes = max(0, self._buffered_bytes - len(item))
                 self._active = False
                 if succeeded:
@@ -1792,7 +1823,7 @@ class AsyncJsonlSpanExporter:
         with self._condition:
             return not self._abandon_active
 
-    def metrics(self) -> dict[str, int | bool]:
+    def metrics(self) -> dict[str, int | bool | str]:
         """Return a process-local, race-consistent exporter health snapshot."""
         self._ensure_process()
         with self._condition:
@@ -1813,6 +1844,9 @@ class AsyncJsonlSpanExporter:
                 # `trace_export_health` row publishes this whole dict, so the reason travels with
                 # the symptom it explains. Empty means the worker has never stopped in this
                 # process — never "stopped for no reason".
+                # WHAT the last export/receipt failure WAS. Empty means none has failed in this
+                # process — never "failed for no reason".
+                "last_export_error": self._last_export_error,
                 "worker_stop_reason": self._worker_stop_reason,
                 "worker_stop_detail": self._worker_stop_detail,
                 **{f"stopped_{reason}": self._worker_stops.get(reason, 0)
