@@ -2036,3 +2036,51 @@ executable in `tests/test_question_shape_is_recorded.py::test_grounding_is_not_a
    would drop a real direction over a style rule. `chars_median` on the next run against 311 is the
    whole experiment.
 ```
+
+
+## `inert` was one word for two failures — `edit_calls` makes it two
+
+A repair that changes nothing is recorded `verified: inert`. #81 established that every inert repair
+in the corpus had exhausted its session bound, and #82 added `budget_exhausted` so the row says WHICH
+bound. That still left one word covering two different failures with opposite remedies:
+
+| what happened | `changed` | `edit_calls` | remedy |
+|---|---|---|---|
+| never reached for the write surface | `[]` | **0** | not a clock problem — more time buys more reading |
+| tried, and every attempt was refused | `[]` | **> 0** | the refusal path (#92's territory) |
+| wrote, and the bytes were identical | `[]` | > 0 | a proposal that was a no-op |
+
+MEASURED over every inert repair that still has spans (v11 ×2, v13 ×2 — v12's are gone because that
+run pinned pre-fix tracing code, the loss #149 closed): **0, 0, 0, 0** edit-like tool calls, in
+sessions of 22.5, 23.6, 24.4 and 27.3 minutes. Each ended inside one long generation (302 s, 242 s,
+215 s, 192 s, 147 s appear in the tails) after reading widely.
+
+That number took a 450 MB span scan across two runs to obtain, and it refuted the last of four
+candidate fixes for v13 node 0 — wall time separates inert from productive repairs perfectly (all
+inert ≥22.5 min, all productive ≤18.3 min, n=11), so the budget looked like the lever until this
+said there was nothing for more time to finish.
+
+```
+  WHERE THE COUNT COMES FROM, and why it is counted where it is
+
+   model ──calls──► RepoWriteTools.execute(name, args)
+                          │
+                          ├─ name in {write_file, edit_file, delete_file} ?
+                          │        edit_calls += 1     ◄── BEFORE the dispatch, so a REFUSED
+                          │                                attempt still counts. `self.files`
+                          │                                below records only what LANDED.
+                          ├─ declare_stages → staged manifest, NOT an edit
+                          └─ dispatch ──► self.files[path] = content   (the RESULT)
+
+   session end ──► developer.last_edit_calls = write.edit_calls
+                          │        registered in roles.DEVELOPER_OUTPUT_ATTRS beside
+                          │        last_budget_exhausted, the precedent it copies
+                          ▼
+   engine ──► _edit_calls = getattr(developer, "last_edit_calls", 0)   ◄── snapshot, not a late read:
+                          │                                                the developer is SHARED
+                          ▼                                                across concurrent evals
+              node_repaired{... verified, budget_exhausted, edit_calls}
+
+   REPORTED, NEVER REFUSED — the same rung as trace_export_health, belief_admission and
+   node_build_delta. Nothing here changes what a repair is allowed to do.
+```

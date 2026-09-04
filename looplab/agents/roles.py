@@ -314,7 +314,13 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     # `runs/`, 12 of the 12 `inert` repairs in the corpus ran past their wall clock and 0 of the 65
     # that finished inside it are inert, so `inert` alone cannot tell "decided not to edit" from
     # "ran out of clock mid-investigation".
-    "last_budget_exhausted")
+    "last_budget_exhausted",
+    # HOW MANY EDIT/WRITE/DELETE CALLS THE SESSION MADE, refusals included. `last_budget_exhausted`
+    # above tells "the clock ended it"; this tells whether the session ever TRIED to change a file,
+    # and the two together separate "ran out of time mid-edit" from "read for 25 minutes and never
+    # reached for the write surface". Measured over every inert repair with spans (v11 x2, v13 x2):
+    # ZERO edit calls in sessions of 22.5-27.3 minutes, which is why the budget lever was refused.
+    "last_edit_calls")
 RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
 
 # The RESEARCHER's outbound ASSIGNMENTS, the mirror of `DEVELOPER_OUTPUT_ATTRS` above.
@@ -1541,7 +1547,7 @@ class WrapsDeveloper:
         """Mirror the wrapped developer's per-call outputs onto this wrapper.
 
         EVERY member of `DEVELOPER_OUTPUT_ATTRS` the engine reads off `self.developer` has to be
-        here, and two were not. `last_rollback_stage` and `last_budget_exhausted` are set on the
+        here, and two were not. `last_rollback_stage`, `last_budget_exhausted` and `last_edit_calls` are set on the
         INNER developer by `adapters/repo_developer.py`, while `engine/evaluate.py` reads them off
         the FACADE — and under the shipped default (`Settings.unified_agent`) the engine's developer
         is a `UnifiedAgent`, i.e. a wrapper. Both have a FALSY default at their reader, so the
@@ -1559,6 +1565,7 @@ class WrapsDeveloper:
         self.last_footprint = getattr(self._wrapped, "last_footprint", None)
         self.last_rollback_stage = getattr(self._wrapped, "last_rollback_stage", "") or ""
         self.last_budget_exhausted = getattr(self._wrapped, "last_budget_exhausted", "") or ""
+        self.last_edit_calls = getattr(self._wrapped, "last_edit_calls", 0) or 0
 
 
 # --------------------------------------------------------------------------- #

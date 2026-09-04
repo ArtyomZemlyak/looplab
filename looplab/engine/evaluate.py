@@ -3058,6 +3058,11 @@ class EvaluateMixin:
                 # own terms, which is the common case (median repair uses 13 % of its clock).
                 _budget_exhausted = str(
                     getattr(self.developer, "last_budget_exhausted", "") or "").strip()[:32]
+                # DID THE SESSION EVER TRY TO WRITE. Snapshotted HERE for the same concurrency
+                # reason as the bound above. `changed: []` says the tree did not move; this says
+                # whether the model reached for the write surface at all, and the pair is what turns
+                # `inert` from one word into two distinct failures with different remedies.
+                _edit_calls = int(getattr(self.developer, "last_edit_calls", 0) or 0)
                 # THE DEVELOPER SAYING "I DO NOT KNOW HOW TO FIX THIS" (F8). The first of the two
                 # signals the operator asked for, and the one that already existed as a capability
                 # and had no way to be expressed: a Developer that knew it was beaten could only
@@ -3203,6 +3208,7 @@ class EvaluateMixin:
                         # fold-ignored (invariant #5); no metric, champion, selectability or
                         # violation moves on it, and `INERT_REPAIR_LIMIT` is untouched.
                         **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
+                        "edit_calls": _edit_calls,
                         # A DECLARED COORDINATE THIS REPAIR MOVED, if any. Additive and fold-ignored
                         # (invariant #5), and OMITTED when empty rather than written as `[]`: an
                         # absent key on an old row means "nobody looked", which is not the same fact
@@ -3306,6 +3312,7 @@ class EvaluateMixin:
                     # divergence here would show one node two different histories depending on
                     # whether the process had resumed.
                     **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
+                    "edit_calls": _edit_calls,
                     # Same omit-when-empty rule as the durable row above, and for the same reason:
                     # `_format_repair_log` renders this row and the rebuilt one identically, so a
                     # `[]` here and an absent key there would render two different histories for

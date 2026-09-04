@@ -1550,6 +1550,11 @@ class LLMRepoDeveloper:
         # this records it instead, because the repair bound is not obviously wrong (median repair =
         # 151 s, 13 % of it) and a bound nobody can see the effect of cannot be argued about.
         self.last_budget_exhausted = ""
+        # HOW MANY TIMES THIS SESSION REACHED FOR THE WRITE SURFACE — reset beside the bound above
+        # and for the same reason: the developer is reused across nodes, so a stale count would
+        # attribute a sibling's edits here. See `repo_write_tools.py::edit_calls` for why the ATTEMPT
+        # is counted rather than the result.
+        self.last_edit_calls = 0
         # Resolved ONCE for the whole node: operator `cmd.stages` make declare_stages refuse (P12)
         # and drive the stage notes below; data-mount names make mount refusals honest.
         op_stages = self._operator_stage_list()
@@ -1785,12 +1790,14 @@ class LLMRepoDeveloper:
                       **self._session_opts())
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)
+            self.last_edit_calls = int(getattr(write, "edit_calls", 0) or 0)
             self.last_deleted = list(write.deleted)
             from looplab.core.models import developer_artifact_footprint
             self.last_footprint = developer_artifact_footprint(
                 idea.footprint, "", self.last_files)
             return f"{DEVELOPER_ERROR_PREFIX} {e})"
         self.last_files = dict(write.files)
+        self.last_edit_calls = int(getattr(write, "edit_calls", 0) or 0)
         self.last_deleted = list(write.deleted)
         from looplab.core.models import developer_artifact_footprint
         self.last_footprint = developer_artifact_footprint(
