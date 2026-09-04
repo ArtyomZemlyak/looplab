@@ -98,3 +98,60 @@ def test_both_swallow_sites_record_before_the_lock_is_dropped():
     assert src.count("_bounded_export_error(") == 2, "both swallow sites must record"
     assert "self._last_export_error = export_error" in src
     assert "self._last_export_error = receipt_error" in src
+
+
+def test_A_REAL_EXPORT_FAILURE_REACHES_metrics(tmp_path):
+    """DRIVEN, and every assertion above this line is a source pin that cannot see it.
+
+    `grep last_export_error tests/ looplab/` showed the field's entire test surface was five
+    `assert "<literal>" in src` checks — the tier CLAUDE.md records as one comment away from
+    vacuous, because the cheapest mutation is *delete the code, leave a comment carrying the pinned
+    literal*. Comment out either swallow-site assignment and leave
+    `# self._last_export_error = export_error` behind: all five still pass, `src.count(...)` still
+    reads 2, and the `trace_export_health` row that v13's silent outage motivated goes back to
+    publishing `""` for every failure.
+
+    So: a real exporter, a delegate write that raises, and the snapshot the engine publishes. The
+    seam is `exporter._writer._export_line`, the one `test_async_trace_exporter.py` already drives.
+
+    MUTATION: drop `self._last_export_error = export_error` -> `last_export_error` is "" while
+    `export_failures` is 1, which is precisely the undiagnosable shape.
+    """
+    from looplab.core.tracing import AsyncJsonlSpanExporter
+
+    exporter = AsyncJsonlSpanExporter(tmp_path / "spans.jsonl", loss_receipt_interval_s=0.01)
+
+    def _boom(_line, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    exporter._writer._export_line = _boom
+    try:
+        assert exporter.export({"name": "probe"}) is True
+        exporter.force_flush(timeout_millis=2_000)
+        snapshot = exporter.metrics()
+    finally:
+        exporter._writer._export_line = None
+        exporter.shutdown(timeout_millis=2_000)
+
+    assert snapshot["export_failures"] >= 1, "the fixture must actually produce a failure"
+    assert snapshot["last_export_error"], (
+        "a swallowed export failure must still SAY what it was — that is the whole feature")
+    assert "OSError" in snapshot["last_export_error"]
+    assert "No space left on device" in snapshot["last_export_error"]
+
+
+def test_a_HEALTHY_exporter_publishes_an_EMPTY_reason(tmp_path):
+    """The non-vacuous half: "" must mean nothing failed in this process, not "the field is unset
+    because nothing writes it"."""
+    from looplab.core.tracing import AsyncJsonlSpanExporter
+
+    exporter = AsyncJsonlSpanExporter(tmp_path / "spans.jsonl", loss_receipt_interval_s=0.01)
+    try:
+        assert exporter.export({"name": "probe"}) is True
+        exporter.force_flush(timeout_millis=2_000)
+        snapshot = exporter.metrics()
+    finally:
+        exporter.shutdown(timeout_millis=2_000)
+
+    assert snapshot["export_failures"] == 0
+    assert snapshot["last_export_error"] == ""

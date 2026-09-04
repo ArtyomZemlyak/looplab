@@ -252,9 +252,17 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
     """Which of a memo's directions may become OPEN BELIEFS — the admitted list alone.
 
     The rule itself lives in `classify_research_beliefs`, which answers the same question and also
-    says WHY each of the others was dropped. This wrapper is what every caller that only needs the
-    list keeps calling, unchanged; a caller that reports a refusal to a human wants the classifier,
-    because the four causes do not have one explanation between them.
+    says WHY each of the others was dropped. A caller that reports a refusal to a human wants the
+    classifier, because the four causes do not have one explanation between them.
+
+    NO PRODUCTION CALLER TODAY, and the docstring said the opposite ("what every caller that only
+    needs the list keeps calling, unchanged") from the commit that split the rule out: the engine's
+    one consumer, `_admissible_beliefs`, calls the classifier directly because it also records the
+    refusal counts. This is kept as the tree's NAME for the rule — nine comments across four files
+    cite it, `DEEP_RESEARCH_OPEN_BELIEF_CAP`'s own comment above among them — and as the thin
+    surface a caller that genuinely wants only the list may use. It is one line over the
+    classifier, so it
+    cannot answer a different question; what it must not do is read as the path production takes.
     """
     return classify_research_beliefs(open_statements, directions, cap=cap, counted=counted).admitted
 

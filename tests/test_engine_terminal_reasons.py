@@ -32,11 +32,30 @@ _REGISTRY_FILE = LOOPLAB / "core" / "models.py"
 
 
 def _minted_literals() -> set[str]:
-    """Every string constant appearing anywhere in `looplab/` EXCEPT the registry's own definition.
+    """Every string a call site writes AS A TERMINAL `reason`, anywhere in `looplab/`.
 
-    Excluding the definition is what makes the scan evidence rather than a tautology — without it a
-    registered-but-never-used word is found inside the tuple that registers it and counts as its own
-    proof. `CARD_BUILD_SKIP_REASONS`' guard records the same trap.
+    NOT "every string constant in the package", which is what this was and which made the guard
+    vacuous for the exact word it was written about. That scan found 20,227 strings, `"cancelled"`
+    among them — `serve/jobs.py`'s launch state and `assistant_watch.py`'s watch status, neither of
+    them a node terminal — so the mutation this file documents ("add `cancelled` back to
+    `ENGINE_TERMINAL_REASONS` -> red, naming it") was GREEN, and `test_the_scan_is_not_vacuous`'s
+    `len(minted) > 1000` bar guaranteed any short word would pass.
+
+    So the scan reads the WRITE, the shape `CARD_BUILD_SKIP_REASONS`' guard uses:
+
+      * `{... "reason": "<word>" ...}` — a dict literal carrying the key, which is how every
+        `store.append(EV_NODE_FAILED, {...})` names it;
+      * `<expr>["reason"] = "<word>"` — the same fact assigned after the dict was built;
+      * `reason="<word>"` / `terminal_reason="<word>"` — the keyword forms;
+      * `reason = "<word>"` — a local whose NAME ends in `reason`, because a real writer routinely
+        computes the word first and appends it a hundred lines later (`evaluate.py`'s
+        `reason = "idea_rejected"`, `_kreason = str(... or "monitor_broken")`).
+
+    A ternary, an `or`, or a `str(...)` wrapper in any of those positions contributes every branch,
+    because every branch is a reachable write. Everything else in the package is invisible to it,
+    which is the point: `serve/jobs.py`'s `launch_state = "cancelled"` and `assistant_watch.py`'s
+    `status="cancelled"` are neither a `reason` key nor a `*reason` name, so the word they share
+    with a retired terminal no longer stands in as proof that something mints it.
     """
     registry_lines = set()
     src = _REGISTRY_FILE.read_text(encoding="utf-8")
@@ -46,6 +65,22 @@ def _minted_literals() -> set[str]:
                 and node.target.id in ("ENGINE_TERMINAL_REASONS", "BENIGN_TERMINAL_REASONS")):
             registry_lines.update(range(node.lineno, node.end_lineno + 1))
 
+    def _strings(value) -> set[str]:
+        """The string constants this expression can evaluate to — both arms of a choice."""
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return {value.value}
+        if isinstance(value, ast.IfExp):
+            return _strings(value.body) | _strings(value.orelse)
+        if isinstance(value, ast.BoolOp):
+            return set().union(*(_strings(v) for v in value.values))
+        if (isinstance(value, ast.Call) and getattr(value.func, "id", None) == "str"
+                and value.args):
+            return _strings(value.args[0])       # `str(x or "monitor_broken")`
+        return set()
+
+    def _is_reason_name(node) -> bool:
+        return isinstance(node, ast.Name) and node.id.rstrip("_").lower().endswith("reason")
+
     found: set[str] = set()
     for path, source in iter_sources(LOOPLAB):
         try:
@@ -53,19 +88,46 @@ def _minted_literals() -> set[str]:
         except (SyntaxError, UnicodeDecodeError):
             continue
         for node in ast.walk(file_tree):
-            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            if path == _REGISTRY_FILE and getattr(node, "lineno", -1) in registry_lines:
                 continue
-            if path == _REGISTRY_FILE and node.lineno in registry_lines:
-                continue
-            found.add(node.value)
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if isinstance(key, ast.Constant) and key.value == "reason":
+                        found |= _strings(value)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if (isinstance(target, ast.Subscript)
+                            and isinstance(target.slice, ast.Constant)
+                            and str(target.slice.value).endswith("reason")):
+                        found |= _strings(node.value)
+                    elif _is_reason_name(target) and node.value is not None:
+                        found |= _strings(node.value)
+            elif isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg and kw.arg.endswith("reason"):
+                        found |= _strings(kw.value)
     return found
 
 
 def test_the_scan_is_not_vacuous():
+    """Two bars, and the SECOND one is what the first could not give.
+
+    `len(minted) > 1000` over every string in the package was not a non-vacuity check at all: it
+    guaranteed that any short word would be found, which is precisely how the documented mutation
+    below came to be green. A scan of the WRITES is small by construction, so what has to be shown
+    is that it sees real writers and does NOT see a word used elsewhere for something else.
+    """
     minted = _minted_literals()
 
-    assert len(minted) > 1000, f"the literal scan found only {len(minted)} strings"
     assert "gpu_unavailable" in minted, "the scan cannot see a reason it should obviously find"
+    assert "frozen" in minted and "superseded" in minted, (
+        "nor the pair `_fail_reserved_build` chooses between — a ternary is two writes")
+    assert "crash" in minted, "and it must reach the FAILURE_REASONS writers too"
+    assert "cancelled" not in minted, (
+        "THE VACUITY: `serve/jobs.py`'s launch state and `assistant_watch.py`'s watch status are "
+        "both the string `cancelled`, and neither is a node terminal. A scan of every constant in "
+        "the package found them and made this file's own documented mutation pass.")
 
 
 @pytest.mark.parametrize("reason", ENGINE_TERMINAL_REASONS)

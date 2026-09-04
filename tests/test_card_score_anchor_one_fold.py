@@ -162,3 +162,43 @@ def test_the_ast_rule_can_actually_fail():
     call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call))
     kwargs = {kw.arg for kw in call.keywords}
     assert "scored_against" in kwargs and "scored_against_attempt" not in kwargs
+
+
+def test_the_anchor_APPLIES_THE_SAME_REFUSAL_the_snapshot_does():
+    """One rule, one spelling. `scored_anchor` re-derived the first half of `_card_score_snapshot`
+    and dropped its `tombstoned` / `aborted_nodes` refusal, so a champion the snapshot refuses came
+    back from here as a live anchor.
+
+    MUTATION: re-derive it as `(state.best_node_id, node.attempt)` -> this is red on both cases.
+    """
+    tombstoned = _fold(_PROPOSAL)
+    tombstoned.nodes[1].tombstoned = True     # set directly: the property is the REFUSAL, not the
+    assert CardReservationMixin._card_score_snapshot(tombstoned, None) is None, (   # event shape
+        "the fixture must actually reach the snapshot's refusal")
+    assert scored_anchor(tombstoned) == (None, None), (
+        "a tombstoned champion is not something a proposal can be scored against")
+
+    aborted = _fold(_PROPOSAL)
+    aborted.aborted_nodes.append(1)
+    assert CardReservationMixin._card_score_snapshot(aborted, None) is None
+    assert scored_anchor(aborted) == (None, None)
+
+
+def test_the_anchor_never_returns_the_OVERLOADED_attempt_sentinel():
+    """`attempt=None` is not "this anchor has no attempt" — one function down it means "the caller
+    has no opinion", and `_card_score_snapshot` then takes the attempt from ITS OWN fresh fold. So
+    an id from the caller's fold arrived beside an attempt from a later one: the exact two-fold
+    mismatch this pair exists to close, reintroduced by the helper that closes it.
+
+    MUTATION: `return node_id, (None if node is None else node.attempt)` -> the pair here is
+    `(1, None)` and the mismatch is back.
+    """
+    missing = _fold(_PROPOSAL)
+    missing.nodes.pop(1)                                   # a best_node_id with no node behind it
+    node_id, attempt = scored_anchor(missing)
+    assert (node_id, attempt) == (None, None), (
+        "an anchor with no node is no anchor; it must never be an id beside a `no opinion` attempt")
+
+    live_id, live_attempt = scored_anchor(_fold(_PROPOSAL))
+    assert live_attempt is not None, "and a real anchor still names its own attempt"
+    assert (live_id, live_attempt) == (1, 0)

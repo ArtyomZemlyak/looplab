@@ -48,31 +48,66 @@ def test_a_task_model_with_no_eval_section_is_undeclared_not_an_error():
     assert _task_declared_env(types.SimpleNamespace(eval=None)) is False
 
 
-def test_the_notice_appears_ONLY_when_the_setting_carries_what_the_task_does_not():
-    """Four cases, and only one of them is the trap. Read off the source because constructing an
-    Engine starts a run; the condition is what is under test."""
-    import inspect
+def test_the_notice_appears_ONLY_when_the_setting_carries_what_the_task_does_not(tmp_path):
+    """Four cases, and only one of them is the trap — DRIVEN over a real run's own `run_started`.
 
-    from looplab.engine import orchestrator
-    src = inspect.getsource(orchestrator)
-    cond = '**({"eval_env_absent_from_task": True}\n                               if self._eval_env and not _task_declared_env(self.task) else {}),'
-    assert cond in src, "the notice must require BOTH a live setting and an undeclaring task"
+    This asserted a 31-column-indented source substring, which is wrong twice: re-wrapping the dict
+    (which this same file's change does elsewhere in `orchestrator.py`) turns it red with no
+    behaviour change, and commenting the spread out while leaving the text keeps it green. The key
+    is a `run_started` field; one fold observes it directly.
+    """
+    from looplab.core.models import RunState
+    from factories import make_engine
+
+    def _started(**kw):
+        engine = make_engine(tmp_path / f"run-{len(list(tmp_path.iterdir()))}", **kw)
+        engine._setup_phase(RunState())          # the phase that writes `run_started`
+        rows = [e for e in engine.store.read_all() if e.type == "run_started"]
+        assert rows, "the engine must have written its run_started"
+        return rows[0].data
+
+    NOTICE = "eval_env_absent_from_task"
+    assert NOTICE not in _started(), "no setting, nothing declared: no notice"
+    assert _started(eval_env={"HF_HOME": "/data/hf"}).get(NOTICE) is True, (
+        "a live setting carrying what the task does not declare IS the trap")
 
 
-def test_a_healthy_payload_stays_byte_identical():
+def test_a_healthy_payload_stays_byte_identical(tmp_path):
     """The key is conditional for the reason the neighbouring `eval_env` key is:
     `speculation_quality._CALIBRATION_RUN_STARTED_FIELDS` compares the payload's key SET for
     equality, so an unconditional key would revoke every issued calibration receipt. The calibration
     profile declares no environment, so `self._eval_env` is empty for it and this key can never
-    appear — the same argument, one line down."""
-    import inspect
+    appear — the same argument, one line down.
 
-    from looplab.engine import orchestrator
-    src = inspect.getsource(orchestrator)
-    # conditional spread, never a bare assignment
-    assert '"eval_env_absent_from_task": True' in src
-    assert 'if self._eval_env and not _task_declared_env' in src
-    assert '\n                            "eval_env_absent_from_task"' not in src
+    THE KEY SET IS THE PROPERTY, and no assertion in this file touched it: a healthy run's payload
+    must differ from a notice-carrying one by exactly this one key, and by nothing else.
+    """
+    from looplab.core.models import RunState
+    from factories import make_engine
+
+    def _keys(**kw):
+        engine = make_engine(tmp_path / f"run-{len(list(tmp_path.iterdir()))}", **kw)
+        engine._setup_phase(RunState())
+        return set(next(e for e in engine.store.read_all() if e.type == "run_started").data)
+
+    healthy = _keys()
+    assert "eval_env_absent_from_task" not in healthy, (
+        "a run whose task and settings agree must carry no notice at all")
+    assert _keys(eval_env={"HF_HOME": "/data/hf"}) - healthy == {
+        "eval_env", "eval_env_absent_from_task"}, (
+        "the notice may add ITSELF and nothing else beyond the `eval_env` key it qualifies — an "
+        "unconditional one would move the key set of EVERY run, and "
+        "`_CALIBRATION_RUN_STARTED_FIELDS` compares that set for equality")
+
+
+def test_the_notice_can_never_appear_on_a_CALIBRATION_payload():
+    """Which is the argument the conditional rests on, stated as a check rather than as prose: the
+    calibration profile declares no environment, so `self._eval_env` is empty and the left half of
+    the condition is False before the task is even consulted."""
+    from looplab.search.speculation_quality import _CALIBRATION_RUN_STARTED_FIELDS
+
+    assert "eval_env_absent_from_task" not in _CALIBRATION_RUN_STARTED_FIELDS, (
+        "if it were, the gate would be accepting a key that only appears on a misconfigured run")
 
 
 def test_it_is_a_notice_and_refuses_nothing():

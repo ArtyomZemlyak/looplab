@@ -134,12 +134,24 @@ def scored_anchor(state) -> tuple[Optional[int], Optional[int]]:
 
     `(None, None)` on an empty board is the honest answer, not a refusal — `_card_score_snapshot`
     turns a `None` id into the `scored_against_empty` triple.
+
+    DELEGATED, because this is the first half of `_card_score_snapshot` and a second spelling of it
+    was wrong in two ways that a re-derivation of a rule is always wrong in. It omitted that
+    method's refusal — a tombstoned or aborted champion came back as a live anchor here while the
+    snapshot refuses it — and, when the anchor's node was simply absent, it returned
+    `attempt=None`, which is an OVERLOADED sentinel: `requested_attempt=None` means "the caller has
+    no opinion" one function down, so the attempt was then taken from the FRESH fold beside an id
+    from the OLD one, which is exactly the two-fold mismatch this pair exists to close.
+
+    A refused anchor answers `(None, None)` — the same thing an empty board does. That is the safe
+    direction and not a loss: `_card_score_snapshot` maps it to `scored_against_empty`, and a
+    champion that has been tombstoned or aborted is not something a proposal can be scored against.
     """
-    node_id = state.best_node_id
-    if node_id is None:
+    snapshot = CardReservationMixin._card_score_snapshot(state, None)
+    if snapshot is None:
         return None, None
-    node = state.nodes.get(node_id)
-    return node_id, (None if node is None else node.attempt)
+    node_id, attempt, empty = snapshot
+    return (None, None) if empty else (node_id, attempt)
 
 
 def _fold(events):
