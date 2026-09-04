@@ -2084,3 +2084,43 @@ said there was nothing for more time to finish.
    REPORTED, NEVER REFUSED — the same rung as trace_export_health, belief_admission and
    node_build_delta. Nothing here changes what a repair is allowed to do.
 ```
+
+
+## A build that declares a stage it never wrote
+
+MEASURED on `runs/e5small-dr-unified-v13`, which lost two of its four nodes to this:
+
+| node | stage | error | exit |
+|---|---|---|---|
+| 0 | `mine` | `No module named vectorsearch.mine_stage` | 0.505 s |
+| 2 | `teacher_embeddings` | `can't open file '.../teacher_embeddings.py'` | 0.209 s |
+
+Each then bought **two** repair sessions of ~30 min — all four `inert`, all four `changed: []`,
+`budget_exhausted: time` — and died. The stage cost half a second; the **cascade** cost ~2 h a node.
+
+I rejected this check two cycles earlier with *"it saves 0.5 s against a 47-minute cost"*. That
+reasoned about the stage's own duration and was wrong: the sub-second failure is what triggers the
+cascade. Three sites were then eliminated by the tree's own reasoning before the right one:
+
+```
+  submit time            repo_task.eval_entrypoint_unprotected is DELIBERATELY silent on a
+                         resolvable-but-absent entrypoint — "the Developer AUTHORS the eval
+                         entrypoint" IS the designed flow.                            REFUSED
+  declare_stages tool    the stages phase runs with READ-ONLY tools, so the script
+                         cannot exist yet when the manifest is declared.               REFUSED
+  the stage runner       too late: the node exists, and the cascade is the cost.       REFUSED
+  the IMPLEMENT emit     manifest and final write-ledger are both known here.          <- HERE
+
+  and only the SCRIPT form:
+      python teacher_embeddings.py   -> ["teacher_embeddings.py"]        1 candidate, decidable
+      python -m vectorsearch.mine_stage -> [".../mine_stage.py", ".../__main__.py"]  \
+      python -m pytest                  -> ["pytest.py", "pytest/__main__.py"]       /  IDENTICAL
+  A module with no local file is how INSTALLED code looks — which is why
+  eval_stages._stage_reachable_files already treats that form as OPAQUE. Refusing it would reject
+  every legitimate `python -m pytest` stage. So v13 node 0 is NOT caught, and that is the correct
+  trade: a false refusal costs a healthy build, a missed catch costs one node.
+```
+
+The rung is `repair_verify.build_declared_script_never_written`, bounced ONCE at the implement emit
+from the same `_bounced` shot the repair rung uses — a session gets one bounce, whichever rung
+fires, because two would spend it arguing instead of editing.

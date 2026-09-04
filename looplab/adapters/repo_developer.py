@@ -1756,8 +1756,24 @@ class LLMRepoDeveloper:
                     # unvalidated instead — rejecting there dropped the summary and `rollback_stage`
                     # on the floor and left `repair_verdict` empty, which is how a rung meant to buy
                     # one more edit came to cost the whole repair record.
-                    if not error or _bounced:
+                    if _bounced:
                         return None
+                    if not error:
+                        # THE BUILD PATH'S OWN ONE-SHOT, in the slot this validator already owns and
+                        # left empty. A manifest declaring a stage whose SCRIPT this session never
+                        # wrote produces a node that exits in under a second and then buys two
+                        # ~30-minute repairs before dying — measured on v13 nodes 0 and 2. The rule
+                        # and the whole safety argument (script form only; `-m` is indistinguishable
+                        # from installed code) live beside their repair sibling in
+                        # `engine/repair_verify.py`.
+                        from looplab.engine.repair_verify import (
+                            build_declared_script_never_written)
+                        build_refusal = build_declared_script_never_written(
+                            write.files.get("looplab_stages.json", ""), write.files)
+                        if not build_refusal:
+                            return None
+                        _bounced.append(True)
+                        return build_refusal
                     # ONE place decides "did this session write anything", and it is the `wrote`
                     # parameter the rule's own docstring says owns it. Testing it here and then
                     # passing the literal `False` stated the byte fact twice and left the parameter
