@@ -8392,3 +8392,28 @@ doing when something bigger than $2.58 rides on it.
 measured, positive counterfactual (recovers $1.5354; costs one node that scored zero). §171 moves
 from "queued" to "needs a refactor, priced at $2.58" — recorded rather than dropped, because the
 measurement stands and only the remedy does not.
+
+## 184. Eleven failures that were not there: a 32-minute suite run over a tree I was editing
+
+The background suite came back **`11 failed, 13571 passed`** — the first double-digit red of the
+campaign. Re-run against the settled tree, all thirty-nine of those tests pass in seventeen seconds.
+
+The eleven were not a regression. They are the shape of the measurement:
+
+* the suite was launched, then `looplab/adapters/repo_developer.py` and
+  `tests/test_the_plan_phase_is_not_promised_a_writer.py` were edited while it ran (§182's wiring);
+* nine of the eleven failures are tests that import `repo_developer`;
+* the eleventh is `test_the_call_site_is_still_open_and_says_so` — **a test I deleted during the
+  run**, which the collector had already picked up.
+
+A pytest run takes 32 minutes on this box. Editing inside that window means half the tests import
+one version of a module and half import another, and the report is about neither tree. It is the
+same class as §160's doubled `-q` and §158's `cmd | tail`: the instrument answered a question I had
+not asked.
+
+**The rule this earns**: a full suite is a measurement of a tree, so the tree has to hold still. In
+practice — start the suite *after* the last edit of a sweep, not before, or re-run whatever fails
+before believing it. The second half of that is what happened here, and it took one command; the
+cost of not doing it would have been a section explaining eleven regressions that did not exist.
+
+A clean run on the settled tree is now in flight, and its number is the one that will be quoted.
