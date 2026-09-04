@@ -247,3 +247,47 @@ def test_reasons_names_only_what_FIRED():
     """A line that always lists four numbers, three of them zero, is the wall of text every bounded
     output rule in this repo refuses."""
     assert classify_research_beliefs([], ["a"], counted=[]).reasons() == ""
+
+
+def test_ONE_FOLD_PER_MEMO_and_both_decisions_read_the_SAME_board(monkeypatch):
+    """Two folds twelve lines apart are not only a second read of a multi-megabyte log per memo —
+    they are two BOARDS.
+
+    `_record_research_steering` resolved a question's PARENT edge against `_board_card_ids()`'s fold
+    and then called `_admissible_beliefs`, which folded the whole log again. A card appended between
+    them could be a legal parent for a question the very next line refused as `restated`: an edge
+    pointing at a board state that never coexisted with the decision that used it.
+
+    Driven through the real method with the documented `research_cadence.fold` seam, the same
+    harness `_admissible` above uses.
+
+    MUTATION: drop the `board=` argument from either call -> the count is 2, and the two decisions
+    read different folds.
+    """
+    st = _board([_direction("card-1", "an existing direction")])
+    appended: list[tuple] = []
+    engine = types.SimpleNamespace(
+        store=types.SimpleNamespace(read_all=lambda: [],
+                                    append=lambda etype, data, **kw: appended.append((etype, data))),
+        _track_hypotheses=True)
+    for name in ("_record_belief_admission", "_admissible_beliefs", "_board_card_ids",
+                 "_record_research_steering"):
+        setattr(engine, name, types.MethodType(getattr(rc.ResearchCadenceMixin, name), engine))
+
+    folds: list[int] = []
+    monkeypatch.setattr(rc, "fold", lambda _events: (folds.append(1), st)[1])
+
+    memo = types.SimpleNamespace(at_node=0)
+    engine._record_research_steering(
+        memo, {"open_questions": ["a fresh direction", "another fresh one"],
+               "question_parents": ["card-1", ""]},   # a parent named as a BOARD ID
+        directions=[], questions=["a fresh direction", "another fresh one"],
+        question_channel="recommended direction")
+
+    assert len(folds) == 1, f"the memo must fold the board once and share it, folded {len(folds)}"
+    assert [etype for etype, _ in appended].count("hypothesis_added") == 2, (
+        "and both questions still reach the board — the sharing must not cost the output")
+    parented = [d for etype, d in appended
+                if etype == "hypothesis_added" and d.get("parent_belief_id")]
+    assert parented and parented[0]["parent_belief_id"] == "card-1", (
+        "the parent edge is resolved against that same board, not a second one")

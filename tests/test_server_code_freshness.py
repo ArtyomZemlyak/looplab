@@ -125,18 +125,79 @@ def test_a_walk_that_hit_the_bound_does_not_claim_completeness(tmp_path, monkeyp
 
 
 def test_the_cache_answers_within_its_window_and_re_reads_after_it(tmp_path, monkeypatch):
-    """A 2.5 s poll per open browser must not walk the tree every tick — and must not go blind."""
+    """A 2.5 s poll per open browser must not walk the tree every tick — and must not go blind.
+
+    The clock is a settable NOW rather than a fixed sequence of ticks: how many times the
+    implementation reads the clock is not the property, and pinning it made the single-flight
+    re-check (one extra read per miss) look like a regression.
+    """
     calls = []
+    now = [0.0]
     monkeypatch.setattr(cf, "code_freshness", lambda: calls.append(1) or {"stale": False})
     monkeypatch.setattr(cf, "_cached", None)
-    # One tick per call on the miss path (the stamp) and one on the hit path (the age check).
-    clock = iter([0.0, 1.0, cf.CACHE_SECONDS + 1.0, cf.CACHE_SECONDS + 1.0])
-    tick = lambda: next(clock)
+    tick = lambda: now[0]
+
     cf.cached_code_freshness(clock=tick)                  # miss: reads, stamps at 0.0
-    cf.cached_code_freshness(clock=tick)                  # checks at 1.0: inside the window, hit
+    now[0] = 1.0
+    cf.cached_code_freshness(clock=tick)                  # inside the window: hit
     assert len(calls) == 1
-    cf.cached_code_freshness(clock=tick)                  # checks past the window: reads again
+    now[0] = cf.CACHE_SECONDS + 1.0
+    cf.cached_code_freshness(clock=tick)                  # past the window: reads again
     assert len(calls) == 2
+
+
+def test_ONE_WALK_PER_WINDOW_even_when_every_reader_misses_together(monkeypatch):
+    """THE THUNDERING HERD. The walk ran with `_cache_lock` RELEASED — correctly, since holding it
+    would serialize every reader — but with nothing else in its place, so at each 30-second boundary
+    every open SSE stream and every polling tab walked the tree simultaneously. On this deployment
+    the package sits on the same network mount as the run dirs (~0.4 ms per present-file `lstat`,
+    ~135 ms per walk), so that is K x the cost of the one answer they all end up sharing.
+
+    MUTATION: drop `_compute_lock` -> `calls` is 8, one per thread.
+    """
+    import threading
+
+    started = threading.Barrier(8)
+    calls: list[int] = []
+
+    def _slow_walk():
+        calls.append(1)
+        time.sleep(0.05)                                  # long enough for the others to arrive
+        return {"stale": False}
+
+    monkeypatch.setattr(cf, "code_freshness", _slow_walk)
+    monkeypatch.setattr(cf, "_cached", None)
+
+    got: list[dict] = []
+
+    def _reader():
+        started.wait()
+        got.append(cf.cached_code_freshness())
+
+    threads = [threading.Thread(target=_reader) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(calls) == 1, f"eight simultaneous misses must produce one walk, got {len(calls)}"
+    assert len(got) == 8 and all(g == {"stale": False} for g in got), (
+        "and every reader still gets the answer")
+
+
+def test_the_payload_reads_the_freshness_ONCE(tmp_path, monkeypatch):
+    """It is a fact about THIS payload, and `state_payload` asked for it twice on both the hit and
+    the miss path — so the `state` mirror and the envelope could disagree, and each ask is a cache
+    lookup that becomes a tree walk at the window boundary."""
+    import inspect
+
+    from looplab.serve import appstate
+
+    body = inspect.getsource(appstate.AppState.state_payload)
+    assert body.count("cached_code_freshness()") == 2, (
+        "once per branch (hit and miss), never once per USE — got "
+        f"{body.count('cached_code_freshness()')}")
+    assert body.count('"server_code": server_code') == 2, "both envelopes reuse that one read"
 
 
 # --- the shipped HTTP surface ---------------------------------------------------------------------

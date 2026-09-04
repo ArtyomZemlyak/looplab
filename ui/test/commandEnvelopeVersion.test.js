@@ -120,6 +120,32 @@ test('an envelope from a NEWER build keeps its command id instead of dying', () 
   assert.ok(loaded.statusUnavailable, 'and the surface is told to go and look')
   assert.equal(loaded.protocolNewer, true,
     'a newer protocol is a distinct fact from corruption and must be reported as one')
+  // AND IT MUST NOT STILL BE THE OUTCOME-UNKNOWN STATE. `protocolTransport` hard-codes
+  // `protocolInvalid: true`, so this branch used to return byte-identically what the key check it
+  // skips already returned — the chip dead, `canResubmit: false`, for a command running right now —
+  // while `protocolNewer` was a flag no surface reads. `Dock.jsx::onCheckTransport` fetches
+  // `record.id` only when the state is NOT `protocolInvalid`; that fetch is the whole remedy.
+  //
+  // MUTATION: return `{ ...protocolTransport(...), protocolNewer: true }` again -> this is red and
+  // the deploy still kills the command.
+  assert.equal(loaded.protocolInvalid, false,
+    'a live command from a newer build must be re-checkable, not a protocol violation')
+  assert.equal(loaded.canResubmit, false,
+    'but not REPLAYABLE: re-checking by id is safe, replaying an envelope this build does not '
+    + 'fully understand is not')
+})
+
+test('a newer envelope with NO command id keeps the honest refusal', () => {
+  // Nothing to re-check means nothing to go and look at, so the outcome really is unknown. The
+  // tolerance the version buys is "trust the fields I understand", not "assume it is fine".
+  const loaded = readEnvelope(liveEnvelope({
+    v: COMMAND_ENVELOPE_VERSION + 1, somethingAddedLater: 'x',
+    commandId: '', record: { status: 'submitting' },
+  }))
+
+  assert.equal(loaded.protocolNewer, true)
+  assert.equal(loaded.protocolInvalid, true, 'no id, no re-check — the refusal stands')
+  assert.equal(loaded.canResubmit, false)
 })
 
 test('genuine corruption is still refused', () => {

@@ -435,11 +435,15 @@ class AppState:
                 # Present-time, and re-stamped on the hit path for the same reason liveness is: a
                 # server that went stale WHILE this entry sat in the cache would otherwise keep
                 # answering "current" out of a body built before the merge.
-                out["server_code"] = cached_code_freshness()
+                # ONE READ, two places. It is a fact about THIS payload, so asking twice can only
+                # produce a payload whose `state` mirror and envelope disagree — and each ask is a
+                # cache lookup that may become a tree walk at the 30-second boundary.
+                server_code = cached_code_freshness()
+                out["server_code"] = server_code
                 return {"state": out, "seq": last_seq, "max_seq": max_seq,
                         "event_count": event_count,
                         "source_integrity": self.log_integrity(rd),
-                        "server_code": cached_code_freshness(),
+                        "server_code": server_code,
                         RUN_GENERATION_FIELD: generation or None}
         all_evs = self.events(rd)
         generation = run_generation_token(all_evs)
@@ -558,7 +562,8 @@ class AppState:
         # server returns 200 with a smaller truth. Mirrored into `state` as well as onto the envelope
         # for the same reason `source_integrity` is: `useRunState` publishes the folded snapshot and
         # not the frame around it. See `serve/code_freshness.py` for the case that produced it.
-        d["server_code"] = cached_code_freshness()
+        server_code = cached_code_freshness()   # one read, mirrored below — see the hit path
+        d["server_code"] = server_code
         if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
             with self._state_cache_lock:      # only the dict ops; the fold/trim above ran lock-free
                 self._state_cache[ckey] = (d, last_seq, max_seq, generation, event_count)
@@ -573,7 +578,7 @@ class AppState:
         return {"state": d, "seq": last_seq, "max_seq": max_seq,
                 "event_count": event_count,
                 "source_integrity": self.log_integrity(rd),
-                "server_code": cached_code_freshness(),
+                "server_code": server_code,
                 RUN_GENERATION_FIELD: generation or None}
 
     def state_probe(self, rd: Path) -> dict:

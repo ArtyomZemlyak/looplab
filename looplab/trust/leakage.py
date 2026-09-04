@@ -17,16 +17,13 @@ def _pearson(a: Sequence[float], b: Sequence[float]) -> float:
     # anywhere poisons cov/var to NaN, and `abs(NaN) >= threshold` is False, so a leaking feature with a
     # single NaN row would slip through the hard gate (arch-review §4 P1-7). Dropping the pair keeps the
     # correlation on the clean rows, so the proxy is still caught.
+    # THE CLEANING IS `_finite_pairs` BELOW, called rather than repeated. The docstring there says
+    # the rule was "hoisted ... so the two coefficients can never disagree about which ROWS they
+    # describe" — and this copy was left standing forty lines above it, so the rule was written
+    # twice in one file and the guarantee was false the day it was made. `target_leakage` flags on
+    # `_pearson` OR `_spearman`, and this gate can abort a run.
     import math
-    n0 = min(len(a), len(b))
-    pairs: list[tuple[float, float]] = []
-    for x, y in zip(list(a)[:n0], list(b)[:n0]):
-        try:
-            fx, fy = float(x), float(y)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(fx) and math.isfinite(fy):
-            pairs.append((fx, fy))
+    pairs = _finite_pairs(a, b)
     n = len(pairs)
     if n < 3:   # a 2-point overlap is always perfectly collinear -> meaningless |r|==1.0 against the gate
         return 0.0

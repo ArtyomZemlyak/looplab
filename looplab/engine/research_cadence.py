@@ -979,9 +979,17 @@ class ResearchCadenceMixin:
             # list for the same reason: `question_parents[i]` names the parent of
             # `open_questions[i]`. `known_ids` is the live board, so a memo may also file a new
             # question under a direction that already exists.
+            # ONE FOLD, read twice. Both the parent edge below and the admission decision at the
+            # bottom of this block ask about the same board, and folding twice made them ask about
+            # two — see `_board_card_ids`. Best-effort exactly like its readers: a fold that raises
+            # yields None and each falls back to its own historical degradation.
+            try:
+                board = fold(self.store.read_all())
+            except Exception:  # noqa: BLE001 - a read must never cost the memo its questions
+                board = None
             parent_by_statement = question_parent_rows(
                 memo_d.get("open_questions") or [], memo_d.get("question_parents") or [],
-                known_ids=self._board_card_ids())
+                known_ids=self._board_card_ids(board))
             # NO INTAKE TRUNCATION, and the bare `5` that used to be here was wrong twice over.
             # `DEEP_RESEARCH_OPEN_BELIEF_CAP` is DERIVED from `BOARD_PROMPT_CARDS` precisely so
             # raising the prompt window cannot leave a stale literal behind (see its comment), and
@@ -992,7 +1000,8 @@ class ResearchCadenceMixin:
             # empty" outcome this cadence's own cap fix was written for. `admit_research_beliefs`
             # owns both the dedup universe and the cap, and it bounds its OUTPUT, so handing it the
             # whole list is what lets the cap mean what it says.
-            for direction in self._admissible_beliefs(questions, channel=question_channel):
+            for direction in self._admissible_beliefs(
+                    questions, channel=question_channel, board=board):
                 concepts = by_statement.get(str(direction).strip())
                 parent = parent_by_statement.get(str(direction).strip())
                 self.store.append(EV_HYPOTHESIS_ADDED, {
@@ -1001,14 +1010,19 @@ class ResearchCadenceMixin:
                     **({"concepts": concepts} if concepts else {}),
                     **({"parent_belief_id": parent} if parent else {})})
 
-    def _board_card_ids(self) -> list[str]:
+    def _board_card_ids(self, board=None) -> list[str]:
         """The ids currently on the board, for resolving a parent named as an EXISTING direction.
 
-        Folded here rather than taken from a caller: `_record_research_steering` runs on the
-        concurrent research task and is handed the memo, not the state. `state` is simply not in
+        Folded here rather than taken from the ENGINE's caller: `_record_research_steering` runs on
+        the concurrent research task and is handed the memo, not the state. `state` is simply not in
         scope there — reaching for it raised `NameError` inside the projection's own try/except,
         which logged one line and swallowed EVERY question registration for the memo. The guards
         caught it as `(0, 1) == (2, 1)`: zero questions reached the board.
+
+        `board` lets the fold be done ONCE and shared with `_admissible_beliefs`, which needs the
+        same one. Two folds of the same log twelve lines apart is not only a second read of a
+        multi-megabyte file per memo: it is two BOARDS, and the parent edge and the admission
+        decision were each taken against a different one.
 
         BEST-EFFORT, exactly like `_admissible_beliefs`: a fold that fails yields no board ids, so
         a parent named as an existing direction goes unresolved and the question registers with no
@@ -1021,7 +1035,8 @@ class ResearchCadenceMixin:
         it would have made every board-id parent unresolvable while looking like it worked.
         """
         try:
-            return list(getattr(fold(self.store.read_all()), "cards", None) or {})
+            board = fold(self.store.read_all()) if board is None else board
+            return list(getattr(board, "cards", None) or {})
         except Exception:  # noqa: BLE001 - a diagnostic read must never cost the memo its questions
             return []
 
@@ -1068,7 +1083,7 @@ class ResearchCadenceMixin:
             pass
 
     def _admissible_beliefs(self, directions: list, *,
-                            channel: str = "recommended direction") -> list[str]:
+                            channel: str = "recommended direction", board=None) -> list[str]:
         """Read the open belief board and apply `admit_research_beliefs` to this memo's directions.
 
         THE WRITE-SIDE HALF of the duplicate fix, and deliberately a REFUSAL TO APPEND rather than a
@@ -1092,9 +1107,15 @@ class ResearchCadenceMixin:
         # admission to the pre-bound behaviour on purpose (see the docstring), but the two empty
         # lists it leaves behind are a fallback and not a measurement — reporting "0 open" off them
         # tells the operator the board was clear when in fact the fold raised.
+        # ONE FOLD PER MEMO, and `board` is how the caller shares it. `_record_research_steering`
+        # resolved the PARENT edge against `_board_card_ids()`'s fold and then reached this method,
+        # which folded the whole log again twelve lines later — a second `read_all()` of a
+        # multi-megabyte log per memo, and worse, TWO BOARDS: a card appended between them could be
+        # a legal parent for a question the very next line refused as `restated`, i.e. an edge
+        # pointing at a board state that never coexisted with the decision that used it.
         board_read = True
         try:
-            board = fold(self.store.read_all())
+            board = fold(self.store.read_all()) if board is None else board
             # A DIRECTION THAT HAS BEEN TAKEN UP NO LONGER OCCUPIES A SLOT, and without this clause
             # the cap is permanent. `open_research_beliefs()` means "open and carrying no EVIDENCE",
             # and a direction never carries any — since the `parent_card_id` edge shipped, the

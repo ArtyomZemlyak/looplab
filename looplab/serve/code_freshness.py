@@ -94,16 +94,40 @@ def code_freshness(root: Path | None = None, boot: dict[str, int] | None = None)
 
 
 _cache_lock = threading.Lock()
+# A SECOND lock, held across the WALK, and it is deliberately not `_cache_lock`. Holding the cache
+# lock over the walk would serialize every reader against it; releasing it before the walk — which
+# is what this did — lets every thread that misses the 30-second boundary walk the tree
+# concurrently. On this deployment the package sits on the same network mount as the run dirs, where
+# a present-file `lstat` is ~0.4 ms, so each open SSE stream and each polling tab paid its own
+# ~135 ms of stat traffic at the same instant, for one answer they would all have shared.
+#
+# Single-flight: the first thread to miss takes this and walks; the rest queue on it and then find
+# the entry already filled by the re-check below. A walk that RAISES releases it like any other.
+_compute_lock = threading.Lock()
 _cached: tuple[float, dict] | None = None
 
 
+def _fresh_enough(clock) -> dict | None:
+    entry = _cached
+    return entry[1] if entry is not None and clock() - entry[0] < CACHE_SECONDS else None
+
+
 def cached_code_freshness(clock=time.monotonic) -> dict:
-    """`code_freshness()` answered from a short cache — the per-request entry point."""
+    """`code_freshness()` answered from a short cache — the per-request entry point.
+
+    ONE WALK PER WINDOW, not one per thread that happens to miss it together. See `_compute_lock`.
+    """
     global _cached
     with _cache_lock:
-        if _cached is not None and clock() - _cached[0] < CACHE_SECONDS:
-            return _cached[1]
-    fresh = code_freshness()
-    with _cache_lock:
-        _cached = (clock(), fresh)
-    return fresh
+        hit = _fresh_enough(clock)
+    if hit is not None:
+        return hit
+    with _compute_lock:
+        with _cache_lock:                 # somebody else may have walked while we queued
+            hit = _fresh_enough(clock)
+        if hit is not None:
+            return hit
+        fresh = code_freshness()
+        with _cache_lock:
+            _cached = (clock(), fresh)
+        return fresh

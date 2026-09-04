@@ -457,7 +457,22 @@ function loadCommandTransport(source, runId, storage) {
       return protocolTransport(runId, source, payload)
     }
     if (envelopeVersion > COMMAND_ENVELOPE_VERSION) {
-      return { ...protocolTransport(runId, source, payload), protocolNewer: true }
+      const transport = protocolTransport(runId, source, payload)
+      // A NEWER PROTOCOL IS NOT A VIOLATION, and until this line it was answered as one.
+      // `protocolTransport` hard-codes `protocolInvalid: true, canResubmit: false` — the
+      // outcome-unknown state — so the newer-envelope branch returned exactly what the key check it
+      // was added to skip already returned, and `protocolNewer` was a flag no surface reads. The
+      // comment above states the intent: the fields this build understands are still what they
+      // claim, so the command is RE-CHECKED rather than declared dead.
+      //
+      // Only with an id, because that is what makes a re-check possible: `Dock.jsx::
+      // onCheckTransport` fetches `record.id` when the state is not `protocolInvalid`, and refuses
+      // with the outcome-unknown toast when there is none. `canResubmit` stays FALSE either way —
+      // re-checking a command by id is safe; REPLAYING an envelope this build does not fully
+      // understand is not.
+      return transport.commandId
+        ? { ...transport, protocolInvalid: false, protocolNewer: true }
+        : { ...transport, protocolNewer: true }
     }
     if (!hasOnlyKeys(payload, commandEnvelopeKeys(source))
         || payload.runId !== String(runId) || !commandTransportActions(source).has(payload.action)

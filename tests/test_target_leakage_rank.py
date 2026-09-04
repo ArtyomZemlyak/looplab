@@ -128,3 +128,36 @@ def test_a_NON_monotone_leak_is_still_missed_and_that_is_STATED():
     symmetric = [float(i) for i in range(-10, 11) if i != 0]
     squared = [v ** 2 for v in symmetric]
     assert target_leakage({"f": squared}, symmetric)["leak"] is False
+
+
+def test_BOTH_coefficients_are_computed_over_THE_SAME_ROWS():
+    """`_finite_pairs`' docstring says it was "hoisted ... so the two coefficients can never disagree
+    about which ROWS they describe" — and `_pearson` still carried the identical cleaning loop forty
+    lines above it, so the rule was written twice in one file and the guarantee was false the day it
+    was made.
+
+    `target_leakage` flags on `_pearson` OR `_spearman`, and this gate can abort a run: any future
+    change to the cleaning (a different `< 3` floor, refusing ragged columns instead of truncating,
+    dropping rows where one side is None) landing in one copy is exactly "a leak flagged by one and
+    cleared by the other, on different row sets" — not a comparison an operator can act on.
+
+    MUTATION: inline the loop back into `_pearson` -> the AST check is red, and the numeric checks
+    keep passing, which is why the AST check has to exist.
+    """
+    import ast
+    import inspect
+
+    from looplab.trust import leakage
+
+    fn = next(n for n in ast.walk(ast.parse(inspect.getsource(leakage)))
+              if isinstance(n, ast.FunctionDef) and n.name == "_pearson")
+    calls = {getattr(c.func, "id", None) for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert "_finite_pairs" in calls, "`_pearson` must CALL the extraction, not repeat it"
+
+    # ...and the two really do describe one row set, driven rather than argued.
+    a = [1, 2, float("nan"), 4, "x", 6]
+    b = [2, 4, 8, 8, 12, 12]
+    pairs = leakage._finite_pairs(a, b)
+    assert pairs == [(1.0, 2.0), (2.0, 4.0), (4.0, 8.0), (6.0, 12.0)]
+    assert leakage._pearson(a, b) == leakage._pearson([x for x, _ in pairs], [y for _, y in pairs])
+    assert leakage._spearman(a, b) == leakage._spearman([x for x, _ in pairs], [y for _, y in pairs])

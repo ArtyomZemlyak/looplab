@@ -263,6 +263,14 @@ const PHASE_TEXT = {
   // The EVAL cursor's own sentence. It defers to `evalStageLabel` so the strip and the node card
   // cannot come to describe the same running stage differently — the rule about what may be CLAIMED
   // (`role`) versus merely SHOWN (`name`) is stated once, there.
+  //
+  // NO PRODUCTION CALLER RENDERS THIS ROW TODAY, and that is a fact worth stating rather than a
+  // reason to delete it. `phaseLabel` has one production caller (`Dock.jsx`) and it passes
+  // `livePhase(..., 'build')`, as does `narration.js`; the eval cursor reaches the operator through
+  // the pipeline strip's own `evalStageLabel`, not through this sentence. The row exists because
+  // `tests/test_phase_progress.py` derives this table FROM `events/types.py::PROGRESS_PHASES` — a
+  // phase with no row renders as the caller's generic fallback — so removing it would go red and
+  // would also leave the next caller that stops filtering with an unlabelled beacon.
   'eval|stage': (r) => `${evalStageLabel(r)}${r.nodeId != null ? ` — experiment #${r.nodeId}` : ''}…`,
   // NO `build|repair` row, and its absence is load-bearing rather than an oversight. That phase
   // existed for one day: it bracketed `developer.repair` inside the `debug` operator's build branch,

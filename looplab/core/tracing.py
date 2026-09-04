@@ -1839,15 +1839,24 @@ class AsyncJsonlSpanExporter:
                 "loss_receipts": self._loss_receipts,
                 "loss_receipt_failures": self._loss_receipt_failures,
                 "worker_alive": bool(self._worker is not None and self._worker.is_alive()),
+                # WHAT the last export/receipt failure WAS. Empty means none has failed in this
+                # process — never "failed for no reason".
+                "last_export_error": self._last_export_error,
                 # WHY it is not alive. `worker_alive: false` alone cannot tell an idle retirement
                 # from a crash, and those have opposite remedies; the engine's
                 # `trace_export_health` row publishes this whole dict, so the reason travels with
                 # the symptom it explains. Empty means the worker has never stopped in this
                 # process — never "stopped for no reason".
-                # WHAT the last export/receipt failure WAS. Empty means none has failed in this
-                # process — never "failed for no reason".
-                "last_export_error": self._last_export_error,
+                #
+                # (These two paragraphs were STACKED above `last_export_error`, so a reader
+                # debugging a stalled exporter was told an empty `last_export_error` meant "the
+                # worker has never stopped" — the opposite of what that field says, and exactly the
+                # misdiagnosis the six-cause v12 hunt this code documents exists to prevent.)
                 "worker_stop_reason": self._worker_stop_reason,
+                # The detail and the per-reason tallies are for a HUMAN reading the durable
+                # `trace_export_health` row; nothing branches on them, and deliberately so —
+                # `events/types.py::trace_export_health_signature` keys that row on the fields that
+                # DECIDE health, so a growing tally cannot make an unchanged state look new.
                 "worker_stop_detail": self._worker_stop_detail,
                 **{f"stopped_{reason}": self._worker_stops.get(reason, 0)
                    for reason in TRACE_WORKER_STOP_REASONS},
