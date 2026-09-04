@@ -2298,6 +2298,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # in flight, each ran the paid call on the loop thread with ZERO ticks. One helper on the proposal
     # pool covers all four sites; the own-node worker seam already licenses their appends.
     # proof:absent:_offload_node_build@looplab/engine/orchestrator.py
+    #
+    # MEASURED 2026-09-04 — the largest loop hold, but the HARM is not established and the
+    # difference decides whether the offload is worth its risk. `card_build` wall, and how much
+    # overlaps a live evaluation (union of eval windows, NOT a per-pair sum: the first cut summed
+    # pairs and reported 149% of the build wall, which is impossible on one thread, and is retracted):
+    #     v11  13 builds  608.6 min   93% overlaps an eval,  7% with none
+    #     v4   16 builds  621.6 min   42% overlaps an eval, 58% with none (362 min)
+    # v11's nine evaluations collapse into ONE continuous union window, so "93%" there says the box
+    # was always evaluating — not that a build displaced anything.
+    #
+    # WHAT IS STILL MISSING, and it is exactly what would justify the change: overlapping an eval is
+    # not a cost. The eval runs in a SUBPROCESS and a busy loop does not slow it. The cost is a FREE
+    # GPU with BUILDABLE WORK while the loop is held, which needs board state per instant and cannot
+    # be read from spans alone. Until that is measured this carries a cost CEILING, not a cost.
     async def _handle_create_actions(self, creates, state, *, created_no_terminal,
                                      no_mint_turns, decision_seq, max_es, max_s, start):
         """The `creates` branch of the run loop, lifted verbatim (doc 25 ES-05).
@@ -4274,6 +4288,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # now lands on top of a live GPU. They write FOLDED rows, so the fix is the offload-under-a-capture-
     # sink discipline `novelty.py` already uses, not a bare `to_thread`.
     # proof:absent:_offload_cadence@looplab/engine/orchestrator.py
+    #
+    # MEASURED 2026-09-04, and the answer RE-RANKS this DOWN rather than closing it. Every
+    # `operation` span on v11 (a full 24 h run, 9 evaluations), totalled by name:
+    #     strategist_consult 3 calls 5.9 min | concept_coverage 2 calls 4.9 min
+    #     foresight_rank     2 calls 2.7 min | report           3 calls 2.0 min
+    #     -> every paid cadence together ~15.5 min, against `evaluate` at 5026.6 min.
+    # The cadences named above are 0.3% of the run. The offload they ask for is a concurrency change
+    # against invariant #1, and 0.3% does not buy that risk. The same sweep found where the hold
+    # actually is: `card_build`, 608.6 min over 13 calls — the serial-node-build item, not this one.
+    # LEFT OPEN because the description is accurate and a costlier Strategist could change the
+    # number; what is recorded is that nobody should spend the risk until it does.
     def _run_cadences(self, state: RunState) -> RunState:
         # Breadth read-model: record the run's narrowing curve at the strategist cadence BEFORE the
         # Strategist decides, so the same snapshot both (a) feeds the meta-controller's decision
