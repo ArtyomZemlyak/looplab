@@ -9439,3 +9439,49 @@ This lands mid-arm on purpose. §190's test is stratified BY BATCH and compares 
 change that reaches all four probes of every later batch equally is absorbed by the stratification —
 which is what batch-stratification is for. Leaving a known 300 s exposure in place for ten more
 batches is not.
+
+## §212 — the fidelity fix was wrong in the direction that matters, and a probe was quietly lost
+
+§209 taught `arm_fidelity` to compare only FINISHED probes, and defined finished as *`final.json`
+exists*. Today it reported `freeB3` as a finished control with 34 executed probes and computed a
+contrast of +10.5 from it.
+
+`freeB3` had not finished. Its `run.log`:
+
+```
+run=run task=algotune_edge_expansion finished=False
+stop: PAUSED (node 2) — resumable, NOT finished, so the absent `run_finished` is correct rather
+than missing. It is OWED more work: `looplab resume`.
+  pause reason: auto-paused: a Developer session crashed (LLM unreachable or a hard error,
+  unresolved within the node) — resume once it's fixed
+nodes=3 evaluated=2
+BEST node 1: metric=265.025 params={}
+```
+
+A paused run writes a `final.json` all the same — 602 bytes, `speedup 260.9543` — so the file is a
+by-product and not the claim. The claim is an EVENT: every genuinely finished probe of batches 1 and
+2 carries `run_finished` with `reason=budget_exhausted`; the paused one carries a `pause` and no
+`run_finished` at all. `finished` now reads that event type, `paused` is surfaced as its own state,
+and the tool says **"PAUSED, not finished, and OWED work"** with the probe named. It still reads no
+scores: event TYPES only, never a metric and never the contents of `final.json`.
+
+Four mutations, all red: `final.json` existence again, a pause counting as finished, paused probes
+not named, and paused folded into finished. The instrument I built one sweep ago to stop a fidelity
+check becoming an interim read had a second way to be wrong, and it took a real paused probe to
+find it.
+
+**Why it paused is §211.** `freeB3` is the probe whose client degraded off SSE at 11:40 and never
+came back: by now **82 of its 313 calls went unstreamed (26 %)**, `capB3` 56/316 (18 %), and the
+ceiling deaths have gone from one to `oldCK9 x6, capB3 x4, freeB3 x1`. Without SSE the 300 s nginx
+window measures the whole generation; enough of those in one node and the Developer session is
+declared unreachable and the run auto-pauses. The permanent degrade did not merely cost latency —
+it cost a probe.
+
+**Resumed**, on its own lane 33-43,81-91 with the same meter path, model and `LOOPLAB_LLM_STREAM=1`,
+at 12:36. It picks up §211's expiring degrade because a resume loads the engine fresh. Dropping it
+instead would have censored the arm on exactly the arm-relevant variable — the control that made the
+most probe calls — which is what §190's registered design exists to prevent.
+
+Money is inside tolerance and says the same thing from the other side: `RESIDUE $+0.070113` against
+an allowance of `$0.080932`, `check_money` exiting 0, with the named parts including
+`$0.076945 PAID RETRIES` on `oldCK9` and 290 calls from five abandoned first-batch probes.

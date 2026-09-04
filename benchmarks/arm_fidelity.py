@@ -28,6 +28,10 @@ import os
 import json
 import statistics
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import events_read  # noqa: E402
 
 DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
 
@@ -35,11 +39,22 @@ DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
 def probe_calls(root: str, name: str) -> dict:
     """`{executed, refused, spans, finished}` for one probe tree. No scores are read.
 
-    `finished` is the EXISTENCE of `final.json`, never its contents. A running probe's count is a
-    lower bound and a finished one's is the answer, and mixing them is how this tool spent three
-    sweeps printing "NO CONTRAST YET" at a moment when the treatment had already stopped at its cap
-    of 12 and the control was still climbing through 10, 11, 12. A negative contrast between a
+    `finished` is a `run_finished` EVENT, and it took two goes to get there. A running probe's
+    count is a lower bound and a finished one's is the answer, and mixing them is how this tool spent
+    three sweeps printing "NO CONTRAST YET" at a moment when the treatment had already stopped at its
+    cap of 12 and the control was still climbing through 10, 11, 12. A negative contrast between a
     finished arm and an unfinished one is not evidence about the intervention; it is the clock.
+
+    The first fix asked whether `final.json` EXISTS, which is wrong in the direction that matters.
+    `freeB3` auto-paused at node 2 on 2026-09-04 -- "a Developer session crashed (LLM unreachable)"
+    -- having spent $0.86 of its $1.00, and a PAUSED run writes a `final.json` all the same: 602
+    bytes, speedup 260.9543. It is not finished, it is OWED more work (`looplab resume`), and this
+    tool counted it into the contrast as a completed control. The four genuinely finished probes of
+    batches 1 and 2 all carry `run_finished` with `reason=budget_exhausted`; the paused one carries
+    a `pause` event and no `run_finished` at all. That event is the claim; the file is a by-product.
+
+    Still no scores: this reads the TYPE of events, never `node_evaluated`'s metric or the contents
+    of `final.json`.
     """
     executed = refused = 0
     spans: set = set()
@@ -65,7 +80,26 @@ def probe_calls(root: str, name: str) -> dict:
                 else:
                     executed += 1
     return {"executed": executed, "refused": refused, "spans": len(spans),
-            "finished": os.path.exists(f"{root}/{name}/final.json")}
+            "finished": _run_finished(root, name), "paused": _paused(root, name)}
+
+
+def _event_types(root: str, name: str) -> set:
+    """The set of event TYPES in this probe's run, crash-atomic packets unwrapped. No data read."""
+    kinds: set = set()
+    for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/events.jsonl")):
+        for event in events_read.iter_events(path):
+            kind = event.get("type")
+            if isinstance(kind, str):
+                kinds.add(kind)
+    return kinds
+
+
+def _run_finished(root: str, name: str) -> bool:
+    return "run_finished" in _event_types(root, name)
+
+
+def _paused(root: str, name: str) -> bool:
+    return any("pause" in k for k in _event_types(root, name))
 
 
 def report(root: str, treat, control) -> dict:
@@ -78,9 +112,10 @@ def report(root: str, treat, control) -> dict:
     t = [rows[n]["executed"] for n in started(treat) if rows[n]["finished"]]
     c = [rows[n]["executed"] for n in started(control) if rows[n]["finished"]]
     running = [n for n in started(list(treat) + list(control)) if not rows[n]["finished"]]
+    paused = [n for n in running if rows[n]["paused"]]
     tm = statistics.median(t) if t else 0
     cm = statistics.median(c) if c else 0
-    return {"rows": rows, "running": running,
+    return {"rows": rows, "running": running, "paused": paused,
             "treat_n": len(t), "control_n": len(c),
             "treat_median": tm, "control_median": cm,
             "contrast": (cm - tm) if (t and c) else None}
@@ -99,7 +134,8 @@ def main(argv=None) -> int:
     for arm, names in (("treat", args.treat), ("control", args.control)):
         for name in names:
             r = got["rows"][name]
-            state = "finished" if r["finished"] else "running"
+            state = ("finished" if r["finished"]
+                     else "PAUSED (owed work)" if r["paused"] else "running")
             print(f'{name:10s} {arm:>9s} {r["executed"]:9d} {r["refused"]:8d} {r["spans"]:7d}  '
                   f'{state}')
     if got["contrast"] is None:
@@ -109,12 +145,18 @@ def main(argv=None) -> int:
               "comparing the two mid-flight measures the clock, not the intervention.")
         if got["running"]:
             print("  still running: " + ", ".join(got["running"]))
+        if got["paused"]:
+            print("  PAUSED and OWED work: " + ", ".join(got["paused"]))
         return 0
     print(f'\nmedian executed over FINISHED probes: treat {got["treat_median"]} '
           f'(n={got["treat_n"]}), control {got["control_median"]} (n={got["control_n"]}), '
           f'contrast {got["contrast"]:+g}')
     if got["running"]:
         print("  still running (not counted): " + ", ".join(got["running"]))
+    if got["paused"]:
+        print("  PAUSED, not finished, and OWED work: " + ", ".join(got["paused"])
+              + " -- resume or the arm is short a probe, and a probe dropped in silence is the "
+                "censoring §190 was designed to avoid")
     if got["contrast"] <= 0:
         print("  NO CONTRAST: the control did not out-probe the treatment in the probes that "
               "FINISHED, so nothing separates the arms so far")

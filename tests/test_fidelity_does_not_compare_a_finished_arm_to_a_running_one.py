@@ -23,9 +23,17 @@ import arm_fidelity  # noqa: E402
 REFUSAL = "(run_probe refused: this run has already made 12 probes, the cap set for this run.)"
 
 
-def _probe(root: Path, name: str, executed: int, refused: int = 0, finished: bool = True):
+def _probe(root: Path, name: str, executed: int, refused: int = 0, finished: bool = True,
+           paused: bool = False):
     d = root / name / "runs" / "edge_expansion" / "run"
     d.mkdir(parents=True)
+    events = []
+    if finished:
+        events.append({"type": "run_finished", "data": {"reason": "budget_exhausted"}})
+    if paused:
+        events.append({"type": "pause", "data": {"reason": "a Developer session crashed"}})
+    (d / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events),
+                                    encoding="utf-8")
     spans = []
     for i in range(executed):
         spans.append({"kind": "tool", "name": "tool", "attributes": {
@@ -34,8 +42,9 @@ def _probe(root: Path, name: str, executed: int, refused: int = 0, finished: boo
         spans.append({"kind": "tool", "name": "tool", "attributes": {
             "tool": "run_probe", "phase_span": "s9", "output": REFUSAL}})
     (d / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans), encoding="utf-8")
-    if finished:
-        (root / name / "final.json").write_text(json.dumps({"speedup": 999.0}), encoding="utf-8")
+    # A final.json is written by a PAUSED run too -- that is what made the first version of this
+    # fix wrong -- so every probe here has one and it decides nothing.
+    (root / name / "final.json").write_text(json.dumps({"speedup": 999.0}), encoding="utf-8")
 
 
 def test_mid_flight_the_tool_refuses_to_state_a_contrast(tmp_path):
@@ -74,16 +83,30 @@ def test_a_running_probe_is_counted_but_not_compared(tmp_path):
     assert got["rows"]["capB3"]["executed"] == 12, "a running probe must still be counted and shown"
 
 
-def test_finished_is_the_existence_of_final_json_and_not_its_contents(tmp_path):
-    """§198: this tool reads no scores, on purpose. A final.json that is empty, truncated or holds
-    a zero must still mark the probe finished -- parsing it would put a score on this screen."""
-    _probe(tmp_path, "capA2", executed=12, finished=False)
-    (tmp_path / "capA2" / "final.json").write_text("", encoding="utf-8")
-    _probe(tmp_path, "freeA2", executed=26, finished=False)
-    (tmp_path / "freeA2" / "final.json").write_text('{"speedup": 0.0', encoding="utf-8")
+def test_a_paused_probe_is_not_a_finished_one(tmp_path):
+    """`freeB3`, 2026-09-04: auto-paused at node 2 -- "a Developer session crashed (LLM
+    unreachable)" -- with $0.86 of $1.00 spent, and it wrote a `final.json` all the same (602 bytes,
+    speedup 260.9543). The first version of this fix asked whether that file EXISTS and counted the
+    probe as a completed control. It is not finished; it is OWED work."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _probe(tmp_path, "freeA2", executed=26)
+    _probe(tmp_path, "freeB3", executed=34, finished=False, paused=True)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA2", "freeB3"])
+    assert got["control_n"] == 1 and got["contrast"] == 14, (
+        f'the paused probe was counted into the contrast: {got}')
+    assert got["paused"] == ["freeB3"], got
+    assert "freeB3" in got["running"], "a paused probe must still be named, not silently dropped"
+
+
+def test_finished_is_an_EVENT_and_not_a_file(tmp_path):
+    """§198: this tool reads no scores. The signal is the TYPE `run_finished`, never `final.json`'s
+    contents -- parsing that file would put a score on this screen."""
+    _probe(tmp_path, "capA2", executed=12)
+    _probe(tmp_path, "freeA2", executed=26)
+    for n in ("capA2", "freeA2"):
+        (tmp_path / n / "final.json").write_text("", encoding="utf-8")   # empty: decides nothing
     got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA2"])
-    assert got["contrast"] == 14, got
-    assert got["running"] == []
+    assert got["contrast"] == 14 and got["running"] == [], got
 
 
 def test_a_probe_that_never_started_is_not_a_zero(tmp_path):
