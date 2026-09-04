@@ -65,6 +65,17 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "engine": {
         "looplab.agents.roles": ("_state_brief",),
+        # THE TRUNCATION BIT, and its own docstring is why it is imported rather than re-derived:
+        # "Split out so a caller that owes its operator a truncation receipt can read the fact from
+        # the one place that knows it, instead of inferring it from lengths." `engine/memory.py`'s
+        # skill card is such a caller — it reconstructed the fact from `len(body)` and shipped a
+        # clipped snippet denying it was clipped, in the direction `core/redact.py` names as a
+        # shipped bug. Declared rather than promoted, on the registry's own question: the name is
+        # private because the PUBLIC spelling is deliberately the plain `str` (~30 call sites
+        # persist that return value directly), and a caller should reach for the tuple only when it
+        # genuinely owes a receipt.
+        "looplab.core.redact": ("_redact_persisted",),
+        # WHO A DROP RECEIPT IS ATTRIBUTED TO, replayed over raw events by the card reopen gate
         # WHO A DROP RECEIPT IS ATTRIBUTED TO, replayed over raw events by the card reopen gate
         # rather than re-derived. Its own docstring is the reason it is imported and not copied:
         # "ONE spelling, because three readers ask it and they must not drift" — the reopen gate is
@@ -80,6 +91,13 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         # instead of a silent break.
         "looplab.events.finalize_scope": ("_adjacent_claim", "_finalize_begun", "_scope_has_step"),
         "looplab.runtime.command_eval": ("_LABEL_KEYS", "_PRED_KEYS", "_as_list"),
+        # THE ONE FILE-DIGEST RULE, sampling above `SAMPLE_ABOVE` with the mode in the preimage so a
+        # sampled entry can never collide with a fully-read one. `engine/workspace.py`'s build-delta
+        # digest is the third reader of it; `runtime/stage_identity.py` was the second and is
+        # in-package. Declared rather than promoted because the rule belongs to `metric_subject` —
+        # it is how a metric's REFERENT is bound, and a caller reaching for it sideways is exactly
+        # what this registry exists to make renameable-with-a-red-test.
+        "looplab.runtime.metric_subject": ("_sha256",),
         "looplab.runtime.sandbox": ("_run_argv", "_to_float"),
         # `looplab.search.concept_graph._experiment_nodes` left this list on 2026-08-05: doc 25 SE-09
         # PROMOTED it (and `_node_text`) to `concept_tagging.experiment_nodes` / `.node_text`. Four

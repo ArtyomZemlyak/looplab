@@ -41,7 +41,13 @@ _CONSUMER_FILES = [
 _REQUIRED = {"id", "goal", "direction", "build_roles"}
 # Plain DATA FIELDS of the composable task model (not optional behaviour hooks): probed by the
 # lessons fingerprinting with defaults for legacy snapshots — legitimate reads, not hook seams.
-_DATA_FIELDS = {"kind", "metric", "goal"}
+#
+# `eval` joined them on 2026-09-04 with `orchestrator.py::_task_declared_env`, and it belongs here
+# rather than in `TASK_OPTIONAL_HOOKS` for that classification's own reason: it is a SECTION of the
+# task model (`RepoTask.eval` -> `EvalSpec`), not behaviour the engine calls. It is duck-typed only
+# because not every task model has one, which is the same reason `kind`/`metric` are read this way.
+# Registering it as a hook would claim the engine dispatches to it.
+_DATA_FIELDS = {"kind", "metric", "goal", "eval"}
 # `(?:self\.)?(?:_e\.)?` covers the engine-delegate spelling `self._e.task` (lessons mixins).
 _PROBE = re.compile(r'getattr\((?:self\.)?(?:_e\.)?task,\s*"([a-z_]+)"')
 

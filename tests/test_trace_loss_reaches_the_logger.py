@@ -63,12 +63,29 @@ def test_the_loss_is_logged_BEFORE_the_durable_attempt():
 
 def test_the_line_names_the_REASONS_not_just_a_count():
     """A number with no reason cannot be acted on. The six reasons are a closed vocabulary and the
-    receipt already carries per-reason counts."""
-    src = (ROOT / "looplab/core/tracing.py").read_text()
-    start = src.index("trace export lost spans")
-    window = src[start:start + 600]
-    assert "reason" in window and "drops.items()" in window, (
+    receipt already carries per-reason counts.
+
+    RESOLVED BY AST, over the `_LOG.warning` CALL, because `src.index("trace export lost spans")`
+    found the first OCCURRENCE of the string — and on 2026-09-04 a comment 267 lines above the log
+    call quoted that very sentence (`"trace export lost spans: none (export failures: 1)"`, the v13
+    evidence). The 600-character window then landed inside the comment block and the test went red
+    against production code that was perfectly correct. That is this repo's own substring-pin trap
+    from the other side: a comment satisfying a pin is the usual failure, a comment SHADOWING one is
+    the same defect with the sign flipped.
+    """
+    import ast
+
+    tree = ast.parse((ROOT / "looplab/core/tracing.py").read_text())
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "warning"
+             and n.args and isinstance(n.args[0], (ast.Constant, ast.JoinedStr, ast.BinOp))
+             and "trace export lost spans" in ast.unparse(n.args[0])]
+    assert len(calls) == 1, f"expected exactly one loss-report log call, found {len(calls)}"
+
+    rendered = ast.unparse(calls[0])
+    assert "reason" in rendered and "drops.items()" in rendered, (
         "the log line must render the per-reason counts, not a bare total")
+    assert "export_failures" in rendered, "and the failure count beside them"
     assert len(_TRACE_EXPORT_DROP_REASONS) == 6
 
 
