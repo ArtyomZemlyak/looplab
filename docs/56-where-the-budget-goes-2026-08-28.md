@@ -9213,3 +9213,48 @@ Batch 1 as described (no contrast computed, per §190): controls `freeA2` 224.36
 `capA3`/`capB3` with `-s developer_probe_max_calls=12`, `freeA3`/`freeB3` with the shipped defaults,
 `LOOPLAB_LLM_STREAM=1`, all four INSTRUMENT.txt verified and all four pinned to their own lane by
 `lanes.py`. Ten batches remain.
+
+## §206 — the snapshot interval was a gap, and four live probes stretched it to an hour
+
+Point 8's three unverified claims about snapshotting are all **refuted by the files and by running
+them**, and one of them led somewhere real.
+
+* *"a snapshot whose destination has vanished reports success"* — no. Measured against an
+  unwritable store: `rc=1`, zero bytes written, `FATAL: … is not writable; refusing to snapshot`.
+* *"nothing separates two simultaneous snapshots"* — no. Two started in the same second land in
+  `20260904-101017` and `20260904-101017-2`; there is a `flock -w 60`, and a run that cannot take
+  the lock exits **3**, which the timer treats as "do not record the fingerprint, retry".
+* *"`.env` does not reach the snapshot and is not named"* — half. It deliberately does not reach it,
+  and it IS named: every snapshot writes `ENVIRONMENT.txt`, `32 lines (redacted; .env itself
+  deliberately NOT copied)`.
+
+The dig came from the incidental part. Snapshot durations, measured as `.complete` mtime minus the
+stamp in the directory name: 129, 118, 104, 127, 117, 200, 126 — and then **1765 s**. Everything but
+the runs archive finished in **7 s**; `cp -ru` spent the remaining 1758 s copying `freeA3` (09:58),
+`freeB3` (10:03), `capA3` (10:07) and `capB3` (10:12) — the four probes I had launched at 09:53,
+**live and growing under the copy**. The archive step scales with how many probes are RUNNING, not
+with how much finished work is new.
+
+And the loop ended `sleep "$INTERVAL"` *after* the snapshot, so the effective period was interval
+PLUS duration. At 127 s that is 1927 s instead of 1800 and nobody notices. At 1765 s it is **3565 s:
+the recovery window doubles**, and the only number the sweep reads — snapshot age, 1147 s against
+2400 — stays comfortably green throughout. The measured gaps say so directly: 1929, 1918, 1904,
+1927, 1917, 2000, 1926 s for a nominal 1800.
+
+Fixed in `benchmarks/snapshot_timer.sh`: time the iteration, sleep `INTERVAL - elapsed`, and when a
+tick already outran the interval **say so** and start the next immediately rather than quietly
+running back to back. Edited by ATOMIC REPLACE, per the doctrine at the top of `run_probe.sh` — the
+old `_loop` was running from this file by offset — then stopped by pid and restarted onto the new
+inode (`3459835`).
+
+`tests/test_the_snapshot_interval_is_a_period_not_a_gap.py` drives the real `_loop` against a stub
+snapshot that sleeps: a 3 s snapshot under a 4 s interval must tick every ~4 s, an overrunning tick
+must name itself, and a 0.2 s snapshot under a 3 s interval must still wait — that last one is there
+because a "fix" that always ran back to back would pass the first test and burn the box. All four
+mutations redden: sleeping the whole interval, never sleeping, running over silently, and measuring
+`elapsed` from a fixed zero.
+
+The stand itself had a hole worth recording: the first version wrote its per-tick marker where
+nothing watched, `fingerprint` returned the same value every time, the loop reported "nothing new"
+and the test timed **one** tick. The stub now moves `meter/`, which is a tree the fingerprint
+actually reads.

@@ -97,6 +97,18 @@ case "${1:-status}" in
   _loop)
     last=""
     while true; do
+      # THE INTERVAL IS A PERIOD, NOT A GAP. This loop used to `sleep "$INTERVAL"` unconditionally,
+      # so the effective period was INTERVAL **plus** however long the snapshot took. That was
+      # invisible while snapshots took ~127 s and the period was 1927 s instead of 1800.
+      #
+      # Measured 2026-09-04: snapshot `20260904-094347` took **1765 s** -- everything but the runs
+      # archive finished in 7 s, and `cp -ru` then spent 1758 s copying four probe trees that were
+      # LIVE and growing under it (`freeA3` at 09:58, `freeB3` at 10:03, `capA3` at 10:07, `capB3`
+      # at 10:12, all launched at 09:53). The archive step scales with how many probes are RUNNING,
+      # not with how much new work finished, so a full bench stretches the period to ~3565 s: the
+      # recovery window doubles and nothing says so. The sweep reads "snapshot age 1147 s" against
+      # a 1800 s expectation and sees nothing wrong.
+      iter_start=$SECONDS
       cur="$(fingerprint)"
       if [ "$cur" != "$last" ]; then
         echo "[$(date +%H:%M:%S)] change detected, snapshotting"
@@ -120,7 +132,16 @@ case "${1:-status}" in
       else
         echo "[$(date +%H:%M:%S)] nothing new since the last snapshot; skipping"
       fi
-      sleep "$INTERVAL"
+      # Sleep the REMAINDER. When the iteration already outran the interval, say so rather than
+      # silently running back to back -- an operator who set 1800 is entitled to know the box can
+      # no longer hold that period.
+      elapsed=$((SECONDS - iter_start))
+      if [ "$elapsed" -ge "$INTERVAL" ]; then
+        echo "[$(date +%H:%M:%S)] that tick took ${elapsed}s, at or over the ${INTERVAL}s interval;"
+        echo "     starting the next one immediately -- the period is now the snapshot's own length"
+      else
+        sleep "$((INTERVAL - elapsed))"
+      fi
     done
     ;;
 
