@@ -506,7 +506,17 @@ while IFS= read -r D; do
   if archive_tree "$D" "$RUNS_ARCHIVE"; then
     N=$(find "$RUNS_ARCHIVE/$B" -name events.jsonl 2>/dev/null | wc -l)
     [ "${ARCH_SUPERSEDED:-0}" -gt 0 ] && \
-      echo "  $ARCH_SUPERSEDED file(s) kept as .superseded-N: a shorter source replaced a longer archive"
+      # WHAT THE RULE ACTUALLY IS, because this line said "a shorter source replaced a longer
+      # archive" and that is false in the case the mechanism exists for. The prefix test two
+      # hundred lines up says it in its own words -- "nothing makes attempt 2 SHORTER than attempt
+      # 1" -- and driving it on 2026-09-04 confirmed both halves: a 50-row attempt 3 of EQUAL
+      # length to attempt 2 and a 900-row attempt 4 LONGER than everything archived were both
+      # superseded, and both were reported as "a shorter source". The per-file line beside it
+      # printed the true sizes all along, so an operator reading the summary and the detail got two
+      # different stories.
+      echo "  $ARCH_SUPERSEDED file(s) kept as .superseded-N: the source is not a continuation of"
+      echo "  what was archived (these are append-only logs, so only growth is benign) -- most"
+      echo "  often a task root deleted and re-run, whose new log may be shorter, equal OR longer"
     R=""
     [ "$ARCH_REPAIRED" -gt 0 ] && R=", $ARCH_REPAIRED re-copied SHORT of its source"
     echo "  runs -> archive       $B $(du -sh "$RUNS_ARCHIVE/$B" 2>/dev/null | cut -f1) ($N run records$R)"

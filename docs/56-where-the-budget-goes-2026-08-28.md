@@ -9816,3 +9816,44 @@ contrast +9** over four finished probes.
 Batch 3 is on all four lanes — `capA4`/`capB4` with `-s developer_probe_max_calls=12`,
 `freeA4`/`freeB5` with the shipped defaults, `LOOPLAB_LLM_STREAM=1`, every INSTRUMENT.txt verified
 and every process pinned to its own lane. Nine batches remain.
+
+## §222 — the last open item on the standing list, driven end to end
+
+The sweep's point 8 has carried one item marked OPEN and "названо агентом честно" since 2026-08-30:
+`campaign.sh` does `rm -rf` of the task root at the head of every attempt, after which `cp -ru`
+overwrites the first attempt's evidence with the second's shorter log, *"закрывается только
+версионированием архива по попыткам"*. It is closed, and the remedy it asks for is already there
+under another name.
+
+Driven against the real `snapshot.sh` on a toy bench root, reproducing `campaign.sh`'s own line —
+delete the task root, write a fresh log at the same path, snapshot:
+
+| attempt | rows | outcome |
+|---|---|---|
+| 1 | 400 | archived, then kept as `events.jsonl.superseded-1` |
+| 2 | 50 — **shorter** | kept as `.superseded-2` |
+| 3 | 50 — **equal length, different content** | kept as `.superseded-3` |
+| 4 | 900 — **longer than anything archived** | live at `events.jsonl` |
+
+Every attempt survives. `.superseded-N` **is** versioning by attempt; the mechanism cannot see
+attempts, so it names what it can see, and the numbering is one per replacement. The equal-length
+and longer cases matter most, because as the supersede loop's own comment says, *nothing makes
+attempt 2 SHORTER than attempt 1* — which is why it tests whether the archive is a PREFIX of the
+source rather than comparing sizes.
+
+**And the summary line was lying about it.** For all three replacements it printed *"a shorter
+source replaced a longer archive"* — including the 900-row one. The per-file line beside it printed
+the true sizes (`kept … (400 bytes) -- the source is now 900`), so the summary and the detail told an
+operator two different stories, and only the wrong one is a sentence. It now states the actual rule:
+the source is not a continuation of what was archived, these being append-only logs where only
+growth is benign, and the new log may be shorter, equal **or** longer.
+
+`test_the_supersede_summary_says_the_real_rule.py` drives the whole sequence through the real script.
+Two mutations red: restoring the old sentence, and replacing the prefix test with a size test — the
+latter loses attempts 2 and 3 outright, which is the 2026-09-01 measurement the loop was written
+from, reproduced.
+
+Three fixture corrections were needed before it ran, each the same shape: `_bench_root` writes its
+sentinel INTO the directory it is given, so that directory has to exist; and the DESTINATION's store
+root needs a sentinel of its own, because `snapshot.sh` refuses a non-empty unmarked store — an
+unmounted volume looks exactly like one.
