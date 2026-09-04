@@ -9626,3 +9626,60 @@ concurrency (§214).
 So the drift stands as measured, its cause remains "the cached baseline and today's box disagree",
 and the only instrument here that compares like with like is the self-check itself — because both
 sides of it are the reference.
+
+## §216 — the instrument earned its keep, and the answer was in the lane discipline
+
+§208 installed a per-part breakdown on the runs-archive step and said the next slow snapshot would
+name its own cause instead of getting a fourth theory. It happened today, and it did:
+
+```
+[13:54:35] change detected, snapshotting
+  runs -> archive       model-probes 1.2G (106 run records, 3 re-copied SHORT of its source)
+                        391s prefix-check + 300s cp -ru + 285s repair
+```
+
+**976 s against 118 s (79 + 7 + 32) for the tick half an hour later**, on the same 1.2 G archive.
+All three parts inflated together — 5×, 43×, 9× — which is contention on a shared resource, not any
+one step. And the window is exactly when AlgoTune evaluations were saturating lanes 0-32 for §214's
+ruler self-check. The two earlier outliers fit the same shape: 1765 s over the morning's pytest and
+mutation runs, 608 s over the next batch of them.
+
+The cause is in point 5's own list. Lanes 44-47 and 92-95 are reserved so service work has cpus of
+its own while probes hold 0-43 and 48-91 — and `snapshot_timer.sh` ran `snapshot.sh` **unpinned**,
+the one service process on this box not using them. Invisible while the bench is merely waiting on
+an LLM; not invisible when it is computing. Fixed: `taskset -c "$SERVICE_LANE"` with
+`SNAPSHOT_SERVICE_LANE` overridable and defaulting to the reserved lanes. Atomic replace, timer
+restarted onto the new inode.
+
+`test_the_snapshot_runs_on_the_service_lanes.py` does not settle for the word `taskset` being in the
+file: it runs the real loop against a stub snapshot that records `sched_getaffinity(0)` and asserts
+the cpus. Three mutations red — unpinned again, a probe lane as the default, and the override
+ignored.
+
+**The verification did not happen and I am not claiming it did.** I loaded lanes 0-32 with
+evaluations and started a pinned snapshot to time it against the 976 s; it came back
+`another snapshot holds the lock (waited 60s); NOTHING WRITTEN by this run` — the restarted timer
+had taken its own snapshot first. The fix rests on the measurement above and on the lane discipline,
+not on a controlled before/after.
+
+## §217 — a test was snapshotting the live corpus
+
+Chasing that, `find /var/tmp/looplab-bench/model-probes` turned up in `/proc` during a suite run —
+a test walking the **live** 1.2 G bench tree. `test_snapshot_refuses_a_store_that_is_not_there.py`
+defaults `BENCH_ROOT` to the real `/var/tmp/looplab-bench`, and its concurrency case starts **two
+real snapshots of it at once**: `find` over 5,151 files with a `cmp` each and 1.2 G of `cp -ru`,
+twice, which is why it carried a 900 s timeout. The subject of that test is the LOCK and the unique
+stamp; §206 reproduced exactly that behaviour on a toy tree in under a second.
+
+Given a `BENCH_ROOT` with one run tree, `test_b_two_snapshots_at_once_do_not_share_one_directory`
+runs in **0.15 s** instead of ~30, and still proves what it is for. Its siblings still on the live
+root cost **27–33 s each** by `--durations`, and converting them is left for a sweep with room: they
+assert on redaction and on recorded settings, and swapping their root risks trading a slow test for
+a weakened one.
+
+**Three regressions of my own, from §209 and §212, fixed in the same pass.** `test_arm_fidelity_
+reads_no_scores.py` pins that the tool never reaches for the outcome, and it forbids the tokens
+anywhere below the module docstring — so §212's explanation, written into a function docstring,
+tripped the guard it was describing. The prose moved up into the module docstring, where the guard
+allows it and the record survives; the guard stays exactly as strict. The other two were a row that
+gained `finished`/`paused` keys and a sentence that changed wording.

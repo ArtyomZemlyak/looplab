@@ -32,6 +32,8 @@ ROOT="${BENCH_ROOT:-/var/tmp/looplab-bench}"
 PIDFILE="$ROOT/snapshot_timer.pid"
 LOGFILE="$ROOT/logs/snapshot_timer.log"
 INTERVAL="${2:-1800}"
+# The reserved service lanes (sweep point 5). Overridable for a box with a different layout.
+SERVICE_LANE="${SNAPSHOT_SERVICE_LANE:-44-47,92-95}"
 [ "${1:-}" = "_loop" ] && INTERVAL="${2:-1800}"
 
 fingerprint() {
@@ -121,7 +123,16 @@ case "${1:-status}" in
         # `$SNAPSHOT_DEST`, which this loop inherits. That indirection is the whole of the fix for
         # a timer that honoured `BENCH_ROOT` for what it READ and ignored it for where it WROTE --
         # which on 2026-08-31 put a snapshot of a synthetic root into the live rotation.
-        "$HERE/snapshot.sh" 2>&1 | sed 's/^/    /'
+        # ON THE SERVICE LANES, like every other service process on this box. The snapshot ran
+        # UNPINNED, which is fine while the bench is only waiting on an LLM and is not fine when it
+        # is computing: measured 2026-09-04, `20260904-135436` took **976 s — 391 s prefix-check +
+        # 300 s cp -ru + 285 s repair** — against 118 s (79+7+32) for the tick half an hour later.
+        # All three parts inflated together, which is contention, not any one step; the window is
+        # exactly when AlgoTune evaluations were saturating lanes 0-32 for the ruler self-check
+        # (§214). The two earlier outliers, 1765 s and 608 s, sit over the pytest and mutation runs
+        # of that morning. Lanes 44-47,92-95 are reserved so service work has cpus of its own; the
+        # timer was the one service process not using them.
+        taskset -c "$SERVICE_LANE" "$HERE/snapshot.sh" 2>&1 | sed 's/^/    /'
         snap_rc=${PIPESTATUS[0]}
         if [ "$snap_rc" = "0" ]; then
           last="$cur"

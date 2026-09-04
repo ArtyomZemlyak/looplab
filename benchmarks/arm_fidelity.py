@@ -19,6 +19,16 @@ and the honest response is to say so, not to reinterpret it afterwards.
 
 Usage:
     arm_fidelity.py --treat capA2 capB2 --control freeA2 freeB2 [--root DIR]
+
+WHAT "FINISHED" MEANS HERE, and it took two goes. A running probe's probe-count is a lower bound and
+a finished one's is the answer, so the contrast is computed over finished probes only. The first fix
+asked whether the run's result file EXISTS -- wrong in the direction that matters, because a PAUSED
+run writes one too: `freeB3` auto-paused at node 2 on 2026-09-04 ("a Developer session crashed, LLM
+unreachable") having spent $0.86 of its $1.00, and it was counted as a completed control. The claim
+is an EVENT: every genuinely finished probe of batches 1 and 2 carries `run_finished` with
+`reason=budget_exhausted`; the paused one carries a `pause` and no `run_finished`. And the state is
+the LAST lifecycle event, not any of them -- the log is append-only, so "a pause exists" answers
+PAUSED for ever, and `freeB3` read paused while it was running after a `resume`.
 """
 from __future__ import annotations
 
@@ -39,22 +49,8 @@ DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
 def probe_calls(root: str, name: str) -> dict:
     """`{executed, refused, spans, finished}` for one probe tree. No scores are read.
 
-    `finished` is a `run_finished` EVENT, and it took two goes to get there. A running probe's
-    count is a lower bound and a finished one's is the answer, and mixing them is how this tool spent
-    three sweeps printing "NO CONTRAST YET" at a moment when the treatment had already stopped at its
-    cap of 12 and the control was still climbing through 10, 11, 12. A negative contrast between a
-    finished arm and an unfinished one is not evidence about the intervention; it is the clock.
-
-    The first fix asked whether `final.json` EXISTS, which is wrong in the direction that matters.
-    `freeB3` auto-paused at node 2 on 2026-09-04 -- "a Developer session crashed (LLM unreachable)"
-    -- having spent $0.86 of its $1.00, and a PAUSED run writes a `final.json` all the same: 602
-    bytes, speedup 260.9543. It is not finished, it is OWED more work (`looplab resume`), and this
-    tool counted it into the contrast as a completed control. The four genuinely finished probes of
-    batches 1 and 2 all carry `run_finished` with `reason=budget_exhausted`; the paused one carries
-    a `pause` event and no `run_finished` at all. That event is the claim; the file is a by-product.
-
-    Still no scores: this reads the TYPE of events, never `node_evaluated`'s metric or the contents
-    of `final.json`.
+    See the module docstring for what `finished` means and why it is an event. No scores are read
+    here: event TYPES only.
     """
     executed = refused = 0
     spans: set = set()
@@ -100,10 +96,8 @@ def _event_types(root: str, name: str) -> set:
 def _last_lifecycle(root: str, name: str) -> str:
     """The LAST of `run_finished` / `pause` / `resume`, or "" if the run has had none.
 
-    Not "is there a pause event" -- §212 asked that, and the log is append-only, so a resumed run
-    stayed PAUSED for ever. `freeB3`'s own order is `pause 12:32:26`, `resume 12:36:06`, then paid
-    calls to 13:03:16, and the tool called it paused throughout. The same correction
-    `probe_summary::_why_no_test` needed: take the LAST match, not any match.
+    The LAST, not any: see the module docstring. Same correction `probe_summary::_why_no_test`
+    needed -- take the last match.
     """
     last = ""
     for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/events.jsonl")):

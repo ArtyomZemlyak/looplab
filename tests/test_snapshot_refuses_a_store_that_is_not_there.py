@@ -85,15 +85,25 @@ def test_b_two_snapshots_at_once_do_not_share_one_directory():
         dest.mkdir()
         (store / ".persistent-store-id").write_text("test")
 
+        # A BENCH_ROOT WITH ONE RUN TREE. The subject here is the LOCK and the stamp, not the
+        # corpus, and this defaulted to the LIVE /var/tmp/looplab-bench -- so the case started TWO
+        # real snapshots of the 1.2 G bench root, `find` over 5,151 files with a `cmp` each and
+        # 1.2 G of `cp -ru`, twice, which is why it carried a 900 s timeout. Caught 2026-09-04 when
+        # `find /var/tmp/looplab-bench/model-probes` turned up in /proc during a suite run. §206
+        # reproduced this same lock behaviour on a toy tree in under a second.
+        toy = store / "bench"
+        (toy / "model-probes" / "p1" / "runs" / "t" / "run").mkdir(parents=True, exist_ok=True)
+        (toy / "model-probes" / "p1" / "runs" / "t" / "run" / "events.jsonl").write_text(
+            '{"type":"run_started"}\n', encoding="utf-8")
         env = dict(os.environ)
-        env.setdefault("BENCH_ROOT", "/var/tmp/looplab-bench")
+        env.setdefault("BENCH_ROOT", str(toy))
         procs = [
             subprocess.Popen(["bash", str(SNAPSHOT), str(dest)],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, env=env)
             for _ in range(2)
         ]
-        outs = [p.communicate(timeout=900) for p in procs]
+        outs = [p.communicate(timeout=120) for p in procs]
         rcs = [p.returncode for p in procs]
 
         trees = sorted(d for d in dest.iterdir() if d.is_dir() and d.name[0].isdigit())
