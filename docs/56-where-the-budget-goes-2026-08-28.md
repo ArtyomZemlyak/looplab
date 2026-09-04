@@ -9093,3 +9093,70 @@ It is still not a change to make mid-arm, and by §185's conversion even $24 rec
 points a run — well inside the noise. But it is the first audit remedy whose direction is not in
 doubt, and the first worth doing for the wall clock rather than for the score: **47 % of tool turns
 is 47 % of the loop's turns**, and a turn is a minute.
+
+## §201 — the duplicate turns cost budget, not wall clock, and the difference is the whole remedy
+
+§200 measured what the re-fetching costs: **11,853 of 25,381 tool-calling turns (46.7 %) requested
+only content already retrieved that run, $25.04**. The obvious next question was how much TIME that
+is, and the answer looked large. Over the 97-run corpus, tool-calling turns account for **201.8 h**
+of wall clock, and the turns that were fully duplicate account for **68.5 h of it — 34 %, a median
+of 40 min in a run that lasts about 150**.
+
+That number is true and it is not the finding. **95 of 96 runs that spent more than $0.20 ended at
+$0.97 or more of the $1.00 cap, and 80 of them say `budget_exhausted` in so many words.** Wall clock
+is not what stops a run; money is. Handing a run back 40 minutes it had no use for buys nothing, so
+the 68.5 h is a *shadow* of the waste, not a second prize on top of it. I had the sentence "40
+minutes a run recoverable" half-written before checking which constraint actually binds — the same
+shape as every other entry here: a measurement that is correct about the thing it measured and wrong
+about the thing it was going to be used for.
+
+In the units that do bind: median spend per evaluated node is **$0.3373** over 95 completed runs
+(median 3 nodes). $25.04 over 97 runs is **$0.2581 a run = 0.77 of an extra node**. At §185's ~8
+points per extra node that is **~6 points a run**, which is the number the "already established"
+seed block should be judged against — not against the clock.
+
+## §202 — a refused probe is not a probe, and the dilution landed on the treated arm
+
+`capA2` finished at TEST 203.1158 and `probe_summary` reported *"reference over 19 run_probe calls:
+15.8 % import"*. `arm_fidelity` said the same probe executed **12** and was **refused 7**. Both were
+counting `run_probe` tool spans; only one of them was subtracting the refusals, which is what
+`developer_probe_max_calls` (§190) generates once a run hits its cap.
+
+A refusal ran nothing. It cannot import the reference, so putting it in the denominator dilutes the
+rate by turns in which the question was not asked. And because refusals only exist under the cap,
+**the whole bias sits on the treatment side of the live arm**, against a §69.1 band (4.9–8.3 %)
+measured on runs where `refused` was zero. Two rates over two different denominators, printed as one
+— the exact mistake the comment three lines above the code was written to prevent.
+
+Fixed in `benchmarks/probe_summary.py`: `run_probe` now counts executed calls, `run_probe_refused`
+is carried beside it, and the line prints `over 12 executed run_probe calls (+7 refused at the cap)`.
+`capA2` reads **16.7 %**, not 15.8 % — the numerator moved by one too, because one refused span
+carried an import that never ran.
+
+`tests/test_refused_probes_are_not_a_denominator.py` pins three things, and all three redden under
+mutation: refusals back in the denominator (M1), refusals counted but the denominator left whole
+(M2), the refusal matched on `input` instead of `output` (M3), and an all-refused run reporting
+0.0 % instead of `None` (M4). The last one matters on its own: **zero executed probes is no evidence
+about reference use, and 0 % is evidence** — it would put such a run below the §69.1 floor on no
+data at all.
+
+## §203 — batch 1 of the probe-cap arm, described but not read
+
+Per §190 no contrast is computed before twelve batches. Describing finished probes is allowed, and
+three of four have landed:
+
+| probe | arm | TEST | nodes (train) | executed / refused | reference use |
+|---|---|---|---|---|---|
+| `freeA2` | control | 224.3657 | 222.81, 199.54, 24.26 | 31 / 0 | 6.5 % |
+| `freeB2` | control | 256.5339 | 21.11, 208.95, 16.41, 256.61 | 21 / 0 | 9.5 % |
+| `capA2` | treat | 203.1158 | 205.15, 149.34 | 12 / 7 | 16.7 % |
+| `capB2` | treat | — running | 139.91, 21.96 | 12 / 5 | — |
+
+Fidelity is intact: treat median 12 executed, control 26, **contrast +14**, which is the separation
+§196's 91 %-bite estimate predicted.
+
+`freeA2` is the champion rule earning its keep in public (§84): its best node was 222.81 and its
+LAST was 24.26, and the run submitted the best — **9.18×** what ending on the last node would have
+scored. It is also the run's own worst node that was graded on code written after its last `check`
+(§104). Nothing in it needed fixing: blind spend 7.2 %, no read loop over threshold, reference use
+inside the §69.1 band.

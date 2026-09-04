@@ -356,8 +356,20 @@ def summarise(run_dir: Path) -> dict | None:
     # of `run_probe` CALLS, not a raw count of regex hits. Reporting counts against a percentage
     # baseline is the same different-denominators mistake this file keeps catching elsewhere, and it
     # sat in this tool for three sweeps.
-    probes = [r for r in tools_all
-              if str((r.get("attributes") or {}).get("tool") or "") == "run_probe"]
+    #
+    # A REFUSED probe is not a probe. `developer_probe_max_calls` (§190) makes `run_probe` return
+    # "run_probe refused: ..." once the run hits its cap, and the span is still a `run_probe` tool
+    # span. Counting those in the denominator dilutes the rate by turns in which NOTHING RAN and so
+    # nothing could possibly have imported the reference. It bites only the capped arm -- `capA2`
+    # read 15.8 % over 19 spans and 25.0 % over the 12 that executed -- which means the bias lands
+    # entirely on the treatment side of the live experiment, and §69.1's 4.9-8.3 % band was measured
+    # on runs where `refused` was zero. Two rates over two different denominators, compared as if
+    # they were one: the same mistake this block's own comment was written to catch.
+    all_probe_spans = [r for r in tools_all
+                       if str((r.get("attributes") or {}).get("tool") or "") == "run_probe"]
+    probes = [r for r in all_probe_spans
+              if "run_probe refused" not in str((r.get("attributes") or {}).get("output", ""))]
+    refused = len(all_probe_spans) - len(probes)
     ref_pct = ref_call_pct = None
     if probes:
         hit_i = sum(1 for r in probes
@@ -403,6 +415,7 @@ def summarise(run_dir: Path) -> dict | None:
         "ref_imports": ref_imports,
         "ref_calls": ref_calls,
         "run_probe": len(probes),
+        "run_probe_refused": refused,
         "ref_pct": ref_pct,
         "ref_call_pct": ref_call_pct,
         "champion_lines": champ_lines,
@@ -755,11 +768,14 @@ def main(argv: list[str]) -> int:
     for s in sorted(seen.values(), key=lambda x: (x["task"], x["probe"])):
         pct = ("—" if s["ref_pct"] is None
                else f"{s['ref_pct']:.1f}% import / {s['ref_call_pct']:.1f}% is_solution")
+        n_ref = s.get("run_probe_refused") or 0
+        refused_note = f" (+{n_ref} refused at the cap)" if n_ref else ""
         nov = f"; proposer repeated itself {s['novelty_rejected']}x" if s.get("novelty_rejected") else ""
         kern = ("" if s.get("first_kernel") is None
                 else "; node 0 kernel" if s["first_kernel"] else "; node 0 NO kernel")
         print(f"  {s['probe']} ({s['task']}) nodes(train)={s['nodes']}  "
-              f"reference over {s['run_probe']} run_probe calls: {pct}   "
+              f"reference over {s['run_probe']} executed run_probe calls"
+              f"{refused_note}: {pct}   "
               f"(§69.1 baseline 4.9-8.3 %){kern}{nov}")
         for ph, cost in s["phases"]:
             share = 100 * cost / s["spent"] if s["spent"] else 0

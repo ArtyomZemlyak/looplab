@@ -352,7 +352,9 @@ def test_reference_use_is_reported_as_a_share_of_run_probe_calls(tmp_path):
     _mk_run_probe(tmp_path, "refr", "t", total=20, with_import=2, with_call=3)
     out = _run(tmp_path)
     line = next(l for l in out.splitlines() if l.strip().startswith("refr ("))
-    assert "over 20 run_probe calls" in line, f"the denominator is not stated: {line}"
+    # "executed" since 2026-09-04: a cap refusal is a `run_probe` span that ran nothing, and it is
+    # excluded from the denominator -- see test_refused_probes_are_not_a_denominator.py.
+    assert "over 20 executed run_probe calls" in line, f"the denominator is not stated: {line}"
     assert "10.0% import" in line, f"2 of 20 imports should read 10.0 %: {line}"
     assert "15.0% is_solution" in line, f"3 of 20 calls should read 15.0 %: {line}"
     assert "4.9-8.3" in line, "the baseline the number is meant to be compared against is missing"
