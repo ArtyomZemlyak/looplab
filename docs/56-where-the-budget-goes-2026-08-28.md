@@ -8666,3 +8666,48 @@ effect size and price both work out.**
 Not launching it this sweep: it needs a registered design first — the cap value, the outcome, the
 batch structure — written before the first probe, and §180 is the record of what happens when an arm
 is sized on anything else.
+
+## 190. The probe-cap arm, registered before the first probe
+
+§189 found the one intervention whose effect size and price both work. This registers the arm and
+ships the mechanism it needs, off by default.
+
+### The design, fixed here
+
+* **Question.** Does capping `run_probe` raise the final TEST score, or is the probe count a symptom
+  of a run that is already lost?
+* **Treatment.** `DevProbeTools(max_calls=12)` — half the corpus median of 24. The refusal names
+  `run_dev_command("eval_train")` rather than only saying no.
+* **Control.** `max_calls=0`, the shipped behaviour, byte-identical to every run in the corpus.
+* **Task.** `edge_expansion`, because §188 measured it as the least noisy relative to its scale
+  (CV 0.30 against 0.43 and 0.47) — the cheapest place to ask anything.
+* **Primary outcome.** Final TEST speedup, **stratified by batch**, batches of four launched
+  together, two per arm (§146, §180).
+* **Test.** Exact stratified permutation over within-batch relabellings, one-sided (capping helps),
+  α = 0.05.
+* **Size.** **Twelve batches, 48 probes, $48**, for power **0.83** against the measured +44-point
+  effect (§187's simulator, §189's effect).
+* **Stopping.** No interim stopping and no interim reading beyond describing the probes that
+  finished. §180 is the record of why: an arm read early is an arm re-designed by its own noise.
+* **Falsification.** If the difference is not positive at p ≤ 0.05 after twelve batches, the reading
+  is "capping probes does not raise the score", not "needs more probes" — §187's table is the
+  commitment that twelve batches was the affordable question.
+
+### What shipped
+
+`DevProbeTools(max_calls=N)`, defaulting to **0 = uncapped**, so the loop is unchanged until an arm
+asks. Past the cap the tool returns an error naming the cheaper instrument:
+
+> `(run_probe refused: this session has already run 12 probes, the cap set for this run. Probes
+> answer yes/no questions about the environment; MEASURING the solver is what
+> run_dev_command("eval_train") is for, and it reports the graded number. Write the change and
+> measure it.)`
+
+`tests/test_the_probe_cap_is_off_until_an_arm_asks.py` pins that the default is uncapped, that the
+cap refuses only after it is reached, that the refusal names `eval_train`, that a refused call does
+not advance the counter, and that an unknown tool is still unknown. Four mutations redden it — cap
+on by default, zero meaning zero, a counter that never advances, and a refusal that names nothing.
+273 probe-related tests pass.
+
+**Not launched this sweep.** The design above is the thing that had to exist first, and it now does;
+the $48 is a separate decision, taken with the table in front of it rather than after.

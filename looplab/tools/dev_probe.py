@@ -577,7 +577,21 @@ class DevProbeTools:
     `RepoWriteTools` whose `files` dict is replicated, read-only, into the probe's cwd."""
 
     def __init__(self, repo_spec: Optional[dict] = None, *, timeout_s: float = _DEFAULT_TIMEOUT,
-                 staged=None, confine_reads: bool = True):
+                 staged=None, confine_reads: bool = True, max_calls: int = 0):
+        # A COUNT CAP, OFF BY DEFAULT (`max_calls=0`). §189 measured the only process variable that
+        # separates the best `edge_expansion` runs from the worst: the bottom decile makes 29
+        # `run_probe` calls to the top decile's 20, while evaluating the SAME number of nodes,
+        # making the SAME number of `eval_train` calls and spending the same share on every phase.
+        # Split at the corpus median of 24, the champion is 221.81 against 177.84 -- +43.97,
+        # two-sided p = 0.0077, and +50.03 (p = 0.0097) among the fifty runs that evaluated exactly
+        # three nodes, which removes the probes-trade-against-nodes confound.
+        #
+        # That is a correlation and the cap is how it gets tested: a run that probes twenty-nine
+        # times may be probing BECAUSE it is lost. §187's simulator prices the arm at 48 probes for
+        # power 0.83. Until that arm runs, the default must leave the loop byte-identical, which is
+        # what 0 does.
+        self.max_calls = max(0, int(max_calls or 0))
+        self._calls = 0
         self.repo_spec = repo_spec or {}
         self.timeout_s = max(1.0, min(float(timeout_s or _DEFAULT_TIMEOUT), _MAX_TIMEOUT))
         self.staged = staged
@@ -642,6 +656,20 @@ class DevProbeTools:
         if name != "run_probe":
             return ToolResult(content=f"(unknown tool: {name})", is_error=True, retryable=False,
                               provenance={"source": "developer_probe"})
+        if self.max_calls and self._calls >= self.max_calls:
+            # The refusal NAMES the cheaper instrument rather than only saying no: the card already
+            # tells the Developer that "if you have run more than a handful, you have stopped
+            # answering questions and started doing the evaluator's job for it", and `eval_train` is
+            # the evaluator.
+            return ToolResult(
+                content=(f"(run_probe refused: this session has already run {self._calls} probes, "
+                         f"the cap set for this run. Probes answer yes/no questions about the "
+                         f"environment; MEASURING the solver is what `run_dev_command(\"eval_train\")` "
+                         f"is for, and it reports the graded number. Write the change and measure it.)"),
+                is_error=True, retryable=False,
+                structured={"exit_code": None, "refused": "probe_cap", "cap": self.max_calls},
+                provenance={"source": "developer_probe"})
+        self._calls += 1
         code = str(args.get("code") or "")
         try:
             text = self._probe(code, args.get("timeout"), cancel_check=cancel_check)
