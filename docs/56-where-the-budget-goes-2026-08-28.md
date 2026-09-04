@@ -9537,3 +9537,50 @@ The criterion is stated here, before any contrast has been computed: **a probe w
 exceeds $1.05 is not a $1 probe and does not enter the arm.** It is recorded now precisely so it
 cannot be chosen later to suit a number. `arm_fidelity` has never printed a score and the batch-2
 contrast has not been read.
+
+## §214 — point 5's four numbers were never checked, and three of them have moved
+
+`ruler_check.py` verifies the SHAPE of the baseline cache: one regime, a hundred per-instance
+timings, written here. It says nothing about the four numbers point 5 also carries —
+`pagerank 1.0024, pde_heat1d 0.9958, edge_expansion 0.9847, discrete_log 1.0162` — which are the
+ruler's READING: submit the reference implementation itself, and `speedup = baseline_ms /
+optimized_ms` must come back ~1.0 because both sides are then the same code. I have been reporting
+"линейка чистая" every sweep on the strength of the shape check and the memorised numbers.
+
+Measured, four repeats each on their own lanes:
+
+| task | repeats | median | sweep says | delta |
+|---|---|---|---|---|
+| edge_expansion | 0.8849 0.8872 0.8994 0.8747 | **0.8861** | 0.9847 | **−10.0 %** |
+| pde_heat1d | 1.0346 1.0468 1.1045 1.0419 | **1.0444** | 0.9958 | +4.9 % |
+| discrete_log | 1.0696 1.0767 1.0804 1.0711 | **1.0739** | 1.0162 | +5.7 % |
+
+The repeats are tight — `discrete_log` spans 1 %, `edge_expansion` 2.8 % — so these are not noise.
+Nor are they load: three more `edge_expansion` runs with the other lanes idle gave **0.8898, 0.8810,
+0.8865**, median 0.8865 against 0.8861 under full concurrency. The shipped tool re-run later put
+`discrete_log` at 1.0900 (+7.3 %).
+
+**What it means.** `baseline_ms` comes out of a cache written once — `edge_expansion` on 08-31 at
+02:15, `discrete_log` on 08-31 at 12:43 — and `optimized_ms` is timed today. The self-speedup is
+therefore the ratio of how fast this box was when the cache was written to how fast it is now.
+`edge_expansion` code runs ~13 % slower today than when its baseline was taken; `discrete_log` ~7 %
+faster. The two directions rule out a single systematic bias and point at per-task cache age.
+
+**What it does and does not affect.** Within one task the drift cancels exactly: all 76
+`edge_expansion` probes are divided by the same cached baseline, so probe-vs-probe and the whole
+probe-cap arm are untouched. What it does bite is comparison ACROSS TIME on one task — which is
+precisely what §181's re-timed arm A constants are: 0.9648 for `edge_expansion` measured in one
+window against arm B's corpus measured across several. A 10 % ruler move is the same size as some of
+the gaps being argued over there.
+
+**Not re-measured, deliberately.** Re-timing the cache would rescore every future run against a
+different ruler than the 102 already in the corpus, and it would move the ruler underneath a
+registered arm (§190). The drift is a number to carry, not a thing to erase.
+
+`benchmarks/ruler_selfcheck.py` makes it a measurement anyone can repeat, and it encodes point 2's
+own rule about how this check lies: **a zero that arrives in a second is the harness declining, not
+a slow solver.** Both refusals were hit while building it, both at `eval_seconds` ~1.7 against a real
+~28 s — first `solver_unloadable`, because `--solver-file-only` copies one file and the reference has
+to be INLINED rather than imported, then `Task data directory not found` until `DATA_DIR` pointed at
+the HF dataset directory. Five mutations red, including "any zero is a refusal", which would have
+erased arm A's real `pagerank` 0.0 (66 verification failures over a full 41 s evaluation).
