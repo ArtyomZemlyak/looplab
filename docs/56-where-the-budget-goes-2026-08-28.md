@@ -9955,3 +9955,44 @@ $1 probe each; the number that would justify it — weak starts that end badly �
 to ship here. What it does support is the reverse: `capA4` and `freeB5` are sitting at 21.1 and 28.1
 this sweep with $0.60 and $0.71 spent, and by this measurement that is an ordinary place to be, not
 a probe worth intervening in.
+
+## §226 — what `eval_seconds` actually measures, per task, and a correction to §215
+
+Two of batch 3's six nodes evaluated in 47.6 s and 47.0 s against the usual 39–42, so I checked
+whether that is a slow box or a slow solver. It is neither, and the answer corrects §215.
+
+Over the 232 evaluated `edge_expansion` nodes carrying both a metric and an `eval_seconds`:
+
+| node | n | median | p10 | p90 |
+|---|---|---|---|---|
+| weak (< 60) | 105 | 40.0 | 39.4 | **47.9** |
+| middle | 22 | 41.2 | 40.8 | 42.4 |
+| strong (≥ 150) | 105 | 41.3 | 40.8 | 42.3 |
+
+So a 47 s evaluation is **inside the weak-node p90**, which is where both of batch 3's belong
+(28.09 and 28.13). Not an anomaly. And the medians barely move — 40.0 against 41.3, with Spearman
++0.375 (p = 1.2e-08): the correlation is real, weak, and **positive**, the opposite of the intuition
+that a slow solver is slow to evaluate. What the weak nodes have is a long right tail, not a higher
+centre.
+
+**The correction.** §215 gave two reasons `eval_seconds` cannot see the ruler drift and called the
+second one the settling one: it "times a different solver every node". On `edge_expansion` that
+effect is about **1.3 s of 41, three per cent** — far too small to be what settles anything, and the
+real reason there is the first one, dilution. But the claim is not wrong, it is task-dependent, and
+`instance_share` predicts which way:
+
+| task | instances' share of wall clock | slow-half vs fast-half `eval_seconds` |
+|---|---|---|
+| edge_expansion | 10.9 % | 40.0 vs 41.3 (**3 %**) |
+| discrete_log | 22.5 % | 46.7 vs 38.8 (**20 %**) |
+| pde_heat1d | 63.0 % | 73.3 vs 58.6 (**25 %**) |
+
+The same arithmetic that says `eval_seconds` is mostly overhead on `edge_expansion` says the
+candidate should dominate it on `pde_heat1d`, and it does. §215's illustration — `discrete_log`
+reading 30.6, 57.0 and 46.7 s on three consecutive days — was drawn from the one task where that
+argument holds, and read as though it held everywhere.
+
+§215's conclusion stands unchanged: `eval_seconds` cannot detect the ruler drift, and the
+self-check is the only instrument here comparing like with like. What changes is which reason does
+the work on which task, and that `instance_share` turns out to be predictive rather than merely
+arithmetic — it was written to explain a number and it forecasts one.
