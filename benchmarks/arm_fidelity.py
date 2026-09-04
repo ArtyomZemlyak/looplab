@@ -98,7 +98,8 @@ def probe_calls(root: str, name: str) -> dict:
                 else:
                     executed += 1
     return {"executed": executed, "refused": refused, "evals": evals, "spans": len(spans),
-            "finished": _run_finished(root, name), "paused": _paused(root, name)}
+            "finished": _run_finished(root, name) or _at_ceiling(root, name),
+            "paused": _paused(root, name)}
 
 
 LIFECYCLE = ("run_finished", "pause", "resume")
@@ -134,8 +135,47 @@ def _run_finished(root: str, name: str) -> bool:
     return "run_finished" in _event_types(root, name)
 
 
-def _paused(root: str, name: str) -> bool:
-    return _last_lifecycle(root, name) == "pause"
+def _at_ceiling(root: str, name: str, budget: float = 1.0) -> bool:
+    """A pause that is really the end of the money -- see `_paused`."""
+    return (_last_lifecycle(root, name) == "pause"
+            and _spend(root, name) >= budget * CEILING_SHARE)
+
+
+CEILING_SHARE = 0.99      # of `llm_budget_usd`; below this a pause is a pause
+
+
+def _spend(root: str, name: str) -> float:
+    """What this run has paid, from its own `llm_usage` events. Budget, not outcome."""
+    total = 0.0
+    for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/events.jsonl")):
+        for event in events_read.iter_events(path):
+            if event.get("type") != "llm_usage":
+                continue
+            data = event.get("data")
+            if isinstance(data, dict):
+                try:
+                    total += max(0.0, float(data.get("cost") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+    return total
+
+
+def _paused(root: str, name: str, budget: float = 1.0) -> bool:
+    """Paused AND not simply at the end of its money.
+
+    A run that reaches `llm_budget_usd` inside a developer session used to be paused with
+    "a Developer session crashed (LLM unreachable or a hard error)" -- the ceiling refusal caught by
+    a blanket `except Exception` and dressed as a provider failure (§228). Measured over the probe
+    corpus: 16 of the 105 runs that reached full budget end that way, every one at or past its
+    ceiling and every one 0.1-0.2 s after its last call. Those runs are COMPLETE, and calling them
+    "OWED work" is what sent `freeB3` back for another $0.1056 (§213).
+
+    The engine no longer does it, but every probe recorded before the fix still reads that way, so
+    the disposition is decided here on the spend rather than on the word.
+    """
+    if _last_lifecycle(root, name) != "pause":
+        return False
+    return _spend(root, name) < budget * CEILING_SHARE
 
 
 def report(root: str, treat, control) -> dict:

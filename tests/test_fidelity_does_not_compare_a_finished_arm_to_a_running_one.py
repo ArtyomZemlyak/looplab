@@ -190,3 +190,53 @@ def test_eval_train_is_counted_from_the_ARGUMENT_not_a_tool_name(tmp_path):
     assert got["treat_evals"] == 5, (
         f'{got["treat_evals"]}: a generation that merely says "eval_train" is not an evaluation')
     assert got["control_evals"] == 0
+
+
+def _cost(root: Path, name: str, dollars: float):
+    d = root / name / "runs" / "edge_expansion" / "run"
+    with open(d / "events.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "llm_usage", "data": {"cost": dollars}}) + "\n")
+
+
+def test_a_pause_at_the_spend_ceiling_is_a_finished_run(tmp_path):
+    """§228: a run that reaches `llm_budget_usd` inside a developer session was paused with
+    "a Developer session crashed (LLM unreachable or a hard error)" -- the ceiling refusal caught by
+    a blanket handler. 16 of the 105 corpus runs that reached full budget end that way, every one at
+    or past its ceiling. They are COMPLETE, and calling them OWED work is what sent freeB3 back for
+    another $0.1056."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _cost(tmp_path, "capA2", 1.0082)
+    _probe(tmp_path, "freeA4", executed=27, finished=False, paused=True)
+    _cost(tmp_path, "freeA4", 1.0031)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA4"])
+    assert got["paused"] == [], (
+        f'{got["paused"]}: a pause at $1.0031 of a $1.00 ceiling is the end of the money, not a '
+        "provider failure, and resuming it spends past the cap")
+    assert got["control_n"] == 1 and got["contrast"] == 15, got
+
+
+def test_a_pause_WELL_BELOW_the_ceiling_is_still_a_pause(tmp_path):
+    """The distinction has to cut both ways or it is just a way of ignoring pauses. freeB3 paused
+    at $0.86 of its $1.00 in the events log -- genuinely mid-run, genuinely owed work."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _cost(tmp_path, "capA2", 1.0082)
+    _probe(tmp_path, "freeB3", executed=34, finished=False, paused=True)
+    _cost(tmp_path, "freeB3", 0.8645)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeB3"])
+    assert got["paused"] == ["freeB3"], got
+    assert got["contrast"] is None, "an unfinished control was compared anyway"
+
+
+def test_a_negative_cost_row_cannot_buy_a_run_back_below_the_ceiling(tmp_path):
+    """A malformed or negative amount must not subtract from what a run has paid -- otherwise one
+    corrupt row turns a finished run back into one that looks OWED work, and §213 is what that
+    costs. `_safe_cost` degrades an unusable amount to 0.0 elsewhere for the same reason; mutation
+    showed no fixture here exercised it."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _cost(tmp_path, "capA2", 1.0082)
+    _probe(tmp_path, "freeA4", executed=27, finished=False, paused=True)
+    _cost(tmp_path, "freeA4", 1.0031)
+    _cost(tmp_path, "freeA4", -0.5)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA4"])
+    assert got["paused"] == [], (
+        f'{got["paused"]}: a -$0.50 row pulled a run that had spent $1.0031 back below its ceiling')

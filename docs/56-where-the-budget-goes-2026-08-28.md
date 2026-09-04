@@ -10035,3 +10035,51 @@ a champion of 28.
 
 `freeB5` is also §225 in action from the unlucky side: a weak node 0 recovers four times in five,
 and this is the fifth. Nothing about it needs fixing.
+
+## §228 — the spend ceiling was being recorded as a provider crash, in 15 % of runs
+
+`freeA4` finished its money and then **paused** — `$1.0031` spent, a scored champion of 227.0792 in
+its `final.json`, and this in the log:
+
+> `auto-paused: a Developer session crashed (LLM unreachable or a hard error, unresolved within the
+> node) — resume once it's fixed`
+
+The LLM was not unreachable. Measured over every probe in the corpus whose last lifecycle event is a
+pause — sixteen of them:
+
+| | |
+|---|---|
+| paused runs | 16 |
+| at or past their $1.00 ceiling | **16 of 16**, median spend **$1.0041** |
+| seconds between the last LLM call and the pause | **0.1–0.2 in every case** |
+| runs that reached full budget and ended cleanly | 88, `run_finished / budget_exhausted` |
+
+Nothing goes unreachable 0.1 s after answering. That is the NEXT call being refused, and the refusal
+is `BudgetExceeded` — which is an `Exception`, and the developer session's blanket
+`except Exception as e: return f"{DEVELOPER_ERROR_PREFIX} {e})"` turns it into the developer-crash
+sentinel. The orchestrator answers that sentinel by pausing the run, correctly, for a cause that did
+not happen.
+
+**What it cost.** A normal ending recorded as a provider failure in **15 % of runs**; runs marked
+"OWED more work: `looplab resume`" when they were complete; and §213 is the bill — I read that
+message, resumed `freeB3`, and it spent **$0.1056 past its cap** before I stopped it by pid.
+
+Fixed in both places that build the sentinel: `repo_developer.py` re-raises `BudgetExceeded` ahead of
+its blanket handler, and `evaluate.py`'s repair path re-raises rather than wrapping. The engine
+already had one reviewed exit for the ceiling and 88 runs prove it works, so this is a re-raise and
+not a translation. The blanket handler is untouched — it exists so a developer hiccup cannot crash
+the engine, and narrowing it to nothing would trade one defect for a worse one.
+
+The test **parses rather than greps**, and mutation is why: the first version asserted
+`"raise" in <handler text>` and a mutation replacing the statement with `pass` stayed green, because
+the comment above it says *"Re-raised rather than translated"*. A word in prose is not a
+control-flow statement. It now walks the AST for a `Raise` inside the `BudgetExceeded` handler, and
+for the `isinstance(_repair_exc, BudgetExceeded)` guard's body in the repair path. Four mutations
+red, including one that moves the re-raise after the blanket catch, where it can never run.
+
+**And the corpus already recorded is not re-runnable**, so `arm_fidelity` decides the disposition on
+the spend rather than the word: a pause at ≥ 99 % of the budget is a finished run, a pause below it
+is genuinely owed work. `freeA4` now reads `finished`, which it is; `freeB3`, paused at $0.8645 in
+its events log, still reads paused, which it was. Four more mutations red — including "every pause
+counts as finished", which would erase the distinction, and a negative cost row pulling a finished
+run back below its ceiling.
