@@ -9683,3 +9683,44 @@ anywhere below the module docstring — so §212's explanation, written into a f
 tripped the guard it was describing. The prose moved up into the module docstring, where the guard
 allows it and the record survives; the guard stays exactly as strict. The other two were a row that
 gained `finished`/`paused` keys and a sentence that changed wording.
+
+## §218 — the snapshot tests now build their own corpus instead of borrowing the live one
+
+§217 measured the cost and deferred the fix with a stated reason: those tests assert on redaction and
+on recorded settings, and swapping their root risked trading a slow test for a weakened one. The
+reason turned out to be answerable rather than blocking.
+
+Why they used the live root at all: **every case asserts `returncode == 0`, and only a COMPLETE
+`BENCH_ROOT` gives that** — a toy tree exits 1 with `INCOMPLETE SNAPSHOT: sources missing`. What they
+actually assert on is `ENVIRONMENT.txt`, which is built from the environment, and the exit code.
+So the fix is not a smaller root, it is a complete small one — and one already exists, in
+`test_snapshot_carries_the_repo_and_the_runs.py::_bench_root`, with the reasoning for each part
+written into it (two git checkouts with a second branch, an uncommitted edit, `meter`, `logs`,
+`reports`, `.baseline_times`, a campaign directory, a probe mid-flight). It is **imported, not
+copied**: two copies of a fixture drift exactly like two copies of a rule (§204).
+
+Measured by `--durations`, same sixteen tests:
+
+| | before | after |
+|---|---|---|
+| `test_c_records_the_settings_but_never_the_key` | 27.7 s | 0.14 s |
+| `test_a_credential_whose_NAME_looks_innocent_is_still_redacted` | 32.6 s | 0.16 s |
+| `test_a_adopts_a_genuinely_empty_store_and_leaves_the_sentinel` | 28.0 s | 0.14 s |
+| …a dozen more | 27–33 s each | 0.14–0.21 s |
+| `test_a_busy_lock_exits_non_zero_so_the_timer_retries` | 62.0 s | 62.0 s |
+
+About **six minutes off every run of this file**, and the tests no longer read and copy 1.2 G of the
+tree live probes are writing into. The busy-lock case is unchanged on purpose: its 60 s is
+`flock -w 60` being waited out, which is the behaviour under test.
+
+Two attempts were needed and the second is the interesting one. Building the toy root under the
+destination broke exactly the two cases whose subject is the destination — one wants a store root
+that is **genuinely empty**, the other a destination that **cannot be written** — and a fixture that
+plants a tree there answers both questions on their behalf. It is now built once, in a directory of
+its own.
+
+The guard is `test_these_tests_do_not_snapshot_the_live_bench_root`, and it **parses rather than
+greps**: the live path is named all through the comments and docstrings of that file and should be,
+because that is the record. What must not exist is a string CONSTANT carrying it — code pointing a
+test at the corpus. Both mutations redden: restoring the live default, and a toy root without the
+git checkouts that make `returncode == 0` mean anything.

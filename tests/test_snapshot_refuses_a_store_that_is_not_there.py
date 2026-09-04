@@ -19,6 +19,7 @@ Each test below reddens if its fix is removed from benchmarks/snapshot.sh.
 """
 import os
 import subprocess
+import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -29,9 +30,39 @@ REPO = Path(__file__).resolve().parents[1]
 SNAPSHOT = REPO / "benchmarks" / "snapshot.sh"
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_snapshot_carries_the_repo_and_the_runs import _bench_root  # noqa: E402
+
+
+_TOY_ROOT: list = []
+
+
+def _toy_root(dest) -> str:
+    """A COMPLETE but tiny BENCH_ROOT, built once per destination.
+
+    These tests defaulted `BENCH_ROOT` to the LIVE `/var/tmp/looplab-bench`, because only a complete
+    root makes `snapshot.sh` exit 0 and every one of them asserts `returncode == 0`. The cost, by
+    `--durations` on 2026-09-04: **27-33 s each** across a dozen cases and **62 s** for the busy-lock
+    one, all of it walking 5,151 files of the live corpus with a `cmp` apiece and copying 1.2 G --
+    while probes are writing into that tree. What they actually assert on is `ENVIRONMENT.txt`,
+    which is built from the ENVIRONMENT, and an exit code.
+
+    `_bench_root` is imported rather than copied: a sibling file already builds this shape, with the
+    reasoning for each part written into it, and two copies of a fixture drift exactly like two
+    copies of a rule (§204).
+    """
+    # Built ONCE, in a directory of its own, and never under the destination: two of these tests
+    # are about a store root that is empty and about a destination that cannot be written, and a
+    # fixture that plants a tree there answers both questions for them.
+    if not _TOY_ROOT:
+        holder = Path(tempfile.mkdtemp(prefix="snapshot-toy-bench-"))
+        _TOY_ROOT.append(str(_bench_root(holder)))
+    return _TOY_ROOT[0]
+
+
 def _run(dest, env=None, timeout=600):  # noqa: D401 - timeout is raised by the lock tests
     e = dict(os.environ)
-    e.setdefault("BENCH_ROOT", "/var/tmp/looplab-bench")
+    e.setdefault("BENCH_ROOT", _toy_root(dest))
     if env:
         e.update(env)
     return subprocess.run(
@@ -358,3 +389,37 @@ def test_the_value_sniff_alone_covers_an_allowlisted_name_holding_a_credential(t
         "an ALLOWLISTED name printed a value that looks like a credential; only the value sniff "
         "can stop this:\n" + live
     )
+
+
+def test_these_tests_do_not_snapshot_the_live_bench_root():
+    """The guard for the fixture above, because the cost of losing it is invisible.
+
+    Every case here asserts `returncode == 0`, and only a COMPLETE `BENCH_ROOT` gives that, so the
+    file defaulted to the live `/var/tmp/looplab-bench` — walking 5,151 files with a `cmp` apiece and
+    copying 1.2 G, per test, while probes were writing into that tree. Measured by `--durations` on
+    2026-09-04: 27–33 s each across a dozen cases, now 0.14–0.16 s. (The busy-lock case stays at
+    62 s: it waits out `flock -w 60` on purpose, and that second is the behaviour under test.)
+    """
+    # PARSED, not grepped: the path is named all over the comments and docstrings above and that
+    # is the record. What must not exist is a string CONSTANT carrying it -- i.e. code that points
+    # a test at the live tree. Docstrings are excluded because they are exactly the prose.
+    import ast
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    docstrings = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(body, list) and body and isinstance(body[0], ast.Expr) \
+                and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            docstrings.add(id(body[0].value))
+    live = [n for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and n.value == "/var/tmp/looplab-bench" and id(n) not in docstrings]
+    # The two below are this guard's own comparisons.
+    assert len(live) == 2, (
+        f"{len(live)} code references to the live bench root (expected only this guard's two) -- "
+        "a snapshot test must build its own root, not walk the corpus probes are writing to")
+    got = _toy_root(Path(tempfile.gettempdir()) / "unused")
+    assert got != "/var/tmp/looplab-bench" and Path(got).is_dir(), got
+    assert (Path(got) / "looplab" / ".git").is_dir(), (
+        f"{got} is not a complete bench root, so snapshot.sh would exit 1 and every "
+        "`returncode == 0` here would be asserting the wrong thing")
