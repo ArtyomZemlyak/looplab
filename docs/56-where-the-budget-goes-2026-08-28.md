@@ -9006,3 +9006,46 @@ redden them, the third being the tool starting to print scores.
 
 *Where batch 1 stands:* four probes alive, `$0.50–0.68` spent each, first nodes evaluated, no failed
 nodes, `eval_seconds` 39.7–42.5 s. One of twelve batches.
+
+## 199. Finding #28's remedy rests on a false premise about what the default call returns
+
+Audit finding #28 says `read_research_memo` "costs six round trips to read one document, and 59 % of
+the calls fetch a section the run already has", and proposes: *return the whole memo by default and
+keep `section` as a narrowing option.*
+
+The measurement holds and is if anything larger. Across all 97 runs: **2,954 calls**, present in
+every run, median **31** per run, max 53. Section split `(none)` 808, findings 680, claims 497,
+directions 378, overview 363, summary 229 — the same ordering the finding gives. Bodies already
+fetched earlier in the same run: **1,934 of 2,954, 65 %** (its 59 %).
+
+**The remedy does not, because the sectionless call is not the whole memo.** Median body size by
+section:
+
+| call | n | median chars |
+|---|---|---|
+| **`{}` — no section** | 808 | **201** |
+| overview | 363 | 3,394 |
+| claims | 497 | 2,511 |
+| findings | 680 | 2,262 |
+| directions | 378 | 1,590 |
+| summary | 229 | 1,372 |
+
+The default call returns two hundred characters, and reading one shows what they are:
+
+> `Deep-research memo (at node 0), section 'overview':`
+> `Verifier: NOT RUN for this memo — its claims are unchecked. Absence of a verdict is not a pass;
+> treat every number below as the memo's own assertion.`
+
+A header and a warning — an empty memo's overview, not a document. "Return the whole memo by
+default" would replace the cheapest call in the set with the most expensive one, on the 27 % of
+calls that currently cost almost nothing.
+
+**And the saving it aims at is not there.** Of the 2,378 turns that touch this tool, only **375 were
+tool-exclusive** — worth **$0.67** of prompt if every one vanished — while **2,003 called it
+alongside other tools** and would still happen. By §185's conversion, $0.67 is about two extra node
+cycles across the whole corpus, or under one point per run.
+
+That is the fifth audit remedy in a row whose counterfactual reverses or dissolves it (§156, §161,
+§162, §165, and now this), against one that survived — §171's dead prompt text, at $2.58, and even
+that needs a refactor rather than a gate (§183). The findings have been a good map of where the
+money goes. **They have not once produced a change worth making on the score.**
