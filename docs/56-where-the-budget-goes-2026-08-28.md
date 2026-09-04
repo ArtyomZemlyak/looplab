@@ -8522,3 +8522,42 @@ corpus cannot say whether forcing a kernel into node 0 would pay. That is a real
 it has a pre-measured effect size to size itself against: 23.5 points on a null spread that §180
 measured at 181 for a four-probe batch — which means it needs far more than four probes, and that
 number should be computed before any money is spent, not after.
+
+## 187. What an arm on §186's effect would cost, computed before the money
+
+§186 measured a designable effect — node 0 carrying a kernel moves the final champion by **23.5
+points** — and ended by saying the probe count should be computed first. `benchmarks/arm_power.py`
+computes it: resample the corpus's own 69 `edge_expansion` champions (median 202.70, p10 106.69,
+p90 267.73, **sd 60.4**), shift one arm by the effect, and run the test the arm would actually use —
+the stratified permutation over within-batch relabellings of paired batches of four.
+
+| batches | probes | $ | power at α = 0.05 |
+|---|---|---|---|
+| 3 | 12 | 12 | 0.18 |
+| 6 | 24 | 24 | **0.24** |
+| 9 | 36 | 36 | 0.31 |
+| 12 | 48 | 48 | 0.44 |
+| 18 | 72 | 72 | 0.46 |
+| 25 | 100 | 100 | 0.66 |
+
+**Twenty-four probes — exactly what §115's arm cost — has power 0.24 against this effect.** A
+hundred dollars still does not reach 0.8. Reading the other way, what twelve batches (48 probes)
+*can* catch: a **60-point** effect at power 0.97, a 90-point effect at 1.00.
+
+So the honest statement about §115 is sharper than §180 put it: that arm had roughly a **one in
+four** chance of detecting an effect the size of the largest one this corpus has ever shown, and it
+did not detect one. Its p = 0.1341 was never going to be the deciding number.
+
+**The rule this makes concrete: no arm without this table first.** An effect below about 60 points
+is not affordable on this task at $1 a probe, and the two candidates on the table — kernel-first at
+23.5 points, checker-repair at whatever §180 saw — are both below it. Money spent on either buys a
+coin flip with extra steps.
+
+*Two defects in the tool itself, both found by running it.* It first enumerated the null always:
+six batches × 300 trials is fourteen million relabellings, and it ran ten minutes without printing
+a row before being stopped by pid. `EXACT_NULL_CAP` now switches to a sampled null above 4,096
+points, and a test pins that the two branches agree. And the first version of THAT test compared
+them on a batch set whose exact p is 1/1296, so a mutation making the sampled branch return 0.0
+passed it — |0 − 0.0008| is inside any tolerance. The comparison now sits where the null actually
+lives (p ≈ 0.5), and the mutation reddens. Four mutations in total: wrong tail, treatment without
+the effect, simulating from a corpus too small, and the sampled branch.
