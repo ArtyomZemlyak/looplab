@@ -8938,3 +8938,33 @@ goes in the next sweep, not this one.
 `290 call(s) from 5 ABANDONED probe(s): capA1 $0.2791, capB1 $0.2477, freeA1 $0.2266, freeB1
 $0.1453, svcCacheCheck $0.0011` — total **$0.90**, residue $-0.000002. The money that bought the
 wrong treatment is visible rather than written off.
+
+## 197. The cross-phase refusal, confirmed on live data
+
+§196 said the confirmation of §195's fix would be "the first live refusal that crosses a phase
+boundary", and deferred it. It has happened, in both capped probes, and it is unambiguous.
+
+`capA2`, cap 12, three phase spans:
+
+```
+seq : 0 0 0 0 0 0 0 0 0 0 0 0 1 1
+span: 615f06 x6 | 05905f x7 | c50a5a x1
+```
+
+Twelve probes ran and the thirteenth and fourteenth were refused. The thirteenth is inside span
+`05905f`, which had itself only used seven; the fourteenth is in span `c50a5a`, a span that had
+used **none**. Under the per-instance counter §195 replaced, `05905f` would have restarted at zero
+and every one of these would have run.
+
+`capB2` is the same shape: 13 probes across `f110a9` ×4, `aa508c` ×7, `afca84` ×2 — twelve ran, the
+thirteenth refused, and it fell in the third span.
+
+The controls behave as controls: `freeA2` 9 probes across three spans, `freeB2` 11 across three,
+zero refusals — both still under 12, so the two arms have not yet diverged in count on these two,
+which is what §196's distribution predicts for the quieter runs.
+
+**So the treatment is real and it is run-scoped.** That is the last of the four hops checked on live
+data rather than by reading: setting → role → tool → *and the tool counting the right thing*.
+
+First nodes, for the record and nothing more — the design forbids reading the arm until twelve
+batches are in: `freeA2` 222.814, `capA2` 205.145, `capB2` 139.9092, `freeB2` 21.1123.
