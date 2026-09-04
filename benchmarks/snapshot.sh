@@ -376,6 +376,13 @@ archive_tree() {  # $1 = source tree, $2 = archive root. Sets ARCH_REPAIRED / AR
   local S="$1" A="$2" B rel ssz dsz rc=0
   B="$(basename "$S")"
   ARCH_REPAIRED=0; ARCH_STILL_SHORT=0; ARCH_SUPERSEDED=0
+  # WHERE THE SECONDS GO, because §207 could not say. This step took 121 s with no probe live, 601 s
+  # with four and 1765 s once -- and the three candidate causes were all refuted by measurement
+  # (0.06 ms per stat, 144 MiB/s to read the whole archive, 1.05 ms per exec in a shell that is not
+  # this sweep's). The honest next move is not another theory: it is to make the next occurrence
+  # readable, by timing the three parts this function actually has.
+  ARCH_T_SUPERSEDE=0; ARCH_T_COPY=0; ARCH_T_REPAIR=0
+  local _t0=$SECONDS
   mkdir -p "$A" || return 1
 
   # AN ARCHIVED FILE LONGER THAN ITS SOURCE IS EVIDENCE THE SOURCE NO LONGER HAS, and `cp -ru` was
@@ -421,8 +428,10 @@ archive_tree() {  # $1 = source tree, $2 = archive root. Sets ARCH_REPAIRED / AR
       rc=1
     fi
   done < <(find "$S" -type f -printf '%P\0' 2>/dev/null)
+  ARCH_T_SUPERSEDE=$((SECONDS - _t0)); _t0=$SECONDS
 
   cp -ru "$S" "$A/" || rc=1
+  ARCH_T_COPY=$((SECONDS - _t0)); _t0=$SECONDS
   while IFS= read -r -d '' rel; do
     # The source can vanish mid-walk -- `campaign.sh` rm -rf's a task root to start an attempt --
     # and a file that is no longer there is not a shortfall in the archive.
@@ -467,6 +476,7 @@ archive_tree() {  # $1 = source tree, $2 = archive root. Sets ARCH_REPAIRED / AR
     dsz=$(stat -c %s "$A/$B/$rel" 2>/dev/null || echo -1)
     if [ "$dsz" -lt "$ssz" ]; then ARCH_STILL_SHORT=$((ARCH_STILL_SHORT + 1)); rc=1; fi
   done < <(find "$S" -type f -printf '%P\0' 2>/dev/null)
+  ARCH_T_REPAIR=$((SECONDS - _t0))
   return $rc
 }
 FOUND_RUNS=0
@@ -500,6 +510,7 @@ while IFS= read -r D; do
     R=""
     [ "$ARCH_REPAIRED" -gt 0 ] && R=", $ARCH_REPAIRED re-copied SHORT of its source"
     echo "  runs -> archive       $B $(du -sh "$RUNS_ARCHIVE/$B" 2>/dev/null | cut -f1) ($N run records$R)"
+    echo "                        ${ARCH_T_SUPERSEDE}s prefix-check + ${ARCH_T_COPY}s cp -ru + ${ARCH_T_REPAIR}s repair"
     echo "$B $N $RUNS_ARCHIVE/$B" >> "$OUT/runs-manifest.txt"
   else
     echo "  COPY FAILED          $B -- the per-run events and spans are NOT archived"
