@@ -9258,3 +9258,60 @@ The stand itself had a hole worth recording: the first version wrote its per-tic
 nothing watched, `fingerprint` returned the same value every time, the loop reported "nothing new"
 and the test timed **one** tick. The stub now moves `meter/`, which is a tree the fingerprint
 actually reads.
+
+## §207 — chasing the archive seconds, and finding the stopwatch
+
+§206 fixed the consequence — the period — and left the cause open: why does the runs-archive step
+take 121 s with no probes live, 193, 601 and once 1758 s with four? Four candidates, measured:
+
+* **Metadata latency on the persistent store.** Refuted: 0.06 ms to stat an existing file, 0.39 ms
+  to create and write one. All 5,151 files stat in 0.3 s, create in 2 s.
+* **Byte throughput.** Refuted: `dd conv=fsync` writes at 121 MB/s and reading every archived byte —
+  what `cmp -n` does for the prefix check — is **1.12 GiB in 7.9 s, 144 MiB/s**.
+* **Process creation.** `archive_tree` forks `stat` twice per file in its supersede loop, `cmp` once,
+  and twice more in its repair loop: roughly 25,000 processes per snapshot over this tree. Timed in
+  my own shell that is **~600 ms per `exec`**, which would make the archive step four hours, not ten
+  minutes — so the number was wrong, and the wrong thing was the stopwatch.
+* **Concurrency starving the copy.** Refuted below, by the ruler.
+
+**The stopwatch.** Spawning `/usr/bin/true` costs **603 ms** in the shell this sweep runs in (50
+execs in 30,158 ms; repeated, 35,089 ms). The same binary from a bash launched by Python costs
+**1.05 ms** (100 execs in 105 ms), and `subprocess.run` costs **1.0 ms**, as does a bare
+`fork`+`_exit`. The box is not slow at starting processes; my shell is, by a factor of ~600. Every
+`for f in …; do <binary>; done` timing I have taken this session was measuring the harness. It also
+explains three "hangs" earlier today — the `/proc` walks with an `awk` per pid that hit the two-
+minute cap — which I put down to "scanning a thousand pids".
+
+So the archive seconds remain **unexplained**, with three of four candidates refuted and the fourth
+measured on a broken instrument. That is where it stands; it is not a cause, and writing one down
+would be the parody of this document.
+
+**The ruler is not the casualty.** The worry that four probes on 88 pinned cpus distort the graded
+number is answerable from the corpus itself. `edge_expansion` `eval_seconds`, grouped by how many
+probes were live at that instant:
+
+| probes live | n | median | p10 | p90 |
+|---|---|---|---|---|
+| 1 | 7 | 40.5 | 39.4 | 47.4 |
+| 2 | 27 | 41.0 | 39.7 | 47.4 |
+| 3 | 48 | 41.2 | 39.6 | 47.1 |
+| 4 | 142 | 41.1 | 39.6 | 45.1 |
+
+Flat to within 0.7 s across a fourfold load change. The lane discipline does what it is for, and
+`eval_seconds` is not a proxy for whatever the archive is spending.
+
+**Evidence integrity, since §206 raised it.** Point 8's open item is `cp -ru` overwriting a first
+attempt with a shorter second one. Over 126 archived probe trees against their live sources: three
+live probes hold 3 short files each (growing under the copy, repaired next cycle), seven hold one
+orphan each — all of them `memory/memora_cache.json.superseded-1`, a file the run itself retired
+after the archive took it — and **not one archived file is longer than its source**, which is the
+signature the mixing hazard would leave. The supersede loop that guards it compares by PREFIX, not
+by size, precisely because nothing makes attempt 2 shorter than attempt 1.
+
+**Not shipped, and why.** Card items (а) the 10× per-instance ceiling and (б) that the best
+EVALUATED node is what gets submitted are still the two rules experience cannot teach — `freeA2`
+scored 224.37 off a node it had already walked away from, 9.18× its last one. Both stay unshipped
+while the probe-cap arm runs: the card is read by treatment and control alike, so changing it
+mid-arm moves both arms at a batch boundary and confounds the thing $48 is being spent to measure.
+Same for (в), the money hint. They go in when the arm closes, and that is a decision to defer, not
+an omission.
