@@ -2291,14 +2291,38 @@ class Tracer:
                 self.exporter.export(rec)
             except Exception:  # noqa: BLE001 - spans are diagnostics: an export failure (disk full,
                 pass           # a non-serializable attribute) must never mask the in-flight exception
-            _stack.reset(token)
-            _current_tracer.reset(tok_tr)
-            if _tok_node is not None:
-                _node_ctx.reset(_tok_node)
-            _generation_ctx.reset(_tok_generation)
-            if _tok_phase is not None:
-                _phase_ctx.reset(_tok_phase)
-            if _tok_prev is not None:
-                _prev_gen.reset(_tok_prev)     # restore the outer trace's chain (or None at top level)
-            _capture_ctx.reset(_tok_cap)       # restore the enclosing run's policy (or None = process)
+            # EVERY RESTORE IS ATTEMPTED, AND NONE OF THEM MAY REPLACE THE CALLER'S EXCEPTION.
+            # `ContextVar.reset` raises `ValueError: Token ... was created in a different Context`
+            # when the span is exited on a context the token was not made in — a shape this tree
+            # made MORE reachable, not less, when the paid proposal moved to `anyio.to_thread`
+            # (`novelty._offload_under_proposal_sink`, `_await_batch_proposal`), because a thread
+            # hop copies the context. Raised from a `finally` that is exactly what the export two
+            # lines above is wrapped to prevent: it REPLACES the exception already unwinding, so an
+            # eval failing with `BudgetExceeded` or an `OSError` surfaced as a `ValueError` about a
+            # ContextVar token, every `except BudgetExceeded` in the tree missed it, and the
+            # tracer's own bookkeeping decided the caller's terminal. It also abandoned the six
+            # restores after the one that raised, leaving the tracer's state describing a span that
+            # has closed.
+            #
+            # SO EVERY RESTORE IS ATTEMPTED, AND THE FAILURE IS RE-RAISED ONLY INTO A CLEAN EXIT.
+            # Swallowing it outright would hide a genuine tracer bug — which is what
+            # `test_the_failed_reset_still_raises_and_is_not_swallowed` is about, and that property
+            # is kept: when the block exited normally there is nothing to mask and the error is the
+            # only news, so it propagates. When an exception is already unwinding, the caller's is
+            # the one that describes what happened and the tracer's bookkeeping does not get to
+            # overwrite it. `sys.exc_info()` inside the `finally` of a generator context manager IS
+            # the in-flight exception, because `__exit__` throws it into the generator.
+            _reset_error: BaseException | None = None
+            for _var, _tok in ((_stack, token), (_current_tracer, tok_tr),
+                               (_node_ctx, _tok_node), (_generation_ctx, _tok_generation),
+                               (_phase_ctx, _tok_phase), (_prev_gen, _tok_prev),
+                               (_capture_ctx, _tok_cap)):
+                if _tok is None:
+                    continue        # never entered (node/phase/prev are conditional); nothing to restore
+                try:
+                    _var.reset(_tok)
+                except (ValueError, RuntimeError) as exc:  # noqa: PERF203 - a cross-context token,
+                    _reset_error = _reset_error or exc     # or a var reset twice
+            if _reset_error is not None and sys.exc_info()[0] is None:
+                raise _reset_error
                 #                or crash the traced engine operation.

@@ -586,6 +586,21 @@ class ConceptCapsuleStore:
                 # matching an opaque key is not permission to delete a future/invalid schema.
                 # Supersede only a row this reader fully understands; keep an unknown same-run record for
                 # explicit repair/migration alongside the new current-schema capsule.
+                # SHARED WITH THE CASCADE, AND WIDER THAN THE PREDICATE IT REPLACED IN ONE
+                # DIRECTION. The hand-written rule here was
+                # `(ruid and row.run_uid == ruid) or (not ruid and not row.run_uid and ...)`, so a
+                # uid-BEARING caller never matched a uid-LESS row; `row_belongs_to_run` falls back
+                # to the directory NAME in that case. Its own docstring names the cost — two
+                # checkouts sharing one memory dir, both holding a run called `demo` — and accepts
+                # it, because the alternative makes every row written before `run_uid` existed
+                # permanently unattributable.
+                #
+                # Accepted HERE too, and the argument is that the same widening already governs the
+                # IRREVERSIBLE path: `serve/memory_cascade.py`'s purge deletes on this predicate.
+                # A name collision that would supersede the wrong capsule would already have
+                # deleted it. What this must not become is a second, quieter rule — a run's own
+                # older capsule going unsuperseded because two readers disagree about which rows are
+                # its own is exactly the drift the unification removed.
                 replace_if=lambda row: (
                     self._valid_capsule(row)
                     and row_belongs_to_run(row, run_uid=ruid, run_id=rid)),

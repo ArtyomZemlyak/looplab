@@ -129,12 +129,27 @@ VERDICTS = ("healthy", "watch", "broken")
 
 # A stage whose status is one of these bought nothing. `timeout` is deliberately absent — see the
 # module docstring; it is its own label class.
-STAGE_FAILED_STATUSES = frozenset({"fail", "expect_failed", "check_failed", "error"})
+#
+# A COPY, on `VERDICTS`' argument above: a bench that moves when production moves cannot detect that
+# it moved, and `tests/test_judge_bench.py` asserts the two still agree. What the copy may NOT be is
+# WRONG, and it was — it predated `runtime/command_eval.py::STAGE_STATUSES` and held `"error"`,
+# which `_run_stages` mints nowhere, while omitting `needs_failed` and `env_unsupported`, which it
+# does. Those two therefore fell through to `LABEL_UNKNOWN`/`stage_status_unknown` instead of
+# `LABEL_WASTED`, so attempts the engine refused before spawning anything were silently dropped from
+# the early-stop bench's saveable-hours denominator — every score derived from it off by whatever
+# they would have caught.
+STAGE_FAILED_STATUSES = frozenset({"fail", "expect_failed", "check_failed",
+                                   "needs_failed", "env_unsupported"})
 STAGE_OK_STATUSES = frozenset({"ok", "reused"})
 STAGE_TIMEOUT_STATUSES = frozenset({"timeout"})
 
 # A node terminal that says nothing about the eval — the node was never run against its own idea.
-NON_EVAL_FAILURE_REASONS = frozenset({"superseded", "idea_rejected_pre_eval", "cancelled"})
+#
+# `cancelled` and `idea_rejected_pre_eval` are BOTH dead words: no terminal writer mints either
+# (`core/models.py::ENGINE_TERMINAL_REASONS` carries `idea_rejected`, and `cancelled` was retired
+# from `BENIGN_TERMINAL_REASONS` for the same reason). A label that can never match is a bucket
+# that stays empty while reading as coverage — the defect this file's own `VERDICTS` note is about.
+NON_EVAL_FAILURE_REASONS = frozenset({"superseded", "idea_rejected"})
 
 # `metric <= DEGENERATE_FRACTION * run_best` is dead, not merely bad. 0.05 is a wide margin on
 # purpose: the corpus's two dead nodes are 0.0 and 2e-05 against a 0.793 best (both < 0.0001x), and

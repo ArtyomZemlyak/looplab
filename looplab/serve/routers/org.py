@@ -382,9 +382,20 @@ def build_router(srv) -> APIRouter:
             # refused deletion added another. `discard_deletion_identity` keeps any sidecar whose
             # RECEIPT exists — that one is live state a retry reads — so this can only drop the ones
             # no operation claimed.
+            #
+            # SHIELDED, because `BaseException` is what makes this reachable at all. The branches
+            # that RAISE here are `HTTPException`s (the wedge and pending answers RETURN), so the
+            # widened catch buys exactly one case: cancellation — the browser disconnects, or the
+            # request times out, after the sidecar is written and while the transaction is still
+            # running. Inside an already-cancelled scope the `await` below raises at its first
+            # checkpoint, so without the shield the cleanup NEVER RUNS on the one path it was
+            # widened for, and the re-raised exception is a fresh `CancelledError` rather than the
+            # original. The shield is scoped to this one thread hop, so a cancellation still stops
+            # the request; it just does not skip the unlink first.
             if cascade and identity.get("read_from_run"):
-                await anyio.to_thread.run_sync(
-                    lambda: discard_deletion_identity(srv, _plain_run_dir(run_id), operation_id))
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(
+                        lambda: discard_deletion_identity(srv, _plain_run_dir(run_id), operation_id))
             raise
         # ORDER IS THE POINT: the cross-run purge runs only once the run itself is durably gone. A
         # deletion that fails after its memory was purged would leave the operator with a run whose

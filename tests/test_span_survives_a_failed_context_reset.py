@@ -109,3 +109,52 @@ def test_the_tracer_keeps_working_after_a_failed_reset():
     with tracer.span("after", new_trace=True):
         pass
     assert _rows(path) == before + 1
+
+
+def test_a_FAILED_RESET_NEVER_REPLACES_THE_CALLERS_EXCEPTION():
+    """The other half of the same `finally`, and the one the export was already wrapped against.
+
+    The export is wrapped with the comment that a failing exporter "must never mask the in-flight
+    exception". The seven `ContextVar.reset` calls immediately below it were bare — and a raising
+    `reset` in a `finally` does exactly that: it REPLACES the exception already unwinding. So an
+    eval failing with `BudgetExceeded`, or a proposal with an `OSError`, surfaced as
+    `ValueError: Token ... was created in a different Context`; every `except BudgetExceeded` in the
+    tree missed it, and the tracer's own bookkeeping decided the caller's terminal. It also
+    abandoned the six restores after the one that raised.
+
+    The shape is MORE reachable now, not less: the paid proposal moved onto `anyio.to_thread`, and
+    a thread hop copies the context.
+
+    MUTATION: make the restores bare again -> the caller's `RuntimeError` is gone and a `ValueError`
+    about a token arrives in its place.
+    """
+    tracer, path = _tracer()
+    before = _rows(path)
+    cm = tracer.span("crossed", new_trace=True)
+    contextvars.copy_context().run(cm.__enter__)
+
+    with pytest.raises(RuntimeError, match="the body failed"):
+        try:
+            raise RuntimeError("the body failed")
+        except RuntimeError:
+            if cm.__exit__(*__import__("sys").exc_info()) is not True:
+                raise
+
+    assert _rows(path) == before + 1, "and the row still lands"
+
+
+def test_EVERY_restore_is_attempted_even_when_one_raises():
+    """A `finally` that stops at the first failure leaves the tracer's own state describing a span
+    that has closed — a node id, a generation and a phase that outlive the block they belonged to,
+    on every span written afterwards."""
+    from looplab.core import tracing
+
+    tracer, _path = _tracer()
+    cm = tracer.span("crossed", new_trace=True, node_id=7, phase="train")
+    contextvars.copy_context().run(cm.__enter__)
+    with pytest.raises(ValueError):
+        cm.__exit__(None, None, None)
+
+    assert tracing._node_ctx.get() is None, "the node id must not outlive the span"
+    assert tracing._phase_ctx.get() is None, "nor the phase"
+    assert tracing._capture_ctx.get() is None, "nor the capture policy"

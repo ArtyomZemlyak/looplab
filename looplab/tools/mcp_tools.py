@@ -290,8 +290,14 @@ class McpTools:
                               provenance={"source": "mcp", "tool": name})
 
     @classmethod
-    def from_config(cls) -> "McpTools":
-        cfg = load_config()
+    def from_config(cls, cfg=None) -> "McpTools":
+        """Connect one server set. `cfg` lets a caller that has ALREADY READ the configuration hand
+        it over rather than have this read it a second time — `cached()` keys its map on the digest
+        of what it read, and a second read is a different file: the operator edits `.mcp.json` in
+        the gap, the entry is stored under the OLD digest holding servers from the NEW config, and
+        re-resolving the new config misses and spawns a second full set that can never be reclaimed.
+        """
+        cfg = load_config() if cfg is None else cfg
         if not cfg:
             return cls([])
         try:
@@ -337,7 +343,22 @@ class McpTools:
         than spawning more. Give a handle a `close()` and this becomes an ordinary LRU.
         """
         cfg = load_config()
+        # ONE READ, keyed and connected. `from_config()` used to `load_config()` again, so the entry
+        # could be stored under one configuration's digest while holding handles connected from
+        # another — the exact cross-configuration leak this keying was added to prevent.
         key = canonical_json_digest(cfg) if cfg else ""
+        if key is None:
+            # `canonical_json_digest` RETURNS None (it does not raise) for a value with no canonical
+            # form, and `json.loads` accepts bare `NaN`/`Infinity`/`-Infinity` while `canonical_json`
+            # uses `allow_nan=False`. `None` as a live dict key is an identity two DIFFERENT configs
+            # would share, so the second caller would be handed the first one's connected servers —
+            # silently, against a `dict[str, McpTools]` annotation that gives no hint. An
+            # unrepresentable configuration is an operator problem and is refused the way the
+            # distinct-configuration bound below is: no handles, and a line saying why.
+            _LOG.warning(
+                "the resolved MCP configuration has no canonical form (a non-finite JSON literal "
+                "such as NaN or Infinity), so it cannot be keyed; returning no MCP tools for it")
+            return cls([])
         cached = _CACHED.get(key)
         if cached is not None:
             return cached
@@ -350,7 +371,7 @@ class McpTools:
                         "returning no MCP tools for this one (handles cannot be closed, so the "
                         "existing %d stay connected)", len(_CACHED) + 1, len(_CACHED))
                     return cls([])
-                cached = _CACHED[key] = cls.from_config()
+                cached = _CACHED[key] = cls.from_config(cfg)
         return cached
 
 

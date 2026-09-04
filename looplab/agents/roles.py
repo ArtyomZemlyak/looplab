@@ -1580,11 +1580,12 @@ class WrapsDeveloper:
         """Mirror the wrapped developer's per-call outputs onto this wrapper.
 
         EVERY member of `DEVELOPER_OUTPUT_ATTRS` the engine reads off `self.developer` has to be
-        here, and two were not. `last_rollback_stage`, `last_budget_exhausted` and `last_edit_calls` are set on the
-        INNER developer by `adapters/repo_developer.py`, while `engine/evaluate.py` reads them off
-        the FACADE — and under the shipped default (`Settings.unified_agent`) the engine's developer
-        is a `UnifiedAgent`, i.e. a wrapper. Both have a FALSY default at their reader, so the
-        omission did not fail: every `node_repaired` row recorded "no rollback was requested" and
+        here, and THREE were not: `last_rollback_stage`, `last_budget_exhausted` and
+        `last_edit_calls` are set on the INNER developer by `adapters/repo_developer.py`, while
+        `engine/evaluate.py` reads them off the FACADE — and under the shipped default
+        (`Settings.unified_agent`) the engine's developer is a `UnifiedAgent`, i.e. a wrapper. Each
+        has a FALSY default at its reader, so the omission did not fail: every `node_repaired` row
+        recorded "no rollback was requested" and
         "the session finished on its own terms", which is precisely the reading each attribute was
         added to stop being the only one available. `tests/test_developer_output_forwarding.py`
         derives the required set from the engine's own `getattr` sites.

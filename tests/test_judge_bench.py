@@ -225,6 +225,46 @@ def test_bench_verdicts_match_the_production_schema():
     assert set(typing.get_args(annotation)) == set(VERDICTS)
 
 
+def test_bench_stage_statuses_match_the_production_registry():
+    """The same guard for the STAGE vocabulary, and it was missing while the copy was wrong.
+
+    `judge_corpus`'s set predated `runtime/command_eval.py::STAGE_STATUSES` and carried `"error"` —
+    which `_run_stages` mints nowhere — while omitting `needs_failed` and `env_unsupported`, which
+    it does. Those two therefore fell through to `LABEL_UNKNOWN`/`stage_status_unknown` instead of
+    `LABEL_WASTED`, dropping attempts the engine refused before spawning anything out of the
+    early-stop bench's saveable-hours denominator.
+
+    A copy is still the right shape here (see `VERDICTS`' own note: a bench that moves when
+    production moves cannot detect that it moved). What a copy may not be is WRONG.
+    """
+    from looplab.judgebench.judge_corpus import (STAGE_FAILED_STATUSES, STAGE_OK_STATUSES,
+                                                 STAGE_TIMEOUT_STATUSES)
+    from looplab.runtime.command_eval import STAGE_STATUSES
+
+    bench = STAGE_FAILED_STATUSES | STAGE_OK_STATUSES | STAGE_TIMEOUT_STATUSES
+    assert bench == set(STAGE_STATUSES), (
+        f"the bench classifies a different vocabulary than the engine mints: "
+        f"only in bench {sorted(bench - set(STAGE_STATUSES))}, "
+        f"only in production {sorted(set(STAGE_STATUSES) - bench)}")
+    assert not (STAGE_FAILED_STATUSES & STAGE_OK_STATUSES), "the three classes must partition"
+    assert not (STAGE_FAILED_STATUSES & STAGE_TIMEOUT_STATUSES)
+    assert "timeout" not in STAGE_FAILED_STATUSES, (
+        "`timeout` is deliberately its own label class — see the module docstring")
+
+
+def test_bench_non_eval_reasons_are_reasons_something_MINTS():
+    """A label that can never match is a bucket that stays empty while reading as coverage.
+
+    Both `cancelled` and `idea_rejected_pre_eval` were dead: nothing writes either, and the real
+    word is `idea_rejected`. Resolved from `ENGINE_TERMINAL_REASONS` rather than by grepping for the
+    string, so a spelling that exists only in prose cannot satisfy this."""
+    from looplab.core.models import ENGINE_TERMINAL_REASONS
+    from looplab.judgebench.judge_corpus import NON_EVAL_FAILURE_REASONS
+
+    unknown = sorted(set(NON_EVAL_FAILURE_REASONS) - set(ENGINE_TERMINAL_REASONS))
+    assert not unknown, f"the bench classifies terminal reason(s) nothing mints: {unknown}"
+
+
 def test_prompt_splits_round_trip_exactly(dataset):
     """The replay seam. If the split and the render are not inverses, a "changed prompt" replay is
     measuring a prompt nobody can reconstruct.

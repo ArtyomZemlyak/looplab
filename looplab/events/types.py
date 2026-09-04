@@ -595,7 +595,7 @@ def run_exit_reason(state) -> str:
 # WHICH long operation is reporting. Closed so that a stage name can be rendered as a label without
 # every reader re-deriving the vocabulary.
 PROGRESS_STAGE_BUILD = "build"      # idea -> code: one node's whole build, `_create_node_scoped`
-# ONE stage, and the absence of a `resume` one is a MEASURED result rather than an omission. A resume
+# TWO stages, and the absence of a `resume` one is a MEASURED result rather than an omission. A resume
 # is just as blank as a build — every line of `Engine._enter_run` runs before the loop's first turn,
 # so no node, marker or pending count has moved and the run looks dead — and beacons were added there
 # and REVERTED, because the event log is the wrong channel for that particular wait. Thirteen tests
@@ -609,7 +609,16 @@ PROGRESS_STAGE_BUILD = "build"      # idea -> code: one node's whole build, `_cr
 # it?", and the prologue is precisely where the authorization fences, the finalize-scope
 # reconciliation and the width pins all read the raw log. Making a resume visible needs a channel
 # that is NOT events.jsonl (a run-dir progress sidecar the server tails is the obvious candidate);
-# adding a stage here without that channel would reintroduce all thirteen.
+# adding a RESUME stage here without that channel would reintroduce all thirteen.
+#
+# THE PARAGRAPH ABOVE IS ABOUT THE RESUME PROLOGUE SPECIFICALLY, not about the set's size, and the
+# `eval` stage below is exempt for the reason it names: what broke was thirteen readers that key on
+# the raw log AT THE PROLOGUE — the authorization fences, the finalize-scope reconciliation and the
+# exact width/event-count pins across a resume. An eval beacon lands nowhere near any of them.
+# `eval_stages._emit_progress` does append `phase_progress` on the single-command path too, so every
+# run's log did grow; that is the class of change this warning gates, and it was weighed rather than
+# skipped.
+
 # idea -> metric: one node's EVALUATION, i.e. the pipeline `run_command_eval` actually executes.
 # It is the second long silent stretch, and the larger one: a build is minutes, an evaluation is
 # hours. `stage_finished` is FOLDED and lands at each stage's COMPLETION, so between two stage rows

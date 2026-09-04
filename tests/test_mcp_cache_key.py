@@ -37,8 +37,12 @@ def _counting(monkeypatch):
     """Count `from_config` calls without connecting to anything."""
     calls: list[dict] = []
 
-    def _fake(cls):
-        calls.append(mcp_tools.load_config())
+    def _fake(cls, cfg=None):
+        # Records what it was HANDED, not what it re-reads. `cached()` keys its map on the digest of
+        # the config IT read, and `from_config` used to `load_config()` a second time — so an entry
+        # could be stored under one configuration's digest while holding servers connected from
+        # another, which is the cross-configuration leak the keying exists to prevent.
+        calls.append(cfg if cfg is not None else mcp_tools.load_config())
         return cls([])
 
     monkeypatch.setattr(McpTools, "from_config", classmethod(_fake))
@@ -133,7 +137,7 @@ def test_concurrent_first_calls_connect_once(monkeypatch):
     started = threading.Barrier(4)
     connects = []
 
-    def _slow(cls):
+    def _slow(cls, cfg=None):
         connects.append(1)
         return cls([])
 
@@ -153,3 +157,48 @@ def test_concurrent_first_calls_connect_once(monkeypatch):
 
     assert len(connects) == 1, "one configuration, one connect"
     assert got[0] is got[1] is got[2]
+
+
+def test_the_KEY_and_the_HANDLES_come_from_ONE_read(monkeypatch, _counting):
+    """The TOCTOU the second `load_config()` opened.
+
+    `cached()` reads the config to key the map; `from_config()` read it AGAIN to connect. An
+    operator editing `.mcp.json` in that gap gets an entry stored under the OLD digest holding
+    servers from the NEW config — and re-resolving the new config then MISSES and spawns a second
+    full set of subprocesses that can never be reclaimed, because a handle exposes no `close()`.
+
+    MUTATION: drop the `cfg` argument and let `from_config` re-read -> the two disagree.
+    """
+    _servers(monkeypatch, alpha={"command": "a"})
+    first = mcp_tools.load_config()
+
+    real_load = mcp_tools.load_config
+    reads = []
+
+    def _shifting():
+        reads.append(len(reads))
+        if len(reads) > 1:                       # the operator edits the file after the key is taken
+            _servers(monkeypatch, beta={"command": "b"})
+        return real_load()
+
+    monkeypatch.setattr(mcp_tools, "load_config", _shifting)
+    McpTools.cached()
+    assert _counting[-1] == first, (
+        "the servers must be connected from the configuration the key was taken over")
+
+
+def test_a_configuration_WITH_NO_CANONICAL_FORM_is_refused_rather_than_shared(monkeypatch, _counting):
+    """`canonical_json_digest` RETURNS None for a value it cannot canonicalize — it does not raise —
+    and `json.loads` accepts bare `NaN`/`Infinity` while `canonical_json` uses `allow_nan=False`.
+    `None` as a live dict key is an identity two DIFFERENT configs would share, so the second caller
+    would be handed the first one's connected servers, silently.
+
+    MUTATION: drop the `key is None` arm -> both configs land on one entry and the second gets the
+    first's servers.
+    """
+    monkeypatch.setenv("LOOPLAB_MCP_SERVERS", '{"mcpServers": {"a": {"timeout": NaN}}}')
+    provider = McpTools.cached()
+    assert provider.specs() == [], "no handles are connected for a config that cannot be keyed"
+    assert _counting == [], "and `from_config` is never reached, so nothing is spawned"
+    assert None not in mcp_tools._CACHED and len(mcp_tools._CACHED) == 0, (
+        "and nothing is stored under a key two different configurations would share")

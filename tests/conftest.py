@@ -22,7 +22,8 @@ cannot fail — it can only hang, and a hang costs the whole run while naming no
 
     without the bound:  select() forever ──▶ no result, no name, the whole suite lost
 
-MEASURED 2026-09-01: `test_otel_bridge.py:47` sat in `communicate()` for 65 minutes with its child
+MEASURED 2026-09-01: `test_otel_bridge.py::test_spans_become_real_recording_otel_spans` sat in
+`communicate()` for 65 minutes with its child
 already exited (the pytest process held both ends of its own capture pipe, so the read never saw
 EOF). It passes in isolation in seconds. 78 subprocess waits then existed in tests/, 20 with a
 timeout and 58 without. Bounding it here rather than at 58 call sites also means a NEW call site
@@ -64,7 +65,8 @@ def _isolation_patch():
 
 
 # A test that waits on a child with no bound cannot FAIL — it can only hang, and a hang costs the
-# whole run while naming no assertion. MEASURED 2026-09-01: `test_otel_bridge.py:47` sat in
+# whole run while naming no assertion. MEASURED 2026-09-01:
+# `test_otel_bridge.py::test_spans_become_real_recording_otel_spans` sat in
 # `communicate()` for 65 minutes with its child already exited and both ends of the capture pipe
 # held by the pytest process itself; the same file passes in isolation in seconds. An AST sweep of
 # tests/ at that moment: 78 subprocess waits, 20 with `timeout=`, 58 without. Bounding it here

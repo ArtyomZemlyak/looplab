@@ -3,7 +3,7 @@
 MEASURED 2026-09-01 on a full-suite run: `py-spy dump` of the live pytest process showed
 
     select (selectors.py:415) / _communicate (subprocess.py:2115) / communicate (subprocess.py:1209)
-    / run (subprocess.py:550) / test_spans_become_real_recording_otel_spans (test_otel_bridge.py:47)
+    / subprocess.run / test_spans_become_real_recording_otel_spans (tests/test_otel_bridge.py)
 
 parked there for 65 minutes. `ps -eo pid,ppid` showed no child of that pid — the subprocess had
 already exited — while the pytest process held BOTH ends of its own capture pipes, so the read
