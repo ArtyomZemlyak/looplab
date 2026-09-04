@@ -21,6 +21,12 @@ is how $48 becomes nothing. Measured over the eight finished probes of batches 1
 treat 12.0 vs control 26.0, and `eval_train` **treat 33.0 vs control 24.5** -- the capped runs turn
 about fourteen ungraded probes into about eight and a half graded evaluations.
 
+AND THAT IS A DOSE, NOT A MECHANISM. The count says the push LANDED; it says nothing about whether
+anything flows through it. Measured over 78 corpus runs of this task (§224): the top and bottom
+deciles by score differ in `run_probe` (24 vs 31, p = 0.048) and do NOT differ in `eval_train`
+(28 vs 27, p = 1.00). So if the cap helps, this is not yet evidence of HOW -- and a column that
+moves is exactly the kind of number that gets read as a mechanism if nobody writes this paragraph.
+
 WHAT TO WATCH. §196 measured that a cap of 12 bites 91 % of `edge_expansion` runs, so most control
 probes should land ABOVE 12 and every treated probe at exactly 12. A batch where the control also
 sits at nine or ten is a batch with little contrast — it dilutes the effect the power table assumed,

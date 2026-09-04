@@ -9894,3 +9894,34 @@ parsed span's attributes. And the channel is measured over FINISHED probes only,
 the dose is — a running probe's evaluations are a lower bound. That last one survived the first four
 mutations because every fixture was finished; it is closed with a running treated probe carrying 90
 evaluations that must not enter the median.
+
+## §224 — §189 replicates on 78 runs, and it argues against the channel being the mechanism
+
+§189 measured eleven process variables against the score and found only `run_probe` separating the
+top and bottom deciles. The corpus has grown since; re-run on the 78 `edge_expansion` runs that now
+carry a TEST score, deciles of seven:
+
+| variable | bottom decile (25.4–104.1) | top decile (265.0–276.7) | Mann–Whitney |
+|---|---|---|---|
+| `run_probe` | 31.0 | **24.0** | **p = 0.048** |
+| `eval_train` | 27.0 | 28.0 | p = 1.00 |
+| nodes | 3.0 | 3.0 | p = 0.25 |
+
+It replicates: fewer ungraded probes still go with better runs, and nothing else does.
+
+**And it cuts against yesterday's framing.** §223 called `eval_train` "the channel" because the
+refusal text points at it and because the capped arm does more of it — 33.0 against 24.5. That is a
+DOSE: it says the push landed. Whether anything flows through it is a different claim, and the
+corpus says the variable it moves has **no association with the score at all** (p = 1.00, medians 27
+and 28). Either the benefit, if there is one, does not travel by that route, or the observational
+comparison is confounded in the obvious direction — a run that is struggling evaluates more, which
+would mask a real effect.
+
+The arm tests the INTERVENTION and can answer whether capping helps. It cannot answer why, and no
+mechanism claim should be built out of "eval_train went up". `arm_fidelity`'s docstring now carries
+that paragraph beside the number it would otherwise be read into, which is the only place it is
+sure to be read.
+
+Worth keeping in view: this same corpus association is where §190's arm came from, and it is
+observational. `run_probe` at p = 0.048 on 14 runs against 78 is a decile split, not a randomised
+comparison — which is precisely why the arm exists.
