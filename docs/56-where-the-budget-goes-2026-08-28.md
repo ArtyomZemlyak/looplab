@@ -9315,3 +9315,36 @@ while the probe-cap arm runs: the card is read by treatment and control alike, s
 mid-arm moves both arms at a batch boundary and confounds the thing $48 is being spent to measure.
 Same for (в), the money hint. They go in when the arm closes, and that is a decision to defer, not
 an omission.
+
+## §208 — the archive step now says which part it was, and two manual runs are healthy
+
+§207 left the runs-archive seconds unexplained with three candidates refuted. Rather than write a
+fourth theory, `archive_tree` now times its three parts and prints them beside the record count:
+
+```
+runs -> archive       model-probes 1.2G (105 run records, 3 re-copied SHORT of its source)
+                      67s prefix-check + 3s cp -ru + 23s repair
+```
+
+Two runs against the live tree, four probes alive throughout:
+
+| run | prefix-check | `cp -ru` | repair | total |
+|---|---|---|---|---|
+| pinned to the service lanes 44-47,92-95 | 67 s | 3 s | 23 s | **93 s** |
+| unpinned, as the timer runs it | 82 s | 38 s | 36 s | **156 s** |
+
+So pinning is worth about 60 s and is not the difference between 93 s and the timer's 601 s, let
+alone 1765 s — the pinned/unpinned gap is the wrong order of magnitude, and `cp -ru` differs mostly
+because the pinned run had copied everything minutes earlier. The prefix check is the dominant part
+in both, which is expected: it is a `cmp` per file over 5,151 files.
+
+What this does NOT do is explain 601 s. Both of my manual runs are healthy; the slow ones were the
+timer's. The instrument is now in place, so the next timer-run snapshot answers it by itself, and
+the answer will be a measurement rather than the fourth theory in a row. Test:
+`test_the_archive_step_says_where_its_seconds_went.py`, whose second case puts a sleeping `cmp` on
+PATH so that only the prefix check is slow and the breakdown has to blame the right part — it
+reddens on a clock that is not reset between parts, on all three parts reporting one total, and on
+no breakdown at all.
+
+§206's own fix is confirmed in production, incidentally: the timer's ticks now land at 10:24:35 and
+10:54:35, exactly 1800 s apart, where before the period was the interval plus the snapshot.
