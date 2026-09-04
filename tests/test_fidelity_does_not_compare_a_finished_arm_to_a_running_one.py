@@ -24,7 +24,7 @@ REFUSAL = "(run_probe refused: this run has already made 12 probes, the cap set 
 
 
 def _probe(root: Path, name: str, executed: int, refused: int = 0, finished: bool = True,
-           paused: bool = False):
+           paused: bool = False, resumed: bool = False):
     d = root / name / "runs" / "edge_expansion" / "run"
     d.mkdir(parents=True)
     events = []
@@ -32,6 +32,8 @@ def _probe(root: Path, name: str, executed: int, refused: int = 0, finished: boo
         events.append({"type": "run_finished", "data": {"reason": "budget_exhausted"}})
     if paused:
         events.append({"type": "pause", "data": {"reason": "a Developer session crashed"}})
+    if resumed:
+        events.append({"type": "resume", "data": {}})
     (d / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events),
                                     encoding="utf-8")
     spans = []
@@ -123,3 +125,18 @@ def test_a_probe_that_never_started_is_not_a_zero(tmp_path):
     assert got["running"] == [], (
         f'{got["running"]} reported as still running, but capB2 has no spans at all -- it has not '
         "started, and naming it makes the arm look like it is waiting on work that never began")
+
+
+def test_a_resumed_probe_is_running_again_and_not_still_paused(tmp_path):
+    """Events are append-only, so "is there a pause event" answers PAUSED for ever. `freeB3`'s
+    order is `pause 12:32:26`, `resume 12:36:06`, then paid calls to 13:03:16 -- it was running,
+    and the tool reported it paused and owed work while it spent money."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _probe(tmp_path, "freeA2", executed=26)
+    _probe(tmp_path, "freeB3", executed=34, finished=False, paused=True, resumed=True)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA2", "freeB3"])
+    assert got["paused"] == [], (
+        f'{got["paused"]} still reported paused after a resume event; the state is the LAST '
+        "lifecycle event, not any of them")
+    assert "freeB3" in got["running"], "a resumed probe is running and must still be named"
+    assert got["control_n"] == 1 and got["contrast"] == 14, got

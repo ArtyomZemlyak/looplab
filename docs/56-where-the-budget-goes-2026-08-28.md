@@ -9525,3 +9525,15 @@ same correction `probe_summary::_why_no_test` needed, arriving in a tool I wrote
 **And §211 is visibly working.** Every one of the resumed run's 45 calls went out streamed —
 `stream=True`, latencies to 83.8 s, not one 300 s death — where the same probe had spent 23 minutes
 unable to leave non-streaming before the fix.
+
+### §213.1 — freeB3 is excluded from batch 2, and the criterion is written before the contrast
+
+`freeB3` ended at **$1.1056** against the $1.00 every other probe held to within a cent. That is my
+doing: I resumed it, and §213 is why the engine let it keep spending. A control that received 10 %
+more budget than its batch-mates is not comparable to them, so it is **excluded from batch 2** and a
+replacement control is run.
+
+The criterion is stated here, before any contrast has been computed: **a probe whose metered spend
+exceeds $1.05 is not a $1 probe and does not enter the arm.** It is recorded now precisely so it
+cannot be chosen later to suit a number. `arm_fidelity` has never printed a score and the batch-2
+contrast has not been read.

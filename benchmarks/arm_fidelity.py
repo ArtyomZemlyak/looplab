@@ -83,6 +83,9 @@ def probe_calls(root: str, name: str) -> dict:
             "finished": _run_finished(root, name), "paused": _paused(root, name)}
 
 
+LIFECYCLE = ("run_finished", "pause", "resume")
+
+
 def _event_types(root: str, name: str) -> set:
     """The set of event TYPES in this probe's run, crash-atomic packets unwrapped. No data read."""
     kinds: set = set()
@@ -94,12 +97,29 @@ def _event_types(root: str, name: str) -> set:
     return kinds
 
 
+def _last_lifecycle(root: str, name: str) -> str:
+    """The LAST of `run_finished` / `pause` / `resume`, or "" if the run has had none.
+
+    Not "is there a pause event" -- §212 asked that, and the log is append-only, so a resumed run
+    stayed PAUSED for ever. `freeB3`'s own order is `pause 12:32:26`, `resume 12:36:06`, then paid
+    calls to 13:03:16, and the tool called it paused throughout. The same correction
+    `probe_summary::_why_no_test` needed: take the LAST match, not any match.
+    """
+    last = ""
+    for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/events.jsonl")):
+        for event in events_read.iter_events(path):
+            kind = event.get("type")
+            if isinstance(kind, str) and kind in LIFECYCLE:
+                last = kind
+    return last
+
+
 def _run_finished(root: str, name: str) -> bool:
     return "run_finished" in _event_types(root, name)
 
 
 def _paused(root: str, name: str) -> bool:
-    return any("pause" in k for k in _event_types(root, name))
+    return _last_lifecycle(root, name) == "pause"
 
 
 def report(root: str, treat, control) -> dict:
