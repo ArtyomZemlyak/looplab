@@ -8777,3 +8777,46 @@ script is still valid shell. Two mutations redden it — remove the splice, or d
 **§190's arm is now executable end to end**: `PROBE_LOOPLAB_SETTINGS='-s developer_probe_max_calls=12'`
 on two probes of each batch, nothing on the other two, and the difference recorded in each probe's
 own instrument file. The $48 remains a separate decision.
+
+## 193. Two more arm-A constants, and both are zeros the validity gate produced
+
+§181 re-timed arm A on the three tasks whose champions had a recorded number. Two of the fifteen
+preserved logs recorded **`Using test dataset speedup for summary: None`** while exiting `rc=0`
+after ten thousand seconds — `pagerank` and `spectral_clustering`, and both have datasets on this
+box. Free to settle, so settled.
+
+| task | arm A, its own campaign | arm A, **re-timed here** | why |
+|---|---|---|---|
+| edge_expansion | 1.1087 | 0.9648 | it shipped the reference (§181) |
+| pde_heat1d | 1.1010 | 1.0267 | |
+| discrete_log | 1.5419 | 1.5133 | |
+| **pagerank** | **None** | **0.0** | `no_valid_speedups` |
+| **spectral_clustering** | **None** | **0.0** | `invalid_results` — **98/100 valid** |
+
+`pagerank`'s failure is one line, repeated 66 times:
+
+> `Solution verification failed: PageRank scores mismatch. Proposed sum=1.0, Reference sum=1.0.
+> (rtol=1e-05, atol=1e-08)`
+
+Both sums are 1.0 and the vectors still differ beyond tolerance — a convergence difference, not a
+crash. `spectral_clustering` misses by **two instances out of a hundred**, and AlgoTune requires all
+hundred, so 98 % valid scores exactly the same as zero.
+
+**So arm A's record over the five tasks re-timable here is 0.96, 1.03, 1.51, 0.00, 0.00** — three
+near the reference and two below the validity gate. Its self-reported `None` was honest; nothing was
+hidden. What was hidden is what `None` meant, and it means a solver that does not pass.
+
+**Two notes on the instruments, both to their credit.**
+
+The first pass of each returned `None` with `reason: baseline_measured_in_pass` — *"the per-instance
+reference timings for this task/subset were written during this evaluation, so the arena timed the
+reference and not the candidate"*. The ruler refused to report a number it had not calibrated, and
+said which number it was refusing and why. That is the opposite of every silent failure in this
+notebook, and it cost one extra pass.
+
+**And it changed the ruler directory, which the standing brief pins at seven entries.** It now holds
+**nine**: `pagerank__test` and `spectral_clustering__test`, both written at the same
+`__w22x1r3` regime on this box, 100 per-instance timings each, measured at 05:04 and 05:05 today.
+Nothing existing was touched — the seven that were there are byte-identical — but the count in the
+sweep list is now stale, and a future sweep reading "seven" against nine should reach this section
+rather than an alarm.
