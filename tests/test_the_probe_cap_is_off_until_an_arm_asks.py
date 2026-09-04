@@ -103,3 +103,40 @@ def test_the_role_hands_the_cap_to_the_tool():
         rd.LLMRepoDeveloper, "_tools_for_build") else inspect.getsource(rd)
     assert 'max_calls=getattr(self, "_probe_max_calls", 0)' in src, (
         "the developer builds DevProbeTools without the cap")
+
+
+def test_the_cap_is_per_RUN_not_per_phase():
+    """`_scout_tools` builds a fresh provider every phase, so a per-instance counter caps nothing.
+
+    Measured live on 2026-09-04 with the first version: `capA1` ran 12 probes inside one phase span,
+    was refused on the 13th, and the NEXT phase span started again at zero — 15 calls under a cap of
+    12. §189's effect is measured per RUN (corpus median 24 probes), so a per-phase cap of 12 across
+    three or four phases is not the treatment the arm registered. The owner passes ONE dict.
+    """
+    shared = {"n": 0}
+    first = DevProbeTools(max_calls=3, counter=shared)
+    for _ in range(3):
+        assert not first.execute_result("run_probe", {"code": "print(1)"}).is_error
+    second = DevProbeTools(max_calls=3, counter=shared)          # a new phase, same run
+    blocked = second.execute_result("run_probe", {"code": "print(1)"})
+    assert blocked.is_error and "this run has already made 3 probes" in blocked.content, blocked.content
+
+
+def test_an_unshared_provider_still_counts_for_itself():
+    """Without a counter the provider owns one, so a direct construction still honours its cap."""
+    solo = DevProbeTools(max_calls=1)
+    assert not solo.execute_result("run_probe", {"code": "print(1)"}).is_error
+    assert solo.execute_result("run_probe", {"code": "print(1)"}).is_error
+
+
+def test_the_developer_hands_one_counter_to_every_provider_it_builds():
+    import inspect
+
+    from looplab.adapters import repo_developer as rd
+    src = inspect.getsource(rd)
+    assert "counter=self._probe_call_counter()" in src, (
+        "the developer builds probe providers without sharing a counter, so the cap resets per phase")
+    dev = rd.LLMRepoDeveloper.__new__(rd.LLMRepoDeveloper)
+    a = dev._probe_call_counter()
+    a["n"] = 5
+    assert dev._probe_call_counter() is a, "the counter is rebuilt per call, so nothing accumulates"

@@ -701,6 +701,9 @@ class LLMRepoDeveloper:
         self._probe_confine = bool(probe_confine)
         # 0 = uncapped, the shipped behaviour; see `Settings.developer_probe_max_calls` and §190.
         self._probe_max_calls = max(0, int(probe_max_calls or 0))
+        # ONE counter for the whole run, not one per phase -- `_scout_tools` builds a fresh probe
+        # provider every phase, and §189's effect is measured per RUN. See `_probe_call_counter`.
+        self._probe_calls = {"n": 0}
         self.brief = task.agent_brief()
         rs = task.repo_spec()
         self._surface = rs["edit_surface"]
@@ -1312,6 +1315,17 @@ class LLMRepoDeveloper:
             return f"(step {idx} error: {e})"
         return ""
 
+    def _probe_call_counter(self) -> dict:
+        """The run-scoped probe tally handed to every `DevProbeTools` this developer builds.
+
+        Lazy because ~170 tests construct this class through `__new__` without running `__init__`;
+        a missing attribute there would turn a cap into an AttributeError at the first probe."""
+        counter = getattr(self, "_probe_calls", None)
+        if not isinstance(counter, dict):
+            counter = {"n": 0}
+            self._probe_calls = counter
+        return counter
+
     def _scout_tools(self, write=None):
         """Read-only repo scouts (read_file / grep / find_files / list_dir) so the Developer can READ
         the code it is EDITING and VERIFY an exact CLI flag / function signature / config key in the
@@ -1344,6 +1358,7 @@ class LLMRepoDeveloper:
                                        timeout_s=getattr(self, "_probe_timeout_s", 60.0),
                                        confine_reads=getattr(self, "_probe_confine", True),
                                        max_calls=getattr(self, "_probe_max_calls", 0),
+                                       counter=self._probe_call_counter(),
                                        staged=write))
         # PART V §22 — the Developer's read-only cross-run knowledge (dev-routed lessons: what code
         # change fixed a crash across runs). Advisory only; role-scoped so it doesn't see the R&D claims.

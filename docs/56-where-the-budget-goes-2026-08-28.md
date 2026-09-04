@@ -8865,3 +8865,41 @@ same direction as the 6.4 % this notebook already carries.
 alarms when the cache grows teaches the reader to ignore it — while a second regime, a short entry
 and an unparseable name all are. Four mutations redden it, including one that makes it complain
 always, which the live-cache test catches.
+
+## 195. The cap was per phase, not per run — caught by asking whether it had fired
+
+Batch 1 of §190's arm launched, and the first thing to check was not the score but whether the
+treatment was doing anything. It was not doing the right thing.
+
+`capA1`, cap 12, four minutes in: **15 `run_probe` calls, 1 refused.** A cap of 12 that has allowed
+fifteen calls is not a cap of 12. Grouping the calls by their phase span says why:
+
+```
+span 39fbe097eaa8: 13 calls, 1 refused
+span f1ab94139380:  2 calls, 0 refused
+sequence: 0 0 0 0 0 0 0 0 0 0 0 0 1 | 0 0
+```
+
+Twelve run, the thirteenth refused, **and then the next phase started again at zero**.
+`_scout_tools` builds a fresh `DevProbeTools` for every phase, and the counter lived on the
+instance. §189's effect is measured **per run** — the corpus median is 24 probes across a whole run
+— so a per-phase cap of 12 across three or four phases permits 36 to 48 and caps nothing the arm is
+about. **The treatment and the control would have been very nearly the same thing.**
+
+This is the third time in four sweeps that the same shape appeared: §191 the setting reached
+nothing, §192 the launcher could not pass it, and now the tool counted the wrong scope. Every hop
+looked correct from the hop beside it. What caught all three was the same move — **ask whether the
+knob has visibly done something, on live data, before believing the arm.**
+
+**Fixed:** the owner passes ONE counter dict into every provider it builds
+(`LLMRepoDeveloper._probe_call_counter`, lazy because ~170 tests construct the class through
+`__new__`), and the refusal now says *"this run has already made N probes"* rather than *"this
+session"*, because the earlier wording was describing the bug. Three tests pin it — a shared counter
+across two providers, an unshared provider still honouring its own cap, and the developer handing
+the same dict every time — and three mutations redden them.
+
+**Batch 1 discarded and relaunched.** The four probes had spent about $0.63 between them measuring a
+treatment nobody registered; their trees are removed, which makes them an ABANDONED arm in the
+ledger — a category `check_money` already names, so the money stays reconciled and visible rather
+than quietly written off. `capA2`/`capB2` (cap 12) and `freeA2`/`freeB2` (uncapped) are running with
+the fix, and each probe's `cli_settings:` line records which side it is on.
