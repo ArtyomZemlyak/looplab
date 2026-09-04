@@ -10262,3 +10262,40 @@ So: keep the pairing, and stop crediting it with variance reduction it does not 
 sentence for the eventual write-up is that the arm has ~0.75 power against +44 points, not that
 stratification bought extra precision. And the number to carry into any future design on this task
 is **ICC ≈ 0** — batching this corpus is a safety measure, never a statistical one.
+
+## §235 — the prediction held, and the node-level record changed with it
+
+§230 registered a falsifiable claim before batch 4 ran: all four probes should end with
+`run_finished / budget_exhausted` and none should end paused, and if any paused I would look for a
+second route to the crash sentinel rather than call it noise. Three have finished:
+
+| probe | ending | TEST |
+|---|---|---|
+| `capA5` | `run_finished['budget_exhausted']` | 104.3631 |
+| `capB5` | `run_finished['budget_exhausted']` | 227.3754 |
+| `freeA5` | `run_finished['budget_exhausted']` | 27.1858 |
+
+No pauses. `freeB6` is still running at $0.9837 and will settle it either way.
+
+**And the fix reaches deeper than the run's ending.** `freeA5` carries a `node_failed` on node 3 —
+`build_interrupted`, *"node build was interrupted before it committed"*, `eval_seconds 0.0`. That is
+what it looks like when the money runs out mid-build. Across the whole corpus:
+
+| `node_failed` reason | count | how those runs ended |
+|---|---|---|
+| `developer_crash` | 17 | **paused (16), resumed (1)** |
+| `build_interrupted` | **1** | **finished** |
+
+Every `developer_crash` in the corpus belongs to a run that paused — the sixteen ceiling hits §228
+identified, plus `freeB3`'s resume. The single `build_interrupted` belongs to the first post-fix run
+to hit its ceiling with a build in flight. So the same event that used to be filed as a provider
+failure is now filed as what it is, at the node level as well as the run level. That correspondence
+is exact and it is the strongest evidence the fix landed.
+
+Point 9 for the three, and one thing worth naming: the two capped probes both used the reference at
+**16.7 %** and `freeA5` at 8.8 % — which under §232's corrected reading is p90-ish and mid-corpus
+respectively, not "above the band" and "inside" it. `capA5` spent 40.0 % of its budget in `plan_step`
+and 1 % after its last node with 38 `eval_train`; `capB5` 33.9 % in `plan_step`, 0 % after, 25
+`eval_train`; `freeA5` 27.1 % in `propose`, **15 % after its last node**, 19 `eval_train` over 34
+executed probes. `freeA5` is also §231's unlucky fifth again — [27.25, 21.90, 27.13], three weak
+nodes and no recovery.
