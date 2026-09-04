@@ -224,6 +224,13 @@ SETTINGS_UI_SCHEMA_UNCURATED_FIELDS: dict[str, str] = {
         "open key set AND a value the form should not invite: it refuses secret-shaped names on "
         "purpose, and a browser field labelled 'environment variables' is how one gets pasted into "
         "a run's durable snapshot — declared in the config file or `-s eval_env=NAME=VALUE`"),
+    "developer_probe_max_calls":
+        "an EXPERIMENT instrument, not an operator knob: it exists to run the registered arm in "
+        "docs/56 §190 (does capping `run_probe` raise the score, or is a high probe count a symptom "
+        "of a run already lost) and its default of 0 is what every run in the corpus did. A form "
+        "row would invite operators to set a number the benchmark has not yet shown to be good — "
+        "set it with `-s developer_probe_max_calls=N` for an arm, and give it a row when an arm "
+        "says which N is right",
 }
 
 

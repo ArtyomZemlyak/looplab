@@ -203,7 +203,14 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # It reached master in `7813032e` WITHOUT this pin or a catalogue row, which is why the
     # reconciliation was red there from that merge until `9a07427f` — see the catalogue note above
     # for why it gets a form row rather than an uncurated entry.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 223
+    # 223 -> 224 on 2026-09-04: `developer_probe_max_calls`, the instrument for the arm registered
+    # in docs/56 §190. It is UNCURATED on purpose and the reason is in the dict beside the others:
+    # a form row would invite operators to set a probe cap the benchmark has not yet shown to be
+    # good. §189 is the measurement behind the arm -- of eleven process variables only probe count
+    # separates the best `edge_expansion` runs from the worst (20 vs 29, p = 0.037), and a median
+    # split at 24 gives champions of 221.81 against 177.84 (p = 0.0077) -- and it is a correlation
+    # until the arm runs. It gets a row when an arm says which N is right.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 224
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

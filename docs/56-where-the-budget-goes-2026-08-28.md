@@ -8711,3 +8711,40 @@ on by default, zero meaning zero, a counter that never advances, and a refusal t
 
 **Not launched this sweep.** The design above is the thing that had to exist first, and it now does;
 the $48 is a separate decision, taken with the table in front of it rather than after.
+
+## 191. The cap reaches the tool, and four repo guards caught the addition before I did
+
+§190 shipped `DevProbeTools(max_calls=N)` but nothing passed N — the arm would have set a setting
+that reached nothing and measured its control against itself. This threads it:
+`Settings.developer_probe_max_calls` (0 = uncapped) → `make_roles` → `LLMRepoDeveloper` →
+`DevProbeTools`. Three tests pin each hop; removing any one reddens exactly that hop.
+
+**The config comment I had to answer rather than ignore.** Directly above the field I was adding,
+`developer_probe_timeout_s` carries this, verbatim:
+
+> "There is deliberately NO probe COUNT budget: the developer session already carries a finite
+> wall-clock ceiling (`developer_session_time_budget_s`), which a probe spends like any other turn,
+> and a second fixed counter is the shape doc 36 names as the category error."
+
+That reasoning is sound and the new field does not overturn it. The field is an **experiment
+instrument**, not a budget: 0 unless an arm sets it, and the comment beside it says so and carries
+§189's measurement as the reason the arm exists.
+
+**Four guards fired, and each was right.**
+
+1. `test_settings_ui_schema` / `test_config_docs_sync`: a new `Settings` field must have a UI form
+   row **or** a recorded reason for omitting one. Recorded — a form row would invite operators to set
+   a probe cap the benchmark has not shown to be good; it gets a row when an arm says which N is.
+2. `docs/guide/configuration.md` must carry a row for the field **in the same change**. Added, with
+   the measurement and the warning that it is a correlation.
+3. The catalogue count is stated four times in that file and pinned once in the suite: 223 → **224**,
+   all five moved together, with a dated note beside the pin.
+4. `test_agent_factory_split::test_neither_module_is_a_god_module_again` — `agents/factory.py` is
+   held under 532 lines and my one added line hit exactly 532. Folded onto the existing line; the
+   file is 531.
+
+That last one is the interesting one. **A line budget is an odd-looking guard until it stops the
+fourth thing you were about to add to a file that already does too much** — and it cost me one
+`git diff` to satisfy honestly rather than by raising the number.
+
+63 guard tests and 662 in the probe/factory/settings/config/documentation set pass.

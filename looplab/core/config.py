@@ -2092,6 +2092,24 @@ class Settings(BaseSettings):
     # with a boundary it does not have -- so this is the switch to flip if that trade is wrong for
     # a given box, and the refusal names it.
     developer_probe_confine: bool = True
+    # A probe COUNT cap, 0 = none, which is the shipped behaviour and every run in the corpus.
+    #
+    # THE COMMENT ABOVE `developer_probe_timeout_s` SAYS THERE IS DELIBERATELY NO SUCH BUDGET, and
+    # it is right about the reasoning it gives: the session already has a wall clock, and a second
+    # fixed counter is a category error as a general rule. This field is not that rule being
+    # reversed -- it is the instrument for the arm registered in §190, and it stays 0 unless an arm
+    # sets it.
+    #
+    # WHY THE ARM EXISTS. §189 measured, over the 69 `edge_expansion` runs with a champion, that of
+    # eleven process variables exactly one separates the top thirteen from the bottom thirteen:
+    # `run_probe` calls, 20 against 29 (p = 0.037), while evaluated nodes (3 vs 3), `eval_train`
+    # calls (12 vs 12), file reads, generations and every phase share are flat. Split at the corpus
+    # median of 24 probes the champion is 221.81 against 177.84 -- +43.97, two-sided p = 0.0077, and
+    # +50.03 (p = 0.0097) among the fifty runs that evaluated exactly three nodes.
+    #
+    # That is a correlation. A run that probes twenty-nine times may be probing BECAUSE it is lost,
+    # and this field is how the two get told apart rather than argued about.
+    developer_probe_max_calls: int = 0
     # Phase-handoff summaries. Each LLM phase in a node build (Researcher·propose → Developer·stages →
     # plan → implement) ends with ONE extra LLM call that distills its transcript — the repo structure
     # it mapped, files/data confirmed, decisions made — into a brief injected into the NEXT phase (even

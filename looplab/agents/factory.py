@@ -377,7 +377,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
             # knob above: `make_roles` is the ONE place a setting becomes a role's behaviour.
             probe=getattr(settings, "developer_probe", True),
             probe_timeout_s=getattr(settings, "developer_probe_timeout_s", 60.0),
-            probe_confine=getattr(settings, "developer_probe_confine", True),
+            probe_confine=getattr(settings, "developer_probe_confine", True), probe_max_calls=getattr(settings, "developer_probe_max_calls", 0),  # noqa: E501
             # Snapshot the eval trust tier here; the role/tool never reads live Settings.
             command_runtime=DeveloperCommandRuntime.from_settings(settings))
 

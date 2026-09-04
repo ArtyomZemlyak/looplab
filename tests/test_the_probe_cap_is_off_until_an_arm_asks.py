@@ -62,3 +62,44 @@ def test_an_unknown_tool_is_still_unknown_under_a_cap():
     tools = DevProbeTools(max_calls=1)
     got = tools.execute_result("nope", {})
     assert got.is_error and "unknown tool" in got.content
+
+
+def _dev(**kw):
+    """A bare developer object with just the probe wiring set, no task or engine needed."""
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    obj = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
+    obj._probe = True
+    obj._probe_repo_spec = None
+    obj._probe_timeout_s = 60.0
+    obj._probe_confine = True
+    obj._probe_max_calls = kw.get("probe_max_calls", 0)
+    obj._dev_commands = None
+    return obj
+
+
+def test_the_setting_defaults_to_uncapped():
+    """`Settings.developer_probe_max_calls` exists for §190's arm and changes nothing until set."""
+    from looplab.core.config import Settings
+    assert Settings().developer_probe_max_calls == 0
+    assert Settings(developer_probe_max_calls=12).developer_probe_max_calls == 12
+
+
+def test_the_factory_threads_the_setting_to_the_role():
+    """One place turns a setting into behaviour; if this stops passing it, the arm silently runs
+    uncapped and its control and treatment become the same thing."""
+    import inspect
+
+    from looplab.agents import factory
+    src = inspect.getsource(factory)
+    assert "probe_max_calls=getattr(settings, \"developer_probe_max_calls\", 0)" in src, (
+        "make_roles no longer passes the cap; an arm setting it would measure nothing")
+
+
+def test_the_role_hands_the_cap_to_the_tool():
+    import inspect
+
+    from looplab.adapters import repo_developer as rd
+    src = inspect.getsource(rd.LLMRepoDeveloper._tools_for_build) if hasattr(
+        rd.LLMRepoDeveloper, "_tools_for_build") else inspect.getsource(rd)
+    assert 'max_calls=getattr(self, "_probe_max_calls", 0)' in src, (
+        "the developer builds DevProbeTools without the cap")
