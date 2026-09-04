@@ -10193,3 +10193,39 @@ The honest use of the number from here: report the rate, compare it to the corpu
 with p10 0.0 and p90 15.8, and stop describing 4.9–8.3 % as a baseline that a probe is above or
 below. That is a reporting change in my own sweeps rather than a code change, so it is written here
 where the next sweep will read it.
+
+## §233 — where the standing marks sit, and what one run can settle
+
+§232 found one of the sweep's carried numbers describing a fifth of the corpus. The others are
+single runs used as comparison points, so the same question applies: where do they sit now?
+
+| task | corpus | mark | percentile |
+|---|---|---|---|
+| edge_expansion | n=82, median 213.15, p10 106.36, p90 262.04 | 224.4432 | **62nd** (31 of 82 at or above) |
+| pde_heat1d | n=10, median 119.25 | 124.63 / 121.85 / 99.00 | 60th / 60th / 30th |
+| discrete_log | n=11, median 8.10 | 14.5186 | **91st** (1 of 11 at or above) |
+| | | 2.8369 | **0th** (all 11 above it) |
+
+`accEE`'s 224.4432 is a good-but-ordinary run, not a ceiling — a third of the corpus beats it. The
+`pde_heat1d` marks are mid-corpus. And on `discrete_log`, the thinnest task, the two marks **bracket
+the entire corpus**: one is near the ceiling, the other below the floor. The brief's "разброс 5.1×"
+is the gap between an outlier-good and an outlier-bad run, not a typical range — which is worth
+knowing before it is used as a spread.
+
+**And what a single run can settle, on the task with the most data.** `edge_expansion` TEST has
+mean 196.4, **sd 61.3, cv 0.31**. Two runs drawn at random differ by a median of **50.8 points**
+(p90 148.5). So a one-run-against-one-mark comparison cannot see any of the effects this document
+argues about:
+
+| effect | source | runs needed PER ARM at α .05, power .8 | cost |
+|---|---|---|---|
+| +23.5 | §186, kernel on node 0 | ~107 | $214 |
+| +28.6 | §225, strong opening | ~73 | $146 |
+| +44.0 | §190's registered target | **~31** | $62 |
+
+This is not an argument against the numbers; it is the resolution they come with. It also puts
+§190's arm in context: twelve batches is 24 runs per arm against a ~31-run requirement for a
+44-point effect, which is the same ballpark and is why the design's own power estimate was 0.83
+rather than 0.99 — the stratified test recovers some of it by pairing within batch. What the table
+rules out is reading any single probe's TEST against a mark as evidence of anything, which is a
+temptation every sweep offers.
