@@ -8903,3 +8903,38 @@ treatment nobody registered; their trees are removed, which makes them an ABANDO
 ledger — a category `check_money` already names, so the money stays reconciled and visible rather
 than quietly written off. `capA2`/`capB2` (cap 12) and `freeA2`/`freeB2` (uncapped) are running with
 the fix, and each probe's `cli_settings:` line records which side it is on.
+
+## 196. Checking that the treatment bites, which I should have done before launching
+
+§190 set the cap at 12 — "half the corpus median of 24" — and that is a reason to pick a number,
+not evidence that the number does anything. §195 was the case where a knob turned out not to bite;
+the same question applies to the value itself, and it costs one pass over the corpus.
+
+Probe counts per run over the 70 `edge_expansion` runs outside the arm: min 0, p10 **13**,
+median **24**, p90 **37**, max **43**.
+
+| cap | runs it bites | probe calls it removes |
+|---|---|---|
+| 6 | 69/70 (99 %) | 1,255 (75 %) |
+| 8 | 66/70 (94 %) | 1,119 (67 %) |
+| 10 | 64/70 (91 %) | 987 (59 %) |
+| **12** | **64/70 (91 %)** | **859 (51 %)** |
+| 16 | 57/70 (81 %) | 613 (37 %) |
+| 20 | 46/70 (66 %) | 400 (24 %) |
+| 24 | 32/70 (46 %) | 240 (14 %) |
+
+**A cap of 12 would have bitten 91 % of runs and removed half of all probe calls.** The registered
+value holds, and it holds for a reason now rather than by construction. Two things this also says:
+a cap at the median (24) would have touched fewer than half the runs — a much weaker treatment for
+the same $48 — and the p10 of 13 means even the quietest tenth of runs sits at the cap, so almost
+nothing in the corpus is naturally below it.
+
+**Live confirmation is still pending, and I am not claiming it.** `capA2` is at 8 probes across two
+phase spans with no refusal yet; the fix is verified by unit tests and three mutations, and the
+first live refusal that crosses a phase boundary is what will confirm it on real data. That check
+goes in the next sweep, not this one.
+
+*Batch 1 bookkeeping.* The four discarded probes are named in the ledger exactly as designed —
+`290 call(s) from 5 ABANDONED probe(s): capA1 $0.2791, capB1 $0.2477, freeA1 $0.2266, freeB1
+$0.1453, svcCacheCheck $0.0011` — total **$0.90**, residue $-0.000002. The money that bought the
+wrong treatment is visible rather than written off.
