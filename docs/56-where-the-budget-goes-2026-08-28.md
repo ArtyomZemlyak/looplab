@@ -9996,3 +9996,42 @@ argument holds, and read as though it held everywhere.
 self-check is the only instrument here comparing like with like. What changes is which reason does
 the work on which task, and that `instance_share` turns out to be predictive rather than merely
 arithmetic — it was written to explain a number and it forecasts one.
+
+## §227 — every zero in the corpus is a real one, and batch 3's three finishers
+
+`freeB5`'s node 1 scored **0.0 with `eval_seconds` 39.8**, which is point 2's exact question: a zero
+that arrives in a tenth of a second is a ruler refusal, a zero after a full evaluation is the solver.
+Thirty-nine seconds is a full evaluation, and the verdict names itself — `no_valid_speedups`, with a
+recognisable signature:
+
+> `Proposed edge_expansion is negative (-0.3227848101265823).`
+> `Solution verification failed: Edge expansion mismatch. Proposed=0.19224283305227655,
+> Reference=13.96627318718381 (rtol=1e-05, atol=1e-08)`
+
+Proposed values about a hundredth of the reference, and two instances negative outright: a
+normalisation gone wrong in the candidate, not anything in the bench.
+
+So I classified every zero the corpus has. **Ten zero-metric evaluated nodes in the whole corpus**
+(eight `edge_expansion`, two `pde_heat1d`), and **none of them is a harness refusal** — every one is
+a genuine solver failure: four value mismatches, one negative value, two evaluator execution errors,
+one compilation failure, two tolerance failures. The trap point 2 warns about is real — I walked into
+it myself twice while building `ruler_selfcheck` (§214), at `eval_seconds` 1.7 against a real 28 —
+but no probe has ever hit it. Zeros are rare (ten of ~270 evaluated nodes) and always earned.
+
+Batch 3's three finishers, described:
+
+| probe | arm | TEST | train nodes | probes | `eval_train` | reference | after last node |
+|---|---|---|---|---|---|---|---|
+| `capA4` | treat | **243.1132** | 21.14, 28.09, 239.94 | 12 (+5 refused) | 24 | 0.0 % | 7 % |
+| `capB4` | treat | **215.3809** | 216.60, 146.31, 212.97 | **11 (+0 refused)** | 33 | 0.0 % | 10 % |
+| `freeB5` | control | **28.0177** | 28.13, **0.0** | 56 | 28 | 5.4 % | 0 % |
+
+Two things to say plainly rather than let them pass. **`capB4` never reached its cap** — eleven
+probes, no refusals — so that probe carries the treatment label and none of the treatment, which is
+the dilution §198's docstring warns about arriving from the treated side. And `capA4` and `capB4`
+both used the reference **0.0 %** of the time, below the §69.1 band of 4.9–8.3 %, while `freeB5` sat
+inside it at 5.4 % and spent **62.8 % of its budget in `plan_step`** across 56 probe calls to reach
+a champion of 28.
+
+`freeB5` is also §225 in action from the unlucky side: a weak node 0 recovers four times in five,
+and this is the fifth. Nothing about it needs fixing.
