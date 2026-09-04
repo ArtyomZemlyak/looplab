@@ -338,7 +338,40 @@ RESEARCHER_OUTPUT_ATTRS: tuple[str, ...] = (
     # `on_budget` since it was written; `on_budget` is in `EXPLICIT_ONLY_LOOP_ARGS`, so it can only
     # ever arrive at a call site by hand, and the Researcher's was the one that never passed it.
     "last_budget_exhausted",
+    # THE SAME RECEIPT UNDER A ROLE-SCOPED NAME, and it is not a duplicate — it is what keeps the
+    # two receipts apart on ONE object. Under the shipped `Settings.unified_agent`,
+    # `agents/factory.py::make_roles` returns the SAME `UnifiedAgent` as both roles, so
+    # `self.researcher` and `self.developer` are one object and both halves were writing
+    # `last_budget_exhausted` on it: `propose` mirrored the inner researcher's cutoff, and
+    # `WrapsDeveloper._sync_audit` mirrored the inner developer's after each code stage. Whichever
+    # ran last won, and `engine/evaluate.py` stamps the DURABLE `node_repaired.budget_exhausted`
+    # from it — so a repair whose delegate raised (swallowed by `_evaluate`'s own
+    # `except Exception as _repair_exc`, which leaves `_sync_audit` unreached) recorded the value a
+    # PROPOSAL had written minutes earlier, as a fact about a repair that had no budget cutoff.
+    #
+    # A plain (non-facade) researcher writes only `last_budget_exhausted` and is not also a
+    # developer, so both spellings are read through `researcher_budget_exhausted` below.
+    "last_propose_budget_exhausted",
 )
+
+
+def researcher_budget_exhausted(researcher) -> str:
+    """WHICH BOUND ENDED THIS ROLE'S LAST PROPOSE — "turns" / "time" / "" — from either spelling.
+
+    THE FALLBACK IS ON ABSENCE, NOT ON EMPTINESS, and that distinction is the whole rule. On a
+    `UnifiedAgent` the plain `last_budget_exhausted` carries the DEVELOPER's last code stage, so
+    falling back whenever the scoped name is merely EMPTY would report a budget-cut repair as this
+    proposal's cutoff — the same confusion in the other direction. An object that DEFINES the scoped
+    slot has answered for the researcher role, "" included; only an object that does not define it
+    at all is a plain researcher, which writes the one name and is not also a developer.
+    """
+    # Both names spelled as LITERALS: `tests/test_role_output_contract.py` scans for
+    # `getattr(<expr>, "<attr>")`, so a loop over a tuple of names would make this reader invisible
+    # to the registry that exists to catch a one-sided rename.
+    scoped = getattr(researcher, "last_propose_budget_exhausted", None)
+    if scoped is not None:
+        return str(scoped or "").strip()[:32]
+    return str(getattr(researcher, "last_budget_exhausted", "") or "").strip()[:32]
 
 # Duck-typed attributes that answer "does building one node make provider calls at all?" — the seam
 # `engine/orchestrator.py::_build_calls_an_llm` reads, and the other half of the same AUTO width

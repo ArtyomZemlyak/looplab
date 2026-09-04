@@ -158,3 +158,46 @@ def test_every_full_population_sweep_passes_the_flag():
             assert flags.get("scan") is True, (
                 f"{func.__qualname__} sweeps {population}() without scan=True, so its folds evict "
                 f"the runs the turn is working with")
+
+
+def test_a_SWEEP_MISS_IS_ACTUALLY_CACHED_at_capacity(tmp_path):
+    """The half the LRU bookkeeping hid: the entry the sweep made evicted ITSELF.
+
+    `self._cache[key] = ...` appended at the hot end, `move_to_end(key, last=False)` moved it to the
+    FRONT — and the eviction loop two lines below pops the front. So at capacity a scan miss was
+    inserted and immediately discarded: the sweep churned ZERO slots, not the "roughly one" the rule
+    says, and every scanned run was folded and thrown away. On a 46-run root with 32 slots the
+    render pass that follows then re-folded all of them.
+
+    MUTATION: insert before evicting again -> `run-040` is absent and the fold is lost.
+    """
+    root = _root(tmp_path, 40)
+    cache = RunStateCache(root)
+    cache._cache_max = 4
+    for i in range(4):                                   # fill the cache with a working set
+        assert cache.state(f"run-{i:03d}") is not None
+    assert len(_cached(cache)) == 4
+
+    assert cache.state("run-039", scan=True) is not None
+    assert "run-039" in _cached(cache), (
+        "a sweep's fold must survive the insert that made it — it churns one slot, not none")
+    assert len(_cached(cache)) == 4, "and the cache stays at its bound"
+
+
+def test_the_sweep_still_gives_up_its_slot_FIRST(tmp_path):
+    """The property the fix must not cost: the scan entry is the next thing evicted, so a sweep
+    wider than the cache leaves the working set alone rather than replacing it."""
+    root = _root(tmp_path, 40)
+    cache = RunStateCache(root)
+    cache._cache_max = 4
+    working = [f"run-{i:03d}" for i in range(3)]
+    for name in working:
+        assert cache.state(name) is not None
+
+    for i in range(30, 36):                              # a sweep, wider than the free space
+        assert cache.state(f"run-{i:03d}", scan=True) is not None
+
+    assert all(name in _cached(cache) for name in working), (
+        "the sweep must not evict what the turn is working with")
+    assert len([k for k in _cached(cache) if k not in working]) == 1, (
+        "and exactly one slot carries the sweep")

@@ -122,13 +122,25 @@ class RunStateCache:
         except (OSError, ValueError, TypeError):
             divergence = {"unreadable": True}
         self._partial[str(run_id)] = divergence
+        # EVICT BEFORE INSERTING, and that order is the whole of it. Inserting first and then
+        # `move_to_end(last=False)` put the new entry at the FRONT — which is the end
+        # `popitem(last=False)` pops — so at capacity a sweep evicted the entry it had just made and
+        # cached NOTHING, not the "one slot" the rule below describes. On a 46-run root with 32
+        # slots that meant every scanned run was folded and thrown away, and the render pass that
+        # follows re-folded all of them.
+        while len(self._cache) >= self._cache_max:
+            self._cache.popitem(last=False)          # drop the least recently used run state
         self._cache[str(run_id)] = (sig, st)
         # A SWEEP'S MISS LANDS COLD. `move_to_end(last=False)` makes it the next thing evicted, so a
         # 46-run walk over 32 slots churns one slot instead of replacing the whole working set with
         # runs the turn never asked about. A single-run read still lands hot, unchanged.
+        #
+        # THE RESIDUE IS DELIBERATE and is the trade this rule already made: consecutive sweep
+        # misses still evict each other, so a sweep wider than the cache leaves one entry behind and
+        # a render pass over the same runs re-folds the rest. Caching the sweep instead would
+        # replace the working set with runs the turn never asked about, which is what the cold
+        # landing exists to prevent. Widening `_cache_max` is the lever, not this order.
         self._cache.move_to_end(str(run_id), last=not scan)
-        while len(self._cache) > self._cache_max:
-            self._cache.popitem(last=False)          # drop the least recently used run state
         return st
 
     def partial(self, run_id: Optional[str]) -> Optional[dict]:

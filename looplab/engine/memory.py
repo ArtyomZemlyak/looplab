@@ -834,13 +834,26 @@ def redacted_skill_body(body: str) -> str:
     own secret-shaped environment variables) carry no such ambiguity and are what actually catch a
     pasted token.
     """
-    from looplab.core.redact import redact_persisted_text
+    from looplab.core.redact import _redact_persisted
 
+    # THE TRUNCATION BIT COMES FROM THE BOUNDER, never from `len(body)`. `core/redact.py`'s own
+    # docstring names that reconstruction as a shipped bug and `_redact_persisted` exists solely to
+    # expose the fact "from the one place that knows it": the redactor NFKC-normalizes and masks
+    # BEFORE bounding, so the raw length says nothing about truncation in either direction. Both
+    # directions were live here — a body of compatibility characters EXPANDS past the cap and is
+    # clipped while `len(body) <= cap`, so the card shipped an amputated code snippet carrying the
+    # bounder's own marker and DENYING it was clipped; and a body just over the cap carrying a
+    # masked `sk-…` credential redacts back under it and is not clipped, while the card asserts it
+    # was — a false receipt on a file mounted into every later Researcher's toolset.
+    #
+    # The receipt therefore no longer quotes a character count either: the number a reader could
+    # check is the raw one, and the raw one is not what the cap was applied to.
     text = str(body or "")
-    clipped = redact_persisted_text(text, max_chars=_MAX_SKILL_BODY_CHARS, entropy=False)
-    if len(text) > _MAX_SKILL_BODY_CHARS:
+    clipped, truncated = _redact_persisted(
+        text, max_chars=_MAX_SKILL_BODY_CHARS, entropy=False)
+    if truncated:
         clipped = (clipped.rstrip()
-                   + f"\n\n<!-- clipped: the distilled body was {len(text)} characters, over the "
+                   + f"\n\n<!-- clipped: the distilled body did not fit the "
                      f"{_MAX_SKILL_BODY_CHARS}-character skill-card limit -->")
     return clipped
 

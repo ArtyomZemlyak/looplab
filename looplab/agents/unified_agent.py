@@ -73,6 +73,13 @@ class UnifiedAgent(WrapsDeveloper):
         # accountant (`costs._CHILD_ATTRS` names it). None = repair shares `developer`, the default.
         self.repair_developer = repair_developer
         self._active_developer = developer
+        # THE PROPOSE RECEIPT'S OWN SLOT, initialized so its ABSENCE means something.
+        # `roles.researcher_budget_exhausted` falls back to the plain `last_budget_exhausted` for a
+        # non-facade researcher — but on THIS object that name carries the DEVELOPER's last code
+        # stage, so a converged propose would fall back to a budget-cut repair's stamp and warn
+        # TRUNCATED about a proposal that emitted on its own terms. Defining the slot makes "this
+        # object answers for the researcher role" a fact the reader can test rather than infer.
+        self.last_propose_budget_exhausted = ""
         self.strategist = strategist
         self._pilot_client = pilot_client
         self._pilot_tools = pilot_tools
@@ -132,7 +139,16 @@ class UnifiedAgent(WrapsDeveloper):
         # the funnel read whatever `_sync_audit` last stamped here: a budget-cut repair made every
         # later proposal warn TRUNCATED, and a genuinely cut propose (set on the inner researcher
         # only) was never reported at all.
-        self.last_budget_exhausted = getattr(
+        # A ROLE-SCOPED NAME, because this facade IS the developer too. Under the shipped
+        # `Settings.unified_agent`, `agents/factory.py::make_roles` returns one object as both
+        # roles, so writing the plain `last_budget_exhausted` here put the PROPOSE receipt where
+        # `_sync_audit` puts the REPAIR one and `engine/evaluate.py` reads it to stamp the durable
+        # `node_repaired.budget_exhausted`. A repair whose delegate raised — swallowed by
+        # `_evaluate`'s own `except Exception as _repair_exc`, which leaves `_sync_audit` unreached
+        # — then recorded a proposal's cutoff as a fact about a repair that had no budget at all.
+        # `roles.researcher_budget_exhausted` reads this first and the plain name after it, so a
+        # non-facade researcher is unchanged.
+        self.last_propose_budget_exhausted = getattr(
             self.researcher, "last_budget_exhausted", "") or ""
         return idea
 
@@ -170,8 +186,14 @@ class UnifiedAgent(WrapsDeveloper):
         return dev
 
     def implement(self, idea: Idea) -> str:
-        code = self._for_stage("implement").implement(idea)
-        self._sync_audit()
+        try:
+            code = self._for_stage("implement").implement(idea)
+        finally:
+            # IN A `finally`: a delegate that RAISES must not leave this facade mirroring the
+            # previous call. The engine reads these off the facade and its repair path swallows
+            # the exception, so an unreached sync records the last successful stage's audit as
+            # this one's.
+            self._sync_audit()
         return code
 
     def implement_from(self, idea: Idea, parent) -> str:
@@ -179,15 +201,19 @@ class UnifiedAgent(WrapsDeveloper):
         improve patches the parent's solution instead of regenerating from the baseline."""
         dev = self._for_stage("implement")
         impl = getattr(dev, "implement_from", None)
-        code = impl(idea, parent) if callable(impl) else dev.implement(idea)
-        self._sync_audit()
+        try:
+            code = impl(idea, parent) if callable(impl) else dev.implement(idea)
+        finally:
+            self._sync_audit()          # see `implement` — a raising delegate must not leave a stale mirror
         return code
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
         dev = self._for_stage("repair")
         rep = getattr(dev, "repair", None)
-        out = rep(idea, code, error) if callable(rep) else dev.implement(idea)
-        self._sync_audit()
+        try:
+            out = rep(idea, code, error) if callable(rep) else dev.implement(idea)
+        finally:
+            self._sync_audit()          # see `implement` — a raising delegate must not leave a stale mirror
         return out
 
     def repair_from(self, idea: Idea, node, error: str) -> str:
@@ -195,9 +221,11 @@ class UnifiedAgent(WrapsDeveloper):
         OWN files) when available, else the plain repair(idea, node.code, error)."""
         dev = self._for_stage("repair")
         rf = getattr(dev, "repair_from", None)
-        out = (rf(idea, node, error) if callable(rf)
-               else self.repair(idea, getattr(node, "code", ""), error))
-        self._sync_audit()
+        try:
+            out = (rf(idea, node, error) if callable(rf)
+                   else self.repair(idea, getattr(node, "code", ""), error))
+        finally:
+            self._sync_audit()          # see `implement` — a raising delegate must not leave a stale mirror
         return out
 
     # ----------------------------------------------------------- Strategist

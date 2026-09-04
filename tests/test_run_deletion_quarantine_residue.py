@@ -523,3 +523,35 @@ def test_the_absorbing_phase_stops_claiming_a_retry_can_move_it(tmp_path, monkey
     assert again["retryable"] is False and again["phase"] == "quarantine_ambiguous", (
         "the same answer twice is what makes the retryable claim checkable")
 
+
+def test_the_branch_that_MINTS_the_absorbing_phase_answers_the_same_way():
+    """The FIRST answer is the one the operator decides on, and it was the false one.
+
+    The test above plants the phase and exercises the RESUME branch. The branch that actually
+    ENTERS `quarantine_ambiguous` — the Windows durable-move failure — was left on `_pending`, whose
+    `retryable: true` is documented as the promise that pressing again can make progress. So the
+    first response about this phase said "Retry or check only this exact deletion operation" and
+    only a SECOND press said no retry can resolve it: two answers about one unmoving phase, making
+    opposite promises, with the false one arriving while the operator is still deciding.
+
+    Driven on the source rather than by simulating an `os.name == "nt"` durable-move failure on
+    Linux, and the assertion is about the two branches AGREEING — which is the property, and which
+    a simulation of one of them cannot show.
+
+    MUTATION: put the minting branch back on `_pending` -> the two branches disagree and this is red.
+    """
+    import inspect
+
+    from looplab.serve import deletion_service
+
+    src = inspect.getsource(deletion_service)
+    minting = src.index('receipt = mark_deletion_quarantine_ambiguous(')
+    answer = src.index("delete_quarantine_outcome_unknown", minting)
+    window = src[minting:answer]
+    assert "_wedged(" in window and "_pending(" not in window, (
+        "the branch that mints the absorbing phase must answer with the wedge, not the promise")
+    assert src.count('"delete_quarantine_outcome_unknown"') == 2, (
+        "exactly two branches speak about this phase — the mint and the resume")
+    assert src.count("no retry can resolve it") == 2, (
+        "and they say the same sentence, so they cannot drift into describing one wedge differently")
+

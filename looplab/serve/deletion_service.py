@@ -795,13 +795,28 @@ def begin_or_resume_run_deletion(
                             source_exists = os.path.lexists(rd)
                             quarantine_exists = os.path.lexists(quarantine)
                             if os.name == "nt" and not source_exists and quarantine_exists:
+                                # THE BRANCH THAT MINTS THE ABSORBING PHASE ANSWERS LIKE THE ONE
+                                # THAT RESUMES IT. The resume path was moved to `_wedged` and this,
+                                # the transition, was left on `_pending` — so the FIRST response the
+                                # operator ever sees about `quarantine_ambiguous` promised
+                                # "Retry or check only this exact deletion operation", and only a
+                                # SECOND press reached the resume branch and said no retry can
+                                # resolve it. Two answers about one unmoving phase, making opposite
+                                # promises, with the false one arriving at the moment the operator
+                                # is deciding — which is exactly what `_wedged` exists to end.
+                                #
+                                # ONE SENTENCE, taken from the resume branch verbatim, so the two
+                                # cannot drift into describing the same wedge differently.
                                 receipt = mark_deletion_quarantine_ambiguous(
                                     receipt_path, receipt)
-                                return _pending(
+                                return _wedged(
                                     receipt, "delete_quarantine_outcome_unknown",
                                     "Windows reported a failed durable move after the exact "
-                                    "quarantine became visible. The operation remains fenced for "
-                                    "manual storage recovery.")
+                                    "quarantine became visible, so whether the run was moved is "
+                                    "unknown. The operation is fenced and no retry can resolve it.",
+                                    remediation="Inspect the quarantine and the run root, reconcile "
+                                                "them by hand, then retire this operation's receipt "
+                                                "and fence.")
                             return _pending(
                                 receipt, "delete_quarantine_unavailable",
                                 f"The run is fenced but could not enter deletion quarantine: {exc}")

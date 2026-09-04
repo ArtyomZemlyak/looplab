@@ -28,6 +28,7 @@ from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState,
                                   idea_proposal_digest, idea_proposal_ref)
+from looplab.agents.roles import researcher_budget_exhausted
 from looplab.engine.card_reservation import discarded_proposal_receipt
 from looplab.engine.shared import effective_researcher_eval_timeout
 from looplab.core.tracing import current_ids
@@ -848,7 +849,7 @@ class NoveltyGateMixin:
                 # check — so without it the primary lane at the shipped width could not tell a
                 # TRUNCATED proposal from a converged one, which is the indistinguishability the
                 # receipt exists to remove. Warning-only, exactly like `_link`'s.
-                _bound = str(getattr(self.researcher, "last_budget_exhausted", "") or "")
+                _bound = researcher_budget_exhausted(self.researcher)
                 if _bound:
                     _LOG.warning(
                         "batch proposal roll %d (draft %d of %d) was cut short by its %s budget "

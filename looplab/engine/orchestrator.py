@@ -137,7 +137,7 @@ from looplab.search.policy import KIND_EXPAND, SearchPolicy
 from looplab.core.profile import profile_dataset
 from looplab.events.replay import fold
 from looplab.agents.roles import (Developer, Researcher, is_researcher_fallback,
-                                  researcher_fallback_cause)
+                                  researcher_budget_exhausted, researcher_fallback_cause)
 from looplab.runtime.sandbox import Sandbox
 from looplab.core.tracing import (
     TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS, AsyncJsonlSpanExporter, Tracer)
@@ -5545,7 +5545,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # operator who set a cap, and the value of saying so is telling a TRUNCATED proposal
             # from a converged one — the distinction a cap destroys if nobody records it.
             if proposed:
-                _bound = str(getattr(researcher, "last_budget_exhausted", "") or "")
+                _bound = researcher_budget_exhausted(researcher)
                 if _bound:
                     _LOG.warning(
                         "the proposal for node %s was cut short by its %s budget — it did not "

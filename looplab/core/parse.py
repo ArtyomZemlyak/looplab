@@ -137,15 +137,29 @@ def _schema_key_sets(schema) -> tuple[frozenset[str], frozenset[str]]:
     return required & declared if declared else required, declared
 
 
-def _schema_fit(obj: dict, required: frozenset[str], declared: frozenset[str]) -> tuple[int, int]:
-    """How well a decoded object answers the schema: (required keys present, declared keys present).
+def _schema_fit(obj: dict, required: frozenset[str], declared: frozenset[str]) -> tuple[int, bool]:
+    """How well a decoded object answers the schema: (required keys present, answers it at all).
 
-    Compared as a TUPLE, so a candidate carrying every required field beats one that merely mentions
-    more optional names. Both halves are counted because a schema with no `required` block — several
-    of this repo's models are entirely optional-with-defaults — would otherwise score everything 0.
+    THE SECOND HALF IS A BOOLEAN, NOT A COUNT, and that is the whole rule. Counting declared keys
+    reads as "more complete is better", which is a different question from "is this the answer" —
+    and on this tree it is answered by the wrong object almost every time: `required` is absent from
+    `model_json_schema()` whenever every field has a default, which is EVERY emit model here (the
+    Strategist's has 14 properties and no `required` block at all). The score then collapses to a
+    count of optional keys, so a later, fuller object is a STRICT improvement and wins — reproduced
+    against the real `_StrategyOut`, where a reply answering `{"policy": "greedy", "rationale":
+    "seed phase"}` and then illustrating a fuller decision returned the ILLUSTRATION, while the same
+    reply with no schema returned the answer. A worked example, a restated few-shot and a
+    "here is what a complete one looks like" are all that shape.
+
+    What the schema can honestly say about a candidate is whether it answers the question at all —
+    which is exactly what catches the echo this scoring exists for: `{"type": "object", "properties":
+    {...}}` decodes cleanly, is a dict, and carries NONE of the declared names. So: every required
+    field, then answered-or-not, and `_extract_json`'s "the first candidate wins ties" does the rest.
+    Conservative by construction — a later object can only win by carrying required fields the
+    earlier one lacked, never by being longer.
     """
     keys = frozenset(k for k in obj if isinstance(k, str))
-    return len(keys & required), len(keys & declared)
+    return len(keys & required), bool(keys & declared)
 
 
 def _extract_json(text: str, schema=None) -> dict:
@@ -164,6 +178,10 @@ def _extract_json(text: str, schema=None) -> dict:
     one wins every tie, so this changes an answer only when a LATER object matches the schema
     STRICTLY better. With no schema (`schema=None`, which is every direct caller and every test that
     predates this) it is byte-identical to the first-object walk it replaces.
+
+    "STRICTLY BETTER" IS NOT "LONGER" — see `_schema_fit`. Scoring the second half as a COUNT of
+    declared keys made a trailing worked example beat the model's real answer on every emit model in
+    this tree, because none of them declares a `required` block.
     """
     # Reasoning models (e.g. Qwen3) wrap chain-of-thought in <think>…</think> that
     # can itself contain braces — strip it before locating the JSON object.
@@ -174,9 +192,17 @@ def _extract_json(text: str, schema=None) -> dict:
     # than one character in: a nested `{` inside an object already decoded is not a second candidate,
     # and re-decoding from inside it is quadratic on a large reply.
     required, declared = _schema_key_sets(schema)
-    perfect = (len(required), len(declared))
+    # The best a candidate can do: every required field, and it answers the schema. With no
+    # `required` block — every emit model in this tree — that is reached by the FIRST object
+    # carrying any declared name, which is both the right answer and the reason the scan stops
+    # there. Short-circuiting on "all DECLARED fields present" instead meant a model that
+    # legitimately omitted an optional field never short-circuited at all, and the walk ran to the
+    # end of the reply: measured at 0.63 s against 0.0002 s on a 197 KB reply with 16,001 braces,
+    # per structured call on the text-parser path. `_JSON_CANDIDATE_CAP` never bounded that, because
+    # it counts DECODED candidates and the cost is in the failed `raw_decode` attempts.
+    perfect = (len(required), bool(declared))
     best: dict | None = None
-    best_fit = (-1, -1)
+    best_fit = (-1, False)
     seen = 0
     i = text.find("{")
     while i != -1:

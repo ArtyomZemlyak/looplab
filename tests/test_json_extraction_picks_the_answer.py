@@ -41,11 +41,76 @@ def test_a_schema_echo_does_not_win_over_the_answer():
     assert _extract_json(reply, _SCHEMA)["operator"] == "improve"
 
 
-def test_a_worked_EXAMPLE_does_not_win_over_the_answer():
-    """The other producer of a leading object: a model that shows its working."""
+def test_a_worked_EXAMPLE_carrying_REAL_FIELDS_is_a_TIE_and_the_first_wins():
+    """THE HONEST LIMIT, and it was asserted the other way for four days at a real cost.
+
+    A schema can decide "does this object answer the question at all" — which is exactly what
+    catches the echo above, since `{"type": "object", "properties": {...}}` carries NONE of the
+    declared names. It cannot decide which of two objects that BOTH answer it the model meant: a
+    worked example and an answer are the same shape, and only the prose around them says which is
+    which.
+
+    Scoring the second half as a COUNT of declared keys buys the leading-example case, and pays for
+    it with the TRAILING-example case on every emit model in this tree — none of them declares a
+    `required` block, so the score collapses to "more optional keys wins" and any later, fuller
+    object is a strict improvement. Reproduced against the real `_StrategyOut` (14 properties, no
+    `required`): a reply answering `{"policy": "greedy", "rationale": "seed phase"}` and then
+    illustrating a fuller decision returned the ILLUSTRATION — a policy/fidelity/developer switch
+    taken from the model's own worked example — while the same reply with no schema returned the
+    answer.
+
+    Neither position is safe on its own, so the tie goes to the rule this module already states and
+    every caller had before: the FIRST one. What the schema still decides is the echo, which is the
+    defect this scoring was written for.
+    """
     reply = ('For example one might answer {"operator": "draft"} — but here is my answer:\n'
              '{"operator": "merge", "rationale": "combine 1 and 2", "params": {"w": 0.5}}')
-    assert _extract_json(reply, _SCHEMA)["operator"] == "merge"
+    assert _extract_json(reply, _SCHEMA)["operator"] == "draft"
+
+
+def test_a_TRAILING_worked_example_does_not_win_over_the_answer():
+    """The complement, and the case the count rule got wrong on every model in this tree.
+
+    MUTATION: score the second half as `len(keys & declared)` again -> the illustration wins, and
+    on a Strategist reply that is a policy/fidelity/developer switch the run then acts on.
+    """
+    reply = ('{"operator": "improve", "rationale": "raise lr"}\n'
+             'A fuller answer might look like: '
+             '{"operator": "merge", "rationale": "x", "params": {"w": 0.5}}')
+    assert _extract_json(reply, _SCHEMA)["operator"] == "improve"
+
+
+def test_a_REQUIRED_block_is_still_counted_and_still_decides():
+    """Where the schema DOES say which fields an answer must carry, that is a real discrimination
+    and it is used: a candidate missing a required field loses to one that has it, wherever it sits.
+    """
+    schema = {"properties": {"operator": {}, "rationale": {}, "params": {}},
+              "required": ["operator", "rationale"]}
+    reply = ('{"operator": "draft"}\n'
+             '{"operator": "merge", "rationale": "combine 1 and 2"}')
+    assert _extract_json(reply, schema)["operator"] == "merge"
+    assert _schema_fit({"operator": "x"}, frozenset({"operator", "rationale"}),
+                       frozenset({"operator", "rationale", "params"})) == (1, True)
+
+
+def test_the_scan_STOPS_at_the_first_object_that_answers_the_schema():
+    """The efficiency half, and it is the same rule seen from the side.
+
+    Short-circuiting on "every DECLARED field present" meant a model that legitimately omitted one
+    optional field never short-circuited, and the walk ran `text.find("{")` + `raw_decode` to the
+    END of the reply. `_JSON_CANDIDATE_CAP` never bounded that — it counts DECODED candidates, and
+    the cost is in the FAILED decodes. Measured 0.63 s against 0.0002 s on a 197 KB reply with
+    16,001 braces, per structured call on the text-parser path.
+
+    Driven as a complexity claim: 16,000 trailing braces must cost what none of them do.
+    """
+    import time
+
+    answer = '{"operator": "improve", "rationale": "r"}'
+    _extract_json(answer, _SCHEMA)                       # warm
+    start = time.perf_counter()
+    assert _extract_json(answer + "\n{" * 16_000, _SCHEMA)["operator"] == "improve"
+    assert time.perf_counter() - start < 0.05, "the scan must stop at the answer, not at EOF"
 
 
 def test_the_FIRST_object_still_wins_a_TIE():

@@ -218,6 +218,16 @@ def fence_untrusted(text: str, label: str) -> str:
     occurrence of the closing fence INSIDE the text is neutralized first, so a result cannot end its
     own block early and speak as the loop.
 
+    NEUTRALIZED CASE-INSENSITIVELY AND ACROSS WHITESPACE, because the consumer is a language model
+    and not a strict parser. A byte-exact `replace` left `END untrusted_run_evidence`,
+    `End UNTRUSTED_RUN_EVIDENCE`, `END  UNTRUSTED_RUN_EVIDENCE` and a newline between the two words
+    all intact — every one of which reads as a close to the thing actually reading it, and the
+    lowercase form is exactly what the neutralization itself emits, so a real close and an
+    attacker's variant were indistinguishable in the transcript. The OPENING label is neutralized
+    too: a result that opens a second block mid-text is claiming the same authority from the other
+    end. Both are folded to a marked, non-matching spelling rather than deleted, so what the
+    candidate wrote is still visible to a human reading the trace.
+
     Applied AFTER `_cap_tool_result`, so truncation can never remove the closing fence.
 
     OPT-IN, and the empty default is what keeps it so: `drive_tool_loop` drives every persona in the
@@ -229,7 +239,27 @@ def fence_untrusted(text: str, label: str) -> str:
     if not label:
         return text
     closing = f"END {label}"
-    return f"{label}\n{text.replace(closing, closing.lower())}\n{closing}"
+    return f"{label}\n{_neutralize_fences(text, label)}\n{closing}"
+
+
+def _fence_pattern(label: str) -> "re.Pattern":
+    """A matcher for one fence marker that is as tolerant as the reader it defends.
+
+    Case-insensitive, and every run of whitespace in the marker matches any run of whitespace
+    (newlines included) — so `END\nUNTRUSTED_RUN_EVIDENCE` is caught, which a byte compare is not.
+    Every other character is escaped: a label is a caller's literal, never a pattern.
+    """
+    parts = [re.escape(part) for part in label.split()]
+    return re.compile(r"\s+".join(parts), re.IGNORECASE)
+
+
+def _neutralize_fences(text: str, label: str) -> str:
+    """Fold every spelling of this fence's own markers inside `text` into a marked, inert form."""
+    def _mark(match: "re.Match") -> str:
+        return "\u2039" + match.group(0).lower() + "\u203a"   # ‹…›: visibly not the marker
+
+    text = _fence_pattern(f"END {label}").sub(_mark, text)
+    return _fence_pattern(label).sub(_mark, text)
 
 
 def _cap_tool_result(result: str, cap: int = RESULT_CAP) -> str:

@@ -87,17 +87,15 @@ def test_the_engine_READS_it_at_the_one_proposal_funnel():
     src = (ROOT / "looplab/engine/orchestrator.py").read_text()
     fn = next(n for n in ast.walk(ast.parse(src))
               if isinstance(n, ast.FunctionDef) and n.name == "_prepare_node_idea")
-    reads = [
-        call for call in ast.walk(fn)
-        if isinstance(call, ast.Call)
-        and getattr(call.func, "id", None) == "getattr"
-        and any(isinstance(a, ast.Constant) and a.value == "last_budget_exhausted"
-                for a in call.args)
-    ]
+    reads = [call for call in ast.walk(fn)
+             if isinstance(call, ast.Call)
+             and getattr(call.func, "id", None) == "researcher_budget_exhausted"]
     assert reads, (
-        "`_prepare_node_idea` must read `last_budget_exhausted` off the researcher — it is the one "
+        "`_prepare_node_idea` must read the propose cutoff off the researcher — it is the one "
         "funnel every proposal crosses, and a carrier with no consumer is a field that ships while "
-        "the record stays silent")
+        "the record stays silent. It reads through `roles.researcher_budget_exhausted` rather than "
+        "a bare getattr because the receipt now has TWO spellings and one object can carry both: "
+        "see that helper and `RESEARCHER_OUTPUT_ATTRS`.")
 
 
 def test_unified_facade_mirrors_the_researchers_cutoff_not_the_developers():
@@ -116,12 +114,23 @@ def test_unified_facade_mirrors_the_researchers_cutoff_not_the_developers():
             self.last_budget_exhausted = "turns"   # this propose was cut short
             return object()
 
+    from looplab.agents.roles import researcher_budget_exhausted
+
     agent = UnifiedAgent.__new__(UnifiedAgent)
+    agent.last_propose_budget_exhausted = ""       # what `__init__` establishes
     agent.researcher = _CutResearcher()
     agent.last_budget_exhausted = "time"           # a budget-cut Developer stamped the facade
     assert UnifiedAgent.propose(agent, None, None) is not None
-    assert agent.last_budget_exhausted == "turns", (
+    assert agent.last_propose_budget_exhausted == "turns", (
         "the funnel reads the facade, so the facade must carry THIS propose's bound")
+    assert researcher_budget_exhausted(agent) == "turns"
+    assert agent.last_budget_exhausted == "time", (
+        "AND IT MUST NOT CLOBBER THE DEVELOPER'S. Under `unified_agent=True` these are ONE object: "
+        "`_sync_audit` writes the repair receipt to `last_budget_exhausted` and "
+        "`engine/evaluate.py` stamps the durable `node_repaired.budget_exhausted` from it, so a "
+        "propose writing that name recorded a proposal's cutoff as a fact about a repair — "
+        "reachable whenever the repair delegate raised, since `_evaluate` swallows that and "
+        "`_sync_audit` is then unreached")
 
     class _ConvergedResearcher:
         last_budget_exhausted = ""
@@ -131,11 +140,14 @@ def test_unified_facade_mirrors_the_researchers_cutoff_not_the_developers():
             return object()
 
     agent.researcher = _ConvergedResearcher()
-    agent.last_budget_exhausted = "time"           # stale developer stamp again
     UnifiedAgent.propose(agent, None, None)
-    assert agent.last_budget_exhausted == "", (
-        "a stale developer cutoff surviving a converged propose is the repeated false-TRUNCATED "
-        "warning coming back")
+    assert agent.last_propose_budget_exhausted == "", (
+        "a stale cutoff surviving a converged propose is the repeated false-TRUNCATED warning "
+        "coming back")
+    assert researcher_budget_exhausted(agent) == "", (
+        "and the reader must not fall back to the DEVELOPER's stamp, which is still 'time' here — "
+        "the role-scoped name answering at all is what makes the fallback safe for a plain "
+        "researcher and unreachable for the facade")
 
 
 def test_the_attribute_is_REGISTERED_so_a_rename_cannot_be_silent():
@@ -143,3 +155,6 @@ def test_the_attribute_is_REGISTERED_so_a_rename_cannot_be_silent():
     which is the entire argument `DEVELOPER_OUTPUT_ATTRS` was written down for.
     `tests/test_role_output_contract.py` scans producers and consumers against this tuple."""
     assert "last_budget_exhausted" in RESEARCHER_OUTPUT_ATTRS
+    assert "last_propose_budget_exhausted" in RESEARCHER_OUTPUT_ATTRS, (
+        "the role-scoped spelling is registered too: it is what keeps the propose receipt and the "
+        "repair receipt apart on the ONE object the shipped default makes of both roles")

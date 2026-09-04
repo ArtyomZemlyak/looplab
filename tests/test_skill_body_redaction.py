@@ -65,7 +65,8 @@ def test_an_oversized_body_is_clipped_AND_SAYS_SO():
     out = redacted_skill_body(body)
 
     assert len(body) > _MAX_SKILL_BODY_CHARS
-    assert "clipped" in out and str(len(body)) in out
+    assert "clipped" in out
+    assert str(_MAX_SKILL_BODY_CHARS) in out, "and it names the limit the reader can check"
 
 
 def test_a_body_within_the_cap_carries_no_notice():
@@ -84,3 +85,35 @@ def test_the_written_card_carries_the_redacted_body(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert "sk-abcdefghijklmnopqrstuvwxyz012345" not in text
     assert "NLLCosLoss()" in text, "the technique must survive into the card"
+
+
+def test_the_clipping_RECEIPT_comes_from_THE_BOUNDER_not_from_len(body_chars=_MAX_SKILL_BODY_CHARS):
+    """`core/redact.py` names this reconstruction as a shipped bug and `_redact_persisted` exists
+    solely to prevent it: the redactor NFKC-normalizes and masks BEFORE bounding, so the RAW length
+    says nothing about truncation in either direction.
+
+    Both directions were live on this card:
+      * a body of compatibility characters EXPANDS past the cap and IS clipped while
+        `len(body) <= cap` — so the card shipped an amputated snippet carrying the bounder's own
+        marker and denying it was clipped;
+      * a body just over the cap carrying a masked credential redacts back UNDER it and is not
+        clipped, while the card asserted it was.
+
+    MUTATION: test `len(body) > _MAX_SKILL_BODY_CHARS` again -> the first assertion is red.
+    """
+    expanding = "\ufb04" * (body_chars - 100)          # NFKC-expands to three characters each
+    assert len(expanding) <= body_chars, "under the cap by the raw measure..."
+    out = redacted_skill_body(expanding)
+    assert "clipped" in out, (
+        "...and over it once normalized — a card that was cut must say so")
+
+
+def test_a_body_that_REDACTS_UNDER_the_cap_is_not_falsely_reported_as_clipped():
+    """The other direction: a false receipt on a file mounted into every later Researcher's
+    toolset is its own defect, and it costs a reader's trust in the ones that are true."""
+    secret = "sk-" + "A1b2C3d4E5f6" * 200                # masks to a short digest
+    body = "x = 1\n" * 100 + secret
+    out = redacted_skill_body(body)
+    assert secret not in out, "the credential is gone either way"
+    if len(out) < _MAX_SKILL_BODY_CHARS:
+        assert "clipped" not in out, "nothing was dropped, so nothing may claim it was"
