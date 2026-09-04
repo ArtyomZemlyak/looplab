@@ -8968,3 +8968,41 @@ data rather than by reading: setting → role → tool → *and the tool countin
 
 First nodes, for the record and nothing more — the design forbids reading the arm until twelve
 batches are in: `freeA2` 222.814, `capA2` 205.145, `capB2` 139.9092, `freeB2` 21.1123.
+
+## 198. Batch 1 has no contrast yet, and the tool that says so cannot see the score
+
+The design forbids reading the arm before twelve batches (§190), and §180 is the record of why. But
+**treatment fidelity is not the outcome**, and §195 is what finding out late costs: four minutes in,
+the cap was capping nothing. So the fidelity question gets asked every sweep, by a tool built so it
+cannot answer any other.
+
+Batch 1, mid-flight:
+
+```
+probe            arm  executed  refused  phases
+capA2          treat        12        2       3
+capB2          treat        12        1       3
+freeA2       control         9        0       3
+freeB2       control        15        0       6
+
+median executed: treat 12.0, control 12.0, contrast +0
+  NO CONTRAST YET: the control has not out-probed the treatment, so nothing separates the arms so far
+```
+
+Both treated probes sit at exactly 12 with refusals beyond, which is the intervention working. But
+**`freeA2` chose 9 probes on its own** — under the cap — so on that pair the two arms did the same
+thing, and the batch's median contrast is zero. §196 measured that 91 % of corpus runs exceed 12, so
+this is the 9 % showing up first; over twelve batches the contrast should hold. It is worth watching
+rather than assuming, because a diluted dose makes the +44-point effect the power table assumed
+optimistic, and that is a thing to say now rather than to discover in the interpretation.
+
+**`benchmarks/arm_fidelity.py` reads no scores, deliberately.** A version that also printed the
+champion would turn every fidelity check into an interim read of the arm, and no amount of
+discipline reliably prevents that once the number is on the screen. Four tests hold it — executed
+and refused counted separately, "no contrast" announced when there is none, nothing scored printed
+even with 999.0 sitting in `events.jsonl` and `final.json` beside every probe, and the source itself
+free of `metric` / `final.json` / `speedup` / `champion` outside its docstring. Three mutations
+redden them, the third being the tool starting to print scores.
+
+*Where batch 1 stands:* four probes alive, `$0.50–0.68` spent each, first nodes evaluated, no failed
+nodes, `eval_seconds` 39.7–42.5 s. One of twelve batches.
