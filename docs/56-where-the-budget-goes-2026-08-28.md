@@ -8417,3 +8417,56 @@ before believing it. The second half of that is what happened here, and it took 
 cost of not doing it would have been a section explaining eleven regressions that did not exist.
 
 A clean run on the settled tree is now in flight, and its number is the one that will be quoted.
+
+## 185. The second node is where the score comes from; the fourth is worth eight points
+
+Every remedy in this notebook that recovers money has rested on an unstated conversion: a dollar
+saved buys node cycles at ~$0.33 each, and more nodes mean a better score. **The second half of that
+has never been measured.** It is, now, over all 91 runs in the corpus that evaluated anything.
+
+Conditional on reaching node *k*, does it beat everything before it?
+
+| node | runs reaching it | beat the running champion | median gain when it did |
+|---|---|---|---|
+| 1 (2nd node) | 83 | **57 (69 %)** | **124.79** |
+| 2 (3rd node) | 61 | 12 (20 %) | 72.07 |
+| 3 (4th node) | 9 | 2 (22 %) | 36.33 |
+
+And the champion by how many nodes a run bought:
+
+| nodes | n | median champion | mean |
+|---|---|---|---|
+| 1 | 91 | **27.83** | 81.92 |
+| 2 | 83 | **169.59** | 157.65 |
+| 3 | 61 | 215.64 | 197.54 |
+| 4 | 9 | 218.66 | 212.85 |
+
+**The jump is entirely at the second node** — 27.83 to 169.59, six-fold. The third adds 27 %, the
+fourth 1.4 %. (The second table compares different subsets — n falls 91 → 9 — so it carries selection;
+the first is within-run and does not, except in which runs reach node 3 at all.)
+
+**The conversion rate, priced:** a fourth node costs a median **$0.2033** and beats the champion
+**22 %** of the time by a median 36.3 points — **about 8 points expected per extra node**, on a
+corpus whose scores run 25 to 275.
+
+That reprices every recovery in this notebook:
+
+| remedy | recovers | ≈ extra nodes | ≈ expected points, corpus-wide |
+|---|---|---|---|
+| §156 budget gate at $0.10 | $1.54 | 7.6 | ~61 |
+| §165 reference in the prompt | ~$1 net | 5 | ~40 |
+| §171 dead prompt text | $2.58 | 12.7 | ~103 |
+| §162 bigger read page | **−$24** | — | negative |
+
+Spread across 91 runs, ~100 points is about **one point per run** against a per-run spread of 250.
+**No money-recovery remedy in this audit can move the score measurably.** That is not an argument
+against fixing them — $2.58 is $2.58, and §164's read loop was worth killing on its own — but it
+ends the framing that recovered dollars buy score.
+
+**What would**: whatever makes the SECOND node good. It is worth 124.79 median points where the
+fourth is worth 36.3, and 69 % of runs improve on it against 22 % on the fourth. The corpus already
+says the shape of a run is decided in its first two draws (§108's running max, §147's low-high-low),
+and this is the price tag on that observation.
+
+*Suite on the settled tree, measured without a pipe: **13,582 passed, 51 skipped, 0 failed**,
+`PYTEST EXIT=0`, 31 min 54 s — 11 more tests than §160's 13,571 and none of §184's phantom failures.*
