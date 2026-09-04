@@ -8820,3 +8820,48 @@ notebook, and it cost one extra pass.
 Nothing existing was touched — the seven that were there are byte-identical — but the count in the
 sweep list is now stale, and a future sweep reading "seven" against nine should reach this section
 rather than an alarm.
+
+## 194. The seven-entry claim, verified against a snapshot that predates my writing to it
+
+§193 said the two new baseline entries left the existing seven byte-identical. That is the shape of
+claim this notebook has been wrong about before — "confirmed" lines refuted by files from the same
+snapshot — so it is worth checking rather than repeating.
+
+The snapshot timer had taken `20260904-045447` at **04:56:40**; my writes landed at **05:04** and
+**05:05**. Comparing that copy against the live directory:
+
+```
+old entries: 7   new entries: 9
+byte-identical: 7, changed: 0
+added: pagerank__test__w22x1r3.json, spectral_clustering__test__w22x1r3.json
+```
+
+The claim holds, checked against an artefact written before the change by a process that was not me.
+
+**And the count was the wrong thing to pin.** The sweep list carries "seven entries" as the
+invariant; the invariant is that every entry is in ONE regime with a full set of per-instance
+timings, because the regime key is what makes two timings comparable and §149 is the record of a
+ruler reporting 0.0 because the key came out `__lane22r3` instead of `__w22x1r3`.
+`benchmarks/ruler_check.py` checks that and prints the provenance:
+
+```
+task                   subset     regime    n  median ms  written
+discrete_log             test    w22x1r3  100       2.16  08-31 12:43
+edge_expansion           test    w22x1r3  100      45.43  08-31 02:15
+pagerank                 test    w22x1r3  100     109.13  09-04 05:04
+pagerank                train    w22x1r3  100     110.47  08-31 00:36
+pde_heat1d               test    w22x1r3  100     146.36  08-31 02:12
+spectral_clustering      test    w22x1r3  100       9.06  09-04 05:05
+  all 9 in regime w22x1r3, 100+ instances each
+```
+
+Two things the table says that the count could not. `pagerank`'s new **test** median is 109.13 ms
+against its **train** median of 110.47 ms measured on 08-31 — the two splits agree to 1.2 % across
+four days, which is the ruler's own stability, measured rather than assumed. And the dataset is
+named `pagerank_T100ms_…`, so this box times that reference **9 % above its nominal 100 ms** — the
+same direction as the 6.4 % this notebook already carries.
+
+`tests/test_the_ruler_cache_is_one_regime.py` pins that growth alone is not a problem — a tool that
+alarms when the cache grows teaches the reader to ignore it — while a second regime, a short entry
+and an unparseable name all are. Four mutations redden it, including one that makes it complain
+always, which the live-cache test catches.
