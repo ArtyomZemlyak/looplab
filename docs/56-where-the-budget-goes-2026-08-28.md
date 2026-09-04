@@ -9925,3 +9925,33 @@ sure to be read.
 Worth keeping in view: this same corpus association is where §190's arm came from, and it is
 observational. `run_probe` at p = 0.048 on 14 runs against 78 is a decile split, not a randomised
 comparison — which is precisely why the arm exists.
+
+## §225 — the first node is bimodal, and a weak one is mostly recoverable
+
+Three of batch 3's four probes opened with a node 0 near 20–28 while the fourth opened at 224, which
+is the shape the corpus has all along. Over the 78 `edge_expansion` runs with a first node and a TEST
+score, node 0 is **bimodal, not spread**: 44 runs below 60, **7** between 60 and 150, 27 at or above
+150. There is almost nothing in the middle.
+
+What that opening is worth:
+
+| | n | final TEST median | p10 | p90 | nodes |
+|---|---|---|---|---|---|
+| node 0 **weak** (< 60) | 44 | 195.73 | 102.17 | 256.53 | 3 |
+| node 0 **strong** (≥ 150) | 27 | **224.37** | 158.63 | 268.25 | 3 |
+
+Difference in medians **+28.63**, one-sided permutation p = **0.0238** over 20 000 shuffles. So a
+strong opening is worth about 29 points — the same order as §186's +23.5 for a kernel on node 0,
+measured a different way and on a bigger corpus.
+
+**And the loop recovers most of it.** Of the 44 weak starts, **35 (80 %) still finish at 150 or
+above**; of the 27 strong starts, exactly **one** ends below 150. So the two facts to carry are
+asymmetric: a weak first node is a soft signal that costs about 29 points in expectation and is
+recovered four times in five, while a strong first node is very nearly a guarantee.
+
+The operational reading matters because the tempting rule is the wrong one. A restart-on-weak-node-0
+policy would abandon four runs in five that were going to get there anyway, at the price of a whole
+$1 probe each; the number that would justify it — weak starts that end badly — is 9 of 44. Nothing
+to ship here. What it does support is the reverse: `capA4` and `freeB5` are sitting at 21.1 and 28.1
+this sweep with $0.60 and $0.71 spent, and by this measurement that is an ordinary place to be, not
+a probe worth intervening in.
