@@ -44,6 +44,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -106,6 +107,68 @@ def one_eval(task: str, solver: str, lane: str, subset: str, timeout: float = 90
                 "no_speedup": {"reason": "unparseable", "stdout": got.stdout[-400:]}}
 
 
+DEFAULT_LOG = HERE / "algotune" / "ruler_selfcheck_log.jsonl"
+
+
+def append_reading(path, task: str, subset: str, values, median: float, stamp=None) -> dict:
+    """Append one dated reading, so the drift becomes a SERIES rather than a single number.
+
+    §214 measured `edge_expansion` at 0.8861 against the sweep's 0.9847 and could say the cached
+    baseline and today's box disagree -- but not WHEN they parted, because there is exactly one
+    reading. §215 then showed the obvious proxy cannot help: `eval_seconds` times a different solver
+    every node. A fixed-work reading taken every sweep is the only thing that can answer it, and the
+    series has to start somewhere.
+
+    The stamp is passed IN rather than read here: a caller that wants a reproducible row (a test, a
+    replay) owns its own clock.
+    """
+    row = {"stamp": stamp or datetime.datetime.now().isoformat(timespec="seconds"),
+           "task": task, "subset": subset,
+           "values": [round(float(v), 6) for v in values],
+           "median": round(float(median), 6)}
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # HEAL A TORN TAIL BEFORE APPENDING. A row half-written by a killed process leaves the file
+    # without its closing newline, and the next append lands ON THAT LINE -- destroying the new
+    # reading as well as the old one. One crash would cost two readings instead of one, in a series
+    # whose whole point is that readings are rare.
+    try:
+        if path.exists() and path.stat().st_size:
+            with open(path, "rb") as fh:
+                fh.seek(-1, os.SEEK_END)
+                torn = fh.read(1) != b"\n"
+        else:
+            torn = False
+    except OSError:
+        torn = False
+    with open(path, "a", encoding="utf-8") as fh:
+        if torn:
+            fh.write("\n")
+        fh.write(json.dumps(row, sort_keys=True) + "\n")
+    return row
+
+
+def read_series(path, task: str | None = None) -> list[dict]:
+    """Every recorded reading, oldest first; torn lines are skipped, not fatal."""
+    out = []
+    try:
+        fh = open(path, encoding="utf-8")
+    except OSError:
+        return out
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if task is None or row.get("task") == task:
+                out.append(row)
+    return sorted(out, key=lambda r: str(r.get("stamp") or ""))
+
+
 def instance_share(task: str, eval_seconds: float, *, subset: str = "test",
                    times_dir=None) -> float:
     """What fraction of an evaluation's wall clock is the per-instance work being compared.
@@ -162,6 +225,10 @@ def main(argv=None) -> int:
     ap.add_argument("--reps", type=int, default=4)
     ap.add_argument("--lane", default="44-47,92-95")
     ap.add_argument("--subset", default="test", choices=("train", "test"))
+    ap.add_argument("--record", metavar="FILE", nargs="?", const=str(DEFAULT_LOG),
+                    help="append this reading to a dated series (default: %(default)s)"
+                         f" [{DEFAULT_LOG}]")
+    ap.add_argument("--stamp", help="ISO timestamp for the recorded row; the caller owns the clock")
     args = ap.parse_args(argv)
 
     with tempfile.TemporaryDirectory(prefix="ruler-selfcheck-") as tmp:
@@ -193,6 +260,9 @@ def main(argv=None) -> int:
     if share:
         print(f"  (per-instance work is {100 * share:.0f} % of an evaluation's wall clock, so "
               f"`eval_seconds` cannot see this drift at all)")
+    if args.record:
+        append_reading(args.record, args.task, args.subset, vals, median, args.stamp)
+        print(f"  recorded to {args.record}")
     if said is not None and abs(median - said) > 0.02:
         print("  DRIFT: the cached baseline and today's box no longer agree. Within one task this "
               "cancels (every probe is divided by the same cached baseline); across time on one "

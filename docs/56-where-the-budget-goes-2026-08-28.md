@@ -9724,3 +9724,38 @@ greps**: the live path is named all through the comments and docstrings of that 
 because that is the record. What must not exist is a string CONSTANT carrying it — code pointing a
 test at the corpus. Both mutations redden: restoring the live default, and a toy root without the
 git checkouts that make `returncode == 0` mean anything.
+
+## §219 — one reading cannot say when the ruler moved, so the series starts
+
+§214 measured the reference against itself and found `edge_expansion` at 0.8861 where the sweep says
+0.9847. §215 then closed off the obvious way to date that: `eval_seconds` times a **different solver
+every node**, so its day-to-day movement is the corpus's candidates changing and not the box. Which
+leaves a fixed-work reading taken repeatedly as the only instrument that can answer *when* the
+cached baseline and the box parted — and a series has to start somewhere.
+
+`ruler_selfcheck.py --record` appends a dated row; `read_series` reads them back in time order.
+First readings, all `subset=test`:
+
+| task | 2026-09-04 ~13:40 | 2026-09-04 15:35 | sweep says |
+|---|---|---|---|
+| edge_expansion | 0.8861 (0.8747–0.8994) | **0.8908** (0.8833–0.8912) | 0.9847 |
+| pde_heat1d | 1.0444 (1.0346–1.1045) | **1.1013** (1.0625–1.1399) | 0.9958 |
+
+Two hours apart, and the two tasks say different things. `edge_expansion` moved **+0.5 %** — its
+repeats span under 1 % and it has now read ~0.886–0.891 four times across two sittings, which is a
+stable disagreement with 0.9847 and the strongest form this evidence has taken. `pde_heat1d` moved
+**+5.5 %** between sittings and its own repeats span 7 %; **no drift claim can be made for it**, and
+§214's `+4.9 %` for that task should be read as one draw from a noisy quantity rather than a
+measurement of anything. The series earned its keep on its second row.
+
+Two properties the recorder needed, and one was only found by mutation:
+
+* **A torn tail is healed before appending.** A row half-written by a killed process leaves the file
+  without its closing newline, and the next append lands *on that line* — one crash would cost two
+  readings instead of one, in a series whose whole point is that readings are rare.
+* **The reader sorts by stamp**, because the file's order is the order rows were WRITTEN: a sweep
+  records several tasks in whatever order their lanes finish, and a back-filled reading is older
+  than the row before it. The first test appended in time order and could not tell a sorted reader
+  from an unsorted one; mutation said so, and the fixture now writes one row out of order.
+
+The stamp is passed in rather than read inside, so a test or a replay owns its own clock.

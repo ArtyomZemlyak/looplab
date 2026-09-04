@@ -102,3 +102,48 @@ def test_a_missing_or_zero_denominator_is_zero_not_a_crash(tmp_path):
     (tmp_path / "t__test__w22x1r3.json").write_text(
         json.dumps({"0": 45.0}), encoding="utf-8")
     assert ruler_selfcheck.instance_share("t", 0.0, times_dir=tmp_path) == 0.0
+
+
+def test_a_reading_is_appended_as_a_dated_row(tmp_path):
+    """One number cannot say WHEN the cached baseline and the box parted; a series can. §215 closed
+    off the obvious proxy — `eval_seconds` times a different solver every node — so a fixed-work
+    reading taken every sweep is the only instrument left, and it has to start somewhere."""
+    log = tmp_path / "series.jsonl"
+    ruler_selfcheck.append_reading(log, "edge_expansion", "test",
+                                   [0.8849, 0.8872, 0.8994], 0.8872, stamp="2026-09-04T13:00:00")
+    ruler_selfcheck.append_reading(log, "edge_expansion", "test",
+                                   [0.8908, 0.8912, 0.8833], 0.8908, stamp="2026-09-04T15:20:00")
+    ruler_selfcheck.append_reading(log, "discrete_log", "test", [1.09], 1.09,
+                                   stamp="2026-09-04T13:50:00")
+    # OUT OF APPEND ORDER, which is the reason the reader sorts at all: the file's order is the
+    # order rows were WRITTEN, and a sweep records several tasks in whatever order their lanes
+    # finish -- or back-fills a reading it took earlier. Mutation showed a fixture appended in
+    # time order cannot tell a sorted reader from an unsorted one.
+    ruler_selfcheck.append_reading(log, "edge_expansion", "test", [0.9002], 0.9002,
+                                   stamp="2026-09-03T09:00:00")
+    got = ruler_selfcheck.read_series(log, "edge_expansion")
+    assert [r["median"] for r in got] == [0.9002, 0.8872, 0.8908], got
+    assert [r["stamp"] for r in got] == ["2026-09-03T09:00:00", "2026-09-04T13:00:00",
+                                        "2026-09-04T15:20:00"], (
+        "the series is not in time order, so a drift cannot be read off it")
+    assert len(ruler_selfcheck.read_series(log)) == 4, "the task filter dropped other tasks entirely"
+
+
+def test_the_series_survives_a_torn_line(tmp_path):
+    """Appended under a crash-prone box: half a row must cost one reading, not the series."""
+    log = tmp_path / "series.jsonl"
+    ruler_selfcheck.append_reading(log, "t", "test", [1.0], 1.0, stamp="2026-09-04T10:00:00")
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write('{"stamp": "2026-09-04T11:00:00", "med')
+    ruler_selfcheck.append_reading(log, "t", "test", [1.1], 1.1, stamp="2026-09-04T12:00:00")
+    assert [r["median"] for r in ruler_selfcheck.read_series(log, "t")] == [1.0, 1.1]
+    assert ruler_selfcheck.read_series(tmp_path / "nope.jsonl") == []
+
+
+def test_the_caller_owns_the_clock(tmp_path):
+    """A row stamped by the reader replays differently every time it is read; the stamp is data."""
+    log = tmp_path / "series.jsonl"
+    row = ruler_selfcheck.append_reading(log, "t", "test", [1.0], 1.0, stamp="2026-01-01T00:00:00")
+    assert row["stamp"] == "2026-01-01T00:00:00"
+    auto = ruler_selfcheck.append_reading(log, "t", "test", [1.0], 1.0)
+    assert auto["stamp"] and auto["stamp"] != "2026-01-01T00:00:00"
