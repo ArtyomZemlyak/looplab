@@ -106,6 +106,44 @@ def one_eval(task: str, solver: str, lane: str, subset: str, timeout: float = 90
                 "no_speedup": {"reason": "unparseable", "stdout": got.stdout[-400:]}}
 
 
+def instance_share(task: str, eval_seconds: float, *, subset: str = "test",
+                   times_dir=None) -> float:
+    """What fraction of an evaluation's wall clock is the per-instance work being compared.
+
+    WHY THIS IS HERE. `eval_seconds` from a probe's `node_evaluated` looks like the obvious way to
+    catch a box that has got slower, and it is not one — for two reasons, and I went at it with the
+    weaker one first.
+
+    The weak reason is dilution, which this function computes: a hundred `edge_expansion` instances
+    are **10.9 %** of an evaluation's wall clock and the rest is fixed harness overhead, so a 13 %
+    move in the part being compared is 1.4 % of `eval_seconds`, inside its own p10-p90. Measured
+    2026-09-04 the corpus median went 41.10 s (08-31) to 40.90 s (09-04), **−0.5 %**, and I nearly
+    read that flat line as refuting the 0.8861 self-check. It does not. The share is not uniform
+    either: `discrete_log` 22.5 %, `pde_heat1d` **63 %**.
+
+    The strong reason is that `eval_seconds` **times a different solver every node**. It is the cost
+    of evaluating whatever the model just wrote, not a fixed-work benchmark, so its day-to-day
+    movement is the corpus's candidates changing: `discrete_log` reads 30.6 s, 57.0 s, 46.7 s on
+    three consecutive days and `pde_heat1d` 54.0 -> 60.7 s, swings far larger than any drift, in a
+    quantity that has no reason to be stable. §207's use of it — flat across one to four concurrent
+    probes — was a statement that the harness does not collapse under load, and that much it can
+    support; hardware constancy it cannot.
+
+    Which leaves the self-check as the only instrument here comparing like with like, because both
+    sides of it are the reference.
+    """
+    times_dir = Path(times_dir or (HERE / "algotune" / ".baseline_times"))
+    path = times_dir / f"{task}__{subset}__w22x1r3.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0.0
+    times = [float(v) for v in data.values() if isinstance(v, (int, float))]
+    if not times or not eval_seconds:
+        return 0.0
+    return (sum(times) / 1000.0) / float(eval_seconds)
+
+
 def refused(row: dict) -> str:
     """Why this reading is not a measurement, or "" if it is one."""
     if row.get("no_speedup"):
@@ -128,7 +166,7 @@ def main(argv=None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="ruler-selfcheck-") as tmp:
         solver = build_solver(args.task, tmp)
-        vals, bad = [], []
+        vals, secs, bad = [], [], []
         for _ in range(max(1, args.reps)):
             row = one_eval(args.task, solver, args.lane, args.subset)
             why = refused(row)
@@ -136,6 +174,8 @@ def main(argv=None) -> int:
                 bad.append(why)
                 continue
             vals.append(float(row["speedup"]))
+            if isinstance(row.get("eval_seconds"), (int, float)):
+                secs.append(float(row["eval_seconds"]))
 
     for why in bad:
         print(f"  REFUSED: {why}")
@@ -148,6 +188,11 @@ def main(argv=None) -> int:
     if said is not None:
         line += f"; the sweep says {said:.4f} ({100 * (median - said) / said:+.1f} %)"
     print(line)
+    share = instance_share(args.task, statistics.median(secs) if secs else 0.0,
+                           subset=args.subset)
+    if share:
+        print(f"  (per-instance work is {100 * share:.0f} % of an evaluation's wall clock, so "
+              f"`eval_seconds` cannot see this drift at all)")
     if said is not None and abs(median - said) > 0.02:
         print("  DRIFT: the cached baseline and today's box no longer agree. Within one task this "
               "cancels (every probe is divided by the same cached baseline); across time on one "

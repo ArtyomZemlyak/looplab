@@ -79,3 +79,26 @@ def test_a_task_with_no_delivered_reference_is_an_error_not_a_number(tmp_path):
     except FileNotFoundError:
         return
     raise AssertionError("a missing reference must refuse, not build an empty solver")
+
+
+def test_the_instance_share_says_why_eval_seconds_cannot_see_the_drift(tmp_path):
+    """A hundred instances are a minority of an evaluation's wall clock, and not the same minority
+    per task: 10.9 % for `edge_expansion`, 63 % for `pde_heat1d`. That arithmetic is why a flat
+    `eval_seconds` does not refute a self-speedup of 0.8861."""
+    import json
+    (tmp_path / "t__test__w22x1r3.json").write_text(
+        json.dumps({str(i): 45.0 for i in range(100)}), encoding="utf-8")
+    got = ruler_selfcheck.instance_share("t", 41.0, times_dir=tmp_path)
+    assert abs(got - 4.5 / 41.0) < 1e-6, got
+    # A task whose instances dominate reads high, and the same code must say so.
+    (tmp_path / "u__test__w22x1r3.json").write_text(
+        json.dumps({str(i): 145.0 for i in range(100)}), encoding="utf-8")
+    assert ruler_selfcheck.instance_share("u", 23.0, times_dir=tmp_path) > 0.6
+
+
+def test_a_missing_or_zero_denominator_is_zero_not_a_crash(tmp_path):
+    assert ruler_selfcheck.instance_share("nope", 41.0, times_dir=tmp_path) == 0.0
+    import json
+    (tmp_path / "t__test__w22x1r3.json").write_text(
+        json.dumps({"0": 45.0}), encoding="utf-8")
+    assert ruler_selfcheck.instance_share("t", 0.0, times_dir=tmp_path) == 0.0

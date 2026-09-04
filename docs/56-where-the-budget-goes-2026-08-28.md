@@ -9584,3 +9584,45 @@ a slow solver.** Both refusals were hit while building it, both at `eval_seconds
 to be INLINED rather than imported, then `Task data directory not found` until `DATA_DIR` pointed at
 the HF dataset directory. Five mutations red, including "any zero is a refusal", which would have
 erased arm A's real `pagerank` 0.0 (66 verification failures over a full 41 s evaluation).
+
+## §215 — the check that would have overturned §214, and why it could not
+
+§214 said the reference against itself has drifted (`edge_expansion` 0.8861 against the sweep's
+0.9847) and read it as the box being ~13 % slower than when the cache was written. The obvious way
+to confirm that is `eval_seconds`, so I measured it across the whole corpus:
+
+| day | n | median `eval_seconds` |
+|---|---|---|
+| 08-31 | 8 | 41.10 |
+| 09-01 | 71 | 41.20 |
+| 09-02 | 36 | 41.40 |
+| 09-03 | 91 | 41.10 |
+| 09-04 | 25 | 40.90 |
+
+Flat: **−0.5 % over the corpus window.** For about a minute that looked like §214 refuted by the
+same snapshot's own files — the failure this document keeps recording. It is not, for two reasons,
+and the weaker one came first.
+
+**Dilution.** A hundred `edge_expansion` instances at a cached 45.43 ms are **4.5 s of a 41 s
+evaluation, 10.9 %**; the rest is fixed harness overhead. A 13 % move in the compared part is 1.4 %
+of `eval_seconds`, inside its own p10–p90. The share is not uniform either — `discrete_log` 22.5 %,
+`pde_heat1d` 63 % — so an eyeballed "it's mostly overhead" is not available; it is now
+`ruler_selfcheck.instance_share`, arithmetic instead of memory.
+
+**And the reason that actually settles it: `eval_seconds` times a different solver every node.** It
+is the cost of evaluating whatever the model just wrote, not fixed work. Its day-to-day movement is
+the corpus's candidates changing, and the movement is far larger than any drift: `discrete_log`
+reads 30.6 s, 57.0 s, 46.7 s on three consecutive days, `pde_heat1d` 54.0 → 60.7 s. A quantity with
+no reason to be stable cannot be evidence that the hardware was. **§207's use of it stands but only
+as far as it goes** — flat across one to four concurrent probes says the harness does not collapse
+under load, which is what it was cited for; hardware constancy it never supported.
+
+Two other candidate causes of the 0.886, both closed by measurement rather than argument. The
+delivered reference is **byte-identical** to AlgoTune's own task file for all three tasks
+(9881 / 6109 / 4504 bytes, comments stripped), so the self-check really is the reference against
+itself. And load is out: three solo `edge_expansion` runs gave 0.8865 against 0.8861 under full
+concurrency (§214).
+
+So the drift stands as measured, its cause remains "the cached baseline and today's box disagree",
+and the only instrument here that compares like with like is the self-check itself — because both
+sides of it are the reference.
