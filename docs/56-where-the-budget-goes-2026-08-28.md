@@ -9049,3 +9049,47 @@ That is the fifth audit remedy in a row whose counterfactual reverses or dissolv
 §162, §165, and now this), against one that survived — §171's dead prompt text, at $2.58, and even
 that needs a refactor rather than a gate (§183). The findings have been a good map of where the
 money goes. **They have not once produced a change worth making on the score.**
+
+## 200. freeB2 closes batch 1's first probe, and finding #4 is bigger than the audit said
+
+### 200.1 The probe that finished
+
+| | |
+|---|---|
+| `freeB2` (control, uncapped) | **TEST 256.5339** |
+| nodes (train) | [21.11, **208.95**, 16.41, **256.61**] |
+| train→test | 256.5339 / 256.6055 = **1.000** |
+| spend | $1.0080 — plan_step 35.4 %, propose 23.0 %, deep_research 21.1 %, plan 9.7 % |
+| before / after the last node | 34 % / **0 %** |
+| `eval_train` | 30 |
+| reference use | 9.5 % import / 9.5 % `is_solution` over 21 `run_probe` calls |
+| champion | 38-line Cython kernel, node 3 |
+
+Four evaluated nodes — only the tenth run in the whole corpus to reach four — and its best node is
+its last, with nothing spent after it. The shape is low-high-low-**highest**: 21.11 → 208.95 →
+16.41 → 256.61, the second collapse recovered from, which is §147's arc extended by one beat.
+
+### 200.2 Finding #4, re-derived and larger
+
+The audit says 30.4 % of tool-calling turns ask only for content the run already has, worth $14.70.
+Over the 97 runs now on disk: **25,381 tool-calling turns carrying $63.34 of prompt, of which
+11,853 (46.7 %) requested nothing but content already retrieved in that run — $25.04.** Of those,
+**11,235 were retrieved by a different phase**, and only 618 within the same one; the model asking
+itself twice is rare, and the loop throwing context away between phases is the whole of it.
+
+**The number survives its own instrument check.** Spans store `_trace_preview(result)`, capped near
+4,000 chars, so two long outputs sharing a prefix would hash alike and inflate the count — the §162
+trap. Only 3.0 % of tool outputs reach that cap; excluding every turn that carries one leaves
+**11,481 of 24,098 turns (47.6 %), $24.19** — the same answer, so the preview is not making it.
+
+**And the remedy is the one the audit got right.** It proposes seeding each phase with a small fixed
+"already established" block rather than making every phase re-derive it. Unlike §156, §161, §162,
+§165 and §199, that is not a threshold to tune — it is a claim that the same bytes are being paid
+for two, three and four times, which is now measured at **$24 of a $76 corpus**. What it would cost
+is the block itself, carried once per chain: §165 priced the reference file at $6.33 to carry
+corpus-wide, and this is the same shape of trade with roughly four times the return.
+
+It is still not a change to make mid-arm, and by §185's conversion even $24 recovered is about eight
+points a run — well inside the noise. But it is the first audit remedy whose direction is not in
+doubt, and the first worth doing for the wall clock rather than for the score: **47 % of tool turns
+is 47 % of the loop's turns**, and a turn is a minute.
