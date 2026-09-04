@@ -451,6 +451,67 @@ def _event_usage_deltas(events: Iterable[object]) -> dict[str, dict[str, int | f
     return deltas
 
 
+_PRIOR_SEEDED_ATTR = "_looplab_prior_spend_seeded"
+
+
+def seed_prior_spend(engine: object) -> float:
+    """Charge a RESUMED run for what it already spent, and return the amount.
+
+    `llm_budget_usd` is documented as a ceiling on "this run's LLM calls", and `run_cost_accountant`
+    went to some trouble to make it one ceiling per RUN rather than per client. It is still one per
+    PROCESS: a fresh `CostAccountant` starts at `spent = 0.0`, so `looplab resume` hands a run that
+    has already exhausted its budget a second full budget.
+
+    Measured 2026-09-04. `freeB3` auto-paused with **$1.0308 already metered** against a $1.00
+    ceiling; resumed, it ran 27 more minutes and 45 more calls for another $0.0929 without a single
+    refusal, and was on course for ~$2.03 before anything would have stopped it. It was stopped by
+    pid at **$1.1056**, 10.6 % over. The events are the run's own append-only record of what it
+    paid, so the spend is recoverable exactly where the ceiling is set.
+
+    Called BEFORE `bind_cost_accountants` on purpose: the tracker takes its baseline from the
+    accountant's counters at bind time, so seeding first means the prior spend is inside the
+    baseline and cannot be re-recorded as new usage. Only accountants that carry a `limit` are
+    seeded -- an unlimited one has no ceiling to protect and adding to it would just inflate a
+    display. Idempotent: a second call on the same accountant is a no-op.
+    """
+    store = getattr(engine, "store", None)
+    read_all = getattr(store, "read_all", None)
+    if not callable(read_all):
+        return 0.0
+    try:
+        events = list(read_all())
+    except Exception:  # noqa: BLE001 - an unreadable log must not stop a run from starting
+        return 0.0
+    prior = 0.0
+    for event in events:
+        if getattr(event, "type", None) != EV_LLM_USAGE:
+            continue
+        data = getattr(event, "data", None)
+        if not isinstance(data, dict):
+            continue
+        try:
+            cost = float(data.get("cost") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if cost > 0:
+            prior += cost
+    if prior <= 0:
+        return 0.0
+    seeded = 0.0
+    for accountant in find_cost_accountants(engine):
+        if getattr(accountant, _PRIOR_SEEDED_ATTR, False):
+            continue
+        if not getattr(accountant, "limit", None):
+            continue
+        try:
+            accountant.spent = float(getattr(accountant, "spent", 0.0) or 0.0) + prior
+            setattr(accountant, _PRIOR_SEEDED_ATTR, True)
+            seeded = prior
+        except Exception:  # noqa: BLE001 - an exotic accountant simply keeps its own counters
+            continue
+    return seeded
+
+
 def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> list[object]:
     """Bind every currently reachable accountant exactly once.
 

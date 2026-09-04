@@ -9485,3 +9485,43 @@ most probe calls — which is what §190's registered design exists to prevent.
 Money is inside tolerance and says the same thing from the other side: `RESIDUE $+0.070113` against
 an allowance of `$0.080932`, `check_money` exiting 0, with the named parts including
 `$0.076945 PAID RETRIES` on `oldCK9` and 290 calls from five abandoned first-batch probes.
+
+## §213 — the spend ceiling is per PROCESS, and a resume hands the run a second budget
+
+Resuming `freeB3` was the right call and it exposed a bigger defect than the one it fixed.
+
+The meter, not the events, is the arm's cash register, and it had already recorded **$1.0308** for
+`freeB3` at the moment it paused — the events log lagged at $0.86 because a paused run has not
+flushed everything. So the probe was resumed **already over its $1.00 ceiling**, and the engine did
+not refuse. It ran 27 more minutes and 45 more calls for another $0.0929 with no refusal of any
+kind. Stopped by pid at **$1.1056**, 10.6 % over a cap its batch-mates respected to within a cent:
+`capA3 $1.0082`, `freeA3 $1.0098`, `capB3 $1.0102`.
+
+`run_cost_accountant` already went to some trouble to make `llm_budget_usd` one ceiling per RUN
+rather than one per client — its own docstring records the measurement where two clients from one
+`Settings` gave an effective ceiling of 2.0. It is still one per PROCESS: a `CostAccountant` is
+constructed with `spent = 0.0`, and `looplab resume` is a new process. The run's own append-only
+event log holds every `llm_usage` it ever paid, so the spend is recoverable exactly where the
+ceiling is set.
+
+`seed_prior_spend(engine)` sums those events and charges the run accountant before any role can
+make a call — called BEFORE `bind_cost_accountants`, so the tracker's baseline already contains the
+prior and cannot re-record it as new usage. Only accountants carrying a `limit` are seeded, junk and
+negative rows cannot buy budget back, an unreadable log cannot stop a run from starting, and a
+second call is a no-op.
+
+Seven tests, and mutation found the hole: **replacing `spent` instead of adding to it survived**,
+because every fixture started at zero. `run_cost_accountant` caches one accountant on the `Settings`
+object, so a process that starts a second engine from the same settings hands over an accountant
+that already holds spend, and overwriting it would erase paid calls. Closed with a pre-charged
+accountant; 632 tests of the cost/budget/resume suites pass.
+
+**The other half of the same reading was my own tool.** `arm_fidelity` called `freeB3` PAUSED while
+it was running: §212 defined paused as "a pause event exists", and events are append-only, so a
+resumed run stays paused for ever. The lifecycle in order is `pause 12:32:26`, `resume 12:36:06`,
+then llm_usage to 13:03:16. The state has to come from the LAST lifecycle event, not from any — the
+same correction `probe_summary::_why_no_test` needed, arriving in a tool I wrote one sweep ago.
+
+**And §211 is visibly working.** Every one of the resumed run's 45 calls went out streamed —
+`stream=True`, latencies to 83.8 s, not one 300 s death — where the same probe had spent 23 minutes
+unable to leave non-streaming before the fix.

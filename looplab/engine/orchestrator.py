@@ -60,7 +60,7 @@ from looplab.engine.card_reservation import (CardReservationMixin, _BuildReserva
                                             _discarded_proposal_text)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
-from looplab.engine.costs import bind_cost_accountants
+from looplab.engine.costs import bind_cost_accountants, seed_prior_spend
 from looplab.engine.crash_repair import CrashRepairMixin
 from looplab.engine.eval_dispatch import EvalDispatchMixin
 from looplab.engine.eval_stages import EvalStagesMixin
@@ -1268,6 +1268,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.store = EventStore(self.run_dir / "events.jsonl")
         # Bind after EventStore exists and before any role can make an LLM call. Paid usage now
         # survives process restarts in the same append-only source of truth as the run itself.
+        #
+        # And the CEILING survives them too, which it did not: a fresh process gets a fresh
+        # `CostAccountant` at zero, so `looplab resume` handed an exhausted run a second full
+        # budget (§213: `freeB3` resumed at $1.03 of a $1.00 ceiling and was stopped by pid at
+        # $1.1056). Seeded BEFORE the bind so the tracker's baseline already contains it.
+        seed_prior_spend(self)
         bind_cost_accountants(self)
         self._write_lock = anyio.Lock()
         # Node-id reservation lock (Variant-1 parallel build): serialises the CHEAP build prefix (fold ->
