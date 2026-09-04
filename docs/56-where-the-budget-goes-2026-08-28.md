@@ -8748,3 +8748,32 @@ fourth thing you were about to add to a file that already does too much** — an
 `git diff` to satisfy honestly rather than by raising the number.
 
 63 guard tests and 662 in the probe/factory/settings/config/documentation set pass.
+
+## 192. The launcher had no way to pass a setting, which would have made the arm measure itself
+
+§191 threaded `developer_probe_max_calls` from `Settings` to the tool. This sweep found the next
+link missing: **`run_probe.sh` invoked `looplab.cli run` with a fixed argument list.** The arm sets
+the field on the treatment side and leaves the control at 0 — with no way to pass it, both sides
+would have launched identically and §190's arm would have compared its control to itself.
+
+That is the same shape as §191's finding one link earlier, and it is worth naming as a pattern: **a
+knob is not wired until every hop between the operator and the behaviour is checked, and each hop
+looks fine from the one beside it.** Settings → role → tool was three hops and all three existed;
+the fourth, launcher → CLI, did not, and nothing in the first three could see that.
+
+Two lines, mirroring the `PROBE_MAKE_TASK_ARGS` pattern the card already uses:
+
+* `${PROBE_LOOPLAB_SETTINGS:-}` spliced into the `looplab.cli run` line — unset expands to nothing,
+  so a probe that sets nothing runs the shipped command byte for byte;
+* `cli_settings:` recorded in `INSTRUMENT.txt` beside `card_args:`, because an arm that varies a
+  setting is unreadable afterwards without it. §113 is the record of what a probe whose inputs are
+  not written down costs — a whole probe, stopped on a card difference that turned out to be a
+  fixture artefact.
+
+`tests/test_the_probe_launcher_can_carry_a_setting.py` pins the splice, its default expansion, the
+`INSTRUMENT.txt` line with its explicit "none" case, that the card hook is still there, and that the
+script is still valid shell. Two mutations redden it — remove the splice, or drop the explicit none.
+
+**§190's arm is now executable end to end**: `PROBE_LOOPLAB_SETTINGS='-s developer_probe_max_calls=12'`
+on two probes of each batch, nothing on the other two, and the difference recorded in each probe's
+own instrument file. The $48 remains a separate decision.

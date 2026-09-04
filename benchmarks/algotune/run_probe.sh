@@ -264,6 +264,11 @@ mkdir -p "$OUT"
   # unstreamed with nothing in the tree to say it. Printed even when empty, so "this probe
   # took the default card" is a POSITIVE statement in the record rather than a missing line.
   echo "card_args:      ${PROBE_MAKE_TASK_ARGS:-(none -- the shipped card)}"
+  # WHAT THE ENGINE WAS TOLD, in the probe's own tree. `PROBE_MAKE_TASK_ARGS` records the card; this
+  # records the SETTINGS, and an arm that varies one of them (docs/56 §190 varies
+  # `developer_probe_max_calls`) is unreadable afterwards without it -- §113 is the record of what a
+  # probe whose inputs are not written down costs.
+  echo "cli_settings:   ${PROBE_LOOPLAB_SETTINGS:-(none -- shipped defaults)}"
   # ХЕШ САМОЙ КАРТОЧКИ, а не только флагов. Флаги называют вариант; хеш ловит любое
   # изменение текста -- новый пункт, поправленную формулировку, сдвинувшуюся константу.
   # 01.09 медиана обращений к reference-модулю по 28 пробам вышла 7.6 %, ровно внутри
@@ -304,7 +309,7 @@ say "===== $MODEL на $TASK, полоса $LANE, бюджет \$$BUDGET ====="
 S=$(date +%s)
 LOOPLAB_MEMORY_DIR="$OUT/runs/$TASK/memory" LOOPLAB_KNOWLEDGE_DIR="$OUT/runs/$TASK/knowledge" \
   taskset -c "$LANE" python -m looplab.cli run "$OUT/ws/algotune_$TASK.json" \
-    --out "$OUT/runs/$TASK/run" --backend llm --max-nodes 20 >> "$OUT/run.log" 2>&1
+    --out "$OUT/runs/$TASK/run" --backend llm --max-nodes 20 ${PROBE_LOOPLAB_SETTINGS:-} >> "$OUT/run.log" 2>&1
 say "прогон rc=$? за $(( $(date +%s) - S ))с"
 
 # ЧЕМПИОНА ВЫБИРАЕТ СВЁРТКА СОБЫТИЙ, А НЕ ВРЕМЯ ФАЙЛА. Здесь стояло `ls -t … | head -1` — самый
