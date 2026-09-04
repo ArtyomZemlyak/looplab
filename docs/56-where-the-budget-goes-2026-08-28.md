@@ -9160,3 +9160,56 @@ LAST was 24.26, and the run submitted the best — **9.18×** what ending on the
 scored. It is also the run's own worst node that was graded on code written after its last `check`
 (§104). Nothing in it needed fixing: blind spend 7.2 %, no read loop over threshold, reference use
 inside the §69.1 band.
+
+## §204 — the sweep's own point 1 was counting greps as probes
+
+Two sweeps in a row, the liveness scan printed a `looplab.cli run` process on no lane — unpinned
+across all 96 cpus, no probe name, gone before its `/proc` entry could be read a second time. The
+scan is a walk of `/proc` for command lines containing `looplab.cli` and `run`.
+
+Reproduced: `grep -rn "python -m looplab.cli run --out" /var/tmp/looplab-bench/model-probes`,
+sampled the instant it spawns, is `argv[0]=grep`, affinity 96 cpus, **and the naive matcher calls it
+a probe.** A search for a string contains that string. Nothing was wrong with the stand; the
+instrument was reporting itself.
+
+`run_probe.sh` already knows this. On 2026-09-01, sampling its lane guard through a full pytest suite
+turned up `python -m looplab.cli ui --help`, `python -m looplab.cli resume /tmp/pytest-of-jovyan/…/run`
+and a `ugrep` for the probe line, and the guard was tightened to: **a python interpreter running the
+module with `run` or `resume`, whose run directory is under the bench root.** That rule sits inside a
+heredoc where nothing but the launcher can call it — so the bench has had a fixed copy and a naive
+one at the same time, and the sweep has been reading the naive one.
+
+`benchmarks/lanes.py` is the callable copy: `is_bench_probe(argv, root)`, `probes()`, `lane_busy()`,
+affinity injectable so the scan is testable against a fake `/proc`. It reads lanes with
+`sched_getaffinity`, not from the command line, which is the only reading of a lane that is not a
+guess. On the live stand it prints the four batch-2 probes and nothing else.
+
+**Three of six mutations survived the first version of the test, and all three were the clauses that
+matter.** The fixtures could not discriminate:
+
+* dropping the `argv[0]` interpreter check stayed green, because a real grep carries its whole
+  pattern as ONE argv element and so has no bare `-m` to match. It needed
+  `grep -rn -m 1 -e looplab.cli -e run <root>` — an ordinary invocation whose argv spells every
+  clause but the interpreter.
+* accepting ANY subcommand stayed green, because `ui --help` has no bench root in it. It needed
+  `looplab.cli inspect <root>/…/runs/edge_expansion/run`: reading a run directory does not occupy
+  its lane.
+* deleting the `-c` exclusion stayed green for the same reason. It needed a `-c` script given the
+  probe's words as `sys.argv` — which is how the sweep's own scanners are written.
+
+`test_a_probe_is_not_a_grep_for_one.py` also pins `lanes.py` against the heredoc in `run_probe.sh`
+clause by clause, so the two cannot drift back apart. `run_probe.sh` itself is NOT edited this
+sweep: four probes are reading it by file offset, and the hazard at the top of that file is exactly
+what editing it under load does.
+
+## §205 — batch 1 complete, batch 2 launched
+
+`capB2` finished at TEST 137.7597 — best node 139.9092 (node 0), last node 12.815, so the champion
+rule earned its keep in three of the four probes of batch 1. Blind spend 11.7 %, no read loop over
+threshold, 12 executed probes and 7 refused, reference use 16.7 % import / 8.3 % `is_solution`.
+
+Batch 1 as described (no contrast computed, per §190): controls `freeA2` 224.3657 and `freeB2`
+256.5339; treated `capA2` 203.1158 and `capB2` 137.7597. Batch 2 is on all four lanes —
+`capA3`/`capB3` with `-s developer_probe_max_calls=12`, `freeA3`/`freeB3` with the shipped defaults,
+`LOOPLAB_LLM_STREAM=1`, all four INSTRUMENT.txt verified and all four pinned to their own lane by
+`lanes.py`. Ten batches remain.
