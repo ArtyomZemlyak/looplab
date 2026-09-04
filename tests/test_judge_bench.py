@@ -252,6 +252,42 @@ def test_bench_stage_statuses_match_the_production_registry():
         "`timeout` is deliberately its own label class — see the module docstring")
 
 
+def test_the_bench_reads_the_SAME_TRACEBACK_LINE_production_does():
+    """Two regexes for "the last exception line", drifted on three clauses.
+
+    `judge_corpus._TERMINAL_EXCEPTION` sets the bench's `terminal_exception` label and ranks which
+    tool reads get stored; `failure_diagnosis._HEADLINE_RE` decides what the Developer is SHOWN.
+    Production widened for the indented-traceback case (a launcher indenting each child's traceback
+    inside its own report block) and for any bracketed stream tag, and accepts `…Interrupt`; the
+    bench anchored at the line start, allowed only `[rank\\d+]: `, and accepted `…Exit`. So the
+    bench could not see the headline the diagnostician was shown on exactly the case production was
+    widened for.
+
+    Still a COPY, on `VERDICTS`' argument — a bench that moves when production moves cannot detect
+    that it moved — so this asserts AGREEMENT rather than identity, and states the one deliberate
+    difference.
+    """
+    from looplab.engine.failure_diagnosis import _HEADLINE_RE
+    from looplab.judgebench.triage_corpus import _TERMINAL_EXCEPTION
+
+    for line in ("ValueError: plain",
+                 "    torch.OutOfMemoryError: CUDA out of memory",   # the indented traceback
+                 "[rank0]: RuntimeError: ddp collective failed",     # the torchrun tag
+                 "[worker-3]: KeyError: 'k'",                        # any bracketed tag
+                 "KeyboardInterrupt: stopped"):
+        assert bool(_TERMINAL_EXCEPTION.findall(line)) == bool(_HEADLINE_RE.findall(line)), line
+        assert _TERMINAL_EXCEPTION.findall(line), f"and both must MATCH it: {line}"
+
+    assert not _TERMINAL_EXCEPTION.findall("retrying after ValueError happened"), (
+        "both stay ANCHORED: a line that merely mentions an error name is not a terminal line")
+    assert not _HEADLINE_RE.findall("retrying after ValueError happened")
+
+    # THE ONE DELIBERATE DIFFERENCE: `SystemExit: 2` is a definite crash for LABELLING and is not a
+    # headline worth pushing to a Developer, so the bench keeps `Exit` and production does not.
+    assert _TERMINAL_EXCEPTION.findall("SystemExit: 2")
+    assert not _HEADLINE_RE.findall("SystemExit: 2")
+
+
 def test_bench_non_eval_reasons_are_reasons_something_MINTS():
     """A label that can never match is a bucket that stays empty while reading as coverage.
 

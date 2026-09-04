@@ -231,8 +231,23 @@ _NONFINITE_MIN_HITS = 3
 
 # The last `SomeError: message` line of a traceback — the careful reader's read, and the one thing
 # a human does first. Only accepted as a label when it names an exception that is NOT an OOM.
-_TERMINAL_EXCEPTION = re.compile(r"^(?:\[rank\d+\]:\s*)?([A-Za-z_][\w.]*(?:Error|Exception|Exit))"
-                                 r": (.*)$", re.MULTILINE)
+#
+# A COPY of `engine/failure_diagnosis.py::_HEADLINE_RE`, on `judge_corpus.VERDICTS`' argument: a
+# bench that moves when production moves cannot detect that it moved. What a copy may not be is
+# arbitrarily DIFFERENT, and these two had drifted on three clauses — production tolerates leading
+# whitespace (a launcher indents each child's traceback inside its own report block) and any
+# bracketed stream tag, and it accepts `…Interrupt`; this one anchored at the line start, allowed
+# only `[rank\d+]: `, and accepted `…Exit`. So the bench could not see the headline the
+# diagnostician was shown on exactly the indented-traceback case production widened for.
+#
+# The two are now the same shape, with the deliberate differences kept and stated: this one REQUIRES
+# the `": "` (a bench label needs a message to be about) and keeps `Exit` beside `Interrupt`, since
+# `SystemExit: 2` is a definite crash for labelling purposes even though it is not a headline worth
+# pushing to a Developer. `tests/test_judge_bench.py` asserts they agree on the shapes that matter.
+_TERMINAL_EXCEPTION = re.compile(
+    r"^[ \t]*(?:\[[^\]]{1,32}\]:[ \t]*)?"
+    r"((?:[A-Za-z_][\w.]*\.)?[A-Za-z_]\w*(?:Error|Exception|Exit|Interrupt))"
+    r": (.*)$", re.MULTILINE)
 _NOT_A_CRASH_EXCEPTIONS = frozenset({"OutOfMemoryError", "torch.OutOfMemoryError",
                                      "torch.cuda.OutOfMemoryError", "MemoryError"})
 
