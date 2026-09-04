@@ -9758,4 +9758,10 @@ Two properties the recorder needed, and one was only found by mutation:
   than the row before it. The first test appended in time order and could not tell a sorted reader
   from an unsorted one; mutation said so, and the fixture now writes one row out of order.
 
+`discrete_log`'s third row landed after this was written: **1.0896** (1.0831–1.1003) at 15:39
+against 1.0739 at ~13:45, **+1.5 %** with repeats spanning 1.6 %. So it behaves like
+`edge_expansion` rather than like `pde_heat1d` — a tight reading that has now disagreed with the
+sweep's 1.0162 by ~7 % twice. Of the three tasks, two carry a stable disagreement and one is too
+noisy to say anything, which is a sharper statement than §214 could make with one sitting.
+
 The stamp is passed in rather than read inside, so a test or a replay owns its own clock.
