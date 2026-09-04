@@ -10229,3 +10229,36 @@ This is not an argument against the numbers; it is the resolution they come with
 rather than 0.99 — the stratified test recovers some of it by pairing within batch. What the table
 rules out is reading any single probe's TEST against a mark as evidence of anything, which is a
 temptation every sweep offers.
+
+## §234 — the batch pairing buys no variance, and its real job is me
+
+§190's design pairs within batch and tests by exact within-batch permutation. Pairing pays only if
+there is a between-batch component to remove, so I measured whether there is one. Grouping the 82
+`edge_expansion` runs by the day they started:
+
+| day | n | mean | sd |
+|---|---|---|---|
+| 08-31 | 4 | 175.09 | 45.17 |
+| 09-01 | 23 | 196.13 | 53.68 |
+| 09-02 | 14 | 224.23 | 36.43 |
+| 09-03 | 28 | 184.38 | 71.13 |
+| 09-04 | 13 | 199.24 | 66.17 |
+
+Between-day MS 4202 against within-day MS 3787 — **F = 1.11, intraclass correlation 0.007**. The
+overall sd is 61.3 and the within-day sd is 61.5: the grouping removes nothing at all. So the
+stratification is not buying the precision it is normally chosen for, and the arm is effectively 24
+unpaired runs a side. Re-running the power table on the corpus as it stands (86 champions, sd 63.7)
+gives **0.75 for a +44 effect over twelve batches** on 60 trials — the design said 0.83 on a smaller
+corpus, and the two are the same claim inside simulation noise.
+
+**But the design is right for a reason it was not chosen for.** What the batches genuinely protect
+against is not day-to-day drift; it is *me*. Between batch 2 and batch 4 I landed §211 (the stream
+degrade expires), §228 (the ceiling is an ending, not a crash) and §213 (the ceiling survives a
+resume) — engine changes reaching treatment and control alike, at batch boundaries. A within-batch
+comparison is immune to all three; an unpaired pooled comparison across batches is not. §214's ruler
+drift is the same shape from the other direction.
+
+So: keep the pairing, and stop crediting it with variance reduction it does not deliver. The honest
+sentence for the eventual write-up is that the arm has ~0.75 power against +44 points, not that
+stratification bought extra precision. And the number to carry into any future design on this task
+is **ICC ≈ 0** — batching this corpus is a safety measure, never a statistical one.
