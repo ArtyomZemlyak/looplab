@@ -8604,3 +8604,65 @@ dollar on the board.
 `edge_expansion` is detectable at 0.91 power for $48 — that is a real, affordable arm. What is not
 affordable is §186's kernel-first effect, which is 23.5 points, or **12 %** of the median. The
 constraint is not the task; it is that the interventions this notebook has found are all small.
+
+## 189. One process variable separates the best runs from the worst, and it is the only affordable arm on the board
+
+§188 ended on the problem: every intervention this notebook has found is worth about 12 % of the
+median, and only ~25 % is affordable. So the question is whether anything in the corpus separates
+good runs from bad ones by that much.
+
+Comparing the top thirteen `edge_expansion` runs by champion (median 267.73) against the bottom
+thirteen (106.69), on every process variable available:
+
+| variable | top | bottom | two-sided p |
+|---|---|---|---|
+| evaluated nodes | 3.000 | 3.000 | 1.000 |
+| `eval_train` calls | 12.000 | 12.000 | 1.000 |
+| **`run_probe` calls** | **20.000** | **29.000** | **0.037** |
+| probes touching the reference | 2.000 | 3.000 | 0.699 |
+| file reads | 120.000 | 116.000 | 0.303 |
+| generations | 323.000 | 314.000 | 0.597 |
+| `plan_step` share | 0.317 | 0.366 | 0.120 |
+| `propose` share | 0.265 | 0.239 | 0.197 |
+| `deep_research` share | 0.160 | 0.156 | 0.832 |
+| `repropose` share | 0.059 | 0.092 | 0.678 |
+| `plan` share | 0.084 | 0.083 | 1.000 |
+
+**Everything is flat except `run_probe`.** The bottom decile makes 45 % more probes than the top
+decile while evaluating the same number of nodes, making the same number of `eval_train` calls, and
+spending the same shares on every phase.
+
+Across all 69 runs, split at the median of 24 probes:
+
+| | n | champion median |
+|---|---|---|
+| ≤ 24 probes | 37 | **221.81** |
+| > 24 probes | 32 | **177.84** |
+
+Difference **+43.97**, two-sided permutation **p = 0.0077**. Restricted to the 50 runs that evaluated
+exactly three nodes — which removes the "probes trade against nodes" confound almost entirely —
+it is **+50.03, p = 0.0097**.
+
+**That is 25 % of the median, which §188 priced as affordable.** Through §187's simulator at a
+44-point effect:
+
+| batches | probes | $ | power |
+|---|---|---|---|
+| 6 | 24 | 24 | 0.56 |
+| 9 | 36 | 36 | 0.74 |
+| **12** | **48** | **48** | **0.83** |
+
+**So there is exactly one arm on the board worth $48: cap `run_probe` and see whether the score
+moves.** It is the audit's finding #5, which I validated at r = −0.41 in an earlier sweep and which
+has now survived a top-vs-bottom comparison with nodes and `eval_train` held equal.
+
+**What it is not.** The correlation is still a correlation: a run that probes 29 times may be
+probing because it is lost, and capping the probes would then cure the symptom. The card already
+says so in its own words — *"If you have run more than a handful, you have stopped answering
+questions and started doing the evaluator's job for it"* — and the corpus median is 24. **The arm is
+the only way to tell those apart, and it is now the only intervention this notebook has found whose
+effect size and price both work out.**
+
+Not launching it this sweep: it needs a registered design first — the cap value, the outcome, the
+batch structure — written before the first probe, and §180 is the record of what happens when an arm
+is sized on anything else.
