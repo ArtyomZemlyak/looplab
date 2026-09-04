@@ -9354,3 +9354,42 @@ And the timer is not systematically slow, which narrows it further. Its eight ke
 after the two slow ones — same four live probes, same 1.2 G archive — took **110 s**. So whatever it
 was is episodic, not a property of running under the timer, and the breakdown will name the part
 when it next happens.
+
+## §209 — the fidelity check was reading the clock and calling it the intervention
+
+Three sweeps running, `arm_fidelity` has ended with a sentence that is false in the way that matters:
+
+```
+median executed: treat 12.0, control 10.5, contrast -1.5
+  NO CONTRAST YET: the control has not out-probed the treatment, so nothing separates the arms
+```
+
+At that moment the intervention was working exactly as designed. The treated probes had hit
+`developer_probe_max_calls=12` and stopped; the controls were mid-flight at nine and eleven, on their
+way past twenty. A running probe's probe-count is a LOWER BOUND and a finished one's is the answer,
+and the tool was comparing one against the other. Batch 1, all four finished, gives treat 12.0 vs
+control 26.0, contrast **+14** — from the same code, once the probes have ended.
+
+The sentence is the defect, not the arithmetic: a reader of "nothing separates the arms" concludes
+something about capping probes, when the number is about which probes had finished at the moment it
+was printed. It is §198's own warning arriving from the direction the file did not guard: that tool
+was built so a fidelity check could never become an interim read of the OUTCOME, and it turned into
+an interim read of the CLOCK instead.
+
+Fixed: the contrast is computed over finished probes only, running ones are counted and named but
+not compared, and when nothing has finished the tool says so in those words instead of printing a
+negative number. `finished` is the EXISTENCE of `final.json` and never its contents — parsing it
+would put a score on this screen, which is the one thing §190 forbids.
+
+Five mutations, and one of them survived the first version: deleting the "a probe with no spans has
+not started" filter left every assertion green, because an unstarted probe is unfinished either way
+and the difference only shows in the RUNNING list. It is closed by asserting that a probe which
+never began is not reported as still running — an operator reading that list is waiting for work
+that would never arrive.
+
+## §210 — the archive breakdown, first reading from the timer
+
+`20260904-112435`, taken by the timer with four probes live: **188 s = 137 s prefix-check + 14 s
+`cp -ru` + 29 s repair**. The prefix check dominates, as it did in both manual runs (67 s pinned,
+82 s unpinned), and 188 s is a tenth of the interval. Five consecutive healthy snapshots now —
+110, 101, 162, 188 — with the two slow ones (608 s, 1765 s) still unexplained and now instrumented.

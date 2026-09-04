@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 import json
 import statistics
 import sys
@@ -32,7 +33,14 @@ DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
 
 
 def probe_calls(root: str, name: str) -> dict:
-    """`{executed, refused, spans}` for one probe tree. No scores are read."""
+    """`{executed, refused, spans, finished}` for one probe tree. No scores are read.
+
+    `finished` is the EXISTENCE of `final.json`, never its contents. A running probe's count is a
+    lower bound and a finished one's is the answer, and mixing them is how this tool spent three
+    sweeps printing "NO CONTRAST YET" at a moment when the treatment had already stopped at its cap
+    of 12 and the control was still climbing through 10, 11, 12. A negative contrast between a
+    finished arm and an unfinished one is not evidence about the intervention; it is the clock.
+    """
     executed = refused = 0
     spans: set = set()
     for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/spans.jsonl")):
@@ -56,17 +64,26 @@ def probe_calls(root: str, name: str) -> dict:
                     refused += 1
                 else:
                     executed += 1
-    return {"executed": executed, "refused": refused, "spans": len(spans)}
+    return {"executed": executed, "refused": refused, "spans": len(spans),
+            "finished": os.path.exists(f"{root}/{name}/final.json")}
 
 
 def report(root: str, treat, control) -> dict:
+    """Contrast over FINISHED probes only, with the running ones counted but not compared."""
     rows = {n: probe_calls(root, n) for n in list(treat) + list(control)}
-    t = [rows[n]["executed"] for n in treat if rows[n]["executed"] or rows[n]["refused"]]
-    c = [rows[n]["executed"] for n in control if rows[n]["executed"] or rows[n]["refused"]]
-    return {"rows": rows,
-            "treat_median": statistics.median(t) if t else 0,
-            "control_median": statistics.median(c) if c else 0,
-            "contrast": (statistics.median(c) if c else 0) - (statistics.median(t) if t else 0)}
+
+    def started(names):
+        return [n for n in names if rows[n]["executed"] or rows[n]["refused"]]
+
+    t = [rows[n]["executed"] for n in started(treat) if rows[n]["finished"]]
+    c = [rows[n]["executed"] for n in started(control) if rows[n]["finished"]]
+    running = [n for n in started(list(treat) + list(control)) if not rows[n]["finished"]]
+    tm = statistics.median(t) if t else 0
+    cm = statistics.median(c) if c else 0
+    return {"rows": rows, "running": running,
+            "treat_n": len(t), "control_n": len(c),
+            "treat_median": tm, "control_median": cm,
+            "contrast": (cm - tm) if (t and c) else None}
 
 
 def main(argv=None) -> int:
@@ -78,18 +95,29 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     got = report(args.root, args.treat, args.control)
-    print(f'{"probe":10s} {"arm":>9s} {"executed":>9s} {"refused":>8s} {"phases":>7s}')
-    for name in args.treat:
-        r = got["rows"][name]
-        print(f'{name:10s} {"treat":>9s} {r["executed"]:9d} {r["refused"]:8d} {r["spans"]:7d}')
-    for name in args.control:
-        r = got["rows"][name]
-        print(f'{name:10s} {"control":>9s} {r["executed"]:9d} {r["refused"]:8d} {r["spans"]:7d}')
-    print(f'\nmedian executed: treat {got["treat_median"]}, control {got["control_median"]}, '
+    print(f'{"probe":10s} {"arm":>9s} {"executed":>9s} {"refused":>8s} {"phases":>7s}  state')
+    for arm, names in (("treat", args.treat), ("control", args.control)):
+        for name in names:
+            r = got["rows"][name]
+            state = "finished" if r["finished"] else "running"
+            print(f'{name:10s} {arm:>9s} {r["executed"]:9d} {r["refused"]:8d} {r["spans"]:7d}  '
+                  f'{state}')
+    if got["contrast"] is None:
+        print(f'\nno contrast to report yet: {got["treat_n"]} finished treated probe(s) and '
+              f'{got["control_n"]} finished control(s). A running probe\'s count is a LOWER BOUND, '
+              "and the treated ones stop at their cap while the controls are still climbing -- "
+              "comparing the two mid-flight measures the clock, not the intervention.")
+        if got["running"]:
+            print("  still running: " + ", ".join(got["running"]))
+        return 0
+    print(f'\nmedian executed over FINISHED probes: treat {got["treat_median"]} '
+          f'(n={got["treat_n"]}), control {got["control_median"]} (n={got["control_n"]}), '
           f'contrast {got["contrast"]:+g}')
+    if got["running"]:
+        print("  still running (not counted): " + ", ".join(got["running"]))
     if got["contrast"] <= 0:
-        print("  NO CONTRAST YET: the control has not out-probed the treatment, so nothing "
-              "separates the arms so far")
+        print("  NO CONTRAST: the control did not out-probe the treatment in the probes that "
+              "FINISHED, so nothing separates the arms so far")
     return 0
 
 
