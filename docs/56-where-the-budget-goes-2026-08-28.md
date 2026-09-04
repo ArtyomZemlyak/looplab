@@ -10155,3 +10155,41 @@ draw from the same distribution, not a different one.
 
 Nothing to ship. It does close the question §225 left open with a number rather than an intuition,
 and it says which of the two populations the money argument is actually about.
+
+## §232 — the reference-use band describes a fifth of the corpus, and predicts nothing
+
+The sweep's point 9 carries "База обращений к референсу — 4.9-8.3 % (§69.1), НЕ 3.0 %", and I have
+been reporting probes against it every sweep — `capB3` at 16.7 % "above the band", `capA4` and
+`capB4` at 0.0 % "below it", `freeB4` at 6.5 % "inside". Measured over the 82 `edge_expansion` runs
+with at least five executed probes and a TEST score:
+
+| | |
+|---|---|
+| median reference use | **8.9 %** |
+| p10 / p90 | 0.0 % / 15.8 % |
+| runs inside 4.9–8.3 % | **18 of 82** |
+| runs that never touch the reference | 13 |
+
+So the band names a fifth of the corpus, and the median run sits above it. Nor is it an artefact of
+one era — by start day the median runs 10.4, 7.0, 9.5, 9.8, 12.5 %, straddling or exceeding the band
+throughout. §69.1's figure was right about the data it had; it has been carried since as though it
+described the population, and I have been flagging perfectly ordinary probes as noteworthy on the
+strength of it. `capB3`'s 16.7 % is a p90 value, not an excursion.
+
+**And it does not predict the score.** Spearman(reference use, TEST) = **−0.099, p = 0.373**. Split
+three ways, the medians even lean the wrong way for the obvious story:
+
+| | n | TEST median |
+|---|---|---|
+| never used the reference | 13 | **223.22** |
+| used it, at or below 8.3 % | 26 | 217.44 |
+| used it above 8.3 % | 43 | 201.33 |
+
+The trend is not significant and I am not claiming a direction; what the numbers do establish is that
+consulting the reference more is not associated with scoring better, so the band cannot be read as a
+target either. Thirteen runs never opened it at all and are the highest-scoring group of the three.
+
+The honest use of the number from here: report the rate, compare it to the corpus median of 8.9 %
+with p10 0.0 and p90 15.8, and stop describing 4.9–8.3 % as a baseline that a probe is above or
+below. That is a reporting change in my own sweeps rather than a code change, so it is written here
+where the next sweep will read it.
