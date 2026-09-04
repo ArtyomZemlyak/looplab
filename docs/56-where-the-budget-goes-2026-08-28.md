@@ -10299,3 +10299,34 @@ and 1 % after its last node with 38 `eval_train`; `capB5` 33.9 % in `plan_step`,
 `eval_train`; `freeA5` 27.1 % in `propose`, **15 % after its last node**, 19 `eval_train` over 34
 executed probes. `freeA5` is also §231's unlucky fifth again — [27.25, 21.90, 27.13], three weak
 nodes and no recovery.
+
+## §236 — batch 4 closed the prediction 4 of 4, and four batches of fidelity in one table
+
+`freeB6` finished at TEST 254.1441 with `run_finished / budget_exhausted`, so **all four probes of
+batch 4 ended cleanly and none paused** — §230's registered prediction, confirmed at 4 of 4 rather
+than the 3 of 4 the last sweep could report. The claim that would have falsified it (a pause, sending
+me looking for a second route to the crash sentinel) did not occur.
+
+With four batches in, the intervention's delivery can be read as a whole. This is fidelity, not
+outcome — probe counts and `eval_train` counts, no scores:
+
+| batch | treated probes (+refused) | control probes | contrast | `eval_train` t/c |
+|---|---|---|---|---|
+| 1 | 12(+7), 12(+7) | 31, 21 | +14 | 33.0 / 26.5 |
+| 2 | 12(+4), 12(+6) | 11, 31 | +9 | 33.0 / 24.5 |
+| 3 | 12(+5), **11(+0)** | 27, 56 | +30 | 31.0 / 25.0 |
+| 4 | 12(+8), 12(+2) | 34, 32 | +21 | 36.5 / 20.0 |
+
+**The cap bit in 7 of 8 treated probes**, against §196's estimate that it bites 91 % of
+`edge_expansion` runs — one miss in eight is what that rate predicts. The exception is `capB4`,
+which stopped at eleven probes on its own and so carries the label without the treatment (§227).
+
+Two things the table says that the batch-by-batch reports did not. The **contrast is never negative
+and never small in the same direction twice** — +14, +9, +30, +21 — so no batch is diluted to the
+point of contributing nothing, and the weakest (+9, batch 2) is the one where a CONTROL stopped at
+eleven probes rather than a treated one failing to be capped. And the **channel is present in every
+batch** (33/26.5, 33/24.5, 31/25, 36.5/20), which is what §223 claimed on eight probes and what §224
+was careful to call a dose rather than a mechanism.
+
+Batch 5 is away on all four lanes at `5230093d`, verified. Seven batches remain, and by §234's
+power table twelve of them buy 0.77 against a +44 effect.
