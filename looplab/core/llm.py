@@ -82,7 +82,18 @@ _LOG = logging.getLogger(__name__)
 
 # Named stream/timeout constants (previously inline magic numbers). Their retry/backoff siblings
 # (BACKOFF_CAP_S / RETRY_AFTER_CAP_S) live in `llm_transient` and are re-imported above.
-STREAM_STALL_DEGRADE_AFTER = 2       # stream stalls before this client goes non-streaming for good
+STREAM_STALL_DEGRADE_AFTER = 2       # stream stalls before this client stops streaming
+# ...AND HOW MANY GOOD NON-STREAMED CALLS BEFORE IT TRIES STREAMING AGAIN. The degrade used to be
+# "for this client's lifetime", and its rationale was measured on an endpoint where non-streaming is
+# the SAFE mode (glm-5.1: non-stream 2 s, stream wedges). On this bench it is the DANGEROUS one: the
+# gateway sits behind an nginx with `proxy_read_timeout 300`, which without SSE measures the whole
+# generation, and 28 % of `discrete_log` calls once died there at five minutes each.
+# Measured 2026-09-04 on `freeB3`: two empty streamed 200s at 11:39:38 and 11:40:36 (60 s, `att=2`,
+# zero tokens both ways) degraded the client, and the next **51 calls over 23 minutes went
+# unstreamed with no way back** while its prompt grew past 34 k tokens and single answers reached
+# 107 s. Its neighbour `capB3` lost a call to the 300 s ceiling at 12:01:40. A transient upstream
+# hiccup should not spend the rest of a $1 run exposed to that.
+STREAM_STALL_RETRY_AFTER = 20        # good unstreamed calls before one probe attempt re-tries SSE
 # Default first-byte (response-headers) window, seconds. The single source: config.py's
 # `Settings.llm_header_timeout` imports this constant as its field default.
 DEFAULT_HEADER_TIMEOUT_S = 45.0
@@ -950,6 +961,9 @@ class OpenAICompatibleClient:
         # for this client's lifetime. Bounded worst case: one idle-timeout, not retries ×
         # idle-timeout of silence.
         self._stream_stalls = 0
+        # Good non-streamed calls since the degrade. At STREAM_STALL_RETRY_AFTER the next call
+        # probes streaming once: if it works the ratchet resets, if it stalls the degrade re-arms.
+        self._unstreamed_since_degrade = 0
         # H1: when the endpoint supports constrained decoding (vLLM/SGLang), drive structured calls
         # from the Pydantic JSON schema — `response_format` json_schema (OpenAI-standard, vLLM+SGLang)
         # + `guided_json` (vLLM extra) — so a weak model can't emit invalid JSON. Off by default
@@ -1626,8 +1640,14 @@ class OpenAICompatibleClient:
             # often answers the SAME request fine without SSE while its stream wedges mid-generation.
             # Streaming is decided HERE, per attempt — never by the caller's payload (`_sdk_chat`
             # reads no `stream` key from it), so every call site gets the same degrade behaviour.
-            use_stream = (self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER
-                          and not _stalled_prev)
+            _degraded = self._stream_stalls >= STREAM_STALL_DEGRADE_AFTER
+            use_stream = (self.stream and not _stalled_prev
+                          and (not _degraded
+                               or self._unstreamed_since_degrade >= STREAM_STALL_RETRY_AFTER))
+            if use_stream and _degraded:
+                # This attempt IS the probe. Zero the counter here rather than on its result, so a
+                # probe that stalls does not immediately probe again on the next call.
+                self._unstreamed_since_degrade = 0
             try:
                 # admit immediately around the real provider attempt, not around a
                 # whole node build. Retries take fresh fair turns and nested build -> novelty work
@@ -1657,6 +1677,11 @@ class OpenAICompatibleClient:
                 # STREAM that produced an empty message (keepalive-only heartbeats, no content/tool_call).
                 empty_stream = self._keepalive_stall(parsed, use_stream)
                 if parsed is not None and not empty_stream:
+                    if self._stream_stalls >= STREAM_STALL_DEGRADE_AFTER:
+                        if use_stream:
+                            self._stream_stalls = 0      # the probe answered: streaming is back
+                        else:
+                            self._unstreamed_since_degrade += 1
                     body = parsed
                     break
                 if empty_stream:                # keepalive-only stream = the same stall family

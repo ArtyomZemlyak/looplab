@@ -9393,3 +9393,49 @@ that would never arrive.
 `cp -ru` + 29 s repair**. The prefix check dominates, as it did in both manual runs (67 s pinned,
 82 s unpinned), and 188 s is a tenth of the interval. Five consecutive healthy snapshots now —
 110, 101, 162, 188 — with the two slow ones (608 s, 1765 s) still unexplained and now instrumented.
+
+## §211 — a transient stall bought 23 minutes behind the 300 s window, and there was no way back
+
+`check_money` reported the share of unstreamed calls rising from 1.2 % to 1.6 % and a new death at
+the nginx ceiling: `7 of them cut at the 300 s nginx ceiling (oldCK9 x6, capB3 x1)`. Every probe's
+INSTRUMENT.txt says `LOOPLAB_LLM_STREAM=1`, so the streaming that the standing brief is emphatic
+about was on. It was turned off by the engine, at run time.
+
+Per live probe, unstreamed share over its whole life: `freeB3` **51 of 271 (18.8 %)**, `capB3`
+15/274 (5.5 %), `capA3` 3/376 (0.8 %), `freeA3` 2/369 (0.5 %). The ledger says exactly when:
+
+```
+11:39:38 stream=True  st=200 lat=  60.3s att=2 pt=0 ct=0
+11:40:36 stream=True  st=200 lat=  60.2s att=2 pt=0 ct=0
+11:40:36 stream=False st=200 lat=   0.9s att=1 pt=20308 ct=69
+11:42:40 stream=False st=200 lat=  67.1s att=1 pt=21356 ct=5627
+… 51 unstreamed calls, to 12:03:55 and still going
+```
+
+Two empty streamed 200s — sixty seconds, `att=2`, zero tokens both ways — and `_stream_stalls`
+reached `STREAM_STALL_DEGRADE_AFTER = 2`. The comment in `core/llm.py` says what happens next, and
+it is not a bug in the sense of a mistake: *"after STREAM_STALL_DEGRADE_AFTER stalls streaming is
+disabled for this client's lifetime"*, deliberate, with a measured rationale — glm-5.1 answered the
+same request in 2 s without SSE while its stream wedged.
+
+**That rationale is inverted on this bench.** Here non-streaming is the dangerous mode: the gateway
+sits behind an nginx with `proxy_read_timeout 300`, which without SSE measures the entire
+generation, and the brief's own measurement is 28 % of `discrete_log` calls dying at five minutes
+each with streaming off against 0 of 28 with it on. `freeB3` spent 23 minutes and 51 calls there,
+its prompt growing past 34 k tokens and single unstreamed answers reaching 106.9 s, while `capB3`
+lost one at exactly 300 s. Unstreamed p90 in that window was 85.6 s against 60.3 s streamed.
+
+Fixed: the degrade now expires. `STREAM_STALL_RETRY_AFTER = 20` good unstreamed calls and the next
+attempt probes SSE once; it works → the ratchet resets to zero and the client streams again; it
+stalls → the degrade re-arms for another twenty. The protection the ratchet exists for is untouched
+— two stalls still stop the streaming, and a stalled probe does not immediately probe again.
+
+Six mutations, all red: making the degrade permanent again, probing on every call, a successful
+probe that does not reset the ratchet, good unstreamed calls never counted, a failed probe that
+re-probes at once, and the degrade threshold removed. The 190 tests of the five existing LLM suites
+pass unchanged.
+
+This lands mid-arm on purpose. §190's test is stratified BY BATCH and compares within a batch, so a
+change that reaches all four probes of every later batch equally is absorbed by the stratification —
+which is what batch-stratification is for. Leaving a known 300 s exposure in place for ten more
+batches is not.
