@@ -9348,3 +9348,9 @@ no breakdown at all.
 
 §206's own fix is confirmed in production, incidentally: the timer's ticks now land at 10:24:35 and
 10:54:35, exactly 1800 s apart, where before the period was the interval plus the snapshot.
+
+And the timer is not systematically slow, which narrows it further. Its eight kept snapshots today:
+117, 200, 126, **1765**, **608**, 110, and my two manual ones at 101 and 162. The tick immediately
+after the two slow ones — same four live probes, same 1.2 G archive — took **110 s**. So whatever it
+was is episodic, not a property of running under the timer, and the breakdown will name the part
+when it next happens.
