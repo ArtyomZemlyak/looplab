@@ -10330,3 +10330,36 @@ was careful to call a dose rather than a mechanism.
 
 Batch 5 is away on all four lanes at `5230093d`, verified. Seven batches remain, and by §234's
 power table twelve of them buy 0.77 against a +44 effect.
+
+## §237 — a hypothesis about the slow snapshots, tested and refuted
+
+The 23:05 snapshot took **337 s** (249 prefix-check + 53 `cp -ru` + 35 repair) against a recent norm
+near 130. It landed two minutes after batch 5 was launched, and the obvious guess is that starting
+four probes at once — `make_task`, workspace copies, four engines booting — is what slows it. The
+guess is testable against the twenty-five breakdowns the timer log has recorded since §208 shipped
+the instrument, so I tested it rather than writing it down.
+
+| snapshots | n | median | p90 | max |
+|---|---|---|---|---|
+| a probe started during or in the 10 min before | 15 | **127 s** | 187 s | 337 s |
+| quiet | 10 | **144 s** | 976 s | **976 s** |
+
+**Refuted.** The medians are the same within noise and the single worst snapshot in the series —
+976 s at 13:54 — is in the QUIET group. Probe launches do not explain it; if anything the quiet
+snapshots are marginally slower, which is what n=10 against n=15 looks like when there is no effect.
+
+What the series does say is that the distribution is tight with rare outliers: twenty-three of
+twenty-five between **113 and 187 s**, and two at 337 and 976. Both outliers sit over periods when
+something CPU-heavy was running that was not a probe — 13:54 is §216's window of AlgoTune
+evaluations saturating lanes 0-32 for the ruler self-check, and 23:05 is a launch plus my own
+analysis queries. That is the same conclusion §216 reached and acted on, and the action bounded the
+damage rather than removing it: the worst case fell from 976 s to 337 s once the snapshot was pinned
+to the service lanes, and eight cpus running a `cmp` per file over 5,400 files is simply not free.
+
+None of it threatens the cadence any more, which is the part that mattered: §206 made the interval a
+period, so even a 976 s snapshot no longer stretches the next tick. p90 of 187 s against an 1800 s
+interval is a tenth of the budget.
+
+I am leaving it here rather than chasing the last outlier. Two events in twenty-five, both explained
+by "the box was busy", with the consequence already neutralised, is the point at which further
+digging costs more than the answer is worth — and saying so is a decision, not an omission.
