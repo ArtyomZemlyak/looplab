@@ -8351,3 +8351,44 @@ Remaining in the queue, in the order their evidence justifies:
 
 Neither ships this sweep. Each wants its own before/after, and the honest way to get one is a small
 paired batch per repair rather than three changes landing together and a single number afterwards.
+
+## 183. §171's remedy is not a gate: the dead sentences are welded to live ones
+
+Next in the queue was §171 — 6,584 chars of the developer's 41,722-char system prompt are about
+epochs, checkpoints, GPUs, Lightning and data assets, none of which exists in this benchmark, costing
+**$2.58** across 11,212 developer generations. The proposed repair was "gate those paragraphs on the
+task actually declaring a train stage".
+
+**Measured before writing it: there is almost nothing to gate.** Splitting the assembled prompt into
+its 117 paragraphs and classifying each by whether *every* sentence in it is dead:
+
+| | paragraphs | chars | share of the prompt |
+|---|---|---|---|
+| **wholly** about training/GPU — separable | **3** | **800** | **1.9 %** |
+| **mixing** dead and live rules — welded | 10 | 14,900 | 35.7 % |
+
+The three separable ones are one hardware line, one checkpoint-self-skip bullet and one
+hyperparameter cue — 800 characters, worth about **$0.31** across the corpus. Everything else is
+welded, and the welding is not accidental. This is one sentence, verbatim:
+
+> "The entrypoint must print the metric as the LAST stdout line (a JSON object with the required
+> key). CRITICAL: the eval command runs `<entrypoint>.py`, so THAT FILE MUST EXIST in the workspace
+> after your edits … **For TRAINING work, WHEN the node's declared pipeline has a separate `train`
+> stage**, the entrypoint here only SCORES…"
+
+The live rule this benchmark depends on and the dead training clause are in the same breath. A regex
+that removes the second removes half of the first.
+
+**So the item is not shippable as a gate**, and I am not shipping a regex excision of a 41 KB prompt
+to recover 1.5 % of spend — that is exactly the shape of change that silently drops a rule and gets
+found four sweeps later by a probe that stopped printing its metric.
+
+What would make it shippable is a rewrite of `_REPO_DEV_SYSTEM_BODY_TAIL` into task-shape-conditional
+segments, with a test asserting that the non-training rendering still contains **every** live rule
+the training rendering does. That is a real refactor of the loop's most-read text, and it is worth
+doing when something bigger than $2.58 rides on it.
+
+**Queue after this sweep:** §156's $0.10 budget gate is now the only held-back repair with a
+measured, positive counterfactual (recovers $1.5354; costs one node that scored zero). §171 moves
+from "queued" to "needs a refactor, priced at $2.58" — recorded rather than dropped, because the
+measurement stands and only the remedy does not.
