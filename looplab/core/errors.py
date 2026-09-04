@@ -64,6 +64,28 @@ class BudgetExceeded(OperatorRefusal, RuntimeError):
     """
 
 
+def is_run_ending(exc: BaseException) -> bool:
+    """Is this refusal the run REACHING ITS END, rather than something going wrong?
+
+    Its five `OperatorRefusal` siblings are not alike, and treating them alike cost real money.
+    `LLMError`, `LLMCredentialError`, `ConfigRefusal` and `EnvironmentRefusal` are all FAULTS: the
+    developer session normalises them into its crash sentinel on purpose, the orchestrator pauses
+    the run, and "resume once it's fixed" is exactly the right sentence — an outage or a bad key is
+    something an operator repairs and continues from.
+
+    `BudgetExceeded` is the odd one out. Nothing is broken; the run has done what it was told to do
+    until the money ran out, and it has a champion. Dressing it as a crash paused **16 of the 105
+    probe runs that reached full budget** (§228) — every one at or past its $1.00 ceiling, every one
+    within 0.2 s of its last call — under "a Developer session crashed (LLM unreachable or a hard
+    error)", leaving finished runs marked OWED WORK. Acting on that message cost $0.1056 past a cap
+    (§213).
+
+    So the distinction is named here rather than spelled out at each catch site, and the test pins
+    all five: the ending is re-raised, the faults keep their sentinel.
+    """
+    return isinstance(exc, BudgetExceeded)
+
+
 class ConfigRefusal(OperatorRefusal, ValueError):
     """A refusal about the configuration this command was handed (settings, flags, the task file).
 

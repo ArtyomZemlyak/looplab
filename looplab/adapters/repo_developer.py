@@ -27,7 +27,7 @@ import math as _math
 
 from typing import Optional
 
-from looplab.core.errors import BudgetExceeded
+from looplab.core.errors import BudgetExceeded, OperatorRefusal, is_run_ending
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
@@ -2366,7 +2366,18 @@ class LLMRepoDeveloper:
                           terminal_salvage=True,
                           fallback=lambda m: "", on_budget=self._note_session_budget,
                       **self._session_opts())
-        except BudgetExceeded:
+        except OperatorRefusal as e:
+            if not is_run_ending(e):
+                # A FAULT, not an ending: an outage, a bad key, a misconfiguration. These keep the
+                # crash sentinel on purpose -- the orchestrator pauses, and "resume once it's fixed"
+                # is the right sentence for them. Only the ceiling is re-raised. See
+                # `errors.is_run_ending` for why the five siblings are not alike.
+                self.last_files = dict(write.files)
+                self.last_deleted = list(write.deleted)
+                from looplab.core.models import developer_artifact_footprint
+                self.last_footprint = developer_artifact_footprint(
+                    idea.footprint, "", self.last_files)
+                return f"{DEVELOPER_ERROR_PREFIX} {e})"
             # THE CEILING IS NOT A CRASH, and dressing it as one cost more than a wrong word.
             # `BudgetExceeded` is an `Exception`, so the blanket handler below turned "this run has
             # spent its $1.00" into the developer-crash sentinel, which the orchestrator answers by

@@ -39,7 +39,7 @@ import anyio
 import orjson
 
 from looplab.core.llm import BudgetExceeded
-from looplab.core.errors import BudgetExceeded
+from looplab.core.errors import BudgetExceeded, is_run_ending
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
                                  coerce_node_id,
                                  developer_artifact_footprint, developer_stuck_reason,
@@ -2984,7 +2984,7 @@ class EvaluateMixin:
                         # exit for "the repair call failed at the provider" rather than adding a
                         # second, differently-behaved one. `except Exception` deliberately does not
                         # catch `BaseException`, so cancellation and KeyboardInterrupt still travel.
-                        if isinstance(_repair_exc, BudgetExceeded):
+                        if is_run_ending(_repair_exc):
                             # The same rule as `repo_developer`'s handler: the spend ceiling is an
                             # ENDING, not a provider failure, and routing it through the crash
                             # sentinel pauses a run that is simply finished (16 of 105 in the probe

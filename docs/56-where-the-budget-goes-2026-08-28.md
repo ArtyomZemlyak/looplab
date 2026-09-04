@@ -10083,3 +10083,44 @@ is genuinely owed work. `freeA4` now reads `finished`, which it is; `freeB3`, pa
 its events log, still reads paused, which it was. Four more mutations red — including "every pause
 counts as finished", which would erase the distinction, and a negative cost row pulling a finished
 run back below its ceiling.
+
+## §229 — the five refusals are not alike, and now the code says which
+
+§228 re-raised `BudgetExceeded` at two catch sites. The obvious next question is whether its
+siblings belong on the same side, and the answer is no — which is worth writing down, because both
+directions of over-reading it are damaging.
+
+`core/errors.py` has five `OperatorRefusal` subclasses. Four are **faults**: `LLMError` (an outage),
+`LLMCredentialError` (a bad key), `ConfigRefusal`, `EnvironmentRefusal`. For those the developer
+session's crash sentinel is exactly right — the orchestrator pauses, the circuit breaker engages,
+and *"resume once it's fixed"* is a true sentence. That breaker exists because a 403 blowout once
+spun **67 dead nodes**, so re-raising them would trade §228's defect for that one. `BudgetExceeded`
+is the one refusal that is the run **reaching its end** with a champion in hand.
+
+The distinction is now named — `errors.is_run_ending(exc)` — and both catch sites ask it instead of
+spelling out a type, so there is one copy of the rule rather than two drifting ones (§204). The test
+pins all five siblings plus an ordinary `ValueError`.
+
+Mutation earned its keep twice more. Making the predicate `isinstance(exc, OperatorRefusal)` — the
+over-generalisation — reddens; making it `False` reddens. But **turning the fault guard into
+`if False:` survived the first version**, because the assertions only checked that a `raise` and a
+`return` existed somewhere in the handler, and `if False:` leaves both in the AST. The test now
+asserts on the If's CONDITION — it must mention `is_run_ending`, not be a constant — which is the
+difference between "the branch is present" and "the branch can be taken".
+
+## §230 — batch 4 away, carrying the fix, with the prediction stated first
+
+All four lanes went idle, so batch 4 is running: `capA5`/`capB5` capped, `freeA5`/`freeB6` at the
+shipped defaults, `LOOPLAB_LLM_STREAM=1`, every INSTRUMENT.txt verified — and all four record
+`looplab: 4bc28700`, which is §228's commit. This is the first batch whose runs cannot mistake their
+own ending for a crash.
+
+**Stated before the data, so it can be wrong:** all four should end with `run_finished` and
+`reason=budget_exhausted`, and none should end paused. Sixteen of the previous 105 full-budget runs
+did end paused; if any of batch 4 does, either the fix does not reach the path these runs actually
+take or there is a second route to the sentinel, and I will look for the second route rather than
+call it noise.
+
+Batch 3 closed at fidelity **treat 11.5, control 41.5, contrast +30**, channel `eval_train` +6, with
+`freeA4` counted as finished on the spend rather than resumed — which is §228 applied to the very
+run that exposed it. Eight batches remain.
