@@ -140,3 +140,53 @@ def test_a_resumed_probe_is_running_again_and_not_still_paused(tmp_path):
         "lifecycle event, not any of them")
     assert "freeB3" in got["running"], "a resumed probe is running and must still be named"
     assert got["control_n"] == 1 and got["contrast"] == 14, got
+
+
+def _dev(root: Path, name: str, n: int):
+    """Append `n` `run_dev_command("eval_train")` spans to an existing probe."""
+    d = root / name / "runs" / "edge_expansion" / "run"
+    with open(d / "spans.jsonl", "a", encoding="utf-8") as fh:
+        for _ in range(n):
+            fh.write(json.dumps({"kind": "tool", "name": "tool", "attributes": {
+                "tool": "run_dev_command", "phase_span": "s0",
+                "input": json.dumps({"command": "eval_train"}), "output": "speedup 12.3"}}) + "\n")
+
+
+def test_the_channel_is_counted_beside_the_dose(tmp_path):
+    """A cap that reduced probes and changed nothing else would be an intervention with no channel.
+    The refusal text points at `run_dev_command("eval_train")`, so that is the count that says
+    whether the push landed. Batch 1+2's real numbers: treat 33.0, control 24.5."""
+    _probe(tmp_path, "capA2", executed=12, refused=7)
+    _dev(tmp_path, "capA2", 30)
+    _probe(tmp_path, "capB2", executed=12, refused=7)
+    _dev(tmp_path, "capB2", 36)
+    _probe(tmp_path, "freeA2", executed=31)
+    _dev(tmp_path, "freeA2", 23)
+    _probe(tmp_path, "freeB2", executed=21)
+    _dev(tmp_path, "freeB2", 26)
+    # A RUNNING treated probe with a large count, which must not enter the median: its evaluations
+    # are a lower bound exactly as its probe count is. Mutation showed that without this the
+    # finished-only filter on the channel was never exercised at all.
+    _probe(tmp_path, "capA4", executed=12, refused=2, finished=False)
+    _dev(tmp_path, "capA4", 90)
+    got = arm_fidelity.report(str(tmp_path), ["capA2", "capB2", "capA4"], ["freeA2", "freeB2"])
+    assert got["treat_evals"] == 33 and got["control_evals"] == 24.5, got
+    assert got["eval_contrast"] == 8.5, got
+    assert got["contrast"] == 14, "the probe contrast moved when eval_train counting was added"
+    assert got["rows"]["capA4"]["evals"] == 90, "a running probe must still be counted and shown"
+
+
+def test_eval_train_is_counted_from_the_ARGUMENT_not_a_tool_name(tmp_path):
+    """`eval_train` is an argument to `run_dev_command`; a counter keyed on the tool NAME sees none
+    of them, and one keyed on the raw line counts generations that merely mention it."""
+    _probe(tmp_path, "capA2", executed=12)
+    _dev(tmp_path, "capA2", 5)
+    d = tmp_path / "capA2" / "runs" / "edge_expansion" / "run"
+    with open(d / "spans.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "generation", "name": "generation", "attributes": {
+            "phase": "plan", "output": "next I will run eval_train twice"}}) + "\n")
+    _probe(tmp_path, "freeA2", executed=20)
+    got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA2"])
+    assert got["treat_evals"] == 5, (
+        f'{got["treat_evals"]}: a generation that merely says "eval_train" is not an evaluation')
+    assert got["control_evals"] == 0

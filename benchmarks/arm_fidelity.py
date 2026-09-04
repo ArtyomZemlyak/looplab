@@ -12,6 +12,15 @@ version that also printed the champion would turn every fidelity check into an i
 arm, which the design forbids and which no amount of discipline reliably prevents once the number
 is on the screen.
 
+THE CHANNEL, NOT ONLY THE DOSE. Capping probes is supposed to work by pushing the developer towards
+the graded measurement -- the refusal text says in so many words that `run_dev_command("eval_train")`
+is what measuring the solver is for -- so a cap that reduced probes and changed nothing else would be
+an intervention with no channel. That is a property of the intervention, like the probe count, and it
+is counted here for the same reason: finding out at batch twelve that the two arms did the same thing
+is how $48 becomes nothing. Measured over the eight finished probes of batches 1 and 2: probes
+treat 12.0 vs control 26.0, and `eval_train` **treat 33.0 vs control 24.5** -- the capped runs turn
+about fourteen ungraded probes into about eight and a half graded evaluations.
+
 WHAT TO WATCH. §196 measured that a cap of 12 bites 91 % of `edge_expansion` runs, so most control
 probes should land ABOVE 12 and every treated probe at exactly 12. A batch where the control also
 sits at nine or ten is a batch with little contrast — it dilutes the effect the power table assumed,
@@ -52,7 +61,7 @@ def probe_calls(root: str, name: str) -> dict:
     See the module docstring for what `finished` means and why it is an event. No scores are read
     here: event TYPES only.
     """
-    executed = refused = 0
+    executed = refused = evals = 0
     spans: set = set()
     for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/spans.jsonl")):
         try:
@@ -61,21 +70,28 @@ def probe_calls(root: str, name: str) -> dict:
             continue
         with fh:
             for line in fh:
-                if '"run_probe"' not in line:
+                # `eval_train` arrives as an ARGUMENT to `run_dev_command`, not as a tool name, so
+                # the cheap prefilter is the word anywhere in the line and the claim is the parsed
+                # span. Counted before the `run_probe` gate below, which returns early.
+                if "eval_train" not in line and '"run_probe"' not in line:
                     continue
                 try:
                     span = json.loads(line)
                 except ValueError:
                     continue
                 attrs = span.get("attributes") or {}
-                if span.get("kind") != "tool" or attrs.get("tool") != "run_probe":
+                if span.get("kind") != "tool":
+                    continue
+                if "eval_train" in json.dumps(attrs):
+                    evals += 1
+                if attrs.get("tool") != "run_probe":
                     continue
                 spans.add(attrs.get("phase_span"))
                 if "run_probe refused" in str(attrs.get("output", "")):
                     refused += 1
                 else:
                     executed += 1
-    return {"executed": executed, "refused": refused, "spans": len(spans),
+    return {"executed": executed, "refused": refused, "evals": evals, "spans": len(spans),
             "finished": _run_finished(root, name), "paused": _paused(root, name)}
 
 
@@ -125,6 +141,8 @@ def report(root: str, treat, control) -> dict:
 
     t = [rows[n]["executed"] for n in started(treat) if rows[n]["finished"]]
     c = [rows[n]["executed"] for n in started(control) if rows[n]["finished"]]
+    te = [rows[n]["evals"] for n in started(treat) if rows[n]["finished"]]
+    ce = [rows[n]["evals"] for n in started(control) if rows[n]["finished"]]
     running = [n for n in started(list(treat) + list(control)) if not rows[n]["finished"]]
     paused = [n for n in running if rows[n]["paused"]]
     tm = statistics.median(t) if t else 0
@@ -132,6 +150,9 @@ def report(root: str, treat, control) -> dict:
     return {"rows": rows, "running": running, "paused": paused,
             "treat_n": len(t), "control_n": len(c),
             "treat_median": tm, "control_median": cm,
+            "treat_evals": statistics.median(te) if te else 0,
+            "control_evals": statistics.median(ce) if ce else 0,
+            "eval_contrast": (statistics.median(te) - statistics.median(ce)) if (te and ce) else None,
             "contrast": (cm - tm) if (t and c) else None}
 
 
@@ -144,14 +165,15 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     got = report(args.root, args.treat, args.control)
-    print(f'{"probe":10s} {"arm":>9s} {"executed":>9s} {"refused":>8s} {"phases":>7s}  state')
+    print(f'{"probe":10s} {"arm":>9s} {"executed":>9s} {"refused":>8s} {"eval_train":>11s} '
+          f'{"phases":>7s}  state')
     for arm, names in (("treat", args.treat), ("control", args.control)):
         for name in names:
             r = got["rows"][name]
             state = ("finished" if r["finished"]
                      else "PAUSED (owed work)" if r["paused"] else "running")
-            print(f'{name:10s} {arm:>9s} {r["executed"]:9d} {r["refused"]:8d} {r["spans"]:7d}  '
-                  f'{state}')
+            print(f'{name:10s} {arm:>9s} {r["executed"]:9d} {r["refused"]:8d} {r["evals"]:11d} '
+                  f'{r["spans"]:7d}  {state}')
     if got["contrast"] is None:
         print(f'\nno contrast to report yet: {got["treat_n"]} finished treated probe(s) and '
               f'{got["control_n"]} finished control(s). A running probe\'s count is a LOWER BOUND, '
@@ -165,6 +187,10 @@ def main(argv=None) -> int:
     print(f'\nmedian executed over FINISHED probes: treat {got["treat_median"]} '
           f'(n={got["treat_n"]}), control {got["control_median"]} (n={got["control_n"]}), '
           f'contrast {got["contrast"]:+g}')
+    if got["eval_contrast"] is not None:
+        print(f'  the channel: median eval_train treat {got["treat_evals"]}, '
+              f'control {got["control_evals"]}, {got["eval_contrast"]:+g} -- a cap with no channel '
+              "would move probes and nothing else")
     if got["running"]:
         print("  still running (not counted): " + ", ".join(got["running"]))
     if got["paused"]:

@@ -9857,3 +9857,40 @@ Three fixture corrections were needed before it ran, each the same shape: `_benc
 sentinel INTO the directory it is given, so that directory has to exist; and the DESTINATION's store
 root needs a sentinel of its own, because `snapshot.sh` refuses a non-empty unmarked store — an
 unmounted volume looks exactly like one.
+
+## §223 — the cap has a channel, and it is counted now
+
+The probe cap is meant to work by pushing the developer towards the graded measurement: the refusal
+text says in so many words that `run_dev_command("eval_train")` is what measuring the solver is for.
+A cap that reduced probes and changed nothing else would be an intervention with no channel, and
+finding that out at batch twelve is how $48 becomes nothing — §198's argument for measuring fidelity
+continuously, applied to the mechanism instead of the dose.
+
+Over the eight finished probes of batches 1 and 2:
+
+| probe | arm | probes | refused | `eval_train` |
+|---|---|---|---|---|
+| capA2 | treat | 12 | 7 | 30 |
+| capB2 | treat | 12 | 7 | 36 |
+| capA3 | treat | 12 | 4 | 35 |
+| capB3 | treat | 12 | 6 | 31 |
+| freeA2 | control | 31 | 0 | 23 |
+| freeB2 | control | 21 | 0 | 30 |
+| freeA3 | control | 11 | 0 | 25 |
+| freeB4 | control | 31 | 0 | 24 |
+
+Medians: probes **12.0 vs 26.0**, `eval_train` **33.0 vs 24.5**. The capped runs turn about fourteen
+ungraded probes into about eight and a half graded evaluations. The channel is live, and it is now a
+column in `arm_fidelity` rather than a one-off query — still reading no scores, because a count of
+`run_dev_command` calls is not an outcome.
+
+Node counts are 3.0 against 3.5 on four probes a side, which at that n says nothing either way and
+is not offered as if it did.
+
+Two details the counter needed. `eval_train` arrives as an **argument** to `run_dev_command`, not as
+a tool name, so a counter keyed on the tool name sees none of them and one keyed on the raw line
+counts a `plan` generation that merely says *"next I will run eval_train twice"*; the claim is the
+parsed span's attributes. And the channel is measured over FINISHED probes only, for the same reason
+the dose is — a running probe's evaluations are a lower bound. That last one survived the first four
+mutations because every fixture was finished; it is closed with a running treated probe carrying 90
+evaluations that must not enter the median.
