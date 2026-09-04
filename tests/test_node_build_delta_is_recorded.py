@@ -155,3 +155,47 @@ def test_a_store_that_refuses_the_row_never_costs_the_node():
 def test_the_event_is_diagnostic_and_not_background_appendable():
     assert EV_NODE_BUILD_DELTA in DIAGNOSTIC_EVENTS
     assert EV_NODE_BUILD_DELTA not in BACKGROUND_APPENDABLE
+
+
+def test_THE_REAL_CALL_SITE_RUNS_AFTER_THE_WORKDIR_EXISTS(tmp_path):
+    """The ordering the unit tests above cannot see, and the reason the feature recorded nothing.
+
+    They pre-create `nodes/node_<id>` and call `_record_node_build_delta` directly. In production
+    the call sat inside `_record_eval_start_boundary`, which runs BEFORE
+    `self._materialize(node, workdir)` creates that directory at all — so `source_tree_digest`
+    answered "" for the node's own tree, the first guard returned, and no row could exist for a
+    node's FIRST evaluation. That is exactly the population the feature was measured on ("2 of 47
+    parent edges ... each having paid a full train"); only a reset or a stage-scoped re-run, whose
+    workdir already exists, could ever have produced one.
+
+    So this asks the question the ordering decides: does the receipt path still emit the row, and
+    does the row appear only once the bytes are on disk?
+
+    MUTATION: move `_record_node_build_delta` back into `_record_eval_start_boundary` -> the first
+    assertion is red.
+    """
+    from looplab.events.types import EV_NODE_EVAL_STARTED
+    from factories import make_engine
+
+    engine = make_engine(tmp_path)
+    engine.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "base"}, "code": "print(1)"})
+    node = types.SimpleNamespace(id=0, attempt=0, parent_ids=[],
+                                 eval_start_boundary=True, eval_activity_started=False)
+    before = len(engine.store.read_all())
+    assert engine._record_eval_start_boundary(node) is True
+    kinds = [e.type for e in engine.store.read_all()[before:]]
+    assert kinds == [EV_NODE_EVAL_STARTED], (
+        "the eval-start receipt may not carry the build delta: at that instant the node workspace "
+        f"does not exist yet, so the delta can only ever be a no-op there. Got {kinds}")
+    assert not (pathlib.Path(engine.run_dir) / "nodes" / "node_0").is_dir(), (
+        "...and this is why — the workdir is created by `_materialize`, later")
+
+
+def test_the_delta_is_recorded_from_the_MATERIALIZED_workdir():
+    """The other half: once the bytes ARE on disk, the same node yields the row."""
+    root = _run_with("x = 1", "x = 1")
+    engine, rows = _engine(root)
+    assert EvaluateMixin._record_node_build_delta(engine, _node(7, [3])) is True
+    assert rows[0][1]["identical_to"] == [3]

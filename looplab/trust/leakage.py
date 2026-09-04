@@ -303,6 +303,13 @@ def temporal_leakage(train_timestamps: list[float], test_timestamps: list[float]
     # `ties` is recorded rather than dropped: a split whose boundary bucket holds train rows is worth
     # SAYING, and an operator on an exact-instant clock reading `ties: 4000` is looking at a split
     # that really does share instants. It is a fact on the verdict, never a leak.
+    #
+    # AND IT HAS TO REACH SOMEBODY, which is the half that shipped missing. The whole verdict lands
+    # on `EV_DATA_LEAKAGE` (`engine/audit.py::_leakage_blocks`), but nothing in `looplab/` or `ui/`
+    # read the field, and the one surface that renders the event printed `leakage scan: clean` off
+    # `leak` alone — so the disclosure this narrowing was traded for was invisible, and a split with
+    # four thousand boundary ties read as assurance. `ui/src/narration.js::data_leakage` names the
+    # count beside `clean` now. A number recorded and never read is the same silence as dropping it.
     overlap = sum(1 for t in train_finite if t > cutoff)
     ties = sum(1 for t in train_finite if t == cutoff)
     return {"detector": "temporal_leakage", "leak": overlap > 0,

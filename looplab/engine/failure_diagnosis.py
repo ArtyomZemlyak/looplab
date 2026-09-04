@@ -421,7 +421,7 @@ _HEADLINE_RE = re.compile(
     r"(?P<line>(?:[A-Za-z_][\w.]*\.)?[A-Za-z_]\w*(?:Error|Exception|Interrupt)\b.*)$", re.M)
 
 
-def failure_headline(stderr: str) -> str:
+def failure_headline(stderr: str, redact=None) -> str:
     """The exception line(s) a failed process ended on, or `""`.
 
     WHY IT IS PUSHED. `engine/evaluate.py::_eval_failure_text` hands the repair path — the Developer's
@@ -454,11 +454,31 @@ def failure_headline(stderr: str) -> str:
     two ranks" is real context — it is just not the headline. The total is bounded because this text
     is PREPENDED to a 500-character tail, and a headline that crowds out the tail has traded one
     missing fact for another.
+
+    `redact` IS `Engine._redact` AND IS NOT OPTIONAL IN PRODUCTION. This string is prepended to the
+    repair prompt (so it reaches the provider and lands verbatim in `spans.jsonl`, which records
+    whole prompts) and rides the durable `node_repaired.error_in`. The 500-character tail one line
+    away at its call site has been going through `self._redact` for exactly that reason, and this
+    reads sixty-four thousand: measured over the preserved stage/console logs, a 500-char window
+    carries 0 masks while a 64 KB read carries 384 — including a real `password`. An exception
+    message quoting a connection string, a token-bearing URL or an env dump was reaching the model
+    and the log unmasked.
+
+    IT REDACTS THE WINDOW, THEN EXTRACTS — the C2 ordering `_screened` states one function over:
+    masking after a cut can be truncated away, and the extraction IS a cut, so a `sk-`+12 stub the
+    shape rule no longer matches would land verbatim. Optional only so the shaping can be unit
+    tested without an Engine; a redactor that raises yields NO headline, never the raw text.
     """
     if not isinstance(stderr, str) or not stderr:
         return ""
+    window = stderr[-_HEADLINE_REACH:]
+    if redact is not None:
+        try:
+            window = str(redact(window) or "")
+        except Exception:  # noqa: BLE001 - a redactor that raises must not lose the terminal…
+            return ""      # …but it must also never fail OPEN and let the raw text through
     seen: list[str] = []
-    for line in _HEADLINE_RE.findall(stderr[-_HEADLINE_REACH:]):
+    for line in _HEADLINE_RE.findall(window):
         text = line.strip()
         if text and text not in seen:
             seen.append(text)

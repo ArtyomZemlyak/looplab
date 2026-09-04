@@ -58,26 +58,64 @@ def source_tree_digest(root) -> str:
 
     Best-effort by construction — an unreadable file contributes its path and the marker `unread`
     rather than raising, because this is a diagnostic and may never cost a node its evaluation.
+
+    THE WALK IS PRUNED, NOT FILTERED, and the difference is the whole cost of this function. The
+    skip set was applied per-file AFTER `rglob("*")` had already yielded and `is_file()`-stat'd
+    every entry, so the walk fully descended `experiments/` (checkpoint directories, ~92 MB apiece
+    here), `.git`, `wandb` and `outputs` and paid a stat inside each — measured 1,084 of 2,721
+    yielded entries under a skip dir on this checkout alone. `dirnames[:] = …` is what its sibling
+    `runtime/stage_identity.py::workdir_content` uses on the SAME workdirs, and
+    `serve/code_freshness.py::snapshot` uses on the package tree.
+
+    THREE BOUNDS, all of them `workdir_content`'s and all of them absent before:
+      * symlinks are NOT followed. `rglob` will not recurse into a symlinked directory but
+        `is_file()` resolves a symlinked FILE, and a `data:`/`references:` mount defaults to a
+        symlink (`DataSpec.mount`) — so a mounted `.json`/`.yaml` was read whole into memory, per
+        parent, per node. That is the case `workdir_content` refuses by name.
+      * a file above `SAMPLE_ABOVE` is sampled head+tail instead of read entire, with the mode in
+        the preimage so a sampled entry can never collide with a fully-read one.
+      * the tree is bounded by file COUNT and BYTES, checked after the `lstat` and before the read,
+        so crossing the ceiling costs at most the ceiling. Over it, the answer is "" — no digest,
+        hence no row — never a digest over a smaller set than it claims.
+
+    It runs on the engine's own event loop at eval dispatch, once for the node and once per parent,
+    so none of this is theoretical: on the network mount this repo documents at ~0.4 ms per lstat,
+    the unpruned walk was seconds of blocking stat traffic per dispatch.
     """
     import hashlib
+    import os
+    import stat as _stat
     from pathlib import Path
+    from looplab.runtime.stage_identity import MAX_KEYED_BYTES, MAX_KEYED_FILES
+    from looplab.runtime.metric_subject import SAMPLE_ABOVE, _sha256
     base = Path(root)
     if not base.is_dir():
         return ""
     rows: list[str] = []
-    for path in base.rglob("*"):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(base)
-        if any(part in _SOURCE_DIGEST_SKIP_DIRS for part in rel.parts[:-1]):
-            continue
-        if path.suffix.lower() not in _SOURCE_DIGEST_SUFFIXES:
-            continue
-        try:
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        except Exception:  # noqa: BLE001 - a diagnostic may never raise on a node's behalf
-            digest = "unread"
-        rows.append(f"{rel.as_posix()}\0{digest}")
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in _SOURCE_DIGEST_SKIP_DIRS]
+        for name in filenames:
+            full = Path(dirpath) / name
+            if full.suffix.lower() not in _SOURCE_DIGEST_SUFFIXES:
+                continue
+            try:
+                st = os.lstat(full)                     # lstat: a symlink is not a source file here
+            except OSError:
+                continue
+            if not _stat.S_ISREG(st.st_mode):
+                continue
+            if len(rows) >= MAX_KEYED_FILES:
+                return ""
+            total += min(int(st.st_size), SAMPLE_ABOVE)
+            if total > MAX_KEYED_BYTES:
+                return ""
+            rel = full.relative_to(base)
+            try:
+                mode, digest = _sha256(full, int(st.st_size))
+            except Exception:  # noqa: BLE001 - a diagnostic may never raise on a node's behalf
+                mode, digest = "unread", "unread"
+            rows.append(f"{rel.as_posix()}\0{mode}\0{digest}")
     if not rows:
         return ""
     return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8")).hexdigest()

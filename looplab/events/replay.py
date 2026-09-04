@@ -287,6 +287,7 @@ class _FoldCtx:
         "concept_input_capped", "concept_input_invalid", "run_base_capped",
         "run_base_invalid", "run_base_seen", "event_index",
         "card_enrichment_index", "card_enrichment_omissions", "charged_repair_seqs",
+        "repair_ledger_keys", "repair_ledger_per_node",
     )
 
     def __init__(self):
@@ -309,6 +310,14 @@ class _FoldCtx:
         # duplicate or re-folded row shares its SEQ, a per-process ordinal restart does not.
         self.charged_repair_seqs: set[tuple[int, int]] = set()
         self.charged_ablation_ids: set[str] = set()
+        # `_record_repair_ledger`'s idempotence key for EVERY row it has seen — including the ones
+        # the caps DROPPED. Scanning `st.repair_ledger` cannot answer for a dropped row (it is not
+        # there), so a duplicate or re-folded `node_repaired` past a cap re-incremented the omission
+        # counters and the CLI's "N dropped" over-reported. The per-node tally rides along for the
+        # same reason it is cheap here and quadratic there: the cap check used to `sum()` the whole
+        # ledger on every row, +18 ms per fold on the repair-heavy corpus run, on the poll path.
+        self.repair_ledger_keys: set[tuple] = set()
+        self.repair_ledger_per_node: dict[int, int] = {}
         # (physical event seq, physical fold index, content). The index is needed for legacy logs
         # whose envelopes have no meaningful seq but whose report->finish adjacency is still valid.
         self.pending_finish_report: tuple[int, int, dict] | None = None
@@ -991,6 +1000,22 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
 # judgement — "this node ended for a reason that says nothing about the experiment" — and were
 # hand-written twice; both carried `cancelled`, which no terminal writer mints, so each held one
 # word that could never match and neither could tell. See `core/models.py::BENIGN_TERMINAL_REASONS`.
+#
+# THE UNIFICATION MOVED THIS SET, AND SAYING ONLY THE `cancelled` HALF UNDERSTATED IT. The two
+# hand-written copies were not the same: `attention.py` also carried `frozen` and this one did not,
+# so taking the shared set ADDED a live reason here. `frozen` is minted by
+# `engine/speculation.py::_fail_reserved_build` when a speculative build is terminalized by a
+# transient pause/stop/budget crossing — the engine's own doing, at a moment the run is already
+# stopping — which is exactly the judgement this set encodes, so the two readers agreeing is the
+# correct end state and `attention.py` was the one that had it right.
+#
+# BUT IT CHANGES FOLDED STATE ON A PRESERVED LOG, which is why it is written down rather than left
+# to the shared set's docstring. `_counts_as_current_failure` feeds `_add_current_failure`, so
+# `RunState.current_failure_count`, `failure_spike_level` and `failure_spike_seq` all move on any
+# log containing a `frozen` terminal, and the consecutive-failure breaker no longer counts one. All
+# three fields are `Field(exclude=True)`, so a corpus check that digests `model_dump()` cannot see
+# this at all — the reason it went unnoticed. `tests/test_failure_spike_ignores_frozen.py` pins the
+# membership deliberately.
 _FAILURE_SPIKE_IGNORED_REASONS = set(BENIGN_TERMINAL_REASONS)
 
 
@@ -1108,28 +1133,42 @@ _REPAIR_LEDGER_MAX_PER_NODE = 20
 _REPAIR_LEDGER_RATIONALE_CAP = 400
 
 
-def _record_repair_ledger(st: RunState, d: dict) -> None:
+def _record_repair_ledger(st: RunState, d: dict, ctx: "_FoldCtx") -> None:
     """Append one row to the cross-node repair ledger — see `RunState.repair_ledger` for why it
     exists and what it deliberately does NOT do.
 
     Recorded OUTSIDE the pending/generation guard below on purpose: that guard protects the node's
     own CODE from a duplicate or post-terminal row, and this records a fact about the run rather
     than mutating a node. Idempotence is provided instead by the (node, attempt, generation) key, so
-    a double-fold collapses to the same single row and replay stays a pure function of the log."""
+    a double-fold collapses to the same single row and replay stays a pure function of the log.
+
+    THE KEY LIVES ON THE FOLD CONTEXT, not on `st.repair_ledger`, and that is what makes the
+    guarantee above true for a DROPPED row too. A row the caps refused is not in the ledger, so a
+    scan of the ledger could never recognise its duplicate: a re-folded or duplicated
+    `node_repaired` past a cap re-incremented `repair_ledger_omitted` and the CLI's "N dropped"
+    over-reported — the exact honesty the counter was added for. `_on_node_repaired`'s own comment
+    names "a duplicate or post-terminal `node_repaired` (corrupt/double-fold)" as the case it
+    defends against.
+
+    The context is also where the counting belongs. The per-node tally used to `sum()` the entire
+    ledger before the O(1) global cap was even consulted, so once the ledger was full every
+    remaining row paid a 200-entry scan to reach a decision the length check had already made —
+    +18 ms per fold on the repair-heavy corpus run, paid on every state poll of a live run.
+    """
     node_id = d.get("node_id")
     attempt = d.get("attempt")
     generation = d.get("generation")
     if type(node_id) is not int:
         return
     key = (node_id, attempt, generation)
-    for row in st.repair_ledger:
-        if (row.get("node_id"), row.get("attempt"), row.get("generation")) == key:
-            return
+    if key in ctx.repair_ledger_keys:
+        return
+    ctx.repair_ledger_keys.add(key)
     # BOTH bounds, and each records what it dropped. A silent cap made the CLI print 200 as a total
     # and let `lessons_reconcile` generalize over a truncated population — see
-    # `RunState.repair_ledger_omitted`.
-    per_node = sum(1 for row in st.repair_ledger if row.get("node_id") == node_id)
-    if per_node >= _REPAIR_LEDGER_MAX_PER_NODE or len(st.repair_ledger) >= _REPAIR_LEDGER_MAX:
+    # `RunState.repair_ledger_omitted`. The cheap bound is asked first.
+    if (len(st.repair_ledger) >= _REPAIR_LEDGER_MAX
+            or ctx.repair_ledger_per_node.get(node_id, 0) >= _REPAIR_LEDGER_MAX_PER_NODE):
         omitted = st.repair_ledger_omitted
         omitted["rows"] = int(omitted.get("rows", 0)) + 1
         nodes = omitted.setdefault("nodes", {})
@@ -1144,6 +1183,7 @@ def _record_repair_ledger(st: RunState, d: dict) -> None:
     if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
         paths = sorted((d.get("files") or {}).keys()) if isinstance(d.get("files"), dict) else []
     rationale = d.get("rationale")
+    ctx.repair_ledger_per_node[node_id] = ctx.repair_ledger_per_node.get(node_id, 0) + 1
     st.repair_ledger.append({
         "node_id": node_id,
         "attempt": attempt,
@@ -1163,7 +1203,7 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # or post-terminal node_repaired (corrupt/double-fold) is a no-op — mirrors the
     # `first_terminal` guard above. The LLM/subprocess are never re-invoked; the final code
     # and metric/status are reconstructed purely from this event + the terminal event.
-    _record_repair_ledger(st, d)
+    _record_repair_ledger(st, d, ctx)
     n = _node_for_event(st, d)
     if (n is not None and n.id not in st.aborted_nodes and not n.tombstoned
             and _generation_matches(n, d)

@@ -171,3 +171,53 @@ def test_the_eval_path_passes_it():
     assert passed, "the eval path no longer pushes the headline"
     assert any(isinstance(kw.value, ast.Call)
                and getattr(kw.value.func, "id", "") == "failure_headline" for kw in passed)
+
+
+def test_the_headline_is_REDACTED_before_it_reaches_the_provider_or_the_log():
+    """C2, on the eighth persisted channel — and on the widest read in the engine.
+
+    This string is prepended to the repair prompt (so it reaches the provider and lands verbatim in
+    `spans.jsonl`, which records whole prompts) and rides the durable `node_repaired.error_in`. The
+    500-character tail one line away at its call site has gone through `Engine._redact` for exactly
+    that reason; this reads SIXTY-FOUR THOUSAND. Measured over the preserved stage/console logs, a
+    500-char window carries 0 masks while a 64 KB read carries 384 — including a real `password`.
+
+    MUTATION: drop the `redact` argument at `evaluate.py`'s call site -> the credential is in the
+    prompt and on the row."""
+    stderr = ("progress " * 200 + "\n"
+              "ValueError: could not connect to postgres://svc:hunter2hunter2@db:5432/app\n")
+    assert "hunter2hunter2" in failure_headline(stderr), "unredacted, it is right there"
+    masked = failure_headline(stderr, lambda t: t.replace("hunter2hunter2", "***"))
+    assert "hunter2hunter2" not in masked and "***" in masked
+
+
+def test_it_redacts_the_WINDOW_and_then_extracts():
+    """The C2 ordering `failure_diagnosis._screened` states one function over: masking after a cut
+    can be truncated away, and the extraction IS a cut. A redactor handed only the already-selected
+    line never sees the bytes around it, and a secret split by the selection lands verbatim."""
+    seen: list[int] = []
+    failure_headline("noise\nValueError: boom\n", lambda t: (seen.append(len(t)) or t))
+    assert seen and seen[0] > len("ValueError: boom"), (
+        "the redactor must be handed the whole window, not the extracted line")
+
+
+def test_a_REDACTOR_THAT_RAISES_yields_no_headline_rather_than_the_raw_text():
+    """It must never fail OPEN. Losing the headline costs context on a failure path; leaking it
+    costs a credential in a provider prompt and on a durable row."""
+    def _boom(_t):
+        raise RuntimeError("redactor exploded")
+
+    assert failure_headline("ValueError: secret=abc\n", _boom) == ""
+
+
+def test_the_engine_passes_its_own_redactor():
+    """Tier 3 is not enough for "did it run", so this drives the ARGUMENT: `Engine._redact` is the
+    one funnel every persisted tail goes through, and the headline is now one of them."""
+    from tests._source_scan import called_names          # noqa: F401 - availability is the point
+    import inspect
+
+    from looplab.engine import evaluate
+    src = inspect.getsource(evaluate)
+    idx = src.index("headline=failure_headline(")
+    assert "self._redact" in src[idx:idx + 160], (
+        "the call site must hand the headline the engine's redactor")

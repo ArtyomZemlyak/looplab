@@ -100,7 +100,22 @@ export const NARR = {
   },
   data_leakage: {
     validate: d => typeof d?.leak === 'boolean',
-    render: (d) => `leakage scan: ${d.leak ? 'LEAK DETECTED' : 'clean'}`,
+    // `clean` is the WHOLE claim only when nothing was qualified. `trust/leakage.py::
+    // temporal_leakage` counts train rows whose stamp EQUALS the first test stamp separately from
+    // the ones strictly after it: the equality is ordinary on a coarse clock (a daily bucket puts
+    // the last train row and the first test row together) and is a real interleave on an
+    // exact-instant one, and the detector deliberately cannot tell those apart, so it records the
+    // tie and does not convict. That number had NO reader anywhere in the tree — so a split whose
+    // boundary instant holds four thousand train rows rendered here as, simply, `clean`.
+    render: (d) => {
+      const rows = Array.isArray(d?.verdicts) ? d.verdicts : []
+      const ties = rows.reduce(
+        (n, v) => n + (Number.isFinite(v?.ties) && v.ties > 0 ? v.ties : 0), 0);
+      if (d.leak) return 'leakage scan: LEAK DETECTED';
+      return ties > 0
+        ? `leakage scan: clean (${ties} train row${ties === 1 ? ' shares' : 's share'} the first test timestamp)`
+        : 'leakage scan: clean';
+    },
   },
   approval_requested: {
     validate: d => ownValue(d, 'node_id'),

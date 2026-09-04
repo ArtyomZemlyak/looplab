@@ -20,14 +20,16 @@ import pytest
 
 from looplab.core.models import RunState
 from looplab.events.replay import (_REPAIR_LEDGER_MAX, _REPAIR_LEDGER_MAX_PER_NODE,
-                                   _record_repair_ledger)
+                                   _FoldCtx, _record_repair_ledger)
 
 
-def _repairs(st, node_id, count, *, start=0):
+def _repairs(st, node_id, count, *, start=0, ctx=None):
+    ctx = ctx if ctx is not None else _FoldCtx()
     for i in range(start, start + count):
         _record_repair_ledger(st, {"node_id": node_id, "attempt": i, "generation": 0,
                                    "reason": "crash", "changed": ["train.py"],
-                                   "rationale": "fix the thing"})
+                                   "rationale": "fix the thing"}, ctx)
+    return ctx
 
 
 def test_one_pathological_node_cannot_consume_the_whole_ledger():
@@ -98,10 +100,54 @@ def test_idempotence_survives_the_bound():
 
     MUTATION: cap before de-duplicating -> replaying the same log twice inflates `rows`.
     """
-    st = RunState()
+    st, ctx = RunState(), _FoldCtx()
     for _ in range(3):
         _record_repair_ledger(st, {"node_id": 1, "attempt": 0, "generation": 0,
-                                   "reason": "crash", "changed": [], "rationale": ""})
+                                   "reason": "crash", "changed": [], "rationale": ""}, ctx)
 
     assert len(st.repair_ledger) == 1
     assert st.repair_ledger_omitted == {}, "a duplicate is not an omission"
+
+
+def test_idempotence_survives_the_bound_FOR_A_DROPPED_ROW_TOO():
+    """The half the ledger scan could never answer, and the one that broke the counter.
+
+    A row the caps REFUSED is not in `st.repair_ledger`, so a dedup that scans the ledger cannot
+    recognise its duplicate: a re-folded or duplicated `node_repaired` past a cap re-incremented
+    `repair_ledger_omitted["rows"]` and its per-node tally, so the CLI's "N dropped" and
+    `lessons_reconcile`'s population size were both overstated — the exact honesty this counter was
+    added for. `_on_node_repaired`'s own comment names "a duplicate or post-terminal `node_repaired`
+    (corrupt/double-fold)" as the case it defends against.
+
+    MUTATION: move the idempotence key back onto `st.repair_ledger` -> `rows` reads 3 for one event.
+    """
+    st = RunState()
+    ctx = _repairs(st, 1, _REPAIR_LEDGER_MAX_PER_NODE)     # fill node 1's own bound exactly
+    assert st.repair_ledger_omitted == {}, "nothing dropped yet"
+
+    over = {"node_id": 1, "attempt": 9_999, "generation": 0,
+            "reason": "crash", "changed": [], "rationale": ""}
+    for _ in range(3):                                     # the SAME event, folded three times
+        _record_repair_ledger(st, over, ctx)
+
+    assert st.repair_ledger_omitted["rows"] == 1, "one event is one omission, however often folded"
+    assert st.repair_ledger_omitted["nodes"] == {"1": 1}
+
+
+def test_the_cap_check_does_not_rescan_the_whole_ledger_per_row():
+    """The cheap bound is asked first and the per-node tally is carried, not re-derived. The old
+    shape `sum(...)`-ed all 200 rows before the O(1) length check, so once the ledger was full every
+    remaining row paid a full scan to reach a decision the length check had already made — measured
+    at +18 ms per fold on the repair-heavy corpus run, on the state-poll path.
+
+    Driven as a COMPLEXITY claim rather than a clock: 40x the rows must not cost 40x the reads."""
+    import time
+
+    st, ctx = RunState(), _FoldCtx()
+    _repairs(st, 1, _REPAIR_LEDGER_MAX + 50, ctx=ctx)      # ledger full, then well past it
+    start = time.perf_counter()
+    _repairs(st, 2, 4_000, start=50_000, ctx=ctx)
+    assert time.perf_counter() - start < 2.0, "a full ledger must not re-scan itself per row"
+    attempted = (_REPAIR_LEDGER_MAX + 50) + 4_000
+    assert st.repair_ledger_omitted["rows"] + len(st.repair_ledger) == attempted, (
+        "every row is either kept or counted exactly once — that IS the honesty claim")

@@ -984,14 +984,22 @@ class EvaluateMixin:
             return False
         self.store.append(EV_NODE_EVAL_STARTED, {
             "node_id": node.id, "generation": node.attempt})
-        self._record_node_build_delta(node)
         return True
 
     def _record_node_build_delta(self, node) -> bool:
         """Say whether this node's built SOURCE differs from the parent it claims to modify.
 
-        Placed here on purpose: after the build, before the train. That is where the GPU hours are,
-        and it is the last moment the question is free to ask.
+        Placed after MATERIALIZATION and before the train. That is where the GPU hours are, and it
+        is the last moment the question is free to ask.
+
+        IT USED TO RUN ONE STEP TOO EARLY and could therefore never fire on the population it was
+        measured for. `_record_eval_start_boundary` is the natural-looking home — it is the
+        "this node is now evaluating" receipt — but it runs BEFORE `self._materialize(node, workdir)`
+        creates `nodes/node_<id>` at all (and, on the card path, before `_card_eval_one` even
+        starts). `source_tree_digest` therefore answered "" for the node's own tree and the function
+        returned at its first guard, so no row could exist for a node's FIRST evaluation: exactly
+        the 47 parent edges the feature cites. Only a reset or a stage-scoped re-run, whose workdir
+        already exists, could produce one.
 
         MEASURED across the three e5small runs with workspaces — 2 of 47 parent edges are nodes
         whose source is byte-identical to a parent's, each having trained a full recipe to
@@ -2043,6 +2051,12 @@ class EvaluateMixin:
             if not _reuse:
                 self._materialize(node, workdir)    # seed tree -> node edits -> task assets
                 _stamp_workdir(node)                # the workdir now IS this manifest
+            # THE BUILD DELTA, here rather than on the eval-start receipt: the question is about
+            # BYTES ON DISK, and until the line above there are none. Fold-ignored and diagnostic,
+            # so a concurrent eval task may append it (invariant #1); best-effort throughout, so it
+            # can never cost this node its evaluation.
+            self._record_node_build_delta(node)
+            if not _reuse:
                 # A stage-scoped re-run whose workdir was GONE has nothing to reuse — the re-seed just
                 # wiped any artifacts. Skipping earlier stages now would run the restarted stage against
                 # MISSING inputs, so drop the start_stage and re-run the FULL pipeline instead.
@@ -3031,7 +3045,8 @@ class EvaluateMixin:
                         new_code = self._repair(
                             node, self._repair_error_context(
                                 reason, _err_in, state=state, node=node,
-                                headline=failure_headline(getattr(res, "stderr", "") or ""))
+                                headline=failure_headline(
+                                    getattr(res, "stderr", "") or "", self._redact))
                             + developer_stuck_contract(DEVELOPER_STUCK_PREFIX),
                             state)
                     except BudgetExceeded:

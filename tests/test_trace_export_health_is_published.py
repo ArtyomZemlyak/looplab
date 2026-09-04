@@ -231,3 +231,54 @@ def test_the_event_is_declared_diagnostic():
     # written but carries no domain meaning, and `_proposal_authority_seq` excludes
     # DIAGNOSTIC_EVENTS wholesale — so a health row cannot displace a paid proposal.
     assert EV_TRACE_EXPORT_HEALTH in DIAGNOSTIC_EVENTS
+
+
+def test_A_HEALTHY_RUNS_THROUGHPUT_IS_NOT_A_NEW_STATE():
+    """THE DEFECT: "one row per distinct state" was keyed on the WHOLE snapshot.
+
+    `metrics()` also carries `accepted_spans`, `exported_spans`, `queued_spans` and
+    `buffered_bytes`, which move with essentially every span, while `trace_export_unhealthy` LATCHES
+    — `_drop_counts` and `_export_failures` are cumulative and never reset. So ONE transient drop
+    made the predicate True for the rest of the run AND made the fingerprint differ on every
+    outer-loop turn: a ~25-key row appended and fsync'd per turn, roughly 580 of them per 24 h run
+    at the ~2.5 min/turn rate this repo measured, on a run dir where an append costs ~200 ms.
+
+    MUTATION: key the fingerprint on `sorted(snapshot.items())` again -> this is red.
+    """
+    snapshot = _snapshot(worker_alive=False, dropped_spans=1, queued_spans=4)
+    engine, appended = _engine(snapshot)
+    assert Engine._record_trace_export_health(engine) is True
+
+    for turn in range(1, 25):                       # the run goes on doing its work
+        snapshot["accepted_spans"] = 1000 * turn
+        snapshot["exported_spans"] = 990 * turn
+        snapshot["buffered_bytes"] = 4096 + turn
+        snapshot["queued_spans"] = 4 + (turn % 3)   # still non-empty: the same symptom
+        assert Engine._record_trace_export_health(engine) is False, (
+            f"turn {turn}: throughput moved, the STATE did not")
+    assert len(appended) == 1
+
+
+def test_but_a_LOSS_that_is_still_growing_is_still_news():
+    """The complement, and the property the reduction must not cost: the three loss counters stay
+    raw, because "seven exports failed" and "nine did" are different facts about the same run."""
+    snapshot = _snapshot(worker_alive=False, export_failures=7)
+    engine, appended = _engine(snapshot)
+    assert Engine._record_trace_export_health(engine) is True
+    snapshot["export_failures"] = 9
+    assert Engine._record_trace_export_health(engine) is True
+    assert [row[1]["export_failures"] for row in appended] == [7, 9]
+
+
+def test_the_signature_reads_every_field_the_PREDICATE_reads():
+    """They live side by side so a fourth symptom cannot be added to one and forgotten in the other:
+    a state the predicate calls unhealthy for a reason the signature cannot see would be published
+    once and then never again, however it changed."""
+    from looplab.events.types import trace_export_health_signature
+
+    base = _snapshot()
+    for deciding in (dict(shutdown=True), dict(worker_alive=False, queued_spans=2),
+                     dict(worker_stop_reason="crashed"), dict(dropped_spans=1),
+                     dict(export_failures=1), dict(loss_receipt_failures=1)):
+        assert trace_export_health_signature(_snapshot(**deciding)) != \
+            trace_export_health_signature(base), f"{deciding} decides health and must key the row"

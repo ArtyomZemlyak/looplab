@@ -529,6 +529,47 @@ def trace_export_unhealthy(snapshot) -> bool:
                ("dropped_spans", "export_failures", "loss_receipt_failures"))
 
 
+def trace_export_health_signature(snapshot) -> tuple:
+    """The part of an exporter snapshot that DECIDES health — the dedup key for the durable row.
+
+    The engine writes one `trace_export_health` row per distinct unhealthy STATE. Fingerprinting the
+    whole snapshot does not answer that question and quietly answers a different one: `metrics()`
+    also carries `accepted_spans`, `exported_spans`, `queued_spans` and `buffered_bytes`, which move
+    with essentially every span, while `trace_export_unhealthy` LATCHES — `_drop_counts` and
+    `_export_failures` are cumulative and never reset. So after ONE transient drop the predicate is
+    True forever, the fingerprint differs on every outer-loop turn, and a ~25-key row is appended
+    and fsync'd each time: on the ~2.5 min/turn rate this repo measured, roughly 580 rows and 580
+    fsyncs per 24 h run, on a FUSE run dir where this file's neighbour records ~200 ms per append —
+    for a fact that never changed.
+
+    So the key is exactly the facts the predicate reads, and nothing else. The three LOSS counters
+    stay raw, because a loss that is still growing genuinely is news and the row records how much;
+    `queued_spans` is reduced to the boolean the predicate asks it for, since on a live exporter it
+    moves every turn while answering the same question. The throughput counters — `accepted_spans`,
+    `exported_spans`, `buffered_bytes` — decide nothing here and are simply absent.
+
+    It lives beside the predicate so a fourth symptom cannot be added to one and forgotten in the
+    other. The row still carries the FULL snapshot: the throughput counts are what an operator
+    wants to read; they are just not what makes a state new.
+    """
+    if not isinstance(snapshot, dict):
+        return ()
+
+    def _count(key: str) -> int:
+        value = snapshot.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    return (
+        bool(snapshot.get("shutdown")),
+        bool(snapshot.get("worker_alive")),
+        str(snapshot.get("worker_stop_reason") or ""),
+        _count("queued_spans") > 0,
+        _count("dropped_spans"),
+        _count("export_failures"),
+        _count("loss_receipt_failures"),
+    )
+
+
 def run_exit_reason(state) -> str:
     """Name the run loop's exit from the FINAL FOLD, in `RUN_EXIT_REASONS`.
 

@@ -28,7 +28,8 @@ from looplab.core.llm import BudgetExceeded
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.types import (EV_RUN_LOOP_EXITED, EV_TRACE_EXPORT_HEALTH,
-                                  trace_export_unhealthy, run_exit_reason,
+                                  trace_export_unhealthy, trace_export_health_signature,
+                                  run_exit_reason,
     EV_ABLATE,
     EV_APPROVAL_REQUESTED,
     EV_COMMAND_ACK,
@@ -1561,7 +1562,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         that snapshot here, on the run's own log.
 
         DIAGNOSTIC and dedup'd: `trace_export_unhealthy` keeps a healthy run's log untouched, and
-        the fingerprint keeps a permanently-dead exporter to one row per distinct state.
+        `trace_export_health_signature` keeps a permanently-dead exporter to one row per distinct
+        state — the fields that DECIDE health, because the snapshot's counters are monotonic and
+        keying on them makes "distinct state" mean "another turn happened".
         """
         exporter = getattr(getattr(self, "tracer", None), "exporter", None)
         snapshot_fn = getattr(exporter, "metrics", None)
@@ -1573,7 +1576,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return False
         if not trace_export_unhealthy(snapshot):
             return False
-        fingerprint = tuple(sorted((str(k), v) for k, v in snapshot.items()))
+        # The DECIDING fields only — never the whole snapshot. `metrics()` also carries
+        # `accepted_spans`/`exported_spans`/`queued_spans`/`buffered_bytes`, which move with
+        # essentially every span, while `trace_export_unhealthy` LATCHES on cumulative counters that
+        # are never reset. Keyed on the whole dict, "one row per distinct state" therefore became
+        # one fsync'd row per outer-loop turn for the rest of the run after a single transient drop.
+        # The derivation lives beside the predicate so the two cannot come apart.
+        fingerprint = trace_export_health_signature(snapshot)
         if fingerprint == self._trace_export_health_seen:
             return False
         self._trace_export_health_seen = fingerprint
