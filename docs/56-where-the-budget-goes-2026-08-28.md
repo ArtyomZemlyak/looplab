@@ -8317,3 +8317,37 @@ rather than inferred from a score: one arm optimised and the other shipped the t
 beat.
 
 Cost of this section: zero dollars, about six minutes of CPU on two free lanes.
+
+## 182. First of the held-back repairs lands: the plan phase stops being promised a writer
+
+§115's arm closed in §180, so the repairs parked behind it can start landing one at a time. This is
+the smallest and the most clear-cut of the three.
+
+**What was wrong** (§153, measured over all 76 probe trees): `write_file` is called **51 times from
+the `plan` phase and all 51 error**, against 716 calls from `plan_step`, which has the tool. **504 of
+528 `plan` chain-roots (95.5 %)** carry a system prompt opening with *"You improve an existing
+experiment repository by WRITING code with the write_file and edit_file tools"*, while the user
+message directly beneath it says *"you CANNOT write code yet"*. The system prompt wins about one run
+in ten, and the run pays a turn to find out.
+
+**What landed:** one line at the top of `_propose_plan` — `system = read_only_intro(system)`. The
+helper has been in the tree, tested and unused, since §153; the note above it now records the date
+it was wired rather than the reason it was not.
+
+**And the test that guarded the held-back state has been deleted, as its own docstring instructed.**
+`test_the_call_site_is_still_open_and_says_so` was written to fail the day the call site was made,
+so the repair could be neither forgotten nor shipped in silence. It did its job for eight sweeps;
+`test_the_plan_phase_actually_uses_it_now` replaces it and pins the opposite. Two mutations redden
+the pair — unwire the call site, or make the rewrite a no-op — and the 197 developer/plan tests pass.
+
+Remaining in the queue, in the order their evidence justifies:
+
+1. **§171** — 15.8 % of the 41,721-char developer system prompt is training/GPU/checkpoint text that
+   cannot apply here; 6,584 chars × 11,212 developer generations = **$2.58**, and positive by
+   construction because nothing has to be fetched later.
+2. **§156** — the budget gate at **$0.10**, not the audit's p75: at p75 it would have destroyed 54
+   real nodes including the corpus's 277.23, at $0.10 it recovers $1.5354 and costs one node that
+   scored zero.
+
+Neither ships this sweep. Each wants its own before/after, and the honest way to get one is a small
+paired batch per repair rather than three changes landing together and a single number afterwards.

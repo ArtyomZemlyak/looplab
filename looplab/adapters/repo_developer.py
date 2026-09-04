@@ -75,10 +75,9 @@ _REPO_DEV_SYSTEM_INTRO = (
 # 15 from `card_build`. 504 of the 528 `plan` chain-roots (95.5 %) carry a system prompt naming
 # `write_file`. So one run in ten spends a turn discovering a contradiction the prompt put there.
 #
-# NOT WIRED IN YET, ON PURPOSE. The call site is one line -- `_propose_plan` would pass
-# `read_only_intro(system)` instead of `system` -- and it is left unmade because §115's arm is
-# eight probes into twenty-four and this changes what every probe is told. It ships when that arm
-# closes. Until then this function exists, is tested, and changes nothing.
+# WIRED IN 2026-09-04, at the top of `_propose_plan`, once §115's arm closed (§180). Before that
+# the function existed and changed nothing, on purpose: it alters what every probe is told, and an
+# arm in flight is the wrong time to alter that.
 def read_only_intro(system: str) -> str:
     """`system` with the write-tools promise replaced by the truth for a read-only phase.
 
@@ -1112,6 +1111,10 @@ class LLMRepoDeveloper:
         {title, detail}; [] on empty/failure so the caller falls back to one session."""
         from looplab.agents.agent import run_phase, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
+        # §153 measured what the unwired version cost: `write_file` was called 51 times from this
+        # phase and ALL 51 errored, while 504 of 528 `plan` chain-roots carried a system prompt
+        # naming it. Held back while §115's arm ran; that arm closed at 24 probes in §180.
+        system = read_only_intro(system)
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         # THE PHASE THAT DECIDES HOW MANY STEPS TO BUY COULD NOT SEE THE PRICE.
         #

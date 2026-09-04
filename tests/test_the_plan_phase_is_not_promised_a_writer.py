@@ -5,11 +5,10 @@ MEASURED over the 76-run probe corpus on 2026-09-03: `write_file` is called 51 t
 504 of the 528 `plan` chain-roots (95.5 %) carry a system prompt that names `write_file`. The user
 message directly under it says "you CANNOT write code yet"; the system prompt wins.
 
-`read_only_intro` is the repair and it is deliberately NOT wired into `_propose_plan` yet — §115's
-arm is eight probes into twenty-four and this changes what every probe is told. These tests pin the
-function's behaviour so the one-line call site can be made the day that arm closes, and they pin
-the two ways the rewrite could go wrong: hitting text it does not own, and leaving the tool names
-behind.
+`read_only_intro` is the repair. It was held back while §115's arm ran and wired into
+`_propose_plan` on 2026-09-04, once that arm closed (§180); the test that guarded the held-back
+state was deleted in the same commit, as its own docstring required. What remains pins the two ways
+the rewrite could go wrong: hitting text it does not own, and leaving the tool names behind.
 """
 from __future__ import annotations
 
@@ -42,16 +41,15 @@ def test_it_rewrites_once_not_everywhere():
     assert got.count("WRITING code with the write_file and edit_file tools") == 1
 
 
-def test_the_call_site_is_still_open_and_says_so():
-    """This is the reminder, and it is a test so that it cannot be quietly forgotten.
+def test_the_plan_phase_actually_uses_it_now():
+    """The wiring itself, pinned — one line at the top of `_propose_plan`.
 
-    When `_propose_plan` starts calling `read_only_intro`, this test fails and is deleted together
-    with the "NOT WIRED IN YET" note above the function. Until then it holds the fact that the
-    corpus is being measured against a prompt that contradicts itself.
+    Until 2026-09-04 the opposite was pinned: a test that failed the day the call site was made, so
+    the held-back repair could be neither forgotten nor shipped silently. §180 closed §115's arm at
+    twenty-four probes; that test was deleted in the same commit that made this one true.
     """
     src = inspect.getsource(rd.LLMRepoDeveloper._propose_plan)
-    assert "read_only_intro" not in src, (
-        "the plan phase now uses read_only_intro -- good; delete this test and the 'NOT WIRED IN "
-        "YET' note, and record in the notebook which batch the change lands between")
-    assert "NOT WIRED IN YET, ON PURPOSE" in inspect.getsource(rd), (
-        "the note explaining why the repair is held back is gone but the repair is still unwired")
+    assert "read_only_intro(system)" in src, (
+        "the plan phase is being handed the writer-promising intro again")
+    assert "NOT WIRED IN YET" not in inspect.getsource(rd), (
+        "the note says the repair is held back while the call site says otherwise")
