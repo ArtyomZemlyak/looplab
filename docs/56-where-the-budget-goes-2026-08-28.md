@@ -8561,3 +8561,46 @@ them on a batch set whose exact p is 1/1296, so a mutation making the sampled br
 passed it — |0 − 0.0008| is inside any tolerance. The comparison now sits where the null actually
 lives (p ≈ 0.5), and the mutation reddens. Four mutations in total: wrong tail, treatment without
 the effect, simulating from a corpus too small, and the sampled branch.
+
+## 188. `edge_expansion` is the cheapest task to measure on, and the queue points at the most expensive
+
+§187 said an effect below ~60 points is unaffordable on `edge_expansion`. The obvious next question
+is whether another task is cheaper. Point 10's standing queue answers it the wrong way round — it
+asks for "a fourth point on the task where the spread is largest" — so it is worth measuring which
+task the spread actually favours.
+
+Final champions by task, across the whole corpus:
+
+| task | n | median | sd | **CV** | p10 | p90 |
+|---|---|---|---|---|---|---|
+| edge_expansion | 69 | 202.70 | 60.44 | **0.30** | 106.69 | 267.73 |
+| pde_heat1d | 11 | 116.73 | 49.71 | 0.43 | 29.56 | 130.81 |
+| discrete_log | 11 | 7.96 | 3.76 | 0.47 | 5.87 | 14.29 |
+
+**`edge_expansion` is the least noisy relative to its own scale**, and `discrete_log` — the task the
+queue names, and the one the brief calls "the thinnest carrying number in the corpus" — is the
+noisiest. Priced through the same simulator at a fixed RELATIVE effect of +25 % of each task's own
+median:
+
+| task | effect | power at 24 probes | at 48 probes |
+|---|---|---|---|
+| edge_expansion | +50.7 | **0.60** | **0.91** |
+| pde_heat1d | +29.2 | 0.35 | 0.59 |
+| discrete_log | +1.99 | 0.40 | 0.51 |
+
+The same proportional improvement costs roughly **twice as many probes** to detect on either of the
+other two. (n=11 for those two, so their distributions are thin and the resampling inherits that —
+the ordering is safe, the exact powers are not.)
+
+Two things follow.
+
+**The queue item is pointed the wrong way.** "The task with the largest spread" is where a fourth
+point buys the least: `discrete_log`'s 5.1× range between 2.8369 and 14.5186 is exactly what makes
+it expensive to measure on, not what makes it interesting to measure. If the goal is a fourth data
+point for its own sake, it is $1 well spent; if the goal is to settle anything, it is the worst
+dollar on the board.
+
+**And the affordability line moves with the question asked.** A 25 % relative improvement on
+`edge_expansion` is detectable at 0.91 power for $48 — that is a real, affordable arm. What is not
+affordable is §186's kernel-first effect, which is 23.5 points, or **12 %** of the median. The
+constraint is not the task; it is that the interventions this notebook has found are all small.
