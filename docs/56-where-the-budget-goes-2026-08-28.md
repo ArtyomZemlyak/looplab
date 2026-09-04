@@ -10124,3 +10124,34 @@ call it noise.
 Batch 3 closed at fidelity **treat 11.5, control 41.5, contrast +30**, channel `eval_train` +6, with
 `freeA4` counted as finished on the spend rather than resumed — which is §228 applied to the very
 run that exposed it. Eight batches remain.
+
+## §231 — what a weak opening actually costs: 44 % of the budget, and it buys the next node
+
+§225 established that a weak node 0 is recovered four times in five and left the price open. Over
+the 82 full-budget `edge_expansion` runs, 46 of which open below 60:
+
+* the first node arrives at **28 % of budget** after a weak opening and **33 %** after a strong one
+  — a weak start does not delay the first node, it wastes it;
+* of the 46, **37 reach a node ≥ 150**, and that node arrives at a median of **72 % of budget**
+  (p10 56 %, p90 94 %);
+* it is the **second** node in 30 of those 37, the third in 6, the fourth in 1.
+
+So the price of opening weak is about **44 % of the run's money** — the gap between 28 % and 72 % —
+and what it buys is almost always simply the next node. Recovery is not a long search; it is one
+more attempt, paid for at full price.
+
+**And the nine that never recovered were not short of nodes.** Their node counts are two (4 runs) and
+three (5 runs) against the recoverers' three (24) and four (11), and every one of the nine spent
+88–100 % of its budget before its last node. Their best nodes are a median of **35.0** against the
+recoverers' 216.3 — `newCK1` at [20.8, 21.8, 24.8], `remEEctl1` at [35.0, 34.8], `freeB5` at
+[28.1, 0.0]. These are runs that kept producing the same weak thing, not runs that ran out of turns
+mid-improvement.
+
+That sharpens §201, which is the standing argument for recovering the $0.258/run of duplicate
+prompt: an extra 0.77 of a node is worth most to the 37 recoverers, who spend nearly three-quarters
+of their budget getting to the node that matters and would gain a real fourth attempt after it. It
+is worth least to these nine, and the shape of their node lists says why — more money buys another
+draw from the same distribution, not a different one.
+
+Nothing to ship. It does close the question §225 left open with a number rather than an intuition,
+and it says which of the two populations the money argument is actually about.
