@@ -10624,3 +10624,39 @@ and a truncated tool call is malformed JSON rather than a shorter answer — it 
 call into a failed one, which is a worse trade at an unknown rate. It also lands mid-arm on both
 sides. The measurement is the deliverable here; the remedy needs a rate for "how often a long
 generation is doing real work", and I do not have it.
+
+## §246 — the missing rate: long generations think, they do not ramble
+
+§245 measured that 11 % of calls carry a quarter of the money and deferred the remedy for want of
+one number — how often a long generation is doing real work. It is in the spans. Over 36,058
+generation spans carrying a usage record:
+
+| | completion ≥ 8,000 | completion < 8,000 |
+|---|---|---|
+| n | 3,960 | 32,098 |
+| made at least one tool call | **93.3 %** | **93.3 %** |
+| median `thinking` characters | **43,662** | **364** |
+| median visible output characters | 235 | 51 |
+| median tool calls | 2 | 1 |
+| thinking chars per completion token | 3.34 | 1.69 |
+
+**The rates are identical to the decimal.** A long generation acts exactly as often as a short one —
+it is not terminal rambling, and 93.3 % of both kinds end in a tool call. What differs is where the
+tokens go: **43,662 characters of thinking against 364**, a factor of 120, to produce two tool calls
+instead of one and 235 characters of visible output instead of 51.
+
+So the answer to §245's question is "always, and barely more of it". These calls are not idle and
+they are not broken; they are reasoning at enormous length and then acting normally.
+
+**That changes the remedy rather than justifying the one I declined.** `max_tokens` would cut the
+stream mid-thought, and since 93.3 % of these calls do finish with a valid tool call, truncation
+converts a working call into a malformed one — the trade I refused in §245, now with a rate attached
+that makes it clearly wrong. The targeted knob is reasoning effort, not a completion cap, and
+`core/llm.py` already carries a `reasoning_effort` toggle it drops per-client when an endpoint
+rejects it (`_is_reasoning_reject`).
+
+I am not turning that knob mid-arm: it would reach both arms at a batch boundary, and unlike §211
+and §228 — which fixed things that were plainly wrong — this one trades a quarter of the spend
+against an unknown amount of solution quality. It belongs in its own registered comparison after the
+probe-cap arm reads out, and the corpus already says what that arm would need: `discrete_log`, where
+47.8 % of the money is in these calls, is the task where it would show first.
