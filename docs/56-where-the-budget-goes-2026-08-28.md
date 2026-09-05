@@ -10762,3 +10762,36 @@ budget buys the attempt that got cut off, and cutting the attempt off earlier do
 Worth correcting my own reporting: quoting "15 % after the last node" as if it were slack, which I
 have done for `freeA5` and others, reads as an accusation. On the 14 runs where it is large it is
 the price of an attempt the budget did not cover, and on the other 80 it is 1.2 % of finalisation.
+
+## §250 — the cap changes what happens inside the phases, not where the money goes
+
+The intervention removes about fourteen probe calls and adds about seven graded evaluations per run
+(§248). A natural question with no outcome in it: does that move the money between phases? Over the
+24 finished probes of batches 1–6, median share of each run's own spend:
+
+| phase | treated | control | delta | two-sided permutation p |
+|---|---|---|---|---|
+| plan_step | 35.2 % | 34.6 % | +0.6 | 0.699 |
+| propose | 26.3 % | 25.8 % | +0.5 | 0.797 |
+| deep_research | 17.0 % | 16.1 % | +0.9 | 0.707 |
+| repropose | 10.5 % | 7.2 % | **+3.3** | 0.444 |
+| plan | 7.1 % | 9.6 % | **−2.4** | 0.126 |
+| foresight_rank | 2.1 % | 1.8 % | +0.3 | — |
+
+**Nothing here is significant.** The two largest deltas — `repropose` +3.3 and `plan` −2.4 — come
+back at p = 0.44 and p = 0.13 over 20,000 relabellings of twelve probes a side. Everything else is
+within a point.
+
+So the money profile of a run is remarkably stable under an intervention that plainly changes its
+behaviour: fourteen fewer probes, seven more graded evaluations, and the same third of the budget in
+`plan_step` either way. The cap operates **inside** the phases rather than across them.
+
+That is worth knowing for two reasons. It is a mild check on the arm — an intervention that had
+silently rearranged the whole run would be a different experiment from the one registered — and it
+narrows where any eventual effect could come from: not from spending more on proposing or less on
+planning, because it does neither.
+
+It also sets the floor for reading the eventual result. The two arms differ in what they *do* with
+a nearly identical budget profile, which is the cleanest form this comparison could take, and it
+means the outcome cannot be explained away as "the treated runs simply spent their money somewhere
+else".
