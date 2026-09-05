@@ -572,7 +572,14 @@ fi
   echo "looplab:  $(cd "$SRC/looplab" && git log --oneline -1) ($(cd "$SRC/looplab" && git status --porcelain | wc -l) dirty files)"
   echo "AlgoTune: $(cd "$SRC/AlgoTune" && git log --oneline -1)"
   echo "runs archive: $RUNS_ARCHIVE (not pruned; see runs-manifest.txt for what it held)"
-  echo "nproc $(nproc) | cpu.max $(cat /sys/fs/cgroup/cpu.max 2>/dev/null) | free $(free -g | awk '/Mem:/{print $7}')G"
+  # THE MACHINE, NOT THE SNAPSHOTTER'S CAGE. `nproc` reports the CALLER'S CPU AFFINITY, not the
+  # box. Since §259 pinned the snapshot to the service lanes this line has read "nproc 8" on a
+  # 96-cpu machine -- 112 snapshots of it against 115 that correctly say 96, and the changeover is
+  # exactly my own fix. It matters because §262 established that the LANE WIDTH is what makes two
+  # timings comparable: a restorer reading "nproc 8" out of the file whose stated job is to answer
+  # "is this mine?", on an archive whose baselines are keyed `w22x1r3`, gets a contradiction with
+  # nothing in the snapshot able to resolve it. So name both, and say which is which.
+  echo "cpus $(nproc --all) on the box | this snapshot pinned to $(nproc) | cpu.max $(cat /sys/fs/cgroup/cpu.max 2>/dev/null) | free $(free -g | awk '/Mem:/{print $7}')G"
 } > "$OUT/PROVENANCE.txt"
 cat "$OUT/PROVENANCE.txt"
 

@@ -11254,3 +11254,38 @@ now carries a finished run whose generation spend is below it.
 already measured that process outliers predict nothing about score. Both subgroups are under 50, so
 by §261 those two medians are not reusable as headline numbers — the refutation stands anyway,
 because it rests on a maximum that exceeds the value, not on the gap between the medians.
+
+## §264 — the provenance file was recording the snapshotter's cage as the size of the box
+
+Checking the three snapshot items the sweep list still carries as "НЕ ПРОВЕРЕНО мной", I found all
+three already shipped and verified them rather than taking that on trust: a vanished destination now
+exits 1 with `NOTHING WAS WRITTEN` instead of claiming success; two concurrent snapshots are
+separated by a `flock` with `exit 3` for busy and a uniquified stamp; `.env` is named in
+`ENVIRONMENT.txt` as `(redacted; .env itself deliberately NOT copied)`.
+
+Reading that output turned up a different one. `PROVENANCE.txt` ends with a machine line, and it
+said:
+
+```
+    nproc 8 | cpu.max 9000000 100000 | free 723G
+```
+
+on a box with **96** cpus. `nproc` reports the CALLER'S AFFINITY. §259 pinned the snapshot to the
+eight service lanes so it would stop stealing CPU from the arm, and from that tick on every snapshot
+has misreported the machine. In the timer log: **112 snapshots saying `nproc 8` against 115 earlier
+ones saying `nproc 96`**, and the changeover is exactly my own fix. Reproduced directly —
+`nproc` 96, `nproc --all` 96, `taskset -c 44-47,92-95 nproc` 8, `/proc/cpuinfo` 96.
+
+It matters because of §262: the baseline cache is keyed by **lane width**, and that key is the whole
+reason two timings are comparable. A restorer reading "8 cpus" off an archive whose rulers are keyed
+`w22x1r3` has a contradiction and nothing in the snapshot to resolve it — in the one file whose
+stated job is answering "is this mine?".
+
+Both numbers are now recorded, each carrying its own words:
+`cpus 96 on the box | this snapshot pinned to 8`. Dropping the affinity would be the opposite error,
+since §262 makes the width a load-bearing fact, so a mutation that keeps only the box size is red;
+so are swapping the two labels and printing the numbers bare.
+
+This is the session's named shape once more, and again with me as the cause: not a breakage, a quiet
+mismatch between what a line says and what it measures, introduced by a correct fix to something
+else.
