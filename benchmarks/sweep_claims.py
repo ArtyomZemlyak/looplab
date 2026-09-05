@@ -114,7 +114,12 @@ def check_accee_test(bench: str):
 
 CEILING_MARKS = ("CEILING ON HOW SLOW YOUR SOLVER MAY BE, PER INSTANCE",
                  "(1 + 5) * reference_time * 10")
-CHAMPION_MARKS = ("best evaluated", "the best EVALUATED node")
+# VERBATIM FROM THE SHIPPED CARD, not a paraphrase of it. The first version guessed
+# `"best evaluated"` and `"the best EVALUATED node"`; the clause that shipped says
+# `BEST **EVALUATED** ONE, NOT YOUR LAST`, so the checker went on reporting the card silent about a
+# rule the card states -- a false reading inside the file whose whole job is catching false
+# readings. `test_the_champion_marker_is_a_string_the_card_generator_actually_contains` pins it.
+CHAMPION_MARKS = ("BEST **EVALUATED** ONE, NOT YOUR LAST",)
 
 
 def _card_source(bench: str) -> str:

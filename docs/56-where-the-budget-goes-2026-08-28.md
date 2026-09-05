@@ -11999,3 +11999,27 @@ nothing" intact, so the clause that tells the run WHAT TO DO was gone and the as
 The test now pins the instruction, not just its opening.
 
 `sweep_claims` flips accordingly: item (б) now reads STALE, because the card does say it.
+
+## §286 — the claim checker reported the card silent about a rule the card states
+
+Ten minutes after shipping §285, `sweep_claims` still read:
+
+```
+  HOLDS  point 8(b): the card does not say the best EVALUATED node is kept
+```
+
+It does say it. `CHAMPION_MARKS` had been **guessed** — `"best evaluated"`, `"the best EVALUATED
+node"` — while the clause that shipped says `BEST **EVALUATED** ONE, NOT YOUR LAST`. A false reading
+inside the file whose entire purpose is catching false readings, produced by the same habit that
+file was built against: writing down what I expect the artefact to say instead of what it says.
+
+The markers are now verbatim from the shipped text, and two tests tie them to it — the marker must
+be a string `make_task.py` actually contains, for the champion clause and for the ceiling clause
+alike. Without that the checker can drift from the card again the next time either is reworded, and
+drift in this direction is invisible: it reports the comfortable answer.
+
+The fixture in the older test had the same disease and went red the moment the real clause landed —
+it asserted on `"the best evaluated node is the one submitted"`, a sentence nobody wrote. Fixed to
+the shipped wording.
+
+`sweep_claims` now reads seven claims, six stale, with item (б) correctly among them.

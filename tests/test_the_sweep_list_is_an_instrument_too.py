@@ -175,9 +175,11 @@ def test_item_b_still_holds_and_says_why_it_matters(tmp_path):
 
 
 def test_item_b_would_flip_if_the_card_said_it(tmp_path):
-    _make_task(tmp_path, "x = 'the best evaluated node is the one submitted'\n")
+    # THE MARKER AS SHIPPED, not a paraphrase: this fixture went red the moment the real clause
+    # landed, which is the point -- a fixture written in words nobody uses tests nothing.
+    _make_task(tmp_path, "x = 'BEST **EVALUATED** ONE, NOT YOUR LAST'\n")
     ok, detail = sweep_claims.check_card_silent_on_the_champion_rule(str(tmp_path))
-    assert not ok and "best evaluated" in detail, detail
+    assert not ok and "NOT YOUR LAST" in detail, detail
 
 
 def _drift(tmp_path: Path, rows):
@@ -225,3 +227,21 @@ def test_the_latest_reading_wins_not_the_first(tmp_path):
 def test_an_unreadable_drift_log_is_not_a_pass(tmp_path):
     ok, detail = sweep_claims.check_ruler_constants(str(tmp_path))
     assert not ok and "cannot read" in detail, detail
+
+
+def test_the_champion_marker_is_a_string_the_card_generator_actually_contains():
+    """A checker matching on a phrase nobody wrote reports silence about a rule that is stated.
+
+    That happened: the markers were guessed as "best evaluated" / "the best EVALUATED node" while
+    the clause shipped as "BEST **EVALUATED** ONE, NOT YOUR LAST", so §271's own tool carried a
+    false reading -- in the file built to catch false readings. This ties the marker to the source
+    it is supposed to be looking for."""
+    src = (Path(__file__).resolve().parents[1] / "benchmarks" / "algotune"
+           / "make_task.py").read_text(encoding="utf-8", errors="replace")
+    assert any(m in src for m in sweep_claims.CHAMPION_MARKS), sweep_claims.CHAMPION_MARKS
+
+
+def test_the_ceiling_marker_is_too():
+    src = (Path(__file__).resolve().parents[1] / "benchmarks" / "algotune"
+           / "make_task.py").read_text(encoding="utf-8", errors="replace")
+    assert any(m in src for m in sweep_claims.CEILING_MARKS), sweep_claims.CEILING_MARKS
