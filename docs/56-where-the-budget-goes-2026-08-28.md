@@ -11558,3 +11558,35 @@ The tool states the date of the wording it was written against, because if the l
 file goes stale in its turn. And a check that raises is printed `UNCHECKABLE` rather than counted
 either way — a mutation that scores it as stale is red, since a false reading in the checker is the
 exact thing it exists to stop.
+
+## §272 — a probe that leaves the lanes looked exactly like one that finished
+
+`freeB12` was gone from `pulse` this sweep. It had ended cleanly — `run_finished/budget_exhausted`
+at $1.0129, `final.json` written, no crash and no pause, so §228's fix holds across a seventh batch —
+but **nothing told me that**. `pulse` lists what is RUNNING, so a probe killed by a stray signal, an
+OOM or my own hand simply stops appearing, and that reads identically to completion.
+
+This is not hypothetical and it is not rare. `check_money` names **five** probes as money in the
+meter with no tree on disk — `capA1 $0.2791, capB1 $0.2477, freeA1 $0.2266, freeB1 $0.1453,
+svcCacheCheck $0.0011` — and §213 is the record of `freeB3` stopped by pid mid-run. Every one of
+those was caught by the MONEY tool. The liveness tool should not need the money tool to notice a
+missing probe.
+
+So `pulse --expect capA11 capB11 freeA11 freeB12` now reports, for each name not on a lane, whether
+it **ENDED** or **VANISHED**:
+
+```
+freeB12    (off the lanes)   1.0129      ended
+```
+
+The disposition comes from `arm_fidelity.probe_calls`, which already owns it and is score-free by
+its own test — so a run at its ceiling that says `pause` reads as ended (§228's 16 corpus runs), and
+only a pause BELOW the ceiling is owed work (§213's $0.1056 lesson). Four mutations red: counting
+every absentee as ended, letting a vanished probe print without setting the exit code, reading a
+genuine pause as ended, and computing the absentee set against nothing.
+
+**Point 3's alarm this sweep was the tool being right.** `RESIDUE $+0.006663` — a thousand times the
+usual — with the next line reading `(allowing $0.010130: 1 unnamed call(s) on arms that are still
+calling, at the p99 price -- spans the engine has not written yet)`. The residue is inside its own
+stated allowance: a call in flight whose span is not written yet. Earlier sweeps had no in-flight
+unnamed call, so the allowance was zero and the residue was six decimal places of rounding.

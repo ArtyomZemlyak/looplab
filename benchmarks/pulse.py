@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import arm_fidelity  # noqa: E402  (score-free by its own test; used only for finished/paused)
 import events_read  # noqa: E402
 import lanes  # noqa: E402
 
@@ -79,12 +80,20 @@ def main(argv=None) -> int:
     ap.add_argument("--root", default=None)
     ap.add_argument("--stall", type=float, default=2400.0)
     ap.add_argument("--now", type=float, default=None)
+    # A PROBE THAT LEAVES THE LANES LOOKS EXACTLY LIKE ONE THAT FINISHED. `pulse` lists what is
+    # RUNNING, so a probe killed by a stray signal or an OOM simply stops appearing -- and the only
+    # reason I have ever caught that is `check_money`, which found FIVE such probes (capA1, capB1,
+    # freeA1, freeB1, svcCacheCheck) as money in the meter with no tree on disk. The liveness tool
+    # should not need the money tool to notice a missing probe. Name the batch and it will say, for
+    # each absentee, whether it ENDED or VANISHED.
+    ap.add_argument("--expect", nargs="*", default=[])
     args = ap.parse_args(argv)
     root = args.root or f"{args.bench}/model-probes"
     now = args.now if args.now is not None else time.time()
 
     live = lanes.probes(args.bench)
-    if not live:
+    running = {r["probe"] for r in live if r["probe"]}
+    if not live and not args.expect:
         print("no bench probe running")
         return 0
     print(f'{"probe":10s} {"lane":12s} {"$":>8s} {"nodes":>5s} {"zeros":>5s} {"errs":>4s} '
@@ -113,7 +122,22 @@ def main(argv=None) -> int:
             stalled += 1
             print(f'      STALLED: {age:.0f}s since the log last grew, past the {args.stall:.0f}s '
                   "ceiling -- check the ledger's newest row and wchan before concluding it is hung")
-    return 1 if stalled else 0
+    vanished = 0
+    for name in sorted(set(args.expect) - running):
+        got = arm_fidelity.probe_calls(root, name)
+        found = sorted(glob.glob(f"{root}/{name}/runs/*/run/events.jsonl"))
+        spend = pulse(found[0])["spend"] if found else 0.0
+        if got["finished"]:
+            print(f'{name:10s} {"(off the lanes)":12s} {spend:8.4f}      ended')
+        elif got["paused"]:
+            print(f'{name:10s} {"(off the lanes)":12s} {spend:8.4f}      PAUSED and owed work -- '
+                  "resume it or the batch is short a probe")
+            vanished += 1
+        else:
+            vanished += 1
+            print(f'{name:10s} {"(off the lanes)":12s} {spend:8.4f}      VANISHED: no process, no '
+                  "ending event, and not at its ceiling -- it did not finish, it stopped")
+    return 1 if (stalled or vanished) else 0
 
 
 if __name__ == "__main__":

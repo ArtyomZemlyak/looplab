@@ -96,3 +96,56 @@ def test_a_fresh_log_is_not_stalled(tmp_path, monkeypatch, capsys):
     _probe(tmp_path, "live", scored=(LOUD,))
     rc, out = _run_main(tmp_path, monkeypatch, capsys)
     assert rc == 0 and "STALLED" not in out, (rc, out)
+
+
+def _events(root: Path, name: str, rows):
+    d = root / name / "runs" / "edge_expansion" / "run"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return d
+
+
+def _absent(tmp_path, monkeypatch, capsys, expect, running=()):
+    monkeypatch.setattr(pulse.lanes, "probes",
+                        lambda bench: [{"pid": 1, "probe": n, "cpus": set(range(11)), "argv": []}
+                                       for n in running])
+    rc = pulse.main(["--bench", str(tmp_path), "--root", str(tmp_path), "--expect", *expect])
+    return rc, capsys.readouterr().out
+
+
+def test_a_probe_that_ended_is_told_apart_from_one_that_stopped(tmp_path, monkeypatch, capsys):
+    """`pulse` lists what is RUNNING, so a probe killed by a signal simply stops appearing and reads
+    exactly like one that finished. The only reason that was ever caught is `check_money`, which
+    found FIVE of them as money in the meter with no tree on disk. The liveness tool should not need
+    the money tool to notice a missing probe."""
+    _events(tmp_path, "ended", [{"type": "llm_usage", "data": {"cost": 1.01}},
+                                {"type": "run_finished", "data": {"reason": "budget_exhausted"}}])
+    _events(tmp_path, "stopped", [{"type": "llm_usage", "data": {"cost": 0.42}}])
+    rc, out = _absent(tmp_path, monkeypatch, capsys, ["ended", "stopped"])
+    assert "ended" in out and "VANISHED" in out, out
+    assert "it did not finish, it stopped" in out, out
+    assert rc == 1, out
+
+
+def test_a_probe_at_its_ceiling_ended_even_though_it_says_pause(tmp_path, monkeypatch, capsys):
+    """§228: 16 corpus runs reached full budget and were PAUSED by a blanket handler dressing the
+    ceiling refusal as a provider failure. Those runs are complete; calling them owed work is what
+    sent freeB3 back for another $0.1056 (§213)."""
+    _events(tmp_path, "atceiling", [{"type": "llm_usage", "data": {"cost": 1.004}},
+                                    {"type": "pause", "data": {}}])
+    rc, out = _absent(tmp_path, monkeypatch, capsys, ["atceiling"])
+    assert "ended" in out and "VANISHED" not in out and "OWED" not in out, out
+    assert rc == 0, out
+
+
+def test_a_genuine_pause_below_the_ceiling_is_owed_work(tmp_path, monkeypatch, capsys):
+    _events(tmp_path, "owed", [{"type": "llm_usage", "data": {"cost": 0.40}},
+                               {"type": "pause", "data": {}}])
+    rc, out = _absent(tmp_path, monkeypatch, capsys, ["owed"])
+    assert "PAUSED and owed work" in out and rc == 1, (rc, out)
+
+
+def test_a_probe_still_on_its_lane_is_not_called_absent(tmp_path, monkeypatch, capsys):
+    _probe(tmp_path, "live", scored=(LOUD,))
+    rc, out = _absent(tmp_path, monkeypatch, capsys, ["live"], running=["live"])
+    assert "off the lanes" not in out and rc == 0, (rc, out)
