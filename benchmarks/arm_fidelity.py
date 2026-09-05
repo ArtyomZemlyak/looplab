@@ -67,7 +67,7 @@ def probe_calls(root: str, name: str) -> dict:
     See the module docstring for what `finished` means and why it is an event. No scores are read
     here: event TYPES only.
     """
-    executed = refused = evals = 0
+    executed = refused = evals = unavailable = 0
     spans: set = set()
     for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/spans.jsonl")):
         try:
@@ -93,11 +93,23 @@ def probe_calls(root: str, name: str) -> dict:
                 if attrs.get("tool") != "run_probe":
                     continue
                 spans.add(attrs.get("phase_span"))
-                if "run_probe refused" in str(attrs.get("output", "")):
+                out = str(attrs.get("output", ""))
+                if out.startswith("(unknown tool"):
+                    # NOT AN EXECUTION AND NOT A REFUSAL BY THE CAP. `run_probe` is not offered in
+                    # every phase, and a model that calls it where it is not available gets
+                    # `(unknown tool: run_probe; available here: …)` back in 2 ms having run nothing.
+                    # `capA6` did exactly that in `propose` and read as **13 executed under a cap of
+                    # 12** -- an off-by-one that was mine, not the engine's: its own refusals all
+                    # say "already made 12 probes". Four such spans exist in the corpus (capA6,
+                    # expEEa, freeB4, remEE2), so this moves little, and a fidelity count that can
+                    # exceed its own cap is worth none of the doubt it creates. Same family as §202.
+                    unavailable += 1
+                elif "run_probe refused" in out:
                     refused += 1
                 else:
                     executed += 1
-    return {"executed": executed, "refused": refused, "evals": evals, "spans": len(spans),
+    return {"executed": executed, "refused": refused, "unavailable": unavailable,
+            "evals": evals, "spans": len(spans),
             "finished": _run_finished(root, name) or _at_ceiling(root, name),
             "paused": _paused(root, name)}
 

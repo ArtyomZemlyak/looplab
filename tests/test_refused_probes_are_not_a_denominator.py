@@ -67,3 +67,22 @@ def test_a_run_that_was_refused_every_time_has_no_rate_at_all(tmp_path):
     assert got["run_probe"] == 0 and got["run_probe_refused"] == 5
     assert got["ref_pct"] is None, (
         "an all-refused run reported a rate; 0 % would put it below the §69.1 floor on no data")
+
+
+UNKNOWN = "(unknown tool: run_probe; available here: arxiv_search, concept_card (+36 more))"
+
+
+def test_a_phase_that_does_not_offer_the_tool_is_not_a_denominator_either(tmp_path):
+    """The second way a `run_probe` span ran nothing. `run_probe` is not available in every phase,
+    and a call in one that does not offer it returns `(unknown tool: run_probe; …)` in 2 ms. Four
+    such spans exist in the corpus, and one of them made `capA6` read as 13 executed probes under a
+    cap of 12 — so this counter can produce a number that its own cap forbids."""
+    d = _probe(tmp_path, executed=12, refused=4, importing=3)
+    with open(d / "spans.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "tool", "name": "tool", "attributes": {
+            "tool": "run_probe", "phase": "propose",
+            "input": json.dumps({"argument": "import time"}), "output": UNKNOWN}}) + "\n")
+    got = probe_summary.summarise(d)
+    assert got["run_probe"] == 12, (
+        f'{got["run_probe"]} executed probes under a cap of 12; an unknown-tool span was counted')
+    assert abs(got["ref_pct"] - 25.0) < 1e-9, got["ref_pct"]

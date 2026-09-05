@@ -367,8 +367,18 @@ def summarise(run_dir: Path) -> dict | None:
     # they were one: the same mistake this block's own comment was written to catch.
     all_probe_spans = [r for r in tools_all
                        if str((r.get("attributes") or {}).get("tool") or "") == "run_probe"]
-    probes = [r for r in all_probe_spans
-              if "run_probe refused" not in str((r.get("attributes") or {}).get("output", ""))]
+    def _ran(row) -> bool:
+        """A span that actually executed a probe.
+
+        Two ways it did not, and both used to count. The cap's refusal (§202), and a call to
+        `run_probe` in a phase that does not offer it -- the model gets
+        `(unknown tool: run_probe; available here: …)` back in 2 ms having run nothing. `capA6`
+        read as 13 executed under a cap of 12 on the strength of one of those.
+        """
+        out = str((row.get("attributes") or {}).get("output", ""))
+        return not out.startswith("(unknown tool") and "run_probe refused" not in out
+
+    probes = [r for r in all_probe_spans if _ran(r)]
     refused = len(all_probe_spans) - len(probes)
     ref_pct = ref_call_pct = None
     if probes:

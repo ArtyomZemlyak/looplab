@@ -10488,3 +10488,37 @@ gets.
 That also caps the whole money-recovery argument honestly: even recovering every duplicate turn buys
 about 9 points on a task whose runs have sd 61.3 (§233). It is real, it is cheap, and it is not what
 decides a comparison.
+
+## §242 — a fidelity count that exceeded its own cap, and the third way a probe span runs nothing
+
+Batch 5 closed with fidelity **treat 12.5, control 29.5** — and a median of 12.5 under a cap of 12
+is arithmetic that cannot be right. `capA6` read as **13 executed probes**. Its own refusals say
+what the engine counted: *"already made 12 probes"*, four times over. So the off-by-one was the
+counter's, not the cap's.
+
+Thirteen distinct inputs, no retries — but one span with a duration of **0.002 s** against 0.06–2.57
+for the rest, and this for an output:
+
+> `(unknown tool: run_probe; available here: arxiv_search, concept_card, concept_nodes,
+> cross_run_atlas, cross_run_claims (+36 more))`
+
+`run_probe` is not offered in every phase. The model called it in `propose`, where it is not
+available, and got that back in two milliseconds having run nothing. Both `arm_fidelity` and
+`probe_summary` counted it as a probe that ran — the same family as §202, which took cap refusals out
+of the reference-use denominator, and the same shape as §227's zeros: **a harness declining is not
+the thing it declined to do.**
+
+Corpus-wide there are **2,870 executed spans, 47 cap refusals and 4 unknown-tool spans** (`capA6`,
+`expEEa`, `freeB4`, `remEE2`), so the correction moves almost nothing — batch 5's contrast goes from
++17 to +17.5. It is worth doing anyway because a fidelity number that can exceed the cap it is
+measuring costs more in doubt than four spans cost in accuracy.
+
+Both counters now discriminate three states rather than two: executed, refused by the cap,
+unavailable in this phase. Four mutations red, and one of them matters more than the fix: **treating
+any error as a non-execution** would erase most of what probes are for — code that raises inside a
+probe used the environment and must count. The discriminator is the harness declining, never the
+probe's own outcome. A fifth mutation initially survived, because `probe_summary`'s copy of the rule
+had no test of its own; it does now.
+
+Batch 5's four probes all ended `run_finished / budget_exhausted` — §228 holding for a second
+consecutive batch — and batch 6 is away on all four lanes.

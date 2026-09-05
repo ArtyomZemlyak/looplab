@@ -240,3 +240,48 @@ def test_a_negative_cost_row_cannot_buy_a_run_back_below_the_ceiling(tmp_path):
     got = arm_fidelity.report(str(tmp_path), ["capA2"], ["freeA4"])
     assert got["paused"] == [], (
         f'{got["paused"]}: a -$0.50 row pulled a run that had spent $1.0031 back below its ceiling')
+
+
+UNKNOWN = ("(unknown tool: run_probe; available here: arxiv_search, concept_card, concept_nodes, "
+           "cross_run_atlas, cross_run_claims (+36 more))")
+
+
+def test_a_call_to_a_tool_the_phase_does_not_offer_is_not_an_execution(tmp_path):
+    """`run_probe` is not available in every phase. A model that calls it where it is not gets
+    `(unknown tool: run_probe; available here: …)` back in 2 ms having run nothing.
+
+    `capA6` did that once in `propose` and read as **13 executed under a cap of 12** — an
+    off-by-one that was the counter's, not the engine's: capA6's own refusals all say "already made
+    12 probes". A fidelity number that can exceed its own cap is worth none of the doubt it creates.
+    """
+    _probe(tmp_path, "capA6", executed=12, refused=4)
+    d = tmp_path / "capA6" / "runs" / "edge_expansion" / "run"
+    with open(d / "spans.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "tool", "name": "tool", "attributes": {
+            "tool": "run_probe", "phase_span": "s9", "phase": "propose",
+            "input": json.dumps({"argument": "import time"}), "output": UNKNOWN}}) + "\n")
+    _probe(tmp_path, "freeA6", executed=26)
+    got = arm_fidelity.report(str(tmp_path), ["capA6"], ["freeA6"])
+    assert got["rows"]["capA6"]["executed"] == 12, (
+        f'{got["rows"]["capA6"]["executed"]} executed under a cap of 12; the unknown-tool span was '
+        "counted as a probe that ran")
+    assert got["rows"]["capA6"]["unavailable"] == 1
+    assert got["rows"]["capA6"]["refused"] == 4, "an unknown tool is not a cap refusal either"
+
+
+def test_a_probe_that_ran_and_failed_is_still_an_execution(tmp_path):
+    """The discriminator is the HARNESS declining, not the probe's own outcome. Code that raises
+    inside a probe used the environment and must count; treating every error as a non-execution
+    would erase most of what probes are for."""
+    _probe(tmp_path, "capA6", executed=5)
+    d = tmp_path / "capA6" / "runs" / "edge_expansion" / "run"
+    with open(d / "spans.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "tool", "name": "tool", "attributes": {
+            "tool": "run_probe", "phase_span": "sX", "phase": "plan_step",
+            "input": json.dumps({"code": "1/0"}),
+            "output": "Traceback (most recent call last):\nZeroDivisionError: division by zero"}})
+            + "\n")
+    _probe(tmp_path, "freeA6", executed=20)
+    got = arm_fidelity.report(str(tmp_path), ["capA6"], ["freeA6"])
+    assert got["rows"]["capA6"]["executed"] == 6, got["rows"]["capA6"]
+    assert got["rows"]["capA6"]["unavailable"] == 0
