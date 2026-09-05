@@ -11813,3 +11813,26 @@ chosen after looking.
 
 Five other mutations red: reporting `mixed` as unreadable, reading every batch as mapping A,
 ignoring the mapping in the split, and running the interaction on a single mapping.
+
+## §280 — point 4 asks for two clocks and the tool was showing one
+
+Checklist item 4 says to look at the age of `events.jsonl` **and** at the age of the last CALL in
+the ledger. `pulse` showed the first and `check_money` showed the second globally; per probe, the
+pair was something I read by eye or not at all. The pair is the whole diagnosis, because the two
+come apart in two opposite ways:
+
+- **fresh ledger, stale log** — the probe is calling and producing nothing. §175's retry storm, and
+  the case where three consecutive 504s at exactly 300 s are the nginx ceiling rather than a hang.
+- **stale ledger, fresh log** — the probe is building or evaluating without calling the model, which
+  is ordinary.
+
+Neither is visible from the log alone, and an idle probe looks like both.
+
+`pulse` now prints `call age` beside `log age`, names a last call that did not come back 200, and
+flags only the first shape. The live batch showed why the second must NOT be flagged: `capB13`'s
+last call was **316 s** old while its log had grown **20 s** ago — a healthy probe mid-evaluation,
+and a rule that fired on it would fire on every probe every time an `eval_train` runs. The threshold
+is a stale log (past a quarter of `STALL_TIMEOUT`) with calls at least four times fresher.
+
+Five mutations red: not reading the second clock, never firing, firing on any stale ledger, ignoring
+a non-200 status, and comparing the two ages the wrong way round.

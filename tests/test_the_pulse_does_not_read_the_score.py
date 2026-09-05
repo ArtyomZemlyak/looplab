@@ -149,3 +149,64 @@ def test_a_probe_still_on_its_lane_is_not_called_absent(tmp_path, monkeypatch, c
     _probe(tmp_path, "live", scored=(LOUD,))
     rc, out = _absent(tmp_path, monkeypatch, capsys, ["live"], running=["live"])
     assert "off the lanes" not in out and rc == 0, (rc, out)
+
+
+def _ledger(tmp_path: Path, rows):
+    d = tmp_path / "meter"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "meter.jsonl").write_text(
+        "".join(json.dumps({"ts": ts, "arm": arm, "status": st}) + "\n" for arm, ts, st in rows),
+        encoding="utf-8")
+    return str(d / "meter.jsonl")
+
+
+def _with_ledger(tmp_path, monkeypatch, capsys, rows, log_age, now=1_000_000.0, stall=2400.0):
+    import os as _os
+    _probe(tmp_path, "live", scored=(LOUD,))
+    p = tmp_path / "live" / "runs" / "edge_expansion" / "run" / "events.jsonl"
+    _os.utime(p, (now - log_age, now - log_age))
+    monkeypatch.setattr(pulse.lanes, "probes",
+                        lambda bench: [{"pid": 1, "probe": "live", "cpus": set(range(11)),
+                                        "argv": []}])
+    rc = pulse.main(["--bench", str(tmp_path), "--root", str(tmp_path),
+                     "--ledger", _ledger(tmp_path, rows), "--now", str(now),
+                     "--stall", str(stall)])
+    return rc, capsys.readouterr().out
+
+
+def test_the_second_clock_point_four_asks_for_is_shown(tmp_path, monkeypatch, capsys):
+    """Point 4 asks for the age of events.jsonl AND the age of the last CALL in the ledger. The tool
+    was showing one of them."""
+    _, out = _with_ledger(tmp_path, monkeypatch, capsys, [("live", 999_940.0, "200")], log_age=30)
+    assert "call age" in out and "60s" in out, out
+
+
+def test_a_fresh_ledger_beside_a_stale_log_is_named(tmp_path, monkeypatch, capsys):
+    """The retry-storm shape: the probe is calling and producing nothing. §175 is the record, and
+    three consecutive 504s at exactly 300 s are the nginx ceiling rather than a hang."""
+    _, out = _with_ledger(tmp_path, monkeypatch, capsys, [("live", 999_990.0, "200")],
+                          log_age=1200)
+    assert "CALLING BUT NOT PRODUCING" in out, out
+
+
+def test_a_stale_ledger_beside_a_fresh_log_is_ordinary(tmp_path, monkeypatch, capsys):
+    """Measured on the live batch: capB13's last call was 316 s old while its log had grown 20 s
+    ago -- a probe building or evaluating without calling the model. Flagging that would fire on
+    every healthy probe mid-evaluation."""
+    _, out = _with_ledger(tmp_path, monkeypatch, capsys, [("live", 999_684.0, "200")], log_age=20)
+    assert "CALLING BUT NOT PRODUCING" not in out, out
+    assert "316s" in out, out
+
+
+def test_a_non_200_last_call_is_named(tmp_path, monkeypatch, capsys):
+    _, out = _with_ledger(tmp_path, monkeypatch, capsys, [("live", 999_990.0, "401")], log_age=30)
+    assert "came back 401" in out, out
+
+
+def test_a_probe_with_no_ledger_row_still_reports(tmp_path, monkeypatch, capsys):
+    """A probe that has not made its first call yet has no row, and a dash is the honest reading --
+    not a zero, and not a crash."""
+    rc, out = _with_ledger(tmp_path, monkeypatch, capsys, [("someone-else", 999_990.0, "200")],
+                           log_age=30)
+    assert rc == 0 and "live" in out, out
+    assert "CALLING BUT NOT PRODUCING" not in out, out

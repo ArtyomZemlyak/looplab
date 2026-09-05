@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import arm_fidelity  # noqa: E402  (score-free by its own test; used only for finished/paused)
+import check_money  # noqa: E402  (for the ledger's newest row per arm; reads money, never a score)
 import events_read  # noqa: E402
 import lanes  # noqa: E402
 
@@ -79,6 +80,13 @@ def main(argv=None) -> int:
     ap.add_argument("--bench", default=DEFAULT_BENCH)
     ap.add_argument("--root", default=None)
     ap.add_argument("--stall", type=float, default=2400.0)
+    # THE LIST ASKS FOR TWO CLOCKS AND THIS TOOL WAS SHOWING ONE. Point 4 says to look at the age of
+    # `events.jsonl` AND at the age of the last CALL in the ledger. They come apart, and the way
+    # they come apart is the diagnosis: a fresh ledger beside a stale log is a probe that is calling
+    # and producing nothing -- the retry storm §175 recorded, where three consecutive 504s at
+    # exactly 300 s are the nginx ceiling rather than a hang. A stale ledger beside a fresh log is
+    # the opposite and much rarer. Reading only the log cannot tell either from an idle probe.
+    ap.add_argument("--ledger", default=None)
     ap.add_argument("--now", type=float, default=None)
     # A PROBE THAT LEAVES THE LANES LOOKS EXACTLY LIKE ONE THAT FINISHED. `pulse` lists what is
     # RUNNING, so a probe killed by a stray signal or an OOM simply stops appearing -- and the only
@@ -91,13 +99,15 @@ def main(argv=None) -> int:
     root = args.root or f"{args.bench}/model-probes"
     now = args.now if args.now is not None else time.time()
 
+    ledger = args.ledger or os.path.join(args.bench, "meter", "meter.jsonl")
+    newest = check_money.endpoint_health(ledger)["newest"]
     live = lanes.probes(args.bench)
     running = {r["probe"] for r in live if r["probe"]}
     if not live and not args.expect:
         print("no bench probe running")
         return 0
     print(f'{"probe":10s} {"lane":12s} {"$":>8s} {"nodes":>5s} {"zeros":>5s} {"errs":>4s} '
-          f'{"log age":>8s}  wchan')
+          f'{"log age":>8s} {"call age":>9s}  wchan')
     stalled = 0
     for row in sorted(live, key=lambda r: r["probe"] or ""):
         name = row["probe"]
@@ -107,8 +117,19 @@ def main(argv=None) -> int:
             continue
         got = pulse(found[0])
         age = now - os.path.getmtime(found[0])
+        called = newest.get(name)
+        call_age = (now - called[0]) if called else None
         print(f'{name:10s} {lanes._fmt(row["cpus"]):12s} {got["spend"]:8.4f} {got["nodes"]:5d} '
-              f'{got["zeros"]:5d} {got["errors"]:4d} {age:7.0f}s  {wchan(row["pid"])}')
+              f'{got["zeros"]:5d} {got["errors"]:4d} {age:7.0f}s '
+              f'{(f"{call_age:8.0f}s" if call_age is not None else "       -"):>9s}  '
+              f'{wchan(row["pid"])}')
+        if called and called[1] != "200":
+            print(f'      last call came back {called[1]}, not 200 -- check the endpoint before '
+                  "the probe")
+        if call_age is not None and age > args.stall / 4 and call_age < age / 4:
+            print(f'      CALLING BUT NOT PRODUCING: last call {call_age:.0f}s ago, log last grew '
+                  f'{age:.0f}s ago. Three consecutive 504s at exactly 300 s are the nginx ceiling, '
+                  "not a hang (§175); check the ledger's statuses before the process")
         for z in got["bad"]:
             # THE ZERO'S OWN SECONDS ARE THE DIAGNOSIS. A zero under five seconds means the harness
             # declined to measure -- a regime mismatch, an unloadable solver -- and blaming the
