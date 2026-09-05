@@ -11071,3 +11071,43 @@ it cannot honestly be used that way.
 `capA9` is the case in point. It flagged on two variables, took its first node at $0.6392 where the
 corpus median is $0.3161, and that node came in at 135.47 — an ordinary middle-band opening (§244).
 Unusual and fine, which is precisely what p = 0.898 predicts.
+
+## §259 — the 600 s trigger fired, and the busy box was me
+
+§240 closed the slow-snapshot question with a registered condition: *"I will not measure this again
+unless a snapshot crosses 600 s."* The 09:35 snapshot took **1789 s** and the timer said so:
+
+```
+[10:05:41] that tick took 1802s, at or over the 1800s interval;
+     starting the next one immediately -- the period is now the snapshot's own length
+1017s prefix-check + 396s cp -ru + 376s repair
+```
+
+That line is §206's fix doing its job — naming an overrun instead of silently running back to back —
+and it is the first time it has printed in this campaign. So the trigger is honoured.
+
+All three parts inflated together, about eightfold, which is §216's contention signature and not any
+one step. Three things coincided in that half hour: batch 8's four probes all finished, so the
+archive had four fresh trees to copy (**1.5 G, 130 run records, 9 re-copied short**); the archive is
+at its largest; and **I was running §258's corpus analysis, which reads ~100 `events.jsonl` and ~100
+`spans.jsonl` files off the same tree.**
+
+The third one is mine and it is the one I can fix. Checking my own commands: the sweep's status
+queries run under `taskset -c 44-47,92-95`, but the heredoc analyses of the last several sweeps —
+§252's node costs, §256's distributions, §258's percentiles — went out **unpinned**. The bench
+reserves lanes 44-47 and 92-95 for service work precisely so heavy reads do not compete with probes
+and with the archiver, and §216 pinned the snapshot for that reason. My analysis was the one service
+process still ignoring it.
+
+So the rule I applied to the snapshot applies to me: **every analysis command over the corpus gets
+`taskset -c 44-47,92-95`**, not just the short status queries. That is a habit rather than a code
+change and it is written here because a habit with no record is a habit that lapses.
+
+Two things this does not claim. It does not prove causation — the archive also had four new trees
+that half hour, and §240 measured no trend with archive size but not with size *and* four fresh trees
+at once. And it does not reopen §237's or §240's refutations, which stand: launches and growth alone
+still explain nothing. What is new is a named third participant, and it is the one holding the
+keyboard.
+
+Next threshold, registered as before: measure again if a snapshot crosses 600 s while no analysis of
+mine is running. That is the observation that would move the cause off me.
