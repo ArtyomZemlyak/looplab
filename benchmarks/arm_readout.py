@@ -69,6 +69,7 @@ BATCHES = [
     # not exclude ~3 %, so batches 10-12 run treatment on 22-32 and 33-43 and control on 0-10 and
     # 11-21. Registered here, before any contrast was read, so the swap cannot be chosen by outcome.
     (["capA11", "capB11"], ["freeA11", "freeB12"]),
+    (["capA12", "capB12"], ["freeA12", "freeB13"]),
 ]
 
 

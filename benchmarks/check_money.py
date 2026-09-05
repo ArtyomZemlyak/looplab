@@ -33,6 +33,10 @@ import time
 import os
 import socket
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import arm_fidelity  # noqa: E402  (score-free by its own test; used only for finished/paused)
 
 
 def _meter_start(port: int) -> float | None:
@@ -112,6 +116,39 @@ def spans_by_probe(root: str, since: float) -> tuple[dict, dict]:
 
 
 INFLIGHT_GRACE_S = 300.0   # a call in flight is recent; five minutes is the nginx ceiling itself
+
+
+def _ended(bench_root: str, probe: str) -> bool:
+    """Has this probe's RUN ended -- `run_finished`, or a pause at its ceiling (§228)?
+
+    THE DECISIVE FACT IS ON DISK, AND BOTH EXPIRIES WERE READING A CLOCK INSTEAD. The in-flight
+    allowance exists because the engine may not have written a span for a call yet. That is true
+    only while the run is still going. §175 already caught one version of this -- the allowance
+    forgiving `oldCK9` $0.076944 an hour and a half after it finished -- and the fix made the grace
+    per-arm and time-based, which leaves the same hole 300 seconds wide: for five minutes after a
+    probe writes `run_finished`, a real leak on that probe is still excused as "spans the engine has
+    not written yet", when the engine has demonstrably finished writing. Batches end every ninety
+    minutes, so that window opens on schedule, at exactly the moment a probe's final accounting
+    matters most.
+
+    Delegated to `arm_fidelity`, which owns the finished/paused distinction, is score-free by its
+    own test, and already knows that a pause at the ceiling is an ending and a pause below it is not.
+    """
+    try:
+        return bool(arm_fidelity.probe_calls(f"{bench_root}/model-probes", probe)["finished"])
+    except Exception:                        # noqa: BLE001 - an unreadable tree is not an ending
+        return False
+
+
+def _still_calling(bench_root: str, probe: str, newest, now=None) -> bool:
+    """Can this arm still produce a span the ledger has already charged for?
+
+    Both conditions, and ONE function so the two call sites cannot drift apart: its last ledger row
+    is recent AND its run has not ended. `newest` is `endpoint_health()["newest"]`.
+    """
+    when = (newest.get(probe) or (0.0, ""))[0]
+    recent = ((now if now is not None else time.time()) - when) <= INFLIGHT_GRACE_S
+    return recent and not _ended(bench_root, probe)
 
 
 def _inflight_call_cost(root: str, since: float) -> float:
@@ -455,8 +492,7 @@ def main(argv: list[str]) -> int:
         # for an arm that has stopped calling, whatever the other arms are doing. So the allowance
         # counts only the unnamed calls of arms whose OWN newest ledger row is recent.
         live_extra = {p2: n for p2, n in extra.items()
-                      if (time.time() - (health["newest"].get(p2) or (0.0, ""))[0])
-                      <= INFLIGHT_GRACE_S}
+                      if _still_calling(a.bench_root, p2, health["newest"])}
         unnamed_live = max(0, sum(live_extra.values())
                            - sum(m_killed.get(p2, 0) for p2 in live_extra)
                            - sum(m_empty.get(p2, 0) for p2 in live_extra))
@@ -527,7 +563,7 @@ def main(argv: list[str]) -> int:
         # down yet, and would let a real leak on a running probe hide behind a plausible name. The
         # in-flight allowance already covers those arms; this category is for gaps that are final.
         # Seen live: `oldCK11` was credited $0.004579 while still running.
-        still_calling = (time.time() - (health["newest"].get(p2) or (0.0, ""))[0]) <= INFLIGHT_GRACE_S
+        still_calling = _still_calling(a.bench_root, p2, health["newest"])
         if p2 in ("?", "__by_kind__") or p2 in abandoned or spent <= 0 or still_calling:
             continue
         arm_gap = m_cost.get(p2, 0.0) - s_cost.get(p2, 0.0)

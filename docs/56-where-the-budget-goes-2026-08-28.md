@@ -11590,3 +11590,38 @@ usual — with the next line reading `(allowing $0.010130: 1 unnamed call(s) on 
 calling, at the p99 price -- spans the engine has not written yet)`. The residue is inside its own
 stated allowance: a call in flight whose span is not written yet. Earlier sweeps had no in-flight
 unnamed call, so the allowance was zero and the residue was six decimal places of rounding.
+
+## §273 — "spans the engine has not written yet" is only an excuse while the engine is writing
+
+Batch 10 finished during this sweep — all four `ended` at $1.0092–$1.0130, which §272's new
+`--expect` said in words instead of leaving me to infer it from an empty table. Batch 11 launched on
+the swapped mapping, and `lane_balance` now **exits clean**: 9/2, 8/3, 3/8, 2/9, no lane at 90 %.
+
+Point 3 read `RESIDUE $+0.006663` — a thousand times the usual. Chased it: inside the flat
+`--max-residue` of $0.01, and separately inside the in-flight allowance. No leak. But the chase found
+a hole worth closing.
+
+The allowance exists because the engine may not have written a span for a metered call yet. **That is
+true only while the run is still going**, and §175 already caught one version of the mistake: the
+allowance forgiving `oldCK9` **$0.076944** an hour and a half after that probe finished, because the
+expiry watched the LEDGER rather than the arm. The fix made the grace per-arm and time-based — which
+leaves the identical hole exactly **300 seconds** wide. For five minutes after a probe writes
+`run_finished`, a real leak on it is still excused as unwritten spans, when the engine has
+demonstrably finished writing. Batches end every ninety minutes, so that window opens on schedule,
+at precisely the moment a probe's final accounting matters most.
+
+The decisive fact was on disk the whole time. Both call sites now go through one predicate —
+`_still_calling` = its last ledger row is recent **and** its run has not ended — delegated to
+`arm_fidelity`, which already owns the distinction, is score-free by its own test, and knows that a
+pause at the ceiling is an ending (§228) while a pause below it is not (§213, and the $0.1056 that
+cost).
+
+**A mutation survived, and again the fixture was the problem.** Making "unreadable tree" count as
+ended passed everything, because a MISSING tree does not raise — `probe_calls` globs nothing and
+reports `finished: False` — so no fixture ever reached the handler. The test now raises for real.
+The direction matters: reading "I could not tell" as "it ended" withdraws the allowance from an arm
+that may genuinely have a call in flight, turning a read error into a false leak.
+
+Six mutations red in total: dropping the ending condition (back to §175), dropping the time
+condition, treating a ceiling pause as not-ended, treating a genuine pause as ended, and the handler
+one above.
