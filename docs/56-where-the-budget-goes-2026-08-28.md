@@ -11387,3 +11387,53 @@ lanes really are exchangeable, nothing is lost.
 lane C, the lowest of the four. A series that cannot tell a change in the box from a change of lane
 is not a series. The lane is now in every row; two mutations red, including one that keeps it in the
 signature and drops it at the call site, which is where the defect actually lived.
+
+## §267 — the check that would have caught §266 at batch two, and a closed item verified rather than re-fixed
+
+**First, the item the sweep list still carries as ОСТАЁТСЯ ОТКРЫТЫМ.** It is closed, and I drove the
+real `archive_tree` to prove it rather than reading the comments and believing them: archived a
+400-row `events.jsonl`, then did exactly what `campaign.sh` does — `rm -rf` the task root and write
+an **equal-length** second attempt at the same path — and ran the archive step again.
+
+```
+  kept demo/run/events.jsonl as .superseded-1 (6692 bytes) -- the source is now 6692
+  ...
+  attempt1 row 1        <- .superseded-1, 400 rows, intact
+  attempt2 row 1        <- events.jsonl
+```
+
+The rule is not "is it shorter" but "is the source a CONTINUATION of the archive" — a prefix check —
+which is why an equal-length attempt 2 is caught where a size test would pass it. `.superseded-N` is
+the per-attempt versioning the list asks for, keyed on what the function can actually see. And it is
+not accumulating: across the whole 6933-file, 1.49 GiB runs-archive there are **7** superseded
+copies, 0.0 MiB, deepest stack 1.
+
+**Second, the improvement.** §266's confound was found at batch 9 of 12 by hand. Nothing in the
+bench had ever looked at which lane carried which label, so `benchmarks/lane_balance.py` now does,
+on the real arm:
+
+```
+lane            treat  control
+0-10,48-58          9        1
+11-21,59-69         8        2
+22-32,70-80         2        8
+33-43,81-91         1        9
+  CONFOUNDED: lane 0-10,48-58: 9 of 10 probes are treat (90 %)
+  CONFOUNDED: lane 33-43,81-91: 9 of 10 probes are control (90 %)
+```
+
+Membership is **parsed out of `arm_readout.py`, not imported** — that module's job is reading the
+outcome, and an AST walk cannot reach the rest of it by accident; the fixture's `score()` raises if
+anything runs it. The lane comes from the probe's own `INSTRUMENT.txt`. Both are facts about the
+ASSIGNMENT, fixed before a probe's first call, so this is readable under §190's embargo. A lane
+carrying fewer than four probes cannot raise an alarm — one crossover on a fresh lane is 100 % of
+that lane and evidence of nothing — and the test proves the guard is what silences it by flagging
+the same data with the guard lowered.
+
+Six mutations red, including removing the thin-lane guard, reversing the share comparison, counting
+only one label, and reading the wrong field out of `INSTRUMENT.txt`. The crossed-assignment fixture
+reads clean, so the fix §266 registered turns this check off rather than leaving a permanent alarm
+whose reader learns to skip it.
+
+The numbers above already show batch 10's swap landing: lane 0-10 has gained its first control and
+22-32 its second treated probe.
