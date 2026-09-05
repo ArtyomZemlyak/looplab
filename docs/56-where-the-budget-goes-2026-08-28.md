@@ -11892,3 +11892,40 @@ design, and writing without the rename.
 Points 1–7 clean throughout: `RESIDUE $-0.000008` at $86.76, nine baseline entries all `w22x1r3`,
 `PermissionError` 0 on 2085 directories, zero zombies, and `pulse --expect` naming all three
 finished probes as `ended` rather than leaving them to be inferred from an empty table.
+
+## §283 — the twelfth batch landed and the readout did not return
+
+All four of batch 12 ended this sweep. The gate opened, `arm_readout` was invoked, and **it did not
+come back.** Diagnosed by pid: `stratified_p` enumerates `6**k` relabellings and the registered
+design is `k = 12`, which is **2 176 782 336**.
+
+§274 is what makes this worth writing down. That section checked the statistic "in the middle of its
+range" — and the range I checked was the range of its own VALUE, p near 0 to p near 1, on **four**
+batches: 1296 combinations. The size of the DESIGN was never a variable in any test. The number that
+decides $48 was verified against a Monte Carlo reference, against its own boundary behaviour, against
+ties and direction — and could not be computed on the design it was written for. Two sweeps of
+sharpening the blade, none of them checking it reached.
+
+With real-valued scores every relabelling gives a distinct sum, so no convolution shrinks the space.
+The honest move is to sample the SAME null rather than enumerate a different one: exact below a
+ceiling, sampled above it with a fixed seed and a reported standard error. Twelve batches now takes
+20 s.
+
+Three things the fix had to get right, each of them a way to lose something §274 had established:
+
+- **The ceiling is measured, not round.** The enumeration costs 0.3 s at `6**5`, 2.0 s at `6**6`,
+  14.3 s at `6**7` — about 20× per batch, so `6**8` is a hundred seconds. My first ceiling was
+  2 000 000, which puts `6**8` under it and would have made "exact when possible" mean "a hundred
+  seconds when possible". It is 50 000.
+- **The observed arrangement stays in its own null.** `(hits + 1) / (draws + 1)`, not `hits/draws`:
+  a sampled p that can return exactly 0 beats every α there is, which is precisely the property
+  §274 pinned for the exact version.
+- **The standard error is carried and used.** A p within two SE of α is printed as a reading that is
+  not yet a decision.
+
+**And my own test for this hung instead of failing.** The first version timed the call and asserted
+afterwards — which cannot fail when the call does not return. Under the mutation that puts the
+ceiling back up it hung, and a hanging test reads as "still running", not "broken". Split
+`relabel_space` out so the decision is checkable without paying for it. Six mutations red: the
+ceiling back up, dropping the plus-one, never taking the exact path, dropping the standard error,
+not counting the space, and silencing the near-α warning.

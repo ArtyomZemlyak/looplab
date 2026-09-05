@@ -448,3 +448,107 @@ def test_the_record_is_written_atomically(tmp_path, monkeypatch, capsys):
     arm_readout.main(["--batches", "2", "--record", str(out)])
     assert out.exists() and not out.with_suffix(".json.tmp").exists()
     json.loads(out.read_text(encoding="utf-8"))       # complete, not torn
+
+
+def test_the_registered_design_size_is_computable_at_all():
+    """THE TEST THIS FILE DID NOT HAVE. §274 checked the statistic across the range of its own
+    VALUE -- p near 0 to p near 1 -- on FOUR batches, 1296 relabellings. The size of the DESIGN was
+    never a variable. The design is twelve batches: 6**12 = 2 176 782 336, and on the sweep in which
+    the twelfth batch landed the gate opened and the function did not return."""
+    batches = [([200.0 + i, 210.0 + i], [100.0 + i, 110.0 + i]) for i in range(12)]
+    # THE DECISION, NOT A STOPWATCH. Timing the call and asserting afterwards cannot fail when the
+    # call does not return: it hangs, and a hanging test reads as "still running" rather than
+    # "broken" -- which is exactly how the first version of this test behaved under the mutation
+    # that put the ceiling back up.
+    space = arm_readout.relabel_space(batches)
+    assert space == 6 ** 12, space
+    assert space > arm_readout.EXACT_CEILING, (space, arm_readout.EXACT_CEILING)
+    got = arm_readout.stratified_p_detail(batches, draws=2_000)
+    assert not got["exact"] and got["space"] == space, got
+
+
+def test_a_computable_design_is_still_computed_exactly(tmp_path):
+    """Below the ceiling nothing changes: the answer is the enumeration, not an estimate of it."""
+    got = arm_readout.stratified_p_detail([([200.0, 210.0], [100.0, 110.0]),
+                                           ([220.0, 230.0], [120.0, 130.0])])
+    assert got["exact"] and got["p"] == 1 / 36 and got["se"] == 0.0, got
+
+
+def test_a_sampled_p_still_contains_its_own_observed_arrangement():
+    """§274's property has to survive the switch to sampling. The observed relabelling is one of the
+    null's, so a p that can come back exactly 0 -- and 0 beats every alpha -- has dropped it. The
+    plus-one estimator keeps it in and turns "no draw reached it" into `< 1/draws`."""
+    batches = [([1000.0, 1000.0], [0.0, 0.0])] * 12
+    # 20 000 draws, not the default 200 000: the property is about the ESTIMATOR, not the precision,
+    # and a suite nobody will sit through stops being run.
+    got = arm_readout.stratified_p_detail(batches, draws=20_000)
+    assert not got["exact"]
+    assert 0.0 < got["p"] <= 2 / (got["draws"] + 1), got
+
+
+def test_a_sampled_p_is_reproducible():
+    """A verdict that moves between runs of the same tool on the same data is not a verdict."""
+    batches = [([200.0 + i, 150.0 + i], [140.0 + i, 130.0 + i]) for i in range(12)]
+    assert (arm_readout.stratified_p_detail(batches, draws=20_000)["p"]
+            == arm_readout.stratified_p_detail(batches, draws=20_000)["p"])
+
+
+def test_a_flat_arm_reads_one_under_sampling_too():
+    assert arm_readout.stratified_p_detail([([100.0, 100.0], [100.0, 100.0])] * 12,
+                                           draws=20_000)["p"] == 1.0
+
+
+def test_the_sampled_p_agrees_with_the_exact_one_where_both_can_be_had():
+    """Six batches is 46 656 relabellings -- under the ceiling, so it is enumerated -- and the
+    sampled estimate of the same quantity must land on it.
+
+    Six and not eight: the enumeration costs 0.3 s at 6**5, 2.0 s at 6**6 and 14.3 s at 6**7 on this
+    box, so an eight-batch fixture makes this test take a hundred seconds. A test nobody will run is
+    not a test."""
+    batches = [([180.0, 95.0], [140.0, 60.0]), ([210.0, 40.0], [155.0, 130.0]),
+               ([90.0, 205.0], [175.0, 35.0]), ([160.0, 120.0], [88.0, 150.0]),
+               ([170.0, 100.0], [130.0, 90.0]), ([155.0, 111.0], [120.0, 140.0])]
+    exact = arm_readout.stratified_p_detail(batches)
+    assert exact["exact"], exact["space"]
+    old = arm_readout.EXACT_CEILING
+    try:
+        arm_readout.EXACT_CEILING = 10
+        sampled = arm_readout.stratified_p_detail(batches)
+    finally:
+        arm_readout.EXACT_CEILING = old
+    assert not sampled["exact"]
+    assert abs(sampled["p"] - exact["p"]) < 4 * sampled["se"] + 0.005, (sampled, exact)
+
+
+def test_a_sampled_p_carries_a_standard_error_and_an_exact_one_does_not():
+    """The SE is what lets a p near alpha be reported as NEAR alpha instead of read as a decision.
+    Without it the sampled number wears the same face as the exact one it replaced."""
+    exact = arm_readout.stratified_p_detail([([200.0, 210.0], [100.0, 110.0]),
+                                             ([220.0, 230.0], [120.0, 130.0])])
+    assert exact["exact"] and exact["se"] == 0.0, exact
+    sampled = arm_readout.stratified_p_detail(
+        [([180.0, 95.0], [140.0, 60.0]), ([210.0, 40.0], [155.0, 130.0]),
+         ([90.0, 205.0], [175.0, 35.0]), ([160.0, 120.0], [88.0, 150.0]),
+         ([170.0, 100.0], [130.0, 90.0]), ([155.0, 111.0], [120.0, 140.0]),
+         ([133.0, 177.0], [150.0, 99.0]), ([144.0, 122.0], [131.0, 118.0]),
+         ([151.0, 129.0], [140.0, 120.0]), ([149.0, 131.0], [128.0, 142.0]),
+         ([160.0, 140.0], [139.0, 121.0]), ([158.0, 122.0], [141.0, 119.0])],
+        draws=4_000)
+    assert not sampled["exact"] and sampled["se"] > 0.0, sampled
+    # the plain binomial SE, which is what the printed +/- claims to be
+    expected = (sampled["p"] * (1 - sampled["p"]) / sampled["draws"]) ** 0.5
+    assert abs(sampled["se"] - expected) < 1e-12, (sampled["se"], expected)
+
+
+def test_a_p_within_two_standard_errors_of_alpha_is_not_reported_as_a_decision(tmp_path,
+                                                                               monkeypatch,
+                                                                               capsys):
+    """The whole point of carrying the SE: at 200 000 draws it is about 0.0005 near alpha, so this
+    fires rarely -- but when it fires, "reject" would be a coin toss dressed as a finding."""
+    _full_arm(tmp_path, monkeypatch)
+    monkeypatch.setattr(arm_readout, "stratified_p_detail",
+                        lambda *a, **k: {"p": 0.0501, "exact": False, "space": 6 ** 12,
+                                         "draws": 200_000, "se": 0.0050})
+    arm_readout.main(["--batches", "2"])
+    out = capsys.readouterr().out
+    assert "NOT a decision" in out, out

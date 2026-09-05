@@ -39,11 +39,13 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import random
 import re
 import json
 import statistics
 import sys
 from itertools import combinations, product
+from math import comb
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -190,20 +192,86 @@ def admit(name: str, arm: str, max_spend: float, budget: float = 1.0):
     return got, None
 
 
-def stratified_p(batches, alternative_positive: bool = True) -> float:
-    obs = sum(statistics.mean(t) - statistics.mean(c) for t, c in batches)
-    per = []
+# MEASURED, NOT ROUND. The enumeration costs 0.3 s at 6**5, 2.0 s at 6**6 and 14.3 s at 6**7 on
+# this box -- roughly 20x per batch, so 6**8 is about a hundred seconds and 6**9 is ten minutes. The
+# first version of this guard said 2 000 000, which puts 6**8 under the ceiling and would have made
+# "exact when possible" mean "a hundred seconds when possible". 50 000 keeps the exact path at a
+# couple of seconds, which is what an operator will actually wait for.
+EXACT_CEILING = 50_000
+
+
+def stratified_p(batches, alternative_positive: bool = True, draws: int = 200_000,
+                 seed: int = 190):
+    """The registered statistic, computed exactly when that is possible and sampled when it is not.
+
+    THE EXACT ENUMERATION IS 6**k AND THE DESIGN IS k = 12. That is 2 176 782 336 relabellings, and
+    on 2026-09-06 -- the sweep in which the twelfth batch finally landed -- this function simply did
+    not return. §274 had tested it "in the middle of its range", and the range I checked was the
+    STATISTIC's, from p near 0 to p near 1, on FOUR batches: 1296 combinations. The size of the
+    DESIGN was never a variable in any test. The gate opened and the tool could not answer.
+
+    With real-valued scores every relabelling gives a distinct sum, so no convolution or
+    dynamic-programming trick shrinks the space; the honest move is to sample the same null rather
+    than to enumerate a different one. Below `EXACT_CEILING` nothing changes and the answer is
+    exact. Above it the p is a Monte Carlo estimate of the SAME quantity, with a fixed seed so it is
+    reproducible, and `stratified_p_detail` returns the standard error so a p near alpha can be
+    reported as near alpha instead of being read as a decision.
+    """
+    return stratified_p_detail(batches, alternative_positive, draws, seed)["p"]
+
+
+def relabel_space(batches) -> int:
+    """How many relabellings the exact test would have to visit.
+
+    Split out so the exact-or-sampled DECISION can be checked without paying for it. A test that
+    times the call and asserts afterwards cannot fail when the call does not return -- it hangs, and
+    a hanging test reads as "still running" rather than "broken". That is how the first version of
+    this file's own guard behaved under a mutation, which is a nice small instance of the thing this
+    whole document is about.
+    """
+    space = 1
     for t, c in batches:
-        pool = list(t) + list(c)
-        per.append([([pool[i] for i in idx], [x for j, x in enumerate(pool) if j not in idx])
-                    for idx in combinations(range(len(pool)), len(t))])
-    total = ge = 0
-    for combo in product(*per):
-        val = sum(statistics.mean(a) - statistics.mean(b) for a, b in combo)
+        space *= comb(len(t) + len(c), len(t))
+    return space
+
+
+def stratified_p_detail(batches, alternative_positive: bool = True, draws: int = 200_000,
+                        seed: int = 190) -> dict:
+    obs = sum(statistics.mean(t) - statistics.mean(c) for t, c in batches)
+    space = relabel_space(batches)
+    if space <= EXACT_CEILING:
+        per = []
+        for t, c in batches:
+            pool = list(t) + list(c)
+            per.append([([pool[i] for i in idx], [x for j, x in enumerate(pool) if j not in idx])
+                        for idx in combinations(range(len(pool)), len(t))])
+        total = ge = 0
+        for combo in product(*per):
+            val = sum(statistics.mean(a) - statistics.mean(b) for a, b in combo)
+            if (val >= obs) if alternative_positive else (val <= obs):
+                ge += 1
+            total += 1
+        return {"p": ge / total, "exact": True, "space": space, "se": 0.0, "draws": total}
+
+    rng = random.Random(seed)
+    hits = 0
+    for _ in range(draws):
+        val = 0.0
+        for t, c in batches:
+            pool = list(t) + list(c)
+            rng.shuffle(pool)
+            k = len(t)
+            val += statistics.mean(pool[:k]) - statistics.mean(pool[k:])
         if (val >= obs) if alternative_positive else (val <= obs):
-            ge += 1
-        total += 1
-    return ge / total
+            hits += 1
+    # (hits + 1) / (draws + 1), NOT hits / draws. §274's property has to survive the switch to
+    # sampling: the OBSERVED arrangement is one of the relabellings, so it belongs in its own null,
+    # and a p that can come back exactly 0 beats every alpha there is. The plus-one estimator is the
+    # standard way to keep it there, it is conservative, and it turns "no draw reached the observed
+    # value" into `< 1/draws` instead of into `impossible`.
+    p = (hits + 1) / (draws + 1)
+    return {"p": p, "exact": False, "space": space, "draws": draws,
+            "se": (p * (1 - p) / draws) ** 0.5}
 
 
 # The lanes treatment ran on for batches 1-9. §266 swapped it for 10-12 so the confound became
@@ -355,9 +423,19 @@ def main(argv=None) -> int:
 
     batches = [(t, c) for _, t, c in ready[:args.batches]]
     obs = sum(statistics.mean(t) - statistics.mean(c) for t, c in batches)
-    p = stratified_p(batches)
+    detail = stratified_p_detail(batches)
+    p = detail["p"]
     print(f"\nsum of within-batch mean differences: {obs:+.2f}")
-    print(f"exact stratified one-sided permutation p = {p:.4f} (alpha {args.alpha})")
+    if detail["exact"]:
+        print(f"exact stratified one-sided permutation p = {p:.4f} (alpha {args.alpha}) "
+              f"over all {detail['space']} relabellings")
+    else:
+        print(f"stratified one-sided permutation p = {p:.4f} +/- {detail['se']:.4f} "
+              f"(alpha {args.alpha}) -- SAMPLED over {detail['draws']} of {detail['space']} "
+              "relabellings, because enumerating them all is not computable")
+        if abs(p - args.alpha) < 2 * detail["se"]:
+            print("    p is within two standard errors of alpha: this is NOT a decision, it is a "
+                  "reading that needs more draws before it becomes one")
     groups = lane_split(ready[:args.batches], ROOT)
     if len(groups) > 1:
         print("\n  the same contrast under each lane-to-label mapping (§266, registered before the "
@@ -380,6 +458,8 @@ def main(argv=None) -> int:
             "scores": [{"batch": i, "treat": t, "control": c} for i, t, c in ready[:args.batches]],
             "sum_of_within_batch_mean_differences": obs,
             "stratified_one_sided_p": p,
+            "p_exact": detail["exact"], "p_se": detail["se"],
+            "p_draws": detail["draws"], "p_space": detail["space"],
             "lane_split": {k: {"n": v["n"], "contrast": v["contrast"]}
                            for k, v in groups.items()},
             "interaction_p": interaction_p(groups),
