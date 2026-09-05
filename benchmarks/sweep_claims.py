@@ -199,7 +199,18 @@ def check_ruler_constants(bench: str):
     said, off = [], 0
     for task, quoted in sorted(SWEEP_CONSTANTS.items()):
         if task not in latest:
-            said.append(f"{task}: UNMEASURED here (list says {quoted:.4f})")
+            # WHY IT IS UNMEASURED, because the two reasons need different actions. The self-check
+            # inlines the DELIVERED reference module, which only exists where a probe has staged
+            # one: `ruler_selfcheck.build_solver` globs `*/ws/<task>/reference_<task>.py`. Measured
+            # 2026-09-06 -- the only tasks with probe trees on this box are discrete_log,
+            # edge_expansion and pde_heat1d, so `pagerank`'s constant is not merely unchecked, it is
+            # UNCHECKABLE here until a probe runs on that task. Reporting the two the same way sends
+            # the reader to re-run a tool that will fail the same way every sweep.
+            why = ("no probe has staged its reference module here, so the self-check cannot build "
+                   "a solver for it -- run a probe on this task first"
+                   if not glob.glob(f"{bench}/model-probes/*/ws/{task}/reference_{task}.py")
+                   else "no reading recorded yet")
+            said.append(f"{task}: UNMEASURED here ({why}; list says {quoted:.4f})")
             off += 1
             continue
         got, stamp = latest[task]

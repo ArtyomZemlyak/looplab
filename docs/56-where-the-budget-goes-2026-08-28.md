@@ -12023,3 +12023,40 @@ it asserted on `"the best evaluated node is the one submitted"`, a sentence nobo
 the shipped wording.
 
 `sweep_claims` now reads seven claims, six stale, with item (б) correctly among them.
+
+## §287 — point 9 on all 48 arm probes, and why `pagerank` was never measurable
+
+**The embargo is lifted, so item 9 finally runs on the arm.** All 48 registered probes have a TEST
+score; none is missing:
+
+| arm | n | TEST median | min | max | nodes | eval_train | before % | after % |
+|---|---|---|---|---|---|---|---|---|
+| treated | 24 | 213.15 | 21.08 | 270.20 | 3.0 | 31.0 | 32 | 0 |
+| control | 24 | 219.83 | 25.84 | 276.38 | 3.0 | 25.0 | 32 | 8 |
+
+Consistent with §284's p = 0.3577: the control median is slightly HIGHER, so what little sign there
+is points away from the cap. Node counts are identical at 3.0, the `eval_train` channel is visible
+(31 against 25), and the one place the arms differ noticeably is waste — treated probes spend a
+median **0 %** after their last evaluated node against the controls' **8 %**, which is what a cap
+that stops the probing would do. Against the list's comparison figure for the task (accEE, whose own
+`final.json` says 224.8846 — §276), the arm's best probes clear it: 276.38 and 270.20.
+
+**With the lanes idle, point 10's queued re-measurement ran** on a 22-cpu bench lane (§262), and the
+three measurable constants moved again in the same directions §281 found:
+
+```
+  pde_heat1d      1.0676   the sweep says 0.9958  (+7.2 %)
+  discrete_log    1.0830   the sweep says 1.0162  (+6.6 %)
+  edge_expansion  0.9007   the sweep says 0.9847  (-8.5 %)
+```
+
+**`pagerank` crashed, and the reason is the finding.** `no delivered reference module for pagerank
+under /var/tmp/looplab-bench/model-probes`. The self-check inlines the DELIVERED reference module —
+`build_solver` globs `*/ws/<task>/reference_<task>.py` — and that file exists only where a probe has
+staged one. The only tasks with probe trees on this box are `discrete_log`, `edge_expansion` and
+`pde_heat1d`. So `pagerank`'s 1.0024 is not merely unchecked, it is **uncheckable here** until a
+probe runs on that task, and every sweep that reported it as "UNMEASURED" was inviting a retry that
+would fail identically. `sweep_claims` now says which of the two it is, and what to do about it.
+
+That makes seven claims checked and **seven stale** — the list has no true reading left in it that
+this tool looks at.

@@ -245,3 +245,18 @@ def test_the_ceiling_marker_is_too():
     src = (Path(__file__).resolve().parents[1] / "benchmarks" / "algotune"
            / "make_task.py").read_text(encoding="utf-8", errors="replace")
     assert any(m in src for m in sweep_claims.CEILING_MARKS), sweep_claims.CEILING_MARKS
+
+
+def test_unmeasurable_and_merely_unmeasured_are_told_apart(tmp_path):
+    """The self-check inlines the DELIVERED reference module, which exists only where a probe has
+    staged one. Measured 2026-09-06: the only tasks with probe trees on this box are discrete_log,
+    edge_expansion and pde_heat1d -- so `pagerank`'s constant is UNCHECKABLE here, not merely
+    unchecked, and reporting the two the same way sends the reader to re-run a tool that will fail
+    identically every sweep."""
+    _drift(tmp_path, [("edge_expansion", 0.9847, "2026-09-05T10:00:00")])
+    ws = tmp_path / "model-probes" / "p" / "ws" / "pde_heat1d"
+    ws.mkdir(parents=True)
+    (ws / "reference_pde_heat1d.py").write_text("class T(Task): pass\n", encoding="utf-8")
+    _, detail = sweep_claims.check_ruler_constants(str(tmp_path))
+    assert "pagerank: UNMEASURED here (no probe has staged its reference module" in detail, detail
+    assert "pde_heat1d: UNMEASURED here (no reading recorded yet" in detail, detail
