@@ -103,3 +103,73 @@ def test_a_value_equal_to_many_others_is_not_extreme():
         "an outlier")
     assert outlier_check.percentile(sample, 0.9) > 90
     assert outlier_check.percentile(sample, 0.1) < 10
+
+
+def _ordered(root: Path, name: str, seq, node_after=None):
+    """A run whose generation spans are written in a KNOWN order, so a phase can be front-loaded."""
+    d = root / name / "runs" / "edge_expansion" / "run"
+    d.mkdir(parents=True)
+    events, spent = [], 0.0
+    for _, cost in seq:
+        events.append({"type": "llm_usage", "data": {"cost": cost}})
+        spent += cost
+        if node_after is not None and spent >= node_after:
+            events.append({"type": "node_evaluated", "data": {"node_id": 0, "metric": 200.0}})
+            node_after = None
+    (d / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    (d / "spans.jsonl").write_text(
+        "".join(json.dumps({"name": "generation", "attributes": {"phase": p, "cost": str(c)}}) + "\n"
+                for p, c in seq), encoding="utf-8")
+    return d
+
+
+def _front_loaded_corpus(root: Path):
+    """Ten finished runs that spend most of their `propose` money early: 60-69 % of the first half
+    dollar, but only 35-39.5 % of the whole run. Measured shape -- the real corpus median
+    `share_propose` is 31.1 % over the first $0.567 and 25.3 % over the whole run."""
+    for i in range(10):
+        _ordered(root, f"done{i}",
+                 [("propose", 0.30 + 0.005 * i), ("plan_step", 0.20 - 0.005 * i),
+                  ("propose", 0.05), ("plan_step", 0.45)], node_after=0.3)
+
+
+def test_a_young_probe_is_placed_against_the_corpus_at_its_own_age(tmp_path):
+    """The whole defect in one assertion: 65 % of the first half-dollar spent on `propose` is
+    perfectly ordinary for a probe that has only spent half a dollar, and looks like the corpus
+    maximum against runs that were allowed to finish."""
+    _front_loaded_corpus(tmp_path)
+    whole = outlier_check.corpus(str(tmp_path), "edge_expansion")
+    aged = outlier_check.corpus(str(tmp_path), "edge_expansion", cap=0.5)
+    assert outlier_check.percentile(whole["share_propose"], 65.0) >= 95.0, (
+        "fixture is not front-loaded, so it cannot discriminate")
+    assert 5.0 < outlier_check.percentile(aged["share_propose"], 65.0) < 95.0, (
+        f"aged corpus {sorted(aged['share_propose'])} still calls 65 % extreme")
+
+
+def test_truncating_the_corpus_changes_how_a_run_reads_never_whether_it_counts(tmp_path):
+    """A run is in the corpus because it FINISHED, which is a fact about the whole run. Capping is
+    a reading, not a filter -- otherwise the cap quietly redefines the population it is compared to.
+    """
+    _front_loaded_corpus(tmp_path)
+    _ordered(tmp_path, "tiny", [("propose", 0.1), ("plan_step", 0.1)], node_after=0.05)
+    # A FINISHED RUN THAT NEVER REACHED THE CAP. It spent its dollar -- so it belongs in the corpus
+    # -- but only $0.30 of that went through generation spans, less than the $0.50 cap. This is the
+    # case that tells "read every run as far as it got" apart from "keep only the runs that got
+    # this far", and without it a cap-as-filter mutation sails through: every other fixture run has
+    # more generation spend than the cap, so dropping the short ones drops nothing.
+    d = _ordered(tmp_path, "thin", [("propose", 0.1), ("plan_step", 0.2)], node_after=0.05)
+    (d / "events.jsonl").write_text(
+        "".join(json.dumps({"type": "llm_usage", "data": {"cost": 0.1}}) + "\n" for _ in range(10)),
+        encoding="utf-8")
+    assert len(outlier_check.corpus(str(tmp_path), "edge_expansion")["share_propose"]) == 11
+    assert len(outlier_check.corpus(str(tmp_path), "edge_expansion", cap=0.5)["share_propose"]) == 11
+
+
+def test_the_check_itself_stops_flagging_a_probe_for_being_young(tmp_path, monkeypatch, capsys):
+    _front_loaded_corpus(tmp_path)
+    _ordered(tmp_path, "live", [("propose", 0.325), ("plan_step", 0.175)], node_after=0.3)
+    monkeypatch.setattr(outlier_check.lanes, "probes",
+                        lambda root: [{"probe": "live", "lane": "0-10", "pid": 1}])
+    assert outlier_check.main(["--root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "share_propose" not in out, out

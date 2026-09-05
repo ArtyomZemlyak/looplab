@@ -36,8 +36,38 @@ DEFAULT_ROOT = "/var/tmp/looplab-bench/model-probes"
 BENCH = "/var/tmp/looplab-bench"
 
 
-def measure(events_path: str, spans_path: str) -> dict:
-    """Process variables for one probe. No scores: counts, money and shares only."""
+def phase_series(spans_path: str) -> list:
+    """(cost, phase) for every generation span, in file order -- which is append order, which is
+    time order. Kept separate from `measure` so a corpus run can be replayed only as far as a
+    running probe has got."""
+    out = []
+    try:
+        fh = open(spans_path, encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    with fh:
+        for line in fh:
+            if not line.startswith("{"):
+                continue
+            try:
+                span = json.loads(line)
+            except ValueError:
+                continue
+            if span.get("name") != "generation":
+                continue
+            attrs = span.get("attributes") or {}
+            try:
+                out.append((float(attrs.get("cost") or 0.0), attrs.get("phase") or "?"))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def measure(events_path: str, spans_path: str, cap: float | None = None) -> dict:
+    """Process variables for one probe. No scores: counts, money and shares only.
+
+    `cap` truncates the phase shares to the first `cap` dollars of generation spend, so a finished
+    run can be read as it looked when it was as young as the probe being placed."""
     spend = 0.0
     first_node_at = None
     nodes = 0
@@ -56,26 +86,12 @@ def measure(events_path: str, spans_path: str) -> dict:
                 if first_node_at is None:
                     first_node_at = spend
     phases: collections.Counter = collections.Counter()
-    try:
-        fh = open(spans_path, encoding="utf-8", errors="replace")
-    except OSError:
-        fh = None
-    if fh:
-        with fh:
-            for line in fh:
-                if not line.startswith("{"):
-                    continue
-                try:
-                    span = json.loads(line)
-                except ValueError:
-                    continue
-                if span.get("name") != "generation":
-                    continue
-                attrs = span.get("attributes") or {}
-                try:
-                    phases[attrs.get("phase") or "?"] += float(attrs.get("cost") or 0.0)
-                except (TypeError, ValueError):
-                    pass
+    seen = 0.0
+    for cost, phase in phase_series(spans_path):
+        if cap is not None and seen >= cap:
+            break
+        seen += cost
+        phases[phase] += cost
     # ABSOLUTE DOLLARS, NOT A SHARE OF SPEND-SO-FAR. The first version reported
     # `first_node_at / spend`, and its very first run flagged three healthy probes: a running probe's
     # denominator is the money it has spent SO FAR, so the same node reads 54 % at $0.59 and 32 % at
@@ -83,20 +99,27 @@ def measure(events_path: str, spans_path: str) -> dict:
     # different clothes -- a partial quantity held against a complete one. Dollars are the same
     # number whenever they are read.
     out = {"spend": spend, "nodes": nodes,
-           "first_node_usd": first_node_at}
+           "first_node_usd": first_node_at, "gen_spend": seen}
     total = sum(phases.values())
     for phase in ("deep_research", "plan_step", "propose", "repropose", "plan"):
         out[f"share_{phase}"] = (100 * phases.get(phase, 0.0) / total) if total else None
     return out
 
 
-def corpus(root: str, task: str, min_spend: float = 0.9) -> dict:
-    """The finished-run distribution of each variable."""
+def corpus(root: str, task: str, min_spend: float = 0.9, cap: float | None = None) -> dict:
+    """The finished-run distribution of each variable.
+
+    With `cap`, each finished run's phase shares are read at the point it had spent `cap` dollars on
+    generation. Membership still needs a FINISHED run (`min_spend`, measured on the whole run) --
+    the truncation changes how a corpus run is read, never which runs are in the corpus.
+    """
     values: dict = collections.defaultdict(list)
     for events_path in sorted(glob.glob(f"{root}/*/runs/{task}/run/events.jsonl")):
-        got = measure(events_path, events_path.replace("events.jsonl", "spans.jsonl"))
-        if got["spend"] < min_spend:
+        spans_path = events_path.replace("events.jsonl", "spans.jsonl")
+        whole = measure(events_path, spans_path)
+        if whole["spend"] < min_spend:
             continue
+        got = measure(events_path, spans_path, cap=cap) if cap is not None else whole
         for key, value in got.items():
             if isinstance(value, (int, float)):
                 values[key].append(float(value))
@@ -127,7 +150,8 @@ def main(argv=None) -> int:
     ap.add_argument("--high", type=float, default=95.0)
     args = ap.parse_args(argv)
 
-    dist = corpus(args.root, args.task)
+    whole_dist = corpus(args.root, args.task)
+    dist = whole_dist
     if not dist:
         print(f"no finished {args.task} runs to compare against", file=sys.stderr)
         return 2
@@ -137,12 +161,25 @@ def main(argv=None) -> int:
         return 0
     n = len(next(iter(dist.values())))
     print(f"{len(live)} running probe(s) against {n} finished {args.task} runs")
+    cache: dict = {}
     flagged = 0
     for name in sorted(live):
         found = sorted(glob.glob(f"{args.root}/{name}/runs/{args.task}/run/events.jsonl"))
         if not found:
             continue
         got = measure(found[0], found[0].replace("events.jsonl", "spans.jsonl"))
+        # READ THE CORPUS AT THE PROBE'S AGE, NOT AT ITS OWN END. A share of generation spend is a
+        # PARTIAL quantity for a running probe and a COMPLETE one for a corpus run, and the phases
+        # are not evenly spread over a run: measured 2026-09-05, the corpus median `share_propose`
+        # is 31.1 % over the first $0.567 and 25.3 % over the whole run, so a young probe reads high
+        # on it for no reason but its age. That mismatch flagged two of three healthy probes --
+        # `freeB11` fell from the 98th percentile to the 79th and `capB10` from the 98th to the
+        # 91st once each corpus run was replayed only as far as the probe had got. It is §209's
+        # mistake for the third time: a partial quantity held against a complete one.
+        near = cache.get(round(got["gen_spend"], 6))
+        if near is None:
+            near = corpus(args.root, args.task, cap=got["gen_spend"])
+            cache[round(got["gen_spend"], 6)] = near
         said = []
         for key, value in got.items():
             if not isinstance(value, (int, float)) or key not in dist:
@@ -151,8 +188,10 @@ def main(argv=None) -> int:
             # DEFINITION. Comparing those two against the finished corpus flags every live probe
             # every time, which is an alarm that means nothing and trains its reader to skip the
             # ones that do. Only quantities that are already final mid-run are compared.
-            if key in ("spend", "nodes"):
+            if key in ("spend", "nodes", "gen_spend"):
                 continue
+            # Shares are read against the age-matched corpus; everything else against the whole run.
+            dist = near if key.startswith("share_") else whole_dist
             # A VARIABLE WITH NO SPREAD CANNOT PLACE ANYTHING. When every corpus run records the
             # same value -- a phase no run on this task ever entered, say -- any reading is
             # simultaneously the minimum and the maximum, and flagging it is noise dressed as a

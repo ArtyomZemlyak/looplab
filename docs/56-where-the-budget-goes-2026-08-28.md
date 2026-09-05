@@ -11215,3 +11215,42 @@ a 22-cpu measurement now would steal CPU from an arm probe. §214 measured that 
 move this reading (0.8865 solo against 0.8861 loaded), so it is safe for the *number* — but it is not
 safe for the *probe*, and the arm outranks the series. The fourth reading goes in the gap between
 batch 9 and batch 10.
+
+## §263 — §209's mistake a third time, on the variable that had not been fixed
+
+`outlier_check` flagged three of four running probes, each on a different phase share:
+
+```
+  capA10   OUTSIDE: share_plan=16.96 at the 97th pct (corpus median 7.751)
+  capB10   OUTSIDE: share_deep_research=25.26 at the 98th pct (corpus median 16.25)
+  freeB11  OUTSIDE: share_propose=36.6 at the 98th pct (corpus median 25.28)
+```
+
+Three of four is not a finding, it is a ruler. **A share of generation spend is partial for a running
+probe and complete for a corpus run**, and the phases are not spread evenly over a run. §257 fixed
+exactly this for `first_node_at/spend` and left the shares alone. Replaying each finished run only as
+far as the probe had actually got:
+
+| probe | variable | vs FULL runs | vs the same-$ PREFIX | corpus median full → prefix |
+|---|---|---|---|---|
+| capA10 | share_plan | 97.1th | **99.0th** | 7.75 → 6.02 |
+| capB10 | share_deep_research | 98.1th | 91.3th | 16.25 → 18.19 |
+| freeB11 | share_propose | 98.1th | 78.6th | 25.28 → 31.13 |
+
+`deep_research` and `propose` are front-loaded — their corpus medians RISE when a run is read young —
+so a young probe reads high on them for no reason but its age, and two of the three flags dissolved.
+`plan` is not front-loaded, its median falls, and capA10's flag survived and got stronger. The
+alarming ruler was hiding the one real reading underneath two artifacts.
+
+Fixed: shares are now placed against the corpus **read at the probe's own age**. Truncation is a
+reading, not a filter — a run is in the corpus because it finished, which is a fact about the whole
+run — and a mutation making the cap drop short runs is red. Four mutations, one of which (cap as a
+filter) first SURVIVED because every fixture run had more generation spend than the cap; the fixture
+now carries a finished run whose generation spend is below it.
+
+**capA10's surviving flag is not a treatment effect and needs no action.** Capped probes run a
+*lower* median `share_plan` than free ones (7.15 % against 9.37 %), and the free arm's maximum is
+19.41 %, above capA10's 16.11 %. So this is a high reading inside the observed range, and §258
+already measured that process outliers predict nothing about score. Both subgroups are under 50, so
+by §261 those two medians are not reusable as headline numbers — the refutation stands anyway,
+because it rests on a maximum that exceeds the value, not on the gap between the medians.
