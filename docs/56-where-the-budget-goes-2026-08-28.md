@@ -10862,3 +10862,38 @@ The caveat is that the fourth node's cost rests on the ten runs that reached one
 0.141–0.254. Taking the p90 instead gives 1.02 nodes and ~12 points; the estimate is somewhere in
 12–18 and the direction has never moved. What has moved, twice, is my habit of pricing a marginal
 thing at an average rate — and both times the corpus was there to catch it.
+
+## §253 — the validity cliff is real and nothing in this corpus has fallen off it narrowly
+
+`capB8`'s node 2 scored **0.0 after a full 47.2 s evaluation** — point 2's rule says that is the
+solver, and the verdict names itself: `invalid_results`, *"Speedup N/A due to invalid results:
+52/100 valid (52.0 %)"*. AlgoTune requires **all hundred instances**, so 52 valid is worth exactly
+what 0 valid is worth.
+
+That is a second zero signature beside §227's. `freeB5`'s failure was uniform — every proposed value
+about a hundredth of the reference, some negative, a normalisation gone wrong. `capB8`'s is not:
+1.248 against 15.325, 6.699 against 9.500, 5.481 against 10.362 — ratios of 0.08, 0.71, 0.53. Half
+the instances are right and the wrong ones are wrong by no fixed factor, which is a partially
+correct algorithm rather than a scaling bug.
+
+The all-or-nothing gate invites an obvious worry: how many runs lose everything to a near miss? So I
+looked at every evaluated node whose verdict carries a validity count.
+
+| | |
+|---|---|
+| nodes reporting a count | **2** |
+| their validity | 52/100 (`capB8`) and 51/100 (`remPde10`) |
+| near misses at 95–99 % valid | **0** |
+
+**None.** In this corpus a node either passes all hundred instances or fails about half of them;
+nothing has come close and lost. §193's `spectral_clustering` at 98/100 — the case that made the
+cliff memorable — belongs to arm A's shipped solver, not to anything this loop produced.
+
+So the cliff is real and it has never been the thing that cost a run. That retires a worry I have
+been carrying since §193, and it bounds card item (а): a card sentence about the per-instance ceiling
+would be telling the loop about a hazard it has not once been near. Whatever the case for (а) is, it
+is not this.
+
+Eleven zeros now exist in the corpus and two of them are validity failures; the other nine are
+§227's mismatches, execution errors and one compilation failure. All eleven are the solver, none is
+the harness.
