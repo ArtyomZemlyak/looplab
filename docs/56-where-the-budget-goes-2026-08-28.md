@@ -10660,3 +10660,36 @@ and §228 — which fixed things that were plainly wrong — this one trades a q
 against an unknown amount of solution quality. It belongs in its own registered comparison after the
 probe-cap arm reads out, and the corpus already says what that arm would need: `discrete_log`, where
 47.8 % of the money is in these calls, is the task where it would show first.
+
+## §247 — the long generations live in two phases, and neither is the biggest spender
+
+§246 established what the long calls are (reasoning, not rambling) and left the future experiment
+pointed at a whole model. It can be pointed much more precisely. Over every `edge_expansion`
+generation with a usage record — $95.89 in total, of which **$20.97 (21.9 %) is in calls of 8,000
+completion tokens or more**:
+
+| phase | calls | ≥8k | ≥8k rate | $ total | $ in ≥8k | share of that phase | median thinking |
+|---|---|---|---|---|---|---|---|
+| **propose** | 6,681 | 1,400 | 21.0 % | 25.31 | **10.64** | **42.0 %** | 366 |
+| **repropose** | 2,065 | 512 | 24.8 % | 8.38 | **4.17** | **49.8 %** | 464 |
+| deep_research | 5,542 | 631 | 11.4 % | 15.85 | 3.57 | 22.5 % | 5,102 |
+| plan_step | 10,258 | 157 | **1.5 %** | **33.31** | 1.08 | **3.2 %** | 246 |
+| plan | 2,428 | 127 | 5.2 % | 7.83 | 0.81 | 10.4 % | 312 |
+| foresight_rank | 814 | 105 | 12.9 % | 1.83 | 0.47 | 26.0 % | **10,901** |
+
+**`propose` and `repropose` carry 71 % of it** — $14.81 of $20.97 — and nearly half of `repropose`'s
+own money is in these calls. Meanwhile `plan_step`, the single largest phase at $33.31, has the
+LOWEST big-call rate in the table at 1.5 % and only 3.2 % of its money there. The biggest spender is
+not the problem; the two proposal phases are.
+
+Two distinct shapes are visible and they should not be confused. `propose` and `repropose` have low
+median thinking (366 and 464 characters) with a fat tail — most calls are ordinary and a fifth are
+enormous. `foresight_rank` is the opposite: **10,901 characters of thinking on the median call** and
+only $1.83 of spend in the whole corpus. One is a tail worth money, the other is a habit worth
+almost nothing.
+
+So §246's eventual reasoning-effort comparison has a target: the two proposal phases, where the
+money is, rather than the model as a whole — and `plan_step` should be left alone, because its
+$33.31 is spent on many ordinary calls and a reasoning knob would reach all of them to recover a
+dollar. That is also where §239's discriminator lives: strong openings differ from weak ones in
+writes and graded evaluations, both of which are proposal-phase work.
