@@ -11625,3 +11625,35 @@ that may genuinely have a call in flight, turning a read error into a false leak
 Six mutations red in total: dropping the ending condition (back to §175), dropping the time
 condition, treating a ceiling pause as not-ended, treating a genuine pause as ended, and the handler
 one above.
+
+## §274 — the number that decides $48 had been tested only at both extremes
+
+One batch from readout, I went looking at the thing that will produce the verdict. `stratified_p`
+had exactly two tests: maximal separation (p = 1/36) and no variation at all (p = 1.0). **Both
+extremes, nothing in the middle** — and a statistic can be wrong across its whole interior while
+getting both endpoints right. It is the number that decides $48, and it had never been checked
+where it will actually land.
+
+So it is now checked **by a different method**. The exact enumeration is compared against the same
+p obtained by *sampling* 200 000 relabellings: enumeration and sampling can each be wrong, but an
+off-by-one in `combinations` bookkeeping does not reproduce itself in a shuffle. On a fixture
+deliberately placed mid-range (the test asserts it is not at an extreme, or it could not
+discriminate) the two agree to within 0.01.
+
+Three more properties, each a way the readout could quietly hand the arm a win:
+
+- **The observed arrangement is always in its own null.** Over 40 random three-batch datasets,
+  `p >= 1/6³`. A one-sided p that can reach 0 has dropped the observed relabelling from the null it
+  is compared against — and 0 < α for every α, so the arm would "win" on any data whatsoever.
+- **Ties sit at the boundary, not outside it.** A strict `>` returns 0 on data that says nothing.
+- **The direction is a real test, not `1 - p`.** With ties in the null the two do not sum to one.
+
+**I got one of these wrong and the code was right.** I asserted that `[5, 7]` against `[5, 7]` gives
+p = 1 "because every relabelling gives the same statistic". It does not: the six relabellings give
++2, 0, 0, 0, 0, −2, so p = 5/6. The tie sits ON the boundary and only the arrangements strictly
+below it are excluded. Corrected in the test, with the reasoning written down, because the wrong
+version of that sentence is exactly the sort of thing that reads as obviously true.
+
+Four mutations red: a strict inequality, ignoring the alternative's direction, pooling the batches
+instead of stratifying them (`zip` for `product`), and fixing the split size at one rather than the
+batch's own treated count.

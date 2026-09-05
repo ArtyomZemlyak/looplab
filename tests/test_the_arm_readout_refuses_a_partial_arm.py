@@ -89,3 +89,75 @@ def test_the_permutation_null_is_the_registered_one():
     assert p == 1 / 36, p
     flat = [([100.0, 100.0], [100.0, 100.0])]
     assert arm_readout.stratified_p(flat) == 1.0
+
+
+def _monte_carlo_p(batches, draws=200_000, seed=20260905):
+    """The SAME p by a different method: sample relabellings instead of enumerating them.
+
+    Enumeration and sampling can both be wrong, but they are wrong in different ways -- an
+    off-by-one in the `combinations` bookkeeping does not reproduce itself in a shuffle. This is the
+    check `stratified_p` never had: its two existing cases are both extremes (maximal separation and
+    no variation at all), and the number that decides $48 has never been tested in the middle of its
+    own range.
+    """
+    import random
+    import statistics as st
+    rng = random.Random(seed)
+    obs = sum(st.mean(t) - st.mean(c) for t, c in batches)
+    hits = 0
+    for _ in range(draws):
+        total = 0.0
+        for t, c in batches:
+            pool = list(t) + list(c)
+            rng.shuffle(pool)
+            k = len(t)
+            total += st.mean(pool[:k]) - st.mean(pool[k:])
+        if total >= obs:
+            hits += 1
+    return hits / draws
+
+
+def test_the_exact_p_agrees_with_the_same_p_sampled(tmp_path):
+    """Four batches of four, values chosen so p lands mid-range rather than at either extreme."""
+    batches = [([180.0, 95.0], [140.0, 60.0]),
+               ([210.0, 40.0], [155.0, 130.0]),
+               ([90.0, 205.0], [175.0, 35.0]),
+               ([160.0, 120.0], [88.0, 150.0])]
+    exact = arm_readout.stratified_p(batches)
+    assert 0.02 < exact < 0.98, f"fixture is at an extreme ({exact}) and cannot discriminate"
+    sampled = _monte_carlo_p(batches)
+    assert abs(exact - sampled) < 0.01, (exact, sampled)
+
+
+def test_the_observed_arrangement_is_always_in_its_own_null():
+    """A one-sided p that can reach 0 has dropped the observed relabelling from the null it is
+    compared against -- and 0 < alpha for every alpha, so the arm would 'win' on any data."""
+    import random
+    rng = random.Random(7)
+    for _ in range(40):
+        batches = [([rng.uniform(0, 300), rng.uniform(0, 300)],
+                    [rng.uniform(0, 300), rng.uniform(0, 300)]) for _ in range(3)]
+        p = arm_readout.stratified_p(batches)
+        assert p >= 1 / 6 ** 3 - 1e-12, p
+        assert p <= 1.0
+
+
+def test_ties_do_not_fall_out_of_the_null():
+    """A strict `>` would return 0 on data that says nothing at all, and 0 < alpha for every alpha.
+
+    With four identical values every relabelling gives the same statistic, so all six are `>= obs`
+    and p is 1. With `[5, 7]` against `[5, 7]` the null is NOT flat -- the six relabellings give
+    +2, 0, 0, 0, 0, -2 -- so p is 5/6, not 1. Getting that wrong was my first guess here, and the
+    code was right: the tie sits at the boundary, and only the arrangements strictly below it are
+    excluded."""
+    assert arm_readout.stratified_p([([5.0, 5.0], [5.0, 5.0])]) == 1.0
+    assert arm_readout.stratified_p([([5.0, 7.0], [5.0, 7.0])]) == 5 / 6
+
+
+def test_the_direction_is_a_choice_and_both_are_available():
+    """The registered alternative is one-sided positive. The negative form must be a real test, not
+    `1 - p`: with ties in the null the two do not sum to one."""
+    batches = [([200.0, 210.0], [100.0, 110.0])]
+    up = arm_readout.stratified_p(batches, alternative_positive=True)
+    down = arm_readout.stratified_p(batches, alternative_positive=False)
+    assert up == 1 / 6 and down == 1.0, (up, down)
