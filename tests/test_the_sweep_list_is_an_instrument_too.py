@@ -132,3 +132,49 @@ def test_an_unreadable_record_is_not_a_verdict_either_way(tmp_path):
     (tmp_path / "model-probes").mkdir(parents=True)
     ok, detail = sweep_claims.check_accee_test(str(tmp_path))
     assert not ok and "cannot read" in detail, detail
+
+
+def _make_task(tmp_path: Path, text: str):
+    d = tmp_path / "looplab" / "benchmarks" / "algotune"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "make_task.py").write_text(text, encoding="utf-8")
+
+
+def test_item_a_is_shipped_and_the_list_still_calls_it_missing(tmp_path):
+    """Read out of the generated card on 2026-09-05: the `goal` field carries the ceiling, the
+    arithmetic `(1 + 5) * reference_time * 10`, and the consequence that a killed instance is
+    INVALID rather than slow. Re-shipping it after the readout would have been wasted work."""
+    _make_task(tmp_path, "x = '(1 + 5) * reference_time * 10 seconds, floored at 10 s'\n")
+    ok, detail = sweep_claims.check_card_silent_on_instance_ceiling(str(tmp_path))
+    assert not ok and "shipped" in detail, detail
+
+
+def test_the_detail_names_what_actually_matched(tmp_path):
+    """The first version of this said "including the worked form ..." when only one of two markers
+    had matched -- a sentence claiming more than the measurement, which is the habit this file
+    exists to catch."""
+    _make_task(tmp_path, "x = '(1 + 5) * reference_time * 10'\n")
+    _, detail = sweep_claims.check_card_silent_on_instance_ceiling(str(tmp_path))
+    assert "(1 + 5) * reference_time * 10" in detail
+    assert "CEILING ON HOW SLOW" not in detail, detail
+
+
+def test_item_a_would_hold_if_the_card_were_silent(tmp_path):
+    _make_task(tmp_path, "x = 'nothing about ceilings here'\n")
+    ok, detail = sweep_claims.check_card_silent_on_instance_ceiling(str(tmp_path))
+    assert ok, detail
+
+
+def test_item_b_still_holds_and_says_why_it_matters(tmp_path):
+    """§84: eleven of seventeen multi-node probes ended on a node that was not their best, none on
+    a better one, paired sign test p = 1/2048."""
+    _make_task(tmp_path, "x = 'the champion is finally scored on held-out instances'\n")
+    ok, detail = sweep_claims.check_card_silent_on_the_champion_rule(str(tmp_path))
+    assert ok, detail
+    assert "eleven of seventeen" in detail, detail
+
+
+def test_item_b_would_flip_if_the_card_said_it(tmp_path):
+    _make_task(tmp_path, "x = 'the best evaluated node is the one submitted'\n")
+    ok, detail = sweep_claims.check_card_silent_on_the_champion_rule(str(tmp_path))
+    assert not ok and "best evaluated" in detail, detail

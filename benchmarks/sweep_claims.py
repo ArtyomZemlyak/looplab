@@ -112,11 +112,58 @@ def check_accee_test(bench: str):
                                  "building, is the one in the file"))
 
 
+CEILING_MARKS = ("CEILING ON HOW SLOW YOUR SOLVER MAY BE, PER INSTANCE",
+                 "(1 + 5) * reference_time * 10")
+CHAMPION_MARKS = ("best evaluated", "the best EVALUATED node")
+
+
+def _card_source(bench: str) -> str:
+    return (Path(bench) / "looplab" / "benchmarks" / "algotune" / "make_task.py").read_text(
+        encoding="utf-8", errors="replace")
+
+
+def check_card_silent_on_instance_ceiling(bench: str):
+    """"(а) карточка не говорит про потолок 10× эталона на инстанс" """
+    try:
+        src = _card_source(bench)
+    except OSError as exc:
+        return False, f"cannot read make_task.py: {type(exc).__name__}"
+    found = [m for m in CEILING_MARKS if m in src]
+    ok = not found
+    # NAME WHAT ACTUALLY MATCHED. The first version said "including the worked form ..." while only
+    # one of two markers had matched -- a sentence that claims more than the measurement, which is
+    # the exact habit this whole file exists to catch.
+    return ok, ("no per-instance ceiling text in the card generator" if ok else
+                f"the card DOES state it; matched {found!r}. Read out of the generated card, the "
+                "goal field carries the rule, the arithmetic and the consequence that a killed "
+                "instance is INVALID rather than slow. Item (a) is shipped")
+
+
+def check_card_silent_on_the_champion_rule(bench: str):
+    """"(б) карточка не говорит, что лучший ОЦЕНЁННЫЙ узел сохраняется" """
+    try:
+        src = _card_source(bench)
+    except OSError as exc:
+        return False, f"cannot read make_task.py: {type(exc).__name__}"
+    # The card's only `champion` sentence is about the held-out SPLIT, not about which node is
+    # submitted. §84 measured the rule biting: eleven of seventeen multi-node probes ended on a node
+    # that was not their best, none on a better one, paired sign test p = 1/2048.
+    found = [m for m in CHAMPION_MARKS if m in src]
+    ok = not found
+    return ok, ("the card still does not say which node is submitted -- §84's rule, which the "
+                "corpus shows biting in eleven of seventeen multi-node probes" if ok else
+                f"the card states it: {found}")
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
     ("state: remEE, remDL2 and remPde are running", check_named_probes_running),
     ("point 9: edge_expansion comparison figure accEE TEST 224.4432", check_accee_test),
+    ("point 8(a): the card does not mention the 10x per-instance ceiling",
+     check_card_silent_on_instance_ceiling),
+    ("point 8(b): the card does not say the best EVALUATED node is kept",
+     check_card_silent_on_the_champion_rule),
 ]
 
 

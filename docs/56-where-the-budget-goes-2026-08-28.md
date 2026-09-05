@@ -11752,3 +11752,33 @@ weak to fail, a fixture too loose to be true. Fixed to carry `subset: test`, as 
 
 Five mutations red: not checking `subset`, treating a missing `subset` as `test`, ignoring
 `superseded`, swallowing the reason in `admit`, and admitting a non-positive speedup.
+
+## §278 — one of the three unshipped card items was already shipped
+
+Batch 12 is running and the readout is one batch away, so I went to check the three card findings
+I have been deferring — the ones I would act on the moment the embargo lifts. Read out of the
+**generated card**, not out of my notes:
+
+- **(а) is SHIPPED.** The `goal` field carries the whole rule: *"AND THERE IS A CEILING ON HOW SLOW
+  YOUR SOLVER MAY BE, PER INSTANCE. The harness gives each instance's subprocess
+  `(1 + 5) * reference_time * 10` seconds -- 5 warm-up runs plus one timed run, each allowed 10x the
+  reference -- floored at 10 s. Cross it and the instance is KILLED, and a killed instance is not a
+  slow score, it is an INVALID one."* Had I not checked, I would have spent the post-readout window
+  re-shipping something already there.
+- **(б) still holds.** The card's only `champion` sentence is about the held-out SPLIT — *"the
+  champion is finally scored on held-out instances from the same generator"* — and says nothing
+  about WHICH node is submitted. §84's rule, the one the corpus shows biting in eleven of seventeen
+  multi-node probes with none the other way, is still absent.
+- **(в) still holds, and more completely than the note says.** `RESEARCHER_PROMPT_CUES` carries
+  `_gpu_budget_hint` and `_time_budget_hint` and no money cue at all; the only `budget` in the card
+  is *"46 ms of budget per instance"*, a time budget. There is nothing for plan / `foresight_rank` /
+  `hyp_prioritize` to fail to receive — the hint does not exist.
+
+Both card items are now claims `sweep_claims.py` checks, so this is measured every sweep instead of
+remembered. That makes six of its checks, five of them stale.
+
+**And the first version of the (а) message overclaimed.** It said the card states the rule
+*"including the worked form `(1 + 5) * reference_time * 10`"* when only one of two markers had
+actually matched — a sentence claiming more than its measurement, inside the file whose entire
+purpose is catching exactly that. Now it names what matched. Five mutations red, including one that
+puts the unmatched marker back into the sentence.
