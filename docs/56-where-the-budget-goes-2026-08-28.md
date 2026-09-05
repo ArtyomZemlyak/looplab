@@ -11523,3 +11523,38 @@ a traceback — `PIPESTATUS`, as the list says. And a throwaway script counting 
 zero for all 107 corpus runs, because `eval_train` arrives as an ARGUMENT to `run_dev_command` and
 not as a tool name — which `arm_fidelity` already knew and documents. The answer was implausible, so
 it got checked; that is the only reason it did not become a finding.)
+
+## §271 — the standing list is an instrument too, and one of its readings is backwards
+
+Five sweeps running I have re-derived the same corrections to the sweep list by hand and reported
+them again. §219's lesson applies to the list itself: an instrument carrying false readings teaches
+its reader to discount the true ones. So `benchmarks/sweep_claims.py` checks the list's checkable
+claims against the bench, delegating each to the tool that owns the question:
+
+```
+        STALE  point 5: seven entries in .baseline_times
+               9 entries, regime w22x1r3 -- the COUNT is not the invariant
+        STALE  point 3: add the abandoned remDL $0.1292 when reconciling
+               remDL has a tree on disk, carrying $0.1292 of generation spans -- already inside
+               the span sum, so adding it by hand MANUFACTURES the discrepancy the note warns about
+        STALE  state: remEE, remDL2 and remPde are running
+               not running: remDL2, remEE, remPde; on the lanes now: capA11, capB11, freeA11, freeB12
+```
+
+**The money one is not merely stale, it is backwards.** Measured: `remDL` has a tree with 27
+generation spans totalling **$0.1292 exactly**, so its money is already in the sum the reconciliation
+uses. Following the instruction produces the very false discrepancy it exists to prevent — and
+`check_money` reconciles to `RESIDUE $-0.000005` without it.
+
+**A mutation survived, and the fix was a better criterion, not a better fixture.** I first keyed the
+money check on "does a tree exist", and a mutation to "is the cost zero" passed every test. The two
+looked equivalent and are not: **the reconciliation compares the meter against the sum of
+generation-span costs**, so what matters is whether remDL's dollars are IN that sum, not whether a
+folder with its name exists. A tree that exists but carries no billed span — a probe that died before
+its first paid call — really is money the sum lacks, and there the note would be right. The criterion
+is now the money, and the fixture that tells the two apart is in the file.
+
+The tool states the date of the wording it was written against, because if the list is edited this
+file goes stale in its turn. And a check that raises is printed `UNCHECKABLE` rather than counted
+either way — a mutation that scores it as stale is red, since a false reading in the checker is the
+exact thing it exists to stop.
