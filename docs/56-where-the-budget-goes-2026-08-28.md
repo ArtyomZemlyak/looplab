@@ -11458,3 +11458,32 @@ So the flags stand as real: those two probes spent their opening money on `propo
 spends it on `deep_research`. One is treated and one is control, so it is not a treatment signature,
 and §258 measured that process outliers predict nothing about the score. **No action** — which is
 the finding, recorded so the next sweep does not re-propose either refinement.
+
+## §269 — the question three sweeps asked by hand, and why a node count could not answer it
+
+Batch 10 sat at $0.28–$0.36 with three of four probes showing no node, and for the third sweep
+running I answered "is that unusual?" with an ad-hoc query. It is not:
+
+```
+108 finished edge_expansion runs; 1 never got a node at all
+  p10 $0.2381   p25 $0.2705   p50 $0.3168   p75 $0.3552   p90 $0.4154
+  at $0.28 spent, 66 % of corpus runs still had NO node
+  at $0.31 spent, 53 %      at $0.34 spent, 33 %      at $0.36 spent, 21 %
+```
+
+§257 had deliberately made `outlier_check` skip `nodes` for a running probe, and correctly — a
+count is partial for a live probe and complete for a corpus run, which is §209's mistake. But that
+left a real question unanswerable, and a probe that never gets a node at all reading as **clean**
+right up to the moment it ends.
+
+The distinction §257 missed: **"has the first node arrived by $S?" is not a count, it is a
+threshold.** It has the same answer whenever it is asked. A probe at $0.30 with nothing is behind
+exactly those corpus runs whose first node came before $0.30, and no later reading changes that. So
+the check now carries a survival reading for nodeless probes, and it stays silent for the merely
+young — on the live batch, capA11 at $0.279 and capB11 at $0.326 are behind 34 % and 50 % of the
+corpus, which is nothing.
+
+A finished run that **never** produced a node stays in the denominator as a first node that never
+came — it is the most extreme value the corpus has, and there is exactly one of them in 108. A
+mutation dropping it is red, as are reversing the threshold, never firing, and firing for probes
+that already have a node.

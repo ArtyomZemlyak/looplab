@@ -173,3 +173,46 @@ def test_the_check_itself_stops_flagging_a_probe_for_being_young(tmp_path, monke
     assert outlier_check.main(["--root", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "share_propose" not in out, out
+
+
+def test_a_first_node_that_has_not_arrived_is_a_threshold_not_a_count(tmp_path):
+    """A node COUNT is partial for a running probe and complete for a corpus run, so §257 skips it.
+    "Has the first node arrived by $S?" is a THRESHOLD and has the same answer whenever it is asked,
+    so it IS readable mid-run -- which is how a probe that never gets a node stops reading as clean
+    right up until it ends."""
+    firsts = [0.1, 0.2, 0.3, 0.4, float("inf")]
+    assert outlier_check.late_share(firsts, 0.05) == 0.0
+    assert outlier_check.late_share(firsts, 0.25) == 40.0
+    assert outlier_check.late_share(firsts, 9.99) == 80.0, (
+        "the run that never produced a node left the denominator")
+
+
+def test_a_run_that_never_produced_a_node_stays_in_the_corpus(tmp_path):
+    """It is the most extreme first-node value the corpus has. Dropping it makes every live probe
+    look later than it is -- measured: 1 of 108 real edge_expansion runs is exactly this."""
+    _run(tmp_path, "never", [0.1] * 10)                      # finished, no node ever
+    _run(tmp_path, "early", [0.1] * 10, node_after=0.2)
+    firsts = outlier_check.corpus_first_nodes(str(tmp_path), "edge_expansion")
+    assert len(firsts) == 2, firsts
+    assert float("inf") in firsts, firsts
+
+
+def test_a_probe_that_is_merely_young_is_not_called_late(tmp_path, monkeypatch, capsys):
+    for i in range(10):
+        _run(tmp_path, f"done{i}", [0.1] * 10, node_after=0.3 + 0.01 * i)
+    _run(tmp_path, "live", [0.1] * 2)                        # $0.20, before anyone's first node
+    monkeypatch.setattr(outlier_check.lanes, "probes",
+                        lambda root: [{"probe": "live", "lane": "0-10", "pid": 1}])
+    outlier_check.main(["--root", str(tmp_path)])
+    assert "no node yet" not in capsys.readouterr().out
+
+
+def test_a_probe_later_than_the_whole_corpus_is_named(tmp_path, monkeypatch, capsys):
+    for i in range(10):
+        _run(tmp_path, f"done{i}", [0.1] * 10, node_after=0.3 + 0.01 * i)
+    _run(tmp_path, "late", [0.1] * 8)                        # $0.80, past every corpus first node
+    monkeypatch.setattr(outlier_check.lanes, "probes",
+                        lambda root: [{"probe": "late", "lane": "0-10", "pid": 1}])
+    outlier_check.main(["--root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "no node yet at $0.8000" in out and "100 % of finished runs had one" in out, out

@@ -126,6 +126,40 @@ def corpus(root: str, task: str, min_spend: float = 0.9, cap: float | None = Non
     return dict(values)
 
 
+def late_share(corpus_firsts, spend: float) -> float:
+    """Of finished runs, the share whose FIRST node had already arrived by `spend` dollars.
+
+    WHY THIS IS READABLE MID-FLIGHT WHEN `nodes` IS NOT. A node COUNT is partial for a running probe
+    and complete for a corpus run, so comparing them measures the clock (§257). "Has the first node
+    arrived by $S?" is not a count, it is a THRESHOLD, and it has the same answer whenever it is
+    asked: a probe at $0.30 with no node is behind exactly those corpus runs whose first node came
+    before $0.30, and no later reading can change that.
+
+    Measured 2026-09-05 on 108 finished `edge_expansion` runs: the median first node lands at
+    $0.3168, and at $0.28 spent 66 % of the corpus ALSO had nothing yet. Without this the sweep
+    keeps asking that by hand -- three sweeps running -- and a probe that never gets a node at all
+    reads as clean until the moment it ends.
+
+    A run that finished with NO node stays in the denominator, as a first node that never came. It
+    is the most extreme value the corpus has; dropping it would make every live probe look later
+    than it is.
+    """
+    if not corpus_firsts:
+        return float("nan")
+    return 100.0 * sum(1 for x in corpus_firsts if x <= spend) / len(corpus_firsts)
+
+
+def corpus_first_nodes(root: str, task: str, min_spend: float = 0.9) -> list:
+    """First-node spend per finished run; `inf` for a run that never produced one."""
+    out = []
+    for events_path in sorted(glob.glob(f"{root}/*/runs/{task}/run/events.jsonl")):
+        got = measure(events_path, events_path.replace("events.jsonl", "spans.jsonl"))
+        if got["spend"] < min_spend:
+            continue
+        out.append(got["first_node_usd"] if got["first_node_usd"] is not None else float("inf"))
+    return out
+
+
 def percentile(sample, value) -> float:
     """Midrank percentile: ties count half.
 
@@ -160,6 +194,7 @@ def main(argv=None) -> int:
         print("no bench probe running")
         return 0
     n = len(next(iter(dist.values())))
+    firsts = corpus_first_nodes(args.root, args.task)
     print(f"{len(live)} running probe(s) against {n} finished {args.task} runs")
     cache: dict = {}
     flagged = 0
@@ -204,6 +239,13 @@ def main(argv=None) -> int:
             if pct <= args.low or pct >= args.high:
                 said.append(f"{key}={value:.4g} at the {pct:.0f}th pct "
                             f"(corpus median {statistics.median(dist[key]):.4g})")
+        # THE ONE QUESTION A NODE COUNT CANNOT ANSWER MID-RUN, ASKED AS A THRESHOLD INSTEAD.
+        if got["nodes"] == 0:
+            share = late_share(firsts, got["spend"])
+            if share >= args.high:
+                said.append(f"no node yet at ${got['spend']:.4f}, by which point {share:.0f} % of "
+                            f"finished runs had one (corpus median first node "
+                            f"${statistics.median([x for x in firsts if x != float('inf')]):.4f})")
         print(f"  {name:10s} ${got['spend']:.4f} {got['nodes']} node(s)"
               + ("" if said else "  -- nothing outside p%g..p%g" % (args.low, args.high)))
         for line in said:
