@@ -10795,3 +10795,37 @@ It also sets the floor for reading the eventual result. The two arms differ in w
 a nearly identical budget profile, which is the cleanest form this comparison could take, and it
 means the outcome cannot be explained away as "the treated runs simply spent their money somewhere
 else".
+
+## §251 — there is no point in a run after which another node stops paying
+
+§249 found that the money spent after the last graded node is an interrupted build rather than
+idling. The neighbouring question is about nodes that *do* finish late: is there a point in the
+budget after which another attempt has never been worth making? That would be a stopping rule, and
+it is the kind of rule that sounds obviously right.
+
+Every evaluated node after the first, across the corpus, placed by the share of its run's budget
+spent when it was evaluated, and scored on whether it beat the best node so far:
+
+| budget decile | nodes | improved the champion | rate | median gain when it did |
+|---|---|---|---|---|
+| 50–60 % | 12 | 12 | **100 %** | 166.4 |
+| 60–70 % | 23 | 17 | 74 % | 107.3 |
+| 70–80 % | 38 | 27 | 71 % | 84.5 |
+| 80–90 % | 35 | 15 | 43 % | 76.4 |
+| 90–100 % | 67 | 15 | **22 %** | 65.2 |
+
+The rate decays monotonically and the gain shrinks with it — but **it never reaches zero**. In the
+final tenth of the budget, 15 of 67 nodes still improved the champion, by a median of 65 points.
+Over the last fifth, **30 of 102**.
+
+So a stopping rule has nothing to stop. At 22 % × 65.2 points, a node evaluated in the last decile is
+worth about **14 points in expectation**, which is the same order as §241's 12.03 for a fourth node —
+the two measurements agree, arrived at from opposite directions. Cutting a run at 80 % of budget
+would have forgone thirty improvements in this corpus to save nothing that could be spent elsewhere.
+
+That is the third tempting rule this corpus has refused. §225: do not restart a run because its first
+node was weak — four in five recover. §249: do not read the tail as slack — it is a build the money
+cut off. And now: do not stop early — the last node is worth about as much as the fourth.
+
+The pattern in all three is the same. The obvious economy is measured against what it saves and not
+against what it forgoes, and every time the number that matters is the one on the other side.
