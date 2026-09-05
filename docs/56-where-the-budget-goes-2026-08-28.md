@@ -11008,3 +11008,37 @@ This is the loop making an unusual choice, not the bench failing.
 evaluated nodes**, and if its first node is weak it lands in §231's unrecovered fifth — because
 recovery normally arrives as the *second* node at 72 % of budget, and there is not room for two more.
 If it finishes with three, my model of how the money converts into nodes is wrong and I will say so.
+
+## §257 — the outlier check, and three defects it found in itself
+
+Three sweeps running, the same question arrived and was answered with an ad-hoc query: is a 47 s
+evaluation unusual (§226 — no), is 52 % of spend in `deep_research` unusual (§256 — yes, the corpus
+maximum), is a first node at 62 % of budget unusual (§256 — yes, past a maximum of 53 %). Two of the
+three were ordinary and one was not, and the difference was never guessable without the distribution.
+So `benchmarks/outlier_check.py` brings the distribution to the sweep: for every running probe it
+reports the percentile of a few PROCESS variables inside the finished corpus, and names only what
+falls outside p5–p95. It reads no score — node **count** and money are process; a metric is the
+outcome, and §190 forbids reading the arm's outcome in flight.
+
+**Its first run flagged three healthy probes**, and the reason is a mistake this document has made
+before. It compared a running probe's `first_node_at / spend-so-far` against a corpus of FINAL
+shares — but the denominator is still growing, so the same node reads **54 % at $0.59 and 32 % at its
+eventual $1.01**. That is §209's error in different clothes: a partial quantity held against a
+complete one. Fixed by measuring the first node in **dollars**, which is the same number whenever it
+is read, and by not comparing `spend` and `nodes` at all for a running probe — a probe that has spent
+less and built fewer nodes than every finished run would be flagged every sweep, and an alarm that
+always fires teaches its reader to skip the ones that matter.
+
+Two more defects came out of writing the tests, both about ties:
+
+* the percentile counted values `<= v`, so a probe sitting **exactly on** a much-repeated corpus
+  value read as the **100th** percentile and was flagged for being typical. Midrank — ties count half
+  — puts it at 50. Mutation caught this one twice: the first fixture had a constant corpus, where the
+  bug is invisible, and the test only bites with a sample that varies **and** has ties;
+* a corpus variable with no spread was skipped outright, which silently swallowed the most notable
+  thing such a corpus can produce — a value far outside a constant. Now it is skipped only when the
+  probe matches the constant.
+
+On the live batch it now says what the hand queries said, in one command: `capA9` outside on
+`first_node_usd` ($0.6392 against a corpus median of $0.3161) and on `share_deep_research` (45.2 %
+against 16.3 %), `capB9` and `freeA9` clean, `freeB10` low on `share_plan`. Four mutations red.
