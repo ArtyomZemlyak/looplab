@@ -10429,3 +10429,32 @@ arm's effect — if there is one — should be smaller than the opening-level di
 
 Written down now, before the arm reads out, so it cannot be assembled afterwards to fit whatever
 number arrives.
+
+## §240 — the snapshot does not get slower as the archive grows
+
+Three elevated snapshots in a row (345, 179, 285 s) raise a different question from §237's, which
+asked *what makes a particular snapshot slow*. This one asks whether the whole distribution is
+creeping upward as the corpus grows — because if it is, the cadence has a deadline.
+
+Twenty-eight snapshots with both a record count and a breakdown, spanning **105 to 118 run records**:
+
+| run records | n | median total |
+|---|---|---|
+| 105–106 | 10 | 131 s |
+| 110 | 8 | 126 s |
+| 114 | 6 | 136 s |
+| 118 | 4 | 225 s |
+
+Regression over all twenty-eight: **slope −1.76 s per run record, Pearson r = −0.05**. No trend.
+The 118-record group looks high on four points, but the largest snapshot in the whole series — 976 s
+— sits at 106 records, in the group with the *lowest* median. Archive size is not what moves it.
+
+So both hypotheses about the slow snapshots are now measured and refuted: probe launches (§237,
+median 127 s near a launch against 144 s quiet) and archive growth (here, r = −0.05). What remains
+is §216's account — the box being busy with something CPU-heavy — which is the one that was acted on,
+and the action bounded the worst case rather than removing it.
+
+The practical answer is that the cadence has no deadline from this direction. A typical snapshot is
+~130 s against an 1800 s interval whatever the corpus size, and §206's period fix means even the
+outliers do not stretch the next tick. I am not measuring this again unless a snapshot crosses
+600 s, which is the point where the outliers would start eating a third of the interval.
