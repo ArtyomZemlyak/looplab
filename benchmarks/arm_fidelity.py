@@ -117,6 +117,30 @@ def probe_calls(root: str, name: str) -> dict:
 LIFECYCLE = ("run_finished", "pause", "resume")
 
 
+SETTING = "developer_probe_max_calls"
+
+
+def assigned_cap(root: str, name: str):
+    """What THIS RUN recorded as its own cap, from `config.snapshot.json`. None if unreadable.
+
+    The counts below verify the treatment by its BEHAVIOUR, which is stronger -- except for a probe
+    that never reaches the cap. `capB4` stopped at eleven probes with zero refusals (§227), so its
+    behaviour is identical to a control's and cannot tell whether it was capped at all. For those
+    the run's own recorded settings are the only evidence, and they are independent of the
+    launcher's INSTRUMENT.txt claim: one is what the operator meant, the other what the engine got.
+
+    Checked across all 24 probes of batches 1-6 on 2026-09-05: every treated probe records 12 and
+    every control records 0, `capB4` included. It was capped and simply never hit it.
+    """
+    for path in sorted(glob.glob(f"{root}/{name}/runs/*/run/config.snapshot.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh).get(SETTING)
+        except (OSError, ValueError):
+            return None
+    return None
+
+
 def _event_types(root: str, name: str) -> set:
     """The set of event TYPES in this probe's run, crash-atomic packets unwrapped. No data read."""
     kinds: set = set()
@@ -193,6 +217,10 @@ def _paused(root: str, name: str, budget: float = 1.0) -> bool:
 def report(root: str, treat, control) -> dict:
     """Contrast over FINISHED probes only, with the running ones counted but not compared."""
     rows = {n: probe_calls(root, n) for n in list(treat) + list(control)}
+    for n in list(treat) + list(control):
+        rows[n]["assigned"] = assigned_cap(root, n)
+    misassigned = [n for n in treat if rows[n]["assigned"] not in (None, 12)] + \
+                  [n for n in control if rows[n]["assigned"] not in (None, 0)]
 
     def started(names):
         return [n for n in names if rows[n]["executed"] or rows[n]["refused"]]
@@ -206,6 +234,7 @@ def report(root: str, treat, control) -> dict:
     tm = statistics.median(t) if t else 0
     cm = statistics.median(c) if c else 0
     return {"rows": rows, "running": running, "paused": paused,
+            "misassigned": misassigned,
             "treat_n": len(t), "control_n": len(c),
             "treat_median": tm, "control_median": cm,
             "treat_evals": statistics.median(te) if te else 0,
@@ -245,6 +274,11 @@ def main(argv=None) -> int:
     print(f'\nmedian executed over FINISHED probes: treat {got["treat_median"]} '
           f'(n={got["treat_n"]}), control {got["control_median"]} (n={got["control_n"]}), '
           f'contrast {got["contrast"]:+g}')
+    if got["misassigned"]:
+        print("  WRONGLY ASSIGNED: " + ", ".join(
+            f'{n} records {SETTING}={got["rows"][n]["assigned"]}' for n in got["misassigned"])
+            + " -- the label and the run's own config disagree, so that probe is not in the arm "
+              "it is filed under")
     if got["eval_contrast"] is not None:
         print(f'  the channel: median eval_train treat {got["treat_evals"]}, '
               f'control {got["control_evals"]}, {got["eval_contrast"]:+g} -- a cap with no channel '

@@ -285,3 +285,54 @@ def test_a_probe_that_ran_and_failed_is_still_an_execution(tmp_path):
     got = arm_fidelity.report(str(tmp_path), ["capA6"], ["freeA6"])
     assert got["rows"]["capA6"]["executed"] == 6, got["rows"]["capA6"]
     assert got["rows"]["capA6"]["unavailable"] == 0
+
+
+def _config(root: Path, name: str, cap):
+    d = root / name / "runs" / "edge_expansion" / "run"
+    (d / "config.snapshot.json").write_text(
+        json.dumps({"llm_budget_usd": 1.0, "developer_probe_max_calls": cap}), encoding="utf-8")
+
+
+def test_the_assignment_is_checked_against_the_runs_own_config(tmp_path):
+    """Counts verify the treatment by BEHAVIOUR, which is stronger — except for a probe that never
+    reaches its cap. `capB4` stopped at eleven probes with zero refusals, so its behaviour is a
+    control's; only its own `config.snapshot.json` can say it was capped. It records 12."""
+    _probe(tmp_path, "capB4", executed=11, refused=0)
+    _config(tmp_path, "capB4", 12)
+    _probe(tmp_path, "freeA4", executed=27)
+    _config(tmp_path, "freeA4", 0)
+    got = arm_fidelity.report(str(tmp_path), ["capB4"], ["freeA4"])
+    assert got["misassigned"] == [], got
+    assert got["rows"]["capB4"]["assigned"] == 12 and got["rows"]["freeA4"]["assigned"] == 0
+
+
+def test_a_treated_probe_that_was_never_capped_is_named(tmp_path):
+    """The failure this exists for: the launcher's INSTRUMENT.txt says one thing and the engine got
+    another, and no count can tell, because an uncapped probe that stops early looks like a control.
+    §195 is four minutes of that; a whole batch of it is $4."""
+    _probe(tmp_path, "capA9", executed=11, refused=0)
+    _config(tmp_path, "capA9", 0)                      # the setting never reached the engine
+    _probe(tmp_path, "freeA9", executed=27)
+    _config(tmp_path, "freeA9", 0)
+    got = arm_fidelity.report(str(tmp_path), ["capA9"], ["freeA9"])
+    assert got["misassigned"] == ["capA9"], got["misassigned"]
+
+
+def test_a_control_that_was_secretly_capped_is_named_too(tmp_path):
+    _probe(tmp_path, "capA9", executed=12, refused=3)
+    _config(tmp_path, "capA9", 12)
+    _probe(tmp_path, "freeA9", executed=11)
+    _config(tmp_path, "freeA9", 12)                    # a control carrying the treatment
+    got = arm_fidelity.report(str(tmp_path), ["capA9"], ["freeA9"])
+    assert got["misassigned"] == ["freeA9"], got["misassigned"]
+
+
+def test_a_missing_config_is_not_an_accusation(tmp_path):
+    """A probe whose config has not been written yet, or cannot be read, is unverified -- not
+    misassigned. Calling it a mismatch would put a false alarm in front of an operator every time a
+    probe is a few seconds old."""
+    _probe(tmp_path, "capA9", executed=12, refused=3)
+    _probe(tmp_path, "freeA9", executed=27)
+    got = arm_fidelity.report(str(tmp_path), ["capA9"], ["freeA9"])
+    assert got["misassigned"] == []
+    assert got["rows"]["capA9"]["assigned"] is None

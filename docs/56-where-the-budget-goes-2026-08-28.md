@@ -10522,3 +10522,34 @@ had no test of its own; it does now.
 
 Batch 5's four probes all ended `run_finished / budget_exhausted` — §228 holding for a second
 consecutive batch — and batch 6 is away on all four lanes.
+
+## §243 — the one probe whose treatment no count could verify
+
+`arm_fidelity` verifies the intervention by its BEHAVIOUR — probes executed, refusals collected —
+which is the stronger evidence and the reason §198 exists. It has one blind spot, and the arm has
+already produced it. `capB4` stopped at eleven probes with **zero refusals** (§227): behaviourally
+indistinguishable from a control. No count can say whether it was capped at all.
+
+For those probes the only evidence is the run's own `config.snapshot.json`, which is independent of
+the launcher's claim — INSTRUMENT.txt records what the operator meant, the config records what the
+engine got. Checked across all 24 probes of batches 1–6:
+
+| arm | probes | `developer_probe_max_calls` recorded |
+|---|---|---|
+| treated | 12 | **12** in every one, `capB4` included |
+| control | 12 | **0** in every one |
+
+No mismatches. `capB4` was capped and simply never reached its cap, which is the 9 % §196 predicts.
+
+The check is now part of `arm_fidelity` rather than a one-off query, because the failure it guards
+against is silent by construction: a treated probe whose setting never reached the engine looks
+exactly like a control that stopped early, and no amount of staring at the counts would show it.
+§195 is four minutes of that mistake caught early; a whole batch of it is $4 and a diluted result.
+
+Four mutations red, and two of them are the interesting pair: **a missing config must not count as a
+mismatch** (a probe seconds old has not written one, and a false alarm every sweep is how a real
+alarm gets ignored), and **the control arm must be checked too** — a control that silently carried
+the cap would be the same defect wearing the other label, and only checking the treated side would
+miss it.
+
+Still no scores: this reads two settings out of a config file.
