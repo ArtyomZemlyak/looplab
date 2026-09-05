@@ -338,7 +338,12 @@ def interaction_p(groups, draws: int = 20000, seed: int = 190) -> float | None:
 
     Sampled rather than enumerated: the exact space is 6^12, which is 2.2 billion.
     """
-    if set(groups) != {"A", "B"}:
+    # A AND B, WHATEVER ELSE IS PRESENT. The first version demanded the group set be EXACTLY
+    # {"A", "B"} -- and §279 had already established, in its own text, that batch 1 is `mixed`. So
+    # the registered check silently returned None on the real design and the readout printed no
+    # interaction p at all, at the one moment it was for. `mixed` is excluded from this comparison
+    # on purpose: one lane from each pair on each side carries no lane confound to estimate.
+    if not {"A", "B"} <= set(groups):
         return None
     import random
     rng = random.Random(seed)
@@ -447,8 +452,14 @@ def main(argv=None) -> int:
             print(f"    mapping {key}: {got['contrast']:+.2f} over {got['n']} batch(es){note}")
         pi = interaction_p(groups)
         if pi is not None:
-            print(f"    two-sided sampled interaction p = {pi:.4f} -- a lane effect would add to "
-                  "the contrast under one mapping and subtract under the other")
+            extra = sorted(set(groups) - {"A", "B"})
+            print(f"    two-sided sampled interaction p = {pi:.4f} on A vs B"
+                  + (f" (excluding {', '.join(extra)}, which carry no confound to estimate)"
+                     if extra else "")
+                  + " -- a lane effect would add to the contrast under one mapping and subtract "
+                    "under the other")
+        else:
+            print("    no interaction p: the design does not contain both mappings")
     if args.record:
         record_readout(args.record, {
             "taken": "by arm_readout.py --record",

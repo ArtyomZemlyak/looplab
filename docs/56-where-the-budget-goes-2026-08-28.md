@@ -11929,3 +11929,44 @@ ceiling back up it hung, and a hanging test reads as "still running", not "broke
 `relabel_space` out so the decision is checkable without paying for it. Six mutations red: the
 ceiling back up, dropping the plus-one, never taking the exact path, dropping the standard error,
 not counting the space, and silencing the near-α warning.
+
+## §284 — the arm read out, and the registered lane check had silently returned nothing
+
+**The twelve-batch arm is read.** Recorded to `benchmarks/algotune/.arm_readout_taken`, which is also
+the file that lifts §190 for `probe_summary` (§282):
+
+```
+12 complete batches of the 12 the design registered
+sum of within-batch mean differences: +105.96
+stratified one-sided permutation p = 0.3577 +/- 0.0011 (alpha 0.05)
+  -- SAMPLED over 200000 of 2176782336 relabellings
+do NOT reject: no effect of the registered size was detected at power 0.77 (§234).
+   That is not the same as 'capping does not help'.
+```
+
+Forty-eight dollars, twelve batches, forty-eight probes: **capping the developer at 12 probes did
+not move the score by an amount this design could see.** The fidelity was never in doubt — every
+treated probe stopped at exactly 12 executed calls and the controls ran to 13–33, with the channel
+visible in `eval_train` all the way through — so this is a real answer about the intervention, not a
+failed manipulation.
+
+**And the check §266 was designed for did not run.** The first output printed no interaction p at
+all. Cause: `interaction_p` required the group set to be EXACTLY `{"A", "B"}` — and §279 had
+established, in its own text, that batch 1 is `mixed`. I wrote the requirement two sweeps after
+documenting the fact that violates it, and the registered analysis silently returned `None` at the
+one moment it existed for. Fixed to need A and B *present* rather than *alone*, with `mixed`
+excluded on purpose and said out loud:
+
+```
+  mapping A: -3.05 over 8 batch(es)
+  mapping B: +66.80 over 3 batch(es)
+  mapping mixed: -70.01 over 1 batch (internally balanced)
+  two-sided sampled interaction p = 0.2510 on A vs B (excluding mixed)
+```
+
+So the lane-to-label mapping does not measurably change the contrast either (p = 0.25), which is
+what §266 hoped to be able to say and could not before the swap. The apparent gap between −3.05 and
++66.80 is three batches against eight and does not survive its own test.
+
+Two mutations red on the fix: silencing the check when a third group is present, and letting it run
+with only one mapping.

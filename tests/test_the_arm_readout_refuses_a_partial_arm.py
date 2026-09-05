@@ -552,3 +552,22 @@ def test_a_p_within_two_standard_errors_of_alpha_is_not_reported_as_a_decision(t
     arm_readout.main(["--batches", "2"])
     out = capsys.readouterr().out
     assert "NOT a decision" in out, out
+
+
+def test_the_interaction_survives_a_third_group():
+    """§279 established in its own text that batch 1 is `mixed`, and then demanded the group set be
+    EXACTLY {A, B}. So the registered check returned None on the real design and the readout printed
+    no interaction p at all, at the one moment it existed for. `mixed` is excluded from the
+    comparison on purpose -- one lane from each pair on each side carries no confound to estimate --
+    but its presence must not silence the check."""
+    rows = [([120.0, 130.0], [100.0, 105.0])]
+    groups = {"A": {"n": 1, "contrast": 22.5, "rows": rows},
+              "B": {"n": 1, "contrast": -22.5, "rows": [([100.0, 105.0], [120.0, 130.0])]},
+              "mixed": {"n": 1, "contrast": -70.0, "rows": rows}}
+    got = arm_readout.interaction_p(groups)
+    assert got is not None and 0.0 <= got <= 1.0, got
+
+
+def test_the_interaction_still_needs_both_mappings_present():
+    assert arm_readout.interaction_p({"A": {"contrast": 1.0, "rows": [], "n": 1},
+                                      "mixed": {"contrast": 0.0, "rows": [], "n": 1}}) is None
