@@ -11970,3 +11970,32 @@ what §266 hoped to be able to say and could not before the swap. The apparent g
 
 Two mutations red on the fix: silencing the check when a third group is present, and letting it run
 with only one mapping.
+
+## §285 — card item (б), shipped the day the embargo lifted
+
+The arm read out yesterday, so the card is no longer read by two sides of a live comparison and the
+deferred items can ship. Item (б) is in:
+
+> AND THE NODE THAT IS SUBMITTED IS YOUR BEST **EVALUATED** ONE, NOT YOUR LAST. A node that was
+> never evaluated cannot be submitted however promising it looks, and a later node that scores worse
+> does not replace an earlier one that scored better. Two things follow. A risky rewrite late in the
+> run cannot cost you what you have already banked — so take it, if you have something to test. And
+> an idea you never spend an evaluation on is worth exactly nothing, so get code evaluated early and
+> often rather than perfecting one submission you may not have the budget to grade.
+
+Both halves are there because the corpus punishes both. §84: of 17 multi-node probes, **eleven ended
+on a node that was not their best and none on a better one** (paired sign test p = 1/2048), median
+submitted TRAIN score 130.81 with the rule against 18.38 without it — `remEE6` scored 234.89 and
+then finished by scoring 0.0, so the rule is the only reason that run has a number. And `remPde`
+spent 74 % of its dollar before any node existed, which is the same rule from the other end.
+
+The two consequences point opposite ways on purpose — take the late risk, and get things graded
+early — because a card that gave only one would push the run off balance.
+
+Tested against the **generated card**, not the source, since the source is not what the model reads.
+Six mutations, one of which survived the first version: cutting *"get code evaluated early and often
+rather than perfecting one submission you may not have the budget to grade"* left "worth exactly
+nothing" intact, so the clause that tells the run WHAT TO DO was gone and the assertion still passed.
+The test now pins the instruction, not just its opening.
+
+`sweep_claims` flips accordingly: item (б) now reads STALE, because the card does say it.
