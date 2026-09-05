@@ -10458,3 +10458,33 @@ The practical answer is that the cadence has no deadline from this direction. A 
 ~130 s against an 1800 s interval whatever the corpus size, and §206's period fix means even the
 outliers do not stretch the next tick. I am not measuring this again unless a snapshot crosses
 600 s, which is the point where the outliers would start eating a third of the interval.
+
+## §241 — what each extra node is worth, re-measured on 90 runs
+
+§185 priced the marginal node on a smaller corpus and its number — about 8 expected points — has
+been carried into every argument about recovering money since, including §201's estimate that the
+duplicate-prompt waste is worth ~6 points a run. Ninety full-budget `edge_expansion` runs later:
+
+| the k-th extra node | runs that reach it | beats the best so far | median gain when it does | **expected gain** |
+|---|---|---|---|---|
+| 2nd node | 89 | **73 %** | 132.29 | **86.85** |
+| 3rd node | 69 | 19 % | 76.43 | **18.16** |
+| 4th node | 10 | 30 % | 47.66 | **12.03** |
+
+Nodes per full-budget run: one run with 1, twenty with 2, fifty-nine with 3, ten with 4.
+
+**The second node is the run.** It beats the opening in nearly three runs in four and is worth 86.85
+points in expectation — which is §225 and §231 seen from the value side, since 30 of the 37 weak-start
+recoveries happen exactly there. Everything after it is worth an order of magnitude less: 18.16 for
+the third, 12.03 for the fourth, the latter on only ten runs.
+
+**Repricing §201.** The duplicate-prompt recovery buys $0.258 a run ≈ 0.77 of a node, and the node it
+buys is the MARGINAL one — a fourth for the fifty-nine runs that reach three. At 12.03 expected
+points that is **~9 points a run**, against the ~6 I estimated from §185's flat ~8. The direction and
+order are unchanged; what the finer numbers add is that the estimate must use the marginal node's
+value, not the average node's, and that the average is dominated by a second node every run already
+gets.
+
+That also caps the whole money-recovery argument honestly: even recovering every duplicate turn buys
+about 9 points on a task whose runs have sd 61.3 (§233). It is real, it is cheap, and it is not what
+decides a comparison.
