@@ -11111,3 +11111,37 @@ keyboard.
 
 Next threshold, registered as before: measure again if a snapshot crosses 600 s while no analysis of
 mine is running. That is the observation that would move the cause off me.
+
+## §260 — the weak/strong thresholds turn out not to matter, which is §225 confirmed sideways
+
+Four sections lean on two numbers I picked by eye from a histogram: weak is below **60**, strong is
+at or above **150** (§225, §231, §238, §244). Cutoffs chosen after seeing the data are exactly the
+kind of degree of freedom §255 was written about, so I varied them over the 102 runs the corpus now
+has:
+
+| weak < | strong ≥ | n weak | n strong | weak starts reaching 150+ | median gap | p |
+|---|---|---|---|---|---|---|
+| 40 | 120 | 58 | 39 | 74 % | +30.01 | 0.0120 |
+| 40 | 150 | 58 | 32 | 74 % | +32.37 | 0.0044 |
+| 40 | 180 | 58 | 19 | 74 % | +52.67 | 0.0002 |
+| 60 | 150 | 60 | 32 | 73 % | +32.37 | 0.0036 |
+| 80 | 120 | 60 | 39 | 73 % | +30.01 | 0.0126 |
+| 80 | 180 | 60 | 19 | 73 % | +52.67 | 0.0001 |
+
+**Every combination gives the same answer.** The recovery rate sits at 73–74 % across cutoffs from 40
+to 80, and the strong-opening gap is significant everywhere, growing from +30 to +53 as the strong
+bar rises — which is what a real difference does.
+
+The reason the cutoffs do not matter is the finding itself: moving the weak bar from 40 all the way
+to 80 moves the group by **two runs** (58 → 60). There is almost nothing in between to move. §225
+claimed that bimodality from a histogram; this is the same claim arriving from a sensitivity
+analysis that was not looking for it.
+
+**One number needs correcting.** §231 reported that 35 of 44 weak starts — **80 %** — still reach
+150+. On 102 runs it is **73–74 %**, from 58–60 weak starts. The direction and the argument stand
+(a restart-on-weak-opening rule would still abandon roughly three runs in four that were going to get
+there), but the figure to carry is 73 %, not 80 %, and the earlier one was a smaller sample being
+kind.
+
+This is the check I should have run when I first drew the lines, and it is cheap enough that there
+was no excuse. What it buys is that none of §225, §231, §238 or §244 rests on where the lines went.
