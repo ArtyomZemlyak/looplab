@@ -11176,3 +11176,42 @@ carry rather than a general suspicion of everything measured earlier.
 The audit itself cost one query and it is the kind of thing that should have been standing practice
 from the point the corpus started growing under the analysis. It is now: any figure quoted from a
 subgroup smaller than about fifty gets re-checked before it is used again.
+
+## §262 — two correct rules collided, and the ruler said so precisely
+
+Taking a fourth reading for §219's drift series, I applied §259's new habit — pin every analysis to
+the service lanes — and got four refusals in a row:
+
+```
+  REFUSED: baseline_regime_mismatch
+  REFUSED: baseline_regime_mismatch
+  REFUSED: baseline_regime_mismatch
+  REFUSED: baseline_regime_mismatch
+```
+
+The bench was right and I was wrong. **The regime key encodes the lane WIDTH.** Lanes 44-47,92-95
+are eight cpus, so the evaluation keys `__w8x1r3`, finds no cached baseline under that name, and
+§149's guard refuses rather than re-timing the reference in the same pass and dividing by a
+different denominator. Its own words, which I had to go and fetch:
+
+> `this invocation would key its baseline '__w8x1r3', which is not on disk, while
+> edge_expansion__test__w22x1r3.json already is -- so it would re-time the reference in this pass
+> and divide by a different denominator than whoever wrote those entries.`
+
+So §259's rule needs its exception written next to it: **every analysis runs pinned to the service
+lanes, EXCEPT a measurement that must happen inside the bench's own regime, which needs a 22-cpu
+bench lane.** Two correct rules, and obeying the newer one broke the older.
+
+**And the tool threw the explanation away.** `ruler_selfcheck.refused()` returned only the `reason`
+label, so four identical useless lines is all I saw; the sentence that names both keys was sitting in
+the `detail` field unread. That is exactly the shape `probe_summary` was built to stop — the
+diagnosis exists, in a field nothing reads. Fixed: the refusal now carries the evaluator's own
+explanation, and the `--lane` default is a bench lane rather than the service lanes, so the next
+person does not walk into this. Three mutations red, including one that keeps the detail but drops
+the label — a refusal has to remain greppable by its reason.
+
+**The reading itself is deferred, on purpose.** All four bench lanes are running batch 9, and taking
+a 22-cpu measurement now would steal CPU from an arm probe. §214 measured that concurrency does not
+move this reading (0.8865 solo against 0.8861 loaded), so it is safe for the *number* — but it is not
+safe for the *probe*, and the arm outranks the series. The fourth reading goes in the gap between
+batch 9 and batch 10.

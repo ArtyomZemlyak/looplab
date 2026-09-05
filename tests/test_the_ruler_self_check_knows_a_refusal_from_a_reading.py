@@ -147,3 +147,40 @@ def test_the_caller_owns_the_clock(tmp_path):
     assert row["stamp"] == "2026-01-01T00:00:00"
     auto = ruler_selfcheck.append_reading(log, "t", "test", [1.0], 1.0)
     assert auto["stamp"] and auto["stamp"] != "2026-01-01T00:00:00"
+
+
+def test_a_refusal_carries_the_evaluator_s_own_explanation():
+    """`REFUSED: baseline_regime_mismatch` four times over says nothing an operator can act on. The
+    evaluator names both keys and the consequence, and that sentence is the whole diagnosis.
+
+    Measured 2026-09-05 by running the self-check on the SERVICE lanes: the regime key encodes the
+    lane WIDTH, so eight cpus key `__w8x1r3` where the cache holds `__w22x1r3`, and §149's guard
+    refuses rather than silently re-timing the reference against a different denominator."""
+    row = {"speedup": None, "eval_seconds": 0.0, "no_speedup": {
+        "reason": "baseline_regime_mismatch",
+        "detail": "this invocation would key its baseline '__w8x1r3', which is not on disk, while "
+                  "edge_expansion__test__w22x1r3.json already is"}}
+    why = ruler_selfcheck.refused(row)
+    assert "baseline_regime_mismatch" in why
+    assert "__w8x1r3" in why and "__w22x1r3" in why, (
+        f"{why!r}: the label survived and the explanation did not")
+
+
+def test_a_refusal_with_no_detail_still_names_itself():
+    why = ruler_selfcheck.refused({"speedup": None, "eval_seconds": 0.0,
+                                   "no_speedup": {"reason": "solver_unloadable"}})
+    assert why == "solver_unloadable", why
+
+
+def test_the_default_lane_is_a_bench_lane_not_the_service_lanes():
+    """§259 says pin every analysis to 44-47,92-95; this is the one measurement that cannot obey,
+    because the regime key it must match is defined by a 22-cpu lane."""
+    import re
+    src = (Path(__file__).resolve().parents[1] / "benchmarks" / "ruler_selfcheck.py").read_text(
+        encoding="utf-8")
+    got = re.search(r'"--lane",\s*default="([^"]+)"', src)
+    assert got, "the --lane default vanished"
+    width = sum(int(b) - int(a) + 1 if "-" in part else 1
+                for part in got.group(1).split(",")
+                for a, b in [part.split("-") if "-" in part else (part, part)])
+    assert width == 22, f"default lane {got.group(1)!r} is {width} cpus; the cached regime is w22"

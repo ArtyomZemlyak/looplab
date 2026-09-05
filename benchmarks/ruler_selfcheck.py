@@ -210,7 +210,17 @@ def instance_share(task: str, eval_seconds: float, *, subset: str = "test",
 def refused(row: dict) -> str:
     """Why this reading is not a measurement, or "" if it is one."""
     if row.get("no_speedup"):
-        return str((row["no_speedup"] or {}).get("reason") or "refused")
+        # CARRY THE DETAIL, NOT JUST THE LABEL. The evaluator explains itself in full -- for a
+        # regime mismatch it names both keys and what would happen -- and the first version of this
+        # printed `REFUSED: baseline_regime_mismatch` four times over, discarding the sentence that
+        # said WHY. That is the shape `probe_summary` was built to stop: the diagnosis exists, in a
+        # field nothing read. Measured 2026-09-05, running this on the SERVICE lanes: "this
+        # invocation would key its baseline '__w8x1r3', which is not on disk, while
+        # edge_expansion__test__w22x1r3.json already is".
+        why = row["no_speedup"] or {}
+        reason = str(why.get("reason") or "refused")
+        detail = str(why.get("detail") or why.get("evaluator_verdict") or "").strip()
+        return f"{reason}: {detail}" if detail else reason
     seconds = row.get("eval_seconds")
     if row.get("speedup") in (0.0, None) and isinstance(seconds, (int, float)) and seconds < 5:
         # Point 2 of the sweep, in code: a zero that arrives in a second is the harness declining.
@@ -223,7 +233,11 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--task", required=True)
     ap.add_argument("--reps", type=int, default=4)
-    ap.add_argument("--lane", default="44-47,92-95")
+    # A BENCH LANE, NOT THE SERVICE LANES. The regime key encodes the lane WIDTH (`w22x1r3`), so an
+    # 8-cpu service lane keys `__w8x1r3`, finds no cached baseline, and is refused -- correctly, by
+    # §149's guard. §259's rule that every analysis runs pinned to 44-47,92-95 has exactly this
+    # exception: a measurement that must happen IN the bench's regime uses a bench lane.
+    ap.add_argument("--lane", default="0-10,48-58")
     ap.add_argument("--subset", default="test", choices=("train", "test"))
     ap.add_argument("--record", metavar="FILE", nargs="?", const=str(DEFAULT_LOG),
                     help="append this reading to a dated series (default: %(default)s)"
