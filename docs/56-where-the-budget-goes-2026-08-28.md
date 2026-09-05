@@ -11487,3 +11487,39 @@ A finished run that **never** produced a node stays in the denominator as a firs
 came — it is the most extreme value the corpus has, and there is exactly one of them in 108. A
 mutation dropping it is red, as are reversing the threshold, never firing, and firing for probes
 that already have a node.
+
+## §270 — the sweep's own point 2 was an interim read, every half hour, for nine batches
+
+`arm_fidelity` exists so the fidelity question can be asked continuously without looking at the
+outcome, and `test_arm_fidelity_reads_no_scores.py` holds it to that. Meanwhile point 2 of the sweep
+— "new nodes, zeros and errors" — has been answered every half hour by a heredoc I write fresh each
+time, and that heredoc prints the node METRICS. §190 forbids reading the arm's outcome before twelve
+batches. **The tool obeyed; the operator did not.** Same shape as everything else this month: not a
+breakage, a quiet mismatch between what I thought I was doing and what I was doing.
+
+Point 2 never needed the value. It needs whether nodes arrived, whether any were zero, and whether a
+zero is the harness declining or an evaluation that ran and failed. So `benchmarks/pulse.py` answers
+points 1, 2 and 4 and never prints a score.
+
+Two things had to be measured rather than assumed while building it. **First**, whether
+`no_speedup` could stand in for the metric, letting the tool avoid the field entirely: no — across
+354 `node_evaluated` events in the corpus, `no_speedup` is present on **zero** of them, including
+all 12 zeros. So the classification must read the field it must never print, and the guard is
+therefore behavioural rather than a token scan: a probe whose node scores 123456.789 must not have
+that number appear in the output, and the node COUNT must still appear.
+
+**Second**, what a zero actually carries. All 12 corpus zeros come with `violations` and
+`eval_seconds` of **41–47 s** — every one of them is an evaluation that ran and came back invalid,
+not a single ruler refusal. The sweep list's discriminator (a zero at ~0.1 s is the harness
+declining) is right and has simply never fired here; the tool now states which kind it is in words,
+because "zero" alone sends the next hour after the wrong half of the bench.
+
+Five mutations red: printing the score beside the count, raising the refusal threshold past a real
+evaluation, dropping it to zero, letting a stall print without setting an exit code, and counting
+scored nodes as zeros.
+
+(En route, the instrument list earned its keep twice more. `pulse.py | tail` reported `EXIT=0` over
+a traceback — `PIPESTATUS`, as the list says. And a throwaway script counting `eval_train` returned
+zero for all 107 corpus runs, because `eval_train` arrives as an ARGUMENT to `run_dev_command` and
+not as a tool name — which `arm_fidelity` already knew and documents. The answer was implausible, so
+it got checked; that is the only reason it did not become a finding.)
