@@ -11289,3 +11289,37 @@ so are swapping the two labels and printing the numbers bare.
 This is the session's named shape once more, and again with me as the cause: not a breakage, a quiet
 mismatch between what a line says and what it measures, introduced by a correct fix to something
 else.
+
+## §265 — the deferred fourth reading, taken; the drift over the arm's window is not readable
+
+Lane 22-32,70-80 came free when `freeA10` finished, so the reading deferred in §262 was taken there —
+a 22-cpu bench lane, per that section's exception to §259's pinning rule. It went through: no
+`baseline_regime_mismatch`, because the width now matches the key.
+
+```
+edge_expansion: [0.8986, 0.9168, 0.9188, 0.8904] -> median 0.9077; the sweep says 0.9847 (-7.8 %)
+```
+
+First: §219's "three readings" were **three tasks on one day**, not three days — the log holds four
+rows and only now two of them are `edge_expansion`. I had been carrying that as a time series it
+never was. Corrected by reading the file.
+
+The two `edge_expansion` points, a day apart:
+
+| when | repeats | median | range |
+|---|---|---|---|
+| 2026-09-04 15:34 | 3 | 0.8908 | 0.8833 – 0.8912 |
+| 2026-09-05 12:39 | 4 | 0.9077 | 0.8904 – 0.9188 |
+
+The gap is +0.0169, **1.90 % of the value, and it is not readable**: the within-recording spread on
+09-05 is 0.0284, larger than the day-to-day gap itself, and an exact one-sided rank test on 3 against
+4 repeats gives **p = 4/35 = 0.114**. So the honest statement is not "the ruler drifted 1.9 % over
+the arm's window" — it is that two days apart, this box's reference-against-itself reading is the
+same as far as seven repeats can tell, and the largest movement visible is *within* a single sitting.
+
+What is solid is the standing −7.8 % against the sweep list's 0.9847, present on both days. That
+offset is common to every probe on the task, which divides by the same cached baseline file
+(untouched since 08-31 02:15), and batches run their four probes concurrently, so it is common to
+treatment and control inside each pair — which is what §190's within-batch pairing is for, and what
+§234's ICC of 0.007 already implied. **The arm is unaffected.** Where it does bite is exactly where
+§219 said: arm A's re-timed constants, compared across time on one task.
