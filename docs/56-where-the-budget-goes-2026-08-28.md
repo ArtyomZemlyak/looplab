@@ -10829,3 +10829,36 @@ cut off. And now: do not stop early — the last node is worth about as much as 
 
 The pattern in all three is the same. The obvious economy is measured against what it saves and not
 against what it forgoes, and every time the number that matters is the one on the other side.
+
+## §252 — a node does not get more expensive as the run goes on; it gets cheaper after the second
+
+I expected the cost of a node to grow through a run — the conversation is re-sent every turn (§152),
+so later nodes should be dearer. Measured over the 95 full-budget `edge_expansion` runs, the money
+spent between one evaluated node and the next:
+
+| node | runs reaching it | median $ to reach it | p10 | p90 |
+|---|---|---|---|---|
+| 0 | 95 | 0.3140 | 0.2366 | 0.4116 |
+| 1 | 94 | **0.4166** | 0.3127 | 0.5407 |
+| 2 | 73 | 0.2261 | 0.1695 | 0.3259 |
+| 3 | 10 | **0.2049** | 0.1412 | 0.2543 |
+| tail after the last | 95 | 0.0424 | 0.0029 | 0.1857 |
+
+**It peaks at the second node and then halves.** The hypothesis is refuted: growth in the re-sent
+prompt does not dominate. Node 1 is the most expensive thing a run does — and §241 measured it as
+also the most valuable, worth 86.85 points in expectation, which is §231's recovery seen a third
+time. After it the loop is working on an established solver and each further node costs about half.
+
+The budget adds up exactly: 0.314 + 0.417 + 0.226 = **$0.957**, plus a $0.042 tail, which is the
+typical three-node run spending its dollar.
+
+**And it corrects my own arithmetic, for the second time.** §201 priced the duplicate-prompt recovery
+at ~6 points using §185's flat ~8 per node; §241 refined that to ~9 using 12.03 for a fourth node at
+an *average* node cost of $0.3373. But the average is inflated by nodes 0 and 1. The **marginal**
+node — a fourth, for the 73 runs that reach three — costs **$0.2049**, so the recoverable $0.258 a
+run buys **1.26 of them**, and at 12.03 points each that is **≈ 15 points a run**, not 9.
+
+The caveat is that the fourth node's cost rests on the ten runs that reached one, and its p10–p90 is
+0.141–0.254. Taking the p90 instead gives 1.02 nodes and ~12 points; the estimate is somewhere in
+12–18 and the direction has never moved. What has moved, twice, is my habit of pricing a marginal
+thing at an average rate — and both times the corpus was there to catch it.
