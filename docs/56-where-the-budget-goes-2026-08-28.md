@@ -10977,3 +10977,34 @@ p = 1.0 on flat data.
 One instrument note, since it happened while checking this: `arm_readout.py | tail` reported
 `EXIT=0` because that is `tail`'s status. The script exits 2. The sweep's own header says to measure
 the return code without a pipe, and it is right.
+
+## §256 — a run outside the corpus in one variable, caught in flight
+
+`capA9` is at **62 % of its budget with no evaluated node**. Across the 98 full-budget
+`edge_expansion` runs the first node arrives at a median of **31 %**, p90 41 %, and a maximum of
+**53 %** (`remEEctl1`). **No run has ever gone past 53 %.** So this is outside the observed range,
+not at its edge, and it is worth the dig while it is still running.
+
+It is not a read loop. Its reads of `reference_edge_expansion.py` total 29 across four phases —
+11 in `plan_step`, 9 in `propose`, 6 in `deep_research`, 3 in `plan` — against the 25–38 per run that
+`read_loops`'s own threshold was set to treat as background. The detector is silent and correctly so.
+
+What it is shows up in one line of the phase table:
+
+| | capA9 | corpus (n=100) |
+|---|---|---|
+| `deep_research` share of spend | **52.2 %** | median 16.3 %, p90 21.6 % |
+
+**$0.3335 of its $0.6392, in 61 calls** — and capA9 is the corpus maximum and the *only* run above
+40 %. Its tool trace shows the shape: `propose` reads the reference, hands back to `deep_research`,
+which reads the same two line-ranges again, consults the memo, and reads them once more. Not a loop
+by the count, but a phase that keeps being re-entered instead of a node being built.
+
+Nothing is broken: no errors, no zeros, no refusals beyond one at the cap, ordinary per-call spend.
+This is the loop making an unusual choice, not the bench failing.
+
+**A prediction, before the next sweep can see it.** By §252 the marginal node costs $0.2049 and by
+§244 the opening sets a floor. With ~38 % of budget left, `capA9` should finish with **one or two
+evaluated nodes**, and if its first node is weak it lands in §231's unrecovered fifth — because
+recovery normally arrives as the *second* node at 72 % of budget, and there is not room for two more.
+If it finishes with three, my model of how the money converts into nodes is wrong and I will say so.
