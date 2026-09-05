@@ -10724,3 +10724,41 @@ explanation for whatever the number turns out to be — which is the whole reaso
 
 Batch 7 is away on all four lanes. Five batches remain, and by §234's table twelve of them buy 0.77
 against a +44 effect.
+
+## §249 — the money spent after the last graded node is an unfinished attempt, not idling
+
+`probe_summary` reports "spend after the last evaluated node" for every probe and I have been
+quoting it every sweep — 0 %, 4 %, 12 %, 15 % — without ever asking what it is. Over the 94
+full-budget `edge_expansion` runs:
+
+| | |
+|---|---|
+| median | **2.7 %** |
+| p10 / p90 | 0.3 % / 13.3 % |
+| max | 41.9 % (`accEE`, $0.4208 after its last of two nodes) |
+| corpus total | **$5.17 of $95.01 = 5.4 %**, or $0.0550 a run |
+
+At §241's marginal-node price of $0.3373 that is **0.16 of a node per run** — a fifth of what §201's
+duplicate-prompt waste is worth, and small enough that it would not have been worth a section on its
+own.
+
+**What makes it worth one is that it is not waste at all.** Splitting the 94 runs by whether they
+started a node they never got to evaluate:
+
+| | n | median after-last-node |
+|---|---|---|
+| started a node it never evaluated | 14 | **13.0 %** |
+| did not | 80 | **1.2 %** |
+
+An order of magnitude apart. The runs with a large tail were **mid-build when the money ran out** —
+which is exactly what §235's `build_interrupted` records at the node level, and what `freeA5`,
+`freeB8` and `capA5` all carry. The eighty runs that finished what they started spend a median of
+1.2 % after their last node, which is the finalisation and the report.
+
+So this number is not recoverable by stopping earlier: a run that stops before starting node N+1
+saves the money and loses the attempt. It is the same coin as §201 from the other side — more
+budget buys the attempt that got cut off, and cutting the attempt off earlier does not buy anything.
+
+Worth correcting my own reporting: quoting "15 % after the last node" as if it were slack, which I
+have done for `freeA5` and others, reads as an accusation. On the 14 runs where it is large it is
+the price of an attempt the budget did not cover, and on the other 80 it is 1.2 % of finalisation.
