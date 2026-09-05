@@ -11657,3 +11657,31 @@ version of that sentence is exactly the sort of thing that reads as obviously tr
 Four mutations red: a strict inequality, ignoring the alternative's direction, pooling the batches
 instead of stratifying them (`zip` for `product`), and fixing the split size at one rather than the
 batch's own treated count.
+
+## §275 — the design the readout will compute over is hand-maintained, and nothing checked it
+
+`BATCHES` is a list I have appended to five times by hand. Measured it before building anything:
+**44 names, all unique, every batch 2+2, every name with a tree on disk.** Sound. And the one
+arm-shaped tree in no batch is `freeB3` — §213's probe, resumed past a ceiling the meter had already
+shown and let run on to $1.1056, excluded at a criterion written down before any contrast was read.
+
+So nothing was broken. What was missing is that **none of that was checked**, and every one of its
+failure modes changes the number silently:
+
+- a name in two batches counts one probe twice;
+- a batch that is not 2+2 is not the permutation set the test conditions on;
+- a name with no tree reads as "batch N incomplete" and gets blamed on the bench.
+
+None of it is visible in the readout's own output. `design_problems()` now runs first, and `main`
+returns 2 without calling `admit` at all if the design is malformed — a mutation that lets it carry
+on is red, and so is one that skips the check entirely. Five mutations red: not detecting duplicates,
+inverting the shape test, ignoring missing trees, ignoring `EXCLUDED`, and not stopping the readout.
+
+`freeB3`'s exclusion now lives **in the code**, with its reason, rather than only in a doc — an
+arm-shaped tree in no batch and not in `EXCLUDED` is itself reported, so the next reader either puts
+a probe in the design or writes down why it is out. That is the same discipline §266 needed and did
+not have: the thing that was true only in my head is now the thing the tool checks.
+
+Also verified in production this sweep: §264's provenance fix is live — four snapshots now record
+`cpus 96 on the box | this snapshot pinned to 8`, and the log still holds exactly one overrun, the
+already-diagnosed 1802 s tick.

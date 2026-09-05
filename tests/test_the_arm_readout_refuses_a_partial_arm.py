@@ -161,3 +161,74 @@ def test_the_direction_is_a_choice_and_both_are_available():
     up = arm_readout.stratified_p(batches, alternative_positive=True)
     down = arm_readout.stratified_p(batches, alternative_positive=False)
     assert up == 1 / 6 and down == 1.0, (up, down)
+
+
+def _tree(root, name):
+    (root / name / "runs" / "edge_expansion" / "run").mkdir(parents=True)
+
+
+def test_a_sound_design_has_nothing_to_say(tmp_path):
+    batches = [(["capA1", "capB1"], ["freeA1", "freeB1"]),
+               (["capA2", "capB2"], ["freeA2", "freeB2"])]
+    for t, c in batches:
+        for n in t + c:
+            _tree(tmp_path, n)
+    assert arm_readout.design_problems(batches, str(tmp_path)) == []
+
+
+def test_one_probe_in_two_batches_is_one_probe_counted_twice(tmp_path):
+    """`BATCHES` is hand-maintained and has been appended to five times. A repeated name changes the
+    number silently -- nothing in the readout's own output could show it."""
+    said = arm_readout.design_problems([(["capA1", "capB1"], ["freeA1", "freeB1"]),
+                                        (["capA1", "capB2"], ["freeA2", "freeB2"])])
+    assert any("capA1" in s and "counted twice" in s for s in said), said
+
+
+def test_a_batch_that_is_not_two_plus_two_is_named(tmp_path):
+    """The test conditions on the within-batch margins; a 3+1 batch is not the design that was
+    registered, and its permutation set is a different one."""
+    said = arm_readout.design_problems([(["capA1", "capB1", "capC1"], ["freeA1"])])
+    assert any("3+1" in s for s in said), said
+
+
+def test_a_name_with_no_tree_is_a_typo_not_an_incomplete_batch(tmp_path):
+    """Without this it reads as "batch N incomplete" and gets blamed on the bench."""
+    _tree(tmp_path, "capA1")
+    said = arm_readout.design_problems([(["capA1", "capB1"], ["freeA1", "freeB1"])],
+                                       str(tmp_path))
+    assert any("capB1" in s and "no probe tree" in s for s in said), said
+
+
+def test_an_arm_shaped_tree_in_no_batch_must_be_explained(tmp_path):
+    for n in ("capA1", "capB1", "freeA1", "freeB1", "freeB99"):
+        _tree(tmp_path, n)
+    said = arm_readout.design_problems([(["capA1", "capB1"], ["freeA1", "freeB1"])],
+                                       str(tmp_path))
+    assert any("freeB99" in s and "EXCLUDED" in s for s in said), said
+
+
+def test_a_probe_excluded_on_the_record_is_not_an_orphan(tmp_path):
+    """§213: freeB3 was resumed past a ceiling the meter had already shown and ran on to $1.1056.
+    Excluded at a criterion written before any contrast was read -- and the reason lives in the
+    code, so nobody helpfully adds it back."""
+    for n in ("capA1", "capB1", "freeA1", "freeB1", "freeB3"):
+        _tree(tmp_path, n)
+    said = arm_readout.design_problems([(["capA1", "capB1"], ["freeA1", "freeB1"])],
+                                       str(tmp_path))
+    assert not any("freeB3" in s for s in said), said
+    assert "§213" in arm_readout.EXCLUDED["freeB3"]
+
+
+def test_the_readout_refuses_a_malformed_design_before_reading_anything(tmp_path, monkeypatch,
+                                                                        capsys):
+    monkeypatch.setattr(arm_readout, "BATCHES",
+                        [(["capA1", "capB1"], ["freeA1", "freeB1"]),
+                         (["capA1", "capB2"], ["freeA2", "freeB2"])])
+    monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
+    def boom(*a, **k):
+        raise AssertionError("admit() ran on a malformed design")
+    monkeypatch.setattr(arm_readout, "admit", boom)
+    rc = arm_readout.main(["--batches", "2"])
+    out = capsys.readouterr().out
+    assert rc == 2 and "DESIGN:" in out, (rc, out)
+    assert "complete batches" not in out, out

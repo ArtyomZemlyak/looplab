@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 import json
 import statistics
 import sys
@@ -71,6 +72,51 @@ BATCHES = [
     (["capA11", "capB11"], ["freeA11", "freeB12"]),
     (["capA12", "capB12"], ["freeA12", "freeB13"]),
 ]
+
+
+# A PROBE DELIBERATELY OUTSIDE THE ARM, AND WHY -- so nobody helpfully adds it back.
+EXCLUDED = {
+    "freeB3": "§213: the meter already showed it at $1.0308 when I resumed it, and the per-process "
+              "accountant let it run on to $1.1056. Excluded at a criterion written down before any "
+              "contrast had been read.",
+}
+
+
+def design_problems(batches, root: str | None = None) -> list:
+    """What is wrong with the DESIGN, before any number is computed from it.
+
+    `BATCHES` is hand-maintained and has been appended to five times. A name repeated across two
+    batches counts one probe twice; a batch that is not 2+2 breaks the within-batch permutation the
+    whole test conditions on; a name with no tree is a typo that will read as an incomplete batch
+    and be blamed on the bench. None of that is visible in the output -- it changes the number
+    silently, which is the one failure mode $48 cannot afford.
+    """
+    said = []
+    names = [n for treat, control in batches for n in list(treat) + list(control)]
+    seen: dict = {}
+    for i, (treat, control) in enumerate(batches, 1):
+        if len(treat) != 2 or len(control) != 2:
+            said.append(f"batch {i} is {len(treat)}+{len(control)}, not 2+2 -- the within-batch "
+                        "permutation the test conditions on is not the one that was registered")
+        for name in list(treat) + list(control):
+            if name in seen:
+                said.append(f"{name} appears in batch {seen[name]} AND batch {i} -- one probe "
+                            "counted twice")
+            else:
+                seen[name] = i
+    if root:
+        for name in names:
+            if not os.path.isdir(f"{root}/{name}"):
+                said.append(f"{name} is in the design with no probe tree under {root}")
+        try:
+            present = {d for d in os.listdir(root)
+                       if os.path.isdir(f"{root}/{d}") and d.startswith(("cap", "free"))}
+        except OSError:
+            present = set()
+        for name in sorted(present - set(names) - set(EXCLUDED)):
+            said.append(f"{name} looks like an arm probe, is in no batch, and is not in EXCLUDED "
+                        "-- either it belongs in the design or its exclusion needs writing down")
+    return said
 
 
 def spend(name: str) -> float:
@@ -137,6 +183,14 @@ def main(argv=None) -> int:
     ap.add_argument("--alpha", type=float, default=0.05)
     ap.add_argument("--max-spend", type=float, default=1.05)
     args = ap.parse_args(argv)
+
+    broken = design_problems(BATCHES, ROOT)
+    for line in broken:
+        print(f"  DESIGN: {line}")
+    if broken:
+        print("\nREFUSING TO READ THE ARM: the design itself is malformed, and a statistic computed "
+              "over it would be wrong in a way its own output could not show.")
+        return 2
 
     ready, missing = [], []
     for i, (treat, control) in enumerate(BATCHES, 1):
