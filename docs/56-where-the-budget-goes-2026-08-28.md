@@ -10583,3 +10583,44 @@ middle is a lottery with a floor in the middle, on seven runs.
 
 That also puts §225's "+28.63 points for a strong opening" in its place: a large part of that gap is
 the floor the champion rule enforces, not a difference in what the loop goes on to build.
+
+## §245 — a quarter of the money goes to eleven per cent of the calls, and half of it on discrete_log
+
+`capB7` is the slowest probe of batch 6, and the ledger says why: two consecutive generations of
+**21,329 completion tokens in 230 s** and **49,051 in 529 s** — twelve minutes and seventy thousand
+tokens in two calls, against a corpus median of **453 completion tokens**.
+
+Over all 36,182 priced calls in the ledger:
+
+| completion tokens | calls | share | cost | wall clock |
+|---|---|---|---|---|
+| median 453, p90 8,605, p99 30,119, max **241,943** | | | | |
+| ≥ 8,000 | 3,982 | **11.0 %** | **$29.00** | 178 h |
+| ≥ 16,000 | 1,442 | 4.0 % | $14.54 | 103 h |
+| ≥ 32,000 | 304 | 0.8 % | $4.50 | 36 h |
+
+**$29.00 of $117.95 — a quarter of everything spent — is in eleven per cent of the calls**, and the
+concentration is by task:
+
+| task | calls ≥ 8k | that task's spend in them |
+|---|---|---|
+| edge_expansion | 9.7 % | 22.1 % |
+| pde_heat1d | 13.3 % | 22.7 % |
+| **discrete_log** | **23.6 %** | **47.8 %** |
+
+Nearly half of `discrete_log`'s money goes to calls emitting eight thousand tokens or more — on the
+task the sweep's own header calls the thinnest carrying number in the corpus, where the whole
+corpus is eleven runs.
+
+**And there is a wall at 1820 s.** The two largest calls in the ledger — `remDL4` at 241,943 tokens
+and `expEEa` at 222,905 — both have a latency of **exactly 1820 s**. Two independent runaways
+stopping at the same second is a bound, not a coincidence. It is not `llm_timeout`, which is 180 s
+and is an inter-token idle limit rather than a total: a stream that keeps producing tokens is never
+idle, so nothing stops it until whatever this is.
+
+**What I am not doing about it yet, and why.** The obvious remedy is a completion cap, and
+`run_probe.sh`'s own notes record that LoopLab sets no `max_tokens` anywhere. But a cap truncates,
+and a truncated tool call is malformed JSON rather than a shorter answer — it would convert a slow
+call into a failed one, which is a worse trade at an unknown rate. It also lands mid-arm on both
+sides. The measurement is the deliverable here; the remedy needs a rate for "how often a long
+generation is doing real work", and I do not have it.
