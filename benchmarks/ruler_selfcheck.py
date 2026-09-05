@@ -110,7 +110,8 @@ def one_eval(task: str, solver: str, lane: str, subset: str, timeout: float = 90
 DEFAULT_LOG = HERE / "algotune" / "ruler_selfcheck_log.jsonl"
 
 
-def append_reading(path, task: str, subset: str, values, median: float, stamp=None) -> dict:
+def append_reading(path, task: str, subset: str, values, median: float, stamp=None,
+                   lane: str | None = None) -> dict:
     """Append one dated reading, so the drift becomes a SERIES rather than a single number.
 
     §214 measured `edge_expansion` at 0.8861 against the sweep's 0.9847 and could say the cached
@@ -121,9 +122,16 @@ def append_reading(path, task: str, subset: str, values, median: float, stamp=No
 
     The stamp is passed IN rather than read here: a caller that wants a reproducible row (a test, a
     replay) owns its own clock.
+
+    AND THE LANE, BECAUSE A READING WITHOUT ONE IS NOT COMPARABLE TO THE NEXT. §266 measured all
+    four bench lanes over six sittings: they differ by about 3 % between the extremes (lane
+    22-32,70-80 reads 0.9127 against 0.9448 on 11-21,59-69), and inside a single bad sitting one
+    lane can drop to 0.87 while its neighbours sit near 0.97. A drift series that does not say which
+    lane it was taken on cannot tell a change in the box from a change of lane -- which is exactly
+    what §265 walked into, comparing two readings whose lanes the file had never recorded.
     """
     row = {"stamp": stamp or datetime.datetime.now().isoformat(timespec="seconds"),
-           "task": task, "subset": subset,
+           "task": task, "subset": subset, "lane": lane,
            "values": [round(float(v), 6) for v in values],
            "median": round(float(median), 6)}
     path = Path(path)
@@ -275,7 +283,7 @@ def main(argv=None) -> int:
         print(f"  (per-instance work is {100 * share:.0f} % of an evaluation's wall clock, so "
               f"`eval_seconds` cannot see this drift at all)")
     if args.record:
-        append_reading(args.record, args.task, args.subset, vals, median, args.stamp)
+        append_reading(args.record, args.task, args.subset, vals, median, args.stamp, args.lane)
         print(f"  recorded to {args.record}")
     if said is not None and abs(median - said) > 0.02:
         print("  DRIFT: the cached baseline and today's box no longer agree. Within one task this "

@@ -11323,3 +11323,67 @@ offset is common to every probe on the task, which divides by the same cached ba
 treatment and control inside each pair — which is what §190's within-batch pairing is for, and what
 §234's ICC of 0.007 already implied. **The arm is unaffected.** Where it does bite is exactly where
 §219 said: arm A's re-timed constants, compared across time on one task.
+
+## §266 — the arm's labels were nearly nailed to the lanes, and a p=0.016 died on replication
+
+Batch 9 ended while the sweep was running — all four `run_finished/budget_exhausted`, spends
+$1.0078–$1.0162, no pauses, so §228's fix has now held across six consecutive batches. (En route I
+printed `final.json no` for all four and nearly filed it: wrong path. It lives in the PROBE ROOT,
+128 of them, written by the scoring step. My ruler, not the bench's.)
+
+With the lanes idle I checked something the design had never measured. **Which lane carried which
+label, over all 37 arm probes:**
+
+| label | 0-10 | 11-21 | 22-32 | 33-43 |
+|---|---|---|---|---|
+| TREAT | 9 | 8 | 1 | — |
+| control | — | 1 | 8 | 10 |
+
+17 of 18 treated probes ran on the first two lanes and 18 of 19 controls on the last two. §190's test
+permutes LABELS within a batch; that is valid only if the four probes in a batch are exchangeable,
+and nothing had ever shown the lanes were. Topologically they are symmetric — one NUMA node, 11
+physical cores each, HT pairs (n, n+48) — but structure is not measurement.
+
+So I measured, with the reference-against-itself ruler, all four lanes at once (the batch's own
+condition), three repeats each:
+
+```
+A 0.9585   B 0.9402   C 0.8820   D 0.9344      treated-lane minus control-lane = +0.0411, p = 0.0162
+```
+
+**A +4.5 % bias in the treated arm's favour, at p = 0.016, in the instrument itself.** I ran it
+again before writing a word of it, and the ordering scrambled: C went from worst to best, D from
+second to worst. Six sittings in total, 72 readings:
+
+| sitting | A | B | C | D | order |
+|---|---|---|---|---|---|
+| 1 | 0.9585 | 0.9402 | 0.8820 | 0.9344 | A>B>D>C |
+| 2 | 0.9593 | 0.9661 | 0.9689 | 0.8883 | C>B>A>D |
+| 3 | 0.9228 | 0.9475 | 0.8978 | 0.9871 | D>B>A>C |
+| 4 | 0.9038 | 0.9340 | 0.9039 | 0.9682 | D>B>C>A |
+| 5 | 0.9341 | 0.9472 | 0.9120 | 0.9485 | D>B>A>C |
+| 6 | 0.9355 | 0.9338 | 0.9116 | 0.9311 | A>B>D>C |
+
+The contrast per sitting: **+0.0411, +0.0341, −0.0073, −0.0171, +0.0104, +0.0133** — mean +0.0124,
+positive in 4 of 6, **sign test p = 0.34**. The blocked permutation over readings still says 0.0745,
+and that number is pseudo-replication: the dominant term is a whole-sitting swing that takes one
+lane down to 0.87 while its neighbours sit near 0.97, so the independent unit is the SITTING, not the
+reading, and the effective n is 6. The first sitting's p = 0.016 was one draw of "which lane got hit"
+landing on a control lane — a coin flip I had already interpreted.
+
+**What survives:** lane 22-32,70-80 is the lowest of the four over six sittings (0.9127 against
+0.9448 on 11-21,59-69, about 3 %), and a lane-level bias of that size cannot be excluded. **What does
+not:** any claim that the arm is measurably contaminated.
+
+Two things follow, neither of which waits on resolving it.
+
+**One, for the arm — decided now, before any outcome is read, and costing nothing: batches 10, 11
+and 12 swap the mapping.** Treatment goes to 22-32,70-80 and 33-43,81-91, control to 0-10,48-58 and
+11-21,59-69. Three crossed batches turn an unmeasurable confound into an estimable one, and if the
+lanes really are exchangeable, nothing is lost.
+
+**Two, a defect fixed:** `--record` wrote a drift row with no lane in it. §265 compared two
+`edge_expansion` readings whose lanes the log had never stored — and both, it turns out, came off
+lane C, the lowest of the four. A series that cannot tell a change in the box from a change of lane
+is not a series. The lane is now in every row; two mutations red, including one that keeps it in the
+signature and drops it at the call site, which is where the defect actually lived.

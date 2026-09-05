@@ -16,6 +16,7 @@ against a real ~28 s.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -184,3 +185,31 @@ def test_the_default_lane_is_a_bench_lane_not_the_service_lanes():
                 for part in got.group(1).split(",")
                 for a, b in [part.split("-") if "-" in part else (part, part)])
     assert width == 22, f"default lane {got.group(1)!r} is {width} cpus; the cached regime is w22"
+
+
+def test_a_recorded_reading_says_which_lane_it_was_taken_on(tmp_path):
+    """§266: over six sittings the four bench lanes differ by ~3 % between the extremes, and in a
+    bad sitting one lane drops to 0.87 while its neighbours sit near 0.97. A series that does not
+    record the lane cannot tell a change in the box from a change of lane."""
+    log = tmp_path / "series.jsonl"
+    ruler_selfcheck.append_reading(log, "edge_expansion", "test", [0.9, 0.91], 0.905,
+                                   stamp="2026-09-05T13:00:00", lane="22-32,70-80")
+    row = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["lane"] == "22-32,70-80", row
+
+
+def test_the_lane_reaches_the_log_from_the_command_line_not_just_the_function():
+    """The fix is worthless if `--record` still writes rows without it: the defect was never in
+    `append_reading`'s signature, it was in what the tool actually wrote."""
+    import ast
+    src = (Path(__file__).resolve().parents[1] / "benchmarks" / "ruler_selfcheck.py").read_text(
+        encoding="utf-8")
+    tree = ast.parse(src)
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "append_reading"]
+    assert calls, "nothing calls append_reading"
+    passes_lane = any(
+        any(isinstance(a, ast.Attribute) and a.attr == "lane" for a in c.args)
+        or any(k.arg == "lane" for k in c.keywords)
+        for c in calls)
+    assert passes_lane, "the recording call site drops the lane on the floor"
