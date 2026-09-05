@@ -10363,3 +10363,34 @@ interval is a tenth of the budget.
 I am leaving it here rather than chasing the last outlier. Two events in twenty-five, both explained
 by "the box was busy", with the consequence already neutralised, is the point at which further
 digging costs more than the answer is worth — and saying so is a decision, not an omission.
+
+## §238 — a kernel before node 0 is necessary for a strong opening, and not sufficient
+
+§225 found the first node bimodal — weak below 60, strong at or above 150, almost nothing between —
+and §186 tied a kernel on node 0 to a +23.5 move in the final champion. The sharper question is
+whether the kernel explains the bimodality itself, and it is answerable from the spans: did any
+tool call before the first evaluation write `numba` / `njit` / `cython` / `cimport` code?
+
+Over 90 `edge_expansion` runs with a first node:
+
+| before node 0 | n | median node 0 | opened strong (≥ 150) |
+|---|---|---|---|
+| a kernel was written | 77 | 52.62 | **30 (39 %)** |
+| no kernel | 13 | 22.82 | **0 (0 %)** |
+
+Fisher exact two-sided **p = 0.0038**. So a kernel is **necessary** — not one of the thirteen
+kernel-free runs opened strong, and their median first node is 22.82, sitting in the middle of the
+weak mode — and it is **not sufficient**: 47 of the 77 that wrote one still opened weak. The
+bimodality is not "kernel or not"; the kernel is the gate, and something else decides what happens
+after it.
+
+That is worth having straight before the card items (а) and (б) are eventually shipped, because it
+constrains what they could be expected to do. A card that reliably moved every run to writing a
+kernel first would move at most the thirteen kernel-free runs — 14 % of the corpus — from a median
+of 22.82 into a population whose median is 52.62 and whose upside is 39 % strong. That is a real
+effect and a bounded one, and it is smaller than the +44 the arm is sized for.
+
+The 47 kernel-yet-weak runs are the larger and more interesting group, and nothing measured so far
+separates them from the 30 kernel-yet-strong ones. That is the next question this corpus can answer,
+and I am naming it rather than guessing at it: what distinguishes a kernel that opens at 250 from
+a kernel that opens at 25.
