@@ -10939,3 +10939,41 @@ above by the cap and cannot be swung by one probe the way an unbounded count can
 **And the correction generalises.** Every per-batch number in §236 and §248 is a median of two, and I
 presented their monotony as evidence. It was evidence of small samples behaving; the pooled test is
 the claim, and from here that is what I will report.
+
+## §255 — the readout, written as code before the numbers exist
+
+§254 ended by saying the pooled test is the claim and the per-batch tables were small samples
+behaving. That correction is easy to make about fidelity, which has no stake in the answer. The
+outcome does, and every rule for what counts as a probe in this arm was decided one incident at a
+time *after* §190 registered the design:
+
+* `freeB3` excluded at $1.1056, by a criterion written before any contrast was read (§213.1);
+* `capB4` in, though its cap never bit, because its own `config.snapshot.json` records it (§243);
+* a pause at ≥ 99 % of budget counted as an ending, because sixteen corpus runs record a normal
+  ending as a Developer crash and the §228 fix cannot reach probes already on disk;
+* the statistic pooled rather than per batch (§254).
+
+Each was decided for a reason at the time. Each is also a degree of freedom that could be
+re-decided afterwards to suit whatever number arrives, and no amount of intending not to prevents
+that. So they are now `benchmarks/arm_readout.py`, run against an arm that is **seven of twelve
+batches complete** — which is the only moment at which writing them down proves anything.
+
+The tool **refuses to read a partial arm**: fewer than twelve complete batches and it prints what is
+missing and exits 2. That refusal is the point. An interim look at the outcome is the one thing
+§190 forbids, and a tool that would do it on request is a tool that will be asked.
+
+```
+7 complete batches of the 12 the design registered
+  batch 8 incomplete: capA9: has not ended ($0.3721); …
+REFUSING TO READ THE ARM at 7 of 12 batches.
+```
+
+Five mutations, all red, and they are the five ways this could quietly go wrong: reading a partial
+arm, ignoring the spend ceiling, dropping the config check, counting a mid-run pause as an ending,
+and — the subtlest — **removing the observed arrangement from its own null**, which turns `>=` into
+`>` and lets a one-sided p reach zero. The test pins p = 1/36 on a clean two-batch separation and
+p = 1.0 on flat data.
+
+One instrument note, since it happened while checking this: `arm_readout.py | tail` reported
+`EXIT=0` because that is `tail`'s status. The script exits 2. The sweep's own header says to measure
+the return code without a pipe, and it is right.
