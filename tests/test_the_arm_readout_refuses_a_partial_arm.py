@@ -385,3 +385,66 @@ def test_the_interaction_test_is_two_sided_and_that_decides_cases_at_alpha():
               "B": {"n": 1, "contrast": contrast(rows_b), "rows": rows_b}}
     p = arm_readout.interaction_p(groups)
     assert 0.05 < p < 0.07, p
+
+
+def _full_arm(tmp_path, monkeypatch, scores=None):
+    """Two complete batches that `admit` lets through, with lanes on record."""
+    batches = [(["capA1", "capB1"], ["freeA1", "freeB1"]),
+               (["capA2", "capB2"], ["freeA2", "freeB2"])]
+    for n, lane in (("capA1", A1), ("capB1", A2), ("freeA1", B1), ("freeB1", B2),
+                    ("capA2", B1), ("capB2", B2), ("freeA2", A1), ("freeB2", A2)):
+        _instrument(tmp_path, n, lane)
+    table = scores or {"capA1": 200.0, "capB1": 210.0, "freeA1": 100.0, "freeB1": 110.0,
+                       "capA2": 150.0, "capB2": 160.0, "freeA2": 140.0, "freeB2": 130.0}
+    monkeypatch.setattr(arm_readout, "BATCHES", batches)
+    monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
+    monkeypatch.setattr(arm_readout, "admit", lambda n, arm, ms: (table[n], None))
+    return batches
+
+
+def test_a_refusal_writes_no_marker(tmp_path, monkeypatch, capsys):
+    """The marker is what lifts §190 for `probe_summary`. A partial readout that left one behind
+    would open the embargo over half an answer."""
+    monkeypatch.setattr(arm_readout, "BATCHES", [(["capA1", "capB1"], ["freeA1", "freeB1"])])
+    monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
+    for n in ("capA1", "capB1", "freeA1", "freeB1"):
+        _instrument(tmp_path, n, A1)
+    monkeypatch.setattr(arm_readout, "admit", lambda n, arm, ms: (None, "has not ended"))
+    out = tmp_path / "marker.json"
+    rc = arm_readout.main(["--batches", "1", "--record", str(out)])
+    assert rc == 2 and not out.exists(), (rc, out.exists())
+
+
+def test_a_full_readout_records_what_it_used(tmp_path, monkeypatch, capsys):
+    """`/var/tmp` is ephemeral and has been wiped once, taking 37 unpushed commits and ~69 runs.
+    The readout is the deliverable of $48 and existed only as terminal text."""
+    _full_arm(tmp_path, monkeypatch)
+    out = tmp_path / "marker.json"
+    rc = arm_readout.main(["--batches", "2", "--record", str(out)])
+    assert rc == 0, capsys.readouterr().out
+    got = json.loads(out.read_text(encoding="utf-8"))
+    assert got["batches"] == 2 and got["verdict"] in ("reject", "do not reject")
+    assert got["design"][0][0] == ["capA1", "capB1"], got["design"]
+    assert got["scores"][0]["treat"] == [200.0, 210.0], got["scores"]
+    assert "stratified_one_sided_p" in got and "lane_split" in got
+    assert "freeB3" in got["excluded"], got["excluded"]
+
+
+def test_the_record_carries_the_lane_split_the_swap_was_for(tmp_path, monkeypatch, capsys):
+    """§266 swapped the mapping so the confound became estimable; §279 computes it. A record
+    without it loses the only evidence about the confound."""
+    _full_arm(tmp_path, monkeypatch)
+    out = tmp_path / "marker.json"
+    arm_readout.main(["--batches", "2", "--record", str(out)])
+    got = json.loads(out.read_text(encoding="utf-8"))
+    assert set(got["lane_split"]) == {"A", "B"}, got["lane_split"]
+    assert got["lane_split"]["A"]["n"] == 1 and got["lane_split"]["B"]["n"] == 1
+
+
+def test_the_record_is_written_atomically(tmp_path, monkeypatch, capsys):
+    """A torn marker would lift the embargo over half a readout."""
+    _full_arm(tmp_path, monkeypatch)
+    out = tmp_path / "marker.json"
+    arm_readout.main(["--batches", "2", "--record", str(out)])
+    assert out.exists() and not out.with_suffix(".json.tmp").exists()
+    json.loads(out.read_text(encoding="utf-8"))       # complete, not torn

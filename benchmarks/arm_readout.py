@@ -292,12 +292,35 @@ def interaction_p(groups, draws: int = 20000, seed: int = 190) -> float | None:
     return hits / draws
 
 
+RECORD_DEFAULT = Path(__file__).resolve().parent / "algotune" / ".arm_readout_taken"
+
+
+def record_readout(path, payload: dict) -> None:
+    """Write the readout where it survives the box.
+
+    `/var/tmp` is ephemeral and has been wiped once, taking 37 unpushed commits and ~69 probe runs
+    with it. The readout is the deliverable of $48 and, until now, existed only as text on a
+    terminal. This writes it into the repo, which is pushed.
+
+    The file is also the marker `probe_summary.EMBARGO_LIFTED` looks for, and that is deliberate:
+    §190 lifts exactly when the readout has been RECORDED, not when somebody decides it has been
+    taken. One act, one artefact, and the artefact is the licence.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)     # atomic: a torn marker would lift the embargo over half a readout
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--batches", type=int, default=12)
     ap.add_argument("--alpha", type=float, default=0.05)
     ap.add_argument("--max-spend", type=float, default=1.05)
+    ap.add_argument("--record", nargs="?", const=str(RECORD_DEFAULT), default=None,
+                    help="write the readout here (default: the embargo marker itself)")
     args = ap.parse_args(argv)
 
     broken = design_problems(BATCHES, ROOT)
@@ -348,6 +371,21 @@ def main(argv=None) -> int:
         if pi is not None:
             print(f"    two-sided sampled interaction p = {pi:.4f} -- a lane effect would add to "
                   "the contrast under one mapping and subtract under the other")
+    if args.record:
+        record_readout(args.record, {
+            "taken": "by arm_readout.py --record",
+            "batches": args.batches, "alpha": args.alpha, "max_spend": args.max_spend,
+            "design": [[list(t), list(c)] for t, c in BATCHES[:args.batches]],
+            "excluded": EXCLUDED,
+            "scores": [{"batch": i, "treat": t, "control": c} for i, t, c in ready[:args.batches]],
+            "sum_of_within_batch_mean_differences": obs,
+            "stratified_one_sided_p": p,
+            "lane_split": {k: {"n": v["n"], "contrast": v["contrast"]}
+                           for k, v in groups.items()},
+            "interaction_p": interaction_p(groups),
+            "verdict": "reject" if p <= args.alpha else "do not reject",
+        })
+        print(f"  recorded to {args.record}")
     print("REJECT the null" if p <= args.alpha else
           f"do NOT reject: no effect of the registered size was detected at power 0.77 (§234). "
           "That is not the same as 'capping does not help'.")

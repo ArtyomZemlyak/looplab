@@ -11866,3 +11866,29 @@ a tolerance that swallows everything, reporting the drift unsigned (the directio
 and treating an unreadable log as a pass.
 
 That makes seven claims `sweep_claims.py` checks, six of them stale.
+
+## §282 — the verdict of $48 existed only as text on a terminal
+
+Three of batch 12's four probes ended during this sweep; `capB13` is the last one left, so the gate
+opens shortly. Which made the gap obvious: `arm_readout` **prints** its answer and keeps nothing.
+`/var/tmp` is ephemeral and has been wiped once already, taking 37 unpushed commits and about 69
+probe runs with it. The readout is the deliverable of forty-eight dollars and eleven days, and until
+now it would have survived exactly as long as a scrollback buffer.
+
+`--record` writes the whole thing into the repo, which is pushed: the design it used, the excluded
+probes and why, every admitted score by batch, the contrast, the exact p, §279's lane split and
+interaction p, and the verdict.
+
+**And the file is the same marker `probe_summary.EMBARGO_LIFTED` looks for**, which is the part
+worth stating plainly: §190 lifts exactly when the readout has been RECORDED, not when somebody
+decides it has been taken. One act, one artefact, and the artefact is the licence. A refusal writes
+nothing — a mutation that stamps the marker before the gate is red, because a partial readout
+leaving a marker behind would open the embargo over half an answer.
+
+The write is atomic (`os.replace`), since a torn marker would do the same thing more quietly. Five
+mutations red: marking before the gate, dropping the lane split, dropping the scores, dropping the
+design, and writing without the rename.
+
+Points 1–7 clean throughout: `RESIDUE $-0.000008` at $86.76, nine baseline entries all `w22x1r3`,
+`PermissionError` 0 on 2085 directories, zero zombies, and `pulse --expect` naming all three
+finished probes as `ended` rather than leaving them to be inferred from an empty table.
