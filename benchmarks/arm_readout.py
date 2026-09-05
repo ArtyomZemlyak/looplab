@@ -61,6 +61,14 @@ BATCHES = [
     (["capA7", "capB7"], ["freeA7", "freeB8"]),
     (["capA8", "capB8"], ["freeA8", "freeB9"]),
     (["capA9", "capB9"], ["freeA9", "freeB10"]),
+    (["capA10", "capB10"], ["freeA10", "freeB11"]),
+    # FROM HERE THE LANE<->LABEL MAPPING IS SWAPPED (§266). Batches 1-9 put 17 of 18 treated probes
+    # on lanes 0-10 and 11-21 and 18 of 19 controls on 22-32 and 33-43, which makes the label and
+    # the lane the same variable. Six sittings of the reference-against-itself ruler could not show
+    # the lanes differ (per-sitting contrast positive in 4 of 6, sign test p = 0.34) but also could
+    # not exclude ~3 %, so batches 10-12 run treatment on 22-32 and 33-43 and control on 0-10 and
+    # 11-21. Registered here, before any contrast was read, so the swap cannot be chosen by outcome.
+    (["capA11", "capB11"], ["freeA11", "freeB12"]),
 ]
 
 
