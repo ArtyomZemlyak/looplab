@@ -11145,3 +11145,34 @@ kind.
 
 This is the check I should have run when I first drew the lines, and it is cheap enough that there
 was no excuse. What it buys is that none of §225, §231, §238 or §244 rests on where the lines went.
+
+## §261 — the other headline numbers audited, and they have not moved
+
+§260 caught one figure drifting as the corpus grew — §231's recovery rate, 80 % on 44 weak starts
+becoming 73 % on 58. That raises the obvious worry about every other number I have been quoting from
+a smaller corpus, so I re-measured the headline ones on the 102 full-budget runs there are now.
+
+| | measured at | now (n=102) |
+|---|---|---|
+| §241 2nd node improves | 73 %, +86.85 (n=90) | **75 %, +85.93** (n=101) |
+| §241 3rd node improves | 19 %, +18.16 | **19 %, +18.37** (n=77) |
+| §241 4th node improves | 30 %, +12.03 | 30 %, +12.03 (n=10, the same ten runs) |
+| §252 cost to node 0 | $0.3140 (n=95) | **$0.3161** |
+| §252 cost to node 1 | $0.4166 | **$0.4164** |
+| §252 cost to node 2 | $0.2261 | **$0.2253** |
+| §252 cost to node 3 | $0.2049 | $0.2049 |
+| §220 TEST / best-train median | 0.9951 (n=78) | **0.9957** |
+| §220 its sd | 0.0140 | **0.0136** |
+| §220 share below 1 | 52/78 = 67 % | 66/102 = **65 %** |
+
+**Nothing moved.** The largest change is the second node's improvement rate, 73 % to 75 %, and every
+money figure agrees to within a fifth of a cent.
+
+So §231's drift was the exception, and its reason is visible in the table: it was a **proportion on
+the smallest subgroup** of any headline number — 44 runs, against 78–95 for the rest. Proportions on
+small subgroups are what move; medians over the whole corpus are what do not. That is the rule to
+carry rather than a general suspicion of everything measured earlier.
+
+The audit itself cost one query and it is the kind of thing that should have been standing practice
+from the point the corpus started growing under the analysis. It is now: any figure quoted from a
+subgroup smaller than about fifty gets re-checked before it is used again.
