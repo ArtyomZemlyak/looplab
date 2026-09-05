@@ -11437,3 +11437,24 @@ whose reader learns to skip it.
 
 The numbers above already show batch 10's swap landing: lane 0-10 has gained its first control and
 22-32 its second treated probe.
+
+## §268 — two refinements proposed to the outlier check, both refused by measurement
+
+Batch 10's early flags: `capB11` at `share_propose` 61.71 % (corpus median 13.8 at that age) and
+`share_deep_research` 38.29 (median 78.0), `freeB12` at `share_propose` 63.43 (median 39.97). Two
+guesses, both tested before writing any code, both wrong:
+
+**"At $0.07 a share is quantized — a couple of calls can only make 0, 50 or 100 %."** No. The corpus
+at that prefix holds a **median of 24 generation spans** (finest share step 4.2 %, minimum 19 spans),
+and `capB11` had 27. The share is resolvable; the reading is not an artifact of coarseness.
+
+**"Match the corpus on span COUNT rather than dollars — equal money is not equal progress when calls
+differ in size."** Marginally true and immaterial. Matching on spans tightens the corpus spread
+slightly (sd 17.64 against 18.01; 12.20 against 13.95) and moves no percentile that matters:
+99.1 → 99.1, 100.0 → 100.0. The one that moved, `share_deep_research` 3.7 → 0.9, is more extreme
+either way. Not worth the code.
+
+So the flags stand as real: those two probes spent their opening money on `propose` where the corpus
+spends it on `deep_research`. One is treated and one is control, so it is not a treatment signature,
+and §258 measured that process outliers predict nothing about the score. **No action** — which is
+the finding, recorded so the next sweep does not re-propose either refinement.
