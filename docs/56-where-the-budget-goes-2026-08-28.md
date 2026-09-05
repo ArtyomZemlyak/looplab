@@ -10693,3 +10693,34 @@ money is, rather than the model as a whole — and `plan_step` should be left al
 $33.31 is spent on many ordinary calls and a reasoning knob would reach all of them to recover a
 dollar. That is also where §239's discriminator lives: strong openings differ from weak ones in
 writes and graded evaluations, both of which are proposal-phase work.
+
+## §248 — six batches in: the dose and the channel have never once gone the wrong way
+
+Half the registered arm is done. §236 tabulated four batches of delivery; here are six, and this is
+still fidelity — probe counts and `run_dev_command("eval_train")` counts, no scores:
+
+| batch | treated (+refused) | control | dose | `eval_train` t/c | channel |
+|---|---|---|---|---|---|
+| 1 | 12(+7), 12(+7) | 31, 21 | +14 | 33.0 / 26.5 | +6.5 |
+| 2 | 12(+4), 12(+6) | 11, 30 | +8.5 | 33.0 / 24.5 | +8.5 |
+| 3 | 12(+5), **11(+0)** | 27, 56 | +30 | 31.0 / 25.0 | +6 |
+| 4 | 12(+8), 12(+2) | 34, 32 | +21 | 36.5 / 20.0 | +16.5 |
+| 5 | 12(+4), 12(+4) | 26, 33 | +17.5 | 43.0 / 22.5 | +20.5 |
+| 6 | 12(+6), 12(+3) | 35, 24 | +17.5 | 31.0 / 28.0 | +3 |
+
+**Dose median +17.5, minimum +8.5. Channel median +7.5, minimum +3. Neither has been negative in any
+batch.** The cap bit in **11 of 12** treated probes — `capB4` remains the only one that stopped short
+on its own, and §243 confirmed from its own `config.snapshot.json` that it was capped all the same.
+
+The channel is the noisier of the two: +3 in batch 6 against +20.5 in batch 5, a sevenfold spread on
+two probes a side. That is what a two-per-arm comparison of a count with a long tail looks like, and
+it is the reason §223's number was reported as a median over eight probes rather than per batch. The
+dose is tighter because it is bounded above by the cap itself.
+
+Nothing here is an outcome and nothing here is surprising; the value is that after six batches and
+$24 the intervention has been delivered every time, in the same direction, through the same channel.
+When the arm reads out at twelve batches, "the two arms did the same thing" will not be an available
+explanation for whatever the number turns out to be — which is the whole reason §198 exists.
+
+Batch 7 is away on all four lanes. Five batches remain, and by §234's table twelve of them buy 0.77
+against a +44 effect.
