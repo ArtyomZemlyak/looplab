@@ -11836,3 +11836,33 @@ is a stale log (past a quarter of `STALL_TIMEOUT`) with calls at least four time
 
 Five mutations red: not reading the second clock, never firing, firing on any stale ledger, ignoring
 a non-200 status, and comparing the two ages the wrong way round.
+
+## §281 — four constants the list quotes as current, and nothing said otherwise
+
+Point 5 of the standing list quotes the reference-against-itself figures as
+`pagerank 1.0024, pde_heat1d 0.9958, edge_expansion 0.9847, discrete_log 1.0162`. I checked the
+docs before claiming anything new, and §219 and its neighbours had already recorded the
+disagreements. What was missing is anything that says so **every sweep**, while the list keeps
+presenting the four numbers as the current state of the ruler:
+
+```
+  discrete_log:    list 1.0162, measured 1.0896 on 2026-09-04  (+7.2 %)
+  edge_expansion:  list 0.9847, measured 0.9077 on 2026-09-05  (-7.8 %)
+  pde_heat1d:      list 0.9958, measured 1.1013 on 2026-09-04  (+10.6 %)
+  pagerank:        UNMEASURED here (list says 1.0024)
+```
+
+**Three tasks, three disagreements, and not one direction.** This is not a box that got slower: it
+is task-specific, which is why a single "the box drifted" correction would be wrong for two of the
+three. `pagerank` has never been read here at all, and it is reported as UNMEASURED rather than
+passed over — silence about a constant nobody has checked is how it stays quoted.
+
+The check compares against the **latest reading this box recorded**, not a fresh measurement: taking
+one needs a 22-cpu bench lane (§262) and those are busy with the arm. The tolerance is 2 %, which
+against measured gaps of 5–11 % is not a hair-trigger.
+
+Five mutations red: letting an unmeasured task pass, taking the first reading instead of the latest,
+a tolerance that swallows everything, reporting the drift unsigned (the directions are the finding),
+and treating an unreadable log as a pass.
+
+That makes seven claims `sweep_claims.py` checks, six of them stale.

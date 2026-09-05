@@ -178,3 +178,50 @@ def test_item_b_would_flip_if_the_card_said_it(tmp_path):
     _make_task(tmp_path, "x = 'the best evaluated node is the one submitted'\n")
     ok, detail = sweep_claims.check_card_silent_on_the_champion_rule(str(tmp_path))
     assert not ok and "best evaluated" in detail, detail
+
+
+def _drift(tmp_path: Path, rows):
+    d = tmp_path / "looplab" / "benchmarks" / "algotune"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "ruler_selfcheck_log.jsonl").write_text(
+        "".join(json.dumps({"task": t, "median": m, "stamp": s, "subset": "test"}) + "\n"
+                for t, m, s in rows), encoding="utf-8")
+
+
+def test_every_constant_matching_its_measurement_holds(tmp_path):
+    _drift(tmp_path, [(t, v, "2026-09-05T10:00:00") for t, v in sweep_claims.SWEEP_CONSTANTS.items()])
+    ok, detail = sweep_claims.check_ruler_constants(str(tmp_path))
+    assert ok, detail
+
+
+def test_the_measured_disagreements_are_reported_with_their_direction(tmp_path):
+    """Measured on this box: edge_expansion -7.8 %, discrete_log +7.2 %, pde_heat1d +10.6 %. Not a
+    uniform box drift -- different tasks, different signs. Already recorded in §219; what was
+    missing is anything that says so while the list keeps quoting the four numbers as current."""
+    _drift(tmp_path, [("edge_expansion", 0.9077, "2026-09-05T12:39:01"),
+                      ("pde_heat1d", 1.1013, "2026-09-04T15:37:39"),
+                      ("discrete_log", 1.0896, "2026-09-04T15:39:43"),
+                      ("pagerank", 1.0024, "2026-09-04T15:00:00")])
+    ok, detail = sweep_claims.check_ruler_constants(str(tmp_path))
+    assert not ok
+    assert "-7.8 %" in detail and "+10.6 %" in detail and "+7.2 %" in detail, detail
+
+
+def test_a_task_with_no_reading_is_unmeasured_not_passed(tmp_path):
+    """Silence about a constant nobody has checked is how it stays quoted."""
+    _drift(tmp_path, [("edge_expansion", 0.9847, "2026-09-05T10:00:00")])
+    ok, detail = sweep_claims.check_ruler_constants(str(tmp_path))
+    assert not ok and "pagerank: UNMEASURED" in detail, detail
+
+
+def test_the_latest_reading_wins_not_the_first(tmp_path):
+    """The log is append-only and holds two edge_expansion rows a day apart."""
+    _drift(tmp_path, [(t, v, "2026-09-01T10:00:00") for t, v in sweep_claims.SWEEP_CONSTANTS.items()]
+                     + [("edge_expansion", 0.9077, "2026-09-05T12:39:01")])
+    ok, detail = sweep_claims.check_ruler_constants(str(tmp_path))
+    assert not ok and "0.9077" in detail, detail
+
+
+def test_an_unreadable_drift_log_is_not_a_pass(tmp_path):
+    ok, detail = sweep_claims.check_ruler_constants(str(tmp_path))
+    assert not ok and "cannot read" in detail, detail

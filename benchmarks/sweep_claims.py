@@ -155,6 +155,58 @@ def check_card_silent_on_the_champion_rule(bench: str):
                 f"the card states it: {found}")
 
 
+SWEEP_CONSTANTS = {"pagerank": 1.0024, "pde_heat1d": 0.9958,
+                   "edge_expansion": 0.9847, "discrete_log": 1.0162}
+DRIFT_LOG = "looplab/benchmarks/algotune/ruler_selfcheck_log.jsonl"
+DRIFT_TOLERANCE = 0.02      # 2 %; the measured disagreements are 5-11 %, so this is not a hair
+
+
+def check_ruler_constants(bench: str):
+    """"Эталон против себя ~1.0: pagerank 1.0024, pde_heat1d 0.9958, edge_expansion 0.9847,
+    discrete_log 1.0162"
+
+    Compared against the LATEST reading this box has recorded for each task, not against a fresh
+    measurement -- taking one needs a 22-cpu bench lane (§262) and those are usually busy. §219 and
+    its neighbours already recorded the disagreements; what was missing is anything that says so
+    every sweep, while the list keeps presenting the four numbers as current.
+
+    A task with no reading is reported as UNMEASURED rather than passed over: silence about a
+    constant nobody has checked is how it stays quoted.
+    """
+    latest: dict = {}
+    try:
+        for line in open(Path(bench) / DRIFT_LOG, encoding="utf-8", errors="replace"):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            task, med, stamp = row.get("task"), row.get("median"), str(row.get("stamp") or "")
+            if not isinstance(med, (int, float)) or task not in SWEEP_CONSTANTS:
+                continue
+            if task not in latest or stamp > latest[task][1]:
+                latest[task] = (float(med), stamp)
+    except OSError as exc:
+        return False, f"cannot read the drift log: {type(exc).__name__}"
+
+    said, off = [], 0
+    for task, quoted in sorted(SWEEP_CONSTANTS.items()):
+        if task not in latest:
+            said.append(f"{task}: UNMEASURED here (list says {quoted:.4f})")
+            off += 1
+            continue
+        got, stamp = latest[task]
+        delta = (got - quoted) / quoted
+        mark = "" if abs(delta) <= DRIFT_TOLERANCE else "  <-- "
+        if abs(delta) > DRIFT_TOLERANCE:
+            off += 1
+        said.append(f"{task}: list {quoted:.4f}, measured {got:.4f} on {stamp[:10]} "
+                    f"({100 * delta:+.1f} %){mark}")
+    return off == 0, "; ".join(said)
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
@@ -164,6 +216,7 @@ CLAIMS = [
      check_card_silent_on_instance_ceiling),
     ("point 8(b): the card does not say the best EVALUATED node is kept",
      check_card_silent_on_the_champion_rule),
+    ("point 5: the reference-against-itself constants", check_ruler_constants),
 ]
 
 
