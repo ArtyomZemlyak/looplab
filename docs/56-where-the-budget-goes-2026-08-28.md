@@ -10394,3 +10394,38 @@ The 47 kernel-yet-weak runs are the larger and more interesting group, and nothi
 separates them from the 30 kernel-yet-strong ones. That is the next question this corpus can answer,
 and I am naming it rather than guessing at it: what distinguishes a kernel that opens at 250 from
 a kernel that opens at 25.
+
+## §239 — what separates a kernel that opens at 250 from one that opens at 25
+
+§238 ended by naming this question rather than guessing at it. Among the 77 `edge_expansion` runs
+that wrote kernel code before their first evaluation — 30 opened strong (≥ 150), 40 weak (< 60),
+7 in between — everything observable in the spans before node 0:
+
+| before node 0 | strong median | weak median | Mann–Whitney |
+|---|---|---|---|
+| file writes / patches | **6.0** | **3.0** | **p < 0.001** |
+| `eval_train` calls | **13.5** | **9.0** | **p = 0.001** |
+| executed `run_probe` calls | 11.0 | 8.0 | p = 0.105 |
+| probes whose output carried an error | 4.0 | 3.0 | p = 0.215 |
+| largest single write, characters | 1812.5 | 1774.0 | p = 0.245 |
+
+The answer is **not a bigger first attempt** — the largest write is the same size to within 2 %, and
+the runs do not differ in how many probes they run or how often those probes error. It is **more
+revisions of it, each graded**: twice the writes and half again the graded evaluations, before the
+first node is ever built.
+
+**This is observational and I am not calling it causal.** The obvious confound runs the other way
+round: a run that had a promising kernel early has something worth revising, and a run whose kernel
+was hopeless has less reason to keep touching it. Nothing here distinguishes "iterating more makes
+the opening strong" from "a strong opening invites more iteration".
+
+What it does do is sharpen the relationship between §223 and §224. The cap moves `eval_train` up
+(33.0 against 24.5 across batches 1–2), and `eval_train` is one of the two things that separates a
+strong opening from a weak one — but §224 measured that `eval_train` has **no** association with the
+FINAL score across the corpus (p = 1.00). Both can hold at once, and §231 says how: a strong opening
+is worth about 29 points, and four weak openings in five recover anyway, so an effect on the opening
+is largely washed out by the end of the run. That is a coherent account, and it predicts that the
+arm's effect — if there is one — should be smaller than the opening-level difference suggests.
+
+Written down now, before the arm reads out, so it cannot be assembled afterwards to fit whatever
+number arrives.
