@@ -11042,3 +11042,32 @@ Two more defects came out of writing the tests, both about ties:
 On the live batch it now says what the hand queries said, in one command: `capA9` outside on
 `first_node_usd` ($0.6392 against a corpus median of $0.3161) and on `share_deep_research` (45.2 %
 against 16.3 %), `capB9` and `freeA9` clean, `freeB10` low on `share_plan`. Four mutations red.
+
+## §258 — the outlier check is hygiene, not an early warning
+
+§257 shipped a tool that places a running probe inside the corpus and names what falls outside
+p5–p95. The temptation it creates is obvious: `capA9` lit up on two variables, and the next step is
+to start reading a flag as a prediction. So I checked whether it is one, on the 98 finished runs.
+
+| process variables outside p5–p95 | n | final TEST median |
+|---|---|---|
+| 0 | 61 | 201.33 |
+| 1 | 28 | 218.22 |
+| 2 | 8 | 210.87 |
+| **any (≥ 1)** | **37** | **215.38** |
+
+Mann–Whitney between "no flags" and "at least one" gives **p = 0.898**. Being unusual in how a run
+spends its money says **nothing** about how it will score — and what direction there is runs the
+wrong way for the worried reading, with flagged runs a shade higher.
+
+The flag rate itself is unremarkable too: 37 of 98 runs carry at least one, and six variables tested
+at p5/p95 independently would produce about 47 % by construction. Nothing here needs explaining.
+
+So the tool answers "is this normal?" and nothing else. That is worth having — three sweeps in a row
+the question arrived and twice the answer was "yes, ordinary", which stopped a dig that would have
+cost an hour. What it must not become is a reason to intervene in a probe, and after this measurement
+it cannot honestly be used that way.
+
+`capA9` is the case in point. It flagged on two variables, took its first node at $0.6392 where the
+corpus median is $0.3161, and that node came in at 135.47 — an ordinary middle-band opening (§244).
+Unusual and fine, which is precisely what p = 0.898 predicts.
