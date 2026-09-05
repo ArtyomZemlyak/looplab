@@ -71,6 +71,7 @@ BATCHES = [
     # 11-21. Registered here, before any contrast was read, so the swap cannot be chosen by outcome.
     (["capA11", "capB11"], ["freeA11", "freeB12"]),
     (["capA12", "capB12"], ["freeA12", "freeB13"]),
+    (["capA13", "capB13"], ["freeA13", "freeB14"]),   # the twelfth and last
 ]
 
 
@@ -135,12 +136,40 @@ def spend(name: str) -> float:
 
 
 def score(name: str):
+    """`(value, None)`, or `(None, why not)`. The last unguarded step from disk to verdict.
+
+    IT WAS READING `speedup` AND NOTHING ELSE. Two things sit beside it in the same file and both
+    change what that number means:
+
+      * `subset`. Every node in a run is evaluated on TRAIN and the champion is scored ONCE on TEST
+        (§84). A train figure in this field is a different measurement on a different split, and
+        arithmetic over the two is meaningless -- but it is a float, and it would go straight into
+        the statistic without a word. Measured 2026-09-05: all 44 finished arm probes and all 136
+        `final.json` on this box say `test`, so this guards a hole rather than closing a leak.
+      * `superseded`. §55 recorded two `final.json` carrying it, both from a scoring pass that took
+        `solver.py` from the wrong path -- a score for a solver that is not the champion.
+
+    Neither was checked, and neither would have shown in the output.
+    """
     try:
         with open(f"{ROOT}/{name}/final.json", encoding="utf-8") as fh:
-            value = json.load(fh).get("speedup")
-    except (OSError, ValueError):
-        return None
-    return float(value) if isinstance(value, (int, float)) and value > 0 else None
+            record = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return None, f"no readable final.json ({type(exc).__name__})"
+    if not isinstance(record, dict):
+        return None, "final.json is not an object"
+    if record.get("superseded"):
+        return None, (f"final.json is marked superseded ({record.get('superseded')}) -- §55: a "
+                      "score for a solver that is not the champion")
+    subset = record.get("subset")
+    if subset != "test":
+        return None, (f"final.json records subset {subset!r}, not 'test' -- every node ran on "
+                      "TRAIN and the champion is scored once on TEST (§84); the two are different "
+                      "measurements and averaging across them means nothing")
+    value = record.get("speedup")
+    if not isinstance(value, (int, float)) or value <= 0:
+        return None, f"speedup is {value!r}"
+    return float(value), None
 
 
 def admit(name: str, arm: str, max_spend: float, budget: float = 1.0):
@@ -154,9 +183,9 @@ def admit(name: str, arm: str, max_spend: float, budget: float = 1.0):
         return None, f"has not ended (${paid:.4f})"
     if paid > max_spend:
         return None, f"spent ${paid:.4f}, over the ${max_spend:.2f} ceiling"
-    got = score(name)
+    got, why = score(name)
     if got is None:
-        return None, "no usable score"
+        return None, why
     return got, None
 
 

@@ -11721,3 +11721,34 @@ Not a new discovery — §73.4 settled it on 2026-09-01 — but a number I have 
 standing list for a week, and one that makes every future probe on that task look 0.20 % better than
 it is. It is now the fourth claim `sweep_claims.py` checks, read from the probe's own record rather
 than from memory.
+
+## §277 — the last unguarded step from disk to verdict
+
+Batch 11 ended clean (all four at $1.0080–$1.0106) and **batch 12, the last, is launched** on the
+swapped mapping. `lane_balance` keeps improving: 9/3, 8/4, 4/8, 3/9. So this was the final sweep
+before the readout, and I spent it on the one step in the path from disk to verdict that nothing
+checked.
+
+`score()` read `speedup` and nothing else. Two fields sit beside it in the same file and both change
+what that number means:
+
+- **`subset`.** Every node in a run is evaluated on TRAIN and the champion is scored once on TEST
+  (§84). A train figure in that field is a different measurement on a different split — and it is a
+  float, so it would go straight into the statistic without a word.
+- **`superseded`.** §55 recorded two `final.json` carrying it, both from a scoring pass that took
+  `solver.py` from the wrong path: a score for a solver that is not the champion.
+
+Measured before writing anything: **all 44 finished arm probes, and all 136 `final.json` on this
+box, record `subset: test` with no `superseded`.** So this guards a hole rather than closing a leak
+— which is the right time to do it, since the hole is invisible by construction and the readout is
+one batch away. `admit` now passes the reason through instead of flattening everything to "no usable
+score", because a generic reason sends the reader to the wrong half of the bench.
+
+**Three existing tests went red, and they were right to.** Their fixtures wrote
+`{"speedup": ...}` with no `subset`, which is not the shape the real file has. A fixture that does
+not match the artefact it stands for tests something that does not exist — the same lesson as §263's
+cap-as-filter and §271's directory-versus-money, arriving from the other direction: not a fixture too
+weak to fail, a fixture too loose to be true. Fixed to carry `subset: test`, as every real file does.
+
+Five mutations red: not checking `subset`, treating a missing `subset` as `test`, ignoring
+`superseded`, swallowing the reason in `admit`, and admitting a non-positive speedup.

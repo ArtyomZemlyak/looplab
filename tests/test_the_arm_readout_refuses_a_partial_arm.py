@@ -30,7 +30,11 @@ def _probe(root: Path, name: str, cap, spend: float, score, finished: bool = Tru
         events.append({"type": "run_finished", "data": {"reason": "budget_exhausted"}})
     (d / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
     if score is not None:
-        (root / name / "final.json").write_text(json.dumps({"speedup": score}), encoding="utf-8")
+        # `subset` BECAUSE THE REAL FILE HAS IT. All 136 final.json on this box record
+        # `"subset": "test"`, and a fixture without it was not the shape being tested -- which is
+        # how three tests here went red the moment `score` started checking it.
+        (root / name / "final.json").write_text(json.dumps({"speedup": score, "subset": "test"}),
+                                                encoding="utf-8")
 
 
 def test_it_refuses_to_read_a_partial_arm(tmp_path, monkeypatch, capsys):
@@ -232,3 +236,62 @@ def test_the_readout_refuses_a_malformed_design_before_reading_anything(tmp_path
     out = capsys.readouterr().out
     assert rc == 2 and "DESIGN:" in out, (rc, out)
     assert "complete batches" not in out, out
+
+
+def _final(tmp_path, name, record):
+    d = tmp_path / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "final.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_a_test_score_is_admitted(tmp_path, monkeypatch):
+    monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
+    _final(tmp_path, "p", {"speedup": 224.8846, "subset": "test"})
+    assert arm_readout.score("p") == (224.8846, None)
+
+
+def test_a_train_score_is_not_a_test_score(tmp_path, monkeypatch):
+    """Every node in a run is evaluated on TRAIN and the champion is scored once on TEST (§84). A
+    train figure in this field is a different measurement on a different split -- and it is a float,
+    so it would go into the statistic without a word. All 44 finished arm probes and all 136
+    final.json on this box say `test`, so this guards a hole rather than closing a leak."""
+    monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
+    _final(tmp_path, "p", {"speedup": 224.8846, "subset": "train"})
+    got, why = arm_readout.score("p")
+    assert got is None and "train" in why and "§84" in why, (got, why)
+
+
+def test_a_missing_subset_is_not_assumed_to_be_test(tmp_path, monkeypatch):
+    monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
+    _final(tmp_path, "p", {"speedup": 224.8846})
+    got, why = arm_readout.score("p")
+    assert got is None and "None" in why, (got, why)
+
+
+def test_a_superseded_record_is_a_score_for_another_solver(tmp_path, monkeypatch):
+    """§55: two final.json carried this, both from a scoring pass that took solver.py from the
+    wrong path."""
+    monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
+    _final(tmp_path, "p", {"speedup": 300.0, "subset": "test", "superseded": "wrong solver path"})
+    got, why = arm_readout.score("p")
+    assert got is None and "superseded" in why, (got, why)
+
+
+def test_a_nonpositive_or_absent_speedup_is_named(tmp_path, monkeypatch):
+    monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
+    _final(tmp_path, "zero", {"speedup": 0.0, "subset": "test"})
+    _final(tmp_path, "null", {"speedup": None, "subset": "test"})
+    assert arm_readout.score("zero")[0] is None and "0.0" in arm_readout.score("zero")[1]
+    assert arm_readout.score("null")[0] is None and "None" in arm_readout.score("null")[1]
+
+
+def test_the_reason_reaches_the_operator_through_admit(tmp_path, monkeypatch):
+    """A generic "no usable score" sends the reader to the wrong half of the bench. `admit` must
+    pass through what `score` actually found."""
+    monkeypatch.setattr(arm_readout, "ROOT", str(tmp_path))
+    _final(tmp_path, "p", {"speedup": 224.0, "subset": "train"})
+    monkeypatch.setattr(arm_readout.arm_fidelity, "assigned_cap", lambda root, name: 12)
+    monkeypatch.setattr(arm_readout, "spend", lambda name: 1.0)
+    monkeypatch.setattr(arm_readout.arm_fidelity, "_run_finished", lambda root, name: True)
+    got, why = arm_readout.admit("p", "treat", 1.05)
+    assert got is None and "train" in why, (got, why)
