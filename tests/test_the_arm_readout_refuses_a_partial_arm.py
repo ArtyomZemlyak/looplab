@@ -295,3 +295,93 @@ def test_the_reason_reaches_the_operator_through_admit(tmp_path, monkeypatch):
     monkeypatch.setattr(arm_readout.arm_fidelity, "_run_finished", lambda root, name: True)
     got, why = arm_readout.admit("p", "treat", 1.05)
     assert got is None and "train" in why, (got, why)
+
+
+def _instrument(root: Path, name: str, lane: str):
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "INSTRUMENT.txt").write_text(f"probe:          {name}\nlane:           {lane}\n",
+                                      encoding="utf-8")
+
+
+A1, A2, B1, B2 = "0-10,48-58", "11-21,59-69", "22-32,70-80", "33-43,81-91"
+
+
+def test_a_batch_on_the_original_lanes_is_mapping_a(tmp_path):
+    _instrument(tmp_path, "capA1", A1); _instrument(tmp_path, "capB1", A2)
+    assert arm_readout.mapping_of(["capA1", "capB1"], str(tmp_path)) == "A"
+
+
+def test_a_batch_on_the_swapped_lanes_is_mapping_b(tmp_path):
+    _instrument(tmp_path, "capA1", B1); _instrument(tmp_path, "capB1", B2)
+    assert arm_readout.mapping_of(["capA1", "capB1"], str(tmp_path)) == "B"
+
+
+def test_a_batch_with_one_lane_from_each_pair_is_mixed_not_unreadable(tmp_path):
+    """Batch 1 of the real arm is exactly this: treatment on 0-10 and 22-32, control on 11-21 and
+    33-43. It is internally balanced against the lane pairs and carries no confound at all, so
+    calling it "?" would report a failure to measure something that was measured and came out
+    even."""
+    _instrument(tmp_path, "capA1", A1); _instrument(tmp_path, "capB1", B1)
+    assert arm_readout.mapping_of(["capA1", "capB1"], str(tmp_path)) == "mixed"
+
+
+def test_an_unreadable_instrument_is_a_question_mark(tmp_path):
+    assert arm_readout.mapping_of(["nobody"], str(tmp_path)) == "?"
+
+
+def test_the_contrast_is_reported_under_each_mapping(tmp_path):
+    """§266 swapped the mapping for batches 10-12 so the lane confound became estimable. Registered
+    here BEFORE any outcome was read, which is the only time such a check is worth writing."""
+    for n, lane in (("capA1", A1), ("capB1", A2), ("capA2", B1), ("capB2", B2)):
+        _instrument(tmp_path, n, lane)
+    monkey = [(["capA1", "capB1"], ["x", "y"]), (["capA2", "capB2"], ["x", "y"])]
+    old = arm_readout.BATCHES
+    try:
+        arm_readout.BATCHES = monkey
+        ready = [(1, [200.0, 210.0], [100.0, 110.0]), (2, [150.0, 160.0], [140.0, 130.0])]
+        got = arm_readout.lane_split(ready, str(tmp_path))
+    finally:
+        arm_readout.BATCHES = old
+    assert got["A"]["n"] == 1 and abs(got["A"]["contrast"] - 100.0) < 1e-9, got
+    assert got["B"]["n"] == 1 and abs(got["B"]["contrast"] - 20.0) < 1e-9, got
+
+
+def test_the_interaction_test_needs_both_mappings():
+    assert arm_readout.interaction_p({"A": {"contrast": 1.0, "rows": [], "n": 1}}) is None
+
+
+def test_a_lane_effect_of_the_size_that_was_feared_is_visible(tmp_path):
+    """A lane effect adds to the contrast under one mapping and subtracts under the other, so the
+    gap between the two is twice the effect. With a large enough gap the interaction test must
+    notice; with no gap it must not."""
+    same = {"A": {"n": 3, "contrast": 20.0,
+                  "rows": [([120.0, 130.0], [105.0, 105.0])] * 3},
+            "B": {"n": 3, "contrast": 20.0,
+                  "rows": [([120.0, 130.0], [105.0, 105.0])] * 3}}
+    assert arm_readout.interaction_p(same) > 0.20
+
+    apart = {"A": {"n": 3, "contrast": 90.0,
+                   "rows": [([200.0, 200.0], [110.0, 110.0])] * 3},
+             "B": {"n": 3, "contrast": -90.0,
+                   "rows": [([110.0, 110.0], [200.0, 200.0])] * 3}}
+    assert arm_readout.interaction_p(apart) < 0.05
+
+
+def test_the_interaction_test_is_two_sided_and_that_decides_cases_at_alpha():
+    """A lane effect can go either way, so the registered check is two-sided. A one-sided version
+    reports about HALF the p on a symmetric null, and that factor decides cases at the boundary:
+    this fixture reads 0.0571 two-sided at the default 20 000 draws -- do NOT reject -- against
+    0.0283 one-sided, which would call a lane effect real. Registered before any outcome was seen,
+    so the side cannot be chosen after looking."""
+    import statistics as st
+    rows_a = [([120.0, 130.0], [100.0, 105.0])]
+    rows_b = [([100.0, 105.0], [120.0, 130.0])]
+
+    def contrast(rows):
+        return st.mean([st.mean(t) - st.mean(c) for t, c in rows])
+
+    groups = {"A": {"n": 1, "contrast": contrast(rows_a), "rows": rows_a},
+              "B": {"n": 1, "contrast": contrast(rows_b), "rows": rows_b}}
+    p = arm_readout.interaction_p(groups)
+    assert 0.05 < p < 0.07, p

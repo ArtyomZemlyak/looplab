@@ -11782,3 +11782,34 @@ remembered. That makes six of its checks, five of them stale.
 actually matched — a sentence claiming more than its measurement, inside the file whose entire
 purpose is catching exactly that. Now it names what matched. Five mutations red, including one that
 puts the unmatched marker back into the sentence.
+
+## §279 — the analysis §266 made possible, registered before the data exists
+
+§266 swapped the lane-to-label mapping for batches 10-12 so that a lane effect could be told apart
+from a treatment effect. Nothing computed that separation, and batch 12 is the last one — so this is
+the final moment at which the check can be written **before** the numbers it will run on exist.
+
+`lane_split` reports the treatment contrast separately under each mapping, and `interaction_p` asks
+how often relabelling within each batch produces a gap between the two mappings this large. The
+logic: a lane effect **adds** to the contrast under one mapping and **subtracts** under the other,
+so the difference between the two contrasts is twice the lane effect. Three batches makes this weak,
+not meaningless; it is printed with its own n, as a check on the headline number rather than a
+replacement for it.
+
+Reading the mapping off each probe's own `INSTRUMENT.txt` turned up something I had not known:
+**batch 1 is mixed, not mapping A.** `capA2` ran on 0-10 and `capB2` on 22-32, `freeA2` on 11-21 and
+`freeB2` on 33-43 — one lane from each pair on each side. That batch is internally balanced against
+the lane pairs and carries no confound at all, and the first version of this code called it `?`,
+which reads as a failure to measure something that was in fact measured and came out even. The
+design is `mixed 1, A 8, B 3`.
+
+**A mutation survived, and the fix was a fixture at the boundary rather than a bigger effect.**
+Replacing the two-sided `abs(...)` with a signed comparison passed every test: on a symmetric null
+the two differ by a factor of two in p and never by direction, so no amount of "make the effect
+bigger" separates them. What separates them is α. The fixture now used reads **0.0571 two-sided —
+do not reject — against 0.0283 one-sided, which would call a lane effect real.** A lane effect can
+go either way, so the registered check is two-sided, and it is registered now so the side cannot be
+chosen after looking.
+
+Five other mutations red: reporting `mixed` as unreadable, reading every batch as mapping A,
+ignoring the mapping in the split, and running the interaction on a single mapping.

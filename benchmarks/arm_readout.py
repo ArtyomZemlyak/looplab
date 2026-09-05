@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 import json
 import statistics
 import sys
@@ -205,6 +206,92 @@ def stratified_p(batches, alternative_positive: bool = True) -> float:
     return ge / total
 
 
+# The lanes treatment ran on for batches 1-9. §266 swapped it for 10-12 so the confound became
+# estimable; this is the mapping being compared against, not a claim that it is the right one.
+MAPPING_A_TREAT_LANES = ("0-10,48-58", "11-21,59-69")
+
+
+def mapping_of(treat, root: str) -> str:
+    """"A" if this batch ran treatment on the original pair of lanes, "B" if on the swapped pair.
+
+    Read from each probe's own INSTRUMENT.txt, which records the lane at launch.
+    """
+    lanes = set()
+    for name in treat:
+        try:
+            text = open(f"{root}/{name}/INSTRUMENT.txt", encoding="utf-8",
+                        errors="replace").read()
+        except OSError:
+            return "?"
+        got = re.search(r"^lane:\s+(\S+)", text, re.M)
+        if not got:
+            return "?"
+        lanes.add(got.group(1))
+    if not lanes:
+        return "?"
+    if lanes <= set(MAPPING_A_TREAT_LANES):
+        return "A"
+    if not (lanes & set(MAPPING_A_TREAT_LANES)):
+        return "B"
+    # MIXED IS NOT UNREADABLE. Batch 1 ran treatment on 0-10 and 22-32 and control on 11-21 and
+    # 33-43 -- one lane from each pair on each side. That batch is internally balanced against the
+    # lane pairs and so carries no confound at all; calling it "?" would read as a failure to
+    # measure something that was in fact measured and came out even.
+    return "mixed"
+
+
+def lane_split(ready, root: str):
+    """The treatment contrast computed SEPARATELY under each lane-to-label mapping.
+
+    REGISTERED BEFORE THE OUTCOME WAS SEEN, which is the only time this is worth writing. §266 found
+    that 17 of 18 treated probes had run on the same pair of lanes, making "treated" and "ran on
+    lanes A or B" one variable with two names, and could not exclude a lane effect of about 3 %.
+    Batches 10-12 swapped the mapping precisely so the two could be told apart.
+
+    If the lanes are exchangeable, the contrast is the same under both mappings. If they are not,
+    the lane effect adds to the treatment effect under one mapping and subtracts under the other, so
+    the DIFFERENCE of the two contrasts is twice the lane effect and the interaction test sees it.
+    A small group (three batches) makes this weak, not meaningless: it is reported with its own n,
+    and it is a check on the headline number rather than a replacement for it.
+    """
+    groups: dict = {}
+    for i, treat_scores, control_scores in ready:
+        key = mapping_of(BATCHES[i - 1][0], root)
+        groups.setdefault(key, []).append((treat_scores, control_scores))
+    out = {}
+    for key, rows in sorted(groups.items()):
+        contrast = statistics.mean([statistics.mean(t) - statistics.mean(c) for t, c in rows])
+        out[key] = {"n": len(rows), "contrast": contrast, "rows": rows}
+    return out
+
+
+def interaction_p(groups, draws: int = 20000, seed: int = 190) -> float | None:
+    """How often relabelling WITHIN each batch produces a gap between the two mappings this large.
+
+    Sampled rather than enumerated: the exact space is 6^12, which is 2.2 billion.
+    """
+    if set(groups) != {"A", "B"}:
+        return None
+    import random
+    rng = random.Random(seed)
+    obs = abs(groups["A"]["contrast"] - groups["B"]["contrast"])
+    rows = {k: groups[k]["rows"] for k in ("A", "B")}
+    hits = 0
+    for _ in range(draws):
+        means = {}
+        for key in ("A", "B"):
+            per = []
+            for t, c in rows[key]:
+                pool = list(t) + list(c)
+                rng.shuffle(pool)
+                k = len(t)
+                per.append(statistics.mean(pool[:k]) - statistics.mean(pool[k:]))
+            means[key] = statistics.mean(per)
+        if abs(means["A"] - means["B"]) >= obs:
+            hits += 1
+    return hits / draws
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -248,6 +335,19 @@ def main(argv=None) -> int:
     p = stratified_p(batches)
     print(f"\nsum of within-batch mean differences: {obs:+.2f}")
     print(f"exact stratified one-sided permutation p = {p:.4f} (alpha {args.alpha})")
+    groups = lane_split(ready[:args.batches], ROOT)
+    if len(groups) > 1:
+        print("\n  the same contrast under each lane-to-label mapping (§266, registered before the "
+              "outcome was seen):")
+        for key, got in sorted(groups.items()):
+            note = ("  (one lane from each pair on each side -- internally balanced)"
+                    if key == "mixed" else
+                    "  (lanes unreadable)" if key == "?" else "")
+            print(f"    mapping {key}: {got['contrast']:+.2f} over {got['n']} batch(es){note}")
+        pi = interaction_p(groups)
+        if pi is not None:
+            print(f"    two-sided sampled interaction p = {pi:.4f} -- a lane effect would add to "
+                  "the contrast under one mapping and subtract under the other")
     print("REJECT the null" if p <= args.alpha else
           f"do NOT reject: no effect of the registered size was detected at power 0.77 (§234). "
           "That is not the same as 'capping does not help'.")
