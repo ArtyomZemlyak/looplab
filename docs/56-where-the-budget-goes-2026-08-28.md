@@ -10553,3 +10553,33 @@ the cap would be the same defect wearing the other label, and only checking the 
 miss it.
 
 Still no scores: this reads two settings out of a config file.
+
+## §244 — the middle band, and why the opening is a floor rather than a forecast
+
+`capB7` opened at **137.757** this sweep, which lands in the band §225 measured as nearly empty. The
+corpus now has seven such runs, so they can be looked at rather than skipped:
+
+| node 0 | n | final median | p10 | p90 | reach 150+ |
+|---|---|---|---|---|---|
+| weak (< 60) | 53 | 195.29 | 28.02 | 254.14 | 40/53 = 75 % |
+| **middle (60–150)** | **7** | **179.65** | **96.92** | 261.36 | 5/7 |
+| strong (≥ 150) | 30 | 223.80 | 174.64 | 268.25 | 29/30 = 97 % |
+
+Run by run the middle band goes 96.92, 151.08, 179.65, 218.85, 218.87, 261.36 and 137.76 — which is
+to say it goes everywhere. Its final median is *lower* than the weak band's despite starting higher,
+and with seven runs that is noise, not a finding. **The middle band cannot be distinguished from
+either neighbour and I am not going to pretend otherwise.**
+
+Its one clear property is a higher floor — p10 96.92 against the weak band's 28.02 — and that is
+mechanical rather than predictive. The champion rule submits the best EVALUATED node, so a run
+cannot finish below its own opening. Verified: of 90 runs, **four** finish below 98 % of their first
+node (`remEEctl4` 96.3 %, `oldCK9` 97.3 %, `newCK2` 97.6 %, `oldCK12` 97.8 %) and every one of those
+four is the train→test gap of §220, whose sd is 1.4 % — not a run that got worse.
+
+So the honest reading of all three bands together: **the opening sets a floor, not a forecast.** A
+strong opening is close to a guarantee because its floor is already above 150 (29 of 30). A weak one
+is a lottery with a floor near zero, which §231 priced at 44 % of the budget to escape. And the
+middle is a lottery with a floor in the middle, on seven runs.
+
+That also puts §225's "+28.63 points for a strong opening" in its place: a large part of that gap is
+the floor the champion rule enforces, not a difference in what the loop goes on to build.
