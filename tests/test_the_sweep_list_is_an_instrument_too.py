@@ -106,3 +106,29 @@ def test_a_broken_check_is_not_a_verdict(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "UNCHECKABLE" in out and "no such thing" in out, out
     assert rc == 0 and "0 of 1" in out, (rc, out)
+
+
+def test_the_comparison_figure_is_read_from_the_probes_own_record(tmp_path):
+    """§73.4 settled this on 2026-09-01 and the list still carries the old number: accEE's TEST is
+    224.8846, measured here with its Cython kernel building. A comparison figure 0.20 % below the
+    truth makes every future probe on this task look slightly better than it is."""
+    d = tmp_path / "model-probes" / "accEE"
+    d.mkdir(parents=True)
+    (d / "final.json").write_text(json.dumps({"speedup": 224.8846, "subset": "test"}),
+                                  encoding="utf-8")
+    ok, detail = sweep_claims.check_accee_test(str(tmp_path))
+    assert not ok and "224.8846" in detail and "73.4" in detail, detail
+
+
+def test_the_figure_would_hold_if_the_record_said_so(tmp_path):
+    d = tmp_path / "model-probes" / "accEE"
+    d.mkdir(parents=True)
+    (d / "final.json").write_text(json.dumps({"speedup": 224.4432}), encoding="utf-8")
+    ok, detail = sweep_claims.check_accee_test(str(tmp_path))
+    assert ok, detail
+
+
+def test_an_unreadable_record_is_not_a_verdict_either_way(tmp_path):
+    (tmp_path / "model-probes").mkdir(parents=True)
+    ok, detail = sweep_claims.check_accee_test(str(tmp_path))
+    assert not ok and "cannot read" in detail, detail

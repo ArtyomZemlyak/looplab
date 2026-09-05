@@ -11685,3 +11685,39 @@ not have: the thing that was true only in my head is now the thing the tool chec
 Also verified in production this sweep: §264's provenance fix is live — four snapshots now record
 `cpus 96 on the box | this snapshot pinned to 8`, and the log still holds exactly one overrun, the
 already-diagnosed 1802 s tick.
+
+## §276 — the tool that answers checklist item 9 would have printed the arm's scores
+
+One batch from readout, I went to validate `probe_summary` against a probe whose answer I already
+knew, and typed `probe_summary.py accEE`. It printed:
+
+```
+no bench roots on this box
+```
+
+A message about the BOX, for a mistake on my command line. `_roots` filters argv with
+`if Path(a).is_dir()` and a probe NAME — which is what the checklist talks in — silently vanishes.
+With two arguments it is worse: a mistyped root is dropped beside a good one, the report looks like
+it worked, and it quietly covers a different scope than the one asked for. Now an argument that is
+not a root is named, and the CLI says what it does take.
+
+**The bigger thing was one command further on.** `probe_summary` prints a `TEST` column for every
+probe it finds, and the arm's probes live in the same tree as everything else — so pointing it at
+`BENCH_ROOT`, its documented default, puts the arm's outcome on screen. `arm_fidelity`, `pulse`,
+`outlier_check` and `lane_balance` were each built specifically to avoid that, and this one, which
+exists to read scores, had nothing stopping it. The only thing that ever had was me remembering.
+Same shape as §270, and I was one keystroke from it while doing something careful.
+
+So §190 is enforced in the code now: probes in the registered design print `EMBARGO` instead of a
+score, the table says how many it masked and why, `--include-embargoed` is an explicit override, and
+the embargo lifts on a **marker file** rather than an inference — lifting it should be a deliberate
+act somebody can find in the history. A `--probe NAME` filter makes item 9 usable one probe at a
+time, which is what I wanted in the first place. Six mutations red, including masking nobody, masking
+everybody, ignoring the marker, and dropping a bad argument silently again.
+
+**And the check that started it found a fifth stale claim.** `accEE`'s own `final.json` records
+**224.8846**, not the **224.4432** the list carries as the comparison figure for `edge_expansion`.
+Not a new discovery — §73.4 settled it on 2026-09-01 — but a number I have been carrying in the
+standing list for a week, and one that makes every future probe on that task look 0.20 % better than
+it is. It is now the fourth claim `sweep_claims.py` checks, read from the probe's own record rather
+than from memory.

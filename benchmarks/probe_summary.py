@@ -88,9 +88,46 @@ def _meter_by_arm(path: str | None = None) -> dict:
     return out
 
 
+ARM_DESIGN = str(Path(__file__).resolve().parent / "arm_readout.py")
+EMBARGO_LIFTED = Path(__file__).resolve().parent / "algotune" / ".arm_readout_taken"
+
+
+def embargoed_probes(design: str = ARM_DESIGN) -> set:
+    """Names §190 forbids showing a score for until the arm has been read.
+
+    THIS TOOL PRINTS A `TEST` COLUMN FOR EVERY PROBE IT FINDS, and the arm's probes live in the same
+    tree as everything else. Pointing it at `BENCH_ROOT` -- the documented default -- puts the arm's
+    outcome on screen, which is the one thing §190 forbids and which `arm_fidelity`, `pulse`,
+    `outlier_check` and `lane_balance` were each built to avoid. I came within one command of it
+    while trying to check this very tool against a NON-arm probe. Same shape as §270: the tools
+    obeyed and the operator did not.
+
+    The embargo lifts when the readout is actually taken, marked by a file rather than inferred, so
+    that lifting it is a deliberate act somebody can find in the history.
+    """
+    if EMBARGO_LIFTED.exists():
+        return set()
+    try:
+        import lane_balance
+        return {n for treat, control in lane_balance.batches(design) for n in treat + control}
+    except Exception:                        # noqa: BLE001 - no design is not a licence to print
+        return set()
+
+
 def _roots(argv: list[str]) -> list[Path]:
     if argv:
-        return [Path(a) for a in argv if Path(a).is_dir()]
+        # AN ARGUMENT THAT IS NOT A ROOT IS AN ERROR, NOT A SILENT DROP. `probe_summary.py accEE`
+        # -- a probe NAME, which is what the checklist talks in -- filtered to an empty list and
+        # printed "no bench roots on this box": a message about the BOX for a mistake on the
+        # command line. Worse with two arguments, where a mistyped root is dropped beside a good
+        # one and the report silently covers a different scope than the one asked for.
+        bad = [a for a in argv if not Path(a).is_dir()]
+        if bad:
+            print(f"not a directory: {', '.join(bad)}", file=sys.stderr)
+            print("this tool takes bench ROOTS, not probe names; probes are filtered with --probe",
+                  file=sys.stderr)
+            return []
+        return [Path(a) for a in argv]
     cands = [os.environ.get("BENCH_ROOT") or "/var/tmp/looplab-bench",
              os.environ.get("SNAPSHOT_RUNS_ARCHIVE")
              or "/home/jovyan/data/looplab-bench/runs-archive"]
@@ -457,10 +494,29 @@ def summarise(run_dir: Path) -> dict | None:
 
 
 def main(argv: list[str]) -> int:
+    wanted = set()
+    while "--probe" in argv:
+        i = argv.index("--probe")
+        if i + 1 >= len(argv):
+            print("--probe needs a name", file=sys.stderr)
+            return 1
+        wanted.add(argv[i + 1])
+        del argv[i:i + 2]
+    show_embargoed = "--include-embargoed" in argv
+    argv = [a for a in argv if a != "--include-embargoed"]
+
+    given = list(argv)
     roots = _roots(argv)
     if not roots:
-        print("no bench roots on this box", file=sys.stderr)
+        # NOT THE SAME FAILURE, so not the same sentence. `_roots` has already named the bad
+        # argument; repeating "no bench roots on this box" over it points the reader back at the
+        # box for a mistake on their command line.
+        if not given:
+            print("no bench roots on this box", file=sys.stderr)
         return 1
+    # ARM_DESIGN read HERE, not baked into the default at import time, so the path is one thing a
+    # caller (or a test) can point somewhere else.
+    hidden = embargoed_probes(ARM_DESIGN) if not show_embargoed else set()
     meter = _meter_by_arm()
     seen: dict[str, dict] = {}
     for root in roots:
@@ -468,16 +524,27 @@ def main(argv: list[str]) -> int:
             s = summarise(ev.parent)
             # The live tree and the archive hold the SAME run; keep whichever has more spend, which
             # is the fresher copy. Reporting one probe twice is how the zeros section went wrong.
-            if s and (s["probe"] not in seen or s["spent"] > seen[s["probe"]]["spent"]):
+            if not s or (wanted and s["probe"] not in wanted):
+                continue
+            if s["spent"] and (s["probe"] not in seen or s["spent"] > seen[s["probe"]]["spent"]) \
+                    or s["probe"] not in seen:
                 seen[s["probe"]] = s
     if not seen:
         print("no probes on this box")
         return 0
 
+    if hidden & set(seen):
+        print(f"{len(hidden & set(seen))} probe(s) in the registered arm: TEST masked until the "
+              f"readout is taken (§190). Override with --include-embargoed, or mark the readout "
+              f"done by creating {EMBARGO_LIFTED.name}.")
     print(f"{'probe':10s}{'task':16s}{'$':>8}{'TEST':>10}{'nodes':>7}"
           f"{'before%':>9}{'after%':>8}{'eval_tr':>8}{'->build':>9}{'build':>7}  champion")
     for s in sorted(seen.values(), key=lambda x: (x["task"], -(x["test"] or -1))):
-        test = f"{s['test']:.4f}" if s["test"] is not None else "-"
+        # §190 IS ENFORCED HERE, NOT IN THE OPERATOR'S MEMORY. The arm's probes share this tree
+        # with everything else; the only thing that ever stopped this column showing them was me
+        # remembering not to run the tool.
+        test = ("EMBARGO" if s["probe"] in hidden else
+                f"{s['test']:.4f}" if s["test"] is not None else "-")
         champ = (f"{s['champion_lines']}L {'kernel' if s['kernel'] else 'plain python'}"
                  if s["champion_lines"] else "(none)")
         tb = f"{s['to_build_min']:.0f}m" if s["to_build_min"] is not None else "-"

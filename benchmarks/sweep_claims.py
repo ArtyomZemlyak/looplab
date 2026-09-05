@@ -97,10 +97,26 @@ def check_named_probes_running(bench: str):
                 f"{', '.join(sorted(live)) or 'nothing'}")
 
 
+def check_accee_test(bench: str):
+    """"edge_expansion -- accEE ТЕСТ 224.4432" """
+    import json
+    path = Path(bench) / "model-probes" / "accEE" / "final.json"
+    try:
+        got = float(json.loads(path.read_text(encoding="utf-8"))["speedup"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return False, f"cannot read accEE's own final.json: {type(exc).__name__}"
+    ok = abs(got - 224.4432) < 5e-4
+    return ok, (f"accEE's own final.json records {got:.4f}"
+                + ("" if ok else " -- §73.4 settled this on 2026-09-01: 224.4432 came from "
+                                 "elsewhere, and the figure measured HERE, with its Cython kernel "
+                                 "building, is the one in the file"))
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
     ("state: remEE, remDL2 and remPde are running", check_named_probes_running),
+    ("point 9: edge_expansion comparison figure accEE TEST 224.4432", check_accee_test),
 ]
 
 
