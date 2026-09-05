@@ -78,7 +78,9 @@ def test_index_mentions_every_numbered_document():
     #   50 -> 51 (2026-09-03): the second external-works synergy pass (doc 51). No collision — the
     #   number was claimed by checking the glob AND the index table together, and no sibling
     #   worktree held an unmerged `51-` at the time.
-    assert len(numbered) == 51, "the derived numbered-document inventory changed"
+    #   51 -> 52 (2026-09-05): the development plan (doc 52). No collision — the number was
+    #   claimed by checking the glob AND the index table together.
+    assert len(numbered) == 52, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
