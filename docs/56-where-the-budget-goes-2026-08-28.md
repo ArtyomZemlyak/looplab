@@ -10897,3 +10897,45 @@ is not this.
 Eleven zeros now exist in the corpus and two of them are validity failures; the other nine are
 §227's mismatches, execution errors and one compilation failure. All eleven are the solver, none is
 the harness.
+
+## §254 — my own "never negative" claim, refuted one batch later
+
+§248 said of the intervention's channel: *"Dose median +17.5, minimum +8.5. Channel median +7.5,
+minimum +3. Neither has been negative in any batch."* Batch 7 closed this sweep with a channel of
+**−3** — treated 25.0, control 28.0 — so the sentence is false, one batch after I wrote it. That is
+the sweep's own standing warning about lines reading "confirmed" arriving from the direction I was
+not watching, and it is worth naming before anything else.
+
+What produced it is visible per probe:
+
+| batch | dose | channel | treated `eval_train` | control `eval_train` |
+|---|---|---|---|---|
+| 1 | +14 | +6.5 | 30, 36 | 23, 30 |
+| 2 | +8.5 | +8.5 | 35, 31 | 25, 24 |
+| 3 | +30 | +6 | 29, 33 | 22, 28 |
+| 4 | +21 | +16.5 | 46, 27 | 19, 21 |
+| 5 | +17.5 | +20.5 | 46, 40 | 20, 25 |
+| 6 | +17.5 | +3 | 34, 28 | 30, 26 |
+| 7 | **+16** | **−3** | 27, 23 | 19, **37** |
+
+One control probe, `freeB9` at **37** — the highest control value in the arm — against its partner's
+19. The treated pair is 27 and 23, entirely ordinary. **A median of two swings on one probe**, which
+is what a two-per-arm batch statistic does and what I should have said in §248 instead of counting
+signs.
+
+The right summary is the pooled one, and it is not close. Over all 14 treated and 14 control probes:
+
+| | treated | control |
+|---|---|---|
+| `eval_train` median | **32.0** | 24.5 |
+| mean | 33.2 | 24.9 |
+
+Stratified one-sided permutation over within-batch relabellings — the same test the arm's own outcome
+will use — gives **p = 0.0018**. The channel is real; only the per-batch sign was ever fragile.
+
+The dose is unaffected: still positive in all seven batches, median +17.5, because it is bounded
+above by the cap and cannot be swung by one probe the way an unbounded count can.
+
+**And the correction generalises.** Every per-batch number in §236 and §248 is a median of two, and I
+presented their monotony as evidence. It was evidence of small samples behaving; the pooled test is
+the claim, and from here that is what I will report.
