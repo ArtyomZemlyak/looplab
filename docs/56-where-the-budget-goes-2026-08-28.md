@@ -12864,3 +12864,50 @@ is now a decision with both numbers on the table rather than a mystery.
 
 `min_dominating_set` remains the one task that does not come home at one worker (1.13–1.20 across
 three repeats, none near unity). One outlier out of four, named rather than averaged away.
+
+## §308 — the last outlier explained: a heavy tail is only fatal when the solver is not deterministic
+
+§307 left `min_dominating_set` as the one CP-SAT task that does not come home at one worker. Its
+cached per-instance times spread p10 12.3 ms to p90 81.3 ms — a factor of **6.6 across instances**,
+where the other CP-SAT tasks that came home are tight.
+
+**A speedup here is a SUM** — the reference's total time over the candidate's — so the heaviest
+instances carry the number. Two independent one-worker timings of the *same* reference:
+
+```
+  sum ratio     1.0951      <- what the scorer uses
+  median ratio  1.0249
+  p10 0.8850   p90 1.4063   max 4.6750
+  five heaviest instances (ms, run A -> run B): 93->87, 92->64, 89->22, 87->33, 87->71
+```
+
+Two of the five heaviest instances took a **quarter to a third** of the time on the second run.
+CP-SAT got lucky. And those are precisely the instances a sum weights most.
+
+**A prediction was recorded before the confirming run.** From the tail ratios across the whole
+cache: `discrete_log` has the heaviest tail on this box, **p90/p10 = 276**, and reads 0.9965 —
+because it is deterministic and the tail cancels exactly. So neither condition alone predicts
+anything. The pair does, and among CP-SAT tasks the ordering should follow the tail. I predicted
+`max_independent_set_cpsat` (32.2) would also miss unity at one worker, unlike `max_clique_cpsat`
+(13.1) and `queens_with_obstacles` (3.4), which came home. It reads **1.2361** (1.27, 1.24, 1.14).
+
+| task | CP-SAT | p90/p10 | one-worker reading |
+|---|---|---|---|
+| min_dominating_set | yes | 51.9 | 1.145 **misses** |
+| max_independent_set_cpsat | yes | 32.2 | 1.236 **misses** |
+| max_common_subgraph | yes | 15.0 | 1.014 |
+| max_clique_cpsat | yes | 13.1 | 0.997 |
+| queens_with_obstacles | yes | 3.4 | 1.014 |
+| discrete_log | no | 276.4 | 0.997 |
+
+Exact ordering inside the CP-SAT group, and the deterministic task with a tail five times heavier
+than any of them is perfectly stable. `ruler_check` now reports the tail ratio when it exceeds 30,
+and says why it matters. Five mutations red, including measuring the tail from the minimum instead
+of the p10 and letting a zero p10 divide.
+
+**So the twenty tasks now sort cleanly.** Ten non-CP-SAT tasks rule within 7 % as they are. Five
+CP-SAT tasks with light tails rule at one worker. Two CP-SAT tasks with tails above 30 do not rule
+under either regime — a sum-weighted score over a randomized solver's worst instances is not a
+measurement, and no amount of re-timing fixes that. The remaining two CP-SAT tasks are untested at
+one worker; their tails (`max_weighted_independent_set` 45.2, `rectanglepacking` 13.3) predict one
+of each.

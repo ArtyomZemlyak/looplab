@@ -50,6 +50,7 @@ def entries(directory) -> list[dict]:
             data = json.loads(path.read_text(encoding="utf-8"))
             times = [float(v) for v in data.values() if isinstance(v, (int, float))]
             row["n"] = len(times)
+            row["times"] = times
             row["median"] = statistics.median(times) if times else 0.0
         except (OSError, ValueError):
             pass
@@ -128,6 +129,36 @@ def uses_cpsat(task: str, root: str | None = None) -> bool:
     return "cp_model" in src or "ortools" in src
 
 
+TAIL_RATIO_LIMIT = 30.0     # p90/p10 of the cached per-instance times; see below
+
+
+def tail_ratio(row):
+    """p90 / p10 of a cache entry's own per-instance times.
+
+    THE SECOND HALF OF THE CP-SAT STORY. A speedup here is a SUM -- the reference's total time over
+    the candidate's -- so the heaviest instances carry the number, and nondeterminism only fails to
+    cancel where it lands on those. Measured 2026-09-06, one worker, three repeats:
+
+        task                        CP-SAT   p90/p10   reading
+        min_dominating_set            yes      51.9     1.145   MISSES
+        max_independent_set_cpsat     yes      32.2     1.236   MISSES
+        max_common_subgraph           yes      15.0     1.014   comes home
+        max_clique_cpsat              yes      13.1     0.997   comes home
+        queens_with_obstacles         yes       3.4     1.014   comes home
+        discrete_log                   no     276.4     0.997   comes home
+
+    `discrete_log` has the heaviest tail on this box by a factor of five and is perfectly stable,
+    because it is deterministic and the tail cancels exactly. Neither condition alone predicts
+    anything; the pair does, and the ordering inside the CP-SAT group is exact.
+    """
+    times = row.get("times") or []
+    if len(times) < 20:
+        return None
+    v = sorted(times)
+    lo = v[len(v) // 10]
+    return (v[9 * len(v) // 10] / lo) if lo > 0 else None
+
+
 def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[str]:
     """Cache entries whose own recorded self-check says they no longer time this box.
 
@@ -154,6 +185,8 @@ def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[st
         if not any(r["task"] == task for r in rows if r["ok_name"]):
             continue
         off = abs(median - 1.0)
+        tail = next((tail_ratio(r) for r in rows
+                     if r["task"] == task and r.get("subset") == "test"), None)
         if off > tolerance and uses_cpsat(task):
             said.append(f"{task}: self-check reads {median:.4f} ({stamp[:10]}) -- but this task "
                         "solves with CP-SAT, whose runtime depends on how many cores it is given: "
@@ -166,7 +199,13 @@ def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[st
                         "1.0141, queens_with_obstacles 1.2667 -> 1.0142, max_clique_cpsat 1.6028 "
                         "-> 0.9974 -- because twenty-two pinned single-core workers all running "
                         "CP-SAT contend differently in the two passes. A one-worker ruler is 22x "
-                        "slower to build and keys __lane22r3, so it is a different cache")
+                        "slower to build and keys __lane22r3, so it is a different cache"
+                        + (f". BUT this task's per-instance times are heavy-tailed "
+                           f"(p90/p10 = {tail:.0f}) and the speedup is a SUM, so the tail carries "
+                           "the number and is exactly where CP-SAT's nondeterminism does not "
+                           "cancel: both tasks above p90/p10 = 30 miss unity even at one worker, "
+                           "while every CP-SAT task below 15 comes home (§308)"
+                           if tail and tail > TAIL_RATIO_LIMIT else ""))
             continue
         if off > tolerance:
             said.append(f"{task}: its own self-check reads {median:.4f} ({stamp[:10]}), so the "

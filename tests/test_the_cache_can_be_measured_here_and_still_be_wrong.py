@@ -165,3 +165,44 @@ def test_an_unreadable_task_source_is_not_assumed_to_be_cpsat(tmp_path):
         assert ruler_check.uses_cpsat("whatever") is False
     finally:
         ruler_check.CPSAT_ROOT = old
+
+
+def _entry(times):
+    return {"task": "t", "subset": "test", "ok_name": True, "regime": "w22x1r3",
+            "n": len(times), "times": times}
+
+
+def test_the_tail_ratio_is_p90_over_p10():
+    row = _entry([float(i) for i in range(1, 101)])
+    assert abs(ruler_check.tail_ratio(row) - 91 / 11) < 0.01, ruler_check.tail_ratio(row)
+
+
+def test_a_thin_sample_has_no_tail_ratio():
+    """Ten instances cannot say where a p90 is; inventing one would put a number on a shrug."""
+    assert ruler_check.tail_ratio(_entry([1.0] * 10)) is None
+    assert ruler_check.tail_ratio({"task": "t"}) is None
+
+
+def test_a_zero_p10_does_not_divide():
+    assert ruler_check.tail_ratio(_entry([0.0] * 50 + [1.0] * 50)) is None
+
+
+def test_a_heavy_tailed_cpsat_task_says_so_and_a_light_one_does_not(tmp_path):
+    """Measured 2026-09-06 at one worker, three repeats: min_dominating_set (p90/p10 = 51.9) reads
+    1.145 and max_independent_set_cpsat (32.2) reads 1.236 -- both MISS unity -- while
+    max_common_subgraph (15.0), max_clique_cpsat (13.1) and queens_with_obstacles (3.4) come home to
+    within 1.5 %. And discrete_log, the heaviest tail on the box at 276.4, is perfectly stable
+    because it is deterministic. Neither condition alone predicts; the pair does."""
+    root = _task_src(tmp_path, "t", "from ortools.sat.python import cp_model\n")
+    heavy = _entry([1.0] * 90 + [100.0] * 10)
+    light = _entry([1.0] * 50 + [1.2] * 50)
+    old = ruler_check.CPSAT_ROOT
+    try:
+        ruler_check.CPSAT_ROOT = root
+        said_h = ruler_check.stale_entries([heavy], {"t": (1.5, "2026-09-06")})
+        said_l = ruler_check.stale_entries([light], {"t": (1.5, "2026-09-06")})
+    finally:
+        ruler_check.CPSAT_ROOT = old
+    assert "heavy-tailed" in said_h[0] and "p90/p10 = 100" in said_h[0], said_h
+    assert "heavy-tailed" not in said_l[0], said_l
+    assert "THE FIX IS THE WORKER COUNT" in said_l[0], said_l
