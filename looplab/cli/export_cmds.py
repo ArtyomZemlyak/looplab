@@ -105,6 +105,31 @@ def export_mlflow(
     typer.echo(f"logged to MLflow run {rid}")
 
 
+@app.command(name="export-bundle")
+def export_bundle_cmd(
+    run_dir: Path = typer.Argument(..., help="Run dir to bundle."),
+    out: Optional[Path] = typer.Option(None, help="Bundle directory (default: <run>/bundle)."),
+    verify: bool = typer.Option(True, help="Re-check every packaged file against the crate's digests."),
+):
+    """Package the run for a REVIEWER as an RO-Crate (doc 52 row 23): the event log and trace, the
+    launch snapshots, the champion's code off the folded record, every memo's claims, the summary row
+    (number, caveats, Mislead pair, seeds) and the audit sidecars, each described with its size and
+    SHA-256 in ro-crate-metadata.json. Copies the run's own record; derives nothing but the row."""
+    from looplab.events.bundle import RO_CRATE_METADATA, export_bundle, verify_bundle
+
+    _require_run_dir(run_dir)
+    dest = out or (run_dir / "bundle")
+    meta = export_bundle(run_dir, dest)
+    files = [e for e in meta["@graph"] if e.get("@type") == "File"]
+    typer.echo(f"wrote {dest / RO_CRATE_METADATA} ({len(files)} file(s))")
+    if verify:
+        defects = verify_bundle(dest)
+        if defects:
+            typer.echo("bundle defects: " + "; ".join(defects))
+            raise typer.Exit(1)
+        typer.echo("verified: every file matches its recorded size and digest")
+
+
 @app.command(name="export-notebook")
 def export_notebook(
     run_dir: Path = typer.Argument(..., help="Run dir to export the champion from."),

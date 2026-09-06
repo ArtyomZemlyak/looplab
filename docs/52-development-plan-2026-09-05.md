@@ -341,19 +341,28 @@ metric, so whether a champion's margin exceeds evaluation noise — AIRA₂'s ex
 profile A/B needs. proof:absent:eval_noise@looplab+absent:noise_floor@looplab/trust
 
 OPEN[no-external-benchmark-number-exists] `adapters/mlebench_real.py` and `docs/MLEBENCH.md` ship the
-real host-graded path and no completed run is recorded anywhere in the tree. BLOCKED behind
-`mlebench-search-optimises-the-private-grade` (today's path would publish a test-selected number),
-the seed protocol, the percentile-rank record and the two official detectors; the audit page carries
-the survey's Table 10 columns (code + prompts, seeds / traces, result-selection policy, novelty
-method, HITL entry points, harness + cost). proof:missing:docs/audit/mlebench-lite-campaign.md
+real host-graded path and no completed run is recorded anywhere in the tree. Every blocker is now in
+the tree (row 3's agent-invisible split, the seed protocol and aggregator, the percentile record,
+the two official detectors, the reviewer bundle) and `docs/audit/mlebench-lite-campaign.md` holds
+the protocol and the survey's Table 10 columns; what is still open is the NUMBER, which needs GPUs,
+a model endpoint and the prepared Kaggle data on a box.
+proof:`absent:RESULT 2026-@docs/audit/mlebench-lite-campaign.md`
 
-OPEN[mlebench-campaign-has-no-seed-protocol] the README's submission rule is ≥3 seeds reported as
-mean ± SEM; `docs/MLEBENCH.md` names no seed count and no aggregation.
-proof:absent:seed@docs/MLEBENCH.md
+*Closed 2026-09-06 (row 23 shipped, code parts): the marker `mlebench-campaign-has-no-seed-protocol`
+stood here. `docs/MLEBENCH.md` now states the protocol — ≥3 seeds per competition via
+`confirm_seed_base` (and `LOOPLAB_EVAL_SEED`), mean ± SEM, never a single run's best — and
+`python -m looplab.adapters.mlebench_campaign runs/…` is the aggregator: per competition the raw and
+the Mislead-adjusted mean ± SEM side by side, the private-grade mean, the mean leaderboard
+percentile, the medal / above-median rates and the rule-violation count, every number read off each
+run's own record and `<3 seeds` said out loud when the protocol is not met
+(`tests/test_mlebench_campaign.py`). Deleted per the index rule.*
 
-OPEN[mlebench-grader-records-no-percentile-rank] `adapters/mlebench_grade.py` records score, medal
-and `above_median`; AIRA₂ and OpenAI report MLE-bench-30 PERCENTILE RANK, so LoopLab's number could
-not be read on their scale. proof:absent:percentile@looplab/adapters/mlebench_grade.py
+*Closed 2026-09-06 (row 23 shipped, code parts): the marker `mlebench-grader-records-no-percentile-rank`
+stood here. `mlebench_grade.py::percentile_rank` is the share of the competition leaderboard the
+submission BEATS (a tie is not a beat), read off the same `get_leaderboard` the medal thresholds
+come from, and every official report `grade()` returns now carries `percentile` and
+`leaderboard_size` — `None`/0 when the leaderboard is unreadable, which costs the percentile and
+never the grade. Deleted per the index rule.*
 
 *Closed 2026-09-06 (row 22, third slice shipped): the marker `mlebench-path-runs-neither-official-detector`
 stood here. `adapters/mlebench_extras.py` is both extras as a POST-RUN instrument (`looplab
@@ -512,9 +521,14 @@ adapter for an experiment-level benchmark (EXP-Bench 461 tasks, ResearchClawBenc
 InnovatorBench 20), so the noun LoopLab is — a research loop, not a medal agent — has no external
 number even after the campaign. proof:missing:docs/audit/research-lifecycle-benchmark.md
 
-OPEN[no-reviewer-bundle-export] seeds (`LOOPLAB_EVAL_SEED`, `confirm_seed_base`) and traces
-(`spans.jsonl`, `events.jsonl`) exist on disk and nothing packages them with code and claims for a
-reviewer — the survey's 38 % dimension, the field's RO-Crate export. proof:absent:RO-Crate@looplab
+*Closed 2026-09-06 (row 23 shipped, code parts): the marker `no-reviewer-bundle-export` stood here.
+`events/bundle.py::export_bundle` (`looplab export-bundle`) packages one run as an RO-Crate 1.1: the
+event log and trace, the launch snapshots, the champion's code off the FOLDED record, every memo's
+claims with their evidence ids and the plan, the summary row (number, caveats, Mislead pair, seeds,
+private grade) and the audit sidecars, each a `File` entity with its size and SHA-256 in
+`ro-crate-metadata.json`; `verify_bundle` re-checks every digest and the command refuses a bundle
+that fails it. Copies the run's own record and derives nothing but the row
+(`tests/test_export_bundle.py`). Deleted per the index rule.*
 
 *Closed 2026-09-06 (row 2 shipped): the marker `eval-may-write-the-run-record` stood here. The eval
 launch allow-list granted the candidate's process `readwrite` over the whole run dir, the fence's

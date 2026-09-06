@@ -43,6 +43,7 @@ _LAYOUT = {
     "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
+    "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
     "plan": "engine",  # the PLAN artifact + the endgame reserve the dispatcher honours (doc 52 row 18)
     "attribute_sites": "engine",  # the Engine attribute declaring-site registry (doc 52 row 21)
@@ -248,6 +249,7 @@ _LAYOUT = {
     "mlflow_export": "events",
     "models": "core",
     "notebook": "events",
+    "bundle": "events",  # the RO-Crate reviewer bundle export (doc 52 row 23)
     "node_build": "engine",
     "node_evidence": "core",
     "novelty": "engine",

@@ -31,9 +31,48 @@ from pathlib import Path
 from typing import Optional
 
 
+def percentile_rank(score, leaderboard_scores, *, lower_is_better: bool) -> Optional[float]:
+    """The competition-leaderboard PERCENTILE RANK of `score` (doc 52 row 23): the share of
+    leaderboard entries the submission BEATS, in percent, on the scale AIRA₂ and OpenAI report
+    MLE-bench-30 on — so a LoopLab number can be read beside theirs. A tie is not a beat. `None`
+    for an invalid score or an empty leaderboard; a leaderboard row that is not a finite number is
+    dropped rather than counted as beaten."""
+    if not isinstance(score, (int, float)) or isinstance(score, bool) or not math.isfinite(score):
+        return None
+    values = []
+    for raw in leaderboard_scores or []:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    if not values:
+        return None
+    beaten = sum(1 for v in values if (score < v if lower_is_better else score > v))
+    return round(100.0 * beaten / len(values), 3)
+
+
+def _leaderboard_scores(comp) -> tuple[list, Optional[bool]]:
+    """The competition's leaderboard scores and its direction, off the same `get_leaderboard` the
+    medal thresholds come from; `([], None)` when the leaderboard cannot be read."""
+    try:
+        from mlebench.data import get_leaderboard
+
+        board = get_leaderboard(comp)
+        lower = bool(comp.grader.is_lower_better(board))
+        column = board["score"]
+        scores = list(column.tolist() if hasattr(column, "tolist") else column)
+        return scores, lower
+    except Exception:  # noqa: BLE001 — a missing leaderboard costs the percentile, never the grade
+        return [], None
+
+
 def grade(competition_id: str, submission_path, data_dir: Optional[str] = None) -> dict:
     """Grade a submission CSV with mle-bench's real grader; return ``CompetitionReport.to_dict()``
-    (``score`` is None for a missing/invalid submission). Imports mlebench lazily."""
+    (``score`` is None for a missing/invalid submission) plus the leaderboard `percentile` rank and
+    `leaderboard_size` (doc 52 row 23; `None`/0 when the leaderboard is unreadable). Imports
+    mlebench lazily."""
     from mlebench.grade import grade_csv
 
     from looplab.adapters.mlebench_real import _competition
@@ -41,8 +80,12 @@ def grade(competition_id: str, submission_path, data_dir: Optional[str] = None) 
     # One registry/data-dir resolution (doc 25 RA-10). Grading against a differently-resolved data
     # dir than the one the task was prepared under scores a submission with the wrong answers.
     comp = _competition(competition_id, data_dir)
-    report = grade_csv(Path(submission_path), comp)
-    return report.to_dict()
+    report = grade_csv(Path(submission_path), comp).to_dict()
+    scores, lower = _leaderboard_scores(comp)
+    report["percentile"] = (percentile_rank(report.get("score"), scores, lower_is_better=lower)
+                            if lower is not None else None)
+    report["leaderboard_size"] = len(scores)
+    return report
 
 
 def grade_search_split(competition_id: str, submission_path, answers_path,

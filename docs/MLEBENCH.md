@@ -131,6 +131,33 @@ The score, medal status, and `above_median` are graded automatically and recorde
 For **true isolation** of LLM-written candidate code, set the untrusted tier (needs Docker):
 `LOOPLAB_TRUST_MODE=untrusted`. The host grader still runs on the host; answers are never mounted.
 
+## The seed protocol and the campaign table
+
+A LoopLab number on MLE-bench Lite is reported as the README's submission rule requires: **at least
+three seeds per competition, mean ± SEM** — never a single run's best (doc 52 row 23). The seed is
+the launch's `confirm_seed_base` (and `LOOPLAB_EVAL_SEED` in `eval_env` when the task's own eval
+reads one); vary it per run and keep everything else identical:
+
+```bash
+for seed in 1 2 3; do
+  LOOPLAB_CONFIRM_SEED_BASE=$seed python -m looplab.cli run examples/mlebench_real_spooky.json \
+      --out runs/spooky-s$seed --backend llm --max-nodes 8
+done
+python -m looplab.adapters.mlebench_campaign runs/spooky-s1 runs/spooky-s2 runs/spooky-s3     # the table
+python -m looplab.adapters.mlebench_campaign runs/spooky-s* --json > campaign.json
+```
+
+The aggregator reads each run's OWN record and computes nothing a reviewer could not recompute
+from its bundle (`looplab export-bundle`): the champion's finish-time private grade
+(`holdout_evaluated`, `protocol: private_grade`), its official report (`mlebench_report.json`:
+medal flags, `above_median`, and since 2026-09-06 the leaderboard **`percentile`** — the share of
+the competition leaderboard the submission beats, the scale AIRA₂ and OpenAI report MLE-bench-30
+on), the run row's Mislead pair (`mislead_gap`), the extras sidecar's verdicts and the seed. Per
+competition it prints runs / distinct seeds (and says `<3 seeds` when the protocol is not met),
+the raw mean ± SEM, the **Mislead-adjusted** mean ± SEM beside it (the raw number minus each run's
+own gap — `S_intended`, never instead of the raw), the private-grade mean ± SEM, the mean
+percentile, the medal and above-median rates, and the rule-violation count.
+
 ## The two official extras: rule violation + plagiarism
 
 `mle-bench/extras` runs two detectors over every agent transcript in the paper, and since 2026-09-06
