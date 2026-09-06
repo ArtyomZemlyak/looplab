@@ -30,13 +30,13 @@ from typing import Optional
 from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext,
                                        canonicalize_strategy_parallelism, failure_rate,
                                        improves_since_best, is_numeric_space,
-                                       classify_run_phase,
+                                       classify_run_phase, stall_rung, strategist_stall_window,
                                        validate_card_scoring, validate_strategy)
 from looplab.core.config import parallelism_aliases
 from looplab.core.llm_broker import LLM_LANES, in_llm_lane
 from looplab.core.models import RunState
 from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_marks,
-                                     seed_boundary_due)
+                                     plateau_due, seed_boundary_due)
 from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
@@ -331,10 +331,29 @@ class StrategyCadenceMixin:
             return {k: v for k, v in snap.items() if k not in {"at_node", "projection_token"}}
         return coverage_signal(state, resolution=self.archive_resolution)
 
-    def _should_consult(self, state: RunState, *, marks=None) -> bool:
+    def _plateau_key(self, state: RunState) -> tuple:
+        """The `(leader, rung)` identity of the plateau the run is on — `(best_node_id, 0)` when it is
+        not on one. The in-process memo `_maybe_consult_strategist` keeps for `plateau_due`'s `seen`
+        is one of these, so it is computed in exactly one place for the gate and for the memo."""
+        rung, _started_at = stall_rung(
+            state, strategist_stall_window(getattr(self, "strategist", None)))
+        return state.best_node_id, rung
+
+    def _should_consult(self, state: RunState, *, marks=None, plateau_seen=None) -> bool:
         """Bounded, deterministic cadence: only at a creation decision point (no pending evals),
         at the seed boundary, then every `strategist_every` created nodes SINCE this consumer last
-        fired.
+        fired — and, since 2026-09-06, when the search has just STALLED (doc 52 row 7).
+
+        The stall reading existed for a year before it could move the consult's TIMING:
+        `improves_since_best` is computed into every `StrategyContext` and `RuleStrategist` branches
+        on it against `stall_window` (greedy⇄broad, deep research at 2x), but this gate fired on
+        `cadence_due` alone, so the reaction to a plateau waited for the next tick — up to
+        `strategist_every - 1` nodes of paid, leader-less pushing (FML-bench: the stagnation-adaptive
+        agent beat all six fixed baselines, and the adaptation is only worth what its latency leaves).
+        `cadence.plateau_due` states the trigger and its bound; `plateau_seen` is the CONSUMER's
+        in-process memo of the last plateau it consulted on (the Strategist passes its own, the
+        coverage snapshot passes none because a snapshot always records a mark). A plateau firing
+        does not move the cadence window unless it records — the same rule as every other firing.
 
         Since-last, not `n % every == 0`. Under `llm_parallel > 1` the node count advances in
         batch-width strides, so a modulo gate can step clean over the only multiple in a window and
@@ -368,6 +387,14 @@ class StrategyCadenceMixin:
         # went unnoticed; the same equality in `_should_consult_concepts` cancelled that phase for the
         # whole run. One spelling for both, in `cadence.seed_boundary_due`.
         if seed_boundary_due(n, last, self.n_seeds):
+            return True
+        # The plateau trigger, keyed on the stall's identity (`agents/strategist.py::stall_rung`) and
+        # read against the same window the Strategist's own rule fires on
+        # (`strategist_stall_window`), so the engine asks exactly when the deterministic fallback
+        # would act — at the stall, and once more at the hard stall that requests deep research.
+        rung, started_at = stall_rung(
+            state, strategist_stall_window(getattr(self, "strategist", None)))
+        if plateau_due(rung, started_at, last, seen=plateau_seen, key=(state.best_node_id, rung)):
             return True
         # `strategist_every` is `ge=1` via Settings, but the Engine kwarg / EngineOptions accept 0, and
         # this cadence is reused for coverage snapshots even with NO strategist wired
@@ -776,7 +803,13 @@ class StrategyCadenceMixin:
                    if pin.get(k) is not None}
         n = len(state.nodes)
         consulting = (self.strategist is not None
-                      and self._should_consult(state, marks=state.strategy_history)
+                      and self._should_consult(
+                          state, marks=state.strategy_history,
+                          # The plateau memo (doc 52 row 7): the `(leader, rung)` this process last
+                          # consulted on. Spent beside `_strategist_consulted_at` below, and for the
+                          # same reason — a stalled run whose Strategist agrees with itself records
+                          # nothing, and without this the plateau re-fires at every new node count.
+                          plateau_seen=getattr(self, "_strategist_plateau_seen", None))
                       and not self._autonomous_strategy_already_recorded_at(state, n)
                       # THE MONEY BOUND for the in-flight cadence (F1i). Both durable gates above close
                       # only when a decision is RECORDED, and `_record_strategy` records only a strategy
@@ -871,6 +904,7 @@ class StrategyCadenceMixin:
             # node-count for this process, or the very failure mode the memo bounds — one paid consult
             # per outer-loop turn at a fixed `n` — comes back through the error path.
             self._strategist_consulted_at = (n, analytics_projection_token(state))
+            self._strategist_plateau_seen = self._plateau_key(state)
             with self._op_span("strategist_consult"):
                 strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
                 if strat:

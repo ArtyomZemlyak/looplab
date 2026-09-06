@@ -182,6 +182,20 @@ def failure_rate(state: RunState) -> float:
     return failed / total
 
 
+# The operator family a stall is counted over: nodes that TRIED to beat the leader. A `draft` is a
+# fresh seed and an `ablate` is a probe of the leader itself, so neither says anything about whether
+# pushing on the leader has stopped paying. One tuple for both readers below, because a family that
+# drifted between "how stalled is the run" and "when did this stall begin" would put the consult's
+# trigger and the rule it triggers on different clocks.
+STALL_OPERATORS = ("improve", "refine_block", "merge", "expand")
+
+# The stall window the Strategist acts on when nothing configures one — the RuleStrategist default,
+# and what `strategist_stall_window` answers for a Strategist that exposes none. ONE spelling: the
+# consult's plateau TRIGGER (`engine/strategy.py::_should_consult`) reads the same window the rule
+# fires on, so the engine asks exactly when the deterministic fallback would act.
+DEFAULT_STALL_WINDOW = 3
+
+
 def improves_since_best(state: RunState) -> int:
     """How many improve/refine nodes were created AFTER the current best node — i.e. how long the
     search has been pushing without dethroning the leader (a stall signal). Deterministic: ids are
@@ -190,7 +204,48 @@ def improves_since_best(state: RunState) -> int:
     if best_id is None:
         return 0
     return sum(1 for n in state.nodes.values()
-               if n.id > best_id and n.operator in ("improve", "refine_block", "merge", "expand"))
+               if n.id > best_id and n.operator in STALL_OPERATORS)
+
+
+def stall_rung(state: RunState, stall_window: int) -> tuple[int, int]:
+    """The plateau's IDENTITY for the consult trigger: `(rung, started_at)`.
+
+    `rung` is how many whole stall windows of `STALL_OPERATORS` nodes have landed since the leader
+    was crowned — 0 while the search is not stalled, 1 at the stall `RuleStrategist` reacts to, 2 at
+    the hard stall that requests deep research — and `started_at` is the node COUNT at which the
+    current rung began: the number of nodes that existed once the `rung * stall_window`-th such node
+    had been created. It is a count and not that node's id on purpose: a consumer's durable mark is
+    `at_node = len(state.nodes)` at record time, so a mark `>= started_at` is a decision recorded
+    after this rung began, whatever gaps the id sequence carries.
+
+    Deterministic over the folded DAG, like `improves_since_best` above (of which it is the windowed
+    reading); `(0, 0)` when there is no leader yet or the window has not filled once.
+    """
+    window = max(1, int(stall_window or 0))
+    best_id = state.best_node_id
+    if best_id is None:
+        return 0, 0
+    after = sorted(n.id for n in state.nodes.values()
+                   if n.id > best_id and n.operator in STALL_OPERATORS)
+    rung = len(after) // window
+    if rung == 0:
+        return 0, 0
+    boundary = after[rung * window - 1]
+    return rung, sum(1 for n in state.nodes.values() if n.id <= boundary)
+
+
+def strategist_stall_window(strategist) -> int:
+    """The stall window a wired Strategist acts on, else `DEFAULT_STALL_WINDOW`.
+
+    `RuleStrategist` carries its own; the LLM and agent Strategists expose their fallback rule's
+    (the threshold their brief's `improves_since_best` is read against when the model cannot answer);
+    a stub, `None`, or junk (a bool, a zero) gets the default, clamped to at least one improve so a
+    misconfigured window can never make every node a plateau.
+    """
+    window = getattr(strategist, "stall_window", None)
+    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+        return DEFAULT_STALL_WINDOW
+    return window
 
 
 def is_numeric_space(state: RunState) -> bool:
@@ -362,7 +417,7 @@ class RuleStrategist:
     the engine records anyway for audit + parity with the LLM path). Knobs are taken from the
     static config defaults, so the operator can tune every threshold."""
 
-    def __init__(self, n_seeds: int = 3, stall_window: int = 3):
+    def __init__(self, n_seeds: int = 3, stall_window: int = DEFAULT_STALL_WINDOW):
         self.n_seeds = n_seeds
         self.stall_window = max(1, stall_window)
 
@@ -833,6 +888,13 @@ class LLMStrategist:
         self.prompts = prompts   # hot-reloadable PromptStore (I18, ADR-8); None = inline default
         self._rule = RuleStrategist(n_seeds=n_seeds)
 
+    @property
+    def stall_window(self) -> int:
+        """The plateau threshold the engine consults this Strategist at (`strategist_stall_window`):
+        the fallback rule's, because that is the window the brief's `improves_since_best` is judged
+        against when the model's answer cannot be parsed."""
+        return self._rule.stall_window
+
     def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
         from looplab.core.parse import forced_structured
         output_model = _strategy_output_model(ctx)
@@ -882,6 +944,8 @@ class ToolUsingStrategist:
         self.max_turns = max_turns
         self.time_budget_s = time_budget_s
         self.context_budget_chars = context_budget_chars
+        # The plateau threshold the engine consults this Strategist at — see LLMStrategist.
+        self.stall_window = self._rule.stall_window
         # Collapse the ctor kwargs that are also loop options into ONE bundle here (see
         # ToolUsingResearcher.__init__): loop_opts_from_settings injects context_budget_chars AND it
         # arrives as a ctor kwarg — passing both to drive_tool_loop would raise TypeError, caught

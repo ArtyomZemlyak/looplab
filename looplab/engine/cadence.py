@@ -18,7 +18,10 @@ docstring before adding a third — the rule that keeps two paces from collapsin
 pace which records an `at_node` mark is a node-count pace whatever it is called.
 
 There is STILL no third pace, and `at_creation_boundary` below is why the obvious candidate was
-refused rather than built (backlog F1i). What was broken was never the PACE — it was the
+refused rather than built (backlog F1i). `plateau_due` (doc 52 row 7) is not one either: it is a
+second CONDITION beside `occupancy_due`, keyed on the stall's identity rather than its persistence,
+and it re-uses the consumer's existing mark instead of recording one — read its docstring for how
+a condition that is NOT self-clearing keeps its money bounded. What was broken was never the PACE — it was the
 PRECONDITION every node-count consumer shared, `state.pending_nodes()` empty, which since F1f made
 evaluation children outlive the turn that admitted them is a state a GPU run does not reach until
 its last evaluation has terminated. A "third pace for the concept classifier" would have had to
@@ -285,6 +288,37 @@ def seed_boundary_due(n: int, last: int, n_seeds: int) -> bool:
     knob.
     """
     return n > 0 and last <= 0 and n >= max(1, int(n_seeds or 0))
+
+
+# ------------------------------------------------------------------ the plateau TRIGGER (doc 52 row 7)
+def plateau_due(rung: int, started_at: int, last: int, *, seen, key) -> bool:
+    """Whether a stalled search owes its consumer a firing NOW rather than at the next cadence tick.
+
+    NOT A THIRD PACE, by the header's own rule: it reads no `every` and records no mark of its own.
+    It is a CONDITION over the folded state, like `occupancy_due` — and unlike it, the condition is
+    not self-clearing: a plateau persists until a new leader is crowned, so a trigger that fired
+    whenever `improves_since_best >= stall_window` would fire at every node of a stalled run, and
+    the paid Strategist consult that reads this gate records NOTHING when the Strategist agrees with
+    itself (`_record_strategy` writes only a changed strategy). That is the one-consult-per-turn
+    money defect `_maybe_consult_strategist`'s in-process memo was built against, one clock over.
+
+    So the trigger fires on the plateau's IDENTITY, not on its persistence. `agents/strategist.py::
+    stall_rung` names it: `rung` is how many whole stall windows have filled since the leader was
+    crowned (1 = the stall `RuleStrategist` reacts to, 2 = the hard stall that requests deep
+    research), `started_at` the node count at which the current rung began. Idempotence is then
+    split the way the durable gates and the memo already split it:
+
+      * DURABLY, a mark `last >= started_at` — the consumer already spoke since this rung began,
+        on cadence or on plateau — closes the rung on every resume and re-entry;
+      * IN-PROCESS, `seen == key` — the consumer's own memo of the last `(leader, rung)` it consulted
+        on — covers the outcome that leaves no mark. A resumed engine re-asks once per rung, which is
+        the same contract the `(n, projection token)` memo states about its own window.
+
+    Each next rung is a NEW fact (the stall doubled), so it may fire once more; between rungs the
+    ordinary `cadence_due` window is untouched. Bound: at most one extra firing per `stall_window`
+    stall nodes, against the cadence's one per `strategist_every` nodes.
+    """
+    return rung >= 1 and last < started_at and seen != key
 
 
 # ---------------------------------------------------------------------------------- backfill (F1h)

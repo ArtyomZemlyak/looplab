@@ -591,13 +591,19 @@ OPEN[no-plan-artifact-with-endgame-reserve] the endgame reserve EXISTS as a rule
 — budget allocation across phases, a reserve the DISPATCHER honours rather than a consult that may
 never fire, re-planning on stagnation (doc 10 P2, doc 11 D13). proof:absent:EV_PLAN@looplab/events/types.py
 
-OPEN[strategist-consult-is-cadence-not-stagnation-triggered] the plateau reading EXISTS —
-`agents/strategist.py::improves_since_best` is computed into `StrategyContext` and
-`RuleStrategist._decide_machinery` branches on it against `stall_window` (greedy⇄broad, deep research
-at 2×) — and `engine/strategy.py::_should_consult` still fires on `cadence_due` alone, so the reaction
-waits for the next cadence tick. The fix is one condition: due when `improves_since_best >=
-stall_window`. FML-bench's stagnation-adaptive agent beat all six baselines; Rehearse's judge decay is
-a second trigger. proof:absent:stagnat@looplab/engine/strategy.py+absent:plateau@looplab/engine/strategy.py
+*Closed 2026-09-06 (row 7 shipped): the marker `strategist-consult-is-cadence-not-stagnation-triggered`
+stood here. `engine/strategy.py::_should_consult` is also due on a plateau: `engine/cadence.py::plateau_due`
+over `agents/strategist.py::stall_rung` — the `(rung, started_at)` identity of the stall, read against
+`strategist_stall_window` (the Strategist's own window, default `DEFAULT_STALL_WINDOW` = 3; the LLM and
+agent Strategists expose their fallback rule's). Not a third pace and not self-clearing, so it fires on
+the stall's identity: a decision recorded at or after `started_at` closes the rung durably, the consult's
+in-process `(leader, rung)` memo (`_strategist_plateau_seen`, spent before the provider call beside
+`_strategist_consulted_at`) covers the unchanged outcome, and each further whole window (the hard
+stall) is a new fact that fires once more — at most one extra consult per `stall_window` stall nodes.
+The coverage snapshot shares the gate and takes one extra sample per rung.
+`tests/test_strategist_plateau_trigger.py` drives the truth table, the property, the money bound, both
+halves of the idempotence across a resume, the window's source and the other consumer. Rehearse's
+judge-decay trigger stays unbuilt — it needs the judge-quality record row 16 owns.*
 
 OPEN[prior-injection-hit-rate-unmeasured] nothing measures whether an injected prior (lesson, skill,
 capsule, claim) was CITED by the proposal that followed or changed its outcome, so memory growth is

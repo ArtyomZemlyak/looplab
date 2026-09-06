@@ -88,6 +88,26 @@ called, and it would both close the node-count window for a full `every` nodes a
 rather than the durable `node_eval_started` boundary, so a freshly resumed process sees occupancy 0,
 takes the ordinary create turn, and is right to.
 
+The Strategist consult has a second **trigger** beside its node-count pace since 2026-09-06
+(`engine/cadence.py::plateau_due`, doc 52 row 7): the search has just **stalled**. The reading
+existed for a year before it could move the consult's timing — `agents/strategist.py::improves_since_best`
+is in every `StrategyContext` and `RuleStrategist` branches on it against its `stall_window`
+(greedy⇄broad, deep research at 2×) — but `_should_consult` fired on `cadence_due` alone, so the
+reaction to a leader that stopped moving waited for the next tick, up to `strategist_every - 1`
+nodes of paid, leader-less pushing (FML-bench: the stagnation-adaptive agent beat all six fixed
+baselines, and the adaptation is only worth what its latency leaves). It is not a third pace and it
+is not self-clearing either — a plateau persists until a new leader is crowned — so it fires on the
+stall's **identity** rather than its persistence: `stall_rung` counts whole stall windows since the
+leader was crowned (1 = the stall the rule reacts to, 2 = the hard stall that requests deep
+research) and names the node count at which the current rung began; a decision recorded at or after
+that count closes the rung durably, and the consult's own in-process `(leader, rung)` memo covers
+the outcome that records nothing (the Strategist agreeing with itself). Bound: at most one extra
+consult per `stall_window` stall nodes, read off the Strategist that will act on it
+(`strategist_stall_window`, default 3); the coverage snapshot shares the gate and takes one extra
+sample per rung. A resumed engine re-asks once per rung — the same contract as the `(n, projection
+token)` memo. `tests/test_strategist_plateau_trigger.py` drives the trigger, the money bound and
+both halves of the idempotence.
+
 ### …and one PRECONDITION both of them share
 
 There is still no third pace, and the reason is worth reading before anyone proposes one. What
