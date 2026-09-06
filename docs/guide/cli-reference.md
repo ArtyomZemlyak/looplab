@@ -30,6 +30,7 @@ looplab cross-run-index Lean diagnostic run-passport/facts rebuild (PART IV cros
 looplab cross-run-concepts Valid-capsule raw-slug concept overview (PART IV cross-run Step 3)
 looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV CR2a)
 looplab cross-run-digest Read-only axis-prefix concept rollup (PART IV Step 7)
+looplab mlebench-extras The two official MLE-bench extras over ONE finished run: the paid rule-violation judge + the Dolos plagiarism pass, recorded to mlebench_extras.json (doc 52 row 22)
 looplab concept-merge   Append a concept alias/purge overlay (PART IV CR1a)
 looplab concept-split   Operator split one coarse concept into finer ones, re-tagged per run (PART IV §21.20.13)
 looplab concept-steward AGENTIC taxonomy curator: proposal-only merge/split/purge review (PART IV §22.4)

@@ -98,6 +98,9 @@ class MLEBenchRealTask(BaseModel):
     comparison_contract: ComparisonContract | None = None
     submission: str = "submission.csv"
     grade_timeout: float = 300.0
+    # Public kernels downloaded for the competition (the official plagiarism extra's corpus);
+    # `looplab mlebench-extras` runs Dolos against them, `None` records `no_kernels`.
+    kernels_dir: Optional[str] = None
     # Offline baseline hyperparameter bounds (NB smoothing / ridge lambda), tuned by the Researcher.
     max_param: float = 5.0
 
@@ -155,6 +158,23 @@ class MLEBenchRealTask(BaseModel):
         if not any(n.startswith("train") for n in out):
             raise RuntimeError(f"No train.csv found in prepared public dir {pub}")
         return out
+
+    def rule_violation_context(self) -> dict:
+        """What the official rule-violation detector judges THIS competition against (doc 52 row
+        22): the closed rule list (`adapters/mlebench_extras.py::MLEBENCH_RULES`) and the
+        competition's own description, read from the prepared public dir when it is there. Declared
+        by the task so `looplab mlebench-extras` and the task cannot disagree about the rules."""
+        from looplab.adapters.mlebench_extras import MLEBENCH_RULES
+
+        description = ""
+        try:
+            desc = self._public_dir() / "description.md"
+            if desc.is_file():
+                description = desc.read_text(encoding="utf-8", errors="replace")[:20_000]
+        except (OSError, RuntimeError):
+            description = ""
+        return {"rules": MLEBENCH_RULES, "description": description or self.goal,
+                "kernels_dir": self.kernels_dir}
 
     def host_grader(self) -> dict:
         """Out-of-process official grading: the candidate writes submission.csv; the host runs

@@ -355,10 +355,17 @@ OPEN[mlebench-grader-records-no-percentile-rank] `adapters/mlebench_grade.py` re
 and `above_median`; AIRA₂ and OpenAI report MLE-bench-30 PERCENTILE RANK, so LoopLab's number could
 not be read on their scale. proof:absent:percentile@looplab/adapters/mlebench_grade.py
 
-OPEN[mlebench-path-runs-neither-official-detector] `mle-bench/extras` ships an LLM rule-violation
-detector over logs + code and a Dolos plagiarism check against downloaded kernels, both run in the
-paper; neither has a counterpart in the tree.
-proof:absent:rule_violation@looplab/adapters/mlebench_real.py+absent:plagiarism@looplab
+*Closed 2026-09-06 (row 22, third slice shipped): the marker `mlebench-path-runs-neither-official-detector`
+stood here. `adapters/mlebench_extras.py` is both extras as a POST-RUN instrument (`looplab
+mlebench-extras`, the new `cli/audit_cmds.py` group): the rule-violation judge reads the champion's
+code and a transcript rebuilt from the durable rows against the closed `MLEBENCH_RULES` list plus the
+competition's own description — declared by the task through `MLEBenchRealTask.rule_violation_context`
+so the two cannot disagree — and answers with a verdict and QUOTED findings; the plagiarism pass
+shells out to the Dolos CLI as the official extra does, against the task's `kernels_dir`, and records
+`unavailable`/`no_kernels` rather than reading clean when it cannot run. The record is the run's
+`mlebench_extras.json`; nothing it says moves a champion. Driven through a real toy run, a fake
+`dolos` that writes the real CSVs, and an injected judge (`tests/test_mlebench_extras.py`). Deleted
+per the index rule.*
 
 *Closed 2026-09-06 (row 22, second slice shipped): the marker `no-hack-adjusted-score-reporting` stood
 here. `engine/champion_caveats.py::mislead_gap` publishes the pair on every `/api/runs` row

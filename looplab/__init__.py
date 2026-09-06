@@ -42,6 +42,7 @@ _LAYOUT = {
     "agent": "agents",
     "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
+    "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
     "plan": "engine",  # the PLAN artifact + the endgame reserve the dispatcher honours (doc 52 row 18)
     "attribute_sites": "engine",  # the Engine attribute declaring-site registry (doc 52 row 21)

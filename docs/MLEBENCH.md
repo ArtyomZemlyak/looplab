@@ -131,6 +131,35 @@ The score, medal status, and `above_median` are graded automatically and recorde
 For **true isolation** of LLM-written candidate code, set the untrusted tier (needs Docker):
 `LOOPLAB_TRUST_MODE=untrusted`. The host grader still runs on the host; answers are never mounted.
 
+## The two official extras: rule violation + plagiarism
+
+`mle-bench/extras` runs two detectors over every agent transcript in the paper, and since 2026-09-06
+(doc 52 row 22) both have a counterpart here as a **post-run instrument**:
+
+```bash
+looplab mlebench-extras runs/spooky-1                       # both halves, judge at the run's own endpoint
+looplab mlebench-extras runs/spooky-1 --no-judge            # only the Dolos pass (no paid call)
+looplab mlebench-extras runs/spooky-1 --kernels-dir kernels/spooky --json
+```
+
+* **Rule violation** — an LLM judge reads the champion's code (every committed file) and a bounded
+  transcript rebuilt from the durable rows (build rationale, each repair's error and fix, the eval's
+  stdout tail, dependency installs, the trace's tool calls when `spans.jsonl` is present) against
+  the closed rule list `adapters/mlebench_extras.py::MLEBENCH_RULES` — test-label access, manual
+  labelling, external data, internet access, grader tampering, submission provenance — and the
+  competition's own `description.md`. The task declares that context (`MLEBenchRealTask.
+  rule_violation_context`), so the instrument and the task cannot disagree about the rules. The
+  verdict is `compliant` / `violation` / `unclear` with one finding per rule the judge can tie to a
+  QUOTED line; a finding it cannot quote is asked not to be made.
+* **Plagiarism** — the Dolos CLI (`dolos run -f csv -l python …`), exactly as the official extra,
+  over the champion's `.py` files against the public kernels under the task's `kernels_dir` (or
+  `--kernels-dir`); the record carries the highest champion-vs-kernel similarity and the top pairs.
+  Without `dolos` on PATH the record says `unavailable`, without kernels `no_kernels` — an absent
+  check is a stated fact, never a clean reading.
+
+The record is `<run_dir>/mlebench_extras.json`, an explicit sidecar; it moves no champion, metric or
+selection. The campaign (row 23) reports it beside the run row's Mislead pair (`mislead_gap`).
+
 ## Notes / limits (v1)
 
 - nomad's per-sample crystal **geometry files are not mounted** — the CPU baseline + brief use the

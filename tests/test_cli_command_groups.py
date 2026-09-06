@@ -75,6 +75,12 @@ GROUPS = {
                         "concept-steward", "concept-ratify", "claim-decide", "task-facets",
                         "task-facets-set", "claim-steward", "cross-run-digest", "cross-run-search",
                         "atlas", "claims"},
+    # `audit_cmds` is the post-run INSTRUMENT group (doc 52 row 22): a command here reads ONE
+    # finished run, may spend money on a judge, and writes a sidecar of that run — a RECORD that
+    # moves no champion, metric, selection or cross-run store. That is neither `inspect_cmds`
+    # (which never spends money) nor `governance_cmds` (which authors cross-run memory and was
+    # already at its ceiling), so it is a domain split like `memory_cmds`, not a drift.
+    "audit_cmds": {"mlebench-extras"},
     # `memory_cmds` is its own group because the line ceiling below refused to let it be a fourth
     # domain inside `governance_cmds` — which was ALREADY eleven lines under the bound. Its contract
     # is the one governance does not have: every command there RECORDS a decision and adds, this one
