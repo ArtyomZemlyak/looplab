@@ -33,14 +33,19 @@ from pathlib import Path
 
 CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign.sh"
 
+# `ruler_fields` and `marker_is_immediate_exit` joined 2026-09-06 (`record_done` calls the first for
+# every marker's ruler identity and reads `IMMEDIATE_EXIT_S`; `already_measured` calls the second),
+# and the two preamble variables they need are stubbed below at the script's own defaults -- the
+# same lag `test_campaign_marker_evidence.py` records for LANE_LAYOUT.
 _FUNCTIONS = ("run_started_evidence", "successful_calls", "ended_on_failure", "next_attempt",
-              "marker_is_harness_cut", "marker_is_operator_skip", "already_measured",
-              "record_done", "refuse_to_start")
+              "ruler_fields", "marker_is_harness_cut", "marker_is_operator_skip",
+              "marker_is_immediate_exit", "already_measured", "record_done", "refuse_to_start")
 
 
 def _bash(script: str, cwd: Path) -> subprocess.CompletedProcess:
     src = CAMPAIGN.read_text(encoding="utf-8")
     parts = ["set -u", "LANE_COUNT=4", "CORES_PER_LANE=22", 'LANE_LAYOUT="whole_cores"',
+             'IMMEDIATE_EXIT_S="${IMMEDIATE_EXIT_S:-60}"', f'HERE="{CAMPAIGN.parent}"',
              'ARM="${ARM:-B}"', 'T="${T:-svm}"']
     for name in _FUNCTIONS:
         found = re.search(rf"^{name}\(\) \{{.*?^\}}$", src, re.M | re.S)
@@ -90,7 +95,11 @@ def test_this_attempts_own_call_still_writes_the_marker(tmp_path):
     marker, said = _marker(tmp_path, rows, started=int(now) - 7)
     assert marker is not None, said
     assert "ok_calls=1" in marker, f"the stale pair is still being counted: {marker!r}"
-    assert "state=ran_to_completion" in marker, marker
+    # A 7-second rc=0 run IS `exited_immediately` since 2026-09-06 (`IMMEDIATE_EXIT_S`, the clock
+    # half of the rung this file is about), and the marker is written either way -- this test's
+    # property is the WINDOW, i.e. that the row inside it was counted. The state's own falsifiers
+    # live in `test_algotune_immediate_exit_is_not_a_finish.py`.
+    assert "state=exited_immediately" in marker and "wall=7" in marker, marker
 
 
 def test_a_cut_run_is_still_read_off_its_own_last_call(tmp_path):
