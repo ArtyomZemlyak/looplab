@@ -1150,14 +1150,13 @@ seams that need a design call rather than a stamp (a run dropped from `/api/runs
 `concept_map.py`'s outage-vs-empty verdict, `lessons.py::store_case`), and `serve/`'s own loops,
 which sit outside the funnel's run path by design. Deleted per the index rule.*
 
-OPEN[claude-md-has-no-size-budget] the agent guide is 238,234 bytes (2026-09-06; 232,919 on
-2026-09-02) — about 60k tokens on every
-turn, roughly 29 % of a 200k window before a single file is read — and 75 % of it is the package
-map, whose engine row alone is 61 KB. Re-deriving 28 of its named counts: 15 hold and 11 do not.
-The rules an agent needs every turn are a small fraction of it and the dated measurements are also
-recorded in the numbered docs and the module docstrings they came from. Guard the budget, and let
-the narratives live where they are already written down.
-proof:absent:CLAUDE_MD_MAX_BYTES@tests/test_documentation_contracts.py
+*Closed 2026-09-06 (doc 52 row 20 shipped): the marker `claude-md-has-no-size-budget` stood here.
+The guide had reached 260,266 bytes by the time the budget landed (the rows the plan itself added).
+`tests/test_documentation_contracts.py::CLAUDE_MD_MAX_BYTES` (100,000) refuses a guide over the
+budget; `CLAUDE.md` keeps the one-line rule per module, the seven invariants and the conventions
+(about 46 KB), and every package-map row, the full invariant account and the full convention
+bullets were archived verbatim, one section per row, in `docs/53-agent-guide-narratives-2026-09-06.md`,
+which a second guard pins to still cover every row the guide keeps. Deleted per the index rule.*
 
 OPEN[http-surface-has-no-generated-reference] 140 routes, 22 with a response model, 39 hand-parsed
 bodies, no version, no deprecation headers, and 110 of the 140 templates named in no guide page;

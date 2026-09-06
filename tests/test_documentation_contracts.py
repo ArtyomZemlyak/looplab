@@ -80,7 +80,10 @@ def test_index_mentions_every_numbered_document():
     #   worktree held an unmerged `51-` at the time.
     #   51 -> 52 (2026-09-05): the development plan (doc 52). No collision — the number was
     #   claimed by checking the glob AND the index table together.
-    assert len(numbered) == 52, "the derived numbered-document inventory changed"
+    #   52 -> 53 (2026-09-06): the agent guide's narratives, archived verbatim when `CLAUDE.md`
+    #   went on a byte budget (doc 53, doc 52 row 20). No collision — the number was claimed by
+    #   checking the glob AND the index table together.
+    assert len(numbered) == 53, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
@@ -335,3 +338,33 @@ def test_every_failure_reason_surface_names_all_of_them():
     assert not problems, (
         "FAILURE_REASONS surfaces disagree with the registry — update them in the SAME change as "
         "the registry (CLAUDE.md docs-sync rule):\n  " + "\n  ".join(problems))
+
+
+# THE AGENT GUIDE'S BYTE BUDGET (doc 52 row 20). `CLAUDE.md` is read on EVERY agent turn: at 260,266
+# bytes on 2026-09-06 it was about 60k tokens — 29 % of a 200k window before a single file was
+# read — and 75 % of it was package-map narrative whose measurements are also recorded in the
+# numbered docs and the module docstrings. The rules stayed; the stories moved, verbatim, to doc 53.
+# The budget is a CEILING with headroom for rules, not a target: a rule added here costs a line,
+# a story added here costs the budget, and the remedy is doc 53 or a docstring, never the ceiling.
+CLAUDE_MD_MAX_BYTES = 100_000
+_NARRATIVES = DOCS / "53-agent-guide-narratives-2026-09-06.md"
+
+
+def test_the_agent_guide_stays_under_its_byte_budget():
+    size = len((ROOT / "CLAUDE.md").read_bytes())
+    assert size <= CLAUDE_MD_MAX_BYTES, (
+        f"CLAUDE.md is {size:,} bytes, over the {CLAUDE_MD_MAX_BYTES:,}-byte budget every agent turn pays "
+        f"for. Keep the RULE here and move the measurement / incident / alternatives to "
+        f"{_NARRATIVES.name} or the module docstring — do not raise the budget.")
+
+
+def test_the_archived_narratives_still_cover_every_package_map_row():
+    """The archive is what made the budget honest: every row the guide keeps has its full story
+    there, one `### <path>` section per row, so a compact row is a pointer and not a deletion."""
+    rows = re.findall(r"^\| (`(?:looplab/[^`]*|ui/)`) \|", (ROOT / "CLAUDE.md").read_text(encoding="utf-8"), re.M)
+    assert rows, "the package map has no rows"
+    archive = _NARRATIVES.read_text(encoding="utf-8")
+    missing = [path for path in rows if f"### {path}\n" not in archive]
+    assert not missing, f"package-map rows with no archived narrative section: {missing}"
+    assert "## Engine invariants (the full account)" in archive
+    assert "## Conventions and traps (the full account)" in archive
