@@ -91,6 +91,11 @@ class LoopOptions(Mapping):
     summary_client: object | _Unset = UNSET
     emit_after: int | _Unset = UNSET
     emit_force: int | _Unset = UNSET
+    # A9 (docs/60 §60.9; evidence docs/56 §164): reads of ONE path inside one loop after which
+    # every further read of it carries `tool_loop._READ_LOOP_NOTE`. Config-shaped (a threshold, not
+    # a callback or a prompt), so it rides the bundle; the loop's own default (25) is the corpus's
+    # normal ceiling — see `drive_tool_loop`.
+    read_loop_nudge_after: int | _Unset = UNSET
 
     # ---------------------------------------------------------------- Mapping (so `**opts` works)
     def __iter__(self):

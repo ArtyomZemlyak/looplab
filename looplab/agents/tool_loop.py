@@ -38,6 +38,11 @@ from looplab.agents.loop_options import (  # noqa: F401
 # notions can't drift. (`StuckDetector` itself stays a function-local import in `drive_tool_loop`:
 # a FRESH detector is built per call, so nothing about it is module state.)
 from looplab.agents.stuck import _canonical
+# The file readers' own page width (`RepoScoutTools._paginate`'s cap, which `repo_read` and
+# `read_installed` both delegate to), reused by the read-loop nudge below so the page it tells the
+# model to ask for is the page the tool actually returns. `reposcout` imports only `core` and
+# `tools._base`, so this edge closes no cycle.
+from looplab.tools.reposcout import _MAX_READ as _READ_PAGE_CHARS
 
 
 # A configured compressor that cannot be constructed must not silently fall back to the main
@@ -312,6 +317,118 @@ _TRUNC_NOTE = ("\n…[truncated by the tool-result cap — {n} chars omitted; "
 # it is always true. `{k}` = length of the identical-result streak.
 _REPEAT_NOTE = ("\n(note: this exact call has now run {k}× this phase with an IDENTICAL result)")
 
+# A9 (docs/60 §60.9; evidence docs/56 §164). The PATH-keyed read ledger: how many times ONE file has
+# been fetched inside ONE loop invocation, whatever the ranges. `oldCK8` (2026-09-03) spent $0.9574
+# of its $1.00 inside `propose` and minted no node, reading the same 248-line
+# `reference_edge_expansion.py` 189 times with `{"lines": 1, "start_line": 25}`, `26`, `27`… — 72-102
+# chars per call, a whole re-sent conversation per turn. Every net above and below missed it, each
+# for its own reason: `_REPEAT_NOTE` keys on identical `(tool, canonical-args)` and the arguments
+# incremented (`repeat_streak` was 1 on 192 of 194 reads); the identical-RESULT half keys on the
+# result and every line was different; the StuckDetector's 1-/2-cycle window sees no cycle in a
+# monotone walk; and `agent_max_turns` is 0 in every probe. The one thing constant across all 189
+# calls was the path, which is what `benchmarks/read_loops.py` counts and what this ledger keys on.
+#
+# A NUDGE, NOT A CAP: nothing is refused and the read still executes and returns exactly what it
+# always did — the operator's always-re-read decision (P3) stands. The note tells the model what it
+# has done (N reads of this one file this phase), what the file is (T lines, about M pages at the
+# widest page, when the reader's own `(lines a-b of T)` header made that derivable) and the one
+# call that ends the walk — spelled as the actual tool and argument, never "read it whole" in the
+# abstract. The threshold (25, `read_loop_nudge_after`) is the corpus's NORMAL behaviour, not a
+# guess: every probe re-reads the reference 25-38 times inside `plan_step` and the next-worst
+# triple after oldCK8's 186 is 38, so at 25 the corpus fires only on oldCK8-shaped runs. Like
+# `_REPEAT_NOTE`, it rides OUTSIDE the cap so it can never be truncated away, and it fires on the
+# threshold read and on EVERY read after it — a one-shot note is one turn of context away from
+# being compacted out of a loop that has already shown it does not stop on its own.
+#
+# The registry of READERS: tool name -> (the argument that names the file, whether the tool pages
+# by `start_line`/`lines`). Only tools that return a FILE's content belong here — a grep, a listing
+# or a write of the same path is not a read of it (`read_loops.py`'s rule, pinned by
+# `tests/test_read_loop_nudge.py`). `read_asset` has no window and no page; its remedy is
+# different and `_READ_LOOP_NOTE_UNPAGED` says so. The stage-log readers (`read_log`) are
+# deliberately absent: a 45 MB training log is not something to "read whole".
+_READ_TOOL_PATH_SLOTS: dict[str, tuple[str, bool]] = {
+    "read_file": ("path", True),          # tools/reposcout.py — the paginator every other reader uses
+    "repo_read": ("path", True),          # tools/knowledge_tools.py — delegates to the scout's read
+    "read_installed": ("module", True),   # tools/env_inspect.py — same `_paginate`, a dotted module
+    "read_asset": ("name", False),        # tools/run_tools.py — one bounded sample, no window
+}
+# `{fit}` is either "" or the sentence `_read_loop_fit` derives; the rest is fixed text. `{page}` is
+# the reader's own page width so the number the model is told matches the tool's own description.
+_READ_LOOP_NOTE = (
+    "\n(note: `{path}` has now been read {n}× this phase.{fit} Stop re-reading it piecemeal: call "
+    "`{tool}({slot}=\"{path}\")` with `lines` OMITTED to get one ~{page}-char page per call, follow "
+    "each page's 'continue with start_line=N' marker to the end, and then work from the copy in "
+    "this conversation instead of reading it again)")
+_READ_LOOP_NOTE_UNPAGED = (
+    "\n(note: `{path}` has now been read {n}× this phase via `{tool}({slot}=\"{path}\")`; its "
+    "content has not changed — work from the copies already in this conversation instead of "
+    "fetching it again)")
+# The paginator's own header, `(lines A-B of T)`, written by `RepoScoutTools._paginate` on every
+# WINDOWED read (a `start_line` or a `lines`) — the exact shape of the oldCK8 walk — and the one
+# place a reader states the file's total length. `re.M` because `read_installed` prefixes an
+# origin line before the page.
+_LINES_OF_RE = re.compile(r"^\(lines (\d+)-(\d+) of (\d+)\)$", re.M)
+
+
+def _canonical_read_path(name: str, args: dict) -> str | None:
+    """The ledger key for a read-type tool call, or None when `name` is not a registered reader or
+    names no file. Separators are normalized and a leading `./` stripped (the scout's own overlay
+    rule), and NOTHING else: `<repo>/<path>` and a bare `<path>` are two keys, because resolving
+    them is the provider's business and a wrong merge would nudge two different files as one."""
+    slot = _READ_TOOL_PATH_SLOTS.get(name)
+    if slot is None:
+        return None
+    raw = (args or {}).get(slot[0])
+    if raw is None:
+        return None
+    path = str(raw).replace("\\", "/").strip()
+    while path.startswith("./"):
+        path = path[2:]
+    return path or None
+
+
+def _read_loop_fit(entry: dict) -> str:
+    """The `{fit}` sentence: the file's total length and about how many widest pages it is, derived
+    ONLY from what the reader's own headers said (`(lines a-b of T)` gives T; the windows seen give
+    the mean chars per line). An estimate, and it says so — the page is a char budget and the file
+    is counted in lines, so no exact figure exists before the whole file has been read; an empty
+    string when no header has been seen, because a number nobody derived is worse than none."""
+    total = entry.get("lines_total")
+    lines_seen = entry.get("lines_seen") or 0
+    if not total or not lines_seen:
+        return ""
+    est_chars = total * (entry.get("chars_seen", 0) / lines_seen)
+    pages = max(1, -(-int(est_chars) // _READ_PAGE_CHARS))
+    return (f" It is {total} lines — about {pages} such page{'s' if pages != 1 else ''} in"
+            f" total.")
+
+
+def _note_path_read(read_state: dict, name: str, args: dict, result: str,
+                    nudge_after: int) -> tuple[int, str]:
+    """Charge one read of `(name, args)`'s path to the caller's ledger and return
+    `(reads_of_this_path, note)` — the note is "" below `nudge_after` (or when it is <= 0, the OFF
+    switch), and `_READ_LOOP_NOTE`/`_READ_LOOP_NOTE_UNPAGED` on the threshold read and every read
+    after it. `0` reads means `name` is not a reader at all, so the caller stamps nothing."""
+    path = _canonical_read_path(name, args)
+    if path is None:
+        return 0, ""
+    entry = read_state.setdefault(path, {"reads": 0, "lines_total": None,
+                                         "lines_seen": 0, "chars_seen": 0})
+    entry["reads"] += 1
+    header = _LINES_OF_RE.search(result[:400])
+    if header is not None:
+        first, last, total = (int(g) for g in header.groups())
+        if total > 0 and last >= first:
+            entry["lines_total"] = total
+            entry["lines_seen"] += last - first + 1
+            entry["chars_seen"] += max(0, len(result) - header.end())
+    if nudge_after <= 0 or entry["reads"] < nudge_after:
+        return entry["reads"], ""
+    slot, paged = _READ_TOOL_PATH_SLOTS[name]
+    template = _READ_LOOP_NOTE if paged else _READ_LOOP_NOTE_UNPAGED
+    return entry["reads"], template.format(path=path, n=entry["reads"], tool=name, slot=slot,
+                                           fit=_read_loop_fit(entry), page=_READ_PAGE_CHARS)
+
 
 def _cap_tool_result(result: str, cap: int = RESULT_CAP) -> str:
     """Bound a tool result to `cap` chars, appending `_TRUNC_NOTE` (inside the cap) when it actually
@@ -488,8 +605,11 @@ def _tool_call_args(tc: dict) -> tuple[str, dict]:
 
 
 def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
-                   on_tool_result=None, cancel_check=None) -> tuple[str, str]:
-    """Execute ONE retrieval tool call and return `(capped_result, repeat_note)`.
+                   on_tool_result=None, cancel_check=None, read_state: dict | None = None,
+                   read_loop_nudge_after: int = 25) -> tuple[str, str]:
+    """Execute ONE retrieval tool call and return `(capped_result, note)`, where `note` is the
+    identical-result repeat note (`_REPEAT_NOTE`) followed by the path-keyed read-loop nudge
+    (`_READ_LOOP_NOTE`), each "" when it did not fire.
 
     Every tool call ALWAYS executes and returns fresh content. The G2 read-dedup cache
     that used to stub an exact repeat ("already ran … use the earlier output") was
@@ -501,6 +621,8 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
     note below covers the 3+-call round-robins B1's 1-/2-cycle window can't see.
 
     `repeat_state` is the caller's per-invocation ledger (see `_REPEAT_NOTE`), mutated here.
+    `read_state` is its PATH-keyed sibling (see `_READ_TOOL_PATH_SLOTS`), also mutated here; `None`
+    keeps the read-loop nudge off, so a caller that only wants the repeat ledger is unchanged.
     """
     # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
     # under the active operation span next to the generations that decided the call.
@@ -583,9 +705,23 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
         _tool_obs.set("repeat_streak", streak)
         if repeat_note:
             _tool_obs.set("repeat_note_sent", True)
+        # A9: the PATH-keyed read ledger, the net for the walk the two ledgers above cannot see
+        # (see `_READ_TOOL_PATH_SLOTS`). Same trace discipline: `path_reads` rides on EVERY read
+        # of a registered reader — the denominator a firing rate needs — and `repeat_path_note_sent`
+        # only when the note really went. The note is appended AFTER the repeat note so that one
+        # stays byte-identical (`tests/test_tool_repeat_streak_is_traced.py`), and outside the cap.
+        path_note = ""
+        if read_state is not None:
+            path_reads, path_note = _note_path_read(read_state, name, args, result,
+                                                    read_loop_nudge_after)
+            if path_reads:
+                _tool_obs.set("path_reads", path_reads)
+            if path_note:
+                _tool_obs.set("repeat_path_note_sent", True)
+    note = repeat_note + path_note
     if on_tool_result is not None:      # provenance hook: exceptions propagate
-        on_tool_result(name, args, result + repeat_note)
-    return result, repeat_note
+        on_tool_result(name, args, result + note)
+    return result, note
 
 
 # Every way this loop can stop WITHOUT the model having emitted an answer of its own accord. The
@@ -677,7 +813,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     cancel_check=None, on_tool_result=None,
                     nudge_prompt: str = "", stuck_prompt: str = "", budget_note=None,
                     validate=None, emit_retries: int = 2, emit_after: int = 0, emit_force: int = 0,
-                    terminal_salvage: bool = False):
+                    terminal_salvage: bool = False, read_loop_nudge_after: int = 25):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -708,6 +844,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     ping-pongs between two, or keeps hitting the SAME error) with no progress, we force the final
     emit and finish instead of spinning forever. Thresholds are config-driven (`stuck_repeat` /
     `stuck_alternate`); a FRESH detector is built per call so state never leaks across loops.
+
+      - `read_loop_nudge_after` (25; 0 = off): reads of ONE file inside this loop after which every
+        further read of it carries `_READ_LOOP_NOTE` — the path-keyed net for a model walking a file
+        one line at a time (A9, docs/56 §164: 189 `repo_read`s of one 248-line file, $0.96, no node).
+        A nudge and never a cap: the read still executes and returns what it always did. The default
+        is the corpus's normal re-read count (25-38 per phase), so it fires only on the runaway.
 
     Optional long-horizon aids:
       - `self_plan` (C1): expose a TodoWrite-style `update_plan` tool so the agent keeps its OWN
@@ -790,6 +932,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # is kept (not a hash): it is already capped at RESULT_CAP, and byte-identity must be exact —
     # no collision caveat. `_run_tool_call` owns the ledger's updates.
     repeat_state: dict[str, tuple[str, int]] = {}
+    # A9: the PATH-keyed read ledger beside it, the same lifetime for the same reason — a fresh
+    # dict per invocation, so a file legitimately re-read across phases (the reference in every
+    # `plan_step`) never accumulates a count from an earlier loop. `_run_tool_call` owns its updates.
+    read_state: dict[str, dict] = {}
     tool_specs = _compose_loop_tool_specs(tools, emit_spec, self_plan=self_plan)
     current_plan = ""
     started = time.monotonic()
@@ -984,7 +1130,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         stuck_reason = None
         investigated = False            # did any call this turn actually RUN a tool (see call_turns)
         for tc in calls:
-            repeat_note = ""            # per-call: set only when an executed call is a 3rd+ repeat
+            repeat_note = ""            # per-call: the repeat note and/or the read-loop nudge, else ""
             name, args = _tool_call_args(tc)     # args HARDENED to a dict (see there)
             if name == emit_name:
                 # Bounce a malformed emit BACK to the model with the concrete error instead of silently
@@ -1035,7 +1181,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # which owns the always-execute rule (P3) and the identical-result repeat note.
                 result, repeat_note = _run_tool_call(tools, name, args, repeat_state=repeat_state,
                                                      on_tool_result=on_tool_result,
-                                                     cancel_check=_cancelled)
+                                                     cancel_check=_cancelled,
+                                                     read_state=read_state,
+                                                     read_loop_nudge_after=read_loop_nudge_after)
             result = _cap_tool_result(str(result))   # idempotent final bound (cancel/plan stubs too)
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "name": name, "content": result + repeat_note})
