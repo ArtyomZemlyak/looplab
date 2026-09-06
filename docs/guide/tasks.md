@@ -1311,6 +1311,14 @@ the engine provides the official `public/` split, the solution writes `submissio
 **host** scores it with MLE-bench's real grader against held-out answers — producing the genuine
 MLE-bench metric plus the official medal / above-median report.
 
+**The search never sees the private grade (2026-09-06).** A `holdout_fraction` slice of the public
+train rows is hidden from the agent — out of its `train.csv`, into its `test.csv` without the label,
+listed in its `sample_submission.csv` — and the search is scored on that slice with the competition's
+own grader; the private answers grade the search champion **once**, at finish (`holdout_evaluated`,
+with the medal report). `holdout_fraction: 0` is the explicit legacy protocol (every node graded on
+the private answers), and `host_grading.protocol` in the log says which one ran. See the
+[runbook](../MLEBENCH.md).
+
 ```jsonc
 { "competition": "spooky-author-identification" }
 ```

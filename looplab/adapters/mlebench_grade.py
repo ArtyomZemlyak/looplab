@@ -7,6 +7,12 @@ out-of-process / host-side grading the trust model (B1) requires, specialised to
 benchmark: the number the search optimises is the genuine MLE-bench metric, plus the medal
 thresholds derived from the real competition leaderboard.
 
+Two protocols since 2026-09-06 (doc 52 §5.1 row 3). The SEARCH protocol grades the agent-invisible
+split `adapters/mlebench_split.py` carves out of the public train rows, with the competition's OWN
+grader (`--answers`), and never names the private answers during a run; the private grade lands ONCE,
+at finish, for the search champion. The legacy protocol (`holdout_fraction=0`) grades every node on
+the private answers and is recorded as such in `host_grading.protocol`.
+
 Used two ways:
   * :func:`grade` — in-process (host) grading, returns the full report dict.
   * :func:`grade_in_subprocess` — what the engine calls: runs grading in a child process (so a
@@ -37,6 +43,77 @@ def grade(competition_id: str, submission_path, data_dir: Optional[str] = None) 
     comp = _competition(competition_id, data_dir)
     report = grade_csv(Path(submission_path), comp)
     return report.to_dict()
+
+
+def grade_search_split(competition_id: str, submission_path, answers_path,
+                       data_dir: Optional[str] = None) -> Optional[float]:
+    """Score a submission against the SEARCH split's answers (the private format, carved by
+    `mlebench_split.carve`) with the competition's own grader.
+
+    Grades through `grade_csv` on a copy of the competition whose `answers` is the split's file, so
+    the submission validation and the metric are exactly the official ones; the medal thresholds the
+    report derives from the leaderboard are about the private set and are discarded here — a split
+    score is a search signal, not a report. Returns None for an invalid submission."""
+    import copy
+
+    from mlebench.grade import grade_csv
+
+    from looplab.adapters.mlebench_real import _competition
+
+    comp = _competition(competition_id, data_dir)
+    split = copy.copy(comp)
+    try:
+        object.__setattr__(split, "answers", Path(answers_path))
+    except (AttributeError, TypeError):
+        split.answers = Path(answers_path)   # type: ignore[attr-defined]
+    score = grade_csv(Path(submission_path), split).to_dict().get("score")
+    ok = isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)
+    return float(score) if ok else None
+
+
+def grade_search_split_in_subprocess(competition_id: str, submission_path, answers_csv: str,
+                                     hidden_ids, data_dir: Optional[str] = None, *,
+                                     timeout: float = 300.0) -> Optional[float]:
+    """The engine's SEARCH-time call: the candidate's submission restricted to the hidden ids, and
+    the answers text, are written into a private temp dir (mode 0700, removed after) and graded by
+    the child. Only the hidden rows leave the workdir and the private answers are never named.
+
+    On the subprocess tier that temp dir is as readable to a SIBLING candidate as the mle-bench data
+    dir (holding `private/test.csv`) already is — the trust model's disclosed caveat, no wider — and
+    the Docker tier sees neither. `(None)` for a missing/malformed submission, a grader failure or a
+    timeout, exactly like `grade_in_subprocess`."""
+    import shutil
+    import tempfile
+
+    from looplab.adapters.mlebench_split import filter_submission
+    from looplab.runtime.sandbox import _last_json_dict, run_argv
+
+    tmp = Path(tempfile.mkdtemp(prefix="looplab-search-grade-"))
+    try:
+        try:
+            text = Path(submission_path).read_text(encoding="utf-8-sig", errors="replace")
+            (tmp / "submission.csv").write_text(filter_submission(text, hidden_ids, keep=True),
+                                                encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+        (tmp / "answers.csv").write_text(answers_csv, encoding="utf-8")
+        argv = [sys.executable, "-m", "looplab.adapters.mlebench_grade",
+                "-c", competition_id, "-s", str(tmp / "submission.csv"),
+                "--answers", str(tmp / "answers.csv")]
+        if data_dir:
+            argv += ["--data-dir", str(Path(data_dir).resolve())]
+        root = str(Path(__file__).resolve().parents[2])
+        rc, out, _err, to = run_argv(argv, root, timeout, None, 256_000)
+        if rc != 0 or to:
+            return None
+        obj = _last_json_dict(out, lambda o: "metric" in o)
+        if obj is None:
+            return None
+        m = obj.get("metric")
+        ok = isinstance(m, (int, float)) and not isinstance(m, bool) and math.isfinite(m)
+        return float(m) if ok else None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def grade_in_subprocess(competition_id: str, submission_path, data_dir: Optional[str] = None,
@@ -72,7 +149,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("-c", "--competition-id", required=True)
     ap.add_argument("-s", "--submission", required=True, help="path to the submission CSV")
     ap.add_argument("--data-dir", default=None)
+    ap.add_argument("--answers", default=None,
+                    help="grade against THIS answers CSV (the search split) instead of the private "
+                         "answers; the report is then omitted — a split score is a search signal")
     args = ap.parse_args(argv)
+    if args.answers:
+        metric = grade_search_split(args.competition_id, args.submission, args.answers, args.data_dir)
+        print(json.dumps({"metric": metric, "report": None, "protocol": "search_split"}))
+        return 0
     report = grade(args.competition_id, args.submission, args.data_dir)
     # One machine-readable line on stdout; `metric` is what the engine reads for selection.
     print(json.dumps({"metric": report.get("score"), "report": report}))

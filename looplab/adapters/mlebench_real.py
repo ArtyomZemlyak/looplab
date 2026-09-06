@@ -4,8 +4,12 @@ Wraps an *actual* Kaggle competition prepared by mle-bench (see :mod:`looplab.ad
 the agent is given the official ``public/`` split (train + unlabeled test + sample submission +
 description) and must write ``submission.csv``; the HOST scores it with mle-bench's *real*
 grader against the held-out ``private/test.csv`` answers (out-of-process, never on the candidate
-FS — :mod:`looplab.adapters.mlebench_grade`). The number the search optimises is therefore the genuine
-MLE-bench metric, and the result carries the official medal/above-median report.
+FS — :mod:`looplab.adapters.mlebench_grade`). Since 2026-09-06 (doc 52 §5.1 row 3) the number the
+SEARCH optimises is the competition's own metric over an agent-invisible split carved from the public
+train rows (:mod:`looplab.adapters.mlebench_split`, pinned by ``holdout_fraction``), and the private
+answers grade the search champion ONCE at finish — that grade is the run's ``holdout_evaluated``
+metric and carries the official medal/above-median report. ``holdout_fraction=0`` is the explicit
+legacy protocol (every node graded on the private answers), recorded in ``host_grading.protocol``.
 
 Trust model: this is the credible, comparable benchmark path. The answer key lives only in the
 mle-bench data dir; ``assets()`` copies just the public files into the candidate workspace, and

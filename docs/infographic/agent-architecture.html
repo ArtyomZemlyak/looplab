@@ -145,7 +145,7 @@ stack(1360,360,DY,[
  {id:"t_conf",h:96,t:"Confirm",tag:"off",c:C.ev,sub:["default OFF · top-K on disjoint seeds [base=1…)","pick best confirmed mean; >1 SE is a significance flag","GPU refusal: 0.5s→5s backoff · 5 in a row → durable auto-pause"]},
  {id:"t_ho",h:64,t:"Holdout-select",tag:"host default",c:C.ev,sub:["host-graded: top-3 on reserved 25%; no retrain"]},
  {id:"t_verify",h:80,t:"Verifier tie-break",tag:"off",c:C.ev,sub:["atomic verifier_group_scored · complete final tie set","generation · evidence · samples validate all-or-none","never overrides the metric (§21.7)"]},
- {id:"t_best",h:64,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible → gate/block trust exclusion","→ metric/tie → confirm → host holdout → approval"]},
+ {id:"t_best",h:84,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible → gate/block trust exclusion","→ metric/tie → confirm → host holdout → approval","mlebench_real (2026-09-06): the search is scored on an agent-invisible split of the public train rows (holdout_fraction); the private answers grade the champion ONCE at finish — holdout_evaluated carries it, never res.metric"]},
 ]);
 // REFINE
 stack(1760,300,DY,[

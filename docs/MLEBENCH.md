@@ -3,9 +3,21 @@
 LoopLab can run **real Kaggle competitions** from OpenAI's
 [MLE-bench](https://github.com/openai/mle-bench): the engine is given the official `public/`
 split (train + unlabeled test + sample submission + description), writes `submission.csv`, and
-the **host** scores it with mle-bench's *real* grader against the held-out answers. The metric
-the search optimises is therefore the genuine MLE-bench number, and each result carries the
-official medal / above-median report derived from the real competition leaderboard.
+the **host** scores it with mle-bench's *real* grader against the held-out answers.
+
+**Two protocols since 2026-09-06.** By default the number the **search** optimises is the
+competition's own metric over an **agent-invisible split** carved from the public train rows
+(`holdout_fraction` of them — removed from the agent's `train.csv`, appended to its `test.csv`
+without the label, added to its `sample_submission.csv`; `looplab/adapters/mlebench_split.py`), and
+the private answers grade the search champion **once**, at finish: that grade is the run's
+`holdout_evaluated` metric and carries the official medal / above-median report derived from the
+real competition leaderboard. The search never receives a private score, so the champion is not a
+max over N private draws (the 9–13-point oracle gap AIRA₂ measured). `holdout_fraction: 0` is the
+explicit legacy protocol — every node graded on the private answers — and the run's `host_grading`
+event records which protocol it ran (`protocol: search_split | private_per_node`). A competition
+whose train/test/sample-submission layout does not decide the answers' format (neither the sample's
+target columns as train columns nor a one-hot of a single train label) refuses the run at start
+and names both ways out.
 
 This is `kind="mlebench_real"`, distinct from the synthetic `kind="mlebench"` (Gaussian blobs)
 used for offline tests.

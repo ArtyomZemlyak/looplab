@@ -283,14 +283,15 @@ allow-list grants the run dir and Landlock is off — so this is L, and the hone
 CONSISTENT (host-scored, held constant across candidates) before HIDDEN. Under the survey's coding
 LoopLab is L4-m today; this is the move to L4-v. proof:absent:holdout@looplab/adapters/repo_task.py
 
-OPEN[mlebench-search-optimises-the-private-grade] on the real MLE-bench path `engine/holdout.py::apply_host_grade`
-grades EVERY node's submission against the private test set and writes it back as `res.metric`, and
-`build_holdout_idx` returns an empty partition for `kind == "mlebench"` — so the search hill-climbs
-the private grade, the champion is a max over N test draws (the 9–13-point oracle gap AIRA₂ cites),
-and the protocol (no score feedback during a run; one final grade) is violated. The fix is a
-search-time host score on an agent-invisible split carved from the PUBLIC train data (AIRA₂'s
-D_search) and one private grade at finish. Precondition for the campaign.
-proof:`present:self._e._host_grader.get("kind") == "mlebench"@looplab/engine/holdout.py`
+*Closed 2026-09-06 (row 3 shipped): the marker `mlebench-search-optimises-the-private-grade` stood
+here. `engine/holdout.py::apply_host_grade` graded every node against the private answers and
+`build_holdout_idx` returned an empty partition for the kind. Now `adapters/mlebench_split.py` carves
+a `holdout_fraction` slice of the public train rows out of what the agent sees, the search is scored
+on that slice with the competition's own grader (`mlebench_grade.py --answers`), and the private
+answers grade the search champion once at finish (`holdout_evaluated`, `protocol: private_grade`);
+`host_grading.protocol` records which protocol a run used, an uncarvable layout refuses the run, and
+`tests/test_mlebench_search_split.py` pins that the search never sees a public test id and the
+private grade never sees a hidden train id. Deleted per the index rule.*
 
 OPEN[merge-operator-is-mean-of-params-not-code] `merge_mode="auto"` resolves to `ensemble` for every
 LLM Developer and `engine/node_build.py::_ensemble_idea` issues a recombination directive (mean params

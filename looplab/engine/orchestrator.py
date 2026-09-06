@@ -1278,7 +1278,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # re-used (see run()), so a changed live setting can't silently make pre/post-resume metrics
         # incomparable. `_build_holdout_idx` rebuilds the partition from a fraction.
         self._holdout_fraction = float(holdout_fraction)
+        # THE MLE-BENCH SEARCH SPLIT (doc 52 §5.1 row 3, `engine/holdout.py::apply_search_split`):
+        # the original assets are kept aside so every (re)build of the partition carves from them.
+        self._assets_public: Optional[dict] = None
+        self._search_answers: Optional[str] = None
+        self._search_hidden_ids: frozenset = frozenset()
         self._holdout_idx: frozenset = self._build_holdout_idx(self._holdout_fraction)
+        self._apply_search_split()
         self._holdout_epoch = 0
         # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
         rs = getattr(task, "repo_spec", None)
@@ -1775,6 +1781,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self._holdout_epoch = state.search_epoch
                 self._holdout_idx = self._build_holdout_idx(
                     self._holdout_fraction, self._holdout_epoch)
+                self._apply_search_split()
             # A scoped terminal intent is itself a work gate. Finalize/recover that exact scope
             # below; never reopen setup/search while a paid-report or terminal append is in flight.
             pending_scope = incomplete_finalize_scope(decision_events)
@@ -3458,6 +3465,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         "predictions": self._graded_output_name()}
                     if hg.get("kind") == "mlebench":          # real MLE-bench: answers live in the
                         evt["competition"] = hg.get("competition")   # mle-bench data dir, never here —
+                        # WHICH PROTOCOL this run scores under (doc 52 §5.1 row 3), so the reader of
+                        # the log can tell a search-split number from a test-selected one.
+                        evt["protocol"] = ("search_split" if self._search_hidden_ids
+                                           else "private_per_node")
+                        evt["n_hidden"] = len(self._search_hidden_ids)
                         # so there is no in-memory label list to count; n_labels=0 would mislead the Trust
                         # panel into "nothing held out". Omit it; `competition` signals host-held answers.
                     else:
@@ -3893,6 +3905,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # seen exam'). Epoch 0 rebuilds the byte-identical original partition, so a normal
             # single-epoch run (and every replay of an existing log) is unchanged.
             self._holdout_idx = self._build_holdout_idx(self._holdout_fraction, _entry.search_epoch)
+            self._apply_search_split()
             self._holdout_epoch = _entry.search_epoch
         # E4: cross-run meta-learned priors. Excluding THIS run's id matters on resume: a run that
         # already mid-run-distilled its own comparative lessons (M6) must not read them back as if
@@ -5015,6 +5028,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         "_apply_host_grade": ("holdout", None),
         "_host_score_split": ("holdout", None),
         "_build_holdout_idx": ("holdout", None),
+        "_apply_search_split": ("holdout", None),
         "_holdout_topk": ("holdout", None),
         "_holdout_pending": ("holdout", None),
         # --- workspace (looplab/engine/workspace.py::Workspace)
@@ -6697,6 +6711,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     def _build_holdout_idx(self, fraction: float, epoch: int = 0) -> frozenset:
         return self.holdout.build_holdout_idx(fraction, epoch)
+
+    def _apply_search_split(self) -> None:
+        return self.holdout.apply_search_split()
 
     def _holdout_topk(self, state: RunState) -> list[int]:
         return self.holdout.holdout_topk(state)
