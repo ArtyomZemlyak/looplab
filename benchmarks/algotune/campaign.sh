@@ -911,10 +911,38 @@ already_measured() {   # $1 = marker path. Success = do NOT run this task-arm ag
   return 0
 }
 
+# THE RULER'S IDENTITY, IN THE MARKER, FOR BOTH ARMS. A speedup is a ratio, its denominator is one
+# per-instance reference-cache entry (`<task>__<subset><regime>.json`), and until 2026-09-06 no
+# arm-A record named it at all: arm A's number comes out of AlgoTuner's own loop into
+# `agent_summary.json`, which carries a float and a model name. docs/58 s58.3: "whether the two
+# arms shared a baseline is not established" -- and eight arm-B numbers were re-scored with the
+# WIDTH recorded nowhere, a factor of ~1.6x on this box. `looplab_eval.py::_emit` now stamps the
+# width and the entry's sha256 on every arm-B line; this is the same identity for the marker, so
+# `compare_arms.py` can refuse to pair two numbers off two instruments, whichever arm produced them.
+#
+# Under the LANE's `taskset`, because the regime key includes the lane width the arena resolved; a
+# box too small for the lane list (a test box) falls back to the driver's own affinity rather than
+# stamping nothing. `?` means "could not be derived", `none` means "derived, and no cached entry
+# exists" -- the same "" / "0" distinction `successful_calls` draws, for the same reason.
+ruler_fields() {   # $1 = task, $2 = subset, $3 = cpus. Echoes "eval_workers=… regime=… baseline_sha256=…"
+  local bridge="$HERE/looplab_eval.py" out
+  out="$(taskset -c "$3" python3 "$bridge" --print-ruler --task "$1" --subset "$2" \
+           --ruler-format marker 2>/dev/null)" \
+    || out="$(python3 "$bridge" --print-ruler --task "$1" --subset "$2" --ruler-format marker \
+           2>/dev/null)" \
+    || out=""
+  case "$out" in
+    eval_workers=*regime=*baseline_sha256=*) echo "$out" ;;
+    *) echo "eval_workers=? regime=? baseline_sha256=?" ;;
+  esac
+}
+
 record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpus, $5 = run dir
   RC=$2
   WALL=$(( $(date +%s) - $3 ))
-  REGIME="cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE layout=$LANE_LAYOUT"
+  # The ruler rides in REGIME so every marker line below carries it without a fifth edit per state.
+  # `test` is the graded split for both arms: arm A's `final_speedup` and arm B's champion pass.
+  REGIME="cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE layout=$LANE_LAYOUT $(ruler_fields "$T" test "$4")"
   # A `.done` marker means "this task-arm reached a TERMINAL state and must not be re-run". It must
   # NOT be written for a run that was interrupted: an interrupted task has no verdict, and a marker
   # makes a later resume SKIP it silently. Measured 2026-08-20: stopping a campaign wrote six

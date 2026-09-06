@@ -141,6 +141,7 @@ See ``benchmarks/algotune/README.md`` for the full workflow.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -261,8 +262,11 @@ def eval_regime() -> dict[str, Any]:
                           f"be derived -- fix ALGOTUNE_EVAL_WORKERS / "
                           f"ALGOTUNE_EVAL_CORES_PER_WORKER"}
     key = f"__lane{width}r3" if workers <= 1 else f"__w{workers}x{cores}r3"
-    return {"key": key, "eval_workers": raw or "(unset -> 1)", "cores_per_worker": cores,
-            "lane_width": width, "baseline_cache_dir": declared}
+    # `workers` is the RESOLVED count (`auto` on a 22-core lane is 22) beside the raw string the
+    # environment carried; the raw one says what was ASKED, the resolved one what the arena DID,
+    # and docs/58 s58.3 is the record of eight numbers that carried neither.
+    return {"key": key, "eval_workers": raw or "(unset -> 1)", "workers": int(workers),
+            "cores_per_worker": cores, "lane_width": width, "baseline_cache_dir": declared}
 
 
 def _load_cache(path: Path) -> dict[str, Any]:
@@ -277,6 +281,93 @@ def _save_cache(path: Path, data: dict[str, Any]) -> None:
         path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     except Exception:  # noqa: BLE001 - the measurement already succeeded; caching is best-effort
         pass
+
+
+# THE BASELINE'S IDENTITY, so a number can be shown to have been measured against the same
+# denominator as another number -- or shown not to have been.
+#
+# Two facts decided the shape. WIDTH: docs/58 s58.3 measures the evaluation width moving a speedup
+# ~1.6x on this box (`discrete_log` 1.0007 / 0.9973 at `workers=1` against 1.6318 / 1.6054 at
+# `workers=24`), and eight of arm B's twenty campaign numbers were RE-SCORED with the width
+# recorded nowhere. BASELINE: all twenty arm-B files said `baseline_source: in-harness`, which
+# names no baseline to compare -- "whether the two arms shared a baseline is not established"
+# (s58.3) is a sentence about a record that could not answer, not about the arms.
+#
+# The per-instance reference the ruler divides by is ONE file, `<task>__<subset><regime>.json`
+# under the baseline cache directory (`patch_baseline_cache.py` names it; `_regime_mismatch` globs
+# it), and a sha256 over its bytes is the identity of the denominator every number in that
+# invocation was measured against. Two rows carrying the same digest were divided by the same
+# timings; two rows carrying different ones were not, whatever their `eval_regime.key` says --
+# a cache re-timed between arms keeps its key and changes its bytes. That is why the digest and the
+# key are BOTH recorded and `compare_arms.py` refuses a pair on either.
+#
+# It is a digest and not a copy because a per-instance cache is ~100 entries of timings and the
+# result line is read by `runtime/sandbox.py::json_line_metric` off a node's stdout; and it is
+# `None` WITH A REASON rather than a guessed value because a null that says why is a row a reader
+# can act on (score it again once the cache exists) while a fabricated identity is the defect this
+# field exists to end.
+_RULER_CTX: dict[str, Any] = {}
+
+
+def bind_ruler(task: str | None, subset: str | None, times_dir: Path | None) -> None:
+    """Tell `_emit` which (task, subset, cache dir) this invocation's lines are about.
+
+    Called once by `main()` after the arguments are parsed; a caller that never binds (a unit test
+    driving `_emit` directly) gets `baseline_cache_sha256: null` with a reason saying so, never a
+    digest of some other task's cache.
+    """
+    _RULER_CTX.clear()
+    _RULER_CTX.update({"task": task, "subset": subset, "times_dir": times_dir})
+
+
+def ruler_identity(task: str | None, subset: str | None, times_dir: Path | None) -> dict[str, Any]:
+    """Which reference-cache entry this (task, subset, regime) divides by, and its digest.
+
+    Returns `{"eval_workers", "regime", "baseline_cache_file", "baseline_cache_sha256", "reason"}`.
+    `eval_workers` is the RESOLVED width as a STRING (see `_emit` for why not an int), `regime` the
+    key `eval_regime()` derives, `baseline_cache_file` the entry name looked for (or None when no
+    name can be formed), and `reason` is non-empty exactly when the digest is None.
+    """
+    regime = eval_regime()
+    key = regime.get("key")
+    workers = regime.get("workers")
+    width = str(workers) if isinstance(workers, int) else None
+    if not task or not subset:
+        return {"eval_workers": width, "regime": key, "baseline_cache_file": None,
+                "baseline_cache_sha256": None,
+                "reason": "no task/subset bound, so no reference-cache entry can be named"}
+    if key is None:
+        return {"eval_workers": width, "regime": None, "baseline_cache_file": None,
+                "baseline_cache_sha256": None,
+                "reason": "no regime key could be derived (" + str(regime.get("detail")) + "), so "
+                          "no reference-cache entry can be named"}
+    name = f"{task}__{subset}{key}.json"
+    entry = Path(times_dir) / name if times_dir is not None else None
+    if entry is None:
+        return {"eval_workers": width, "regime": key, "baseline_cache_file": name,
+                "baseline_cache_sha256": None,
+                "reason": "no baseline cache directory is bound, so the entry cannot be read"}
+    try:
+        digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+    except OSError as exc:
+        return {"eval_workers": width, "regime": key, "baseline_cache_file": name,
+                "baseline_cache_sha256": None,
+                "reason": f"no readable per-instance reference cache at {entry} "
+                          f"({type(exc).__name__}) -- the denominator was not a cached entry"}
+    return {"eval_workers": width, "regime": key, "baseline_cache_file": name,
+            "baseline_cache_sha256": digest, "reason": ""}
+
+
+def _ruler_fields(subset: str | None) -> dict[str, Any]:
+    """The top-level keys every result line carries: width and baseline identity, or a reason."""
+    ident = ruler_identity(_RULER_CTX.get("task"), subset or _RULER_CTX.get("subset"),
+                           _RULER_CTX.get("times_dir"))
+    fields: dict[str, Any] = {"eval_workers": ident["eval_workers"],
+                              "baseline_cache_file": ident["baseline_cache_file"],
+                              "baseline_cache_sha256": ident["baseline_cache_sha256"]}
+    if ident["baseline_cache_sha256"] is None:
+        fields["baseline_cache_missing"] = ident["reason"]
+    return fields
 
 
 _SPEEDUP_KEYS = ("final_speedup", "speedup", "avg_speedup")
@@ -763,6 +854,17 @@ def _emit(out: dict[str, Any]) -> None:
     # undeclared `auto` measurement, so `eval_workers` at the top level would enter the operator's
     # metrics table as a score.
     out.setdefault("eval_regime", eval_regime())
+    # WIDTH AND BASELINE IDENTITY, on every line, top-level and NON-NUMERIC. `eval_workers` is the
+    # resolved count as a STRING: `json_line_extras` sweeps every top-level numeric key into the
+    # node's `extra_metrics` as an undeclared `auto` measurement, and a worker count is not a
+    # score. (The int lives in `eval_regime.workers`, nested for the same reason.) The digest is a
+    # hex string or null; when null, `baseline_cache_missing` says why and `baseline_source` is
+    # filled in only if no path above already said where the denominator came from -- the scored
+    # path's "in-harness (...)" sentence is a true statement that must not be overwritten.
+    for key, value in _ruler_fields(out.get("subset")).items():
+        out.setdefault(key, value)
+    if out.get("baseline_cache_sha256") is None:
+        out.setdefault("baseline_source", out.get("baseline_cache_missing"))
     speedup = out.get("speedup")
     if not isinstance(speedup, (int, float)) or speedup <= 0:
         block = out.get("no_speedup")
@@ -925,7 +1027,43 @@ def _build_error_digest(stderr: str, limit: int = 400) -> str:
     return f"{text[:limit // 2]} ... {text[-limit // 2:]}"
 
 
+def _print_ruler(argv: list[str]) -> int:
+    """`--print-ruler`: the ruler identity for (task, subset) under THIS environment, and nothing
+    else -- no arena, no solver, no scoring.
+
+    Exists for `campaign.sh::ruler_fields`, which stamps `eval_workers=`/`regime=`/`baseline_sha256=`
+    into every `.done` marker so arm A -- whose number comes out of AlgoTuner's own loop and passes
+    through no `final.json` -- carries the same identity arm B's result line does. Run under the
+    lane's `taskset` so the lane width is the one the arena resolved. `--ruler-format marker` prints
+    the marker grammar; `json` prints the whole record.
+    """
+    ap = argparse.ArgumentParser(prog="looplab_eval.py --print-ruler")
+    ap.add_argument("--print-ruler", action="store_true")
+    ap.add_argument("--task", required=True)
+    ap.add_argument("--subset", choices=("train", "test"), default="test")
+    ap.add_argument("--baseline-times-dir", type=Path, default=DEFAULT_TIMES_DIR)
+    ap.add_argument("--ruler-format", choices=("json", "marker"), default="json")
+    args = ap.parse_args(argv)
+    ident = ruler_identity(args.task, args.subset, args.baseline_times_dir)
+    if args.ruler_format == "marker":
+        # `?` is "could not be derived", `none` is "derived, and there is no cached entry": a
+        # reader must be able to tell a bookkeeping gap from a cold cache, which is the same
+        # distinction `successful_calls` draws between "" and "0" in campaign.sh.
+        text = (f"eval_workers={ident['eval_workers'] or '?'} regime={ident['regime'] or '?'} "
+                f"baseline_sha256={ident['baseline_cache_sha256'] or ('none' if ident['regime'] else '?')}")
+    else:
+        text = json.dumps(ident)
+    # ONE print, and the third stdout printer this file tolerates by name
+    # (`tests/test_algotune_bridge_says_why.py::test_the_bridge_has_exactly_one_printer`): this is
+    # not a result line -- nothing was scored -- so routing it through `_emit` would stamp a
+    # `no_speedup` block onto a ruler identity.
+    print(text)
+    return 0
+
+
 def main() -> int:
+    if "--print-ruler" in sys.argv[1:]:
+        return _print_ruler(sys.argv[1:])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--algotune-root", required=True, type=Path,
                     help="Path to the AlgoTune checkout (the dir holding scripts/ and results/).")
@@ -968,6 +1106,10 @@ def main() -> int:
                          "default: these are THIS arena's rules, not LoopLab's, and a LoopLab task "
                          "that is not an AlgoTune arm must not inherit them.")
     args = ap.parse_args()
+    # Bound BEFORE the first `_emit`, so even the "no evaluate_results.py" line carries its ruler.
+    # The subset is the one ASKED for; `_emit` prefers the row's own `subset` where a path has
+    # already verified it, which is the same rule `_regime_mismatch` follows.
+    bind_ruler(args.task, args.subset, args.baseline_times_dir)
 
     root: Path = args.algotune_root.resolve()
     evaluator = root / "scripts" / "evaluate_results.py"
@@ -1025,7 +1167,7 @@ def main() -> int:
             # regime being recorded at all" rather than as a candidate that was never eligible.
             print(json.dumps({"speedup": None, "rules_violation": violation,
                               "looplab_failure_reason": "rules_violation",
-                              "eval_regime": eval_regime(),
+                              "eval_regime": eval_regime(), **_ruler_fields(args.subset),
                               "error": f"rules_violation: {violation}"}))
             return 2
 

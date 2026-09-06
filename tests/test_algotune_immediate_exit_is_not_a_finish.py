@@ -34,7 +34,7 @@ CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "ca
 COMPARE = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "compare_arms.py"
 STATUS = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign_status.py"
 
-_FUNCTIONS = ("run_started_evidence", "successful_calls", "marker_is_harness_cut",
+_FUNCTIONS = ("run_started_evidence", "successful_calls", "ruler_fields", "marker_is_harness_cut",
               "marker_is_operator_skip", "marker_is_immediate_exit", "already_measured",
               "record_done", "refuse_to_start", "final_banner")
 
@@ -52,8 +52,11 @@ def _harness() -> str:
     exports it before calling, and the `${...:-60}` form lets it.
     """
     src = CAMPAIGN.read_text(encoding="utf-8")
+    # `HERE` is the script's own directory, which `ruler_fields` (called by `record_done` for the
+    # marker's ruler identity) resolves `looplab_eval.py` against; the preamble sets it from `$0`.
     parts = ["set -u", "LANE_COUNT=4", "CORES_PER_LANE=22", 'LANE_LAYOUT="whole_cores"',
-             'IMMEDIATE_EXIT_S="${IMMEDIATE_EXIT_S:-60}"', 'ARM="${ARM:-B}"', 'T="${T:-svm}"']
+             'IMMEDIATE_EXIT_S="${IMMEDIATE_EXIT_S:-60}"', f'HERE="{CAMPAIGN.parent}"',
+             'ARM="${ARM:-B}"', 'T="${T:-svm}"']
     for name in _FUNCTIONS:
         found = re.search(rf"^{name}\(\) \{{.*?^\}}$", src, re.M | re.S)
         assert found, f"campaign.sh no longer defines {name}()"

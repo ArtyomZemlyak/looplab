@@ -462,22 +462,34 @@ def test_a_positive_speedup_is_printed_untouched(capsys):
     assert printed["speedup"] == 1.5
     assert printed["subset"] == "train"
     assert "no_speedup" not in printed
-    assert set(printed) == {"speedup", "subset", "eval_regime"}, printed
+    # Since 2026-09-06 the width and the baseline identity ride top-level too (docs/58 s58.3: width
+    # moves the number ~1.6x and eight re-scored arm-B numbers carried none; twenty carried a
+    # baseline nothing could compare). They are STRINGS or null, never numbers -- the same
+    # `json_line_extras` reason the regime block is nested for -- and the null carries its reason.
+    assert set(printed) == {"speedup", "subset", "eval_regime", "eval_workers",
+                            "baseline_cache_file", "baseline_cache_sha256",
+                            "baseline_cache_missing", "baseline_source"}, printed
     assert isinstance(printed["eval_regime"], dict), (
         "the ruler must be nested; a top-level numeric key is swept into extra_metrics")
+    for key in ("eval_workers", "baseline_cache_file", "baseline_cache_sha256",
+                "baseline_cache_missing", "baseline_source"):
+        assert printed[key] is None or isinstance(printed[key], str), (key, printed[key])
 
 
 def test_the_bridge_has_exactly_one_printer():
-    """The invariant above is only worth having while `_emit` is the only way out. Two `print`
-    statements are tolerated and named: `_emit`'s own, and the `--enforce-rules` refusal, which
-    this change was asked to leave alone and which already explains itself."""
+    """The invariant above is only worth having while `_emit` is the only way out. Three `print`
+    statements are tolerated and named: `_emit`'s own, the `--enforce-rules` refusal, which
+    this change was asked to leave alone and which already explains itself, and since 2026-09-06
+    `_print_ruler`'s, which prints a ruler IDENTITY for `campaign.sh`'s markers and no result at
+    all -- routing it through `_emit` would stamp a `no_speedup` block onto a line that scored
+    nothing."""
     tree = ast.parse(BRIDGE.read_text(encoding="utf-8"))
     printers = [node for node in ast.walk(tree)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == "print"
                 and not any(isinstance(kw.value, ast.Attribute) and kw.value.attr == "stderr"
                             for kw in node.keywords)]
-    assert len(printers) == 2, \
+    assert len(printers) == 3, \
         f"{len(printers)} stdout printers; every JSON line must leave through _emit"
 
 
