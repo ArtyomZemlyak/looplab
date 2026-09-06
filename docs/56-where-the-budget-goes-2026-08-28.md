@@ -12098,3 +12098,49 @@ because a third copy is how the wordings would have started drifting for good, a
 `propose` deserves its own measurement rather than a paste. A run with no ceiling gets no line at
 all: "0 % gone" is a number a run cannot act on. Five mutations red, including reporting negative
 money on an overspend and inverting the share.
+
+## §289 — a parse of my own tool's prose invented an arm difference
+
+Doing item 9's last unmeasured column — does the model use the reference module — I grepped
+`probe_summary`'s output and got:
+
+```
+  treat    n= 1  import median  0.0 %
+  control  n=23  import median  9.1 %
+```
+
+A total difference between the arms, off 24 of 48 rows. **It is an artifact of the regex.** The
+reference line reads
+
+```
+  reference over 12 executed run_probe calls (+10 refused at the cap): 8.3% import / 8.3% is_solution
+  reference over 20 executed run_probe calls: 5.0% import / 5.0% is_solution
+```
+
+and a pattern expecting `calls:` drops every probe with a parenthesis — which is every CAPPED probe,
+and only capped probes. **The selection bug correlated perfectly with the treatment.** Twice before
+in this series a throwaway parse produced a plausible false number (§287's all-zero `eval_train`,
+§289's earlier 24-of-48); this one would have produced a headline.
+
+From the data, the arms are the same:
+
+| arm | run_probe (refused) | import | is_solution |
+|---|---|---|---|
+| treated | 12 (4) | 8.3 % | 8.3 % |
+| control | 28 (0) | 9.0 % | 8.7 % |
+
+So the fix is not a better regex. `probe_summary --json` now emits the record `summarise` already
+computes — `ref_pct`, `ref_call_pct`, `run_probe`, `run_probe_refused`, `eval_train` and the rest —
+so item 9 never has to recover a number from a sentence again. The embargo is honoured in JSON too:
+a machine-readable escape hatch around §190 would be worse than a prose one, not better. Three
+mutations red.
+
+**And the numbers themselves, now trustworthy.** Across all 48 arm probes the reference-import share
+has a median of **8.5 %**, just above §69.1's 4.9–8.3 % band; only **7 of 48** fall inside it, six
+probes never touched the reference at all, and the maximum is 25.0 %. The standing list is right to
+warn against the 3.0 % figure: it is below every probe in this arm.
+
+Also visible in the same output, and worth recording: **four arm probes ended on a node that scored
+ZERO** — `capA10` (best 249.3451, last 0.0000), `capB11` (237.3300 → 0.0000), `capB8`, `freeB5`.
+§84's rule is the only reason those four have a number, inside the arm that was measuring something
+else entirely.

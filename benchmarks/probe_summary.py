@@ -504,6 +504,18 @@ def main(argv: list[str]) -> int:
         del argv[i:i + 2]
     show_embargoed = "--include-embargoed" in argv
     argv = [a for a in argv if a != "--include-embargoed"]
+    # DATA, NOT PROSE, FOR ANYTHING DOWNSTREAM. Checklist item 9 keeps being answered by grepping
+    # this tool's own sentences, and on 2026-09-06 that produced a false arm difference: the
+    # reference line reads
+    #     reference over 12 executed run_probe calls (+10 refused at the cap): 8.3% import
+    # for a CAPPED probe and
+    #     reference over 20 executed run_probe calls: 5.0% import
+    # for an uncapped one, so a regex expecting `calls:` dropped every treated probe and reported
+    # "treat 0.0 %, control 9.1 %" off 24 of 48 rows. The parenthesis correlates perfectly with the
+    # arm, which is the worst possible thing for a selection bug to correlate with. The numbers
+    # exist in `summarise`; they should not have to be recovered from a sentence.
+    as_json = "--json" in argv
+    argv = [a for a in argv if a != "--json"]
 
     given = list(argv)
     roots = _roots(argv)
@@ -533,6 +545,16 @@ def main(argv: list[str]) -> int:
         print("no probes on this box")
         return 0
 
+    if as_json:
+        rows = []
+        for s_ in sorted(seen.values(), key=lambda x: (x["task"], -(x["test"] or -1))):
+            row = {k: v for k, v in s_.items() if not isinstance(v, (bytes, set))}
+            if s_["probe"] in hidden:
+                row["test"] = None
+                row["embargoed"] = True
+            rows.append(row)
+        print(json.dumps(rows, indent=2, sort_keys=True, default=str))
+        return 0
     if hidden & set(seen):
         print(f"{len(hidden & set(seen))} probe(s) in the registered arm: TEST masked until the "
               f"readout is taken (§190). Override with --include-embargoed, or mark the readout "

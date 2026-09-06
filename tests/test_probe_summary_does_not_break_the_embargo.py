@@ -127,3 +127,39 @@ def test_marking_the_readout_taken_lifts_it(tmp_path, monkeypatch, capsys):
 def test_probe_filters_to_one_name(tmp_path, monkeypatch, capsys):
     out = _report(tmp_path, monkeypatch, capsys, ["--probe", "accEE"])
     assert "accEE" in out and "capA1" not in out, out
+
+
+def test_json_carries_the_numbers_item_nine_keeps_grepping_for(tmp_path, monkeypatch, capsys):
+    """Checklist item 9 kept being answered by grepping this tool's prose, and on 2026-09-06 that
+    produced a FALSE ARM DIFFERENCE. The reference line reads
+
+        reference over 12 executed run_probe calls (+10 refused at the cap): 8.3% import
+
+    for a capped probe and `... run_probe calls: 5.0% import` for an uncapped one, so a regex
+    expecting `calls:` dropped every treated probe and reported "treat 0.0 %, control 9.1 %" off 24
+    of 48 rows. The parenthesis correlates perfectly with the arm. From the data the two are 8.3 %
+    and 9.0 %."""
+    out = _report(tmp_path, monkeypatch, capsys, ["--json"], lifted=True)
+    rows = json.loads(out)
+    assert rows and all("probe" in r for r in rows)
+    for key in ("ref_pct", "ref_call_pct", "run_probe", "run_probe_refused", "eval_train"):
+        assert key in rows[0], (key, sorted(rows[0]))
+
+
+def test_json_still_honours_the_embargo(tmp_path, monkeypatch, capsys):
+    """A machine-readable escape hatch around §190 would be worse than the prose one, not better."""
+    rows = json.loads(_report(tmp_path, monkeypatch, capsys, ["--json"]))
+    by = {r["probe"]: r for r in rows}
+    assert by["capA1"]["test"] is None and by["capA1"]["embargoed"] is True, by["capA1"]
+    assert by["accEE"]["test"] == 111.0 and "embargoed" not in by["accEE"], by["accEE"]
+
+
+def test_json_respects_the_probe_filter(tmp_path, monkeypatch, capsys):
+    rows = json.loads(_report(tmp_path, monkeypatch, capsys, ["--json", "--probe", "accEE"]))
+    assert [r["probe"] for r in rows] == ["accEE"], rows
+
+
+def test_json_is_parseable_not_merely_printed(tmp_path, monkeypatch, capsys):
+    """`default=str` is there so one unserialisable field cannot take the whole report down."""
+    out = _report(tmp_path, monkeypatch, capsys, ["--json"], lifted=True)
+    assert json.loads(out) == json.loads(out)
