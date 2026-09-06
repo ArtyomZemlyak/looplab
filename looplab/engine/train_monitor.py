@@ -2554,6 +2554,35 @@ def repair_log_tools(engine, workdir, log_plan=None, log_snapshot=None):
     return _log_query_tools(workdir, log_plan, log_snapshot)
 
 
+def stage_check_tools(engine, workdir, log_plan=None, log_snapshot=None):
+    """The log tools the INTER-STAGE CHECKER may LOOK with, or None to keep the historical one-line
+    completion over `run.out[-4000:]` (doc 52 row 9).
+
+    The fourth gate over the ONE `_log_query_tools` derivation, and the last judge to get it: the
+    two watchdogs (2026-08-14) and the crash/timeout triage judge (2026-08-15) were moved off fixed
+    slices because a slice was measured wrong on each of them, and `docs/BACKLOG.md` §0.9 recorded
+    this checker — the one that can END A NODE — as the still-open residue: its window is
+    `run.out[-4000:]` of a `run.out` that is itself a 64,000-byte tail clamp, so the trainer's
+    banner, the first losses, the `Saving model` line, a traceback that preceded a long progress
+    bar and every restart are outside it by construction (`STAGE_CHECK_TRAJECTORY_KIND`'s block
+    above holds the ten-node measurement). Same boundary as its siblings — a log is named, never
+    pathed; the map is `eval_log_plan` over the resolved pipeline; every read is a bounded seek that
+    states its byte range; the floor is `attempt_byte_floor` over the snapshot `_stage_check_fn`
+    took BEFORE this attempt's first stage wrote a byte, so the checker of attempt N cannot read
+    attempt N-1's log as N's.
+
+    Its OWN switch (`Settings.stage_check_tools`), not the triage judge's or the watchdogs': this
+    role is paid once per checked stage on the eval-blocking path between stages, and it is the
+    only one of the four whose verdict can be terminal. `getattr` is total over a partially-built
+    engine and over the doubles in the suite. None also when no stage has written a nameable log
+    yet, which is why `_stage_check_fn` builds it at CHECK time rather than at construction — the
+    checked stage's log does not exist until the stage has run.
+    """
+    if not getattr(engine, "_stage_check_tools", False):
+        return None
+    return _log_query_tools(workdir, log_plan, log_snapshot)
+
+
 class TrainingMonitorMixin:
     """The engine's training-log monitor cluster. `self` IS the Engine (mixin convention — see
     orchestrator.py). Gated on `self._train_monitor`; started as a sibling task in `_evaluate`'s task

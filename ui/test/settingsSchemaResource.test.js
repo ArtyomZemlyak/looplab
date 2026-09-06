@@ -116,7 +116,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   default WAS the value and no config, env var or form field could move it. Verified as the
   //   paragraph prescribes: removing exactly `agent_timeout` from the catalogue gives back 185.
   //   FIFTEENTH occurrence, and the Python guard caught it first for the eleventh time.
-  assert.equal(Object.keys(schema.fieldByKey).length, 186)
+  //   186 -> 187 (2026-09-06): `stage_check_tools`, whether the inter-stage checker may query the
+  //   checked stage's own log instead of deciding from its last 4,000 characters (doc 52 row 9).
+  assert.equal(Object.keys(schema.fieldByKey).length, 187)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')

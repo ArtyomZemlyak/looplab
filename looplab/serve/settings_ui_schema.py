@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 186
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 187
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -148,7 +148,11 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # worktree. None of the four registered omission clauses applies: the key set is closed, it is
 # not an alias, it is exactly operator-typed, and its parent feature (the external coding-agent
 # Developer) has rows of its own.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "297e7fb64f00ca539108fb5a10b59594f4d1d0a7fc24f956a4e815983ac6f504"
+# 2026-09-06: +`stage_check_tools` (doc 52 row 9). A row for the reason `train_monitor_tools` and
+# `repair_log_tools` beside it are rows — it changes what the evidence for a paid, NODE-ENDING
+# judgement IS, it buys extra round trips when on, and it changes a PROMPT, so an operator must
+# be able to see the switch that restores the historical bytes.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "345f122bb0b757f8e0503d99c5cc156dcd43c1b975efb81eeb7cf723668b9021"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

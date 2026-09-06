@@ -368,7 +368,9 @@ before the next stage runs, and has two halves:
   artifact plausible — a stage that "succeeds" without rewriting its output hands the next stage a
   previous attempt's file.
 * **`assert`** — one line stating the condition, in the declarer's own words, checked against what the
-  stage **prints** by the inter-stage checker. Declaring it opts that stage's check in (`check: true` is
+  stage **prints** by the inter-stage checker (which, since 2026-09-06, may read the stage's whole log
+  through `read_log` / `metric_series` rather than only its last 4,000 characters — `stage_check_tools`).
+  Declaring it opts that stage's check in (`check: true` is
   not additionally required) and is the ONLY thing that unlocks the checker's
   `declared_condition_violated` verdict — without a declaration that verdict is refused and degrades to
   `inconclusive`, because a checker may not invoke a contract that does not exist. State the

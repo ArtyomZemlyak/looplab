@@ -100,7 +100,12 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 186
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 187
+    # 186 -> 187 catalogued rows on 2026-09-06: `stage_check_tools`, whether the INTER-STAGE
+    # CHECKER — the one judge whose verdict can end a node — may query the checked stage's own
+    # log instead of deciding from `run.out[-4000:]` (doc 52 row 9). A row for the reason
+    # `train_monitor_tools` / `repair_log_tools` are: it changes what the evidence for a paid,
+    # node-ending judgement IS, buys round trips when on, and restores a PROMPT when off.
     # 185 -> 186 catalogued rows on 2026-09-03: `agent_timeout`, the wall on ONE external
     # coding-agent invocation. A ROW because none of the four honest omission clauses holds — the
     # key set is closed, it is not a legacy alias, it is exactly operator-typed, and its parent
@@ -188,7 +193,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 218 -> 219 Settings on 2026-09-03: `agent_timeout`. See the catalogue note above for why it
     # is a form row; the reason it is a Settings field at ALL is that it previously was not, and the
     # constructor default it replaced was therefore the only value a composed run could ever have.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 219
+    # 219 -> 220 Settings on 2026-09-06: `stage_check_tools`. See the catalogue note above.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 220
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

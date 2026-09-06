@@ -1007,7 +1007,14 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   already on disk are attributed retroactively.
 - **Optional inter-stage verify** — a stage flagged `"check": true` hands its output to an agentic
   checker (Researcher/Developer) before the next stage runs, so a diverged train can't silently feed
-  eval. Since 2026-08-13 the checker answers a **verdict**, not a concern string: a stage dies only
+  eval. **Since 2026-09-06 the checker may LOOK** (`stage_check_tools`, on; doc 52 row 9): beside the
+  4,000-character output tail it is handed, it gets `read_log` / `metric_series` over the checked
+  stage's own log — the same tools and the same boundary the two watchdogs and the triage judge
+  have — because that tail is the end of a stdout that is itself a 64,000-byte clamp, and the
+  trainer's banner, the first losses, a traceback that preceded a long progress bar and every
+  restart are outside it by construction. Looking widens what it sees and nothing it may say: the
+  verdict line is read out of its answer and coerced by the same closed vocabulary. Since
+  2026-08-13 the checker answers a **verdict**, not a concern string: a stage dies only
   when the checker NAMES a physical failure from the closed
   `runtime/command_eval.py::STAGE_CHECK_HARD_KINDS` (`crash`, `nan_or_inf_loss`,
   `no_artifact_written`, `silent_fallback`, `loss_unchanged_from_first_step`, plus

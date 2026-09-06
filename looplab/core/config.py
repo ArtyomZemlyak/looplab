@@ -622,6 +622,25 @@ class Settings(BaseSettings):
     # cost 7 ms (a `read_log` tail) to 525 ms (a whole-run hourly scan of the real 10.0 MB log).
     # Paid once per FAILED ATTEMPT, not on a timer like the watchdog's.
     repair_log_tools: bool = True
+    # THE FOURTH ROLE THAT MAY LOOK (doc 52 row 9): the INTER-STAGE CHECKER — the judge that decides,
+    # between two stages, whether a `check`-flagged stage physically succeeded and may END A NODE on
+    # a named hard kind — queries the stage's own log (`tools/log_tools.py`'s `read_log` +
+    # `metric_series`, over the same `monitor_log_sources` derivation as the three rows above)
+    # instead of only being handed `run.out[-4000:]` of a `run.out` that is itself a 64,000-byte tail
+    # clamp. It was the LAST judge in the engine working from a blind slice, and it is the one whose
+    # slice cost the most: `docs/BACKLOG.md` §0.9 records the 2.33 GPU-h re-train a verdict drawn
+    # from ~38 log lines of a 1.4-hour training bought, and `train_monitor.py`'s
+    # `STAGE_CHECK_TRAJECTORY_KIND` block the ten `rubertlite-dense-retrieval` nodes condemned for
+    # "no learning" from a tail that held three of 11,248 loss points. The deterministic vetoes
+    # (`epoch_floor_acquits`, `trajectory_acquits_stage_check`) are untouched and still only ACQUIT;
+    # this widens what the model SEES, and the closed verdict vocabulary
+    # (`parse_stage_check_reply` -> `STAGE_CHECK_HARD_KINDS`) is exactly what it was, so nothing read
+    # here can end a node that the one-line contract could not. OFF restores the historical single
+    # completion byte for byte, prompt included (`eval_stages.STAGE_CHECK_LOOK_INVITATION` is the
+    # ONE conditional block). Cost: up to `eval_stages.STAGE_CHECK_LOOK_TURNS` extra round trips per
+    # CHECKED STAGE — paid once per stage, on the eval-blocking path between stages, never on a
+    # timer — plus the log reads (2.4 ms for a default `read_log`, ~10 ms/MB for a search).
+    stage_check_tools: bool = True
     # ASHA live-curve watchdog (sibling of the training monitor): reads the latest INTERMEDIATE value of
     # the objective metric off the live log (reusing the eval's OWN metric reader). Finished-endpoint rank
     # remains advisory. An opt-in KILL additionally requires an operator-declared metric.resource_key and
@@ -2527,6 +2546,9 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # `Settings` fields, and a snapshot written between the two changes carries `train_monitor_tools`
     # explicitly (so no `setdefault` fires for it) while genuinely predating this one.
     "repair_log_tools": False,
+    # And the stage checker's look, on the same ground and with its own row for the same reason: a
+    # pre-2026-09-06 run resumes with the single completion it was launched with.
+    "stage_check_tools": False,
     "asha_live": False,
     "asha_live_kill": False,
     "asha_live_quantile": 0.5,

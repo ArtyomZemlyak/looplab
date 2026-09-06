@@ -93,6 +93,12 @@ class EngineOptions:
     # `EngineOptions` caller gains no new call — only a better-informed one, and only when the eval
     # wrote a nameable stage log at all (the toy/dataset paths never do).
     repair_log_tools: bool = True
+    # Let the INTER-STAGE CHECKER query the checked stage's own log instead of deciding from the
+    # 4,000-char stdout tail (doc 52 row 9). NOT a divergence, on the row above's ground: it is a
+    # modifier on a call the engine already makes once per `check`-flagged stage, so a bare
+    # `EngineOptions` caller gains no new call — only a better-informed one, and only when the stage
+    # wrote a nameable log at all.
+    stage_check_tools: bool = True
     asha_live: bool = False              # ASHA live-curve rank watchdog (advisory); off = today
     asha_live_kill: bool = False         # opt-in: tree-kill a persistently-underperforming node early
     asha_live_quantile: float = 0.5      # rank bar = this quantile of finished siblings' finals (median)

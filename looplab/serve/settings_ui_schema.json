@@ -503,6 +503,13 @@
           "help": "ON by default: let the crash/timeout TRIAGE judge — the role that decides why a failed experiment died and what to change — READ the dead run's own stage logs, instead of diagnosing from the last 500 characters of its error output. It exists because that slice was measured insufficient in the sharpest way: a node finished all 15 of its epochs and was then killed 20 minutes into a SECOND progress bar (retrieval), the 522-character tail it was handed contained only that second bar, and it concluded the run was \"still in epoch 1\" — discarding 6 GPU-hours and then prescribing a change (cut the epochs 15 to 8) for a problem the node did not have. That cut never actually landed, which is worse rather than better: the node simply re-ran the same 10,590 steps into the same ceiling. Same boundary as the watchdog switch above: a log is chosen by NAME, never by path, scoped to the stage logs this eval's own plan names, and read only from the byte where THIS attempt started so a previous attempt's curve can never be read as this one's. It widens what the judge can SEE and nothing it can decide — the verdict vocabulary, the failure reason on the record and every metric/champion/selection rule are untouched. Costs a few extra model round trips per failed attempt (not on a timer, unlike the watchdog). OFF restores the historical single ask exactly."
         },
         {
+          "key": "stage_check_tools",
+          "label": "Stage checker may query the logs",
+          "type": "bool",
+          "default": true,
+          "help": "ON by default: let the INTER-STAGE CHECKER — the judge that decides, between two stages of a multi-stage eval, whether a `check`-flagged stage physically succeeded, and the one judge whose verdict can end an experiment — READ that stage's own log, instead of deciding from the last 4,000 characters of its output. It exists because that window was measured wrong in the most expensive way: the trainer's banner, the first losses, a `Saving model` line, a traceback that preceded a long progress bar and every restart are outside it by construction, and a converged curve's tail is indistinguishable from one that never moved — ten experiments were condemned for \"no learning\" from a tail holding three of 11,248 loss points, and one re-train of 2.33 GPU-hours was bought by a verdict drawn from ~38 log lines of a 1.4-hour training. Same boundary as the two switches above: a log is chosen by NAME, never by path, scoped to the stage logs this eval's own plan names, and read only from the byte where THIS attempt started. It widens what the checker can SEE and nothing it may SAY — the closed verdict vocabulary and the engine's own deterministic acquittals are untouched. Costs up to six extra model round trips per checked stage, paid once per stage between stages (never on a timer). OFF restores the historical single completion exactly, prompt included."
+        },
+        {
           "key": "asha_live",
           "label": "ASHA live-curve watchdog",
           "type": "bool",
@@ -1101,7 +1108,7 @@
           "label": "Agent timeout (s)",
           "type": "float",
           "default": 600.0,
-          "help": "Wall-clock seconds one external coding-agent invocation may run before it is killed. Not the eval clock \u2014 that is Max eval timeout, a different wall on a different process."
+          "help": "Wall-clock seconds one external coding-agent invocation may run before it is killed. Not the eval clock — that is Max eval timeout, a different wall on a different process."
         },
         {
           "key": "agent_patch_gate",

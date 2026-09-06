@@ -38,6 +38,47 @@ _STAGE_CHECK_REPLY_RE = re.compile(
 
 STAGE_MANIFEST_NAME = "looplab_stages.json"
 
+# THE ONE CONDITIONAL BLOCK of the stage checker's prompt (doc 52 row 9): spliced at the END of the
+# system message when `train_monitor.stage_check_tools` hands the checker its log tools, so
+# `stage_check_tools=false` — and every caller without a workdir — reproduces the historical prompt
+# byte for byte. It names the log by the STAGE, because `monitor_log_sources` names sources after
+# their files and the checker is asked about exactly one stage. `{stage}` is the only placeholder.
+STAGE_CHECK_LOOK_INVITATION = (
+    "YOU CAN LOOK FURTHER. The output tail below is the last 4,000 characters of a stdout that is "
+    "itself a 64,000-byte tail of this stage — a few dozen records of a run that may have taken "
+    "hours. The trainer's banner, the first losses, a `Saving model` line, a traceback that "
+    "preceded a long progress bar, and every restart are OUTSIDE that window by construction. "
+    "Before you answer, USE YOUR TOOLS on this stage's own log, `{stage}.log`: `read_log` with "
+    "mode `search` for a traceback, an error, or the summary line; mode `head` for how the run "
+    "started; `metric_series` for what the loss actually did over the whole stage. An answer "
+    "grounded in the log outranks one read off the tail — when the tools contradict the tail, the "
+    "tools have more evidence. When you have looked, give the ONE-LINE verdict in exactly the form "
+    "above through `answer`; the vocabulary of kinds is unchanged and looking widens only what you "
+    "can see.")
+
+# The tool-loop turn budget for ONE stage check. Below the watchdog's nine because this judge runs
+# on the EVAL-BLOCKING path — the eval worker waits between two stages for it and the whole batch
+# inherits its latency (`_stage_check_fn`'s docstring) — and it has one log and one question: a
+# search, a head, a series, a follow-up, and the answer. A loop that spends it degrades to the plain
+# completion over the same messages rather than to nothing (`agents.tool_loop.agentic_text`).
+STAGE_CHECK_LOOK_TURNS = 6
+
+
+def stage_check_verdict_line(text: str) -> str:
+    """The line of a tool-using checker's answer that carries the verdict, else the answer itself.
+
+    `parse_stage_check_reply` reads the reply from its FIRST character, which is the historical
+    one-line contract and stays it on the plain path. A checker that has just read a log through
+    its tools tends to say what it found before it says the verdict, and reading that preamble as
+    the whole reply would demote every such answer to `inconclusive` — i.e. the tools would make the
+    checker LESS able to name the NaN loss it was built to catch. Applied on the agentic path only,
+    so a reply that carries no verdict line at all is still the unstructured answer it always was.
+    """
+    for line in (text or "").splitlines():
+        if line.strip() and _STAGE_CHECK_REPLY_RE.match(line):
+            return line.strip()
+    return (text or "").strip()
+
 
 def manifest_prefix_unchanged(prev_manifest: object, stages: list, failed_stage: str,
                               params: object = None) -> bool:
@@ -1254,8 +1295,8 @@ class EvalStagesMixin:
         # reason (`needs_log_snapshot`). It costs one glob plus a 64-byte read per existing `*.log`,
         # and only on a pipeline that asked for a check at all.
         from looplab.engine.train_monitor import (eval_log_plan, snapshot_training_logs,
-                                                  stage_check_trajectory, trajectory_acquits_stage_check,
-                                                  trajectory_context)
+                                                  stage_check_tools, stage_check_trajectory,
+                                                  trajectory_acquits_stage_check, trajectory_context)
         _log_plan = _log_snapshot = None
         if workdir is not None:
             try:
@@ -1291,6 +1332,17 @@ class EvalStagesMixin:
                 except Exception:  # noqa: BLE001 — an instrument may never take down an eval
                     trajectory = None
             measured = trajectory_context(trajectory) if trajectory is not None else ""
+            # THE TOOLS, built at CHECK time and not when this callback was made (doc 52 row 9): the
+            # checked stage's log does not exist until the stage has run, and `_log_query_tools`
+            # answers None for a workdir with no nameable log. None keeps the historical single
+            # completion; the gate (`Settings.stage_check_tools`) and the boundary are
+            # `train_monitor.stage_check_tools`'.
+            tools = None
+            if workdir is not None:
+                try:
+                    tools = stage_check_tools(self, workdir, _log_plan, _log_snapshot)
+                except Exception:  # noqa: BLE001 — an instrument may never take down an eval
+                    tools = None
             msgs = [{"role": "system", "content":
                      "You are a SANITY checker for ONE stage of an ML eval pipeline, run BEFORE the next "
                      "stage. Decide ONLY whether this stage physically SUCCEEDED and produced a usable "
@@ -1315,7 +1367,9 @@ class EvalStagesMixin:
                      "artifact it declared. FAIL only when the evidence for one of the kinds above "
                      "is actually IN the output; if your reason would not fit one of those kinds, "
                      "it is INCONCLUSIVE."
-                     + (EvalStagesMixin.STAGE_CONTRACT_CLAUSE if expect else "")},
+                     + (EvalStagesMixin.STAGE_CONTRACT_CLAUSE if expect else "")
+                     + (("\n\n" + STAGE_CHECK_LOOK_INVITATION.format(stage=stage_name))
+                        if tools is not None else "")},
                     {"role": "user", "content":
                      f"The run's objective metric is `{objective}` — ignore other scalars when judging "
                      f"whether the stage worked.\nExperiment: {idea_text[:400]}\n\n"
@@ -1323,7 +1377,20 @@ class EvalStagesMixin:
                      + (measured + "\n\n" if measured else "")
                      + f"Stage '{stage_name}' output tail:\n{tail}"}]
             try:
-                out = (client.complete_text(msgs) or "").strip()
+                if tools is None:
+                    out = (client.complete_text(msgs) or "").strip()
+                else:
+                    # `agentic_text` is the plain completion upgraded to a tool loop: the model may
+                    # read the log first, then emits its line through `answer`; a loop that yields
+                    # nothing degrades to `client.complete_text(msgs)` over the same messages, so the
+                    # off path and the exhausted path are the same call. The verdict LINE is read
+                    # out of the answer (`stage_check_verdict_line`) because a checker that has just
+                    # read a log says what it found before it says the verdict.
+                    from looplab.agents.tool_loop import agentic_text
+                    out = stage_check_verdict_line(agentic_text(
+                        client, tools, msgs, loop_opts={"max_turns": STAGE_CHECK_LOOK_TURNS},
+                        answer_desc=("your ONE-LINE verdict: `OK`, `FAIL <kind>: <evidence>`, or "
+                                     "`INCONCLUSIVE: <what you would need to see>`")))
             except Exception:  # noqa: BLE001 — a checker failure must never fail the eval
                 return None
             verdict = parse_stage_check_reply(out, declared=bool(expect))

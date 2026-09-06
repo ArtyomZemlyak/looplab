@@ -2830,14 +2830,19 @@ into a false refusal. On the legacy map, `redact_output`'s ground (b) fails outr
 no intervention, no concurrency, no selection policy; the derivation makes no request and can only
 ever spend LESS GPU time than the behaviour it replaces.
 
-⬜ **Still open.**
-1. **The 4,000-character tail is the deeper defect and this does not fix it.** The window handed to
+⬜ **Still open** (items 2 and 3; item 1 SHIPPED 2026-09-06).
+1. ✅ **[2026-09-06 — SHIPPED (doc 52 row 9): `train_monitor.stage_check_tools` hands the checker
+   `read_log` / `metric_series` over the checked stage's own log, built at CHECK time in
+   `eval_stages._stage_check_fn`; its own switch `Settings.stage_check_tools` (ON; legacy snapshots
+   OFF); the verdict line is read out of the tool-using answer and coerced by the same closed
+   vocabulary. `tests/test_stage_check_tools.py` drives it.]** The 4,000-character tail was the
+   deeper defect. The window handed to
    the checker starts mid-token (`r_second': 6280.573, …`) and holds ~38 log lines of a 1.4-hour
    training; the step counter, the trainer's banner, the "Saving model" line and every restart are
    outside it. The two live-eval watchdogs and the crash-triage judge were all moved off fixed slices
-   onto `tools/log_tools.py` (`read_log` / `metric_series` over `eval_log_plan`'s sources); **the
-   inter-stage checker is the last judge in the engine still handed a blind tail**, and it is the one
-   that can end a node. Same remedy, already built.
+   onto `tools/log_tools.py` (`read_log` / `metric_series` over `eval_log_plan`'s sources); the
+   inter-stage checker was the last judge in the engine still handed a blind tail, and it is the one
+   that can end a node. Same remedy, now applied.
 2. `no_artifact_written` is reachable for a stage whose `expect.files` the engine has ALREADY
    verified on disk one branch earlier — v8 node 8's own refusal says "and no final-model save is
    reported" about a node whose declared artifact passed. That is the same class of defect as this

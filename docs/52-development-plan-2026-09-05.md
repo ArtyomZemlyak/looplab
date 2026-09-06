@@ -543,11 +543,21 @@ OPEN[settings-doc-guard-compares-names-not-defaults] `tests/test_config_docs_syn
 field's (doc 50 DX-03); the one default compared anywhere is `inline_repair_reasons`, in a different
 file. proof:absent:default@tests/test_config_docs_sync.py
 
-OPEN[stage-checker-is-handed-a-blind-tail] `runtime/command_eval.py::_call_stage_check` is the last
-judge in the engine handed a blind 4,000-character tail of the stage's stdout with no log tools — the
-same slice-vs-look defect the three watchdog judges were fixed for — and BACKLOG §0.9 records it as
-the still-open residue behind the 2.33 GPU-h re-train; `train_monitor.repair_log_tools` is the
-provider it should be given. proof:`present:run.out[-4000:]@looplab/runtime/command_eval.py`
+*Closed 2026-09-06 (row 9 shipped): the marker `stage-checker-is-handed-a-blind-tail` stood here.
+`train_monitor.stage_check_tools` is the fourth gate over the one `_log_query_tools` derivation — its
+OWN switch `Settings.stage_check_tools` (ON; `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` OFF; `EngineOptions`
+row; settings-UI catalogue row) rather than the triage judge's, because this role is paid once per
+checked stage on the eval-blocking path and is the only one of the four whose verdict can be terminal.
+`eval_stages._stage_check_fn` builds the provider at CHECK time (the checked stage's log does not
+exist until the stage has run), splices `STAGE_CHECK_LOOK_INVITATION` at the END of the system
+message as the one conditional block, and asks through `agents.tool_loop.agentic_text` under
+`STAGE_CHECK_LOOK_TURNS` (six; the exhausted loop degrades to the plain completion over the same
+messages). The tail is still handed — it is the cheapest evidence — so the proof literal survives by
+design; what changed is that the checker may now read past it. `stage_check_verdict_line` reads the
+verdict out of a tool-using answer and `parse_stage_check_reply` coerces it by the same closed
+vocabulary, so looking widens what the checker SEES and nothing it may SAY. `tests/test_stage_check_tools.py`
+drives the property (a silent fallback at the start of a stage whose tail is a healthy bar), the line,
+the byte-identical off path, the money bound and the pipeline end to end.*
 
 OPEN[sse-retransmits-the-whole-folded-state] `serve/routers/runs.py`'s state stream serializes and
 retransmits the complete, growing folded state on every event (its own `CODEX AGENT` note), so a long

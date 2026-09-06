@@ -604,6 +604,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         train_monitor_tools = _opt("train_monitor_tools")
         train_monitor_contract = _opt("train_monitor_contract")
         repair_log_tools = _opt("repair_log_tools")
+        stage_check_tools = _opt("stage_check_tools")
         asha_live = _opt("asha_live")
         asha_live_kill = _opt("asha_live_kill")
         asha_live_quantile = _opt("asha_live_quantile")
@@ -1126,6 +1127,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # same shape as the line above, and deliberately its own switch: the watchdog's tools are paid
         # on a TIMER up to ~200 times per node, this one is paid once per failed attempt.
         self._repair_log_tools = bool(repair_log_tools)
+        # Whether the INTER-STAGE CHECKER may LOOK at the checked stage's own log instead of judging
+        # from `run.out[-4000:]`. Read by `train_monitor.stage_check_tools`, the ONE place
+        # `eval_stages._stage_check_fn` builds its provider — the fourth gate over the one
+        # `_log_query_tools` derivation, and its own switch: this judge is paid once per checked
+        # stage on the eval-blocking path, and it is the one that can end a node (doc 52 row 9).
+        self._stage_check_tools = bool(stage_check_tools)
         # ASHA live-curve rank watchdog (advisory in the product surface; opt-in kill). off == today.
         self._asha_live = bool(asha_live)
         self._asha_live_kill = bool(asha_live_kill)
