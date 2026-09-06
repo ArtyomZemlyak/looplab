@@ -441,14 +441,14 @@ A falsifier that cannot go false is the vacuous guard this repo has found nine t
   only from a task family it was confirmed on — and the second demotion retires it; every move is
   receipted on the `reflection_note` (`skills_demoted`). Only code moves `status`, only from
   recorded outcomes. Deleted per the index rule.*
-- **OPEN[knn-uncertainty-dropped-by-two-of-three-callers]** — `core/numeric.py::knn_idw` returns
-  `(prediction, nearest_distance)`; `search/surrogate.py` spends the second value as a UCB
-  exploration term while `search/panel.py` and `search/proxy.py` keep only `res[0]`, so the K-idea
-  panel ranks purely exploitatively and the pre-eval kill has no abstain-on-uncertainty rung
-  (§5; LDM).
-  proof:absent:nearest@looplab/search/panel.py
-  (bound to the panel, the ranking caller: the in-tree exemplar tuple-unpacks, so `res[1]` would
-  never appear, and `proxy.py` already names `nearest` in prose)
+- *Closed 2026-09-06 (doc 52 row 17 shipped): the marker `knn-uncertainty-dropped-by-two-of-three-callers`
+  stood here. `search/panel.py::_predict_with_distance` keeps the pair and `acquisition` is the
+  surrogate's own sign rule (`pred ± explore × nearest`), wired from `Settings.surrogate_explore`
+  by the CLI; `search/proxy.py::score_with_uncertainty` keeps the pair and `abstains` is the
+  abstain band — never skip a candidate whose nearest evaluated neighbour is beyond
+  `support_radius`, the explored region's own leave-one-out radius — read by `should_skip` and
+  recorded on `proxy_scored` (`nearest`, `abstained`). `tests/test_knn_uncertainty.py` drives all
+  three callers. Deleted per the index rule.*
 - **OPEN[repo-task-exposes-no-perception-hook]** — data profiling is gated on the task exposing
   `columns`, six adapters implement it, and `repo_task` — the family the real GPU runs use —
   implements neither it nor `data_samples`, so `EV_DATA_PROFILED` never fires, `state.data_profile`

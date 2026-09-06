@@ -771,6 +771,17 @@ the configured policy's legal lanes and budget semantics rather than inventing a
 Add `policy=bohb` behavior by combining ASHA racing with the surrogate proposer
 (`surrogate_proposer`).
 
+**The three empirical predictors spend the same uncertainty (2026-09-06).** `core/numeric.py::knn_idw`
+returns `(prediction, nearest_distance)`, and the distance to the nearest evaluated point is the
+only uncertainty proxy the search layer has. The surrogate proposer always spent it as a UCB term;
+the K-idea panel (`researcher_panel`) now ranks the K LLM ideas by the same acquisition
+(`pred ± surrogate_explore × nearest`, sign by direction) instead of the point estimate alone, and
+the pre-eval proxy kill (`proxy_kill_fraction`) **abstains** on a candidate whose nearest evaluated
+neighbour is farther than any evaluated point is from its own nearest sibling — its prediction is
+an extrapolation, and killing what the surrogate understands least is backwards. The `proxy_scored`
+audit row carries `nearest` and `abstained` beside the score. All three stay pure functions of
+folded state, so all three stay replay-safe.
+
 ## Operators
 
 The win comes from rich operators, not exotic search. The Researcher/Developer apply:

@@ -874,7 +874,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate.
         elif settings.researcher_panel > 1:
             from looplab.search.panel import PanelResearcher
-            researcher = PanelResearcher(researcher, k=settings.researcher_panel)
+            researcher = PanelResearcher(researcher, k=settings.researcher_panel,
+                                         explore=settings.surrogate_explore)
     elif _foresight_panel_applies(settings, researcher):
         # Foresight in UNIFIED mode: the wrappers above are skipped because they'd re-wrap only the
         # researcher handle, but ForesightPanelResearcher now DELEGATES its whole developer surface to

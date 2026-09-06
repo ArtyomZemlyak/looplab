@@ -152,7 +152,7 @@ stack(1760,300,DY,[
  {id:"r_gt",h:72,t:"GreedyTree (default)",tag:"R",c:C.r,sub:["n_seeds 3 → improve best","merge every 3 (max 2) · ablate_every 0"]},
  {id:"r_op",h:60,t:"Operators",tag:"",c:C.r,sub:["draft·improve·merge·ablate(+expand) — `debug` REMOVED 2026-08-13 (F5): no node may be created to retry an experiment that just failed, under any operator name · merge_mode auto = ensemble when the Developer writes code, else mean (dropping code recombination costs ~9pp)"]},
  {id:"r_ba",h:60,t:"Operator bandit",tag:"UCB off",c:C.r,sub:["gain/gmax + c=0.8·√(ln(t+1)/(n+1))"]},
- {id:"r_pol",h:60,t:"Other policies",tag:"opt-in",c:C.r,sub:["ASHA · BOHB (ASHA+surrogate) · MCTS · evolutionary"]},
+ {id:"r_pol",h:60,t:"Other policies",tag:"opt-in",c:C.r,sub:["ASHA · BOHB (ASHA+surrogate) · MCTS · evolutionary","THE k-NN UNCERTAINTY IS SPENT BY ALL THREE CALLERS (2026-09-06, doc 52 row 17): knn_idw returns (prediction, nearest distance); the surrogate proposer always spent it as UCB, the K-idea PANEL (researcher_panel > 1) now ranks LLM ideas by pred ± surrogate_explore × nearest instead of the point estimate, and the pre-eval PROXY kill (proxy_kill_fraction) ABSTAINS on a candidate whose nearest evaluated neighbour is beyond the explored region's own radius (proxy_scored carries nearest + abstained)"]},
 ]);
 // CROSS-CUTTING (right column)
 stack(2100,360,DY,[

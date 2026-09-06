@@ -1979,14 +1979,21 @@ class EvaluateMixin:
             # + replay-safe: the skip is recorded as node_failed reason="proxy_skipped" and a
             # proxy_scored audit event. OFF by default (kill_fraction=0 -> never skips).
             if self.proxy_scorer is not None and self.proxy_kill_fraction > 0:
-                pred = self.proxy_scorer.score(state, node)
-                if pred is not None:
-                    skip = self.proxy_scorer.should_skip(state, node, pred)
-                    sp.set_many(proxy_score=round(pred, 6), proxy_skipped=skip)
+                # The pair, not the point estimate (doc 52 row 17): the kill abstains on a candidate
+                # whose nearest evaluated neighbour is beyond the explored region's own radius, and
+                # the row records the distance and the abstention beside the score (additive).
+                scored = self.proxy_scorer.score_with_uncertainty(state, node)
+                if scored is not None:
+                    pred, nearest = scored
+                    abstained = self.proxy_scorer.abstains(state, node, nearest)
+                    skip = self.proxy_scorer.should_skip(state, node, pred, nearest)
+                    sp.set_many(proxy_score=round(pred, 6), proxy_skipped=skip,
+                                proxy_nearest=round(nearest, 6), proxy_abstained=abstained)
                     async with self._write_lock:
                         self.store.append(EV_PROXY_SCORED,
                                           {"node_id": node_id, "generation": generation,
-                                           "score": round(pred, 6), "skipped": skip})
+                                           "score": round(pred, 6), "skipped": skip,
+                                           "nearest": round(nearest, 6), "abstained": abstained})
                         if skip:
                             self.store.append(EV_NODE_FAILED, {
                                 "node_id": node_id, "generation": generation,
