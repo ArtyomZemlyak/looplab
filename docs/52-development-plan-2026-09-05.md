@@ -613,10 +613,15 @@ and only a third of the stated layering rules are guarded; nothing guards `core`
 `engine↛serve`, `tools↛serve`, `adapters` (doc 50 XP-07). One AST guard over the package matrix with
 the deferred-import allowance explicit per edge. proof:missing:tests/test_package_layering.py
 
-OPEN[settings-doc-guard-compares-names-not-defaults] `tests/test_config_docs_sync.py` asserts every
-`Settings` field has a row in `docs/guide/configuration.md` and never that the row's DEFAULT is the
-field's (doc 50 DX-03); the one default compared anywhere is `inline_repair_reasons`, in a different
-file. proof:absent:default@tests/test_config_docs_sync.py
+*Closed 2026-09-06 (row 25 shipped): the marker `settings-doc-guard-compares-names-not-defaults`
+stood here. `tests/test_config_docs_sync.py::test_every_documented_default_is_the_fields_declared_default`
+compares every row's DEFAULT cell with a live `Settings()` under the table's own conventions (a
+trailing annotation, `—`/`_(unset)_` for unset, `~` for home, JSON for a list or dict — the
+comparator has its own truth table), with one prose-rendered exception (`agent_control`). Measured
+on landing: 216 rows, 0 drifts. Beside it, `tests/test_api_reference.py` pins the HTTP surface
+against the live `app.openapi()` and `tests/test_cli_reference.py` pins the CLI reference's command
+set against the Typer app both ways — four commands had landed without a line. Deleted per the
+index rule.*
 
 *Closed 2026-09-06 (row 9 shipped): the marker `stage-checker-is-handed-a-blind-tail` stood here.
 `train_monitor.stage_check_tools` is the fourth gate over the one `_log_query_tools` derivation — its

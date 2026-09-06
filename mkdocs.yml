@@ -143,6 +143,7 @@ nav:
       - JupyterHub onboarding: guide/jupyterhub-onboarding.md
       - Quickstart: guide/quickstart.md
       - CLI reference: guide/cli-reference.md
+      - HTTP API reference: guide/api-reference.md
       - Configuration: guide/configuration.md
       - Tasks: guide/tasks.md
       - Generating code: guide/generating-code.md

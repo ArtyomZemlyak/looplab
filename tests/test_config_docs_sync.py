@@ -69,3 +69,89 @@ def test_cli_docs_expose_recovery_and_raw_snapshot_boundaries():
     assert "inclusive range `1..64`" in cli
     assert "raw launch snapshot + current folded best result" in cli
     assert "raw launch snapshot + current folded best result" in readme
+
+
+# --------------------------------------------------------------------- the DEFAULT column, compared
+# Doc 50 DX-03 / doc 52 row 25: this file asserted every field had a ROW and never that the row's
+# default was the field's. The comparator below understands the table's own conventions — a
+# backticked value, a trailing annotation (`0` (AUTO)), `—` / `_(unset)_` for None or empty, `~` for
+# the home directory, JSON for a list or dict — so a real drift is the only thing it can report.
+_UNSET_CELLS = {"—", "_(unset)_", "(unset)", "null", "none", ""}
+# The one row whose default is rendered in prose below the table rather than in the cell, because
+# it is a nested dict (`agent_control`, the governance matrix). Shrink-only.
+_PROSE_DEFAULTS = {"agent_control": "*(see below)*"}
+
+
+def _documented_defaults() -> dict:
+    import re
+    text = _DOC.read_text(encoding="utf-8")
+    return {m.group(1): m.group(2).strip() for m in re.finditer(
+        r"^\| `([A-Za-z_][A-Za-z0-9_]*)` \| `LOOPLAB_[A-Z0-9_]+` \| (.+?) \| ", text, re.M)}
+
+
+def _normalized_cell(cell: str) -> str:
+    import re
+    c = re.sub(r"\s*\([^()]*\)\s*$", "", cell.strip()).strip()      # `0` (AUTO) -> `0`
+    if c.startswith("`") and c.endswith("`"):
+        c = c[1:-1]
+    return c.strip()
+
+
+def documented_default_matches(cell: str, value) -> bool:
+    """Does the table cell state `value`, under the table's own rendering conventions?"""
+    import json
+    import os
+    from pathlib import Path
+
+    c = _normalized_cell(cell)
+    if c.lower() in _UNSET_CELLS:
+        return value is None or value in ("", [], {})
+    if isinstance(value, bool):
+        return c.lower() == ("true" if value else "false")
+    if isinstance(value, (int, float)):
+        try:
+            return float(c) == float(value)
+        except ValueError:
+            return False
+    if value is None:
+        return False
+    if isinstance(value, (list, dict, tuple)):
+        try:
+            return json.loads(c) == json.loads(json.dumps(value))
+        except ValueError:
+            return False
+    text = str(value)
+    bare = c.strip('"').strip("'")
+    return bare == text or os.path.expanduser(bare) == text or bare == text.replace(str(Path.home()), "~")
+
+
+def test_every_documented_default_is_the_fields_declared_default(monkeypatch):
+    """Compared, not grepped: each row's default cell against a live `Settings()` built with the
+    two directory overrides the test environment sets removed (their factories read the env)."""
+    for var in ("LOOPLAB_MEMORY_DIR", "LOOPLAB_KNOWLEDGE_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    live = Settings()
+    drift = []
+    for name, cell in _documented_defaults().items():
+        if not hasattr(live, name):
+            continue                                     # the ghost-row test owns this case
+        if _PROSE_DEFAULTS.get(name) == cell:
+            continue
+        if not documented_default_matches(cell, getattr(live, name)):
+            drift.append((name, cell, getattr(live, name)))
+    assert not drift, ("configuration.md documents a DEFAULT that is not the field's — "
+                       f"(field, documented, actual): {drift}")
+
+
+def test_the_default_comparator_reads_the_tables_conventions():
+    """The comparator's own truth table, so a convention it stops understanding is a red test here
+    and not a silent pass above."""
+    assert documented_default_matches("`0` (AUTO)", 0) and not documented_default_matches("`1` (AUTO)", 0)
+    assert documented_default_matches("`true`", True) and not documented_default_matches("`true`", False)
+    assert documented_default_matches("—", None) and documented_default_matches("_(unset)_", "")
+    assert not documented_default_matches("—", 0), "an unset cell is not a documented zero"
+    assert documented_default_matches('`["a", "b"]`', ["a", "b"]) and not documented_default_matches('`["a"]`', ["a", "b"])
+    assert documented_default_matches("`~/.looplab/memory`", str(__import__("pathlib").Path.home() / ".looplab" / "memory"))
+    assert documented_default_matches("`audit`", "audit") and not documented_default_matches("`gate`", "audit")
+    assert documented_default_matches("`-1.0` (AUTO)", -1.0) and documented_default_matches("`8`", 8.0)
+

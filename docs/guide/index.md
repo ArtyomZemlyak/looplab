@@ -23,6 +23,7 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 |---|---|
 | **[CLI reference](cli-reference.md)** | Every command (`run`, `resume`, `replay`, `inspect`, `smoke`, `approve`, `bench`, `ui`, `export-*`) and its options |
 | **[Configuration](configuration.md)** | Every `LOOPLAB_*` setting, grouped by topic, with defaults |
+| **[HTTP API reference](api-reference.md)** | Every route of `looplab ui`'s server, generated from its own OpenAPI schema and pinned by a test |
 | **[Tasks](tasks.md)** | All nine task kinds and their JSON fields |
 | **[Generating train & test code](generating-code.md)** | Every "let the agent write the code" case + how to point at your data |
 

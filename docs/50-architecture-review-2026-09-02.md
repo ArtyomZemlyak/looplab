@@ -1158,12 +1158,16 @@ budget; `CLAUDE.md` keeps the one-line rule per module, the seven invariants and
 bullets were archived verbatim, one section per row, in `docs/53-agent-guide-narratives-2026-09-06.md`,
 which a second guard pins to still cover every row the guide keeps. Deleted per the index rule.*
 
-OPEN[http-surface-has-no-generated-reference] 140 routes, 22 with a response model, 39 hand-parsed
-bodies, no version, no deprecation headers, and 110 of the 140 templates named in no guide page;
-three routes have no HTTP test and nothing asserts the route SET is covered, so a new route lands
-green and undocumented. Generate the reference from the app's own schema under the strict docs
-build and pin `(method, path, deprecated)`, the way the settings and CLI tables should also be
-generated. proof:missing:docs/guide/api-reference.md
+*Closed 2026-09-06 (doc 52 row 25 shipped): the marker `http-surface-has-no-generated-reference`
+stood here. `serve/api_reference.py` writes `docs/guide/api-reference.md` from `make_app(…).openapi()`
+— 137 routes on 123 paths at landing, 2 deprecated, 25 with a declared response model, each row
+`(method, path, deprecated)` plus the handler's docstring first line (79 handlers have one; the rest
+show FastAPI's auto-name marked `(no docstring)`) — under the strict docs build, and
+`tests/test_api_reference.py` compares the checked-in page with the live schema and pins the triple
+set both ways. The settings table is compared cell by cell against `Settings()` and the CLI block's
+command set against the Typer app (same row). What is deliberately NOT here: a version or
+deprecation header on the surface, and per-route HTTP-test coverage — the review's other two
+findings, still open as prose. Deleted per the index rule.*
 
 OPEN[largest-ui-components-are-never-mounted] AssistantBar, RunView and RunList's default export —
 10,595 lines, 55 % of the six largest components — are named by 54 test files and mounted by none

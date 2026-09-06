@@ -65,6 +65,7 @@ _LAYOUT = {
     "artifacts": "serve",
     "paid_work": "serve",
     "paid_ledger": "serve",  # ...its claim→terminal receipt half, shared by the paid routes (doc 25 SR-01)
+    "api_reference": "serve",  # the HTTP API reference generated from app.openapi() (doc 52 row 25)
     "settings_ui_schema": "serve",
     "asset_brief": "tools",   # PART IV D1 bounded local asset/prior-art brief
     "audit": "engine",   # engine audit/trust-emitter mixin

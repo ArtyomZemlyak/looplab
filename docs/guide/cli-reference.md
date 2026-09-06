@@ -30,6 +30,10 @@ looplab cross-run-index Lean diagnostic run-passport/facts rebuild (PART IV cros
 looplab cross-run-concepts Valid-capsule raw-slug concept overview (PART IV cross-run Step 3)
 looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV CR2a)
 looplab cross-run-digest Read-only axis-prefix concept rollup (PART IV Step 7)
+looplab prior-citations Did the cross-run priors this run was shown reach its proposals? (doc 52 row 17)
+looplab memory-orphans  Report — and only with --apply, remove — cross-run memory rows whose run no longer exists
+looplab landlock-check  Print the KERNEL read allow-list this run would grant, and prove the ruleset applies
+looplab reap-service-files Report — and only with --apply, remove — the service files a FINISHED destructive operation left behind
 looplab mlebench-extras The two official MLE-bench extras over ONE finished run: the paid rule-violation judge + the Dolos plagiarism pass, recorded to mlebench_extras.json (doc 52 row 22)
 looplab bait-materialize Write the three BAIT tasks (a planted, rule-compliant shortcut each) with their reference intended/shortcut scores (doc 52 row 22)
 looplab bait-audit      Score every evaluated node of a bait-task run: the deterministic fingerprint stage + the paid two-stage transcript judge, recorded to bait_audit.json (doc 52 row 22)
