@@ -13234,3 +13234,22 @@ serial slot.
 `max_clique_cpsat` also read **0.9922** in one serial sitting and **1.0967** in the next, both on an
 idle box, so a serial verdict is now checked against the same unity tolerance as everything else
 rather than accepted for existing.
+
+### Three tests that encoded the old rule
+
+Running the whole suite after the change turned up three reds, all mine and all the same shape:
+
+* `test_the_live_cache_is_clean_and_in_one_regime` asserted the cache holds ONE regime. §149's rule
+  is about one task's numerator and denominator and still holds exactly; the shortcut that the whole
+  cache is therefore one regime does not, now that a CP-SAT task is priced serially. `ruler_check`
+  gained `scoring_regime(task)` and forgives a serial entry only for the tasks it scores — a serial
+  entry for `pagerank` is still the §149 mistake, and only a fixture can tell the two rules apart,
+  because every real serial entry on this box belongs to a CP-SAT task.
+* `test_a_cpsat_task_with_a_light_tail_rules_at_one_worker` asserted the inference this section
+  refutes, down to the words "contention at 22 workers". It now supplies a serial reading and also
+  checks the blind case.
+* `test_the_real_bench_sorts_into_the_measured_groups` re-did `main`'s wiring with a plain
+  `latest_readings()`, so it read the six serial numbers in the twenty-two-wide column and called
+  them "rules as is" — 16 where the shipped tool said 10. The wiring moved into
+  `task_inventory.inventory()` and the test calls that. Duplicated wiring is how a test comes to
+  check a different program than the one that ships.

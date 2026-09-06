@@ -69,3 +69,18 @@ def test_the_live_cache_is_clean_and_in_one_regime():
     if not rows:                      # a checkout without the bench tree
         return
     assert ruler_check.problems(rows, "w22x1r3") == [], ruler_check.problems(rows, "w22x1r3")
+
+
+def test_a_serial_entry_is_only_forgiven_for_the_tasks_it_scores():
+    """§314 lets a CP-SAT task keep a `lane22r3` ruler beside the wide one, because that is the
+    regime it is scored in. The forgiveness has to be per task: a serial entry for `pagerank`, which
+    is scored twenty-two wide, is the §149 mistake and must still be a problem. Every real serial
+    entry on this box belongs to a CP-SAT task, so only a fixture can tell the two rules apart."""
+    rows = [
+        {"file": "max_clique_cpsat__test__lane22r3.json", "ok_name": True, "n": 100,
+         "task": "max_clique_cpsat", "subset": "test", "regime": "lane22r3"},
+        {"file": "pagerank__test__lane22r3.json", "ok_name": True, "n": 100,
+         "task": "pagerank", "subset": "test", "regime": "lane22r3"},
+    ]
+    said = ruler_check.problems(rows, "w22x1r3")
+    assert len(said) == 1 and "1 entry in regime lane22r3" in said[0], said

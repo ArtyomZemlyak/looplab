@@ -46,11 +46,12 @@ def _cpsat(tmp_path, task, yes=True):
     return str(tmp_path)
 
 
-def _classify(tmp_path, task, times, reading, cpsat=True):
+def _classify(tmp_path, task, times, reading, cpsat=True, serial=None):
     old = ruler_check.CPSAT_ROOT
     try:
         ruler_check.CPSAT_ROOT = _cpsat(tmp_path, task, cpsat)
-        return ti.classify(task, _rows(task, times), {task: (reading, "2026-09-06")})
+        return ti.classify(task, _rows(task, times), {task: (reading, "2026-09-06")},
+                           serial={task: (serial, "2026-09-06T18:00:00")} if serial else {})
     finally:
         ruler_check.CPSAT_ROOT = old
 
@@ -68,9 +69,17 @@ def test_a_deterministic_task_with_the_heaviest_tail_still_rules(tmp_path):
 
 
 def test_a_cpsat_task_with_a_light_tail_rules_at_one_worker(tmp_path):
-    got = _classify(tmp_path, "t", LIGHT, 1.4820)
+    """AND ONLY WITH A ONE-WORKER READING BEHIND IT. §314 measured what this verdict used to infer:
+    the six tasks read 1.14-1.60 wide and 1.01-1.10 serially, so the verdict is right -- but it was
+    being asserted from "CP-SAT and a light tail" with no serial reading on the box, and its stated
+    cause (contention) is refuted: re-timing the baseline idle moved it 2 %, and reading it idle
+    still gave 1.5291."""
+    got = _classify(tmp_path, "t", LIGHT, 1.4820, serial=1.0113)
     assert got["verdict"] == "rules at one worker", got
-    assert "contention at 22 workers" in got["why"], got
+    assert "the pass asymmetry is concurrency, not the solver" in got["why"], got
+
+    blind = _classify(tmp_path, "t", LIGHT, 1.4820)
+    assert blind["verdict"] == "unread at one worker", blind
 
 
 def test_a_cpsat_task_with_a_heavy_tail_rules_under_neither(tmp_path):
@@ -122,7 +131,8 @@ def test_the_real_bench_sorts_into_the_measured_groups():
         import pytest
         pytest.skip("campaign task list is not the twenty this was measured on")
     rows = ruler_check.entries(ruler_check.DEFAULT_DIR)
-    out = [ti.classify(t, rows, ruler_check.latest_readings()) for t in tasks]
+    # THROUGH THE SHIPPED WIRING, not a second copy of it: see `inventory`'s docstring.
+    out = ti.inventory(tasks, rows)
     counts = {}
     for r in out:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1

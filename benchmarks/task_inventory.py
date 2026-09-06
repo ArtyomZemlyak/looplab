@@ -154,6 +154,21 @@ def classify(task: str, rows, readings, serial=None) -> dict:
             "tail": tail, "cpsat": False, "why": f"self-check {reading:.4f}, not CP-SAT"}
 
 
+def inventory(tasks, rows=None) -> list[dict]:
+    """The classified list, with the regime selection done HERE and nowhere else.
+
+    §314: `main` did this wiring inline and the end-to-end test re-did it with a plain
+    `latest_readings()`. The moment a second regime existed the two disagreed -- the test saw the
+    six CP-SAT tasks' SERIAL readings in the twenty-two-wide column and called them "rules as is",
+    while the tool reported them correctly. Duplicated wiring is how a test comes to check a
+    different program than the one that ships.
+    """
+    rows = ruler_check.entries(ruler_check.DEFAULT_DIR) if rows is None else rows
+    readings = ruler_check.latest_readings(regime=CAMPAIGN_REGIME, accept_unstamped=True)
+    serial = ruler_check.latest_readings(regime=SERIAL_REGIME)
+    return [classify(t, rows, readings, serial) for t in tasks]
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -169,9 +184,7 @@ def main(argv=None) -> int:
     # Rows written before the regime was recorded carry no key; they were all taken twenty-two
     # wide, so they are the fallback for a task with no regime-stamped reading yet -- but a serial
     # row must never fill this slot, which is what an unfiltered "latest" did the hour it existed.
-    readings = ruler_check.latest_readings(regime=CAMPAIGN_REGIME, accept_unstamped=True)
-    serial = ruler_check.latest_readings(regime=SERIAL_REGIME)
-    out = [classify(t, rows, readings, serial) for t in tasks]
+    out = inventory(tasks, rows)
     if args.json:
         print(json.dumps(out, indent=2, sort_keys=True))
         return 0

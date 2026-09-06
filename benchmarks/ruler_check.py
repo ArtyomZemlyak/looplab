@@ -240,6 +240,25 @@ def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[st
     return said
 
 
+SERIAL_REGIME = "lane22r3"    # ALGOTUNE_EVAL_WORKERS=1; the only regime CP-SAT rules in
+
+
+def scoring_regime(task: str, root=None) -> str:
+    """The regime a task is SCORED in, which is not the same for every task any more.
+
+    §314 measured the reference against itself for six CP-SAT tasks: 1.14-1.60 with twenty-two
+    evaluation workers and 1.01-1.10 with one, on an idle box, against baselines built in each
+    regime. The excess is an asymmetry between the baseline pass and the candidate pass that only
+    exists at twenty-two, so a CP-SAT task is priced serially or not priced.
+
+    §149's rule -- timings from two regimes are not comparable -- is about ONE task's numerator and
+    denominator, and it still holds exactly. What stops holding is the shortcut that the whole cache
+    is therefore one regime: a serial ruler for `max_clique_cpsat` beside a wide one for `pagerank`
+    scores each task in its own regime and compares nothing across them.
+    """
+    return SERIAL_REGIME if uses_cpsat(task, root=root) else CAMPAIGN_REGIME
+
+
 def problems(rows, expect_regime: str | None = None, min_instances: int = 100) -> list[str]:
     """What is WRONG with the cache, as sentences. Empty list = nothing to say.
 
@@ -255,10 +274,19 @@ def problems(rows, expect_regime: str | None = None, min_instances: int = 100) -
         if row["n"] < min_instances:
             said.append(f"{row['file']}: {row['n']} per-instance timings, fewer than {min_instances}")
     if expect_regime:
-        for reg, n in regimes.items():
-            if reg != expect_regime:
-                said.append(f"{n} entr{'y' if n == 1 else 'ies'} in regime {reg}, not {expect_regime}"
-                            f" -- timings from two regimes are not comparable (§149)")
+        stray = collections.Counter()
+        for row in rows:
+            if not row["ok_name"] or row["regime"] == expect_regime:
+                continue
+            # A CP-SAT task's own scoring regime is not a stray entry; anything else is, including
+            # a serial entry for a task that is scored wide -- which is the fixture that keeps this
+            # branch honest, since every real serial entry on this box belongs to a CP-SAT task.
+            if row["regime"] == scoring_regime(row["task"]) != expect_regime:
+                continue
+            stray[row["regime"]] += 1
+        for reg, n in stray.items():
+            said.append(f"{n} entr{'y' if n == 1 else 'ies'} in regime {reg}, not {expect_regime}"
+                        f" -- timings from two regimes are not comparable (§149)")
     elif len(regimes) > 1:
         said.append("entries span more than one regime: "
                     + ", ".join(f"{r}x{n}" for r, n in regimes.most_common())
