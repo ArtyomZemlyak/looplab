@@ -12295,3 +12295,34 @@ cross-task context that took this sweep to assemble is one line in the output. F
 including one that survived first: reading the target with a bare `(\d+)` passes every real file
 name, because there the target happens to be the first number. The fixture now puts something in
 front of it.
+
+## §294 — one reference band for four tasks, and the tasks differ
+
+`probe_summary` prints `(§69.1 baseline 4.9-8.3 %)` beside every probe's reference-use figure,
+whatever task it ran. Measured over the 140 probes with five or more executed `run_probe` calls:
+
+| task | n | median import share | inside 4.9–8.3 % |
+|---|---|---|---|
+| edge_expansion | 118 | 8.6 % | 22/118 — 19 % |
+| discrete_log | 11 | 4.8 % | 3/11 — 27 % |
+| pde_heat1d | 11 | 8.3 % | 5/11 — 45 % |
+
+Permutation p that the task means are the same: **0.0080**. The band fits none of the three, and it
+was never measured per task — it is a historical figure being read as a per-task expectation, which
+is §290's cross-task mistake in a gentler form. Worth noting the caveat rather than hiding it: 118
+against 11 and 11, so the test is dominated by one group; the practical point is the coverage
+column, which needs no test at all.
+
+So the band keeps its provenance and gains the task's own measured middle beside it — the same move
+§281 made for the ruler constants. And with `--probe`, where the corpus has been filtered away, it
+says *"this task's middle needs the unfiltered run"* rather than going quiet: two different absences
+want two different sentences, and silence makes a filtered run look like a thin task.
+
+**Three fixtures in a row agreed with the bug.** The mutation that lets low-call probes into the
+median survived twice. First fixture: four zero-call probes against five real ones — the median
+stays 10 % either way. Second: six zero-call probes — but a probe with no calls has `ref_pct` of
+`None` and never reaches the median under any version, so the fixture was testing nothing. The case
+the threshold actually excludes is **one to four** calls, where the share can only be 0, 25, 50, 75
+or 100 % — a number, admitted by any `isinstance` check, and pure quantization in a median. Six of
+those move the middle from 10.0 % to 0.0 %, and the mutation is red. Writing down what a threshold
+excludes turned out to be the only way to find out what it was for.

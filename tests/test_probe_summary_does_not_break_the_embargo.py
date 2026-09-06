@@ -163,3 +163,86 @@ def test_json_is_parseable_not_merely_printed(tmp_path, monkeypatch, capsys):
     """`default=str` is there so one unserialisable field cannot take the whole report down."""
     out = _report(tmp_path, monkeypatch, capsys, ["--json"], lifted=True)
     assert json.loads(out) == json.loads(out)
+
+
+def test_the_reference_band_gains_the_task_s_own_middle(tmp_path, monkeypatch, capsys):
+    """§69.1's 4.9-8.3 % is one number for every task, and the tasks differ. Measured 2026-09-06
+    over the 140 probes with five or more executed run_probe calls: median import share 8.6 % on
+    edge_expansion, 4.8 % on discrete_log, 8.3 % on pde_heat1d, permutation p = 0.008 that the task
+    means are the same. The band covers 19 %, 27 % and 45 % of those tasks respectively -- it fits
+    none of them, and it was never measured per task."""
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(6):
+        _probe(root, f"ee{i}", speedup=100.0 + i)
+    monkeypatch.setattr(probe_summary, "ARM_DESIGN", _design(tmp_path, []))
+    monkeypatch.setattr(probe_summary, "EMBARGO_LIFTED", tmp_path / "taken")
+    (tmp_path / "taken").write_text("x", encoding="utf-8")
+    probe_summary.main([str(root)])
+    out = capsys.readouterr().out
+    assert "§69.1 baseline 4.9-8.3 %" in out, out
+    assert ("this task:" in out) or ("too few for a middle" in out), out
+
+
+def test_a_filtered_run_says_why_it_has_no_middle(tmp_path, monkeypatch, capsys):
+    """`--probe` skips summarising everything else, so a middle computed then would be over the one
+    probe asked for -- and omitting it silently looks exactly like a task that genuinely has too few
+    probes. Two different absences, two sentences."""
+    out = _report(tmp_path, monkeypatch, capsys, ["--probe", "accEE"], lifted=True)
+    assert "this task's middle needs the unfiltered run" in out, out
+    assert "too few for a middle" not in out, out
+
+
+def test_a_thin_task_says_it_is_thin_rather_than_going_quiet(tmp_path, monkeypatch, capsys):
+    out = _report(tmp_path, monkeypatch, capsys, [], lifted=True)
+    assert "too few for a middle" in out, out
+
+
+def _probing_probe(root: Path, name: str, calls: int, ref_imports: int, speedup=100.0):
+    """A probe that really ran `run_probe`, so `ref_pct` has a denominator."""
+    run = root / name / "runs" / "edge_expansion" / "run"
+    run.mkdir(parents=True)
+    rows = []
+    for i in range(calls):
+        body = "import reference_edge_expansion" if i < ref_imports else "print(1)"
+        rows.append({"kind": "tool", "name": "tool",
+                     "attributes": {"tool": "run_probe", "phase_span": f"s{i}",
+                                    "code": body, "output": "exit=0"}})
+    (run / "spans.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    (run / "events.jsonl").write_text(
+        json.dumps({"type": "llm_usage", "data": {"cost": 1.0}}) + "\n", encoding="utf-8")
+    (root / name / "final.json").write_text(json.dumps({"speedup": speedup, "subset": "test"}),
+                                            encoding="utf-8")
+
+
+def test_a_share_quantized_to_quarters_stays_out_of_the_task_middle(tmp_path, monkeypatch, capsys):
+    """The threshold is five EXECUTED calls, and the reason is resolution, not zero.
+
+    A probe with no calls at all has `ref_pct` of `None` and never reaches the median anyway -- so a
+    fixture built from those agreed with the mutation and let it survive twice. The case the
+    threshold actually excludes is a probe with ONE to FOUR calls, whose share can only be 0, 25, 50,
+    75 or 100 %: a number, admitted by any `isinstance` check, and pure quantization noise in a
+    median. Six such probes against five real ones move the middle from 10.0 % to 0.0 %."""
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(5):
+        _probing_probe(root, f"real{i}", calls=10, ref_imports=1, speedup=100.0 + i)
+    # SIX idle probes against five real ones, and not four: with four the mutation that lets them
+    # in leaves the median at 10.0 anyway (0,0,0,0,10,10,10,10,10 -> the middle is still 10), so the
+    # fixture agreed with the bug. Six moves the middle to 0.0 and the count from 5 to 11.
+    for i in range(6):
+        _probing_probe(root, f"coarse{i}", calls=2, ref_imports=0, speedup=50.0 + i)
+    monkeypatch.setattr(probe_summary, "ARM_DESIGN", _design(tmp_path, []))
+    monkeypatch.setattr(probe_summary, "EMBARGO_LIFTED", tmp_path / "taken")
+    (tmp_path / "taken").write_text("x", encoding="utf-8")
+    probe_summary.main([str(root)])
+    out = capsys.readouterr().out
+    assert "this task: 5 probes, median 10.0 %" in out, out
+
+
+def test_the_middle_is_the_median_of_probes_that_actually_probed(tmp_path, monkeypatch):
+    """A probe with no executed `run_probe` calls has a reference share of 0 % by construction, and
+    letting those into the median would drag every task's middle toward zero."""
+    task_ref = {"t": [4.0, 6.0, 8.0, 10.0, 12.0]}
+    assert "median 8.0 %" in probe_summary._task_ref_note(task_ref, "t")
+    assert probe_summary._task_ref_note({"t": [1.0]}, "t").endswith("too few for a middle")

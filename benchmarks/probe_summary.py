@@ -493,6 +493,22 @@ def summarise(run_dir: Path) -> dict | None:
     }
 
 
+def _task_ref_note(task_ref: dict, task: str, filtered: bool = False) -> str:
+    """"; this task: N probes, median M %", or why there is no middle to print.
+
+    WITH `--probe` THERE IS NO CORPUS TO SPEAK OF. The filter skips summarising everything else, so
+    the middle would be computed over the one or two probes asked for -- and silently omitting it
+    then looks identical to a task that genuinely has too few probes. Two different absences want
+    two different sentences.
+    """
+    vals = sorted(task_ref.get(task) or [])
+    if filtered:
+        return "; this task's middle needs the unfiltered run"
+    if len(vals) < 5:
+        return f"; this task has only {len(vals)} probe(s) here, too few for a middle"
+    return f"; this task: {len(vals)} probes, median {statistics.median(vals):.1f} %"
+
+
 def main(argv: list[str]) -> int:
     wanted = set()
     while "--probe" in argv:
@@ -555,6 +571,19 @@ def main(argv: list[str]) -> int:
             rows.append(row)
         print(json.dumps(rows, indent=2, sort_keys=True, default=str))
         return 0
+    # THE §69.1 BAND IS ONE NUMBER FOR EVERY TASK, AND THE TASKS DIFFER. Measured 2026-09-06 over
+    # the 140 probes with at least five executed `run_probe` calls: median reference-import share
+    # 8.6 % on `edge_expansion`, 4.8 % on `discrete_log`, 8.3 % on `pde_heat1d`, permutation
+    # p = 0.008 that the task means are the same. The printed band 4.9-8.3 % covers 19 % of
+    # edge_expansion probes, 27 % of discrete_log and 45 % of pde_heat1d -- it fits none of them
+    # well, and it was never measured per task. So it keeps its provenance and gains the task's own
+    # observed middle beside it, the same move §281 made for the ruler constants: a memorised
+    # constant becomes a measured comparison. Below five probes a task has no middle worth printing.
+    task_ref: dict = {}
+    for s_ in seen.values():
+        if (s_.get("run_probe") or 0) >= 5 and isinstance(s_.get("ref_pct"), (int, float)):
+            task_ref.setdefault(s_["task"], []).append(float(s_["ref_pct"]))
+
     if hidden & set(seen):
         print(f"{len(hidden & set(seen))} probe(s) in the registered arm: TEST masked until the "
               f"readout is taken (§190). Override with --include-embargoed, or mark the readout "
@@ -875,7 +904,9 @@ def main(argv: list[str]) -> int:
         print(f"  {s['probe']} ({s['task']}) nodes(train)={s['nodes']}  "
               f"reference over {s['run_probe']} executed run_probe calls"
               f"{refused_note}: {pct}   "
-              f"(§69.1 baseline 4.9-8.3 %){kern}{nov}")
+              f"(§69.1 baseline 4.9-8.3 %"
+              f"{_task_ref_note(task_ref, s['task'], bool(wanted))})"
+              f"{kern}{nov}")
         for ph, cost in s["phases"]:
             share = 100 * cost / s["spent"] if s["spent"] else 0
             print(f"      {ph:16s}{s['calls'][ph]:>5} calls  ${cost:.4f}  {share:4.1f}%")
