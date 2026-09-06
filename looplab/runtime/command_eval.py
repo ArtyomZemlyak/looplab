@@ -41,6 +41,7 @@ from looplab.core.models import DIRECTIONS, EXTRA_METRIC_AUTO, EXTRA_METRIC_DECL
 # The two stage-row identity slots and the derivation behind them. A LEAF under this module — it
 # reaches back for `_confined`/`normalize_declared_path` through deferred, function-local imports
 # only (`metric_subject`'s precedent), so this module-level import closes no cycle.
+from looplab.runtime.numeric_contract import numeric_contract_defects, validate_numeric
 from looplab.runtime.stage_identity import (STAGE_INPUT_KEY, STAGE_KEY_REASON,  # noqa: F401
                                             STAGE_OUTPUTS_KEY, stage_output_identity)
 from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
@@ -127,10 +128,18 @@ STAGE_ROLE_TRAINING = "training"
 MAX_STAGE_EXPECT_FILES = 16
 MAX_STAGE_NEEDS_FILES = 16
 MAX_STAGE_ASSERT_CHARS = 300
+# THE THIRD HALF, added 2026-09-06 (doc 52 row 24): `numeric` — a declared RELATION the ENGINE
+# evaluates against a named value the stage PRINTS (`{"key": "params", "op": "<=", "value": 2e6}`;
+# CapCode's cap and Arbor's margin are the shape). `assert` is a sentence a model judges against a
+# tail; a number needs no judge and no tail — the last value the stage printed for the key, held to
+# the bound, deterministically. It fails the stage exactly as `files` does and fails CLOSED on a key
+# the stage never printed. `runtime/numeric_contract.py` owns the parsing and the rule; this module
+# owns where it runs. A numeric failure is NEVER salvaged (`metric_salvage._salvage_condition`): a
+# number produced past the declared bound is not a measurement of the intended protocol.
 # Closed key set. An unknown key is REFUSED, not ignored: `expect`'s whole value is that a declared
 # condition is actually checked, so a silently-dropped `"assets"` typo would leave a stage
 # advertising a contract nothing enforces — which is the failure this field exists to end.
-STAGE_EXPECT_KEYS = ("files", "assert")
+STAGE_EXPECT_KEYS = ("files", "assert", "numeric")
 
 # The SAME closed-key rule one level UP, and the argument is `STAGE_EXPECT_KEYS`' own. `expect`
 # refuses an unknown key because a dropped `"assets"` typo leaves a stage advertising a contract
@@ -255,12 +264,20 @@ def _validate_expect(nm: str, expect) -> tuple[Optional[dict], Optional[str]]:
         a = " ".join(a.split())[:MAX_STAGE_ASSERT_CHARS]
         if a:
             clean["assert"] = a
+    numeric = expect.get("numeric")
+    if numeric is not None:
+        rels, err = validate_numeric(nm, numeric)
+        if err is not None:
+            return None, err
+        if rels:
+            clean["numeric"] = rels
     if not clean:
         # An `expect` that declares nothing is worse than no `expect`: it reads, to anyone auditing
         # the manifest, like the stage carries a contract. Refuse it at authoring time.
         return None, (f"stage {nm!r} `expect` declares nothing — give it `files` (the artifacts this "
-                      "stage produces) and/or `assert` (one line stating what its success MEANS), or "
-                      "drop the key.")
+                      "stage produces), `assert` (one line stating what its success MEANS) and/or "
+                      "`numeric` (relations the engine evaluates against values the stage prints), "
+                      "or drop the key.")
     return clean, None
 
 
@@ -1378,6 +1395,12 @@ EXPECT_SINCE_KEY = "expect_since"
 # name/status/exit_code/seconds, and a reader of an older log sees it absent — which the re-check
 # treats as "cannot establish", i.e. no promotion.
 EXPECT_DECLARED_KEY = "expect_declared"
+# The NUMERIC half's own two keys on a `stage_finished` row (doc 52 row 24), additive and
+# fold-ignored like the pair above: the relations the row was held to, and the values the engine read
+# for them — on a PASS as well as a failure, so a reader can see what the bound was checked against.
+# `metric_salvage._salvage_condition` reads `NUMERIC_DECLARED_KEY` to refuse salvage on this failure.
+NUMERIC_DECLARED_KEY = "numeric_declared"
+NUMERIC_VALUES_KEY = "numeric_values"
 
 
 def verify_stage_artifacts(expect, workdir, since: Optional[float], *, stage: str = "") -> Optional[str]:
@@ -2906,6 +2929,39 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 stderr=f"stage '{_sname}' failed its declared artifact contract: {_artifact_problem}",
                 stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
             return run
+        # THE NUMERIC HALF (doc 52 row 24), after the artifact half and before the model: the last
+        # value the stage printed for each declared key, read off its own log (the tail `run.out`
+        # keeps is enough for an end-of-stage summary, and the log file is read when it is there),
+        # held to the declared relation by `numeric_contract_defects`. Same status, same early
+        # return and the same repair loop as the artifact half; the row records the relations and
+        # the values on a pass too. Refused for salvage — see `metric_salvage._salvage_condition`.
+        _numeric = _expect.get("numeric") if isinstance(_expect.get("numeric"), list) else None
+        if _numeric:
+            _text = run.out or ""
+            try:
+                _log_file = ex.log(f"{_sname}.log")          # None without a log dir (a library caller)
+                if _log_file and os.path.isfile(_log_file):
+                    with open(_log_file, "rb") as _fh:
+                        _fh.seek(max(0, os.path.getsize(_log_file) - 1_048_576))
+                        _text = _fh.read().decode("utf-8", errors="replace")
+            except OSError:
+                pass
+            _defects, _values = numeric_contract_defects(_text, _numeric)
+            stage_results[-1][NUMERIC_DECLARED_KEY] = list(_numeric)
+            stage_results[-1][NUMERIC_VALUES_KEY] = _values
+            if _defects:
+                stage_results[-1]["status"] = "expect_failed"
+                _problem = ("exited 0 but did NOT satisfy its declared numeric contract: "
+                            + "; ".join(_defects) + ". The relation is the declarer's own bound on what "
+                            "this stage produces — fix the stage or the declaration, do not delete "
+                            "the declaration to make this pass.")
+                stage_results[-1]["concern"] = _problem[:700]
+                stage_results[-1][EXPECT_SINCE_KEY] = _w0
+                run.early = RunResult(
+                    exit_code=0, stdout=run.out, metric=None, timed_out=False,
+                    stderr=f"stage '{_sname}' failed its declared numeric contract: {'; '.join(_defects)}",
+                    stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
+                return run
         # WHICH BYTES the stage produced, bound at the instant the contract PASSED and against the
         # identical `_w0` floor it was just held to. `verify_stage_artifacts` proves the artifact is
         # there, non-empty and written by THIS run; only the content identity can later prove a reuse

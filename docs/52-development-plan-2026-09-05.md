@@ -522,7 +522,7 @@ InnovatorBench 20), so the noun LoopLab is — a research loop, not a medal agen
 number even after the campaign. proof:missing:docs/audit/research-lifecycle-benchmark.md
 
 *Closed 2026-09-06 (row 23 shipped, code parts): the marker `no-reviewer-bundle-export` stood here.
-`events/bundle.py::export_bundle` (`looplab export-bundle`) packages one run as an RO-Crate 1.1: the
+`engine/bundle.py::export_bundle` (`looplab export-bundle`) packages one run as an RO-Crate 1.1: the
 event log and trace, the launch snapshots, the champion's code off the FOLDED record, every memo's
 claims with their evidence ids and the plan, the summary row (number, caveats, Mislead pair, seeds,
 private grade) and the audit sidecars, each a `File` entity with its size and SHA-256 in
@@ -738,10 +738,16 @@ show). Demoted: no measured precedent in the window; the edit-type marker is the
 diagnostic. Guessed names — re-point on landing.
 proof:absent:distance_from_seed@looplab/search+absent:seed_distance@looplab/search
 
-OPEN[stage-assert-has-no-model-free-numeric-form] a stage's `expect.assert` is judged by an LLM
-against the stage's printed tail; a declared numeric relation the ENGINE evaluates against a named key
-the stage prints (CapCode's cap, Arbor's margin are the shape) is not built — `STAGE_EXPECT_KEYS` is
-the closed pair `("files", "assert")`. proof:`line:STAGE_EXPECT_KEYS&&"assert")@looplab/runtime/command_eval.py`
+*Closed 2026-09-06 (row 24 shipped): the marker `stage-assert-has-no-model-free-numeric-form` stood
+here. `STAGE_EXPECT_KEYS` is the closed triple `("files", "assert", "numeric")`:
+`runtime/numeric_contract.py` validates `expect.numeric` (≤8 `{key, op, value}` relations over a
+closed operator set) and evaluates it against the LAST value the stage printed for each key (the log
+tools' three spellings plus a JSON line), `command_eval._run_stages` holds the stage to it after exit
+0 and before the next stage — `expect_failed`, the same early return and repair loop as the artifact
+half, fails CLOSED on a key never printed, the relations and the values read recorded on the
+`stage_finished` row on a pass too — and `metric_salvage.salvage_condition` refuses to salvage a
+number produced past its declared bound. Driven end to end through `run_command_eval`
+(`tests/test_numeric_contract.py`). Deleted per the index rule.*
 
 OPEN[stage-rows-are-last-wins-per-name] `replay.py::_on_stage_finished` keeps one row per stage NAME,
 so after an inline repair the attempt that spent the training wall-clock leaves no row (BACKLOG §6

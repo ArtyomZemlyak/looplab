@@ -445,6 +445,24 @@ before the next stage runs, and has two halves:
   of 50) is still refused, and so is one whose trainer never wrote a summary at all. Note this needs
   the stage to declare `files` as well — the acquittal rests on the artifact half of the declaration
   having already been checked on disk.
+* **`numeric`** — since 2026-09-06 (doc 52 row 24), the model-free form: a list of relations the
+  ENGINE evaluates against the last value the stage **printed** for a named key, after the stage
+  exits 0 and before the next stage runs — CapCode's cap and Arbor's margin are the shape:
+
+  ```jsonc
+  "expect": {"numeric": [{"key": "params", "op": "<=", "value": 2000000},
+                         {"key": "val_ndcg", "op": ">=", "value": 0.71}]}
+  ```
+
+  `op` is one of `<`, `<=`, `>`, `>=`, `==`, `!=`; at most 8 relations; the value is read in the
+  three spellings the log tools read (`key: v`, `key=v`, `'key': v`, case-insensitive) or off a
+  JSON line carrying the key, the LAST occurrence winning (the end-of-stage summary). It fails the
+  stage exactly as `files` does — `expect_failed`, the same repair loop — and it fails **closed**: a
+  key the stage never printed is an unmet relation. Unlike an artifact failure it is **never
+  salvaged**: a number produced past the declared bound is not a measurement of the intended
+  protocol. The `stage_finished` row records the relations and the values read on a pass too.
+  Declared by the operator on `cmd.stages` or by the Developer in `looplab_stages.json` (the
+  `declare_stages` tool validates it; its prompt does not yet advertise the key).
 
 **The metric must say what it is ABOUT — `eval.metric.subject`.** `expect` and `needs` describe a
 stage's files; `subject` describes the *number*. It names the workdir-relative artifact the metric is a

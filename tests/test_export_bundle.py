@@ -7,7 +7,7 @@ import json
 
 import anyio
 
-from looplab.events.bundle import RO_CRATE_METADATA, export_bundle, verify_bundle
+from looplab.engine.bundle import RO_CRATE_METADATA, export_bundle, verify_bundle
 from tests.factories import make_engine
 
 

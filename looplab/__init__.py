@@ -45,6 +45,7 @@ _LAYOUT = {
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
     "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
+    "bundle": "engine",  # the RO-Crate reviewer bundle export (doc 52 row 23); composes events + engine, so not `events`
     "plan": "engine",  # the PLAN artifact + the endgame reserve the dispatcher honours (doc 52 row 18)
     "attribute_sites": "engine",  # the Engine attribute declaring-site registry (doc 52 row 21)
     "agents_md": "tools",
@@ -128,6 +129,7 @@ _LAYOUT = {
     "belief_projection": "events",   # derived belief view over the card board (doc 25 CO-11)
     "comment_projection": "events",
     "command_eval": "runtime",
+    "numeric_contract": "runtime",  # `expect.numeric`: a declared relation the engine evaluates (doc 52 row 24)
     "command_observation": "serve",
     "code_freshness": "serve",   # is this server process still running the code on disk
     "comparison": "core",
@@ -249,7 +251,6 @@ _LAYOUT = {
     "mlflow_export": "events",
     "models": "core",
     "notebook": "events",
-    "bundle": "events",  # the RO-Crate reviewer bundle export (doc 52 row 23)
     "node_build": "engine",
     "node_evidence": "core",
     "novelty": "engine",

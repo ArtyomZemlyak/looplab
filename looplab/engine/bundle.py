@@ -1,6 +1,10 @@
 """The reviewer bundle: one run's seeds, traces, code, claims and record, packaged as an RO-Crate
 (doc 52 row 23; the survey's 38 % dimension, the field's export).
 
+It lives in `engine/` and not beside the other exporters in `events/` because it composes the
+fold with the engine's own derivations (`champion_caveats`), and `events` may import only `core`
+(`tests/test_card_selection_guard.py` holds that line).
+
 Seeds (`LOOPLAB_EVAL_SEED`, `confirm_seed_base`) and traces (`events.jsonl`, `spans.jsonl`) existed
 on disk and nothing packaged them with the code and the claims for a reviewer. `export_bundle`
 copies the run's OWN record — never a re-derivation of it — into one directory and describes every

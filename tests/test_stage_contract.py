@@ -89,9 +89,12 @@ def test_a_malformed_expect_is_refused_with_a_reason_the_declarer_can_act_on(exp
 def test_the_expect_key_set_is_closed_and_the_validator_is_what_closes_it():
     """The registry and its enforcement are the same fact here — an added key that nothing reads is
     exactly what the closed set prevents, so the set must be what the refusal is derived from."""
+    well_formed = {"files": ["f.pkl"], "assert": "one line",
+                   "numeric": [{"key": "params", "op": "<=", "value": 2000000}]}
+    assert set(well_formed) == set(STAGE_EXPECT_KEYS), "a registered key with no well-formed example"
     for key in STAGE_EXPECT_KEYS:
         clean, err = validate_stages([{"name": "s", "command": ["a"],
-                                       "expect": {key: ["f.pkl"] if key == "files" else "one line"}}])
+                                       "expect": {key: well_formed[key]}}])
         assert err is None, f"{key} is in the registry but the validator refuses it: {err}"
         assert key in clean[0]["expect"]
 

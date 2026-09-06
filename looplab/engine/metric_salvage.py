@@ -394,6 +394,14 @@ def salvage_condition(res, reason: str) -> Optional[str]:
         # inconclusive stage no longer ends the pipeline and so is never the row `status` describes.
         return None
     if status == "expect_failed":
+        # The ARTIFACT half only. A `numeric` failure (doc 52 row 24) carries the same status and is
+        # NEVER salvaged: the relation is the declarer's own bound on what the stage produces, and a
+        # number produced past that bound — a model over its parameter cap, a margin not reached —
+        # is not a measurement of the intended protocol. Re-admitting it under `select` would
+        # publish exactly the number the declaration refused.
+        from looplab.runtime.command_eval import NUMERIC_DECLARED_KEY
+        if stages[-1].get(NUMERIC_DECLARED_KEY):
+            return None
         return "artifact_contract"
     if status == "fail":
         # Only reachable under the `stalled` carve-out above — a plain crashed stage returned None

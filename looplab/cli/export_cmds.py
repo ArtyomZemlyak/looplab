@@ -115,7 +115,7 @@ def export_bundle_cmd(
     launch snapshots, the champion's code off the folded record, every memo's claims, the summary row
     (number, caveats, Mislead pair, seeds) and the audit sidecars, each described with its size and
     SHA-256 in ro-crate-metadata.json. Copies the run's own record; derives nothing but the row."""
-    from looplab.events.bundle import RO_CRATE_METADATA, export_bundle, verify_bundle
+    from looplab.engine.bundle import RO_CRATE_METADATA, export_bundle, verify_bundle
 
     _require_run_dir(run_dir)
     dest = out or (run_dir / "bundle")
