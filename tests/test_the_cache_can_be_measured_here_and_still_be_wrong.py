@@ -113,7 +113,11 @@ def test_a_cpsat_task_is_named_as_unrulable_not_as_a_drifting_cache(tmp_path):
     # noisy" would reach for more repeats, which is precisely what does not help.
     assert "x2.2" in said[0] and "num_search_workers" in said[0], said[0]
     assert "not mere noise" in said[0], said[0]
-    assert "Fixable" in said[0], said[0]
+    # THE WHOLE REMEDY, not the word that introduces it: a mutation cutting "the allocation in BOTH
+    # passes; until then this number is not a ruler" left "Fixable by pinning the " standing, and
+    # the assertion held over a sentence that no longer said what to do.
+    assert "pinning the allocation in BOTH passes" in said[0], said[0]
+    assert "this number is not a ruler" in said[0], said[0]
 
 
 def test_a_plain_task_with_the_same_reading_is_still_a_drifting_cache(tmp_path):
