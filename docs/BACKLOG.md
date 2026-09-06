@@ -4638,7 +4638,11 @@ stored in the dataset header and printed above every report, because a caveat th
 doc is a caveat nobody reading the number sees. A prompt optimised against this corpus will overfit
 it.
 
-OPEN[judge-bench-covers-two-judges-of-four] failure triage LANDED 2026-08-20
+DECLINED[judge-bench-covers-two-judges-of-four] the repair critic and the novelty gate stay
+unbenched. measured: the critic has 7 decisions in the whole corpus (a bench on it reports noise with
+a decimal point) and the novelty gate rejects ideas that are never run, so no outcome label can exist
+for it — docs/BACKLOG.md §0.19; converted 2026-09-06 from an open marker whose own text below was
+already this decline. Failure triage LANDED 2026-08-20
 (`looplab/judgebench/triage_corpus.py` + `triage_score.py`,
 `tests/data/judge_bench/failure_triage.v1.jsonl.gz`, **122 rows, 118 labelled**) and it is smaller
 than the span count suggested for a reason worth keeping: the unit that can carry a label is the
@@ -4648,7 +4652,6 @@ effort. The **repair critic** has **7 decisions in the whole corpus** and a benc
 noise with a decimal point. The **novelty gate** can never be scored for correctness at all — the
 idea it rejects is never run, so nothing on disk says whether it would have worked, and only
 `score.py`'s consistency field can ever exist for it.
-proof:absent:extract_critic@looplab/judgebench/__main__.py
 
 **[CLOSED 2026-09-03 — the marker was STALE, and the way it was stale is worth keeping.]** Its
 subject no longer exists: `_TORCH_OOM_MARKERS` and `_is_torch_oom` were DELETED on 2026-08-20 (see
@@ -4718,13 +4721,20 @@ stored PROMPT — a field no label and no headline number reads — kills the de
 sha tripwire. The regeneration test now runs and passes when pointed at the runs
 (`LOOPLAB_BENCH_RUNS=runs`), which is the first time it has ever executed.
 
-OPEN[judge-bench-cannot-see-a-post-exit-stage-failure] the missed-stop class is not a prompt
+**[CLOSED 2026-09-06 — the marker was STALE, the same way the OOM one above was.]** Its ask —
+the declared `expect`/`assert` contract in front of the judge while the stage still runs — shipped on
+2026-08-20 as `engine/train_monitor.py::stage_contract_context`, spliced into every tick's user
+message under `Settings.train_monitor_contract` (ON), and scored over the same 450-decision
+corpus: the deterministic schedule reading fires on 12 decisions, 12 wasted / 0 productive, taking
+the incumbent from 6 to 9 of 27 wasted attempts caught (CLAUDE.md, the `train_monitor.py` row).
+The falsifier was `absent:monitor_expect_context`, a symbol the fix never spelled, so the guard
+stayed green over a shipped item for seventeen days — the second time this section records that
+shape, and the reason a proof should name the fix's OWN symbol or the defect's own text, never a
+name guessed in advance. The measurement stands: the missed-stop class is not a prompt
 problem: all **20** uncaught wasted attempts are `stage_failed`, and of the 20.1 h an oracle could
 have saved by stopping each at its first look, **13.4 h across 7 attempts is
 `check_failed`/`expect_failed`** — the stage exited rc 0 and the ENGINE then failed it, over
-artifacts the judged log never showed. What reaches that is EVIDENCE, not wording: the declared
-`expect`/`assert` contract, in front of the judge while the stage still runs.
-proof:absent:monitor_expect_context@looplab/engine/train_monitor.py
+artifacts the judged log never showed. What reaches that is EVIDENCE, not wording, and it now does.
 
 The other 6.6 h is 13 real crashes, 5 of them under six minutes after the look charged for missing
 them. Both dead-model attempts were caught, at 31 of 33 and 17 of 20 decisions. **The checker half
