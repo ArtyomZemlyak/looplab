@@ -595,6 +595,43 @@ def _interrupted_stream_is_salvageable(*, produced_content: bool, produced_tool_
     return produced_content or produced_tool_calls or produced_reasoning
 
 
+# Where a BARREN cut carries the usage its gateway still priced. `_accumulate_stream` is a
+# staticmethod with no accountant in reach, and the only thing that leaves it on the barren path
+# is the exception -- so the usage rides on the exception, and `_post`'s one `except` bills it
+# through `_bill_barren_cut` before the retry policy runs. A private attribute rather than a wrapper
+# exception, because every `_RETRY_POLICY` row keys on the SDK's own class and a wrapper would send
+# a stream cut to the unclassified tail.
+_BARREN_CUT_USAGE_ATTR = "_looplab_barren_cut_usage"
+
+
+def _stamp_barren_cut_usage(exc: BaseException, usage: Optional[dict]) -> bool:
+    """Carry the usage a cut-and-barren stream reported out with the exception that ends it.
+
+    The productive cut is billed by `_post` off the body `_accumulate_stream` returns; the barren
+    one re-raises, and until this stamp the `usage` frame `defer_inband_error` had reordered past
+    the error frame -- precisely so it could be read -- died with the exception. Driven with an
+    error frame plus a $0.01 / 50-token usage frame and `max_retries=1`: two real HTTP requests,
+    `calls == 1, priced_calls == 0, spent == 0.0`. The call reached the ledger as neither spend nor
+    a CALL, and the retry then re-spent past a ceiling the ledger could not see.
+
+    `_stream_envelope_is_billable`'s first rule is the whole justification: `usage_observed` wins
+    over everything, including what happened afterwards. `complete_text_stream` already bills this
+    exact shape through that rule; this keeps the two streaming paths on ONE rule rather than one
+    and a half. Only usage with something in it is stamped -- an empty frame is no evidence of a
+    call, and `_bill_barren_cut` must not mint a `calls` row for it. Returns whether it stamped.
+    """
+    if not usage:
+        return False
+    normalized = _normalize_usage(usage)
+    if not (normalized["total_tokens"] or normalized["cost"]):
+        return False
+    try:
+        setattr(exc, _BARREN_CUT_USAGE_ATTR, dict(usage))
+    except Exception:  # noqa: BLE001 -- an exception type refusing attributes still propagates
+        return False
+    return True
+
+
 def salvaged_lengths(message: Optional[dict]) -> dict[str, int]:
     """How much of a salvaged answer is WHERE, in characters. One rule, because a notice that
     measures the wrong part of an answer is how a working fix gets read as a broken one.
@@ -1229,9 +1266,11 @@ class OpenAICompatibleClient:
         class is a precise reading of it). Whatever already arrived is a real, truncated answer, and
         it used to be thrown away with the exception: 200,438 forwarded deltas and thirty minutes of
         generation, discarded, unbilled, re-asked. `_interrupted_stream_is_salvageable` decides; a
-        stream with nothing to salvage re-raises unchanged, so `_policy_stream_interrupted` still
-        owns that case. Every OTHER mid-stream failure — an idle-guard kill, a reset, an EOF —
-        re-raises here untouched and keeps `_policy_connection`'s existing degrade-and-retry.
+        stream with nothing to salvage re-raises, so `_policy_stream_interrupted` still owns that
+        case — carrying any usage the stream DID report (`_stamp_barren_cut_usage`), which is the
+        only way that spend can reach the accountant from a staticmethod. Every OTHER mid-stream
+        failure — an idle-guard kill, a reset, an EOF — re-raises here with the same stamp and
+        keeps `_policy_connection`'s existing degrade-and-retry.
         """
         content: list[str] = []
         reasoning: list[str] = []
@@ -1286,24 +1325,18 @@ class OpenAICompatibleClient:
             # guard fired, the APITimeoutError is a fact about the socket arriving after the fact
             # about the call. Reading the class alone would send a 220k-token cut generation to
             # `_policy_connection` and re-buy thirty minutes of it.
-            # OPEN[barren-cut-usage-frame-is-discarded] a cut stream that produced NOTHING but whose
-            # gateway still priced it re-raises here, and the `usage` this loop already captured —
-            # the frame `defer_inband_error` reordered past the error precisely so it could be
-            # read — dies with the exception: the call reaches the ledger as neither spend nor a
-            # CALL, and the retry then re-spends.
-            # proof:absent:_bill_barren_cut@looplab/core/llm.py
-            # REVIEW 2026-08-30 (money): driven with error-frame + $0.01/50-token usage frame and
-            # max_retries=1: two real HTTP requests, `accountant.calls == 1, priced_calls == 0,
-            # spent == 0.0`. That is defect #2 from this file's own header ("not as spend, not even
-            # as a CALL"), fixed for the productive cut and still open for the priced barren one —
-            # and an asymmetry against `complete_text_stream`, which bills this same shape through
-            # `_stream_envelope_is_billable(usage_observed=True)`, so "keeping the two streaming
-            # paths on ONE rule" is not yet true. Bill observed usage before the re-raise (an
-            # `_account_keepalive_stall`-shaped helper; the accountant is one attribute away).
             if not ((_inband_stream_error(exc) or "held" in inband)
                     and _interrupted_stream_is_salvageable(
                         produced_content=bool(content), produced_tool_calls=bool(tcs),
                         produced_reasoning=bool(reasoning))):
+                # The BARREN cut. Nothing to return, so the usage this loop already captured — the
+                # frame `defer_inband_error` reordered past the error precisely so it could be
+                # read — would die with the exception and the call would reach the ledger as
+                # neither spend nor a CALL. It rides out on the exception instead; `_post` bills
+                # it (`_bill_barren_cut`) before `_retry_or_raise` decides anything, so the
+                # ceiling sees this attempt before a retry re-spends. See
+                # `_stamp_barren_cut_usage` for the driven shape.
+                _stamp_barren_cut_usage(exc, usage)
                 raise
             truncated = True
         if truncated:
@@ -1599,6 +1632,31 @@ class OpenAICompatibleClient:
             self.accountant.add(usage["cost"], usage=usage)
             self._last_usage = usage
 
+    def _bill_barren_cut(self, exc: BaseException) -> None:
+        """Bill the usage a cut-and-barren stream stamped on its exception, BEFORE the retry policy.
+
+        `_account_keepalive_stall`'s sibling, for the same money rule from the other streaming
+        failure: a stream the gateway ended in band having produced nothing is still a provider call
+        the gateway may have PRICED (`_stamp_barren_cut_usage` says how the price gets here). The
+        order matters twice over. `CostAccountant.add` is where the ceiling raises, so billing
+        first means an over-ceiling barren cut stops the run here rather than buying one more
+        attempt the ledger never saw; and `_retry_or_raise` raises `LLMError` on every
+        non-retryable path, so a bill placed after it would be skipped exactly when the call was
+        the run's last. The stamp is consumed so the same attempt can never be billed twice through
+        a re-raised or chained exception.
+        """
+        usage = getattr(exc, _BARREN_CUT_USAGE_ATTR, None)
+        if usage is None:
+            return
+        try:
+            delattr(exc, _BARREN_CUT_USAGE_ATTR)
+        except Exception:  # noqa: BLE001 -- billing does not depend on the stamp being removable
+            pass
+        normalized = _normalize_usage(usage)
+        if normalized["total_tokens"] or normalized["cost"]:
+            self.accountant.add(normalized["cost"], usage=normalized)
+            self._last_usage = normalized
+
     def _post(self, payload: dict) -> dict:
         # T7 LLM response cache: serve an identical DETERMINISTIC (temp 0) request from cache instead
         # of re-hitting the model — cuts cost on retry/panel/verify flows. Sampling calls (temp>0)
@@ -1641,6 +1699,10 @@ class OpenAICompatibleClient:
                 # two families are what the ladder caught: every SDK error derives from
                 # `openai.APIError`, and a keepalive-only 200 body escapes the SDK's decoder as a RAW
                 # `json.JSONDecodeError` that is NOT an APIError.
+                # Money before policy: a barren cut the gateway priced is billed here, so the
+                # ceiling can refuse the retry `_retry_or_raise` is about to grant (and so the
+                # bill is not skipped when the policy raises instead). See `_bill_barren_cut`.
+                self._bill_barren_cut(e)
                 _stalled_prev = self._retry_or_raise(e, attempt, use_stream) or _stalled_prev
                 continue
             else:

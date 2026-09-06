@@ -37,7 +37,7 @@ import pytest
 import looplab.core.llm as llm
 import looplab.core.llm_streaming as llm_streaming
 import looplab.core.llm_transient as llm_transient
-from looplab.core.llm import LLMError, OpenAICompatibleClient
+from looplab.core.llm import BudgetExceeded, CostAccountant, LLMError, OpenAICompatibleClient
 
 _REQ = httpx.Request("POST", "http://x/v1/chat/completions")
 
@@ -611,6 +611,118 @@ def test_a_barren_cut_still_raises_even_though_the_stream_was_read_to_the_end(no
 
     with pytest.raises(LLMError, match="Not enough data"):
         client.complete_text([{"role": "user", "content": "go"}])
+
+
+# --------------------------------------------------------------------------------------------
+# 2b. The PRICED barren cut. Docs/57 `barren-cut-usage-frame-is-discarded`: the productive cut was
+#     billed and the barren one was not, although `defer_inband_error` had reordered its usage
+#     frame past the error frame precisely so it could be read. Driven exactly as the marker
+#     recorded it — error frame + $0.01 / 50-token usage frame, `max_retries=1`, two real HTTP
+#     requests through the real SDK — the pre-fix ledger read `calls == 1, priced_calls == 0,
+#     spent == 0.0`: the attempt the gateway priced was neither spend nor a CALL, and the retry
+#     re-spent on a ceiling the ledger could not see.
+# --------------------------------------------------------------------------------------------
+
+def _barren_priced_cut() -> _Transport:
+    return _Transport(_sse(_error_frame(), _meter_estimate(0.01, 50)) + _done())
+
+
+def test_a_priced_barren_cut_reaches_the_ledger_before_the_retry(no_sleep):
+    """Two provider calls happened, and the ledger says two — the priced cut and its rescue —
+    rather than the one it used to admit. The retry is unchanged (still off SSE, still answered);
+    what changes is that the attempt it replaced is no longer free."""
+    transport = _barren_priced_cut()
+    client = _client(transport, max_retries=1)
+
+    assert client.complete_text([{"role": "user", "content": "go"}]) == "answered without sse"
+
+    assert transport.streamed == [True, False], "the rescue itself must be the same retry as before"
+    assert client.accountant.calls == 2, "the priced barren cut is still not a CALL in the ledger"
+    assert client.accountant.priced_calls == 1, "the priced barren cut is still not priced"
+    assert client.accountant.spent == pytest.approx(0.01)
+    assert client.accountant.completion_tokens == 50 + 1      # the cut's 50 + the rescue's 1
+
+
+def test_the_priced_barren_cut_pushes_its_own_delta_at_the_durable_ledger(no_sleep):
+    """The engine's sink drops an all-zero delta (`engine/costs.py::_has_value`), so `spent` alone
+    would not prove the row survives to `events.jsonl`. The cut's delta must carry the price."""
+    from looplab.engine.costs import _has_value, sanitize_usage_delta
+
+    deltas: list[dict] = []
+    client = _client(_barren_priced_cut(), max_retries=1)
+    client.accountant.set_sink(deltas.append)
+
+    client.complete_text([{"role": "user", "content": "go"}])
+
+    assert len(deltas) == 2, "the cut pushed no delta of its own; only the rescue reached the ledger"
+    cut = sanitize_usage_delta(deltas[0])
+    assert _has_value(cut)
+    assert cut["calls"] == 1 and cut["priced_calls"] == 1
+    assert cut["cost"] == pytest.approx(0.01) and cut["completion_tokens"] == 50
+
+
+def test_a_priced_barren_cut_over_the_ceiling_stops_the_run_INSTEAD_of_retrying(no_sleep):
+    """The money half of the defect. Billing happens BEFORE `_retry_or_raise` grants the retry, so
+    an attempt that crosses `llm_budget_usd` raises the accountant's own `BudgetExceeded` here and
+    the second HTTP request — the re-spend the marker measured — is never made."""
+    transport = _barren_priced_cut()
+    client = _client(transport, max_retries=3, accountant=CostAccountant(limit=0.005))
+
+    with pytest.raises(BudgetExceeded):
+        client.complete_text([{"role": "user", "content": "go"}])
+
+    assert transport.streamed == [True], "the ceiling was crossed and a retry was still bought"
+    assert client.accountant.spent == pytest.approx(0.01)
+    assert client.accountant.calls == 1 and client.accountant.priced_calls == 1
+
+
+def test_a_priced_barren_cut_on_the_LAST_attempt_is_still_billed(no_sleep):
+    """`_retry_or_raise` raises `LLMError` when the budget of attempts is spent. A bill placed after
+    it would be skipped on exactly the attempt that ends the call, so the order is the property:
+    the clean `LLMError` still surfaces, and the ledger still holds the priced attempt."""
+    client = _client(_barren_priced_cut(), max_retries=0)
+
+    with pytest.raises(LLMError, match="Not enough data"):
+        client.complete_text([{"role": "user", "content": "go"}])
+
+    assert client.accountant.calls == 1 and client.accountant.priced_calls == 1
+    assert client.accountant.spent == pytest.approx(0.01)
+
+
+def test_an_UNPRICED_barren_cut_mints_no_call_of_its_own(no_sleep):
+    """The bound on the fix, and the same one `_account_keepalive_stall` keeps: a stream that
+    produced nothing AND reported nothing is no evidence of a priced call, so nothing is invented
+    for it. Only the rescue reaches the ledger — the historical row count, unchanged."""
+    client = _client(_Transport(_sse(_error_frame())), max_retries=1)
+
+    assert client.complete_text([{"role": "user", "content": "go"}]) == "answered without sse"
+
+    assert client.accountant.calls == 1
+    assert client.accountant.priced_calls == 0
+    assert client.accountant.spent == pytest.approx(0.0)
+
+
+def test_the_stamp_is_consumed_so_one_attempt_cannot_be_billed_twice():
+    """`_bill_barren_cut` reads the stamp off the exception and removes it. A chained or re-raised
+    exception reaching a second `except` must not charge the same attempt again."""
+    exc = openai.APIError(LITELLM_CUT, request=_REQ, body=None)
+    assert llm._stamp_barren_cut_usage(exc, {"total_tokens": 50, "cost": 0.01})
+    client = _client(_Transport(b""))
+
+    client._bill_barren_cut(exc)
+    client._bill_barren_cut(exc)
+
+    assert client.accountant.calls == 1 and client.accountant.spent == pytest.approx(0.01)
+
+
+def test_the_stamp_refuses_an_empty_usage_frame():
+    """An empty or token-less frame is not stamped: `_bill_barren_cut` would otherwise mint a
+    `calls` row for a stream that reported nothing."""
+    exc = openai.APIError(LITELLM_CUT, request=_REQ, body=None)
+    assert not llm._stamp_barren_cut_usage(exc, None)
+    assert not llm._stamp_barren_cut_usage(exc, {})
+    assert not llm._stamp_barren_cut_usage(exc, {"prompt_tokens": 0, "completion_tokens": 0})
+    assert not hasattr(exc, llm._BARREN_CUT_USAGE_ATTR)
 
 
 def test_a_reasoning_only_cut_reports_what_it_kept_not_what_it_lacks(caplog, no_sleep):
