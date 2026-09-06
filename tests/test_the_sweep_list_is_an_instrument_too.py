@@ -370,3 +370,26 @@ def test_a_superseded_file_holding_the_wrong_attempt_is_not_intact(tmp_path):
     ok, detail = sweep_claims.check_campaign_evidence_overwrite(str(tmp_path))
     assert ok is True, detail
     assert "does not hold attempt 1 intact" in detail, detail
+
+
+def test_the_reason_a_constant_is_unmeasured_is_globbed_not_remembered(tmp_path):
+    """The comment here used to name the three tasks with probe trees on the box, and pagerank was
+    "UNCHECKABLE until a probe runs on that task" while `pgr1/ws/pagerank/` sat on disk, findable by
+    the very glob one line above it -- with sixteen more under `_ruler/ws/`. Read quietly afterwards
+    it gave 0.9994 against the quoted 1.0024.
+
+    The fixture stages a module for one task and not another, so a check that remembered ANY list
+    would have to be right about this box, which no fixture can arrange."""
+    (tmp_path / "model-probes" / "someprobe" / "ws" / "pagerank").mkdir(parents=True)
+    (tmp_path / "model-probes" / "someprobe" / "ws" / "pagerank"
+     / "reference_pagerank.py").write_text("class T: pass\n", encoding="utf-8")
+    (tmp_path / "looplab" / "benchmarks" / "algotune").mkdir(parents=True)
+    (tmp_path / "looplab" / "benchmarks" / "algotune"
+     / "ruler_selfcheck_log.jsonl").write_text("", encoding="utf-8")
+    ok, detail = sweep_claims.check_ruler_constants(str(tmp_path))
+    assert not ok
+    # pagerank IS stageable here, so its reason must be "no reading", not "no module".
+    assert "pagerank: UNMEASURED here (no reading recorded yet" in detail, detail
+    # pde_heat1d is not staged, and the sentence carries the count the glob actually found.
+    assert "pde_heat1d: UNMEASURED here (no probe has staged its reference module here (1 staged" \
+        in detail, detail

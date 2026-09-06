@@ -44,3 +44,5 @@
 {"busy_cpus_outside_lane": 0, "lane": "33-43,81-91", "median": 1.0329, "regime": "lane22r3", "stamp": "2026-09-06T18:28:05", "subset": "test", "task": "rectanglepacking", "values": [1.0382, 1.0172, 1.0329]}
 {"busy_cpus_outside_lane": 0, "lane": "33-43,81-91", "median": 1.0401, "regime": "lane22r3", "stamp": "2026-09-06T18:41:49", "subset": "test", "task": "multi_dim_knapsack", "values": [1.0355, 1.0522, 1.0401]}
 {"busy_cpus_outside_lane": 0, "lane": "33-43,81-91", "median": 1.0341, "regime": "lane22r3", "stamp": "2026-09-06T18:56:09", "subset": "test", "task": "set_cover_conflicts", "values": [1.0341, 1.0012, 1.0388]}
+{"busy_cpus_outside_lane": 0, "lane": "33-43,81-91", "median": 0.9994, "regime": "w22x1r3", "stamp": "2026-09-06T20:59:32", "subset": "test", "task": "pagerank", "values": [0.9909, 0.9994, 1.0]}
+{"busy_cpus_outside_lane": 0, "lane": "33-43,81-91", "median": 1.03865, "regime": "w22x1r3", "stamp": "2026-09-06T21:05:14", "subset": "test", "task": "pde_heat1d", "values": [1.0335, 1.0438, 1.025, 1.0683]}

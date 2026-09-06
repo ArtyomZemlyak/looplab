@@ -13278,7 +13278,8 @@ A median taken over a window that contains a serial phase is not the concurrency
 
 So the mechanism is still open, and it is now bounded on four sides: it is not baseline staleness
 (re-timing quiet moves 2 %), not box contention (idle box, 1.5291), not worker count (identical
-profiles), and it scales with the task's own timing variance. What remains is inside how each pass
+profiles), and it scales with the task's own timing variance (§316 corrects the reading of that last
+clause: it is not zero on deterministic tasks, only small). What remains is inside how each pass
 turns ten timed runs into one number under oversubscription. Both use `min_time_ms`; both warm on a
 neighbouring problem; the run counts come from the same `EVAL_RUNS`. Named here so the next sitting
 starts from the four things it is not.
@@ -13300,3 +13301,33 @@ typed the stripped key by hand, so fixture and bug came from the same wrong idea
 shape. Both keys now come from `eval_regime()` itself. Measured after the fix: serial scores
 (1.0733), wide refuses, override scores (1.8529 — a fourth sample of the biased number, beside
 1.6028, 1.5291 and 1.7702).
+
+## §316 — the asymmetry is not CP-SAT's, and pagerank's constant was never unmeasurable
+
+Two corrections to what this file said last sitting, both from measurement.
+
+**pagerank was not "UNCHECKABLE here".** `check_ruler_constants` carried a comment naming the three
+tasks with probe trees on the box and concluding that pagerank's constant could not be read until a
+probe ran on it. `pgr1/ws/pagerank/reference_pagerank.py` had been on disk the whole time, findable
+by the glob one line above the comment, along with sixteen more under `_ruler/ws/`. A remembered
+list contradicted by the file system, inside the file whose subject is remembered numbers. Read
+quietly on the free lane: **0.9994** against the quoted 1.0024 (−0.3 %), where the reading it had
+been carrying, 0.9507, came from the four-lane rebuild at 06:50. The reason is now globbed at call
+time and states how many trees the glob found; two mutations are red, including one that hardcodes
+the old three names.
+
+Three of point 5's four constants now hold on a quiet box: pagerank −0.3 %, discrete_log +0.5 %,
+edge_expansion +1.0 %.
+
+**And §315's "invisible on the ten deterministic tasks" is wrong.** `pde_heat1d` is deterministic
+(p90/p10 = 1.4) and reads **1.0198** and **1.0387** in two quiet sittings hours apart, drifting
+away from unity rather than scattering around it. Prediction 6 said a second sitting would land
+within 1.5 % of unity if that were sampling; it landed at +4.3 %, all four values between 1.025 and
+1.068. Prediction 7 then said the cached ruler must be stale — re-timed on the quiet box it came
+back **14 478 ms against the cached 14 482**, identical to 0.02 %.
+
+So the pass asymmetry is not a CP-SAT property. It is present on a deterministic task with a
+verified-fresh ruler, at 2–4 %, and CP-SAT amplifies it about fifteenfold. The four walls from §315
+still stand and a fifth is added: it is not the ruler's age either. What it costs is now stated
+rather than assumed — a probe scored on `pde_heat1d` carries roughly 3 % in the candidate's favour
+before the candidate does anything.

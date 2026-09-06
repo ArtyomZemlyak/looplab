@@ -210,15 +210,24 @@ def check_ruler_constants(bench: str):
         if task not in latest:
             # WHY IT IS UNMEASURED, because the two reasons need different actions. The self-check
             # inlines the DELIVERED reference module, which only exists where a probe has staged
-            # one: `ruler_selfcheck.build_solver` globs `*/ws/<task>/reference_<task>.py`. Measured
-            # 2026-09-06 -- the only tasks with probe trees on this box are discrete_log,
-            # edge_expansion and pde_heat1d, so `pagerank`'s constant is not merely unchecked, it is
-            # UNCHECKABLE here until a probe runs on that task. Reporting the two the same way sends
-            # the reader to re-run a tool that will fail the same way every sweep.
-            why = ("no probe has staged its reference module here, so the self-check cannot build "
-                   "a solver for it -- run a probe on this task first"
-                   if not glob.glob(f"{bench}/model-probes/*/ws/{task}/reference_{task}.py")
-                   else "no reading recorded yet")
+            # one: `ruler_selfcheck.build_solver` globs `*/ws/<task>/reference_<task>.py`.
+            #
+            # THE NAMES USED TO BE WRITTEN OUT HERE and they were wrong. This comment said the only
+            # trees on the box were discrete_log, edge_expansion and pde_heat1d, so pagerank was
+            # "UNCHECKABLE until a probe runs on that task" -- while `pgr1/ws/pagerank/` had been
+            # sitting on disk the whole time, findable by the very glob one line up, along with
+            # sixteen more under `_ruler/ws/`. A remembered list contradicted by the file system,
+            # in the file whose subject is remembered numbers. pagerank was then read quietly:
+            # 0.9994 against the quoted 1.0024. The reason is GLOBBED at call time and says how
+            # many trees the glob found, so the next reader can see the evidence rather than a
+            # sentence about it -- reporting the two reasons alike would send them to re-run a tool
+            # that fails the same way every sweep.
+            staged = glob.glob(f"{bench}/model-probes/*/ws/{task}/reference_{task}.py")
+            elsewhere = len(glob.glob(f"{bench}/model-probes/*/ws/*/reference_*.py"))
+            why = (f"no probe has staged its reference module here ({elsewhere} staged for other "
+                   "tasks), so the self-check cannot build a solver for it -- stage one or run a "
+                   "probe on this task"
+                   if not staged else "no reading recorded yet")
             said.append(f"{task}: UNMEASURED here ({why}; list says {quoted:.4f})")
             off += 1
             continue
