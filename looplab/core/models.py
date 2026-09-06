@@ -1439,6 +1439,14 @@ class Node(BaseModel):
     # overperformed on the signal the search optimized — the overfitting indicator the Trust
     # panel surfaces. Audit-only.
     generalization_gap: Optional[float] = None
+    # HOST-SIDE SCORING (doc 52 row 10a): on a node scored by the task's host scorer, `metric` is
+    # the HOST's number and `self_metric` is what the candidate's own scorer printed — recorded,
+    # never selected on. `self_report_gap` is DERIVED by the fold, direction-aware like the gap
+    # above: positive = the candidate reported better than the host measured (the over-reporting
+    # indicator; a large one is a hack signal, a small one is noise between two scorers). Both
+    # None on every node an old log or a self-scored task produced.
+    self_metric: Optional[float] = None
+    self_report_gap: Optional[float] = None
     # R1-c: a calibrated §12-verifier soundness score in [0,1] for THIS node's realized result. New writers
     # publish the complete tie atomically in `verifier_group_scored`; legacy `node_verified` remains readable.
     # Used ONLY as a tie-break among metric-EQUAL/CI-tied feasible nodes (SearchFitness)

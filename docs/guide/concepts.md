@@ -1005,6 +1005,13 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   own statement that the result stands — so a deliberately-reused success is never called stale.
   Both numbers are derived by the fold from the log's ORDER, so no event gained a field and runs
   already on disk are attributed retroactively.
+- **Host-side scoring** (2026-09-06, doc 52 row 10a) — a repo task may declare `cmd.host_scorer`,
+  the operator's own scoring program at an absolute path outside every editable root; the engine
+  appends it as the final protected `score` stage, its number is the node's `metric`, the
+  candidate's own printed number is recorded beside it as `self_metric` (with a derived
+  `self_report_gap`, positive = over-reported), and the program's sha256 rides on
+  `metric_provenance.host_scorer` so the "same scorer for every node" claim is checkable. See
+  [Host-side scoring](tasks.md#host-side-scoring-cmdhost_scorer).
 - **Optional inter-stage verify** — a stage flagged `"check": true` hands its output to an agentic
   checker (Researcher/Developer) before the next stage runs, so a diverged train can't silently feed
   eval. **Since 2026-09-06 the checker may LOOK** (`stage_check_tools`, on; doc 52 row 9): beside the

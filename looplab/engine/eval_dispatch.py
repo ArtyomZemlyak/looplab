@@ -685,8 +685,16 @@ class EvalDispatchMixin:
             # does for the subject: the engine's own reuse must not make the reused stage's config
             # read as `stale`.
             _attempt_started = time.time()
+            # HOST-SIDE SCORING (doc 52 row 10a): when the task declares a host scorer, the final
+            # stage's stdout is the HOST's, read with the host scorer's own reader (the task's when
+            # it declares none), and the task's reader is handed over as `self_metric` to read the
+            # candidate's own number off the stage before it. Without one, byte-identical.
+            _host = es.get("host_scorer") if isinstance(es.get("host_scorer"), dict) else None
+            _primary = ((_host.get("metric") if isinstance(_host.get("metric"), dict) else None)
+                        or es["metric"]) if _host else es["metric"]
             res = command_eval.run_command_eval(
-                cmd, cwd, timeout, es["metric"], env,
+                cmd, cwd, timeout, _primary, env,
+                self_metric=(es["metric"] if _host else None),
                 setup=es.get("setup") or None, setup_timeout=es.get("setup_timeout", 600.0),
                 setup_cwd=root,                               # deps install at the repo root
                 cross_check=es.get("cross_check"),            # Phase 4 drift cross-check …

@@ -261,6 +261,14 @@ class EvalStagesMixin:
             return [dict(s, command=command_eval.expand_params(list(s["command"]), params))
                     for s in stages]
 
+        # THE HOST SCORER (doc 52 row 10a): the operator's own scoring program, appended as the
+        # FINAL protected `score` stage of every shape below, from a path outside every editable
+        # tree (`adapters/repo_task.py::HostScorerSpec`). When it is declared the candidate's own
+        # `command` still runs — as the stage BEFORE it, named `self_score`, so its printed number
+        # is recorded as `self_metric` — and the eval is ALWAYS staged, because the single-command
+        # path has no place for a second program. `needs` under `require` derives onto whichever
+        # stage is last, which is this one whenever it exists.
+        host = self._host_scorer_stage(es, params)
         task_stages = es.get("stages")
         if isinstance(task_stages, list) and task_stages:
             # cmd declares stages → canonical, dev file ignored. EvalSpec validated these at submit
@@ -276,7 +284,7 @@ class EvalStagesMixin:
             clean, err = command_eval.validate_stages(
                 task_stages, allow_env=True, existing_run=True)
             if err is None:
-                return _expand(clean)
+                return _expand(clean) + ([self._with_final_needs(es, host)] if host else [])
             # A BAD operator list falls back to the SINGLE COMMAND, and must not fall THROUGH to the
             # developer-manifest branch below. Falling through handed stage authorship to the
             # agent-authored looplab_stages.json in exactly the case this branch exists to prevent
@@ -285,6 +293,8 @@ class EvalStagesMixin:
             # operator's `cmd` still runs — dropping their unusable stage list is the conservative
             # reading, and the alternative (raising) would fail a resumed run on a snapshot the
             # engine can still honour the scoring half of.
+            if host:
+                return self._candidate_then_host(es, params, score_cmd, score_timeout, host)
             return None
 
         # single-command cmd: read the Developer's PRECEDING stages, append the protected cmd stage.
@@ -392,13 +402,61 @@ class EvalStagesMixin:
             # then does not name. What is given up is exactly what this whole entry says `needs`
             # buys, which is LATENCY: a pattern that resolves to nothing is `missing` at bind time
             # and the node is unselectable under `require` either way, one scorer run later.
-            if str(getattr(self, "metric_subject", "audit") or "audit") == "require":
-                _subject = (es.get("metric") or {}).get("subject") if isinstance(es.get("metric"), dict) else None
-                _needs = [s for s in (_subject or []) if isinstance(s, str) and s.strip()]
-                if _needs:
-                    final["needs"] = _needs
-            return _expand(preceding) + [final]
+            if host:
+                # The candidate's `cmd` keeps running, as the self-report stage — when the task has
+                # one; a host scorer alone appends nothing empty — and the host scorer is the score
+                # stage and takes the `needs` derivation.
+                final["name"] = "self_score"
+                candidate = [final] if final.get("command") else []
+                return _expand(preceding) + candidate + [self._with_final_needs(es, host)]
+            return _expand(preceding) + [self._with_final_needs(es, final)]
+        if host:
+            return self._candidate_then_host(es, params, score_cmd, score_timeout, host)
         return None
+
+    def _host_scorer_stage(self, es, params):
+        """The engine-built host scorer stage for this eval, or None when the task declares none.
+
+        Stamped with `command_eval.HOST_STAGE_KEY`, which no declarer may write (`validate_stages`
+        refuses it as an unknown key), so only a stage built HERE can be a host stage. `%params%`
+        expands as for every stage; `%subject%` is left for the runtime, which expands it at the
+        score stage's start from the subject it has just bound."""
+        from looplab.runtime import command_eval
+        hs = es.get("host_scorer") if isinstance(es, dict) else None
+        if not isinstance(hs, dict) or not hs.get("command"):
+            return None
+        stage = {"name": "score",
+                 "command": command_eval.expand_params(list(hs["command"]), params),
+                 "timeout": float(hs.get("timeout") or 1800.0),
+                 command_eval.HOST_STAGE_KEY: True}
+        if isinstance(hs.get("env"), dict) and hs["env"]:
+            stage["env"] = dict(hs["env"])
+        return stage
+
+    def _candidate_then_host(self, es, params, score_cmd, score_timeout, host):
+        """The pipeline for a task with a host scorer and no usable preceding stages: the
+        candidate's own `command` (when it has one) as `self_score`, then the host's `score`."""
+        from looplab.runtime import command_eval
+        cmd = (list(score_cmd) if score_cmd is not None
+               else command_eval.expand_params(list(es.get("command") or []), params))
+        chain = []
+        if cmd:
+            chain.append({"name": "self_score", "command": cmd,
+                          "timeout": score_timeout if score_timeout is not None
+                          else es.get("timeout", 600.0)})
+        return chain + [self._with_final_needs(es, host)]
+
+    def _with_final_needs(self, es, final):
+        """The `needs` derivation for the FINAL stage under `metric_subject="require"` — see the
+        block above the first call site for the rule and its bounds. One helper because there are
+        now two candidates for "the final stage" (the candidate's `cmd`, or the host scorer)."""
+        if str(getattr(self, "metric_subject", "audit") or "audit") == "require":
+            _subject = ((es.get("metric") or {}).get("subject")
+                        if isinstance(es.get("metric"), dict) else None)
+            _needs = [s for s in (_subject or []) if isinstance(s, str) and s.strip()]
+            if _needs:
+                final["needs"] = _needs
+        return final
 
     # The refusal `_run_eval` reports when the resolved chain invokes a PROTECTED script the workdir
     # does not contain. Hoisted so the two audiences it has to serve are visible in one place and can

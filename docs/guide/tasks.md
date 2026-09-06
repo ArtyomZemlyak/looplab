@@ -102,7 +102,7 @@ which capability fields are present (`looplab/adapters/tasks.py::normalize_task`
 |---|---|
 | `repo` | Absolute path to an **editable codebase** — the agent may edit any file within it (`protect: [...]` for exceptions; default edit surface is everything). |
 | `dataset` | Data / model weights that live outside the repo, as `{ "<mount>": "<abs path>" }` (a bare path mounts as `./dataset`). Read-only by default; a value may be an object with [per-source permissions](#per-source-data-permissions). They appear at `./<mount>` in the workdir. |
-| `cmd` | **How to run + score** one experiment — either a bare argv `["python","test.py"]` or an object `{ "command"\|"stages", "metric": {"reader","key"}, "timeout" }`. This is the operator's **authoritative, non-rewritable** scorer. |
+| `cmd` | **How to run + score** one experiment — either a bare argv `["python","test.py"]` or an object `{ "command"\|"stages"\|"host_scorer", "metric": {"reader","key"}, "timeout" }`. This is the operator's **authoritative, non-rewritable** scorer; `host_scorer` is the [host-side](#host-side-scoring-cmdhost_scorer) form of it. |
 | `kaggle` | A Kaggle / MLE-bench competition slug (the official grader scores a submission — no `cmd` needed). |
 | `benchmark` | A built-in synthetic task (`quadratic`, `regression`, …) for testing the loop. |
 
@@ -144,6 +144,54 @@ validated by ONE shared rule set (`runtime/command_eval.py::validate_stages`) at
 phase's `declare_stages` emit), submit (`cmd.stages`) and consume time (the engine re-validates even a
 hand-written `looplab_stages.json`; `score` is reserved in a Developer manifest, and an invalid manifest
 falls back to the single command instead of half-running).
+
+### Host-side scoring (`cmd.host_scorer`)
+
+A protected `cmd` freezes the scorer's **entry file** — and nothing else. Everything it imports,
+every config it reads and the split it scores on live inside the editable tree the candidate
+rewrites, so on the repo family the number every candidate was ranked by was, in the end, a number
+the candidate's own code printed. `cmd.host_scorer` (2026-09-06, doc 52 row 10a — AIRA₂'s
+"consistent scoring") is the other half of the contract:
+
+```jsonc
+"cmd": {
+  "command": ["python", "-m", "vectorsearch.test"],             // optional: the candidate's own scorer
+  "host_scorer": {
+    "command": ["python", "/opt/scorers/score_dr.py", "%subject%"],   // an ABSOLUTE path, outside the repo
+    "timeout": 1800,
+    "env": {"SCORER_DATA": "/data/dr-eval"},                     // optional, operator-only
+    "metric": {"reader": "stdout_json", "key": "recall@100"}     // optional: defaults to cmd.metric
+  },
+  "metric": {"reader": "stdout_json", "key": "recall@100", "subject_glob": ["**/final/model.safetensors"]}
+}
+```
+
+* **Where it runs.** The engine appends it as the final protected `score` stage of every pipeline
+  shape (an operator `cmd.stages` list, a Developer manifest, or a bare `command`), in the node
+  workdir, under the eval's declared environment plus its own `env`. Its stdout is read with its
+  `metric` reader (the task's when absent) and **that number is the node's `metric`** — the one the
+  search ranks, selects and breeds on.
+* **What it must be.** `command` names its program by an **absolute path** that `RepoTask` refuses
+  at submit unless it lies **outside every `repo` / `editables` root** and exists as a file
+  (`adapters/repo_task.py::host_scorer_outside_editables`). A relative path would resolve inside the
+  candidate's copy and `-m module` names no file the record can digest; both are refused. A
+  `cmd.stages` entry named `score` is refused too — the host scorer *is* the score stage.
+* **What the candidate's own scorer becomes.** When `command` is also given it still runs, as the
+  candidate-side `self_score` stage just before the host's; its printed number is recorded on the
+  node as **`self_metric`** and the fold derives **`self_report_gap`** (direction-aware, positive =
+  the candidate reported better than the host measured). Neither is ever selected on; both are the
+  audit that makes over-reporting visible.
+* **The receipt.** At the score stage's start the runtime digests the program
+  (`metric_provenance.host_scorer = {argv, program, program_sha256, program_size}`), so two nodes
+  scored by different bytes are distinguishable after the fact — the fact a "consistent scoring"
+  claim rests on. `%subject%` in the argv expands to the ONE artifact `cmd.metric.subject` /
+  `subject_glob` declared and the pipeline produced (absolute path); a subject that did not bind
+  fails the host stage as `needs_failed`, exactly like a missing `needs` input. `%params%` expands
+  as in every stage.
+* **What it does not do.** It does not withhold a split: a host scorer that reads a test set the
+  candidate can also read is *consistent*, not hidden. The withheld-split half (a host-held split
+  scored at finish, selection through `holdout_select`) is doc 52's slice (b) and waits on the
+  run-record fence and the Landlock validation.
 
 ### Operator-pinned Developer commands
 
@@ -1386,6 +1434,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `eval.metrics` | Extra **named** readers reported alongside the primary, for audit/observability: `{"latency_ms": {"kind": "stdout_json", "key": "latency"}}`. A `file_*` reader here needs its own `path` — without one it is silently dropped and the node just reports no value under that name. **This is not the only way a value reaches `extra_metrics`, and the difference is now on the record.** Every OTHER numeric key on the primary metric's own stdout JSON line is AUTO-CAPTURED too — no declaration, no reader spec, no `adapter` refusal — which is how all 1,642 secondary metrics in this box's preserved runs got there, 1,636 of them the four keys of a CUDA probe (one a schema VERSION number). `node_evaluated` now carries `extra_metrics_provenance` (`{name: "declared"|"auto"|"engine"}`) beside the values, and every surface that shows a secondary metric says which channel it came through; a value with no tag is from a run recorded before 2026-08-14 and reads `unknown`, never `declared`. **A LABEL NEEDS A VALUE (2026-08-29).** The node metrics table lists the UNION of every node's extras keys, so a key THIS node never reported answered `unknown` too — the same word — and rendered a warn *provenance unknown* beside an EMPTY cell: a caveat about a value that does not exist, which is the invented-caveat shape `objectiveMetricSource` forbids, and it fed `anyUnverified` so a phantom row could summon the whole self-reported footnote. The channel is now `null` where the node holds no value and the source cell renders nothing; the `best #N` column gained its own read against the CHAMPION's record, since until then only the ★ row consulted `champObjective` and a self-reported champion extra sat unlabelled beside this node's labelled one. `engine` names a key the engine's OWN spliced instrumentation declared and its source authenticates — trustworthy, and still a diagnostic rather than a result. Set `auto_extra_metrics: false` to record only what YOUR readers produced (plus that engine instrumentation, which was never the candidate's) |
 | `eval.constraints` | Reader specs carrying a `max`/`min` bound. A node that violates any (or whose constraint value can't be read) is still measured but **excluded from best-selection** — "optimize the metric subject to `latency_ms <= 100`". Operator-owned (trust boundary). A `file_*` reader here needs its own `path`: an unverifiable constraint counts as a violation, so a pathless one excludes *every* node |
 | `eval.inputs` | The files whose CONTENT decides the metric independently of the model — the test set, the product index, an id map. Bound to their content identity at the metric read and digested into `metric_provenance.comparability`, the **comparability key** every ranking surface consults before it orders two numbers. Paths may be ABSOLUTE (the opposite rule to `metric.subject`: an input is by definition not produced by this node), there is no freshness floor, and no globs. Empty is not "comparable by default" — it records `unknown`, which is never read as agreement |
+| `eval.host_scorer` | The operator's **host-side scorer** — `{command, timeout, env, metric}`, its program named by an absolute path outside every editable root — appended by the engine as the final protected `score` stage; its number is the node's `metric`, the candidate's own printed number rides beside it as `self_metric`, and the program's sha256 lands on `metric_provenance.host_scorer`. See [Host-side scoring](#host-side-scoring-cmdhost_scorer) |
 | `eval.cross_check` | An INDEPENDENT built-in reader (`stdout_json`/`stdout_regex`/`file_json`/`file_regex` — never `adapter`) that re-reads the same metric from a source the agent can't forge. Used by `eval_trust_mode="ratify_freeze_drift"`; `None` disables it. A `file_*` reader here needs its own `path`: the drift check fails closed, so a pathless one discards *every* node's metric |
 | `eval.drift_tolerance` | Tolerance for the `cross_check` comparison (default `1e-6`; must be finite and ≥ 0) |
 

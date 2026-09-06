@@ -949,6 +949,9 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
         first_terminal = n.status is NodeStatus.pending
         if first_terminal:
             n.metric = _finite_metric(d.get("metric"))  # invalid/missing remains only in the raw log
+            # Additive, reader-side default (invariant #5): the candidate's own number on a
+            # host-scored node (doc 52 row 10a); an old log has no key and folds to None.
+            n.self_metric = _finite_metric(d.get("self_metric"))
             n.status = NodeStatus.evaluated
             n.terminal_event_seq = e.seq
             n.rerun_stage = None                # any stage-scoped re-run has now landed
@@ -4502,3 +4505,12 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
         if not is_usable_metric(robust) or not is_usable_metric(n.metric):
             continue
         n.generalization_gap = (n.metric - robust) if st.direction == "max" else (robust - n.metric)
+    # Derived self-report gap (audit-only, doc 52 row 10a): how much better the candidate SAID it
+    # did than the host scorer measured. Direction-aware so positive always means "over-reported".
+    # Deliberately NOT `generalization_gap`: that one compares the signal the search optimised with
+    # an unseen one, and on a host-scored node the search optimised the HOST's number.
+    for n in st.nodes.values():
+        if not is_usable_metric(n.self_metric) or not is_usable_metric(n.metric):
+            continue
+        n.self_report_gap = ((n.self_metric - n.metric) if st.direction == "max"
+                             else (n.metric - n.self_metric))

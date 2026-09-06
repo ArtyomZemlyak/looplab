@@ -924,6 +924,106 @@ def expand_params(argv: list, params: Optional[dict]) -> list:
     return out
 
 
+# ----------------------------------------------------------- the HOST scorer stage (doc 52 row 10a)
+# The one stage of a pipeline the CANDIDATE did not write and cannot reach: the operator's own scoring
+# program, named by an ABSOLUTE path outside every editable tree (`adapters/repo_task.py::
+# HostScorerSpec` refuses anything else at submit), appended by `engine/eval_stages.py::
+# _resolve_stages` as the final `score` stage and stamped with `HOST_STAGE_KEY`. The key is
+# ENGINE-STAMPED and never declarable: it is deliberately absent from `STAGE_KEYS`, so a Developer
+# manifest or an operator `cmd.stages` entry carrying it is refused by `validate_stages` like any
+# other unknown key, and only the engine-built stage can carry it.
+#
+# What it buys is the AIRA2 property the repo family lacked — the number every candidate is ranked
+# by is computed by code and data the host holds constant — and the record that proves it:
+# `host_scorer_receipt` digests the program at the stage's start, so two nodes scored by different
+# bytes are distinguishable after the fact. The candidate's own printed number is still read (off
+# the stage BEFORE this one) and recorded as `RunResult.self_metric`, never selected on.
+HOST_STAGE_KEY = "host"
+# The standalone argv token a host scorer writes where the candidate's artifact path belongs:
+# expanded at the score stage's start from the metric subject the engine has just bound, i.e. the
+# ONE artifact `eval.metric.subject` / `subject_glob` declared and the pipeline produced.
+SUBJECT_TOKEN = "%subject%"
+
+
+def host_program_token(argv) -> Optional[str]:
+    """The host scorer's PROGRAM: the first argv token that is an absolute path (`python
+    /opt/scorers/score.py …` -> `/opt/scorers/score.py`), or None when the argv names none.
+
+    ONE rule for the submit-time refusal (`HostScorerSpec`) and the runtime receipt
+    (`host_scorer_receipt`), so what the operator was told is outside the editable tree is the file
+    whose digest lands on the record. An interpreter token (`python`, `python3.11`, a venv binary)
+    is skipped even when absolute; a `-m module` form names no file and is refused at submit for
+    exactly that reason — a program the receipt cannot digest cannot be shown constant.
+    """
+    for tok in (argv or []):
+        if not isinstance(tok, str) or not os.path.isabs(tok):
+            continue
+        base = os.path.basename(tok)
+        if re.match(r"^python(\d+(\.\d+)?)?(\.exe)?$", base):
+            continue
+        return tok
+    return None
+
+
+def host_scorer_receipt(argv, workdir) -> dict:
+    """What produced this host-scored number: `{argv, program, program_sha256, program_size}`.
+
+    Digested at the score stage's START (the same instant the metric subject is bound), so a
+    scorer rewritten while the stage runs is caught at the next node, and a reader comparing two
+    nodes' receipts compares the bytes that actually ran. `program_sha256` is None when the
+    program cannot be read, which the receipt SAYS rather than omits — "held constant" must never
+    be inferable from an absent field.
+    """
+    import hashlib
+    receipt: dict = {"argv": [str(a) for a in (argv or [])], "program": None,
+                     "program_sha256": None, "program_size": None}
+    program = host_program_token(argv)
+    if program is None:
+        return receipt
+    receipt["program"] = program
+    try:
+        data = Path(program).read_bytes()
+    except OSError:
+        return receipt
+    receipt["program_sha256"] = hashlib.sha256(data).hexdigest()
+    receipt["program_size"] = len(data)
+    return receipt
+
+
+def expand_subject(argv: list, metric_subject: Optional[dict],
+                   workdir: Optional[str] = None) -> tuple[list, Optional[str]]:
+    """Substitute a standalone `%subject%` token with the ONE bound subject path, or say why not.
+
+    `(argv, None)` when the token is absent or exactly one subject bound; `(argv, problem)` when the
+    token is present and no unique bound subject exists — an undeclared subject, an unbound one
+    (`missing`/`ambiguous`/`stale`, in the record's own words), or several. The problem is phrased
+    for the stage row: it is the candidate's declared INPUT that is not there, the same fact
+    `verify_stage_inputs` reports for `needs`, so the caller files it as `needs_failed`.
+
+    The bound subject is recorded workdir-RELATIVE (the declaration's own spelling); the scorer gets
+    it ABSOLUTE under `workdir` when one is given, because a host program that `chdir`s into its own
+    tree would otherwise resolve the artifact against the wrong directory.
+    """
+    argv = list(argv or [])
+    if SUBJECT_TOKEN not in argv:
+        return argv, None
+    ms = metric_subject if isinstance(metric_subject, dict) else None
+    bound = [row.get("path") for row in ((ms or {}).get("subjects") or [])
+             if isinstance(row, dict) and row.get("bound") and isinstance(row.get("path"), str)]
+    if ms is None:
+        return argv, (f"{SUBJECT_TOKEN} in the host scorer's command but the task declares no "
+                      "`eval.metric.subject` / `subject_glob` to expand it from")
+    if not ms.get("subject_bound") or len(bound) != 1:
+        why = ms.get("unbound_reason") or ("several subjects" if len(bound) > 1 else "none bound")
+        return argv, (f"{SUBJECT_TOKEN} in the host scorer's command but the metric subject did "
+                      f"not bind to exactly one artifact ({why}) — the pipeline must produce the "
+                      "declared artifact before the host scorer can score it")
+    path = bound[0]
+    if workdir and not os.path.isabs(path):
+        path = str(Path(workdir) / path)
+    return [path if tok == SUBJECT_TOKEN else tok for tok in argv], None
+
+
 # GPU CLI flags reconciled to a SINGLE device when the eval is pinned to one GPU (see
 # run_command_eval::_bound). Deliberately a TIGHT allowlist of unambiguous device selectors from the
 # DL-training world — capping an unrelated numeric flag would corrupt a command, so anything not
@@ -1960,6 +2060,10 @@ class _EvalRun:
     signals: dict = field(default_factory=dict)
     stage_results: Optional[list] = None
     early: Optional[RunResult] = None
+    # HOST-SIDE SCORING (doc 52 row 10a): the stdout of the last candidate-side stage before the
+    # host scorer ran (what the candidate said about itself), and the host scorer's receipt.
+    self_out: str = ""
+    host_receipt: Optional[dict] = None
     # The METRIC SUBJECT binding, captured at the FINAL stage's start (see `_bind_subject`). It is
     # on this object rather than returned separately for the reason every other field here is: the
     # tail must never read a name the branch that ran happened not to bind.
@@ -2562,6 +2666,25 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             run.metric_subject = bind_metric_subject(subject, str(ex.wd), since=_fresh_since,
                                                      stages=stages, upto=_i, stage=_sname,
                                                      subject_glob=subject_glob)
+        # THE HOST SCORER (doc 52 row 10a): keep what the candidate said about itself (the previous
+        # stage's stdout, which `run.out` is about to be overwritten with), expand `%subject%` from
+        # the subject bound one line up, and take the receipt of the program that is about to run.
+        # The expansion refuses exactly like `needs` does, because it IS the same fact: the input
+        # the scorer was declared to read is not there. The receipt is taken BEFORE the run for the
+        # reason the subject is bound before the run — a scorer rewritten while it runs must show
+        # in the next node's receipt, not be hidden by a digest taken after.
+        if _stg.get(HOST_STAGE_KEY):
+            run.self_out = run.out
+            _scmd, _subject_problem = expand_subject(_scmd, run.metric_subject, str(ex.wd))
+            if _subject_problem:
+                stage_results.append({"name": _sname, "status": "needs_failed", "exit_code": 0,
+                                      "seconds": 0.0, "concern": _subject_problem[:700]})
+                run.early = RunResult(
+                    exit_code=0, stdout=run.out, metric=None, timed_out=False,
+                    stderr=f"stage '{_sname}' failed its declared input contract: {_subject_problem}",
+                    stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
+                return run
+            run.host_receipt = host_scorer_receipt(_scmd, str(ex.wd))
         # THE INPUT CONTRACT, before anything is spent. A stage whose declared input is not there
         # cannot succeed, and every second it runs before discovering that is a second bought at GPU
         # prices — v5 node 0 spent 76 minutes on a pipeline whose scorer read a directory the trainer
@@ -2887,9 +3010,15 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      subject_glob: Optional[list] = None,
                      stage_key_fn=None,
                      on_stage_event=None,
-                     divergence_watch: bool = False) -> RunResult:
+                     divergence_watch: bool = False,
+                     self_metric: Optional[dict] = None) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
-    metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
+    metric.
+
+    `self_metric` (doc 52 row 10a): the reader for the CANDIDATE's own printed number when the
+    pipeline ends in a host scorer stage (`HOST_STAGE_KEY`) — applied to the last candidate-side
+    stage's stdout and recorded as `RunResult.self_metric`, never selected on. None means the
+    primary `metric` reader; it is only ever consulted when a host stage actually ran. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
     (defaults to the repo/workdir root, NOT the eval `cwd` subdir — so a root-level
     requirements file is reachable); a non-zero/timed-out setup short-circuits to a failed
     RunResult (its stderr is the error fed back to the Developer's repair).
@@ -3133,12 +3262,23 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
     # it so the engine can collapse it to the node's best metric (no eval_spec change required).
     trials = json_line_trials(out) if not to else None
+    # THE CANDIDATE'S OWN NUMBER, beside the host's (doc 52 row 10a). Read with the TASK's reader off
+    # the last candidate-side stage's stdout, only when a host scorer actually ran — `out` is the
+    # host stage's stdout, so the primary read above cannot see the self-report, and a reader that
+    # is not the candidate's must not be pointed at what the candidate printed. Absent, not zero,
+    # when the candidate printed nothing readable: silence is not an over-report.
+    _self_m = None
+    if _run.host_receipt is not None and _run.self_out and not to:
+        with _sp("read_self_metric", kind=(self_metric or metric).get("kind", "stdout_json")):
+            _self_m = read_metric(_run.self_out, str(wd), self_metric or metric, wrap=wrap,
+                                  since=_eval_started, env=env)
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
                      extra_metrics=extra, extra_metrics_provenance=extra_channels,
                      extra_metrics_direction=extra_directions,
                      violations=(viol or None), trials=trials,
                      stages=stage_results, stalled=_salvageable_stall(_sig),
-                     diverged=bool(_sig.get("diverged")), metric_subject=_run.metric_subject)
+                     diverged=bool(_sig.get("diverged")), metric_subject=_run.metric_subject,
+                     self_metric=_self_m, host_scorer=_run.host_receipt)
 
 
 # PUBLIC ALIASES for the three helpers `engine/metric_salvage.py` needs. They were reached as

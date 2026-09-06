@@ -525,6 +525,15 @@ class RunResult:
     # stops the record attributing a number to parameters the node never used. It gates nothing and
     # cannot fail a node. None when the node declares no comparable coordinate or no carrier read.
     applied_params: Optional[dict] = None
+    # HOST-SIDE SCORING (doc 52 row 10a, `adapters/repo_task.py::HostScorerSpec`): when the task
+    # declared a host scorer, `metric` above is ITS number and these two carry what the candidate
+    # said about itself. `self_metric` is the candidate's own printed number, read off the last
+    # candidate-side stage's stdout with the task's own reader — recorded, never selected on — and
+    # `host_scorer` is the receipt of the program that produced `metric`: `{argv, program,
+    # program_sha256, program_size}`, taken at the score stage's start, so a reader can prove the
+    # scorer was held constant across every node of the run. None on every other path.
+    self_metric: Optional[float] = None
+    host_scorer: Optional[dict] = None
 
     # SETUP: True when the run's SETUP command — the one the engine itself ran, before the eval —
     # exited non-zero or timed out. The out-of-band twin of `timed_out`/`stalled`/`diverged`, and it

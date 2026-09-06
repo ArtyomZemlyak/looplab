@@ -3536,6 +3536,10 @@ class EvaluateMixin:
                         # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
                         "trials": res.trials or [],
                     }
+                    # THE CANDIDATE'S OWN NUMBER (doc 52 row 10a), only on a host-scored node that
+                    # printed one — absent otherwise, on the rule the two keys below state.
+                    if getattr(res, "self_metric", None) is not None:
+                        _eval_payload["self_metric"] = res.self_metric
                     # Written only when there is something to say. `extra_metrics` is unconditional
                     # (it is `{}` on the ordinary node), but a new UNCONDITIONAL key would change the
                     # `node_evaluated` bytes of every node in every run — including the CUDA-probe
@@ -3623,6 +3627,16 @@ class EvaluateMixin:
                     if isinstance(_subject_prov, dict):
                         _eval_payload["metric_provenance"] = {
                             **(_eval_payload.get("metric_provenance") or {}), **_subject_prov}
+                    # THE HOST SCORER'S RECEIPT (doc 52 row 10a) — WHAT PRODUCED the number, beside
+                    # what it is ABOUT: `{argv, program, program_sha256, program_size}`, digested at
+                    # the score stage's start, merged onto the same provenance dict for the reason
+                    # the subject is. Two nodes whose receipts differ were not scored by the same
+                    # program, and that is the fact a "consistent scoring" claim rests on.
+                    _host_prov = getattr(res, "host_scorer", None)
+                    if isinstance(_host_prov, dict):
+                        _eval_payload["metric_provenance"] = {
+                            **(_eval_payload.get("metric_provenance") or {}),
+                            "host_scorer": _host_prov}
                         # THE ENFORCEMENT, under `require`: an UNBOUND metric gets the EXISTING
                         # `metric_salvaged` violation row, so the fold's `feasible = not violations`
                         # keeps it out of `feasible_nodes()` — counted, in the budget, in the UI and

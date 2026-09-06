@@ -273,15 +273,26 @@ change.
 
 ### 4.1 From the SOTA pass and the six literature agents
 
-OPEN[repo-task-champion-is-picked-on-the-candidates-own-metric] the real GPU task family
-(`adapters/repo_task.py`) elects its champion on the number the candidate's own scorer prints —
-exactly the self-report AIRA₂ replaced with host-side CONSISTENT scoring on a label-hidden split
-(+13.0 / +18.4 percentile points), the never-seen final pick being the "marginal" half. `engine/holdout.py`
-holds only that marginal half, and only for host-graded tasks; the repo task document declares no
-split, `command_eval.py` has no host-side stage, and a "hidden" split is unenforceable while the eval's
-allow-list grants the run dir and Landlock is off — so this is L, and the honest first slice is
-CONSISTENT (host-scored, held constant across candidates) before HIDDEN. Under the survey's coding
-LoopLab is L4-m today; this is the move to L4-v. proof:absent:holdout@looplab/adapters/repo_task.py
+*Slice (a) closed 2026-09-06 (row 10a shipped): the CONSISTENT half. `adapters/repo_task.py::
+HostScorerSpec` — the operator's own scoring program at an absolute path that
+`host_scorer_outside_editables` refuses unless it is outside every editable root — is appended by
+`engine/eval_stages.py::_resolve_stages` as the final protected `score` stage (stamped with
+`command_eval.HOST_STAGE_KEY`, engine-only), the candidate's `cmd` runs before it as `self_score`, its
+number is folded as `Node.self_metric` with `self_report_gap` derived (never selected on), `%subject%`
+expands to the one bound artifact, and `host_scorer_receipt` digests the program at the stage's start
+onto `metric_provenance.host_scorer`. `tests/test_host_scorer.py` drives the refusal, every pipeline
+shape, the runtime, the folded record end to end over the repo fixture (receipt equal on every node,
+replay byte-identical) and the no-host negative control. `generalization_gap` is deliberately NOT
+folded from this pair — the search optimised the host's number, so the self-report is an
+over-reporting audit and not an unseen signal; the unseen signal is slice (b)'s.*
+
+OPEN[repo-task-champion-is-picked-on-the-candidates-own-metric] slice (b), the WITHHELD half:
+the repo task's host scorer is consistent (row 10a) but scores a split the candidate can read, so
+the champion is still picked on a number the candidate could overfit — AIRA₂'s "marginal" half, a
+host-held split scored ONCE at finish for the top-k with selection through `holdout_select`, and
+`generalization_gap` folded for repo runs from that pair. Unenforceable until the run-record fence
+(row 2, shipped) is joined by the Landlock validation on a real GPU eval; a replay-digest proof
+that undeclared runs are byte-identical is part of the slice. proof:absent:HoldoutScorerSpec@looplab/adapters/repo_task.py
 
 *Closed 2026-09-06 (row 3 shipped): the marker `mlebench-search-optimises-the-private-grade` stood
 here. `engine/holdout.py::apply_host_grade` graded every node against the private answers and
