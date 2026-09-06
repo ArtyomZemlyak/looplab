@@ -668,7 +668,7 @@ class DevProbeTools:
             # answering questions and started doing the evaluator's job for it", and `eval_train` is
             # the evaluator.
             return ToolResult(
-                content=(f"(run_probe refused: this run has already made {self._counter.get("n", 0)} probes, "
+                content=(f"(run_probe refused: this run has already made {self._counter.get('n', 0)} probes, "
                          f"the cap set for this run. Probes answer yes/no questions about the "
                          f"environment; MEASURING the solver is what `run_dev_command(\"eval_train\")` "
                          f"is for, and it reports the graded number. Write the change and measure it.)"),
