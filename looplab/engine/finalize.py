@@ -915,7 +915,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
     try:
         final = _build_readmodel_atomic(
             engine.store.read_all(), engine.run_dir / "readmodel.sqlite")
-    except Exception as exc:  # derived cache must never undo a domain terminal
+    except Exception as exc:  # noqa: BLE001 — derived cache must never undo a domain terminal
         final = fold(engine.store.read_all())
         try:
             engine.store.append(EV_READMODEL_SKIPPED, {"error": str(exc)[:300]})

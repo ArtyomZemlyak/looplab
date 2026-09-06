@@ -180,9 +180,13 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
 
     def spy(_self, messages, emit_spec, finalize, fallback, *, state=None, bind_state=True,
             transport_fallback=None, extra_tools=None, extra_turns=0, wall_when_unbounded=0.0,
-            on_budget=None):
+            on_budget=None, tool_result_label=""):
+        # `tool_result_label` joined the helper's signature with the untrusted-evidence envelope
+        # (doc 52 row 13); a spy that refused it silently retired this test, which is the
+        # "test drift after a contract change" doc 50 recorded about `on_budget=` one row up.
         seen.update(state=state, bind_state=bind_state, extra_tools=extra_tools,
-                    extra_turns=extra_turns, wall=wall_when_unbounded, on_budget=on_budget)
+                    extra_turns=extra_turns, wall=wall_when_unbounded, on_budget=on_budget,
+                    tool_result_label=tool_result_label)
         # Fire the observer the way the loop would when a bound cuts the emit short. Recording the
         # kwarg alone would pass for a caller that forwards `None`, and the cutoff key is stamped
         # from THIS callable — a model cannot emit it — so the wiring is the whole property.

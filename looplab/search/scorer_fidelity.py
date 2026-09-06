@@ -529,7 +529,7 @@ def scorer_fidelity_gate(
         try:
             actual_raw = card_actions(case.state, case.policy, case.max_nodes)
             actual, actual_ownership, actual_error = _canonical_actions(actual_raw)
-        except Exception as exc:  # a gate must report candidate failure, never turn it into approval
+        except Exception as exc:  # noqa: BLE001 — a gate must report candidate failure, never turn it into approval
             actual = []
             actual_ownership = []
             actual_error = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_CHARS]

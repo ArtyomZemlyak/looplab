@@ -24,13 +24,14 @@ import time
 from typing import Optional
 
 from looplab.core import tracing
+from looplab.core.containment import contain
 from looplab.core.llm import BudgetExceeded
 from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult,
                                  capability_manifest)
 from looplab.core.redact import redact_secrets
 # The result FENCE is `core/evidence.py`'s (doc 52 row 13); re-exported under the names this
 # module's callers and tests import, so both spellings name the SAME objects.
-from looplab.core.evidence import _fence_pattern, _neutralize_fences, fence_untrusted  # noqa: F401
+from looplab.core.evidence import fence_untrusted  # noqa: F401
 # The typed options bundle (doc 25 AG-01). Re-exported here — and, through `agents/agent.py`, under
 # every historical spelling — because `loop_opts_from_settings` lives in THIS module and now returns
 # one: a caller that imports the factory must be able to name its type from the same place.
@@ -1125,7 +1126,7 @@ def loop_opts_from_settings(settings) -> LoopOptions:
     return opts
 
 
-def resilient(attempt, fallback, *, on_error=None):
+def resilient(attempt, fallback, *, on_error=None, reason: str = "resilient"):
     """Run `attempt()`; on any non-budget failure return `fallback()` instead (doc 25 AG-06).
 
     This is the package's containment rule, written down once. Every agentic entry point needs it and
@@ -1148,12 +1149,17 @@ def resilient(attempt, fallback, *, on_error=None):
 
     `on_error` receives the contained exception for logging/telemetry. It must not raise; if it does,
     the fallback still runs, because a broken observer must not become a broken agent.
+
+    Since doc 52 row 14 every containment here is COUNTED: `core/containment.py::contain` stamps the
+    enclosing span with `reason` (a caller-supplied word, default "resilient") and the exception type,
+    so `looplab timings` can say how many of a run's agentic calls degraded to their fallback.
     """
     try:
         return attempt()
     except BudgetExceeded:
         raise
     except Exception as exc:  # noqa: BLE001 - the containment boundary this helper exists to be
+        contain(reason, exc)
         if on_error is not None:
             try:
                 on_error(exc)

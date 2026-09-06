@@ -21,6 +21,7 @@ from typing import Optional
 
 import orjson
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import NodeStatus, RunState, safe_lesson_node_count
 from looplab.engine.lessons_priors import LESSON_ROLE_RESEARCHER
@@ -545,6 +546,8 @@ class LessonDistillMixin:
             out = agentic_text(client, self._reflect_tools(final), [{"role": "user", "content": prompt}],
                                loop_opts=self._reflect_loop_opts(),
                                answer_desc="generalizable lessons, one theme per line, each tagged [GOOD]/[BAD]") or ""
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:   # noqa: BLE001 - best-effort; a real run writes NO templated fallback
             return []
         from looplab.engine.memory import distilled_claim_stance, parse_credit_lessons
@@ -612,6 +615,8 @@ class LessonDistillMixin:
                    or "").strip()
             return (f"{out[:1800]}\n\n_Verified on `{final.task_id}` (Δ={h.best_delta:+.4g})._"
                     if out else base)
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:   # noqa: BLE001 - best-effort
             return base
 
@@ -653,5 +658,7 @@ class LessonDistillMixin:
                                 answer_desc="a 2-3 sentence reusable causal note on WHY the winner won")
                    or "").strip()
             return out[:700] or None
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:   # noqa: BLE001 - reflection is best-effort
             return None

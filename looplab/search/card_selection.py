@@ -1117,7 +1117,7 @@ def _score_for_policy(
     if callable(hook):
         try:
             return _coerce_card_score(hook(state, card, scoring=scoring))
-        except Exception:  # optional policy extension: fail closed to legacy next_actions
+        except Exception:  # noqa: BLE001 — optional policy extension: fail closed to legacy next_actions
             return None
     if _builtin_policy_name(policy) is None:
         return None
@@ -1246,7 +1246,7 @@ def _hook_select(
         return None
     try:
         raw = hook(state, list(ranked), max_cards=limit)
-    except Exception:
+    except Exception:  # noqa: BLE001 — a raising policy hook fails closed to no selection
         return []
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         return []

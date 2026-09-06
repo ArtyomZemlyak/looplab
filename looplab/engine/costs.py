@@ -365,7 +365,7 @@ def _commit_usage_delta(engine: object, usage_id: str, clean: dict[str, int | fl
     """
     try:
         engine.store.append(EV_LLM_USAGE, _payload(usage_id, clean))
-    except Exception as exc:  # append may have committed before surfacing an error
+    except Exception as exc:  # noqa: BLE001 — append may have committed before surfacing an error
         if not _delta_is_durable(engine, usage_id, clean):
             return False, False, exc
     else:
@@ -494,7 +494,7 @@ def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> 
                             outbox_error: Exception | None = None
                             try:
                                 _persist_outbox(engine, usage_id, clean)
-                            except Exception as exc:  # memory retry remains valid in this process
+                            except Exception as exc:  # noqa: BLE001 — memory retry remains valid in this process
                                 outbox_error = exc
                             if isinstance(outbox_error, _OutboxEvidenceError):
                                 # A same-ID file that we cannot prove is ours is stronger evidence
@@ -522,7 +522,7 @@ def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> 
                     if callable(_previous):
                         try:
                             _previous(dict(clean))
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 — the previous callback's error is recorded and re-surfaced below
                             callback_error = exc
                     if append_error is not None:
                         raise append_error
@@ -623,7 +623,7 @@ def reconcile_cost_accountants(engine: object) -> bool:
                 except _OutboxEvidenceError:
                     complete = False
                     continue
-                except Exception:
+                except Exception:  # noqa: BLE001 — still try events.jsonl below; a successful append is itself the durable boundary
                     # Still try events.jsonl: a successful append is itself the durable boundary.
                     pass
                 # Rescan even on success: this is a RETRY of an id whose first append already failed

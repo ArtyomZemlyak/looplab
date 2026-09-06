@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from looplab.core.llm import BudgetExceeded
 from looplab.tools.vectorstore import Hit, Vector, VectorStore
 
 # Deliberately a superset of memory._STOP: the abstractor sees free-form note/case text, not just task
@@ -123,6 +124,8 @@ class LLMAbstractor:
         try:
             raw = self.complete(self._PROMPT + (text or "")[:4000])
             ab = self._parse(raw)
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:  # noqa: BLE001 — an abstractor must never crash the caller's write path
             ab = None
         if ab is None:

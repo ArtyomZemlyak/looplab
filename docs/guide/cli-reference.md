@@ -717,6 +717,13 @@ reconciliation vs 27.9 min wall clock:
   remainder — work with no span at all, engine bookkeeping, provider waits, and the idle gap while a
   stopped run waits for someone to finalize it. It is reported rather than hidden: a residual you
   can see is a residual you can go and instrument.
+* **Contained failures** — printed only when a span carries one. `core/containment.py::contain`
+  stamps the span it ran under with a `contained` count and a `contained` event (the reason and the
+  exception type), so a run whose watchdog ticks or agentic calls degraded to their fallbacks says
+  so here — `contained failures: N across M span(s)`, then the top reasons — instead of reading as a
+  clean run (doc 52 row 14). It is an honesty count, not an error count: the handler's fallback was
+  the handler's, and nothing about the run's metrics moved. A run with no stamp keeps the report
+  above byte for byte, including every pre-2026-09-06 run on disk.
 
 ### tokens
 

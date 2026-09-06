@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
@@ -777,6 +778,8 @@ class LLMRepoDeveloper:
                 label="Developer·plan", next_label="the implement phase",
                 finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
                 **self._session_opts())
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:  # noqa: BLE001 — a failed plan phase just degrades to a single session
             return []
         steps = []
@@ -816,6 +819,8 @@ class LLMRepoDeveloper:
                       validate=validate,
                       fallback=lambda m: "", on_budget=self._note_session_budget,
                       **self._session_opts())
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception as e:  # noqa: BLE001
             return f"(step {idx} error: {e})"
         return ""
@@ -1517,6 +1522,8 @@ class LLMRepoDeveloper:
                 label="Developer·stages", next_label="the plan & implement phases",
                 finalize=_finalize, fallback=lambda m: [], validate=_validate,
                 on_budget=self._note_session_budget, **self._session_opts()) or []
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:  # noqa: BLE001 — a failed stages phase degrades to the operator cmd alone
             return []
 
@@ -1831,6 +1838,8 @@ class LLMRepoDeveloper:
                           terminal_salvage=True,
                           fallback=lambda m: "", on_budget=self._note_session_budget,
                       **self._session_opts())
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)
             self.last_edit_calls = int(getattr(write, "edit_calls", 0) or 0)
@@ -1958,6 +1967,8 @@ class LLMOnboarder:
                 [{"role": "system", "content": render(
                     self.prompts, "repo_onboarder_system", self._SYS)},
                  {"role": "user", "content": user}]))
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception as e:  # noqa: BLE001 — propose a stub; human will reject/fix
             code = f"def read_metric(workdir):\n    raise RuntimeError({str(e)!r})\n"
         return {

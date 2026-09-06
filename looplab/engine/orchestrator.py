@@ -6518,7 +6518,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             except Exception:
                 try:
                     landed = node_id in fold(self.store.read_all()).nodes
-                except Exception:
+                except Exception:  # noqa: BLE001 — a failed landing probe reads as not landed; the branch below decides
                     landed = False
                 if not landed:
                     self._fail_reserved_build(

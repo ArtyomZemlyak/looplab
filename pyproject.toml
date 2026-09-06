@@ -29,6 +29,7 @@ dev = [
     "fastapi>=0.110",    # server/assistant tests import TestClient and app helpers directly.
     "uvicorn>=0.27",     # keep the dev test environment aligned with the runnable UI server.
     "pytest-split>=0.10", # deterministic CI shards keep portability gates bounded.
+    "ruff>=0.6",          # the BLE001 census only (`[tool.ruff]` below); no style rule is enabled.
 ]
 # Documentation site (MkDocs + Material). `mkdocs serve` for a live preview; CI builds & deploys it.
 docs = ["mkdocs-material>=9.5,<10", "pymdown-extensions>=10"]
@@ -72,6 +73,22 @@ looplab = [
     "serve/ui_dist/assets/*",
     "serve/ui_dist/.vite/*",
 ]
+
+# The ONE lint rule this tree runs, and it is a CENSUS rather than a style: `BLE001` (a blind
+# `except Exception` / `except BaseException` / bare `except`) — doc 52 row 14 / doc 50 XP-03.
+# 675 such handlers exist under `looplab/` and containment is the house style, so the rule is not
+# "do not write one"; it is "every one carries `# noqa: BLE001 — <why this is safe to contain>`",
+# which turns the annotations from cargo into a reviewed allow-list. `tests/test_containment_census.py`
+# re-derives the same census by AST (no `ruff` needed to run the suite) and refuses a new blind
+# handler that states no reason; `python -m ruff check looplab` is the command-line twin.
+# No formatter and no other rule: "match the style of surrounding code" (CLAUDE.md) stays the rule.
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["ui", "runs", "docs", "examples", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["BLE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

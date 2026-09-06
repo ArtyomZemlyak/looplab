@@ -21,6 +21,7 @@ import os
 import re
 from pathlib import Path
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 
 # The reply protocol the inter-stage checker answers in, and the ONLY three things it can mean. The
@@ -1285,6 +1286,8 @@ class EvalStagesMixin:
                      f"Experiment: {idea_text[:400]}\n\nLive log tail:\n{tail}"}]
             try:
                 out = (client.complete_text(msgs) or "").strip()
+            except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+                raise
             except Exception:  # noqa: BLE001 — a judge failure must never turn a timeout into a crash
                 return 0.0
             # ASK FOR EVERYTHING ALLOWED, never for a number. `_granted_grace` clamps to the cap the
@@ -1449,6 +1452,8 @@ class EvalStagesMixin:
                         client, tools, msgs, loop_opts={"max_turns": STAGE_CHECK_LOOK_TURNS},
                         answer_desc=("your ONE-LINE verdict: `OK`, `FAIL <kind>: <evidence>`, or "
                                      "`INCONCLUSIVE: <what you would need to see>`")))
+            except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+                raise
             except Exception:  # noqa: BLE001 — a checker failure must never fail the eval
                 return None
             verdict = parse_stage_check_reply(out, declared=bool(expect))

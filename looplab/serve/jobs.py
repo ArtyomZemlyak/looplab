@@ -297,7 +297,7 @@ class JobRegistry:
                 # Authorization belongs inside this protected region: an asynchronous exception
                 # anywhere after start() returned but before this commit must still cancel the target.
                 launch_state = "authorized"
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 — a non-conforming start() must still cancel the target under the lock; see below
                 # The target, if a non-conforming start() already launched it, is blocked on this
                 # lock until the cancelled state is visible and therefore cannot call the provider.
                 launch_state = "cancelled"
@@ -312,7 +312,7 @@ class JobRegistry:
                     "error_kind": "internal",
                     "error": "background job failed",
                 }
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 — the callback's own failure is recorded as the job's result
                 callback_exc = exc
                 result = {
                     "ok": False,

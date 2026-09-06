@@ -134,7 +134,7 @@ def run_sweep(
         try:
             metric, extras = _normalize(train_fn(params, trial_seed))
             err = ""
-        except Exception as exc:  # isolate: a failed trial must not abort the sweep
+        except Exception as exc:  # noqa: BLE001 — isolate: a failed trial must not abort the sweep
             metric, extras, err = None, {}, f"{type(exc).__name__}: {exc}"
         return {
             "params": params,

@@ -49,6 +49,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 # The median the trajectory reduces its windows with. It was a byte-identical private copy here and
 # in `tools/log_tools.py`, which reduce the SAME log one trust tier apart (the deterministic veto's
@@ -2676,6 +2677,8 @@ class TrainingMonitorMixin:
             # so an agentic hiccup degrades to the historical verdict rather than to no verdict.
             return structured_judge(client, messages, TrainingVerdict, parser="tool_call",
                                     tools=tools, max_turns=_MONITOR_LOOK_TURNS)
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:  # noqa: BLE001 — a parser/endpoint failure means "no verdict this tick", not a crash
             return None
 

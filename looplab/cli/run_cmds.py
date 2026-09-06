@@ -113,7 +113,7 @@ def _run_engine_guarded(eng: Engine):
         # stays resumable.)
         try:
             error_text = str(e)[:500]
-        except BaseException:  # an adversarial __str__ must not replace the root exception
+        except BaseException:  # noqa: BLE001 — an adversarial __str__ must not replace the root exception
             error_text = type(e).__name__
         error = {"reason": RUN_STOP_ERROR, "error": error_text}
         try:
@@ -477,7 +477,7 @@ def _calibration_envelope_task_dict(task, settings) -> dict:
         from looplab.core.hardware import effective_gpu_inventory
         if not effective_gpu_inventory():
             calibration_errors.append("an effective visible GPU must be detected")
-    except Exception:
+    except Exception:  # noqa: BLE001 — an undetectable inventory is a stated calibration error, not a crash
         calibration_errors.append("GPU inventory could not be detected")
     if calibration_errors:
         raise typer.BadParameter(

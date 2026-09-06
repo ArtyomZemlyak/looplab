@@ -118,9 +118,22 @@ def test_the_factory_reaches_search_and_tools_only_through_function_local_import
             module_level |= {inner.module for inner in ast.walk(node)
                              if isinstance(inner, ast.ImportFrom) and inner.module
                              and "TYPE_CHECKING" not in ast.unparse(node.test)}
+    # `agents/providers.py` (the shared providers, extracted 2026-09-06) is the ONE agents module
+    # the factory may import at module level, because the re-export identity `adapters.tasks`
+    # relies on needs a module-level binding — and it is admissible only while it keeps the same
+    # property itself, which the second assertion holds: its own module-level imports reach
+    # nothing in `search`, `tools` or `agents`, so the cycle stays exactly as open as before.
     offenders = sorted(m for m in module_level
-                       if m.startswith(("looplab.search", "looplab.tools", "looplab.agents.")))
+                       if m.startswith(("looplab.search", "looplab.tools", "looplab.agents."))
+                       and m != "looplab.agents.providers")
     assert offenders == [], f"module-level imports that must stay function-local: {offenders}"
+    providers_tree = ast.parse((_PKG / "agents/providers.py").read_text(encoding="utf-8"))
+    providers_level = {node.module for node in providers_tree.body
+                       if isinstance(node, ast.ImportFrom) and node.module}
+    assert not [m for m in providers_level
+                if m.startswith(("looplab.search", "looplab.tools", "looplab.agents."))], (
+        "agents/providers.py must keep every search/tools/agents import function-local, or the "
+        "factory's module-level import of it closes the cycle this guard exists to keep open")
 
 
 def test_the_task_adapter_annotation_does_not_create_an_import_cycle():

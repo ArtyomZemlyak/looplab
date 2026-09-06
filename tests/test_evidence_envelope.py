@@ -210,11 +210,10 @@ def _drive_facade(monkeypatch, method, *args, envelope: bool, **kw):
 _NODE = type("N", (), {"id": 7, "code": "print(1)"})()
 
 
-def test_triage_off_is_the_historical_prompt():
+def test_triage_off_is_the_historical_prompt(monkeypatch):
     """`tests/test_triage_diagnostician_replay.py` pins `system == _TRIAGE_SYSTEM`; this pins the
     user turn too, and that no fence label is handed to the loop."""
-    seen = _drive_facade(pytest.MonkeyPatch(), "triage_crash", _NODE, "boom", 1, envelope=False,
-                         history="H")
+    seen = _drive_facade(monkeypatch, "triage_crash", _NODE, "boom", 1, envelope=False, history="H")
     assert seen["messages"][0]["content"] == UnifiedAgent._TRIAGE_SYSTEM
     assert "--- ERROR (stderr tail) ---\nboom\nH\n--- CODE (tail) ---\nprint(1)\n" in seen["messages"][1]["content"]
     assert LABEL not in seen["messages"][1]["content"]
@@ -308,10 +307,11 @@ def test_a_tool_stamped_result_inside_a_fencing_loop_is_marked_once():
 
 
 def test_every_construction_site_threads_the_one_settings_reader():
-    """By AST over the three modules that build the consumers: each `LiteratureTools(` /
-    `WebTools(` call passes `envelope=envelope_enabled(...)`, `UnifiedAgent(` passes
-    `evidence_envelope=envelope_enabled(...)`, and `make_strategist` reads the same function."""
-    from looplab.agents import deep_research, factory, strategist
+    """By AST over the modules that build the consumers (`agents/providers.py` holds the shared
+    providers since 2026-09-06): each `LiteratureTools(` / `WebTools(` call passes
+    `envelope=envelope_enabled(...)`, `UnifiedAgent(` passes `evidence_envelope=envelope_enabled(...)`,
+    and `make_strategist` reads the same function."""
+    from looplab.agents import deep_research, factory, providers, strategist
 
     def calls_named(module, name):
         tree = ast.parse(inspect.getsource(module))
@@ -325,7 +325,7 @@ def test_every_construction_site_threads_the_one_settings_reader():
                 return True
         return False
 
-    for module, name, kwarg in ((factory, "LiteratureTools", "envelope"),
+    for module, name, kwarg in ((providers, "LiteratureTools", "envelope"),
                                 (factory, "WebTools", "envelope"),
                                 (deep_research, "WebTools", "envelope"),
                                 (factory, "UnifiedAgent", "evidence_envelope")):

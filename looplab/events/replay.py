@@ -653,7 +653,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # `_create_node` re-computes node_id=0 forever -> a 184MB node_created(0) runaway. Let
         # it propagate so a transient glitch surfaces instead of self-sustaining into a spin.
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 — skip just this event (it was `continue` in the loop arm); the fold stays total
         return   # (was `continue` in the loop arm: skip just this event)
     st.nodes[n.id] = n
     _fold_node_concept_envelope(st, ctx, n, d, current)
@@ -998,7 +998,7 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             for t_d in (_raw_trials if isinstance(_raw_trials, (list, tuple)) else []):
                 try:
                     trials.append(Trial(**t_d))
-                except Exception:
+                except Exception:  # noqa: BLE001 — a malformed trial row is skipped, never allowed to break the fold
                     continue
             n.trials = trials
             _charge_terminal_cost(st, n, d, ctx)
@@ -3055,7 +3055,7 @@ def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
             hid = str(receipt.get("id") or hypothesis_id(receipt["statement"]))
             if hid in st.hypotheses_abandoned:
                 st.hypotheses_abandoned.remove(hid)
-        except Exception:
+        except Exception:  # noqa: BLE001 — an unreadable receipt cannot reopen a hypothesis; the fold stays total
             pass
 
 

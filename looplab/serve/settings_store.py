@@ -317,7 +317,7 @@ class SettingsStore:
         if effective_shared_active and shared_key:
             try:
                 bound_api_key_for(settings, settings.llm_base_url)
-            except Exception:  # caller-side preflight rejects when its plan really needs this pair
+            except Exception:  # noqa: BLE001 — caller-side preflight rejects when its plan really needs this pair
                 pass
             else:
                 env[_SECRET_ENV["llm_api_key"]] = shared_key
@@ -466,7 +466,7 @@ class SettingsStore:
         overrides = self.load_ui_settings()
         try:
             return self.resolve_settings(overrides).masked_snapshot()
-        except Exception:
+        except Exception:  # noqa: BLE001 — unresolvable overrides fall back to the schema defaults merged with what was saved
             base = (s or Settings()).masked_snapshot()
             base.update(overrides)
             base.pop("llm_api_key_base_url", None)

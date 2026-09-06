@@ -1135,15 +1135,20 @@ row below, so the table shrinks as work lands and the live index is `grep -rn 'O
 number written here. A count in this section that someone kept up to date would be the fifth status
 vocabulary CLAUDE.md's open-item rules exist to abolish.
 
-OPEN[containment-is-unmeasured] 743 handlers catch `Exception`/`BaseException` in production and
-458 of them neither re-raise, log, record nor assign; 652 `# noqa: BLE001` annotations (re-derived
-2026-09-06; 636 on 2026-09-02) decorate them while no linter is configured anywhere in the tree, so the annotations document nothing and
-nothing counts a containment. The review found the cost at the seams (a swallowed budget stop at a
-selection site, a run dropped from the run list on a fold error, an outage that reads as a clean
-verdict, a refused case the finalize step still marks done). Adopt the linter with that rule and
-turn the existing annotations into a reviewed allow-list; then a `contain(span, reason)` helper so
-a containment is countable rather than invisible.
-proof:`missing:.ruff.toml+absent:[tool.ruff]@pyproject.toml`
+*Closed 2026-09-06 (doc 52 row 14 shipped): the marker `containment-is-unmeasured` stood here.
+`[tool.ruff]` selects `BLE` and nothing else; `python -m ruff check looplab` is clean because every
+one of the 670 blind, non-re-raising handlers now carries `# noqa: BLE001` (the 64 bare ones were
+reviewed and given a reason in the same change), and `tests/test_containment_census.py` re-derives
+the census by AST: a new blind handler must state its reason, and the 103 pre-existing sites whose
+annotation says nothing are a shrink-only backlog in `tests/data/containment_unreviewed.txt` — the
+reviewed allow-list, one row deleted per reason written. `core/containment.py::contain(reason, exc)`
+stamps the enclosing span and counts, refuses `BudgetExceeded`, and `looplab timings` prints the
+count; `agents/tool_loop.py::resilient` counts through it. The paid-call funnel is pinned: thirteen
+blind handlers around paid calls in the run path gained `except BudgetExceeded: raise` and the
+guard names any new one. Not done here: the 103-row backlog itself (start with `engine/`), the
+seams that need a design call rather than a stamp (a run dropped from `/api/runs` on a fold error,
+`concept_map.py`'s outage-vs-empty verdict, `lessons.py::store_case`), and `serve/`'s own loops,
+which sit outside the funnel's run path by design. Deleted per the index rule.*
 
 OPEN[claude-md-has-no-size-budget] the agent guide is 238,234 bytes (2026-09-06; 232,919 on
 2026-09-02) — about 60k tokens on every

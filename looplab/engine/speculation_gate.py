@@ -358,7 +358,7 @@ def _receipt_refusal_detail(receipt_path, validated) -> str:
                 ),
                 "",
             )
-    except Exception:
+    except Exception:  # noqa: BLE001 — the suffix is descriptive; an unreadable receipt drops it
         return ""
     return f" — {reason}" if reason else ""
 
@@ -410,7 +410,7 @@ def admit_speculation_lane(engine, rt: CalibrationRuntime, gate_receipt) -> None
         try:
             from looplab.core.hardware import effective_gpu_inventory
             gpu_inventory = _stable_effective_gpu_inventory(effective_gpu_inventory())
-        except Exception:
+        except Exception:  # noqa: BLE001 — an uninventoriable box is no GPU, which the calibration gate refuses
             gpu_inventory = []
         if not gpu_inventory:
             calibration_errors.append(
@@ -576,7 +576,7 @@ def admit_speculation_lane(engine, rt: CalibrationRuntime, gate_receipt) -> None
                 # drops out of the description when it cannot be computed.
                 try:
                     _task_profile = speculation_task_profile_digest(task)
-                except Exception:
+                except Exception:  # noqa: BLE001 — resolved defensively; the term drops out of the description when it cannot be computed
                     _task_profile = _gate_receipt.get("task_profile_sha256")
                 mismatches = [
                     text for ok, text in (

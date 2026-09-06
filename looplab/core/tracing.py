@@ -820,6 +820,21 @@ def tool(name: str, arguments=None):
         yield ObservationHandle(h)
 
 
+def current_span_handle() -> Optional["SpanHandle"]:
+    """A handle on the span currently open on THIS task/thread, or None when nothing is traced.
+
+    For code that wants to annotate whatever span it happens to be running under without holding
+    a Tracer or a handle — `core/containment.py::contain` stamps the enclosing span this way. The
+    OTel mirror is not reachable from the record alone, so the handle writes the durable
+    `spans.jsonl` record only; every purpose-built span still mirrors as before.
+    """
+    stack = _stack.get()
+    if not stack:
+        return None
+    rec = stack[-1]
+    return SpanHandle(rec, None) if isinstance(rec, dict) else None
+
+
 @contextmanager
 def operation(name: str, **attributes):
     """Open a first-class OPERATION span (a phase / sub-loop — propose / stages / plan / implement /
@@ -921,7 +936,7 @@ def _after_export_fork_child() -> None:
                 # ordinary collection during the child lifetime; preserve fork progress over a lock.
                 try:
                     os.close(fd)
-                except Exception:
+                except Exception:  # noqa: BLE001 — last-resort fd close during fork recovery; the quarantine already covers it
                     pass
     _EXPORT_OPEN_STREAMS = {}
     _EXPORT_OPEN_FDS_GUARD = threading.Lock()
@@ -1977,6 +1992,11 @@ class SpanHandle:
     def __init__(self, rec: dict, otel_span):
         self._rec = rec
         self._otel = otel_span
+
+    @property
+    def attributes(self) -> dict:
+        """The span's durable attribute map, READ side (writes go through `set`, which sanitizes)."""
+        return self._rec.setdefault("attributes", {})
 
     # `spans.jsonl` and the OTLP exporter are a DURABLE egress boundary, so redaction has to happen
     # here rather than at the call site. Every purpose-built path already sanitizes before writing

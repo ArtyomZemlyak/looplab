@@ -51,6 +51,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 # The confidence normalizer is the training monitor's, deliberately not a second spelling: both watchdogs
 # must treat a NaN/absent/non-numeric model confidence the same way (observable at 0.0, never authority
@@ -700,6 +701,8 @@ class AshaMonitorMixin:
             from looplab.trust.judge import structured_judge
             return structured_judge(client, messages, AshaVerdict, parser="tool_call",
                                     tools=tools, max_turns=_MONITOR_LOOK_TURNS)
+        except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
+            raise
         except Exception:  # noqa: BLE001 — a parser/endpoint failure means "no verdict", not a crash
             return None
 

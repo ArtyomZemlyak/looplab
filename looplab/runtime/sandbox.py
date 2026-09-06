@@ -1312,7 +1312,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                             logf.flush()
                     if scan and text:
                         _observe_health(key, text)
-        except Exception:
+        except Exception:  # noqa: BLE001 — a pump thread's write/scan error must not kill the drain; the child's exit is the signal
             pass
         finally:
             if decoder is not None:
@@ -1324,11 +1324,11 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                             logf.flush()
                     if scan:
                         _observe_health(key, text, final=True)
-                except Exception:
+                except Exception:  # noqa: BLE001 — the final flush is best-effort; the exit code carries the outcome
                     pass
             try:
                 stream.close()
-            except Exception:
+            except Exception:  # noqa: BLE001 — closing a dead pipe is best-effort
                 pass
 
     t_out = threading.Thread(target=_pump, args=(proc.stdout, "out"), daemon=True)
@@ -1355,7 +1355,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 _kill_tree(proc)
                 try:
                     proc.wait(timeout=10)
-                except Exception:
+                except Exception:  # noqa: BLE001 — the tree is already killed; a wait timeout must not block the watchdog
                     pass
                 break
             if (stall_timeout and not stalled.is_set()
@@ -1371,7 +1371,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 _kill_tree(proc)
                 try:
                     proc.wait(timeout=10)
-                except Exception:
+                except Exception:  # noqa: BLE001 — the tree is already killed; a wait timeout must not block the watchdog
                     pass
                 break
             if cancel is not None and cancel.is_set():
@@ -1379,7 +1379,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 _kill_tree(proc)
                 try:
                     proc.wait(timeout=10)
-                except Exception:
+                except Exception:  # noqa: BLE001 — the tree is already killed; a wait timeout must not block the watchdog
                     pass
                 timed_out = True
                 break
@@ -1426,7 +1426,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 _kill_tree(proc)
                 try:
                     proc.wait(timeout=10)
-                except Exception:
+                except Exception:  # noqa: BLE001 — the tree is already killed; a wait timeout must not block the watchdog
                     pass
                 timed_out = True
                 break
@@ -1451,12 +1451,12 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
         try:
             logf.write(active_marker)
             logf.flush()
-        except Exception:
+        except Exception:  # noqa: BLE001 — the marker is a diagnostic aid; the kill is the decision
             pass
     if logf is not None:
         try:
             logf.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — closing the log is best-effort after the child exited
             pass
     rc = proc.returncode if proc.returncode is not None else -1
     out = b"".join(bufs["out"]).decode("utf-8", "replace")
@@ -1644,7 +1644,7 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
         except psutil.NoSuchProcess:
             pass
         return
-    except Exception:
+    except Exception:  # noqa: BLE001 — the psutil walk is best-effort; the killpg fallback below still runs
         pass
     # Last-resort fallback (no psutil, or the group kill above failed): OS-branched WHOLE-TREE kill.
     # Plain proc.kill() on Windows ends only the direct child, orphaning grandchildren
@@ -1674,10 +1674,10 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
             proc.kill()
         else:
             os.killpg(os.getpgid(proc.pid), 9)
-    except Exception:
+    except Exception:  # noqa: BLE001 — killpg/taskkill failed; fall through to a direct kill
         try:
             proc.kill()
-        except Exception:
+        except Exception:  # noqa: BLE001 — last-resort kill; nothing left to escalate to
             pass
 
 

@@ -194,13 +194,14 @@ def test_the_FACTORY_forwards_the_role_it_was_given():
     """The other half, and it is worthless alone: under the OLD predicate a forwarded
     `"strategist"` matched no tagged row at all, so this forward without the escape above takes
     that role from 46 of the live store's 50 lessons down to the 10 untagged ones. Driven over the
-    real `_shared_providers` so the wiring is observed rather than asserted about the source."""
+    real `_shared_providers` so the wiring is observed rather than asserted about the source —
+    which lives in `agents/providers.py` since its 2026-09-06 extraction out of the factory."""
     import ast
     import inspect
 
-    from looplab.agents import factory
+    from looplab.agents import providers
 
-    tree = ast.parse(inspect.getsource(factory))
+    tree = ast.parse(inspect.getsource(providers))
     calls = [n for n in ast.walk(tree)
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
              and n.func.id == "MemoryTools"]

@@ -1834,7 +1834,7 @@ class LiteLLMClient:
             if cost_is_reported(raw_cost):
                 payload["cost"] = _safe_cost(raw_cost)
             return _normalize_usage(payload)
-        except Exception:
+        except Exception:  # noqa: BLE001 — usage normalization is best-effort; None means unreported, never a fabricated number
             return None
 
     def complete_text(self, messages: list[dict]) -> str:

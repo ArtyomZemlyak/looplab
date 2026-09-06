@@ -1356,7 +1356,7 @@ class CardReservationMixin:
         if not isinstance(idea, Idea):
             try:
                 idea = Idea.model_validate(idea)
-            except Exception:
+            except Exception:  # noqa: BLE001 — an unparseable proposal is refused, never coerced
                 return None
         if (type(proposal_node_ceiling) is not int or proposal_node_ceiling < 0
                 or type(at_node) is not int or at_node < proposal_node_ceiling):
@@ -1825,7 +1825,7 @@ class CardReservationMixin:
             idea = self._rebuilt_claim_idea(
                 card.id, card.seed_statement, receipt_action, card.rationale,
                 concepts=calibration_concepts)
-        except Exception:  # hostile/future Card data cannot escape the closed Idea schema
+        except Exception:  # noqa: BLE001 — hostile/future Card data cannot escape the closed Idea schema
             return None
         rebuilt_action = self._card_action(
             idea, parents, parent_generations,
@@ -1939,7 +1939,7 @@ class CardReservationMixin:
                         candidate.id for candidate in card_selection_set(
                             state, self.policy, max_nodes, scoring=treatment)
                     ]
-            except Exception:  # policy/Card hooks must never weaken the ownership boundary
+            except Exception:  # noqa: BLE001 — policy/Card hooks must never weaken the ownership boundary
                 return self._refuse_card_claim("the Card selector raised while revalidating the lane")
             if requested_ids != current_ids:
                 return self._refuse_card_claim(
