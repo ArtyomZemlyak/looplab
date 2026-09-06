@@ -654,9 +654,16 @@ retransmits the complete, growing folded state on every event (its own `CODEX AG
 run's tab costs O(events × state) bytes; the fix is a delta stream keyed on the seq the client last
 saw. proof:`present:f"data: {json.dumps(payload)}\n\n")@looplab/serve/routers/runs.py`
 
-OPEN[cross-run-tools-are-a-process-wide-flag] `serve/assistant.py` mounts `CrossRunTools` on one
-process-wide `cross_run_enabled` flag, not per principal (its own `CODEX AGENT` note: a multi-user
-security gap on the shared hub). proof:`present:if cross_run_enabled:@looplab/serve/assistant.py`
+*Closed 2026-09-06 (row 29 shipped, slice a): the marker `cross-run-tools-are-a-process-wide-flag`
+stood here. `serve/principal.py` names the party — `owner` (the token holder), `local` (the
+unauthenticated single-user plane), `review` (a capability, with its link id), `anonymous` — stamped
+on the request by the auth middlewares in `server.py`; `portfolio_access(principal, settings)` is the
+one decision that mounts `CrossRunTools` and `ConceptGovernanceTools`, evaluated per turn from the
+principal the route captured, pinned on a standing watch at arming, and refused for a review or
+anonymous party whatever the flag says; the subagent runs as the same party. The prompt's tool
+mirror uses the same decision. What this is NOT: per-user identity — the owner token is a
+per-deployment credential, so the change is the seam a per-user identity plugs into. Deleted per the
+index rule.*
 
 OPEN[parallel-build-is-a-bulk-synchronous-barrier] `engine/orchestrator.py`'s parallel build is a
 join over a `parallel_build_batch` task group — a barrier, not the steady-state pool AIRA₂ dispatches

@@ -41,6 +41,8 @@ from looplab.adapters.tasks import make_llm_client  # noqa: F401 — patchable r
 from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_process_tree re-exported
     _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks,
     install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
+from looplab.serve.principal import (ANONYMOUS_PRINCIPAL, LOCAL_PRINCIPAL, OWNER_PRINCIPAL,
+                                     review_principal, stamp as _stamp_principal)
 from looplab.serve.owner_token import (
     log_owner_token_decision, on_shared_origin, resolve_owner_token)
 from looplab.serve.projects import ProjectStore
@@ -584,6 +586,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                         "review_read_only", 403)
                 # A review identity is independently scoped even if an owner header is also present:
                 # bearer composition must never promote a read-only link into the owner plane.
+                _stamp_principal(request, review_principal(review))
                 response = await call_next(request)
                 response.headers["Cache-Control"] = "no-store"
                 response.headers["Referrer-Policy"] = "no-referrer"
@@ -597,6 +600,10 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                     and not _owner_authenticated(request)):
                 return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
                                     status_code=401)
+            # WHO THIS IS (`serve/principal.py`): the token holder is the `owner` principal; a request
+            # on the small open surface that presented nothing is `anonymous` — never promoted.
+            _stamp_principal(request, OWNER_PRINCIPAL if _owner_authenticated(request)
+                             else ANONYMOUS_PRINCIPAL)
             response = await call_next(request)
             # Keep authenticated API responses out of shared/browser caches, but do not defeat the
             # immutable cache policy of Vite's content-hashed /assets.  The owner and review HTML
@@ -624,6 +631,9 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
         async def _scope_review_capability(request: "Request", call_next):
             review_token = request.headers.get(REVIEW_HEADER, "")
             if not review_token:
+                # No token resolved: the historical single-user plane, named `local` so the
+                # portfolio decision (`serve/principal.py`) can tell it from a review link.
+                _stamp_principal(request, LOCAL_PRINCIPAL)
                 return await call_next(request)
             try:
                 review = reviews.resolve(review_token)
@@ -635,6 +645,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                 return _review_denial(
                     "read-only review capability does not permit this request",
                     "review_read_only", 403)
+            _stamp_principal(request, review_principal(review))
             response = await call_next(request)
             response.headers["Cache-Control"] = "no-store"
             response.headers["Referrer-Policy"] = "no-referrer"
