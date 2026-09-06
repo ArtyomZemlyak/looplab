@@ -12570,3 +12570,34 @@ and it is added now.
 The shape is the document's own, at the largest size it has reached: not a breakage, a quiet
 mismatch between what I thought I was measuring and what I was measuring — sustained for three
 sweeps by the fact that everything I built to check it inherited the same mistake.
+
+## §300 — the bench is ready for a full campaign, and what it took
+
+The operator's decision was **first the ruler, then launch**. That turned out to mean four things,
+only one of which I had expected.
+
+**1. Fifteen of the twenty campaign tasks had no data on this box.** Measured, not assumed: only
+`discrete_log`, `edge_expansion`, `pagerank`, `spectral_clustering` and `pde_heat1d` had a dataset.
+The other fifteen were fetched from HuggingFace — 874 MiB, of which `convex_hull` alone is 815 MiB
+across 202 shards. `.hf_datasets` went from 129 MB to 1006 MB; 65 GB free on the overlay, so no
+pressure.
+
+**2. Eleven of the fifteen then failed to time at all**, with
+`Task 'multi_dim_knapsack' could not be imported`. Not a missing implementation — all 154 are
+present. The import failed because I was running the timing under `/opt/conda/bin/python`, which has
+no `ortools`. That was the first symptom of §299, and chasing it is what exposed the whole error.
+
+**3. The ten baselines I had already written under conda were retired**, archived beside the others,
+and every one of the fifteen tasks was re-timed under `$BENCH/AlgoTune/.venv/bin/python` — the
+interpreter `run_probe.sh` actually scores with.
+
+**4. The bench now holds 40 cache entries covering all 20 campaign tasks, test and train**, up from
+9 covering 5. Thirty carry §297's provenance sidecar, now including the interpreter field §299
+added; **none names conda**. `ruler_check` reports `all 39 in regime w22x1r3, 100+ instances each`
+with no problems, and the four constants the standing sweep quotes hold within 3.6 %.
+
+What is *not* done, and should be said plainly rather than left implied: nine of the forty entries
+predate the sidecar and will never have one, so their conditions remain unrecorded — the same gap
+that made §292–§298 possible, closed going forward and not backwards.
+
+The campaign can now run 20 tasks against a ruler measured under the interpreter that will score it.
