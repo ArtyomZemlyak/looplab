@@ -98,6 +98,7 @@ from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagn
                                               diagnosis_repair_lead,
                                               coerce_evidence, coerce_findings,
                                               diagnosed_failure_reason, diagnosis_tools,
+                                              reason_override_refused,
                                               engine_observed_facts, evidence_citation_resolves,
                                               resolve_findings)
 # NOTE what is deliberately NOT imported here: `UNCLASSIFIED_REASON` and `REASON_SOURCE_UNDIAGNOSED`.
@@ -2084,6 +2085,10 @@ class EvaluateMixin:
             # nothing" (`failure_diagnosis.EVIDENCE_SOURCE_NONE`).
             _evidence = None
             _evidence_resolved = None
+            # WHY THE ENGINE'S OWN WORD STOOD over a diagnostician that named a different one — the
+            # evidence source the override lacked (`failure_diagnosis.OVERRIDE_EVIDENCE_REQUIRED`),
+            # or None when no override was refused. Omitted from the row when None, same rule.
+            _override_refused = None
             # …and the ACCOUNT plus the trail behind it, on the same rule. `None`/`None` and not
             # `""`/`[]`, deliberately: an empty summary and an empty list are a diagnostician that
             # was asked and wrote nothing down, which is a real and different answer from one that
@@ -2371,6 +2376,7 @@ class EvaluateMixin:
                 # one, and that is exactly the property the summary is trusted for.
                 _evidence, _evidence_resolved = None, None
                 _summary, _findings = None, None
+                _override_refused = None
                 # The node's whole account of what went wrong — see `_eval_failure_text`, which is
                 # where the no-metric hint and the blank-stderr fallback now live.
                 err = self._eval_failure_text(res)
@@ -2699,6 +2705,11 @@ class EvaluateMixin:
                 # `idea_rejected`, which is the engine's word for "the lineage is wrong" and not a
                 # classification of the eval at all — it stays the last word, and `_reason_source`
                 # below records that the engine chose it.
+                # …and WHY the engine's word stood when it did: the source the override lacked
+                # (doc 44's "text may nominate, never decide" at the one pair where text overrides a
+                # stage verdict). Read off the same verdict and the same deterministic answer the
+                # rule above read, BEFORE `reason` is rebound, so the two cannot disagree.
+                _override_refused = reason_override_refused(reason, triage) or None
                 reason, _reason_source = diagnosed_failure_reason(reason, triage)
                 # WHERE THE DIAGNOSTICIAN SAID IT LOOKED, and whether that citation resolves. The
                 # evidence is not decoration: no out-of-band probe exists for a failure KIND (see
@@ -3202,6 +3213,11 @@ class EvaluateMixin:
                         **({"reason_evidence": _evidence} if _evidence else {}),
                         **({"reason_evidence_resolved": _evidence_resolved}
                            if _evidence_resolved is not None else {}),
+                        # WHY THE ENGINE'S WORD STOOD, when a diagnostician named another and the
+                        # override was refused for lacking this evidence source. Additive,
+                        # fold-ignored, omitted when no override was refused.
+                        **({"reason_override_refused": _override_refused}
+                           if _override_refused else {}),
                         # WHAT HAPPENED, IN PROSE — same additive, fold-ignored, omitted-when-absent
                         # rule as the pair above, and the absence means the same thing: nobody was
                         # asked. This is the column that makes the row readable a week later
@@ -3735,6 +3751,8 @@ class EvaluateMixin:
                         data["reason_evidence"] = _evidence
                     if _evidence_resolved is not None:
                         data["reason_evidence_resolved"] = _evidence_resolved
+                    if _override_refused:
+                        data["reason_override_refused"] = _override_refused
                     # THE ACCOUNT AND ITS TRAIL, on the same rule as on `node_repaired` above. This
                     # is the row a whole run is audited from and the row most likely to be read
                     # after everything else is gone, which is exactly why the SUMMARY has to carry

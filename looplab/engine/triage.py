@@ -310,6 +310,7 @@ def _failure_reason(res) -> str:
 # would silently mishandle. A renamed rule with changed semantics must break its callers.
 from looplab.engine.failure_diagnosis import (       # noqa: E402,F401  (re-export beside its classifier)
     DIAGNOSABLE_ENGINE_REASONS,
+    DIAGNOSED_CONTEXT_BOUND,
     DIAGNOSED_ENGINE_FINAL_OVERLAP,
     DIAGNOSED_FAILURE_REASONS,
     DIAGNOSED_ONLY_REASONS,
@@ -321,16 +322,19 @@ from looplab.engine.failure_diagnosis import (       # noqa: E402,F401  (re-expo
     EVIDENCE_SOURCES,
     FINDINGS_CAP,
     FINDING_MEANS_CAP,
+    OVERRIDE_EVIDENCE_REQUIRED,
     REASON_SOURCE_ENGINE,
     REASON_SOURCE_TRIAGE,
     REASON_SOURCE_UNDIAGNOSED,
     REASON_SOURCES,
     UNCLASSIFIED_REASON,
+    cited_sources,
     coerce_diagnosis_summary,
     coerce_evidence,
     coerce_failure_kind,
     coerce_findings,
     diagnosed_failure_reason,
+    reason_override_refused,
     resolve_findings,
 )
 

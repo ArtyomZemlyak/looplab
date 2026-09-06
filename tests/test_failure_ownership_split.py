@@ -38,14 +38,25 @@ THE THREE PROPERTIES THAT MATTER, and each is one wrong line away from a real in
   3. `unclassified` IS NOT A REGEX. When a WIRED diagnostician cannot answer, the row must say so
      rather than silently keeping a residual that reads identically to agreement.
 
-WHY THE OVERLAP IS ONE MEMBER AND WHY IT IS NOT DISJOINTNESS. The brief that commissioned this
+WHY THE OVERLAP IS TWO MEMBERS AND WHY IT IS NOT DISJOINTNESS. The brief that commissioned this
 asked for "no engine-caused reason is agent-decidable, and vice versa". The first half is the
-asymmetry above and is enforced. The second half is asked for exactly one member, `not_learning`,
-and is REFUSED with its argument in `DIAGNOSED_ENGINE_FINAL_OVERLAP` — because disjointness
-conflates a CAUSE vocabulary with a PRODUCER partition, and because without it this change cannot
-fix its own motivating measurement (16 `runs/rubertlite-dense-retrieval` terminals whose real cause
-is "the loss never moved" and whose label is a stage checker's `check_failed`). The exception is
-registered, bounded to one name, and this file asserts it is EXACTLY that one.
+asymmetry above and is enforced. The second half is asked for exactly two members, `not_learning`
+and (since 2026-09-06) `diverged`, and is REFUSED with its argument in
+`DIAGNOSED_ENGINE_FINAL_OVERLAP` — because disjointness conflates a CAUSE vocabulary with a
+PRODUCER partition, and because without it this change cannot fix its own motivating measurement
+(16 `runs/rubertlite-dense-retrieval` terminals whose real cause is "the loss never moved" and
+whose label is a stage checker's `check_failed`; and, for `diverged`, the four of them whose loss
+went non-finite before any divergence watchdog existed, which the judgebench scored as unwinnable
+by construction). The exceptions are registered, bounded by name, and this file asserts the set is
+EXACTLY those two — and that `diverged` is further bound to a tagged `check_failed`
+(`DIAGNOSED_CONTEXT_BOUND`), the one context in which a model naming it contradicts nothing the
+engine observed.
+
+THE FOURTH PROPERTY (2026-09-06): AT THE ONE PLACE TEXT OVERRIDES A STAGE VERDICT, TEXT MAY
+NOMINATE AND NOT DECIDE. The bench measured the diagnostician overriding a CORRECT `check_failed`
+with `not_learning` on 7-9 of 15 rows, citing the error text — the checker's own refusal — or
+nothing. `OVERRIDE_EVIDENCE_REQUIRED` keys that pair to a `log` citation; without one the engine's
+word stands and the row says which source the override lacked.
 """
 from __future__ import annotations
 
@@ -59,17 +70,21 @@ import pytest
 from looplab.core.models import FAILURE_REASONS
 from looplab.engine import crash_repair as cr
 from looplab.engine.failure_diagnosis import (DIAGNOSABLE_ENGINE_REASONS,
+                                              DIAGNOSED_CONTEXT_BOUND,
                                               DIAGNOSED_ENGINE_FINAL_OVERLAP,
                                               DIAGNOSED_FAILURE_REASONS,
                                               DIAGNOSED_ONLY_REASONS,
                                               DIAGNOSIS_CODE_LOOK_TURNS,
                                               DIAGNOSIS_UNAVAILABLE_KEY, ENGINE_FINAL_REASONS,
                                               EVIDENCE_SOURCE_CODE, EVIDENCE_SOURCE_LOG,
-                                              EVIDENCE_SOURCE_NONE, REASON_SOURCE_ENGINE,
+                                              EVIDENCE_SOURCE_NONE, OVERRIDE_EVIDENCE_REQUIRED,
+                                              REASON_SOURCE_ENGINE,
                                               REASON_SOURCE_TRIAGE, REASON_SOURCE_UNDIAGNOSED,
-                                              REASON_SOURCES, UNCLASSIFIED_REASON, coerce_evidence,
+                                              REASON_SOURCES, UNCLASSIFIED_REASON, cited_sources,
+                                              coerce_evidence,
                                               coerce_failure_kind, diagnosed_failure_reason,
-                                              evidence_citation_resolves)
+                                              evidence_citation_resolves,
+                                              reason_override_refused)
 from looplab.engine.metric_salvage import NEVER_SALVAGED_REASONS, salvage_condition
 from looplab.engine.triage import (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
                                    _failure_reason, _rule_triage)
@@ -254,11 +269,17 @@ def test_the_engine_can_no_longer_say_oom_at_all():
     # ANOTHER MODEL's reading of stdout, so "that reading was wrong" is a claim only a second
     # reader can make — there is nothing for the engine to have observed. Pinned here rather than
     # left to a `>=` so a third member has to be argued into this list, not slipped into it.
-    assert set(DIAGNOSED_ONLY_REASONS) == set(DIAGNOSED_FAILURE_REASONS) - set(
-        DIAGNOSABLE_ENGINE_REASONS) == {"oom", "not_learning", "check_false_positive"}
+    assert set(DIAGNOSED_ONLY_REASONS) == {"oom", "not_learning", "check_false_positive"}
+    # What the diagnostician may answer that the engine never ASKS about is the answer-only set
+    # plus the registered overlap — `diverged` (2026-09-06) is the member that is neither asked
+    # nor answer-only: `_failure_reason` returns it (the watchdog's kill) AND a model may name it
+    # in one context, so it lives in the overlap and not here.
+    assert (set(DIAGNOSED_FAILURE_REASONS) - set(DIAGNOSABLE_ENGINE_REASONS)
+            == set(DIAGNOSED_ONLY_REASONS) | set(DIAGNOSED_ENGINE_FINAL_OVERLAP))
+    assert "diverged" not in DIAGNOSED_ONLY_REASONS and "diverged" in _classifier_vocabulary()
 
 
-def test_the_diagnosed_vocabulary_overlaps_engine_final_in_exactly_one_registered_place():
+def test_the_diagnosed_vocabulary_overlaps_engine_final_in_exactly_the_registered_places():
     """THE DEVIATION FROM THE BRIEF, pinned so it can only ever be argued and never drift.
 
     `not_learning` is both: the engine produces it when ITS OWN training watchdog killed a stage
@@ -266,13 +287,28 @@ def test_the_diagnosed_vocabulary_overlaps_engine_final_in_exactly_one_registere
     a loss frozen in a log that a stage checker labelled `check_failed`. Those are one cause with
     two witnesses, and the record tells them apart through `reason_source`, not through the word.
 
-    Any second member has to argue the three bullets in `DIAGNOSED_FAILURE_REASONS`' comment, so
-    this asserts the set EXACTLY rather than asserting "the overlap is small"."""
+    `diverged` (2026-09-06) is the second, and it is the same shape one watchdog over: the engine
+    produces it when the DIVERGENCE watchdog killed a stage, and the diagnostician may answer it
+    about a non-finite loss that a stage checker caught instead — the four
+    `rubertlite-dense-retrieval` rows the judgebench scored as unwinnable by construction. It is
+    the more dangerous member (it is in `NEVER_SALVAGED_REASONS`), so it is additionally bound to
+    that one context by `DIAGNOSED_CONTEXT_BOUND`.
+
+    Any further member has to argue the bullets in `DIAGNOSED_FAILURE_REASONS`' comment, so this
+    asserts the set EXACTLY rather than asserting "the overlap is small"."""
     overlap = set(DIAGNOSED_FAILURE_REASONS) & set(ENGINE_FINAL_REASONS)
-    assert overlap == set(DIAGNOSED_ENGINE_FINAL_OVERLAP) == {"not_learning"}
+    assert overlap == set(DIAGNOSED_ENGINE_FINAL_OVERLAP) == {"not_learning", "diverged"}
     assert MONITOR_REPAIR_REASON == "not_learning", (
         "the overlap is registered by VALUE; if the watchdog's reason is renamed this argument is "
         "about a different thing")
+    # Every context-bound kind is an overlap member (a kind the engine never asks about needs no
+    # context), and its contexts are DIAGNOSABLE reasons — bounding a kind to an engine-final
+    # context would be a bound nothing can ever satisfy.
+    assert set(DIAGNOSED_CONTEXT_BOUND) == {"diverged"}
+    for kind, contexts in DIAGNOSED_CONTEXT_BOUND.items():
+        assert kind in DIAGNOSED_ENGINE_FINAL_OVERLAP
+        assert set(contexts) == {"check_failed"} and set(contexts) <= set(
+            DIAGNOSABLE_ENGINE_REASONS)
 
 
 def test_the_registered_overlap_buys_nothing_privileged():
@@ -286,6 +322,14 @@ def test_the_registered_overlap_buys_nothing_privileged():
     assert bounded["action"] == "abandon"
     # (c) it is selectable, so an operator who narrowed `inline_repair_reasons` still governs it.
     assert "not_learning" in FAILURE_REASONS
+
+    # `diverged` (2026-09-06) keeps (b) and (c) and is HONEST about (a): it IS a never-salvaged
+    # reason, so what keeps a diagnosed `diverged` from suppressing a metric is not vocabulary but
+    # the two things `test_a_diagnosed_reason_can_never_move_a_metric` pins — the salvage gate runs
+    # on the engine's own answer branches earlier, and `salvage_condition` re-reads `res.diverged`.
+    assert "diverged" in NEVER_SALVAGED_REASONS
+    assert _rule_triage("diverged", "", attempt=99, max_attempts=3)["action"] == "abandon"
+    assert "diverged" in FAILURE_REASONS
 
 
 # --------------------------------------------------------------------------------------------
@@ -358,7 +402,12 @@ def test_check_failed_is_diagnosable_and_the_two_filesystem_contracts_are_not():
                          "progress.", metric=None, timed_out=False,
                          stages=[{"name": "train", "status": "check_failed"}])
     assert _failure_reason(contract) == "check_failed"
+    # Citing the LOG, because since 2026-09-06 that is what a `not_learning` over a
+    # `check_failed` has to stand on (`OVERRIDE_EVIDENCE_REQUIRED`); the same verdict with the
+    # error text as its only citation keeps the check's verdict — driven two sections down.
     verdict = {"action": "repair", "failure_kind": "not_learning",
+               "evidence_source": "log", "evidence_locator": "train.log:1200",
+               "evidence_quote": "loss 13.31 13.30 13.31 over 400 steps",
                "rationale": "the loss never left its initialization value"}
     assert diagnosed_failure_reason(_failure_reason(contract), verdict) == ("not_learning",
                                                                            REASON_SOURCE_TRIAGE)
@@ -366,8 +415,181 @@ def test_check_failed_is_diagnosable_and_the_two_filesystem_contracts_are_not():
 
 @pytest.mark.parametrize("kind", DIAGNOSED_FAILURE_REASONS)
 def test_every_member_of_the_closed_vocabulary_is_accepted(kind):
+    """…in a context it is admissible in: `crash` for an unbound kind, the registered context for
+    a bound one. A verdict with no evidence is enough here — the override rule below is keyed on
+    the pair, and `(crash, <anything>)` is not a pair it names."""
+    engine = DIAGNOSED_CONTEXT_BOUND.get(kind, ("crash",))[0]
     verdict = {"action": "repair", "failure_kind": kind, "rationale": "r"}
-    assert diagnosed_failure_reason("crash", verdict) == (kind, REASON_SOURCE_TRIAGE)
+    assert diagnosed_failure_reason(engine, verdict) == (kind, REASON_SOURCE_TRIAGE)
+
+
+# --------------------------------------------------------------------------------------------
+# THE CONTEXT BOUND: `diverged` may be named where the engine said `check_failed` and nowhere else
+# --------------------------------------------------------------------------------------------
+
+_DIVERGED = {"action": "repair", "failure_kind": "diverged",
+             "evidence_source": "error", "evidence_quote": "loss=inf at epoch 19",
+             "rationale": "the objective went non-finite"}
+
+
+def test_diverged_is_answerable_over_a_check_failed_and_refused_over_every_other_handoff():
+    """THE ASYMMETRY, for the second overlap member. On a `check_failed` the engine has already
+    delegated the reading to a model (the stage checker), so a second reader naming the cause
+    contradicts nothing the engine observed — and the checker's own refusal quotes the non-finite
+    value, so no log citation is asked for (a one-value claim, not a series claim). On a `crash` or
+    a `no_metric` the divergence watchdog observed that process to its exit and stayed silent, so
+    `diverged` there is a model asserting a mechanism that was watching and did not fire —
+    `timeout`'s shape, refused `timeout`'s way: out of vocabulary, `unclassified`."""
+    assert diagnosed_failure_reason("check_failed", _DIVERGED) == ("diverged",
+                                                                   REASON_SOURCE_TRIAGE)
+    for other in set(DIAGNOSABLE_ENGINE_REASONS) - {"check_failed"}:
+        assert diagnosed_failure_reason(other, _DIVERGED) == (UNCLASSIFIED_REASON,
+                                                              REASON_SOURCE_UNDIAGNOSED), other
+    # And the engine's OWN `diverged` is still never put to a model at all — the first branch, the
+    # verdict unread. The overlap is about what may be ANSWERED, never what may be OVERRIDDEN.
+    killed = RunResult(exit_code=-9, stdout="", stderr="", metric=None, timed_out=False,
+                       diverged=True)
+    assert diagnosed_failure_reason(_failure_reason(killed), _OOM) == ("diverged",
+                                                                      REASON_SOURCE_ENGINE)
+
+
+def test_the_context_bound_is_applied_only_when_the_engine_answer_is_in_hand():
+    """`coerce_failure_kind` without `engine_reason` is the intake shape — a layer that holds no
+    deterministic answer must not refuse, or the refusal is spelled twice. With it, the bound
+    applies; an unbound kind is unaffected either way."""
+    assert coerce_failure_kind("diverged", "") == "diverged"
+    assert coerce_failure_kind("diverged", "", engine_reason="check_failed") == "diverged"
+    assert coerce_failure_kind("diverged", "", engine_reason="crash") == ""
+    assert coerce_failure_kind("DIVERGED ", "x", engine_reason="no_metric") == "x"
+    assert coerce_failure_kind("not_learning", "", engine_reason="crash") == "not_learning"
+
+
+# --------------------------------------------------------------------------------------------
+# THE OVERRIDE RULE: text may nominate, never decide, where text overrides a stage verdict
+# --------------------------------------------------------------------------------------------
+
+def _nl(**evidence):
+    return {"action": "repair", "failure_kind": "not_learning",
+            "rationale": "loss stagnant at 13.3", **evidence}
+
+
+@pytest.mark.parametrize("verdict, expect, lacked", [
+    # cited from the error text — the checker's own refusal, i.e. the sentence being contradicted
+    (_nl(evidence_source="error", evidence_quote="Loss stagnant at 13.3 throughout epoch 19"),
+     ("check_failed", REASON_SOURCE_ENGINE), EVIDENCE_SOURCE_LOG),
+    # cited nothing at all
+    (_nl(), ("check_failed", REASON_SOURCE_ENGINE), EVIDENCE_SOURCE_LOG),
+    # cited code — real, checkable, and still not the series the claim is about
+    (_nl(evidence_source="code", evidence_locator="train.py:31", evidence_quote="lr = 0.0"),
+     ("check_failed", REASON_SOURCE_ENGINE), EVIDENCE_SOURCE_LOG),
+    # a 'log' source with NO locator collapses to `none` on the row, and therefore here too:
+    # the two must agree about what "cited" means
+    (_nl(evidence_source="log"), ("check_failed", REASON_SOURCE_ENGINE), EVIDENCE_SOURCE_LOG),
+    # the primary citation is into the log: the override stands
+    (_nl(evidence_source="log", evidence_locator="train.log:2200-2260",
+         evidence_quote="loss 13.31 13.30 13.31 13.30"),
+     ("not_learning", REASON_SOURCE_TRIAGE), ""),
+    # the primary is the error text and a FINDING is the log read: also stands — findings are the
+    # trail of everything it looked at, and one of them is the series
+    (_nl(evidence_source="error", evidence_quote="stage 'train' failed verification",
+         findings=[{"source": "log", "locator": "train.log:40", "quote": "loss=13.30",
+                    "means": "flat from step 1"}]),
+     ("not_learning", REASON_SOURCE_TRIAGE), ""),
+])
+def test_a_not_learning_override_of_a_check_failed_needs_a_log_citation(verdict, expect, lacked):
+    """THE MEASURED DEFECT: over `failure_triage.v1` the diagnostician overrode a CORRECT
+    `check_failed` with `not_learning` on 7-9 of 15 rows, citing the error text or nothing. "The
+    objective never descended" is a claim about a SERIES; a series lives in a stage log, and the
+    diagnostician has `read_log`/`metric_series` for exactly this. Without a log citation the
+    engine's word stands, with `REASON_SOURCE_ENGINE`, and the caller can record which source the
+    override lacked. Nothing else about the verdict is lost — summary, evidence and findings are
+    still coerced and stamped by the loop beside the engine's word."""
+    assert diagnosed_failure_reason("check_failed", verdict) == expect
+    assert reason_override_refused("check_failed", verdict) == lacked
+
+
+def test_the_override_rule_is_keyed_on_the_pair_and_not_on_the_word():
+    """`(check_failed, not_learning)` is the one pair `OVERRIDE_EVIDENCE_REQUIRED` names, and it is
+    a REGISTRY: a third pair has to be argued in. `not_learning` over a `crash` needs no log (the
+    engine held no verdict to override); `diverged` over a `check_failed` needs no log (the
+    checker's refusal already quotes the one non-finite value the claim is about — see
+    `DIAGNOSED_FAILURE_REASONS`); `crash` over a `check_failed` is not an override the rule knows."""
+    assert dict(OVERRIDE_EVIDENCE_REQUIRED) == {("check_failed", "not_learning"): EVIDENCE_SOURCE_LOG}
+    for (engine, kind), required in OVERRIDE_EVIDENCE_REQUIRED.items():
+        assert engine in DIAGNOSABLE_ENGINE_REASONS and kind in DIAGNOSED_FAILURE_REASONS
+        assert required in (EVIDENCE_SOURCE_LOG, EVIDENCE_SOURCE_CODE), (
+            "an override may be required to cite a CHECKABLE source; `error` is the text being "
+            "overridden and `none` is no requirement at all")
+    err = {"evidence_source": "error", "evidence_quote": "x"}
+    assert diagnosed_failure_reason("crash", _nl(**err)) == ("not_learning", REASON_SOURCE_TRIAGE)
+    assert reason_override_refused("crash", _nl(**err)) == ""
+    assert diagnosed_failure_reason("check_failed", _DIVERGED) == ("diverged",
+                                                                   REASON_SOURCE_TRIAGE)
+    crash = {"action": "repair", "failure_kind": "crash", **err}
+    assert diagnosed_failure_reason("check_failed", crash) == ("crash", REASON_SOURCE_TRIAGE)
+    # Total over junk, like the rule it serves.
+    for junk in (None, 3, "x", [], {"failure_kind": ["not_learning"]}):
+        assert reason_override_refused("check_failed", junk) == ""
+    assert reason_override_refused("timeout", _nl()) == ""       # never asked, never overridden
+
+
+def test_cited_sources_is_the_rows_own_reading_of_what_was_cited():
+    """The rule reads sources through the SAME normalization the durable row gets
+    (`coerce_findings`), so the row and the decision cannot disagree about whether a log was
+    cited: a `log` with no locator is `none` on both."""
+    assert cited_sources(_nl(evidence_source="log")) == frozenset({EVIDENCE_SOURCE_NONE}) or (
+        cited_sources(_nl(evidence_source="log")) == frozenset())
+    assert cited_sources(_nl(evidence_source="log", evidence_locator="train.log")) == frozenset(
+        {EVIDENCE_SOURCE_LOG})
+    assert cited_sources(_nl(evidence_source="error", evidence_quote="q",
+                             findings=[{"source": "code", "locator": "a.py", "quote": "z"},
+                                       {"source": "log", "locator": "train.log", "quote": "w"}])
+                         ) == frozenset({"error", "code", "log"})
+    assert cited_sources("junk") == frozenset()
+
+
+def test_the_engine_loop_records_why_its_own_word_stood():
+    """`reason_override_refused` lands on BOTH rows (`node_repaired` by dict pair, the `node_failed`
+    terminal by subscript assignment), from the loop variable, by the same AST reading as the
+    other stamps — a comment produces neither node. And the refusal is read off the verdict
+    BEFORE `reason` is rebound by the rule, so the two cannot disagree about which pair it was."""
+    from looplab.engine import evaluate as ev
+    from tests._source_scan import called_names
+
+    src = _dedented(ev.EvaluateMixin._evaluate)
+    assert "_override_refused" in _payload_stamps(src).get("reason_override_refused", set())
+    calls = called_names(ev.EvaluateMixin._evaluate)
+    assert "reason_override_refused" in calls and "diagnosed_failure_reason" in calls
+    assert calls.index("reason_override_refused") < calls.index("diagnosed_failure_reason")
+
+
+_BENCH = Path(__file__).resolve().parents[1] / "bench-out"
+
+
+@pytest.mark.parametrize("arm, before, after, moved", [
+    ("durable", 97, 103, (7, 1, 4)), ("widened", 102, 105, (4, 1, 4))])
+def test_the_override_rule_replayed_over_the_captured_bench_answers(arm, before, after, moved):
+    """THE MEASUREMENT, re-derived from the committed capture through the PRODUCTION rule rather
+    than quoted. `(wrong->right, right->wrong, wrong->wrong)`: the one loss on each arm is
+    `rubertlite-dense-retrieval` node 12 — the corpus's single genuine `not_learning` — whose
+    answer cited nothing, and the four wrong->wrong are the `diverged`-truth rows the model
+    answered `not_learning` about, which the rule turns back into the engine's `check_failed`
+    (wrong either way on the CAPTURE; a live re-run may now answer `diverged`)."""
+    from looplab.judgebench import triage_score
+    from looplab.judgebench.triage_corpus import DEFAULT_DATASET, read_dataset
+
+    path = _BENCH / ("cand.%s.jsonl" % arm)
+    if not path.exists():
+        pytest.skip("captured bench answers not on this checkout")
+    rows = read_dataset(DEFAULT_DATASET)["rows"]
+    candidate = triage_score.jsonl_candidate(path)
+    replay = triage_score.override_rule_replay(rows, candidate.records)
+    assert (replay["correct_before"], replay["correct_after"]) == (before, after)
+    assert (replay["wrong_to_right"], replay["right_to_wrong"],
+            replay["wrong_to_wrong"]) == moved
+    assert replay["lacked"] == {EVIDENCE_SOURCE_LOG: sum(moved)}
+    n12 = candidate.records["rubertlite-dense-retrieval/n12/s174"]
+    assert triage_score.override_rule_answer(n12) == ("check_failed", EVIDENCE_SOURCE_LOG)
 
 
 def test_the_source_says_triage_even_when_the_diagnostician_agrees():
@@ -743,9 +965,26 @@ def test_a_diagnosed_reason_can_never_move_a_metric():
         triage call, so no diagnosed reason has ever reached the gate whatever it said. That one is
         a fact about code order, which is why it is pinned separately.
     """
-    assert set(DIAGNOSED_FAILURE_REASONS) & set(NEVER_SALVAGED_REASONS) == set()
+    # VOCABULARY, restated 2026-09-06: the ONE diagnosed kind on the never-salvaged list is the
+    # context-bound overlap member, and it is admissible only where the engine said `check_failed`
+    # — a status `salvage_condition` has already been asked about, on the engine's own answer,
+    # before any diagnostician spoke. Stated exactly, not as `<= something`, so a second member
+    # has to be argued in here as well as in the registry.
+    assert (set(DIAGNOSED_FAILURE_REASONS) & set(NEVER_SALVAGED_REASONS)
+            == set(DIAGNOSED_CONTEXT_BOUND) & set(NEVER_SALVAGED_REASONS) == {"diverged"})
     assert set(NEVER_SALVAGED_REASONS) <= set(ENGINE_FINAL_REASONS)
     assert UNCLASSIFIED_REASON not in NEVER_SALVAGED_REASONS
+    # …and that member is FLAG-GUARDED: the gate re-reads `res.diverged` beside the reason, so a
+    # diverged RESULT is refused whatever the label, and a clean result with a diagnosed label
+    # never reaches the gate (ordering, below). Driven, not pinned, on a stage-less exit-0 result
+    # (a `check_failed` STAGE is vetoed by the gate on its own status, which is a different rule):
+    # salvageable under a salvageable reason, refused under the word, refused under the flag.
+    clean = RunResult(exit_code=0, stdout="", stderr="", metric=None, timed_out=False)
+    assert salvage_condition(clean, "check_failed") is not None
+    assert salvage_condition(clean, "diverged") is None
+    flagged = RunResult(exit_code=0, stdout="", stderr="", metric=None, timed_out=False,
+                        diverged=True)
+    assert salvage_condition(flagged, "check_failed") is None
 
     from looplab.engine import evaluate as ev
     src = inspect.getsource(ev.EvaluateMixin._evaluate)

@@ -498,7 +498,10 @@ def test_looking_cannot_widen_what_the_verdict_may_SAY():
                                        diagnosed_failure_reason)
     from looplab.engine.metric_salvage import NEVER_SALVAGED_REASONS
     assert set(AGENT_TRIAGE_ACTIONS) == {"repair", "abandon", "reject_idea"}
-    assert set(DIAGNOSED_FAILURE_REASONS) & set(NEVER_SALVAGED_REASONS) == set()
+    # `diverged` is the ONE diagnosed kind that is also never-salvaged (2026-09-06): admitted as an
+    # answer only where the engine said `check_failed`, and its salvage containment is ordering +
+    # the `res.diverged` flag re-read, not vocabulary — see `DIAGNOSED_CONTEXT_BOUND`.
+    assert set(DIAGNOSED_FAILURE_REASONS) & set(NEVER_SALVAGED_REASONS) == {"diverged"}
 
     class _Overreaching:
         def triage_crash(self, node, error, attempt, *, state=None, brief="", tools=None, **kw):

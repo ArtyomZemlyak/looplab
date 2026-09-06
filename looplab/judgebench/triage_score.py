@@ -162,6 +162,11 @@ def live_ownership_split() -> dict:
         "engine_final": frozenset(_fd.ENGINE_FINAL_REASONS),
         "diagnosable": frozenset(_fd.DIAGNOSABLE_ENGINE_REASONS),
         "answerable": frozenset(_fd.DIAGNOSED_FAILURE_REASONS),
+        # kind -> the engine answers it may be named under (2026-09-06; `{}` on an older tree).
+        # Detected with `getattr` for the same reason the shape is: a bench must not go red on
+        # the other side of a production change it exists to measure.
+        "context_bound": {k: frozenset(v) for k, v in
+                          dict(getattr(_fd, "DIAGNOSED_CONTEXT_BOUND", {}) or {}).items()},
         "unclassified": _fd.UNCLASSIFIED_REASON,
     }
 
@@ -171,7 +176,23 @@ LIVE_SHAPE = _LIVE["shape"]
 LIVE_ENGINE_FINAL_REASONS = _LIVE["engine_final"]
 LIVE_DIAGNOSABLE_REASONS = _LIVE["diagnosable"]
 LIVE_ANSWERABLE_REASONS = _LIVE["answerable"]
+LIVE_CONTEXT_BOUND = _LIVE.get("context_bound") or {}
 LIVE_UNCLASSIFIED_REASON = _LIVE["unclassified"]
+
+
+def answerable_for(engine_reason) -> frozenset:
+    """What the diagnostician may answer when the engine's own answer is `engine_reason`.
+
+    `LIVE_ANSWERABLE_REASONS` minus every context-bound kind whose context this is not. Until
+    2026-09-06 the answer vocabulary was one set for every handoff and the four `diverged`-truth
+    rows the stage checker caught (`rubertlite-dense-retrieval` 15/60/68/74 — the watchdog did
+    not exist yet) were unwinnable by construction; `diverged` is now admissible on a tagged
+    `check_failed` and on nothing else, so "unwinnable" has to be asked per handoff."""
+    out = set(LIVE_ANSWERABLE_REASONS)
+    for kind, contexts in LIVE_CONTEXT_BOUND.items():
+        if str(engine_reason) not in contexts:
+            out.discard(kind)
+    return frozenset(out)
 
 ERROR_COSTS = {
     "admits_refused_metric": (
@@ -190,6 +211,14 @@ ERROR_COSTS = {
         "the truth has a directive of its own and the answer falls back to 'diagnose the root "
         "cause'. Measured on e5small-dr-unified-v3: 8 repairs over 3 nodes, 2 returning "
         "byte-identical files, 0 metrics, run stopped systemic."),
+    "diverged_without_the_flag": (
+        "the answer is `diverged` and the divergence watchdog did not say so — the ONE diagnosed "
+        "kind that is also NEVER_SALVAGED (admitted 2026-09-06, only over a tagged `check_failed`). "
+        "No metric moves: salvage is decided on the engine's own answer branches earlier, and "
+        "`salvage_condition` re-reads `res.diverged`. What it costs is the numerics directive "
+        "against a run whose loss was finite, plus a durable row naming a never-salvaged reason for "
+        "a node the gate would have admitted — the audit trail says 'unsalvageable' about a result "
+        "that was not."),
     "specific_for_generic": (
         "a specific directive is issued for a failure that has no such shape — one repair round "
         "pointed at memory (or at the numerics) instead of at the real bug."),
@@ -213,6 +242,11 @@ def cost_of(answer: str, truth: str) -> str:
     if (answer in NEVER_SALVAGED_REASONS - FLAG_GUARDED_REASONS
             and truth not in NEVER_SALVAGED_REASONS):
         return "suppresses_real_metric"
+    # Above the opposed pair it would otherwise fall into (`oom`/`diverged`, `diverged`/
+    # `not_learning`): a model-named `diverged` is a different error from an engine-named one and
+    # is charged as itself, whatever the truth was.
+    if answer == "diverged" and truth != "diverged":
+        return "diverged_without_the_flag"
     if any({answer, truth} <= pair for pair in OPPOSED_DIRECTIVES):
         return "opposed_directive"
     if truth in SPECIFIC_DIRECTIVES and answer in GENERIC_DIRECTIVE:
@@ -369,8 +403,13 @@ def head_replay_candidate(*, widened: bool = False) -> Callable:
 
 
 def jsonl_candidate(path) -> Callable:
-    """A candidate's captured answers: JSONL of `{"case_id": ..., "reason": ...}`. No network."""
-    answers = {}
+    """A candidate's captured answers: JSONL of `{"case_id": ..., "reason": ...}`. No network.
+
+    The callable carries `.records` — the raw rows by `case_id` — so `score_dataset` can replay
+    the shipped override rule over a capture that predates it (`override_rule_replay`). A capture
+    that carries only `reason` replays as nothing changed, which is the honest reading of a file
+    that recorded no evidence."""
+    answers, records = {}, {}
     with Path(path).open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -378,7 +417,72 @@ def jsonl_candidate(path) -> Callable:
                 continue
             row = json.loads(line)
             answers[row.get("case_id")] = row.get("reason") or row.get("failure_kind")
-    return lambda row: answers.get(row.get("case_id"))
+            records[row.get("case_id")] = row
+
+    def candidate(row: dict) -> Optional[str]:
+        return answers.get(row.get("case_id"))
+    candidate.records = records
+    return candidate
+
+
+def override_rule_answer(record: dict) -> tuple:
+    """`(reason after the shipped override rule, the source it lacked or "")` for one captured
+    diagnostician row.
+
+    The capture (`tools/triage_diagnostician_replay.py`) records `engine_reason`, the answered
+    `reason` and the primary `evidence` (`{source, locator, quote}`) — and, on a newer harness,
+    `findings` — so the verdict the rule reads can be REBUILT and handed to the production rule
+    itself (`failure_diagnosis.reason_override_refused`), never to a copy of it: a bench that
+    re-spelled the rule would measure the re-spelling. A record with no `engine_reason` (a bare
+    `{case_id, reason}` file) is returned unchanged."""
+    reason = record.get("reason") or record.get("failure_kind")
+    engine = record.get("engine_reason")
+    if not engine or not reason:
+        return reason, ""
+    try:
+        from looplab.engine.failure_diagnosis import reason_override_refused
+    except ImportError:                      # an older tree: no rule to replay
+        return reason, ""
+    ev = record.get("evidence") or {}
+    verdict = {"action": record.get("action") or "repair", "failure_kind": reason,
+               "evidence_source": ev.get("source", ""), "evidence_locator": ev.get("locator", ""),
+               "evidence_quote": ev.get("quote", ""), "findings": record.get("findings") or []}
+    lacked = reason_override_refused(str(engine), verdict)
+    return (str(engine) if lacked else reason), lacked
+
+
+def override_rule_replay(rows: list, records: dict) -> dict:
+    """How many labelled rows the shipped override rule CHANGES on a capture, and which way.
+
+    `{"changed", "wrong_to_right", "right_to_wrong", "wrong_to_wrong", "correct_before",
+    "correct_after", "labelled", "lacked": {source: n}}` — the four directions are reported
+    separately and never netted, because "+6" hides that one of the rows it moved was the corpus's
+    only genuine `not_learning` (`rubertlite-dense-retrieval` node 12, which cited nothing)."""
+    out = {"changed": 0, "wrong_to_right": 0, "right_to_wrong": 0, "wrong_to_wrong": 0,
+           "correct_before": 0, "correct_after": 0, "labelled": 0, "lacked": {}}
+    for row in rows:
+        truth = (row.get("label") or {}).get("reason")
+        if truth in (None, LABEL_UNKNOWN):
+            continue
+        record = records.get(row.get("case_id"))
+        if not record:
+            continue
+        before = record.get("reason") or record.get("failure_kind")
+        after, lacked = override_rule_answer(record)
+        out["labelled"] += 1
+        out["correct_before"] += int(before == truth)
+        out["correct_after"] += int(after == truth)
+        if after == before:
+            continue
+        out["changed"] += 1
+        out["lacked"][lacked] = out["lacked"].get(lacked, 0) + 1
+        if before != truth and after == truth:
+            out["wrong_to_right"] += 1
+        elif before == truth and after != truth:
+            out["right_to_wrong"] += 1
+        else:
+            out["wrong_to_wrong"] += 1
+    return out
 
 
 # --- the report --------------------------------------------------------------------------------
@@ -418,6 +522,10 @@ class ScoreReport:
     # construction and a ceiling computed without them is a promise the design cannot keep.
     unreachable_by_diagnosis: int = 0
     scores_live_classifier: bool = False    # set only by the live arm; gates the handoff block
+    # A captured-answers arm only: what the shipped override rule (`failure_diagnosis.
+    # OVERRIDE_EVIDENCE_REQUIRED`) would change on this capture. None when the candidate carried
+    # no records to replay over.
+    override_rule: Optional[dict] = None
 
     @property
     def accuracy(self) -> Optional[float]:
@@ -457,7 +565,7 @@ def score_dataset(rows: list, candidate: Callable, *, name: str = "?",
         if answer in LIVE_DIAGNOSABLE_REASONS:
             report.diagnosable_handoff[1] += 1
             report.diagnosable_handoff[0] += int(answer == truth)
-            if answer != truth and truth not in LIVE_ANSWERABLE_REASONS:
+            if answer != truth and truth not in answerable_for(answer):
                 report.unreachable_by_diagnosis += 1
         if row.get("provenance", {}).get("terminal"):
             report.terminal_rows += 1
@@ -473,6 +581,9 @@ def score_dataset(rows: list, candidate: Callable, *, name: str = "?",
         else:
             cost = cost_of(answer, truth)
             report.costs[cost] = report.costs.get(cost, 0) + 1
+    records = getattr(candidate, "records", None)
+    if isinstance(records, dict) and records:
+        report.override_rule = override_rule_replay(rows, records)
     return report
 
 
@@ -512,6 +623,20 @@ def format_report(report: ScoreReport, *, limits: str = CORPUS_LIMITS) -> str:
                 "  REACHABLE CEILING if it wins every row it is allowed to: %d/%d = %.1f%%"
                 % (reachable, report.label_coverage,
                    100 * reachable / max(1, report.label_coverage))]
+    if report.override_rule is not None:
+        o = report.override_rule
+        out += ["",
+                "OVERRIDE RULE REPLAYED  (a `not_learning` over a tagged `check_failed` must cite a "
+                "'log' source; else the check's verdict stands)", "-" * 88,
+                "  rows the rule CHANGES on this capture : %d of %d labelled" % (o["changed"],
+                                                                                o["labelled"]),
+                "    wrong -> right %d   right -> wrong %d   wrong -> wrong %d"
+                % (o["wrong_to_right"], o["right_to_wrong"], o["wrong_to_wrong"]),
+                "  correct before %d/%d -> after %d/%d   (the score above is the CAPTURE; a live "
+                "re-run applies the rule inside `diagnosed_failure_reason`)"
+                % (o["correct_before"], o["labelled"], o["correct_after"], o["labelled"])]
+        if o["lacked"]:
+            out.append("  evidence source lacked: %s" % dict(sorted(o["lacked"].items())))
     out += ["", "CONFUSION  (truth -> answer)", "-" * 88]
     truths = sorted({t for t, _a in report.confusion})
     for truth in truths:

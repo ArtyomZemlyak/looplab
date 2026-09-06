@@ -271,20 +271,75 @@ DIAGNOSABLE_ENGINE_REASONS: tuple[str, ...] = ("crash", "no_metric", "check_fail
 # to rewrite an experiment that may have nothing wrong with it. A wrong `check_false_positive`
 # therefore costs exactly one repair round pointed at the check instead of at the code — the same
 # thing every other wrong kind costs.
+#
+# `diverged` IS THE SECOND REGISTERED OVERLAP WITH ENGINE-FINAL (2026-09-06), AND IT IS BOUND TO ONE
+# CONTEXT. The `failure_triage.v1` bench over 118 labelled rows found four whose truth is
+# `diverged` — `rubertlite-dense-retrieval` nodes 15/60/68/74, `loss=inf` for 20 epochs, `loss=nan`,
+# `-2e+10`, `-2.35e+08` — and every one of them was UNWINNABLE BY CONSTRUCTION: the divergence
+# watchdog did not exist when those runs trained, so the truth arrived through a DIFFERENT channel
+# (the stage CHECKER, another model, read the non-finite loss and returned `check_failed`), and the
+# diagnostician, handed `check_failed`, could answer `not_learning` (it did, 4 of 4, each time
+# describing the divergence in its own rationale) but never the word that was true. So it is
+# admitted — under `DIAGNOSED_CONTEXT_BOUND`, ONLY where the engine's own answer is `check_failed`,
+# and refused everywhere else — on `not_learning`'s three bullets plus the one that bounds it:
+#
+#   * THE ASYMMETRY HOLDS EXACTLY AS FOR `not_learning`. The engine never ASKS about its own
+#     `diverged` (a watchdog kill is engine-final, first branch of `diagnosed_failure_reason`), and
+#     a model may only NAME it where the engine said `check_failed`, i.e. where the engine has
+#     already delegated the reading to a model. On a `crash` or a `no_metric` the same answer is an
+#     out-of-vocabulary kind: the divergence watchdog was watching that process and did not fire,
+#     and a model saying it should have is asserting a mechanism it cannot observe — `timeout`'s
+#     exact shape, refused for `timeout`'s exact reason.
+#   * IT IS NOT DISJOINT FROM `metric_salvage.NEVER_SALVAGED_REASONS`, and that is stated rather
+#     than hidden: it is the one diagnosed kind on that list. What contains it is ORDERING, not
+#     vocabulary — `_salvage_eval_metric` runs on the deterministic answer branches ABOVE the triage
+#     call and the loop recomputes `reason` from `_failure_reason(res)` on every attempt, so no
+#     diagnosed word has ever reached the gate — plus the flag: `salvage_condition` re-reads
+#     `res.diverged` beside the reason, so "a diverged training is never salvaged" is a property of
+#     the RESULT. A diagnosed `diverged` therefore cannot suppress a metric; what a wrong one costs
+#     is the numerics directive against a run whose loss was finite, and a durable row naming a
+#     never-salvaged reason for a node the gate would have admitted — which is why the judgebench
+#     charges it as its own cost class (`triage_score.ERROR_COSTS["diverged_without_the_flag"]`).
+#   * IT NEEDS NO LOG CITATION where `not_learning` does (`OVERRIDE_EVIDENCE_REQUIRED` below),
+#     and the difference is what each claim IS. "The loss never descended" is a claim about a
+#     SERIES, which only a log holds, and the bench measured the diagnostician overriding a correct
+#     `check_failed` with it on 7-9 of 15 rows from the error text alone. "The loss is not finite"
+#     is a claim about ONE VALUE, and on every corpus row the checker's own refusal — the error
+#     text the diagnostician is handed — already quotes it.
 DIAGNOSED_FAILURE_REASONS: tuple[str, ...] = (
-    "crash", "oom", "no_metric", "check_failed", "not_learning", "check_false_positive")
+    "crash", "oom", "no_metric", "check_failed", "not_learning", "check_false_positive",
+    "diverged")
 
-# The two ANSWER-ONLY kinds, i.e. the members no classifier produces. `oom` because both of its
+# WHERE A CONTEXT-BOUND ANSWER IS ADMISSIBLE: kind -> the engine's own answers under which a
+# diagnostician may name it. A kind absent from this map is admissible on every DIAGNOSABLE reason;
+# a kind present here is REFUSED (an out-of-vocabulary answer, i.e. `unclassified`) on any other,
+# because outside that context the word asserts an engine mechanism that was watching and did not
+# fire. `diverged` on a `check_failed`: the checker (a model) already read the non-finite value and
+# the engine delegated that reading, so a second reader naming the cause contradicts nothing the
+# engine observed. `diverged` on a `crash`: the divergence watchdog observed that process to its
+# exit and stayed silent.
+DIAGNOSED_CONTEXT_BOUND: dict[str, tuple[str, ...]] = {"diverged": ("check_failed",)}
+
+# The ANSWER-ONLY kinds, i.e. the members no classifier produces. `oom` because both of its
 # producers were the deleted text rules (see `DIAGNOSABLE_ENGINE_REASONS`), `not_learning` because
 # its only engine producer is a watchdog KILL and the diagnostician's answer is about a run nothing
 # killed. Spelled so the guard test can assert the two vocabularies' relationship exactly instead of
-# asserting "they overlap somehow".
+# asserting "they overlap somehow". `diverged` is deliberately NOT here: `_failure_reason` returns
+# it (the divergence watchdog's kill), so it is an engine-final answer that a model may ALSO name in
+# one context, not a kind only a model can name — the two facts are `DIAGNOSED_ENGINE_FINAL_OVERLAP`
+# and `DIAGNOSED_CONTEXT_BOUND`, and `tests/test_inline_repair_reason_coverage.py` holds this tuple
+# disjoint from the classifier's own returns.
 DIAGNOSED_ONLY_REASONS: tuple[str, ...] = ("oom", "not_learning", "check_false_positive")
 
 # The registered overlap with ENGINE-FINAL, spelled once so the guard test can assert it EXACTLY
-# rather than assert "some overlap is allowed". Adding a member here means arguing the three bullets
-# above for it.
-DIAGNOSED_ENGINE_FINAL_OVERLAP: tuple[str, ...] = ("not_learning",)
+# rather than assert "some overlap is allowed". Adding a member here means arguing the bullets above
+# for it. The asymmetry that keeps the engine safe is the same for both members: the engine never
+# ASKS about its own `not_learning` (the training watchdog's kill) or its own `diverged` (the
+# divergence watchdog's kill) — an engine-final answer is returned before the verdict is read — and
+# a model may only name either where the engine said `check_failed`, the one stage status that is
+# itself another model's reading. `diverged` is additionally bound to that context by
+# `DIAGNOSED_CONTEXT_BOUND`; `not_learning` is admissible on every diagnosable reason.
+DIAGNOSED_ENGINE_FINAL_OVERLAP: tuple[str, ...] = ("not_learning", "diverged")
 
 # --- "Nobody could say" ------------------------------------------------------------------------
 # THE FALLBACK, AND IT IS NOT A REGEX. When the diagnostician was WIRED and ASKED and could not
@@ -351,6 +406,36 @@ EVIDENCE_SOURCE_NONE = "none"       # it cited nothing readable
 EVIDENCE_SOURCES: tuple[str, ...] = (EVIDENCE_SOURCE_CODE, EVIDENCE_SOURCE_LOG,
                                      EVIDENCE_SOURCE_ERROR, EVIDENCE_SOURCE_NONE)
 
+# --- The override rule: text may NOMINATE, never DECIDE, at the one place text overrides a verdict
+# `(engine's own answer, diagnostician's answer) -> the evidence SOURCE the override must cite`, in
+# `evidence_source` or in any `findings[].source`. Absent that source the engine's own answer
+# STANDS, and the row records `reason_override_refused = <the source it lacked>`.
+#
+# THE MEASUREMENT. Over the 118 labelled rows of `failure_triage.v1`, the diagnostician answered
+# `not_learning` about a `check_failed` on 7-9 rows whose truth WAS `check_failed` — the engine's
+# own stage verdict was right and the model overrode it — and on those rows its citation was the
+# ERROR text (the checker's refusal, i.e. the very sentence it was contradicting) or nothing. Where
+# it cited a LOG it was wrong too, on this corpus, but there the claim is at least of the right
+# SHAPE: "the objective never descended" is a claim about a series, a series lives in a stage log,
+# and the diagnostician has `read_log`/`metric_series` for exactly this. Replayed over the captured
+# answers with the rule applied: durable 97 -> 103 of 118 (12 rows moved, 7 wrong -> right, 1
+# right -> wrong, 4 wrong -> wrong), widened 102 -> 105 (9 moved, 4 / 1 / 4). The one loss each
+# time is `rubertlite-dense-retrieval` node 12 — the corpus's single genuine `not_learning` — whose
+# answer cited NOTHING; the rule holds it to the same bar as the wrong ones, which is the point.
+#
+# THIS IS DOC 44's RULE, not a confidence threshold. `check_failed` is the one DIAGNOSABLE status
+# whose "channel" is itself a model, and `not_learning` is the one answer that DISPUTES that model's
+# reading by restating it more strongly ("the check said the loss did not move; I say it never
+# learned"). A restatement grounded in the same text is not a second reading; a citation into the
+# series is. The rule is keyed on the PAIR so a third pair has to be argued in, and it is a REFUSAL
+# of the override, never a refusal of the diagnosis: the summary, the evidence and the findings are
+# still recorded on the row beside the engine's word.
+#
+# `diverged` on a `check_failed` is deliberately NOT a key — see `DIAGNOSED_FAILURE_REASONS`.
+OVERRIDE_EVIDENCE_REQUIRED: dict[tuple[str, str], str] = {
+    ("check_failed", "not_learning"): EVIDENCE_SOURCE_LOG,
+}
+
 # Durable-row bounds. The locator is a path (possibly `path:line`) and the quote is one line of
 # what was there; both land on `node_failed`/`node_repaired`, so both are capped at the row-sized
 # 300 every other model-authored string on those rows wears.
@@ -401,7 +486,7 @@ DIAGNOSIS_SUMMARY_CAP = 1200
 DIAGNOSIS_CODE_LOOK_TURNS = 3
 
 
-def coerce_failure_kind(value, fallback: str) -> str:
+def coerce_failure_kind(value, fallback: str, engine_reason=None) -> str:
     """Normalize a diagnostician-supplied failure kind to a member of `DIAGNOSED_FAILURE_REASONS`,
     failing closed to `fallback`.
 
@@ -409,9 +494,50 @@ def coerce_failure_kind(value, fallback: str) -> str:
     because the two callers want different ones: `diagnosed_failure_reason` below passes `""` so it
     can tell "no readable kind" from "a kind", while a caller that merely wants a safe string can
     pass the engine's own answer. Pure and total over junk — a non-string, a `None`, a list, a
-    number all answer `fallback`."""
+    number all answer `fallback`.
+
+    `engine_reason`, when given, applies `DIAGNOSED_CONTEXT_BOUND`: a kind admissible only under
+    certain engine answers is `fallback` under any other. Left `None` the bound is not applied,
+    which is what a caller with no engine answer in hand (an intake layer) gets — the refusal has to
+    be spelled where the engine's own answer is known, and that is `diagnosed_failure_reason`."""
     v = str(value or "").strip().lower()
-    return v if v in DIAGNOSED_FAILURE_REASONS else str(fallback)
+    if v not in DIAGNOSED_FAILURE_REASONS:
+        return str(fallback)
+    if engine_reason is not None and v in DIAGNOSED_CONTEXT_BOUND:
+        if str(engine_reason) not in DIAGNOSED_CONTEXT_BOUND[v]:
+            return str(fallback)
+    return v
+
+
+def cited_sources(verdict) -> frozenset:
+    """Every evidence SOURCE the diagnostician's verdict cites — the primary `evidence_source` plus
+    each `findings[].source` — after the same normalization the durable row gets, so a `log` with no
+    locator is `none` here exactly as it is on the row. Empty for a non-dict; never raises.
+
+    Unredacted on purpose: only the SOURCE words are read, never the locator or the quote, so
+    nothing model-authored passes through here on its way anywhere durable."""
+    if not isinstance(verdict, dict):
+        return frozenset()
+    return frozenset(item["source"] for item in coerce_findings(verdict, None))
+
+
+def reason_override_refused(deterministic: str, verdict) -> str:
+    """The evidence source a diagnostician's override LACKED, or `""` when the override stands (or
+    there is no override to refuse).
+
+    The pure half of `OVERRIDE_EVIDENCE_REQUIRED`, split out so a caller can stamp WHY the engine's
+    own answer stood on the durable row (`reason_override_refused`) beside the answer itself —
+    `diagnosed_failure_reason` applies it and returns only the pair. Reads the verdict's raw kind
+    through the same coercion the decision uses, so the two cannot disagree about which pair a
+    verdict is. Total over junk."""
+    det = str(deterministic)
+    if det not in DIAGNOSABLE_ENGINE_REASONS or not isinstance(verdict, dict):
+        return ""
+    kind = coerce_failure_kind(verdict.get("failure_kind"), "", engine_reason=det)
+    required = OVERRIDE_EVIDENCE_REQUIRED.get((det, kind))
+    if not required or required in cited_sources(verdict):
+        return ""
+    return required
 
 
 def _screened(value, cap: int, redact=None) -> str:
@@ -710,7 +836,15 @@ def diagnosed_failure_reason(deterministic: str, verdict) -> tuple[str, str]:
          `UNCLASSIFIED_REASON` with `REASON_SOURCE_UNDIAGNOSED`. It was asked and it could not
          answer, and that is a fact worth recording as itself. See `UNCLASSIFIED_REASON` for the
          four properties that make this safe to route.
-      4. Otherwise the diagnostician's kind is the reason and the source says so — INCLUDING when
+      4. The kind is CONTEXT-BOUND (`DIAGNOSED_CONTEXT_BOUND`) and the engine's own answer is not
+         one it may be named under -> `UNCLASSIFIED_REASON` / `REASON_SOURCE_UNDIAGNOSED`, exactly
+         like an out-of-vocabulary kind, because outside its context that is what it is: a word
+         asserting an engine mechanism that was watching and did not fire.
+      5. The kind OVERRIDES the engine's answer on a pair `OVERRIDE_EVIDENCE_REQUIRED` names and the
+         verdict cites no evidence of the required SOURCE -> the engine's own answer with
+         `REASON_SOURCE_ENGINE`. Text nominated and could not decide; `reason_override_refused`
+         says which source it lacked, so the caller can record the refusal beside the word.
+      6. Otherwise the diagnostician's kind is the reason and the source says so — INCLUDING when
          it agrees with the engine. That is a 2026-08-20 change from `judged_failure_reason`, which
          stamped `engine` on agreement: under ownership-by-decision the diagnostician DID decide,
          and `engine_reason` on the same row is what lets a reader recover whether the two agreed.
@@ -732,9 +866,11 @@ def diagnosed_failure_reason(deterministic: str, verdict) -> tuple[str, str]:
     from looplab.engine.triage import AGENT_TRIAGE_ACTIONS
     if str(verdict.get("action", "")).strip().lower() not in AGENT_TRIAGE_ACTIONS:
         return UNCLASSIFIED_REASON, REASON_SOURCE_UNDIAGNOSED
-    kind = coerce_failure_kind(verdict.get("failure_kind"), "")
+    kind = coerce_failure_kind(verdict.get("failure_kind"), "", engine_reason=det)
     if not kind:
         return UNCLASSIFIED_REASON, REASON_SOURCE_UNDIAGNOSED
+    if reason_override_refused(det, verdict):
+        return det, REASON_SOURCE_ENGINE
     return kind, REASON_SOURCE_TRIAGE
 
 
