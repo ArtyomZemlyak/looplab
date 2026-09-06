@@ -58,6 +58,7 @@ ATTR_BY_FIELD = {
     "max_eval_timeout": "max_eval_timeout",
     "sweep_timeout_mult": "sweep_timeout_mult",
     "eval_stall_timeout_s": "eval_stall_timeout_s",
+    "single_command_divergence_watch": "_single_command_divergence_watch",
     "eval_deadline_grace_s": "eval_deadline_grace_s",
     "eval_env": "_eval_env",
     "confirm_top_k": "confirm_top_k",
@@ -344,6 +345,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         asha_live_kill=settings.asha_live_kill,
         asha_live_quantile=settings.asha_live_quantile,
         asha_live_min_siblings=settings.asha_live_min_siblings,
+        # …and the single-command divergence watchdog, ON in Settings and OFF in the bare library
+        # for the reason frozen in tests/test_options_divergence.py (kill authority).
+        single_command_divergence_watch=settings.single_command_divergence_watch,
         # …and the proposal-derived width (docs/29 F1), ON in Settings and OFF in the bare library
         # for the reason frozen in tests/test_options_divergence.py.
         proposal_width=settings.proposal_width,

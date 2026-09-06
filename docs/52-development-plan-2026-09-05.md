@@ -562,11 +562,18 @@ Not done here: the Researcher's and the Deep-Research loop's OTHER tool results 
 scouts, memory) still arrive bare under their system rules; MCP results and a remote server's
 self-description in the tool schema (doc 50 TO-06) are untouched. Deleted per the index rule.*
 
-OPEN[engine-attributes-have-no-declaring-site-guard] `Engine` touches 772 attribute names across 20
-mixins, 91 assigned only outside `__init__`, 47 from more than one file, with 143 silent handlers in
-the package to absorb the `AttributeError` a typo produces (doc 50 XP-08; the `_AshaStub` incident).
-The cheap half is an AST guard that every `self._x` read in `engine/` has exactly one declaring site.
-proof:missing:tests/test_engine_attribute_sites.py
+*Closed 2026-09-06 (row 21, first half shipped): the marker `engine-attributes-have-no-declaring-site-guard`
+stood here. Re-measured over `Engine.__mro__` rather than every class in the package: 261 data
+attributes, 218 declared in `Engine.__init__`, 42 minted only elsewhere, 125 read through
+`getattr(self, "…", default)`. `tests/test_engine_attribute_sites.py` walks the real family's AST and
+holds four rules — every read has a declaring site (`__init__`, class level, or a row in
+`engine/attribute_sites.py::LAZY_ENGINE_ATTRIBUTES` naming EXACTLY the minting methods), a registered
+row is never also declared, a new lazy mint is red until declared or registered, and the declared
+attributes read with INCONSISTENT `getattr` defaults are exactly `GETATTR_DEFAULT_DRIFT` (five today).
+Both tables are shrink-only backlogs. The guard found a dead setting on its first run:
+`Settings.single_command_divergence_watch` had no `EngineOptions` field and no `__init__` assignment,
+so the single-command divergence watchdog never armed on a product run from 2026-08-30 to 2026-09-06 —
+wired now, with a driven test at the `run_command_eval` seam. Deleted per the index rule.*
 
 OPEN[layering-rules-are-not-machine-checked] 38 % of intra-package import edges are function-local
 and only a third of the stated layering rules are guarded; nothing guards `core` or `events` purity,

@@ -617,6 +617,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         asha_live_kill_confidence = _opt("asha_live_kill_confidence")
         sweep_timeout_mult = _opt("sweep_timeout_mult")
         eval_stall_timeout_s = _opt("eval_stall_timeout_s")
+        single_command_divergence_watch = _opt("single_command_divergence_watch")
         eval_deadline_grace_s = _opt("eval_deadline_grace_s")
         eval_env = _opt("eval_env")
         confirm_seed_base = _opt("confirm_seed_base")
@@ -1124,6 +1125,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Eval stall watchdog cap (seconds); 0 disables. Threaded into command_eval and surfaced to the
         # Developer so its code can emit periodic progress to avoid a false silence-kill.
         self.eval_stall_timeout_s = float(eval_stall_timeout_s)
+        # The single-command path's deterministic divergence stop, DECLARED here because
+        # `eval_dispatch._run_eval` used to read it through a `getattr(..., False)` on a name nothing
+        # ever assigned — the exact silent-typo shape `tests/test_engine_attribute_sites.py` refuses.
+        self._single_command_divergence_watch = bool(single_command_divergence_watch)
         # Most extra wall clock a live-log judge may buy for a stage at its deadline, ONCE per
         # command. 0 (default) = the historical unconditional tree-kill. See
         # `Settings.eval_deadline_grace_s` for the 22.0 discarded GPU-hours and for why it is opt-in.

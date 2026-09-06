@@ -44,6 +44,7 @@ _LAYOUT = {
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
     "plan": "engine",  # the PLAN artifact + the endgame reserve the dispatcher honours (doc 52 row 18)
+    "attribute_sites": "engine",  # the Engine attribute declaring-site registry (doc 52 row 21)
     "agents_md": "tools",
     "appconfig": "core",
     "envsafe": "core",   # the secret screen + the DECLARED ENVIRONMENT rule all three levels share

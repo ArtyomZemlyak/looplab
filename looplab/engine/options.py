@@ -110,6 +110,16 @@ class EngineOptions:
     max_eval_timeout: float = 3600.0
     sweep_timeout_mult: float = 8.0      # intra-node sweep nodes get this × the single-eval budget
     eval_stall_timeout_s: float = 1800.0  # #6: silence-before-kill CAP for an eval stage; 0 disables
+    # The single-command eval path's DETERMINISTIC divergence watchdog (`Settings.
+    # single_command_divergence_watch`, 2026-08-30): five CONSECUTIVE non-finite `loss`/`grad_norm`
+    # records fail the stage `diverged`. OFF here and ON in the product surface — a divergence-table
+    # row (`tests/test_options_divergence.py`) — because it is KILL AUTHORITY, and a bare `Engine(...)`
+    # must not gain a kill it never asked for: the rule `train_monitor_kill` follows.
+    # It had NO field here from the day the setting shipped: `eval_dispatch._run_eval` read the
+    # never-assigned name through `getattr(self, "single_command_divergence_watch", False)`, so the
+    # product default was decorative for a week while its source pin stayed green. The engine
+    # attribute guard (`tests/test_engine_attribute_sites.py`, doc 52 row 21) is what found it.
+    single_command_divergence_watch: bool = False
     # -1 = AUTO (min(10% of the stage's own wall, 1800s)); 0 = off; >0 = the operator's absolute
     # ceiling. Resolved per stage in `runtime/sandbox.py::resolve_deadline_grace`.
     eval_deadline_grace_s: float = -1.0   # one-shot judge-granted extension at the deadline

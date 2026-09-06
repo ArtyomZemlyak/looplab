@@ -68,6 +68,12 @@ EXPECTED = {
     # `resource_key`, past the grace window, with `asha_live_min_siblings` finished same-resource peers.
     "train_monitor_kill": (True, False),
     "asha_live_kill": (True, False),
+    # The third kill: the single-command path's deterministic divergence watchdog (2026-08-30). ON in
+    # the product surface (0 false positives across 110 scorer logs on the box that measured it), OFF
+    # in the bare library for the reason the two rows above state — and this row is a week younger
+    # than the setting because the field was MISSING from EngineOptions until 2026-09-06, which is
+    # how the product default was decorative for a week (doc 52 row 21's attribute guard).
+    "single_command_divergence_watch": (True, False),
     "unified_agent": (True, False),
     # Layer 3 Card queue owns macro-action selection in the product surface (2026-08-04): the Card lane
     # is the intended selector, and it wins over `agent_drives_actions` when both are on. The bare

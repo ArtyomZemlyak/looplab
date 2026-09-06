@@ -711,8 +711,11 @@ class EvalDispatchMixin:
                              if start_stage is _UNSET else start_stage),  # Phase 2: re-run from a stage
                 stall_cap=self.eval_stall_timeout_s,          # #6: operator-set silence-before-kill cap (0 = off)
                 # The single-command path's deterministic divergence stop (Settings; see the field's
-                # comment for the 0-of-110 scorer measurement that decided the default).
-                divergence_watch=bool(getattr(self, "single_command_divergence_watch", False)),
+                # comment for the 0-of-110 scorer measurement that decided the default). Read off the
+                # DECLARED attribute: until 2026-09-06 this was `getattr(self,
+                # "single_command_divergence_watch", False)` on a name no `__init__` ever assigned,
+                # so the watchdog never armed on this path whatever the setting said.
+                divergence_watch=bool(self._single_command_divergence_watch),
                 check_fn=check_fn,                            # Phase 3: optional inter-stage agentic verify
                 # THE STAGE IDENTITY INSTRUMENT. Derives each stage's reuse key before it runs and
                 # its outputs' content identity when its artifact contract passes; both ride on the
