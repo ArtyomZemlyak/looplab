@@ -29,7 +29,9 @@ response body comes back unchanged except for `usage.cost` / `usage.cost_basis` 
 
 It DOES shape traffic, and that is deliberate: one shared RPM budget and one 429-retry policy for
 both arms (see `RateLimiter`), because the endpoint's own limit is shared and each framework would
-otherwise absorb it with its own private backoff.
+otherwise absorb it with its own private backoff. The queue in front of that budget is BOUNDED
+(`--rpm-max-wait`, default 40 s): a request the window cannot admit within the bound is answered
+429 at once rather than held on a socket the client will abandon first (doc 56 §170).
 
 A streamed response is forwarded frame by frame and priced from its usage frame; a stream the
 GATEWAY cut without one is priced from the content deltas it forwarded plus a prompt side recovered
@@ -388,6 +390,36 @@ class PromptTokens:
         return max(1, int(round(chars / per_token))), "estimated_from_request_chars", per_token, calls
 
 
+def _upstream_lines(resp, died: dict):
+    """`for line in resp`, ending EARLY -- not raising -- when the upstream fails mid-read.
+
+    WHY. `_proxy_stream` forwards inside one `try` whose `except` has two tenants that look alike
+    and are priced differently: our CLIENT hanging up (a `BrokenPipeError` out of `emit()`; what
+    was generated after that reached nobody) and the UPSTREAM dying under us (an RST, a socket
+    timeout; what it had sent WAS forwarded, or collected for the adapted client, and the
+    provider generated and billed it). Note what is NOT in that second set: a chunked body that
+    simply ends without its terminator is swallowed by `http.client`'s `_peek_chunked` into a
+    clean EOF while iterating lines, so the gateway's ~1800 s cut usually arrives as the tidy
+    no-usage-frame path below and only sometimes as one of these. Driven 2026-08-30 with an
+    upstream sending 3 deltas then RST: the adapted client received status 200, the full
+    forwarded content and a truncation mark, and the row landed `{metered: false, cost: 0.0,
+    deltas_seen: 3}` -- a served answer priced at nothing, the silent-under-count shape the delta
+    estimator exists to close, live whenever the ~1800 s gateway cut arrives as an exception
+    instead of a clean EOF.
+
+    So the read failure is stashed in `died["exc"]` and the loop simply ends, which puts the
+    caller on the SAME path a clean cut takes -- the synthesis, the two frames, the sentinel -- with
+    the exception in hand to say how the stream ended. A write failure is not caught here and is
+    still the `except`'s. `GeneratorExit` (the caller `break`ing at its ceiling) is not an
+    `Exception` and passes through untouched.
+    """
+    try:
+        for line in resp:
+            yield line
+    except Exception as exc:  # noqa: BLE001 - the caller decides what the death means
+        died["exc"] = exc
+
+
 def _header_cost(headers: dict) -> float | None:
     """A positive cost the upstream reported in a header, or None.
 
@@ -404,6 +436,66 @@ def _header_cost(headers: dict) -> float | None:
     return None
 
 
+def _body_cost(usage: dict) -> float | None:
+    """A positive cost the upstream reported in the BODY (`usage.cost`), or None.
+
+    THE SAME RULE AS `_header_cost`, and until 2026-09-06 it was not. A body `cost: 0.0` was taken
+    as an authoritative invoice -- `{metered: true, cost: 0.0, cost_basis: "upstream"}`, no
+    imputation run -- while the identical zero in `x-litellm-response-cost-original` was refused
+    as "unpriced, not free". The corporate gateway IS LiteLLM and already emits the header form;
+    the day it stamps the same zero into the body, every call prices at $0 under a green
+    `metered: true`, which is the founding "budget never binds" defect back, asserted as an
+    invoice. So a zero, a negative number and a value that is not a number are all "the upstream
+    did not price this", and the caller falls through to the header and then to imputation exactly
+    as it does when the key is absent -- recording, in the frame and in the row, that a reported
+    figure was refused (`meter_upstream_cost_refused` / `upstream_cost_refused`), so a reader
+    comparing the two can see why `cost_basis` is not `upstream`.
+    """
+    if not isinstance(usage, dict) or usage.get("cost") is None:
+        return None
+    try:
+        amount = float(usage["cost"])
+    except (TypeError, ValueError):
+        return None
+    return amount if amount > 0 else None
+
+
+# THE RPM QUEUE IS BOUNDED, and this is the bound. Measured 2026-09-03 over 26,004 ledger rows
+# (doc 56 §170): `RateLimiter.acquire` is a 60 s sliding window that BLOCKS before the upstream
+# request is opened, and both arms' clients give up on a first byte at 45 s
+# (`llm_header_timeout = 45.0` in every probe's `config.snapshot.json`). 39 requests waited more
+# than 0.5 s in that queue and 23 of them came back an EMPTY 200 -- 59 %, against 0.0154 % of the
+# 25,968 that did not wait; 23 of the 27 empty 200s in the corpus had queued. A request held for
+# up to 60 s by this proxy is a request its client abandons at 45 s, after which the proxy opens
+# the upstream, spends a slot, streams nothing to nobody and writes a clean-looking row.
+#
+# 40 s sits under the client's 45 s window with a margin for the connect and the first byte. The
+# refusal is IMMEDIATE and PROJECTED: the earliest a slot can open is when the oldest stamp leaves
+# the window, and if that instant is past the bound the request is answered 429 now rather than
+# after 40 s of holding the socket -- the client's own retry then re-enters the queue when it can
+# be admitted. 0 restores the historical unbounded queue.
+RPM_MAX_WAIT_DEFAULT = 40.0
+
+# The `kind` a queue refusal's row carries. Its status is 429, which is ALSO what an upstream
+# throttle answers, and `check_money._failure_kind` keys on status; a reader that could not tell
+# the two apart would file this proxy's own refusals under the gateway. One word, on the row.
+RPM_QUEUE_REFUSED_KIND = "rpm_queue_refused"
+
+
+class RpmQueueRefused(Exception):
+    """`RateLimiter.acquire` declined to hold the request: the queue bound would be exceeded.
+
+    `waited` is what the request had already spent in the queue (0.0 when the projection refused
+    it outright), `retry_after` the seconds until the window can admit it.
+    """
+
+    def __init__(self, waited: float, retry_after: float, max_wait: float):
+        super().__init__(f"RPM queue wait of ~{retry_after:.0f}s exceeds the {max_wait:.0f}s bound")
+        self.waited = waited
+        self.retry_after = retry_after
+        self.max_wait = max_wait
+
+
 class RateLimiter:
     """One shared request budget for both arms, because the endpoint applies one.
 
@@ -417,16 +509,26 @@ class RateLimiter:
     unshaped 429 storm would charge the two loops differently for the same endpoint condition. One
     queue in front of both makes the endpoint's limit a constant of the experiment instead of a
     variable that correlates with how each framework happens to retry.
+
+    THE QUEUE IS BOUNDED (`max_wait`, see `RPM_MAX_WAIT_DEFAULT` for the measurement). A wait the
+    bound cannot cover is refused with `RpmQueueRefused` at once, on the projection, and a wait
+    that has already reached the bound -- possible under contention, since every waiter re-checks
+    the window on its own clock -- is refused on the next check. `0` never refuses.
     """
 
-    def __init__(self, rpm: int):
+    def __init__(self, rpm: int, max_wait: float = RPM_MAX_WAIT_DEFAULT):
         self.rpm = rpm
+        self.max_wait = float(max_wait or 0.0)
         self._stamps: list[float] = []
         self._lock = threading.Lock()
         self.waited_s = 0.0
+        self.refused = 0
 
     def acquire(self) -> float:
-        """Block until a request slot is free. Returns seconds waited (metered per call)."""
+        """Block until a request slot is free. Returns seconds waited (metered per call).
+
+        Raises `RpmQueueRefused` instead of blocking past `max_wait`.
+        """
         if self.rpm <= 0:
             return 0.0
         waited = 0.0
@@ -439,6 +541,16 @@ class RateLimiter:
                     self.waited_s += waited
                     return waited
                 sleep_for = max(0.05, 60.0 - (now - self._stamps[0]))
+                if self.max_wait > 0 and (waited >= self.max_wait
+                                          or waited + sleep_for > self.max_wait):
+                    # Not "after the bound elapses": the earliest admission is when the oldest
+                    # stamp leaves the window, and if that is past the bound there is nothing to
+                    # wait FOR. Holding the socket until 40 s would reproduce the empty 200 with
+                    # a shorter minute.
+                    self.refused += 1
+                    self.waited_s += waited
+                    raise RpmQueueRefused(waited=waited, retry_after=sleep_for,
+                                          max_wait=self.max_wait)
             time.sleep(min(sleep_for, 5.0))
             waited += min(sleep_for, 5.0)
 
@@ -454,6 +566,7 @@ class Meter:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.errors = 0
+        self.rpm_refused = 0
 
     def record(self, row: dict) -> None:
         with self._lock:
@@ -463,6 +576,8 @@ class Meter:
             self.completion_tokens += int(row.get("completion_tokens") or 0)
             if int(row.get("status") or 0) >= 400 or row.get("error"):
                 self.errors += 1
+            if row.get("kind") == RPM_QUEUE_REFUSED_KIND:
+                self.rpm_refused += 1
             if not self.path:
                 return
             try:
@@ -479,6 +594,7 @@ class Meter:
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
                 "errors": self.errors,
+                "rpm_refused": self.rpm_refused,
             }
 
 
@@ -544,6 +660,34 @@ class Handler(BaseHTTPRequestHandler):
             "latency_ms": round((time.time() - t0) * 1000, 1), "error": message, "metered": False,
         })
         self._send(status, body, {"Content-Type": "application/json"})
+
+    def _refuse_rpm_queue(self, exc: RpmQueueRefused, *, arm: str, task: str, attempt: str,
+                          tail: str, model: str, t0: float, tally: dict, streaming: bool,
+                          req_sha: str) -> None:
+        """Answer 429 NOW, and write the refusal down as THIS proxy's, not the gateway's.
+
+        The row is a full one -- path, model, attempts, the queue time it did spend -- and not
+        `_fail`'s stub, because a refusal is a fact about the campaign's load that `check_money`
+        has to be able to count beside the 429s the upstream sends. `kind` is what separates the
+        two; `Retry-After` tells an honouring client when the window can take it, in whole seconds
+        as the header requires, never less than 1.
+        """
+        retry_after = max(1, int(exc.retry_after + 0.999))
+        message = (f"meter RPM queue: the next slot opens in ~{exc.retry_after:.0f}s, past this "
+                   f"proxy's --rpm-max-wait of {exc.max_wait:.0f}s; refused after "
+                   f"{exc.waited:.1f}s queued rather than held past the client's own timeout")
+        self.server.meter.record({
+            "ts": time.time(), "arm": arm, "task": task, "attempt": attempt, "path": tail,
+            "model": model, "status": 429, "latency_ms": round((time.time() - t0) * 1000, 1),
+            "stream": streaming, "attempts": tally["attempts"],
+            "queued_s": round(tally["queued_s"] + exc.waited, 2), "req_sha": req_sha,
+            "kind": RPM_QUEUE_REFUSED_KIND, "refused_by": "meter", "retry_after_s": retry_after,
+            "error": message, "metered": False,
+        })
+        body = json.dumps({"error": {"message": message, "type": "meter_rpm_queue",
+                                     "code": 429}}).encode()
+        self._send(429, body, {"Content-Type": "application/json",
+                               "Retry-After": str(retry_after)})
 
     # -- the actual proxy -------------------------------------------------------------------
     def do_GET(self):
@@ -715,6 +859,11 @@ class Handler(BaseHTTPRequestHandler):
             resp_headers = {k: v for k, v in (exc.headers or {}).items()}
             # The tuple above never bound: take what the retry loop actually did.
             attempts, queued_s = tally["attempts"], tally["queued_s"]
+        except RpmQueueRefused as exc:
+            self._refuse_rpm_queue(exc, arm=arm, task=task, attempt=attempt, tail=tail,
+                                   model=model, t0=t0, tally=tally, streaming=streaming,
+                                   req_sha=_request_sha(req.data or b""))
+            return
         except Exception as exc:  # noqa: BLE001 - upstream failures are data, not crashes
             self._fail(502, f"upstream {type(exc).__name__}: {exc}", arm, task, attempt, t0)
             return
@@ -739,23 +888,13 @@ class Handler(BaseHTTPRequestHandler):
                 pout = int(usage.get("completion_tokens") or 0)
                 rate_in, rate_out, basis = self.server.pricing.rate(model or data.get("model", ""))
                 header_cost = _header_cost(resp_headers)
-                if "cost" in usage and usage.get("cost") is not None:
+                reported_cost, body_cost = usage.get("cost"), _body_cost(usage)
+                if body_cost is not None:
                     # The upstream priced it itself (a real OpenRouter, say). Never overwrite a
-                    # provider's own invoice with an imputed one.
-                    # OPEN[meter-upstream-zero-cost-is-an-invoice] a body `usage.cost` of 0.0 is
-                    # accepted as an authoritative $0 while the header rule refuses the same zero.
-                    # proof:`present:if "cost" in usage and usage.get("cost") is not None:@benchmarks/meter/proxy.py`
-                    # REVIEW 2026-08-30 (money): `_header_cost` thirty lines up states the rule —
-                    # "Zero is NOT a price here: LiteLLM emits ... 0.0 for a model group it has no
-                    # price for, which is the unpriced case, not a free one" — and this branch (and
-                    # its streaming twin in `_proxy_stream`) skips it: `cost: 0.0` in the BODY lands
-                    # as `{metered: true, cost: 0.0, cost_basis: "upstream"}` and no imputation
-                    # runs. The corporate gateway IS LiteLLM and already emits the header form; the
-                    # day it stamps the same zero into the body, every call prices at $0 with a
-                    # green `metered: true` — the founding "budget never binds" defect back, now
-                    # asserted as an invoice. Treat a zero body cost like the zero header cost
-                    # (fall through to imputation), or label it so no reader mistakes it.
-                    cost = float(usage["cost"])
+                    # provider's own invoice with an imputed one. A ZERO is not an invoice: see
+                    # `_body_cost`, which refuses it exactly as `_header_cost` refuses the header
+                    # form, so the branches below run and the row says the figure was refused.
+                    cost = body_cost
                     basis = "upstream"
                 elif header_cost is not None:
                     # The corporate gateway is itself LiteLLM and publishes its own figure in
@@ -771,6 +910,9 @@ class Handler(BaseHTTPRequestHandler):
                     usage["cost"] = cost
                 usage["cost_basis"] = basis
                 usage["cost_source"] = self.server.pricing.fetched_at
+                if reported_cost is not None and body_cost is None:
+                    usage["meter_upstream_cost_refused"] = reported_cost
+                    row["upstream_cost_refused"] = reported_cost
                 # The gateway just told us how many tokens this exact prompt was. That is the only
                 # evidence there is for what a character is worth here, and it is free.
                 self.server.prompt_scale.observe(_prompt_chars(body), pin)
@@ -788,21 +930,22 @@ class Handler(BaseHTTPRequestHandler):
                 row["note"] = "no usage object in response"
         else:
             row["metered"] = False
-            # OPEN[meter-error-body-shape-skips-the-ledger] a non-object JSON error body raises out
-            # of the handler BEFORE the row is recorded and before anything is sent to the client.
-            # proof:`line:upstream_error&&json.loads(raw)@benchmarks/meter/proxy.py`
-            # REVIEW 2026-08-30 (money): `json.loads(b'"internal error"')` (a JSON string, array or
-            # number — shapes a busy gateway's own edge really produces) succeeds and `.get` then
-            # raises AttributeError, which `except ValueError` does not catch. The exception
-            # escapes before `self.server.meter.record(row)` below, so the paid request VANISHES
-            # from the ledger — the one thing this file says it must never do — and the client gets
-            # a bare connection drop instead of the legible 500, which the arms' retry loops
-            # classify differently. Catch `(ValueError, AttributeError)` or guard with
-            # `isinstance(parsed, dict)`. Driven live: upstream 500 with body `"internal error"`
-            # -> client RemoteDisconnected, rows recorded: 0.
+            # TOTAL OVER BODY SHAPES. `json.loads(b'"internal error"')` -- a JSON string, array or
+            # number, shapes a busy gateway's own edge really produces -- parses, and `.get` on the
+            # result raised AttributeError, which `except ValueError` did not catch. The exception
+            # escaped BEFORE `self.server.meter.record(row)` below and before any response, so the
+            # paid request VANISHED from the ledger (the one thing this file must never do) and the
+            # client got a bare connection drop instead of the legible status, which the arms'
+            # retry loops classify differently. Driven 2026-08-30: upstream 500 with body
+            # `"internal error"` -> client RemoteDisconnected, rows recorded: 0. An object's
+            # `error` member is carried as before; any other shape is carried as text.
             try:
-                row["upstream_error"] = json.loads(raw).get("error")
+                parsed = json.loads(raw)
             except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                row["upstream_error"] = parsed.get("error")
+            else:
                 row["upstream_error"] = raw[:400].decode("utf-8", "replace")
 
         self.server.meter.record(row)
@@ -823,13 +966,18 @@ class Handler(BaseHTTPRequestHandler):
         which means a request that was retried five times and then failed was written down as
         `attempts: 1, queued_s: 0.0` -- a false statement about exactly the calls a retry counter
         exists to count. Anything passed here is updated in place, before each attempt and after
-        each sleep, so the row can be honest on the failure path too.
+        each sleep, so the row can be honest on the failure path too. The attempt count lands
+        BEFORE the queue is entered, because `limiter.acquire` can raise `RpmQueueRefused`
+        (propagated, never retried here: it is this proxy's own answer) and the attempt it refused
+        was still an attempt.
         """
         limiter = self.server.limiter
         attempts = 0
         waited = 0.0
         while True:
             attempts += 1
+            if tally is not None:
+                tally["attempts"] = attempts
             waited += limiter.acquire()
             if tally is not None:
                 tally["attempts"], tally["queued_s"] = attempts, waited
@@ -877,6 +1025,12 @@ class Handler(BaseHTTPRequestHandler):
         collected: list = []
         tally = {"attempts": 1, "queued_s": 0.0}
         answered = False        # did the CLIENT get an HTTP response? see the tail below
+        # `_upstream_lines` stashes a mid-read failure here; `priced_exception_cut` is that failure
+        # once the stream it ended has been priced like any other cut (see the loop's tail).
+        died: dict = {}
+        priced_exception_cut = None
+        # A reported body cost this proxy REFUSED (a zero: see `_body_cost`), kept for the row.
+        upstream_cost_refused = None
         try:
             resp, attempts, queued_s = self._open_upstream(req, tally)
             row.update({"attempts": attempts, "queued_s": round(queued_s, 2)})
@@ -890,6 +1044,11 @@ class Handler(BaseHTTPRequestHandler):
                         "upstream_error": raw[:400].decode("utf-8", "replace")})
             self.server.meter.record(row)
             self._send(exc.code, raw, {"Content-Type": "application/json"})
+            return
+        except RpmQueueRefused as exc:
+            self._refuse_rpm_queue(exc, arm=arm, task=task, attempt=attempt, tail=tail,
+                                   model=model, t0=t0, tally=tally, streaming=True,
+                                   req_sha=row["req_sha"])
             return
         except Exception as exc:  # noqa: BLE001
             self._fail(502, f"upstream {type(exc).__name__}: {exc}", arm, task, attempt, t0)
@@ -990,7 +1149,7 @@ class Handler(BaseHTTPRequestHandler):
         # sends `[DONE]` (`_frame_done` in tests/test_meter_delta_ceiling_is_not_retryable.py)
         # never asserts the client saw it, which is how this shipped. Re-emit on the other exits.
         try:
-            for line in resp:
+            for line in _upstream_lines(resp, died):
                 out = line
                 if line.startswith(b"data: [DONE]"):
                     done_seen = True
@@ -1029,8 +1188,12 @@ class Handler(BaseHTTPRequestHandler):
                         pout = int(usage.get("completion_tokens") or 0)
                         rate_in, rate_out, basis = self.server.pricing.rate(
                             model or frame.get("model", ""))
-                        if usage.get("cost") is not None:
-                            cost, basis = float(usage["cost"]), "upstream"
+                        reported_cost, body_cost = usage.get("cost"), _body_cost(usage)
+                        if body_cost is not None:
+                            # A ZERO is not an invoice here either: `_body_cost` refuses it as
+                            # `_header_cost` refuses the header form, so the two branches below
+                            # run and the frame says the reported figure was refused.
+                            cost, basis = body_cost, "upstream"
                         elif _hdr_cost is not None:
                             # THE GATEWAY'S OWN INVOICE, read on this route too. `_header_cost` was
                             # consulted only in `_proxy`, so with `METER_STREAM_ADAPT=1` the very
@@ -1046,6 +1209,9 @@ class Handler(BaseHTTPRequestHandler):
                             usage["cost"] = cost
                         usage["cost_basis"] = basis
                         usage["cost_source"] = self.server.pricing.fetched_at
+                        if reported_cost is not None and body_cost is None:
+                            usage["meter_upstream_cost_refused"] = reported_cost
+                            upstream_cost_refused = reported_cost
                         self.server.prompt_scale.observe(prompt_chars, pin)
                         prompt_basis = "reported_by_upstream"
                         out = b"data: " + json.dumps(frame).encode() + b"\n"
@@ -1059,6 +1225,17 @@ class Handler(BaseHTTPRequestHandler):
                 if ceiling and deltas >= ceiling and not usage_frame_seen:
                     cut_by_meter = True
                     break
+            if died.get("exc") is not None:
+                if usage_frame_seen or not deltas:
+                    # Nothing to price that the gateway did not already price, or nothing was
+                    # produced at all: the historical error path answers (a 502 on the adapted
+                    # route when no frame arrived, the partial body otherwise).
+                    raise died["exc"]
+                # THE UPSTREAM DIED UNDER A GENERATION THAT WAS SERVED. The deltas it sent went to
+                # the client as they arrived (or sit in `collected` for the adapted one), the
+                # provider generated and billed them, and from here on this is a cut like the
+                # gateway's clean EOF: the estimate below prices it and the row names the cause.
+                priced_exception_cut = died["exc"]
             if cut_by_meter:
                 # STOP PAYING FOR TOKENS NOBODY WILL SEE. The whole saving is here: the generation
                 # runs until someone hangs up, so the socket goes NOW rather than after the frames
@@ -1135,6 +1312,17 @@ class Handler(BaseHTTPRequestHandler):
                         f"the meter stopped forwarding at its delta ceiling of {ceiling}; the "
                         "generation was still running upstream and was not billed beyond this "
                         f"point. prompt_tokens is {prompt_basis}")
+                elif priced_exception_cut is not None:
+                    # SAY HOW IT ENDED, in the frame as well as the row: the accountant reading
+                    # this usage must know the completion count is a floor on a generation whose
+                    # socket FAILED, not one the gateway closed tidily.
+                    usage["meter_cut_by"] = "upstream_exception"
+                    usage["meter_upstream_error"] = (
+                        f"{type(priced_exception_cut).__name__}: {priced_exception_cut}")
+                    usage["meter_note"] = (
+                        "upstream died by exception mid-stream with no usage frame; what it had "
+                        "sent was served, and completion_tokens is a FLOOR counted from those "
+                        f"forwarded deltas. prompt_tokens is {prompt_basis}")
 
                 # TWO FRAMES, NOT ONE, AND THAT IS THE WHOLE FIX ON THE STREAMING SIDE. A single
                 # frame carrying BOTH a populated `choices` array and a `usage` block is not the
@@ -1241,6 +1429,8 @@ class Handler(BaseHTTPRequestHandler):
         row["deltas_seen"] = deltas
         if prompt_basis:
             row["prompt_tokens_basis"] = prompt_basis
+        if upstream_cost_refused is not None:
+            row["upstream_cost_refused"] = upstream_cost_refused
         if basis == "estimated_from_deltas":
                row["prompt_chars"] = prompt_chars
                # `stream_aborted` MEANS THE STREAM NEVER REACHED ITS TERMINATOR, not "we had to
@@ -1261,6 +1451,19 @@ class Handler(BaseHTTPRequestHandler):
                                   f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
                                   f"(EXACT for what was forwarded, a floor for what upstream generated)"
                                   f" and a prompt of {pin} tokens ({prompt_basis})")
+               elif priced_exception_cut is not None:
+                   # AN EXCEPTION CUT, PRICED. It is an abort (the socket failed; the stream
+                   # demonstrably did not finish), it carries the exception the row would have
+                   # carried unpriced, and `stream_cut_by` keeps it apart from a gateway EOF and a
+                   # meter ceiling cut in every column that reads either.
+                   row["stream_aborted"] = True
+                   row["stream_cut_by"] = "upstream_exception"
+                   row["error"] = f"{type(priced_exception_cut).__name__}: {priced_exception_cut}"
+                   row["error_source"] = "upstream"
+                   row["note"] = ("upstream died by exception with no usage frame after "
+                                  f"{latency_ms/1000:.0f}s; what it had sent was served and priced "
+                                  f"from {deltas} forwarded deltas (a FLOOR) and a prompt of {pin} "
+                                  f"tokens ({prompt_basis}) ({row['error']})")
                else:
                    if not done_seen:
                        row["stream_aborted"] = True
@@ -1268,19 +1471,6 @@ class Handler(BaseHTTPRequestHandler):
                                   f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
                                   f"(a FLOOR) and a prompt of {pin} tokens ({prompt_basis})")
         elif not basis and row.get("error"):
-            # OPEN[meter-exception-cut-is-served-unpriced] an upstream that dies by EXCEPTION (an
-            # RST, a socket timeout) can still deliver a usable 200 answer that costs the ledger $0.
-            # proof:absent:priced_exception_cut@benchmarks/meter/proxy.py
-            # REVIEW 2026-08-30 (money): the paragraph below deliberately declines to price the
-            # client-hung-up case, and that reasoning does not cover the other tenant of this same
-            # `except`: an UPSTREAM-side death. Driven live with an upstream sending 3 deltas then
-            # RST — the adapted client receives status 200, the full forwarded content and a
-            # truncation mark, and the row lands `{metered: false, cost: 0.0, deltas_seen: 3}`.
-            # A served answer priced at nothing is the exact silent-under-count shape the delta
-            # estimator was built to close, live whenever the ~1800 s gateway cut arrives as an
-            # exception instead of a clean EOF. The estimate has all its inputs in scope at the
-            # except site; at minimum an upstream-typed exception on the adapted path should price
-            # like a clean cut, with its own basis label.
             # THE ROW MUST NOT CONTRADICT ITSELF. The synthesis above lives inside the `try`, so any
             # exception while forwarding -- a client that hung up is the one that happens; five
             # `BrokenPipeError` rows are in `meter/meter.jsonl` -- skips it and lands here. Two of
@@ -1290,6 +1480,12 @@ class Handler(BaseHTTPRequestHandler):
             # branch deliberately does not answer it -- `metered` stays false and `cost` stays 0.0,
             # which is the module's "unpriced, never $0" rule. What it must not do is state a fact
             # about the row that the field next to it falsifies.
+            #
+            # This branch's OTHER tenant is gone since 2026-09-06: an UPSTREAM-side death (an RST,
+            # a socket timeout) used to land here too, with the deltas it had already served
+            # priced at nothing. `_upstream_lines` now routes that one through the synthesis above
+            # as a priced cut (`stream_cut_by: "upstream_exception"`); what reaches this line is a
+            # failure on OUR side of the forwarding, or an upstream death that produced no delta.
             row["note"] = (f"stream ended in an error after {deltas} forwarded delta(s) and no "
                            f"usage frame; nothing was priced ({row['error']})")
         elif not basis:
@@ -1369,6 +1565,11 @@ def main() -> int:
                          "The gateway publishes x-litellm-key-rpm-limit: 50.")
     ap.add_argument("--max-retries", type=int, default=5,
                     help="429 retries absorbed here instead of by each framework's own policy")
+    ap.add_argument("--rpm-max-wait", type=float,
+                    default=float(os.environ.get("METER_RPM_MAX_WAIT", RPM_MAX_WAIT_DEFAULT)),
+                    help="longest the RPM queue may hold a request before answering 429 itself "
+                         "(0 = hold until a slot opens, up to 60 s). Under both arms' 45 s "
+                         "first-byte timeout, so a queued call is refused rather than abandoned")
     ap.add_argument("--delta-ceiling", type=int,
                     default=int(os.environ.get("METER_DELTA_CEILING", DELTA_CEILING_DEFAULT)),
                     help="stop forwarding a stream after this many content deltas and close it as "
@@ -1387,7 +1588,7 @@ def main() -> int:
     server.pricing = pricing
     server.timeout = args.timeout
     server.meter = Meter(args.log or None)
-    server.limiter = RateLimiter(args.rpm)
+    server.limiter = RateLimiter(args.rpm, max_wait=max(0.0, args.rpm_max_wait))
     server.max_retries = args.max_retries
     server.delta_ceiling = max(0, args.delta_ceiling)
     # WHICH EGRESS PATH THE UPSTREAM NEEDS IS THE UPSTREAM'S BUSINESS, NOT THIS FILE'S.
@@ -1420,7 +1621,8 @@ def main() -> int:
           f"out={pricing.default.get('output_per_token')} basis={pricing.basis} "
           f"fetched_at={pricing.fetched_at}", flush=True)
     print(f"[meter] log {args.log or '(none)'}", flush=True)
-    print(f"[meter] rpm cap {args.rpm or 'unlimited'} | 429 retries {args.max_retries}", flush=True)
+    print(f"[meter] rpm cap {args.rpm or 'unlimited'} | 429 retries {args.max_retries} | "
+          f"queue wait cap {server.limiter.max_wait or 'none'}", flush=True)
     print(f"[meter] delta ceiling {server.delta_ceiling or 'off'}", flush=True)
     try:
         server.serve_forever()
