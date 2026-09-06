@@ -40,7 +40,7 @@ from looplab.core.pathsafe import filesystem_identity
 from looplab.core.models import Event
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
-from looplab.engine.finalize import incomplete_finalize_scope
+from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
 from looplab.events.comment_projection import COMMENT_MAX_VERSION
 from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, EventStore, EventStoreConcurrencyError, EventStoreLockError,
@@ -1352,8 +1352,10 @@ class RunCommandService:
         if observation.incomplete_finalize_scope() is not None:
             return True
         state = state or observation.state()
+        # `is_guarded_abort`, never the literal: a ceiling-ended run (`budget_exhausted`) is the
+        # same guarded-path finish as `error` and owes the same wrap-up.
         return bool(state.finalization_pending() or (state.stop_requested and (
-            not state.finished or str(state.stop_reason or "").lower() == "error")))
+            not state.finished or is_guarded_abort(state.stop_reason))))
 
     def _pending_finalize_intent(
             self, rd: Path, observation: Optional[CommandObservation] = None):
@@ -2813,8 +2815,10 @@ class RunCommandService:
                         and state.last_resume_served_seq > event_seq and not state.paused)
         if kind == "finished_and_stopped":
             state = observation.state()
+            # A guarded-abort finish (`error` OR the ceiling's `budget_exhausted`) is not the
+            # engine's own stopped terminal; the class predicate keeps both out.
             if (not state.finished or self._engine_state(rd) is not False
-                    or str(state.stop_reason or "").lower() == "error"):
+                    or is_guarded_abort(state.stop_reason)):
                 return False
             if not state.stop_requested:
                 return False

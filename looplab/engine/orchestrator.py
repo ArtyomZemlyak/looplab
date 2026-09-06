@@ -84,6 +84,7 @@ from looplab.engine.finalize import (
     finalize_run,
     finalize_scope_quiescent,
     incomplete_finalize_scope,
+    is_guarded_abort,
     mark_finish_report_complete,
     scoped_finish_report,
 )
@@ -1920,11 +1921,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 continue
             # Terminal/operator gates precede ALL work, including reset rebuilds. An explicit pause
             # must freeze a queued rerun; a scoped developer-crash pause must stop a stale reset batch.
-            # A prior invocation guard may have appended run_finished(error) after a durable abort.
-            # That is a retryable failed wrap-up, not the abort's terminal result; republish the
-            # stable abort scope and let scoped finalization deduplicate every completed side effect.
+            # A prior invocation guard may have appended a guarded-abort run_finished (`error`, or
+            # the ceiling's `budget_exhausted`) after a durable abort. That is a retryable failed
+            # wrap-up, not the abort's terminal result; republish the stable abort scope and let
+            # scoped finalization deduplicate every completed side effect. `is_guarded_abort` and
+            # never the literal: the ceiling is the ORDINARY terminal of a budgeted campaign, and a
+            # literal `"error"` here made it read as a clean finish nothing needed to retry.
             if (state.finished and state.stop_requested
-                    and str(state.stop_reason or "").lower() == "error"):
+                    and is_guarded_abort(state.stop_reason)):
                 abort = next(
                     (event for event in reversed(decision_events)
                      if event.type == EV_RUN_ABORT),
@@ -3826,11 +3830,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._repin_settled_widths(_entry)
         self._require_pinned_speculation_receipt(_entry)
         self._pending_finalize_scope = incomplete_finalize_scope(_events)
-        # A failed finalize attempt is recorded as finished(reason=error) by the CLI guard, but its
-        # durable stop is still pending. Treat that as NOT already finalized so the retry below can
-        # write run_finished(aborted) and re-run budget/archive/case/cost wrap-up exactly once.
+        # A failed finalize attempt is recorded as a guarded-abort finish (`error`, or the ceiling's
+        # `budget_exhausted`) by the CLI guard, but its durable stop is still pending. Treat that as
+        # NOT already finalized so the retry below can write run_finished(aborted) and re-run
+        # budget/archive/case/cost wrap-up exactly once. The CLASS predicate, not the literal —
+        # see `events/finalize_scope.py::GUARDED_ABORT_REASONS`.
         entry_finished = bool(_entry.finished and self._pending_finalize_scope is None and not (
-            _entry.stop_requested and str(_entry.stop_reason or "").lower() == "error"))
+            _entry.stop_requested and is_guarded_abort(_entry.stop_reason)))
         # Restore Card authority before replaying the active Strategy: its conditional governance
         # grant for card_scoring depends on this run-start-pinned value, not the ambient snapshot.
         if _entry.run_id:

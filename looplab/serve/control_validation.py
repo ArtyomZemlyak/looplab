@@ -56,6 +56,7 @@ from looplab.core.redact import redact_secrets
 from looplab.events.comment_projection import (
     COMMENT_ID_RE, COMMENT_MAX_PER_NODE_GENERATION, COMMENT_MAX_PER_RUN, COMMENT_MAX_VERSION,
     normalize_comment_text)
+from looplab.events.finalize_scope import is_guarded_abort
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
@@ -1479,7 +1480,10 @@ def _decide_run_abort(service, rd: Path, event_type: str, state, alive: bool,
             "retry after engine_running becomes false", retryable=True)
     if pending_finalize:
         return "attach", None
-    if state.finished and str(state.stop_reason or "").lower() != "error":
+    # A guarded-abort finish (`error`, or the ceiling's `budget_exhausted`) still owes its wrap-up,
+    # so an operator's abort on it is APPENDED like on an `error` finish — a literal `"error"` here
+    # answered `noop` for every ceiling-ended run (`events/finalize_scope.py::is_guarded_abort`).
+    if state.finished and not is_guarded_abort(state.stop_reason):
         return "noop", None
     return "append", None
 

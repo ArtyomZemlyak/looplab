@@ -66,6 +66,7 @@ from looplab.events.card_ledger import (
     derive_cards as _derive_cards,
 )
 from looplab.events.comment_projection import apply_comment_event
+from looplab.events.finalize_scope import is_guarded_abort
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
@@ -3467,10 +3468,14 @@ def _on_run_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # the class the engine decided; this is the account it wrote at the same moment.
     _detail = d.get("error")
     st.stop_detail = str(_detail) if isinstance(_detail, str) and _detail.strip() else None
-    # Drop dangling markers on normal completion. Error finishes deliberately retain crash prefixes:
-    # older/external writers may need resume recovery to append the missing node_failed receipt. Other
-    # terminal reasons must not leave a false in-flight pulse on a run that is over.
-    if d.get("reason") != "error":
+    # Drop dangling markers on normal completion. GUARDED-ABORT finishes deliberately retain crash
+    # prefixes: older/external writers may need resume recovery to append the missing node_failed
+    # receipt. Other terminal reasons must not leave a false in-flight pulse on a run that is over.
+    # The CLASS predicate (`finalize_scope.is_guarded_abort`), not the literal: the ceiling's
+    # `budget_exhausted` is written by the SAME outer guard, from the same mid-build exception, so
+    # the recovery this clause preserves the prefix for applies to it identically — docs/57's ninth
+    # site, found by the tree-wide literal scan and not by the review that counted six.
+    if not is_guarded_abort(d.get("reason")):
         st.building = None
         st.buildings.clear()
 

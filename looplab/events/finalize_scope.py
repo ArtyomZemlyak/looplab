@@ -122,7 +122,7 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
     return True
 
 
-# THE GUARDED-ABORT CLASS, and why it is a predicate rather than a literal in six places.
+# THE GUARDED-ABORT CLASS, and why it is a predicate rather than a literal ANYWHERE.
 #
 # `reason == "error"` never meant "this run crashed". It means "this terminal event was written by
 # `cli/run_cmds.py::_run_engine_guarded`'s outer handler rather than by the engine's own clean
@@ -134,24 +134,29 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
 # campaign, all eleven finishes in `runs-B` said `error` and every one was the ceiling, zero
 # genuine failures. Introducing that reason WITHOUT this predicate would have flipped all six
 # protocol checks at once and made a guarded abort look like a clean engine finish.
+#
+# The six checks in `engine/finalize.py` and this file were converted on the day the reason was
+# introduced; docs/57 (`guarded-abort-class-has-six-private-spellings`, closed 2026-09-06) then
+# found the OLDER decision sites the paragraph above had not reached, every one still comparing
+# the literal over `stop_reason` (or `run_finished.reason`) and every one an inert defense-in-depth
+# layer for the ORDINARY terminal of a budgeted campaign: `orchestrator.py::_enter_run`'s
+# abort-scope republish ("a retryable failed wrap-up", never retried for `budget_exhausted`) and
+# its `entry_finished` gate beside the re-run-wrap-up-once path; `cli/run_cmds.py::
+# classify_prior_run` (`pending_finalize` excluded the ceiling class); `serve/control_validation.py
+# ::_decide_run_abort` (an operator's abort on a ceiling-ended run answered `noop` where an `error`
+# finish got `append`); two spellings in `serve/run_commands.py`; `serve/appstate.py::phase`
+# (published the ceiling's not-yet-finalized finish as FINISHED); the observation pair
+# `serve/command_observation.py::domain_failure_after` / `has_non_error_finish_after`, which
+# `run_commands` reads its own answers off and which must therefore name a finish the same way;
+# and -- found by the tree-wide scan, not by the review that counted six -- the FOLD's own
+# crash-prefix clause in `events/replay.py::_on_run_finished`, which retained a mid-build marker
+# for resume recovery on `error` and cleared it on the ceiling written by the same guard from the
+# same exception. All route through `is_guarded_abort` now, and
+# `tests/test_budget_exhausted_is_not_an_error.py` bans every literal spelling over the whole
+# `looplab/` tree -- which is what would have caught this on the day.
 GUARDED_ABORT_REASONS = ("error", "budget_exhausted")
 
 
-# OPEN[guarded-abort-class-has-six-private-spellings] six OLDER decision sites still compare the
-# literal `"error"` over `stop_reason`, so for them a ceiling-ended run reads as a clean finish and
-# their recovery/abort answers go inert for the ORDINARY terminal of every budgeted campaign.
-# proof:`present:str(state.stop_reason or "").lower() == "error"@looplab/engine/orchestrator.py`
-# REVIEW 2026-08-30 (protocol-split-brain): the paragraph above converted the six checks in
-# `engine/finalize.py` and this file; the sites it did not reach: `orchestrator.py::_enter_run`'s
-# abort-scope republish ("a retryable failed wrap-up" never retried for `budget_exhausted`), the
-# `entry_finished` gate beside the re-run-wrap-up-once path, `cli/run_cmds.py::classify_prior_run`
-# (`pending_finalize` excludes the ceiling class), `serve/control_validation.py::_decide_run_abort`
-# (an operator's abort on a ceiling-ended run answers `noop` where an `error` finish got `append`)
-# and two spellings in `serve/run_commands.py`. Most are re-caught by the scoped `finalize_begun`
-# marker, so these are defense-in-depth layers going quietly inert — each of which exists for a
-# measured defect. Route them through `is_guarded_abort` (importable from all four files), and
-# widen `test_budget_exhausted_is_not_an_error.py`'s literal-ban scan from two files to the tree
-# (both the `reason` and `stop_reason` spellings), which is what would have caught this.
 def is_guarded_abort(reason) -> bool:
     """True when a `run_finished` reason was written by the guarded-abort path."""
     return str(reason or "").lower() in GUARDED_ABORT_REASONS

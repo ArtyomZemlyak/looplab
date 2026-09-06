@@ -26,7 +26,7 @@ from looplab.engine.orchestrator import (
     SPECULATION_CALIBRATION_PROFILE_DIGEST,
     RunStartPinError,
 )
-from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
+from looplab.engine.finalize import finalize_run, incomplete_finalize_scope, is_guarded_abort
 from looplab.events.replay import fold
 from looplab.adapters.repo_task import (eval_entrypoint_unprotected, eval_reader_path_errors,
                                         eval_source_tree_command_paths, eval_workspace_conflicts)
@@ -343,8 +343,11 @@ def classify_prior_run(prior, prior_events) -> str:
     """
     if terminal_projection_incomplete(prior, prior_events):
         return "finalization_pending"
+    # The CLASS, not the literal: a ceiling-ended run finishes `budget_exhausted` through the same
+    # guarded path as `error`, and a literal here excluded it from `pending_finalize` — the
+    # ordinary terminal of every budgeted campaign read as a clean finish with nothing owed.
     if prior.stop_requested and (
-            not prior.finished or str(prior.stop_reason or "").lower() == "error"):
+            not prior.finished or is_guarded_abort(prior.stop_reason)):
         return "pending_finalize"
     if prior.finished:
         return "finished"
