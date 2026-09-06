@@ -260,3 +260,57 @@ def test_unmeasurable_and_merely_unmeasured_are_told_apart(tmp_path):
     _, detail = sweep_claims.check_ruler_constants(str(tmp_path))
     assert "pagerank: UNMEASURED here (no probe has staged its reference module" in detail, detail
     assert "pde_heat1d: UNMEASURED here (no reading recorded yet" in detail, detail
+
+
+def _probe_with_score(root: Path, name: str, task: str, speedup, subset="test"):
+    (root / "model-probes" / name / "runs" / task / "run").mkdir(parents=True, exist_ok=True)
+    (root / "model-probes" / name / "runs" / task / "run" / "events.jsonl").write_text(
+        "", encoding="utf-8")
+    rec = {"subset": subset}
+    if speedup is not None:
+        rec["speedup"] = speedup
+    (root / "model-probes" / name / "final.json").write_text(json.dumps(rec), encoding="utf-8")
+
+
+def test_a_figure_still_in_the_corpus_holds(tmp_path, monkeypatch):
+    monkeypatch.setattr(sweep_claims, "COMPARISON_FIGURES", {"discrete_log": [14.5186]})
+    _probe_with_score(tmp_path, "dsDL", "discrete_log", 14.5186)
+    ok, detail = sweep_claims.check_comparison_figures(str(tmp_path))
+    assert ok and "still here (dsDL)" in detail, detail
+
+
+def test_a_figure_whose_probe_is_gone_is_named(tmp_path, monkeypatch):
+    """The figures are REAL and documented -- §68 and its tables -- and their probes are GONE: the
+    2026-08-29 crash took /var/tmp with about 69 runs, `dsDL` and `dsDL2` among them. Point 9 reads
+    as though they were the current corpus, and measured 2026-09-06 not one of the five is within
+    0.005 of any probe now on this box."""
+    monkeypatch.setattr(sweep_claims, "COMPARISON_FIGURES", {"discrete_log": [14.5186]})
+    _probe_with_score(tmp_path, "remDL7", "discrete_log", 16.7799)
+    ok, detail = sweep_claims.check_comparison_figures(str(tmp_path))
+    assert not ok and "NOT among the 1 probe(s)" in detail, detail
+
+
+def test_a_train_score_does_not_satisfy_a_test_figure(tmp_path, monkeypatch):
+    """Every node runs on TRAIN and the champion is scored once on TEST (§84/§277); a train number
+    that happens to match would be a different measurement wearing the right value."""
+    monkeypatch.setattr(sweep_claims, "COMPARISON_FIGURES", {"discrete_log": [14.5186]})
+    _probe_with_score(tmp_path, "dsDL", "discrete_log", 14.5186, subset="train")
+    ok, detail = sweep_claims.check_comparison_figures(str(tmp_path))
+    assert not ok, detail
+
+
+def test_a_probe_on_another_task_does_not_satisfy_the_figure(tmp_path, monkeypatch):
+    monkeypatch.setattr(sweep_claims, "COMPARISON_FIGURES", {"discrete_log": [14.5186]})
+    _probe_with_score(tmp_path, "elsewhere", "pagerank", 14.5186)
+    ok, detail = sweep_claims.check_comparison_figures(str(tmp_path))
+    assert not ok and "NOT among the 0 probe(s)" in detail, detail
+
+
+def test_an_unreadable_final_does_not_take_the_check_down(tmp_path, monkeypatch):
+    monkeypatch.setattr(sweep_claims, "COMPARISON_FIGURES", {"discrete_log": [14.5186]})
+    _probe_with_score(tmp_path, "dsDL", "discrete_log", 14.5186)
+    (tmp_path / "model-probes" / "torn").mkdir(parents=True)
+    (tmp_path / "model-probes" / "torn" / "final.json").write_text("{not json",
+                                                                  encoding="utf-8")
+    ok, detail = sweep_claims.check_comparison_figures(str(tmp_path))
+    assert ok, detail

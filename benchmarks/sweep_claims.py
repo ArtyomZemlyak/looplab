@@ -223,6 +223,56 @@ def check_ruler_constants(bench: str):
     return off == 0, "; ".join(said)
 
 
+# The figures point 9 tells the operator to compare each finished probe against.
+COMPARISON_FIGURES = {
+    "edge_expansion": [224.4432],
+    "pde_heat1d": [124.63, 99.00, 121.85],
+    "discrete_log": [14.5186, 2.8369],
+}
+
+
+def _scores(bench: str, task: str) -> dict:
+    """Every TEST score currently on this box for a task, by probe."""
+    out = {}
+    for path in glob.glob(f"{bench}/model-probes/*/final.json"):
+        name = path.split("/model-probes/")[1].split("/")[0]
+        try:
+            rec = json.loads(open(path, encoding="utf-8").read())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("subset") != "test":
+            continue
+        if not glob.glob(f"{bench}/model-probes/{name}/runs/{task}/run/events.jsonl"):
+            continue
+        val = rec.get("speedup")
+        if isinstance(val, (int, float)):
+            out[name] = float(val)
+    return out
+
+
+def check_comparison_figures(bench: str):
+    """"ЧИСЛА ДЛЯ СРАВНЕНИЯ: edge_expansion 224.4432; pde_heat1d 124.63, 99.00, 121.85;
+    discrete_log 14.5186 и 2.8369, разброс 5.1×"
+
+    They are REAL and documented -- §68 and the tables around it -- and their probes are GONE. The
+    2026-08-29 container crash took /var/tmp with about 69 runs in it, `dsDL` and `dsDL2` among
+    them. So the figures are history, and point 9 reads as though they were the current corpus:
+    measured 2026-09-06, not one of the five is within 0.005 of any probe now on this box, and
+    `discrete_log`'s stated spread of 5.1x is 4.2x over the eleven probes that are.
+    """
+    said, missing = [], 0
+    for task, figures in sorted(COMPARISON_FIGURES.items()):
+        here = _scores(bench, task)
+        for fig in figures:
+            hit = [n for n, v in here.items() if abs(v - fig) < 5e-3]
+            if hit:
+                said.append(f"{task} {fig}: still here ({hit[0]})")
+            else:
+                missing += 1
+                said.append(f"{task} {fig}: NOT among the {len(here)} probe(s) on this box")
+    return missing == 0, "; ".join(said)
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
@@ -233,6 +283,7 @@ CLAIMS = [
     ("point 8(b): the card does not say the best EVALUATED node is kept",
      check_card_silent_on_the_champion_rule),
     ("point 5: the reference-against-itself constants", check_ruler_constants),
+    ("point 9: the comparison figures are the current corpus", check_comparison_figures),
 ]
 
 

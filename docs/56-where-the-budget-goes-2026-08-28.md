@@ -12177,3 +12177,36 @@ took it for a stall. It is not: 17 `llm_usage` events, `$0.0592`, `events.jsonl`
 17 generations in `deep_research` — the slow opening phase, which §288 measured as the one phase that
 does get the budget line. Two samples close together in probe-time, not a stuck run. Checking cost
 one query; assuming would have cost a diagnosis.
+
+## §291 — point 9's comparison figures are history, and the corpus has moved
+
+§276 caught `accEE`'s 224.4432 against its own record of 224.8846. This sweep I checked the other
+five the list quotes, from the `--json` data §289 shipped. **Not one of the six is within 0.005 of
+any probe now on this box:**
+
+| task | quoted | what is actually here |
+|---|---|---|
+| pde_heat1d | 124.63, 99.00, 121.85 | 167.21, 133.51, 129.75, 125.92, 120.76 … 30.33, 0.00 |
+| discrete_log | 14.5186, 2.8369 | 16.78, 14.05, 12.40, 12.18 … 5.83, 4.03 |
+| edge_expansion | 224.4432 | `accEE` records 224.8846 (§276) |
+
+The figures are **real and documented** — §68 and the tables around it — and their probes are
+**gone**: the 2026-08-29 container crash took `/var/tmp` with about 69 runs in it, `dsDL` and `dsDL2`
+among them. So they are history, and point 9 reads as though they were the current corpus.
+
+One of them carries a claim that has quietly become false. The list calls `discrete_log`'s pair
+*"самое тонкое несущее число корпуса"* with a spread of **5.1×**. Over the eleven `discrete_log`
+probes that exist now the spread is **4.2×** (4.0326 to 16.7799), and **2.8369 is below every one of
+them.**
+
+`sweep_claims` now checks all six against the live corpus, requiring the `test` subset (§277's
+lesson: a train number wearing the right value is a different measurement) and the matching task.
+Four mutations red, including letting any probe satisfy any figure. That makes **eight claims
+checked and eight stale** — the standing list now has no figure this tool looks at that still holds.
+
+Two smaller things from the same sweep. `outlier_check --task pagerank` correctly refuses with *"no
+finished pagerank runs to compare against"* — the first probe on a task has no corpus, and saying so
+is the right answer. And `sweep_claims`' pagerank line has already changed since §287, from *"no
+probe has staged its reference module here"* to *"no reading recorded yet"*: `pgr1` staged the
+module, so the constant is now merely unmeasured rather than unmeasurable. The probe is paying for
+itself before it finishes.
