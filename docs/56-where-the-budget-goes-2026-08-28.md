@@ -12984,3 +12984,38 @@ mutation doing exactly that is red. So is one that files a *deterministic* task 
 Five mutations red in total. And the end-to-end test asserts the three group sizes on the real
 bench, so a change to the cache or the readings that silently re-sorts the campaign is a failing
 test rather than a different table.
+
+## §311 — spectral_clustering's own reference trips its own reward-hack detector
+
+The one task §310 files as UNREAD refuses with `invalid_results: 93/100 valid`. Running the
+reference against the task's own `is_solution`, instance by instance:
+
+```
+  7 of 100 reference solutions rejected by the task's own checker
+     instances 1, 26, 55, 61, 62, 64, 84
+  ERROR:root:Detected argmax over a k-column subset (suspicious).
+```
+
+Exactly the seven the harness counts, from a second instrument. The rejection comes from an
+anti-reward-hacking heuristic inside `is_solution` (line 763) that looks for a solution which is an
+argmax over a k-column subset of the spectral embedding — and **the reference's own output looks
+like that** on seven instances, because that is more or less what spectral clustering *is*. So the
+task is unscorable here: 100 % validity is required and its reference cannot reach it. That is an
+upstream defect, not a bench one, and nothing on this box can repair it.
+
+**My probe was wrong three times before it was right, and each time plausibly.** First it read the
+raw JSON and reported `100 of 100` with `points=2` — the matrices are external `.npy` files behind
+`{"__type__": "ndarray_ref", "npy_path": …}` and only `stream_jsonl`'s decoder resolves them. This
+is the method note's own "манифест считает ВНЕШНИЙ архив" in another costume. Second, with decoding
+fixed, it still said `100 of 100` — `AttributeError: 'SpectralClustering' object has no attribute
+'is_solution'`, because `from …spectral_clustering import SpectralClustering` binds **sklearn's**
+class: the module imports it at line 13 and the task is `SpectralClusteringTask`. Third time it
+agreed with the harness.
+
+Each wrong version returned a clean, quotable number. The only thing that caught them was that
+`100 of 100` did not match the harness's `93/100` — an implausibility, not a test. That is the same
+guard that saved §287 and §289, and it is the last line of defence rather than a method.
+
+**While there: the downloaded datasets are complete.** Tasks needing external arrays have them —
+`spectral_clustering` 200 `.npy` files, `convex_hull` 200, `rbf_interpolation` 2 — and tasks that
+need none have no `_npy_data` directory. The §300 fetch pulled the payloads, not just the manifests.
