@@ -97,6 +97,37 @@ def latest_readings(path=DRIFT_LOG) -> dict:
     return out
 
 
+CPSAT_ROOT = "/var/tmp/looplab-bench/AlgoTune/AlgoTuneTasks"
+
+
+def uses_cpsat(task: str, root: str | None = None) -> bool:
+    """Does this task's reference solve with CP-SAT?
+
+    IT DECIDES WHETHER A RULER IS POSSIBLE AT ALL. Measured 2026-09-06 across all 19 tasks whose
+    self-check returned a number, three repeats each: the nine CP-SAT tasks read **1.1375 to 1.8545**
+    and the ten others **0.9021 to 1.0670** -- no overlap. CP-SAT is multi-threaded and its search is
+    nondeterministic, so the same solver timed twice does not give the same time: within one task the
+    repeats swing 1.72/2.09/1.85 and 1.32/1.48/1.19, against 0.96/0.98/0.98 for `edge_expansion`.
+
+    The reference-as-candidate reading exists to say "the cache and the box still agree". On these
+    tasks it cannot: there is no stable time for the cache to hold. That is a property of the task,
+    not a defect in the cache, and it must be said differently -- a 46 % "drift" on `pagerank` was
+    worth a week (§292-§299); the same number here means only that CP-SAT was asked twice.
+    """
+    import os
+    # READ AT CALL TIME, NOT BOUND AT DEF TIME. `root: str = CPSAT_ROOT` evaluates once at import,
+    # so a test setting `ruler_check.CPSAT_ROOT` changed nothing and every call read the real
+    # checkout: two tests passed for the wrong reason and a mutation dropping the tolerance guard
+    # survived. (It survived twice, the second time because I restored the file from a backup taken
+    # BEFORE this very fix -- a stale backup quietly undoing it.)
+    path = f"{root if root is not None else CPSAT_ROOT}/{task}/{task}.py"
+    try:
+        src = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return False
+    return "cp_model" in src or "ortools" in src
+
+
 def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[str]:
     """Cache entries whose own recorded self-check says they no longer time this box.
 
@@ -123,6 +154,13 @@ def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[st
         if not any(r["task"] == task for r in rows if r["ok_name"]):
             continue
         off = abs(median - 1.0)
+        if off > tolerance and uses_cpsat(task):
+            said.append(f"{task}: self-check reads {median:.4f} ({stamp[:10]}) -- but this task "
+                        "solves with CP-SAT, which is multi-threaded and nondeterministic, so it "
+                        "has no stable reference time to rule against. NOT a drifting cache: the "
+                        "nine CP-SAT tasks read 1.1375-1.8545 and the ten others 0.9021-1.0670, "
+                        "with no overlap")
+            continue
         if off > tolerance:
             said.append(f"{task}: its own self-check reads {median:.4f} ({stamp[:10]}), so the "
                         f"cached baseline is {'high' if median > 1 else 'low'} by "

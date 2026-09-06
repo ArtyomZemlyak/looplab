@@ -12676,3 +12676,50 @@ task list.
 
 That is a measurement of maybe an hour on idle lanes, and it is the honest next step rather than a
 launch. The five original tasks remain campaign-ready today.
+
+## §303 — nine of the twenty tasks cannot be ruled at all, and the split is exact
+
+§302 left three bad rulers and a question. The self-check was then recorded for **all twenty tasks,
+three repeats each**, and the answer is not "some rulers drifted". It is a clean partition:
+
+| | n | reading range |
+|---|---|---|
+| tasks whose reference solves with **CP-SAT** | 9 | **1.1375 – 1.8545** |
+| every other task | 10 | **0.9021 – 1.0670** |
+
+**No overlap.** `max_independent_set_cpsat` 1.8545, `max_weighted_independent_set` 1.8260,
+`max_clique_cpsat` 1.6028, `max_common_subgraph` 1.4820, `min_dominating_set` 1.3175,
+`queens_with_obstacles` 1.2667, `rectanglepacking` 1.2151, `multi_dim_knapsack` 1.1534,
+`set_cover_conflicts` 1.1375 — against `rbf_interpolation` 1.0670 downward to `kcenters` 0.9021.
+
+**A prediction was written down before the run finished** and is in the record: from the first three
+CP-SAT tasks and six non-CP-SAT ones, I predicted which of the remaining eleven would read high. The
+partition held for every task; the numeric threshold I guessed (>1.15) did not — `set_cover_conflicts`
+came in at 1.1375, just under it. The separation was the claim worth making; the cut-point was not.
+
+**The mechanism is not a drifting cache.** CP-SAT is multi-threaded and its search is
+nondeterministic, so the same solver timed twice does not give the same time: within one task the
+repeats swing **1.72 / 2.09 / 1.85** and **1.32 / 1.48 / 1.19**, against **0.96 / 0.98 / 0.98** for
+`edge_expansion`. A reference-as-candidate reading exists to say "the cache and the box still
+agree"; on these tasks there is no stable time for a cache to hold. That is a property of the task.
+
+So `ruler_check` now says the two things differently, and the distinction has to cut: an identical
+1.86 on a deterministic task is §296's `pagerank` finding and must not be filed under "solver is
+nondeterministic". Four mutations red, including calling everything CP-SAT and assuming it for a
+task whose source cannot be read.
+
+**Two of my tests passed for the wrong reason.** `uses_cpsat(task, root=CPSAT_ROOT)` binds its
+default **at import**, so tests setting `ruler_check.CPSAT_ROOT` changed nothing and every call read
+the real checkout — where the fixtures' pretended properties happen to be true. The guard is read at
+call time now. It took two attempts: the first fix was undone when the mutation script restored the
+file from a backup taken *before* it.
+
+**`spectral_clustering` returns no reading at all**: `invalid_results: 93/100 valid (93.0 %)`. The
+reference does not solve seven of its own hundred instances to the checker's satisfaction, so there
+is nothing to divide. It is neither ruled nor rulable and is the twentieth task.
+
+**Where that leaves a twenty-task campaign.** Ten tasks have a ruler that reads within 7 % of unity.
+Nine cannot be ruled by this method at all. One does not evaluate. A campaign over all twenty would
+produce a mix of numbers with error bars and numbers without, and the two would look identical in
+the results table. **Ten tasks are campaign-ready; the CP-SAT nine need a different scoring rule
+than "divide by a cached reference time", and that is a design decision, not a measurement.**

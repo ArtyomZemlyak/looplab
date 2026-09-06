@@ -79,3 +79,68 @@ def test_a_missing_log_is_not_an_all_clear_by_accident(tmp_path):
     """An empty series means nothing has been checked, which must not read as everything is fine --
     it reads as no entries reported, and `ruler_check`'s other checks still run."""
     assert ruler_check.latest_readings(tmp_path / "nope.jsonl") == {}
+
+
+def _task_src(tmp_path: Path, task: str, body: str):
+    d = tmp_path / task
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{task}.py").write_text(body, encoding="utf-8")
+    return str(tmp_path)
+
+
+def test_a_cpsat_task_is_named_as_unrulable_not_as_a_drifting_cache(tmp_path):
+    """Measured 2026-09-06 across all 19 tasks that returned a number, three repeats each: the nine
+    CP-SAT tasks read 1.1375-1.8545 and the ten others 0.9021-1.0670, with NO overlap. CP-SAT is
+    multi-threaded and nondeterministic -- within one task the repeats swing 1.72/2.09/1.85, against
+    0.96/0.98/0.98 for edge_expansion. A 46 % reading on pagerank was worth a week (§292-§299); the
+    same number here means only that CP-SAT was asked twice."""
+    root = _task_src(tmp_path, "min_dominating_set",
+                     "from ortools.sat.python import cp_model\n")
+    said = ruler_check.stale_entries(
+        _rows("min_dominating_set"),
+        {"min_dominating_set": (1.8627, "2026-09-06")})
+    old = ruler_check.CPSAT_ROOT
+    try:
+        ruler_check.CPSAT_ROOT = root
+        said = ruler_check.stale_entries(_rows("min_dominating_set"),
+                                         {"min_dominating_set": (1.8627, "2026-09-06")})
+    finally:
+        ruler_check.CPSAT_ROOT = old
+    assert said and "no stable reference time" in said[0], said
+    assert "drifting cache" in said[0], said
+
+
+def test_a_plain_task_with_the_same_reading_is_still_a_drifting_cache(tmp_path):
+    """The distinction has to cut: an identical number on a deterministic task is the pagerank
+    finding, and calling it 'nondeterministic solver' would have buried §296."""
+    root = _task_src(tmp_path, "pagerank", "import networkx\n")
+    old = ruler_check.CPSAT_ROOT
+    try:
+        ruler_check.CPSAT_ROOT = root
+        said = ruler_check.stale_entries(_rows("pagerank"), {"pagerank": (1.8627, "2026-09-06")})
+    finally:
+        ruler_check.CPSAT_ROOT = old
+    assert said and "cached baseline is high" in said[0], said
+    assert "CP-SAT" not in said[0], said
+
+
+def test_a_cpsat_task_reading_one_is_not_reported_at_all(tmp_path):
+    """Being unrulable in principle is not a reason to shout when the reading happens to be fine."""
+    root = _task_src(tmp_path, "kcenters", "from ortools.sat.python import cp_model\n")
+    old = ruler_check.CPSAT_ROOT
+    try:
+        ruler_check.CPSAT_ROOT = root
+        assert ruler_check.stale_entries(_rows("kcenters"),
+                                         {"kcenters": (1.0, "2026-09-06")}) == []
+    finally:
+        ruler_check.CPSAT_ROOT = old
+
+
+def test_an_unreadable_task_source_is_not_assumed_to_be_cpsat(tmp_path):
+    """Guessing CP-SAT for a task we cannot read would silence a real drifting cache."""
+    old = ruler_check.CPSAT_ROOT
+    try:
+        ruler_check.CPSAT_ROOT = str(tmp_path / "nothing-here")
+        assert ruler_check.uses_cpsat("whatever") is False
+    finally:
+        ruler_check.CPSAT_ROOT = old
