@@ -12210,3 +12210,45 @@ is the right answer. And `sweep_claims`' pagerank line has already changed since
 probe has staged its reference module here"* to *"no reading recorded yet"*: `pgr1` staged the
 module, so the constant is now merely unmeasured rather than unmeasurable. The probe is paying for
 itself before it finishes.
+
+## §292 — pagerank's ruler is off by 43 %, and it is not the 09-04 re-timing
+
+`pgr1` staged the delivered reference module, so the constant §287 called **uncheckable** could
+finally be read. It reads:
+
+```
+pagerank: [1.4317, 1.4320, 1.4271] -> median 1.4317; the sweep says 1.0024 (+42.8 %)
+```
+
+Three repeats within 0.005 of each other, so not noise — and six times the disagreement of the other
+three tasks (−8.5 %, +6.6 %, +7.2 %). Four things checked before writing this down:
+
+- **Not the 09-04 re-timing.** `pagerank`'s TEST baseline was rewritten on 09-04 by §193's arm A
+  work while every other entry dates from 08-31, which made it the obvious suspect. Its TRAIN twin,
+  untouched since **08-31 00:36**, reads **1.4908** — *higher* still. Two baselines written four
+  days apart agree with each other and disagree with today by the same large factor.
+- **Not a loaded box when the baseline was written.** `pagerank`'s cached timings are as tight as
+  any: cv 0.13 test / 0.11 train, p10–p90 of 84–113 ms against a 109 ms median. `discrete_log`'s
+  cv is 2.33 and nobody suspects it.
+- **Not a changed reference.** `AlgoTuneTasks/pagerank/` has not been touched since `init`, and the
+  module `pgr1` staged is byte-identical to the repo's.
+- **Not the method.** `edge_expansion` TRAIN, run through the same tool on the same lane minutes
+  later, reads **0.9157** against its TEST **0.9007** — consistent, and consistent with §281.
+
+What is distinctive about `pagerank` is how much of an evaluation is real work:
+
+| task | per-instance work as a share of wall clock |
+|---|---|
+| edge_expansion | 16 % |
+| discrete_log | 24 % |
+| pagerank | **35–36 %** |
+| pde_heat1d | 67 % |
+
+**I am not re-timing the baseline yet, and the reason is `pgr1`.** It is running now and being
+scored against exactly this cached baseline; rewriting the cache mid-run changes its denominator
+half way through, which is §149's mistake with the operator holding the knife. The re-timing goes in
+the gap after `pgr1` finishes, and until then "stale cache or faster box" cannot be told apart —
+which is the honest state, not a conclusion.
+
+`sweep_claims` now carries the reading: `pagerank: list 1.0024, measured 1.4317 on 2026-09-06
+(+42.8 %)`. The constant is no longer unmeasured; it is measured and wrong by a wide margin.
