@@ -1846,7 +1846,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if _resets:
                 # One rebuild per fold. A developer crash can auto-pause the first node, and a reset/
                 # abort can change the rest while it is building; never process a stale whole batch.
-                self._rerun_node(_resets[0], state)
+                # OFF the loop thread (doc 52 row 12), like every other build: the rebuild is a paid
+                # Developer call and its own-node appends are the worker seam's.
+                await self._offload_build(functools.partial(self._rerun_node, _resets[0], state))
+                self._drain_create_pause()
                 continue
             # Charge the runaway guard for what the log says was MINTED since the previous turn. Read
             # off the events rather than the fold so the empty-nodes spin (which folds to no nodes at
@@ -2314,13 +2317,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return [action for action in lane
                 if action.get("kind") in ("draft", "improve", "merge")][:free]
 
-    # OPEN[serial-node-build-holds-the-loop] the 2026-08-29/31 offloads moved only the two propose lanes:
-    # the Developer call in this serial lane, and the fork/inject/rerun proposes, still run on the loop
-    # with no in-flight guard — while `_occupancy_paced_creates` delivers work here precisely when an
-    # eval is burning. Driven: a fork served with an adopted eval, and a width-2 Card claim with node 0
-    # in flight, each ran the paid call on the loop thread with ZERO ticks. One helper on the proposal
-    # pool covers all four sites; the own-node worker seam already licenses their appends.
-    # proof:absent:_offload_node_build@looplab/engine/orchestrator.py
+    # CLOSED 2026-09-06 (doc 52 row 12): the serial lane's build, the fork's build and the node-reset
+    # rebuild leave the loop thread through `_offload_build` / `_offload_node_build` (the proposal
+    # pool, the own-node worker seam, the pause drained on the main task), and every build site
+    # reads its outputs off the `DeveloperResult` envelope instead of the shared instance.
+    # `tests/test_developer_result.py` drives the loop's own counter through a blocking build.
     #
     # MEASURED 2026-09-04 — the largest loop hold, but the HARM is not established and the
     # difference decides whether the offload is worth its risk. `card_build` wall, and how much
@@ -2675,7 +2676,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # The complete Card lane was claimed atomically above, before the first slow
                 # build could make its siblings ineligible through the evaluate-all prefix.
                 try:
-                    self._create_node(a, reserved=reservation)
+                    await self._offload_node_build(a, reserved=reservation)
                 except BaseException:
                     for later in (_card_reservations or [])[_create_index + 1:]:
                         self._fail_reserved_build(
@@ -2687,7 +2688,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         )
                     raise
             else:
-                self._create_node(a)  # sequential -> deterministic ids/proposals
+                # sequential -> deterministic ids/proposals; OFF the loop thread since 2026-09-06
+                await self._offload_node_build(a)
             if self._create_paused:
                 self._drain_create_pause()
                 for later in (_card_reservations or [])[_create_index + 1:]:
@@ -4231,8 +4233,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # concurrent parallel-build sibling can add an unrelated node in the same window, and
                 # miscounting that as success is the safe direction (it only stays quiet).
                 before = {n.id for n in fold(self.store.read_all()).nodes.values()}
-                self._create_node({"kind": "improve", "parent_id": pid,
-                                   "parent_generations": {str(pid): generation}})
+                await self._offload_node_build({"kind": "improve", "parent_id": pid,
+                                                "parent_generations": {str(pid): generation}})
                 after = fold(self.store.read_all()).nodes
                 if not any(nid not in before and pid in (getattr(nd, "parent_ids", None) or [])
                            for nid, nd in after.items()):
@@ -5879,7 +5881,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # blank while this call ran.
                 with self.tracer.span("implement"), self._progress(
                         PROGRESS_STAGE_BUILD, "implement", node_id=node_id, operator=kind):
-                    code = self._implement(
+                    built = self._implement_result(
                         self._directed_idea(idea.model_copy(deep=True), state),
                         developer=developer, state=state)
             elif kind == "merge":
@@ -5897,7 +5899,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # the other parent. Mean-param merges (numeric tasks, no files) stay from-scratch.
                     _didea = self._directed_idea(
                         idea.model_copy(deep=True), state)   # §1: directives steer the merge code too
-                    code = self._implement(
+                    built = self._implement_result(
                         _didea,
                         pnodes[0] if self._merge_mode == "ensemble" and pnodes else None,
                         developer=developer, state=state)
@@ -5912,11 +5914,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 parents = [parent.id]
                 with self.tracer.span("implement"), self._progress(
                         PROGRESS_STAGE_BUILD, "implement", node_id=node_id, operator=kind):
-                    code = self._implement(
+                    built = self._implement_result(
                         self._directed_idea(idea.model_copy(deep=True), state), parent,
                         developer=developer, state=state)
+            # THE ENVELOPE (doc 52 row 12): everything this build recorded about itself is read off
+            # the `DeveloperResult` the call returned, captured under the instance's lock in the
+            # same breath as the call — never off the instance afterwards, which is what makes the
+            # serial lane safe to run off the loop thread beside a repair on the shared Developer.
+            code = built.code
             idea, footprint_finalized = self._finalize_developer_footprint(
-                idea, developer, code)
+                idea, developer, code, footprint=built.last_footprint)
             # 💡 deep-research provenance: tag the first couple of nodes created right after a research
             # memo (its directions are the active steering) so the UI can show WHERE research landed in
             # the tree. Audit/UI only — never affects search. Coarse-but-honest (temporal proximity).
@@ -5953,8 +5960,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 operator=idea.operator,
                 idea=durable_idea_payload(idea),
                 code=code,
-                files=getattr(developer, "last_files", {}) or {},         # per-build developer (pool-safe)
-                deleted=getattr(developer, "last_deleted", []) or [],
+                files=dict(built.last_files),                # the envelope's, never the instance's
+                deleted=list(built.last_deleted),
                 research_origin=research_origin,
                 # Variant-1: read the receipt THIS build stamped on its own researcher (set under
                 # `_advisory_lock` in `_set_complexity_hint`), so a concurrent sibling draft's advisory
@@ -6095,6 +6102,37 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 except Exception:  # noqa: BLE001 — best-effort terminal; never re-raise into the group
                     pass
 
+    async def _offload_build(self, fn) -> None:
+        """Run ONE paid build off the event-loop thread, on the proposal pool.
+
+        THE SERIAL LANE HELD THE LOOP (doc 52 row 12; the marker that stood above
+        `_handle_create_actions`). The 2026-08-29/31 offloads moved the two propose lanes and left
+        the Developer call of the serial build, the fork's build and the node-reset rebuild on the
+        loop thread — driven, a fork served with an adopted eval and a width-2 Card claim with node
+        0 in flight each ran the paid call with ZERO ticks, and the critic's re-read of the marker's
+        own file found the harm: a dead node waited 62 minutes for its terminal while both H200s
+        idled, because the loop was inside a build. `_occupancy_paced_creates` delivers work here
+        precisely when an evaluation is burning, which is when the loop must keep turning.
+
+        ONE helper for the four sites, on `proposal_limiter()` (anyio's shared 40-token default is
+        held by every in-flight `_run_eval` for its whole multi-hour duration, so a build queued on
+        it could wait behind the evaluations it exists to feed). A bare `to_thread` and not the
+        proposal SINK: the build's appends are its OWN node's — `node_building`, `node_created`,
+        `node_failed`, the per-node audit — which is exactly the worker seam invariant #1 licenses
+        for the concurrent fan-out, and the run-global pause it may need goes through
+        `_request_create_pause` and is drained by the caller on the main task, as the fan-out's
+        already is. The build's outputs come back through the `DeveloperResult` envelope, so a
+        repair on the shared Developer running in another worker cannot clobber what this build
+        read (`agents/roles.py::DeveloperResult`). A raise propagates to the caller unchanged: the
+        serial path keeps its historical crash-on-raise so bugs surface in tests.
+        """
+        from looplab.engine.novelty import proposal_limiter
+        await anyio.to_thread.run_sync(fn, limiter=proposal_limiter())
+
+    async def _offload_node_build(self, action: dict, **kwargs) -> None:
+        """`_create_node`, off the loop — see `_offload_build`."""
+        await self._offload_build(functools.partial(self._create_node, action, **kwargs))
+
     @in_llm_lane("build")
     def _rerun_node(self, node: Node, state: RunState) -> None:
         """node_reset "propose"/"implement": re-run this EXISTING node id IN PLACE (never mints a new
@@ -6222,10 +6260,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             with self.tracer.span("implement"):
                 # §1: a reset RE-BUILDS the node from scratch, so standing operator directives must
                 # steer its code too — same as the four _create_node build sites.
-                code = self._implement(
+                built = self._implement_result(
                     self._directed_idea(idea.model_copy(deep=True), state), parent, state=state)
+            code = built.code
             idea, footprint_finalized = self._finalize_developer_footprint(
-                idea, self.developer, code)
+                idea, self.developer, code, footprint=built.last_footprint)
             latest = fold(self.store.read_all())
             current = latest.nodes.get(node.id)
             parents_current = all(
@@ -6244,8 +6283,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._emit_node_created(
                 node_id=node.id, parent_ids=parents, operator=idea.operator,
                 idea=durable_idea_payload(idea), code=code,
-                files=getattr(self.developer, "last_files", {}) or {},
-                deleted=getattr(self.developer, "last_deleted", []) or [],
+                files=dict(built.last_files),
+                deleted=list(built.last_deleted),
                 generation=generation,
                 eval_start_boundary=True,
                 **({"parent_generations": parent_generations} if parent_generations else {}),
@@ -6411,6 +6450,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                               generation=0, operator=idea.operator, source="manual"):
             developer_called = not bool(code)
             footprint_finalized = False
+            _inj = None                     # the envelope, when the Developer was called (doc 52 row 12)
             if developer_called:
                 try:
                     self._reset_developer_footprint(self.developer)
@@ -6419,7 +6459,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # base) — hand the parent's solution to a parent-aware developer. Preserve the
                         # receipt-bound Idea by handing the plugin a deep working copy.
                         _pnode = state.nodes.get(parents[0]) if parents else None
-                        code = self._implement(idea.model_copy(deep=True), _pnode, state=state)
+                        _inj = self._implement_result(idea.model_copy(deep=True), _pnode, state=state)
+                        code = _inj.code
                 except Exception:
                     self._fail_reserved_build(
                         node_id=node_id, card_id=reservation.card_id, generation=0,
@@ -6427,7 +6468,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     self._discard_node_build_telemetry()
                     raise
                 idea, footprint_finalized = self._finalize_developer_footprint(
-                    idea, self.developer, code)
+                    idea, self.developer, code,
+                    footprint=(_inj.last_footprint if _inj is not None else None))
             latest = fold(self.store.read_all())
             if any(pid not in latest.nodes
                    or latest.nodes[pid].attempt != generation
@@ -6451,7 +6493,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # sibling's full multi-file solution); else use the Developer's last build, and
                     # only when the Developer actually implemented (no ready-made code was supplied).
                     files=(req.get("files")
-                           or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
+                           or ({} if req.get("code") or _inj is None else dict(_inj.last_files))) or {},
                     deleted=req.get("deleted") or [],
                     source="manual",
                     eval_start_boundary=True,

@@ -13,8 +13,10 @@ Agent-facing deps (`legal_actions`, `_state_brief`, `render_hint_directives`) st
 method-local imports so monkeypatching through their source modules keeps working."""
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Optional
 
+from looplab.agents.roles import DeveloperResult, developer_call_lock
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import Idea, RunState, normalize_researcher_footprint, is_developer_error
 from looplab.events.types import EV_AGENT_DECISION, EV_NODE_CREATED, EV_NODE_FAILED, EV_PAUSE
@@ -160,14 +162,64 @@ class NodeBuildMixin:
         code/files) and patches it, instead of regenerating everything from the pristine baseline
         (which loses the parent's accumulated edits and burns tokens re-deriving them). Falls back
         to the plain `implement(idea)` for developers that don't take a parent (draft, offline)."""
+        return self._implement_result(idea, parent, developer=developer, state=state).code
+
+    def _implement_result(self, idea, parent=None, *, developer=None, state=None) -> DeveloperResult:
+        """`_implement`, returning the whole `DeveloperResult` envelope (doc 52 row 12).
+
+        The `str`-returning `_implement` above is kept for its callers and the suite; every site
+        that then READ a side channel off the instance (`last_files`, the footprint, the rollback
+        ask) reads this envelope instead, which is what lets the paid call leave the loop thread —
+        see `agents/roles.py::DeveloperResult` for why the freeze was the only thing that made the
+        instance reads safe."""
         developer = developer or self.developer
         bind_state = getattr(developer, "bind_state", None)
         if callable(bind_state):
             bind_state(state)
         impl_from = getattr(developer, "implement_from", None)
         if parent is not None and callable(impl_from):
-            return impl_from(idea, parent)
-        return developer.implement(idea)
+            return self._run_developer(developer, impl_from, idea, parent)
+        return self._run_developer(developer, developer.implement, idea)
+
+    def _run_developer(self, developer, fn, *args) -> DeveloperResult:
+        """ONE Developer call and the capture of its outputs, as one atomic step under the
+        instance's lock (`developer_call_lock`). The lock is what makes two offloaded calls on a
+        SHARED instance safe: they queue here, in a worker, instead of on the event loop."""
+        with developer_call_lock(developer):
+            code = fn(*args)
+            return self._capture_developer_result(developer, code)
+
+    @staticmethod
+    def _capture_developer_result(developer, code) -> DeveloperResult:
+        """Read every registered side channel off the instance INTO the envelope, totally.
+
+        Literal `getattr`s, one per `DEVELOPER_OUTPUT_ATTRS` member, on purpose: the registry's
+        two-way contract test (`tests/test_role_output_contract.py`) needs each consumer read to be
+        greppable, and a loop over the tuple would hide them all behind one line. TOTAL over junk —
+        a stub that sets a string where a dict is expected must read as "nothing", never raise out
+        of a build or a repair — which is the coercion the old inline reads did piecemeal."""
+        files = getattr(developer, "last_files", {}) or {}
+        deleted = getattr(developer, "last_deleted", []) or []
+        footprint = getattr(developer, "last_footprint", None)
+        edit_calls = getattr(developer, "last_edit_calls", 0) or 0
+        try:
+            edit_calls = int(edit_calls)
+        except (TypeError, ValueError):
+            edit_calls = 0
+        return DeveloperResult(
+            code=code,
+            last_files=MappingProxyType(dict(files) if isinstance(files, dict) else {}),
+            last_deleted=tuple(str(d) for d in deleted) if isinstance(deleted, (list, tuple)) else (),
+            last_footprint=dict(footprint) if isinstance(footprint, dict) else footprint,
+            last_report=getattr(developer, "last_report", None),
+            last_seed=getattr(developer, "last_seed", None),
+            last_run=getattr(developer, "last_run", None),
+            last_patch=getattr(developer, "last_patch", None),
+            last_rollback_stage=str(getattr(developer, "last_rollback_stage", "") or "").strip(),
+            last_budget_exhausted=str(
+                getattr(developer, "last_budget_exhausted", "") or "").strip()[:32],
+            last_edit_calls=edit_calls,
+        )
 
     @staticmethod
     def _reset_developer_footprint(developer) -> None:
@@ -197,18 +249,25 @@ class NodeBuildMixin:
                 if child is not None and child is not current:
                     pending.append(child)
 
-    def _finalize_developer_footprint(self, idea: Idea, developer, code: str) -> tuple[Idea, bool]:
+    def _finalize_developer_footprint(self, idea: Idea, developer, code: str,
+                                      footprint=_OMIT) -> tuple[Idea, bool]:
         """Merge the Developer's per-call resource estimate onto a durable Idea.
 
         A missing optional output means the Developer accepted the Researcher's proposal.  A concrete
         output may scale it up or down, then the detected pool clamps the effective quantities.  An
         unspecified proposal stays unspecified so legacy scheduling remains byte-for-byte compatible.
+
+        `footprint` is the envelope's `last_footprint` (doc 52 row 12): every build site that has a
+        `DeveloperResult` passes it, so the estimate read is the one captured under the call's own
+        lock and never a sibling's landing on the shared instance afterwards. Omitted, the instance
+        is read as before — the shape the suite's direct callers and older wrappers still use.
         """
         proposed = normalize_researcher_footprint(getattr(idea, "footprint", None))
         if proposed is None or is_developer_error(code):
             return idea, False
         finalized = normalize_researcher_footprint(
-            getattr(developer, "last_footprint", None)) or proposed
+            getattr(developer, "last_footprint", None) if footprint is _OMIT else footprint
+        ) or proposed
         clamp = getattr(self, "_clamp_resource_footprint", None)
         if callable(clamp):
             finalized = clamp(finalized) or proposed
@@ -246,6 +305,11 @@ class NodeBuildMixin:
 
         §1: when `state` is given, standing operator directives are folded into the idea so the REPAIRED
         code honors them too (consistency with the four build sites); without it the raw idea is used."""
+        return self._repair_result(node, err, state, developer=developer).code
+
+    def _repair_result(self, node, err: str, state: Optional[RunState] = None, *,
+                       developer=None) -> DeveloperResult:
+        """`_repair`, returning the whole `DeveloperResult` envelope — see `_implement_result`."""
         idea = self._directed_idea(node.idea, state) if state is not None else node.idea
         developer = developer or self.developer
         bind_state = getattr(developer, "bind_state", None)
@@ -253,8 +317,8 @@ class NodeBuildMixin:
             bind_state(state)
         rf = getattr(developer, "repair_from", None)
         if callable(rf):
-            return rf(idea, node, err)
-        return developer.repair(idea, node.code, err)
+            return self._run_developer(developer, rf, idea, node, err)
+        return self._run_developer(developer, developer.repair, idea, node.code, err)
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,

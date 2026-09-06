@@ -200,9 +200,12 @@ Research only.
 >   `cur.total_eval_seconds`, i.e. already-COMPLETED time, so several can enter under one remaining
 >   allowance; the spine carries a live annotation prescribing the reservation.
 >   proof:present:cur.total_eval_seconds@looplab/engine/orchestrator.py
-> - **OPEN[developer-output-has-no-immutable-envelope]** Developer output is still `str` plus the
->   mutable `DEVELOPER_OUTPUT_ATTRS` side channels; no `DeveloperResult` envelope exists.
->   proof:absent:DeveloperResult@looplab/agents/roles.py
+> - **[closed 2026-09-06 (doc 52 row 12) — `agents/roles.py::DeveloperResult` is the frozen
+>   envelope of one Developer call (its field set IS `DEVELOPER_OUTPUT_ATTRS` plus `code`),
+>   captured by `engine/node_build.py::_run_developer` under the instance's own lock in the same
+>   step as the call; every build and repair site reads the envelope and none reads the shared
+>   instance afterwards, which is what let those calls leave the loop thread.
+>   `tests/test_developer_result.py` drives it.]**
 > - **OPEN[cancel-not-propagated-into-provider-request]** two of the three legs: nothing reaches an
 >   in-flight provider request (`core/llm.py` has no `cancel_check` at all) and the external CLI is
 >   killed on TIMEOUT rather than on a cancel token. The MCP leg shipped 2026-08-17.

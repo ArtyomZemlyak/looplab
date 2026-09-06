@@ -126,7 +126,7 @@ Two kinds of work are therefore given their own pool rather than the default:
 | Pool | Size | Who rides it | Why it must not queue behind an eval |
 |---|---|---|---|
 | `evaluate.py::_watch_limiter` | 8 | watchdog / ASHA / train-monitor ticks | a liveness poll that queues goes blind exactly when a kill matters |
-| `novelty.py::proposal_limiter` | 4 | the three proposal lanes | a paid proposal that queues starves the board while the GPUs idle |
+| `novelty.py::proposal_limiter` | 4 | the three proposal lanes; since 2026-09-06 also every BUILD (`orchestrator.py::_offload_build` — the serial lane, the fork, the node-reset rebuild) and the repair path's three paid calls (`evaluate.py`, through the proposal sink) | a paid proposal that queues starves the board while the GPUs idle; a build or a repair that ran ON the loop held it for a 116–276 s median (doc 52 row 12) |
 
 The proposal size is **derived**: the batch lane (`orchestrator.py::_await_batch_proposal`) and the
 per-action lane (`card_reservation.py`) are the two arms of one `if` on the loop task, and

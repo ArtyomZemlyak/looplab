@@ -35,7 +35,11 @@ import time
 from collections.abc import Mapping
 from typing import Optional
 
+import functools
+
 import anyio
+
+from looplab.agents.roles import DeveloperResult
 import orjson
 
 from looplab.core.llm import BudgetExceeded
@@ -1631,19 +1635,23 @@ class EvaluateMixin:
                                        or _prior.get("files") or _prior.get("deleted")), {}
         with self.tracer.span("salvage_cause_repair", node_id=node.id, attempt=attempt + 1):
             try:
-                new_code = self._repair(node, cause_repair_context(salvaged, err), state)
+                # Off the loop thread and off the envelope (doc 52 row 12), like the attempt loop's
+                # own repair: the same paid Developer call, the same shared instance.
+                repaired = await self._offload_under_proposal_sink(functools.partial(
+                    self._repair_result, node, cause_repair_context(salvaged, err), state))
             except BudgetExceeded:
                 # See the docstring: propagating this out of a best-effort fix costs the node its
                 # terminal, because the callers' handler is a `finally`, not an `except`.
                 return node, attempt, False, {}
             except Exception:  # noqa: BLE001 — a failed cause fix must not cost the salvaged metric
                 return node, attempt, False, {}
-        # Snapshot the developer's per-call audit state before the next `await`, for the reason the
-        # attempt loop does: the developer instance is SHARED across concurrent evals and the write
-        # lock below is a checkpoint, so a sibling's repair would otherwise be recorded as this
-        # node's edits.
-        repaired_files = dict(getattr(self.developer, "last_files", {}) or {})
-        repaired_deleted = list(getattr(self.developer, "last_deleted", []) or [])
+        new_code = repaired.code
+        # The per-call outputs come off the frozen envelope the worker returned, captured under the
+        # instance's lock in the same step as the call — the reason the attempt loop's own reads
+        # moved there: the developer instance is SHARED across concurrent evals and the write lock
+        # below is a checkpoint, so a read off the instance here could be a sibling's repair.
+        repaired_files = dict(repaired.last_files)
+        repaired_deleted = list(repaired.last_deleted)
         # WAS THIS A REPAIR AT ALL? The same four answers as the attempt loop's, through the same
         # rule. A dead provider must not be committed as the node's code here either — but unlike
         # the loop, it does not pause the run: the node HAS its metric, the terminal is about to be
@@ -2728,21 +2736,25 @@ class EvaluateMixin:
 
                 _repair_tools, _monitor_verdicts = await anyio.to_thread.run_sync(
                     _repair_inputs, abandon_on_cancel=True)
-                # OPEN[repair-path-holds-the-engine-loop] the three paid repair-path calls (`_triage_crash`,
-                # `_repair`, `_repair_critic`) are plain sync calls on the engine loop: driven with a 5 ms ticker,
-                # ZERO loop ticks pass during one, so watchdog kills, operator aborts and sibling terminals wait out
-                # a 116-276 s median (one recorded case 88.3 min). The propose lanes were offloaded 2026-08-30; this
-                # path was not, and the ContextVar reason given for the direct call is false (a worker thread
-                # inherits the caller's context). Offload with `to_thread.run_sync`, but make the Developer's
-                # per-call outputs a RETURN value first: today the freeze is what serialises concurrent repairs on
-                # the shared instance. proof:`present:triage = self._triage_crash(state, node, err@looplab/engine/evaluate.py`
-                triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
-                                            repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
-                                            depth=_depth,
-                                            attempts_left=_repair_attempts_left(attempt, _repair_cap),
-                                            log_tools=_repair_tools,
-                                            engine_facts=engine_observed_facts(res),
-                                            monitor_verdicts=_monitor_verdicts)
+                # OFF THE LOOP THREAD since 2026-09-06 (doc 52 row 12). The three paid repair-path
+                # calls — this triage, `_repair_result` and `_repair_critic` below — were plain sync
+                # calls on the engine loop: driven with a 5 ms ticker, ZERO loop ticks passed during
+                # one, so watchdog kills, operator aborts and sibling terminals waited out a 116-276 s
+                # median (one recorded case 88.3 min). The propose lanes were offloaded 2026-08-30;
+                # this path could not follow until the Developer's per-call outputs became a RETURN
+                # VALUE (`agents/roles.py::DeveloperResult`), because the freeze was what serialised
+                # concurrent repairs on the shared instance. Through the proposal SINK helper, like
+                # the propose lanes: a worker copies the caller's context (the tracer span, the LLM
+                # lane), and any proposal receipt a judge's tool loop buffers is published from the
+                # main task on the way out. `BudgetExceeded` propagates through it unchanged.
+                triage = await self._offload_under_proposal_sink(functools.partial(
+                    self._triage_crash, state, node, err, attempt + 1, reason=reason,
+                    repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
+                    depth=_depth,
+                    attempts_left=_repair_attempts_left(attempt, _repair_cap),
+                    log_tools=_repair_tools,
+                    engine_facts=engine_observed_facts(res),
+                    monitor_verdicts=_monitor_verdicts))
                 action = triage.get("action", DEFAULT_TRIAGE_ACTION)
                 # WHAT THE FAILURE WAS, RE-READ BY THE JUDGE THAT JUST READ IT. Applied HERE, on the
                 # verdict this attempt already paid for, and before every branch below that
@@ -2957,8 +2969,9 @@ class EvaluateMixin:
                     # The SAME verdicts the triage judge just read, from the same durable
                     # rows — the critic decides whether this chain lives and must not be
                     # reading a thinner record than the judge whose work it is grading.
-                    critic = self._repair_critic(state, node, _judged, attempt + 1,
-                                                monitor_verdicts=_monitor_verdicts)
+                    critic = await self._offload_under_proposal_sink(functools.partial(
+                        self._repair_critic, state, node, _judged, attempt + 1,
+                        monitor_verdicts=_monitor_verdicts))
                     # THE VERDICT REACHES THE DURABLE RECORD, WHATEVER IT IS. Until 2026-08-15 the
                     # critic left no trace of what it ANSWERED: its span carried
                     # `{attempt, node_id, generation}`, a `continue` appended nothing at all, and a
@@ -3042,13 +3055,17 @@ class EvaluateMixin:
                         # never sees it. Appended after the per-reason directive on purpose: "here is
                         # what went wrong and what to do about it" then "…and here is how to say you
                         # cannot", never the other way round.
-                        new_code = self._repair(
+                        # THE ENVELOPE, off the loop (doc 52 row 12): the whole `DeveloperResult`
+                        # comes back from the worker, captured under the instance's lock in the
+                        # same breath as the call, so nothing below reads the shared instance.
+                        repaired = await self._offload_under_proposal_sink(functools.partial(
+                            self._repair_result,
                             node, self._repair_error_context(
                                 reason, _err_in, state=state, node=node,
                                 headline=failure_headline(
                                     getattr(res, "stderr", "") or "", self._redact))
                             + developer_stuck_contract(DEVELOPER_STUCK_PREFIX),
-                            state)
+                            state))
                     except BudgetExceeded:
                         raise      # the hard budget stop propagates, exactly as in `_triage_crash`
                     except Exception as _repair_exc:  # noqa: BLE001 - see below; never escapes an eval
@@ -3066,34 +3083,30 @@ class EvaluateMixin:
                         # exit for "the repair call failed at the provider" rather than adding a
                         # second, differently-behaved one. `except Exception` deliberately does not
                         # catch `BaseException`, so cancellation and KeyboardInterrupt still travel.
-                        new_code = f"{DEVELOPER_ERROR_PREFIX} {_repair_exc})"
-                # Snapshot the developer's per-call audit state IMMEDIATELY, before any `await`: under
-                # max_parallel>1 the developer instance is SHARED across concurrent _evaluate tasks,
-                # and `async with self._write_lock` below is a checkpoint — a sibling task's repair()
-                # would overwrite `developer.last_files` in the gap, so reading it after the lock would
-                # record (and re-materialize) ANOTHER node's edits as this node's. Capture now.
-                # Read BEFORE the not-a-repair gate below (which awaits on the pause path) for that
-                # same reason, and because the gate itself has to know whether the whole-file `code`
-                # even IS this repair's artifact.
-                repaired_files = dict(getattr(self.developer, "last_files", {}) or {})
-                repaired_deleted = list(getattr(self.developer, "last_deleted", []) or [])
-                # The rollback REQUEST, snapshotted in the same breath and for the same reason: this
-                # developer instance is shared across concurrent evals, so reading it after the next
-                # `await` would risk picking up a sibling node's answer and re-running an expensive
-                # stage on THIS node that nobody asked for.
-                _rollback_ask = str(getattr(self.developer, "last_rollback_stage", "") or "").strip()
-                # WHICH BOUND ENDED THE SESSION, snapshotted HERE for exactly the reason the line
-                # above is: the developer is shared across concurrent evals, so reading it after the
-                # next `await` could attribute a sibling node's exhaustion to this one. Bounded and
-                # coerced because it rides a durable row; empty for a session that finished on its
-                # own terms, which is the common case (median repair uses 13 % of its clock).
-                _budget_exhausted = str(
-                    getattr(self.developer, "last_budget_exhausted", "") or "").strip()[:32]
-                # DID THE SESSION EVER TRY TO WRITE. Snapshotted HERE for the same concurrency
-                # reason as the bound above. `changed: []` says the tree did not move; this says
-                # whether the model reached for the write surface at all, and the pair is what turns
-                # `inert` from one word into two distinct failures with different remedies.
-                _edit_calls = int(getattr(self.developer, "last_edit_calls", 0) or 0)
+                        repaired = DeveloperResult.failed(f"{DEVELOPER_ERROR_PREFIX} {_repair_exc})")
+                new_code = repaired.code
+                # THE DEVELOPER'S PER-CALL OUTPUTS, OFF THE ENVELOPE. Until 2026-09-06 these five
+                # were snapshotted off the SHARED instance "IMMEDIATELY, before any `await`", because
+                # under max_parallel>1 a sibling task's repair() would overwrite `developer.last_files`
+                # in the gap and this row would record (and re-materialize) ANOTHER node's edits as
+                # this node's — and what made even that snapshot safe was the freeze: the paid call
+                # ran on the loop thread, so no sibling could run during it. The envelope is captured
+                # under the instance's own lock in the same breath as the call (`_run_developer`),
+                # so there is no gap left to read across, and the ordering discipline the old
+                # comments carried ("read BEFORE the not-a-repair gate below, which awaits") is now a
+                # property of the record rather than of the line order.
+                repaired_files = dict(repaired.last_files)
+                repaired_deleted = list(repaired.last_deleted)
+                # The rollback REQUEST: the suspect earlier stage this repair blamed, "" for none.
+                _rollback_ask = repaired.last_rollback_stage
+                # WHICH BOUND ENDED THE SESSION. Bounded and coerced because it rides a durable row;
+                # empty for a session that finished on its own terms, which is the common case
+                # (median repair uses 13 % of its clock).
+                _budget_exhausted = repaired.last_budget_exhausted
+                # DID THE SESSION EVER TRY TO WRITE. `changed: []` says the tree did not move; this
+                # says whether the model reached for the write surface at all, and the pair is what
+                # turns `inert` from one word into two distinct failures with different remedies.
+                _edit_calls = int(repaired.last_edit_calls)
                 # THE DEVELOPER SAYING "I DO NOT KNOW HOW TO FIX THIS" (F8). The first of the two
                 # signals the operator asked for, and the one that already existed as a capability
                 # and had no way to be expressed: a Developer that knew it was beaten could only

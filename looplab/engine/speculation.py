@@ -1057,14 +1057,16 @@ class SpeculationMixin:
         kind = reservation.kind
         try:
             self._reset_developer_footprint(developer)
+            # THE ENVELOPE (doc 52 row 12): the build's outputs are read off the `DeveloperResult`
+            # the call returned, never off the instance afterwards — see `agents/roles.py`.
             if kind == "draft":
-                code = self._implement(
+                built = self._implement_result(
                     self._directed_idea(idea.model_copy(deep=True), state),
                     developer=developer, state=state)
             elif kind == "merge":
                 parents = [state.nodes[node_id] for node_id in reservation.parent_ids]
                 directed = self._directed_idea(idea.model_copy(deep=True), state)
-                code = self._implement(
+                built = self._implement_result(
                     directed,
                     parents[0] if self._merge_mode == "ensemble" and parents else None,
                     developer=developer, state=state)
@@ -1077,9 +1079,9 @@ class SpeculationMixin:
                     error = self._repair_error_context(
                         parent.error_reason, parent.error, state=state, node=parent,
                     )
-                    code = self._repair(parent, error, state, developer=developer)
+                    built = self._repair_result(parent, error, state, developer=developer)
                 else:
-                    code = self._implement(
+                    built = self._implement_result(
                         self._directed_idea(idea.model_copy(deep=True), state),
                         parent,
                         developer=developer,
@@ -1087,15 +1089,17 @@ class SpeculationMixin:
                     )
             else:
                 parent = state.nodes[action["parent_id"]]
-                code = self._implement(
+                built = self._implement_result(
                     self._directed_idea(idea.model_copy(deep=True), state),
                     parent,
                     developer=developer,
                     state=state,
                 )
-            idea, finalized = self._finalize_developer_footprint(idea, developer, code)
-            files = dict(getattr(developer, "last_files", {}) or {})
-            deleted = tuple(getattr(developer, "last_deleted", []) or [])
+            code = built.code
+            idea, finalized = self._finalize_developer_footprint(
+                idea, developer, code, footprint=built.last_footprint)
+            files = dict(built.last_files)
+            deleted = tuple(built.last_deleted)
             return SpecBuildResult(
                 card_id=card_id,
                 generation=generation,

@@ -206,7 +206,18 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    events, `EventStore.append`/`read_all` serialize via their own `threading.Lock`s, ids are reserved
    serially under `_id_lock` up front, and the fold is order-tolerant across independent nodes — so
    only the log's byte-order (not the folded state) becomes nondeterministic. A settled build width
-   of `1` keeps the strict "only the main task appends" behaviour, byte-identical. The seam is
+   of `1` kept the strict "only the main task appends" behaviour until 2026-09-06; since doc 52
+   row 12 EVERY build — the serial lane's, the fork's and the node-reset rebuild — runs in ONE
+   worker at a time through `orchestrator.py::_offload_build` (the proposal pool), awaited by the
+   main task, so the byte order at width 1 is still one build's rows in sequence and the appends
+   are still the worker seam's own-node rows. What moved with it is WHERE the Developer's outputs
+   are read: `agents/roles.py::DeveloperResult` — captured under the instance's lock in the same
+   step as the call (`node_build.py::_run_developer`), never off the shared instance afterwards —
+   which is what let the repair path's three paid calls (`_triage_crash`, `_repair_result`,
+   `_repair_critic`, `evaluate.py`) leave the loop through `_offload_under_proposal_sink` as well;
+   the loop freeze had been the only thing serialising concurrent repairs on the shared instance.
+   `tests/test_developer_result.py` drives the loop's own counter through a blocking repair and a
+   blocking build. The seam is
    OWN-NODE ONLY: a worker that needs a run-GLOBAL gate (the developer-crash / build-crash
    auto-pause) calls `_request_create_pause` and the MAIN task appends the `pause` after the join,
    via `_drain_create_pause` — a worker-written EV_PAUSE would race a concurrent EV_RESUME for byte

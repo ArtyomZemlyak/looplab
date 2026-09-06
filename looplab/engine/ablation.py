@@ -211,10 +211,11 @@ class AblationMixin:
         # that already thread _directed_idea (the signal_delivery registry lists the Developer as a
         # consumer, so skipping it here would silently drop the directive for every ablation child).
         self._reset_developer_footprint(self.developer)
-        code = self._implement(
+        built = self._implement_result(
             self._directed_idea(idea.model_copy(deep=True), state), parent, state=state)
+        code = built.code                     # the envelope's, never the instance's (doc 52 row 12)
         idea, footprint_finalized = self._finalize_developer_footprint(
-            idea, self.developer, code)
+            idea, self.developer, code, footprint=built.last_footprint)
         if not self._ablation_parent_current(parent_id, generation):
             self._fail_reserved_build(
                 node_id=node_id, card_id=reservation.card_id, generation=0,
@@ -224,7 +225,7 @@ class AblationMixin:
         self._emit_node_created(
             node_id=node_id, parent_ids=[parent_id], operator="refine_block",
             idea=durable_idea_payload(idea), code=code,
-            files=getattr(self.developer, "last_files", {}) or {},
+            files=dict(built.last_files),
             eval_start_boundary=True,
             parent_generations={str(parent_id): generation},
             **({"footprint_finalized": True} if footprint_finalized else {}))

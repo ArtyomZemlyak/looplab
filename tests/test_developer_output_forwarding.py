@@ -43,7 +43,11 @@ def _attrs_read_off_the_facade() -> set[str]:
                     and node.func.id == "getattr" and len(node.args) >= 2):
                 continue
             target, name = node.args[0], node.args[1]
-            reads_developer = (isinstance(target, ast.Attribute) and target.attr == "developer")
+            # `self.developer` at the historical inline sites, or the bare `developer` the envelope
+            # capture (`node_build._capture_developer_result`, doc 52 row 12) reads through — the
+            # ONE place every side channel is now read, on behalf of every build and repair site.
+            reads_developer = ((isinstance(target, ast.Attribute) and target.attr == "developer")
+                               or (isinstance(target, ast.Name) and target.id == "developer"))
             if not (reads_developer and isinstance(name, ast.Constant)
                     and isinstance(name.value, str)):
                 continue
