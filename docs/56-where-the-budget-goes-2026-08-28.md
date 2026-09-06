@@ -12326,3 +12326,50 @@ the threshold actually excludes is **one to four** calls, where the share can on
 or 100 % — a number, admitted by any `isinstance` check, and pure quantization in a median. Six of
 those move the middle from 10.0 % to 0.0 %, and the mutation is red. Writing down what a threshold
 excludes turned out to be the only way to find out what it was for.
+
+## §295 — the prediction was right: pagerank's cached baseline is high by 46 %
+
+`pgr1` ended at $1.0123, so the cache could be re-timed without moving a live probe's denominator.
+§293 wrote down what each outcome would mean before the measurement: **~76 ms → the cache is high;
+~109 ms → this box is genuinely fast on pagerank.**
+
+```
+n=100  median 74.581 ms   p10 63.025   p90 78.772
+```
+
+Against the cached **109.133 ms** (p10 84.0, p90 113.4). Not a shifted median — the whole
+distribution has moved. The ratio 109.1/74.6 = **1.46** matches the self-check's independently
+measured **1.43**. Two methods, one answer: **the cached pagerank baseline is high, and this box is
+not unusually fast.**
+
+The evaluator refused to report a speedup for that run — `baseline_measured_in_pass: the
+per-instance reference timings for this task/subset were written during this evaluation, so the
+arena timed the reference and not the candidate`. Exactly right, and worth naming: the fresh number
+is trustworthy as a TIMING and would have been worthless as a RATIO. The one caveat I cannot remove
+with this measurement alone is that a baseline timed in the same pass may run warm; the agreement
+with the self-check's separate 1.43 is what makes "the cache is high" much the stronger reading.
+
+**I have not overwritten the cache.** Doing so reprices every pagerank score including `pgr1`'s,
+which was earned against the old one. That is a decision to take deliberately, not as the tail of a
+diagnosis.
+
+**And the re-timing could not be taken at all until a defect was fixed.** `ruler_selfcheck.one_eval`
+hard-coded `ALGOTUNE_BASELINE_CACHE_DIR` into the child's environment on top of whatever the caller
+had set, and passed `--baseline-times-dir` at the same fixed place. So the first attempt — the
+variable pointed at a scratch directory, exactly as §293 planned — produced an ordinary-looking
+reading against the REAL cache and an empty scratch directory, silently. The same shape as the
+sweep list's own `.env` warning, in the other direction: a value the operator set, overridden
+without a word. The cache is now resolved once, both channels get it, the reading names it when it
+is not the default, and `_cached_median_ms` follows the cache actually in use.
+
+**Two of my own tests were wrong and said so.** The `_T(\d+)ms_` fixture used
+`pagerank_v2_T100ms_…`, a filename the glob `{task}_T*ms_*` will never return — I had written a test
+for a case that cannot occur, to catch a mutation the glob was already catching. The glob now allows
+`{task}*_T*ms_*` so the regex is the thing that decides the shape, and one of them decides instead of
+both half-deciding. The median test still built its path from `BENCH`, which stopped being where the
+cache lives.
+
+**Point 9 on the first pagerank probe.** `pgr1`: TEST **34.2751**, $1.0123, three nodes, 25
+`eval_train`, 37 % of its dollar before the first node and **0 % after the last**, champion a 62-line
+Cython kernel, 53 minutes to first build. Its last node was also its best, so §84's rule cost it
+nothing — the first probe on the task, and the corpus for pagerank is now exactly one.

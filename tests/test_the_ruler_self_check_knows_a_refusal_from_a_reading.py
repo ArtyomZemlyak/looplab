@@ -232,7 +232,7 @@ def test_a_missing_dataset_is_not_a_zero_target(tmp_path):
 
 
 def test_the_target_is_the_T_field_not_the_first_number_in_the_name(tmp_path):
-    """`_T(\d+)ms_` and not `(\d+)`. In the real names the target happens to come first, so a
+    r"""`_T(\d+)ms_` and not `(\d+)`. In the real names the target happens to come first, so a
     mutation to a bare number search passed every fixture -- this one puts something else in front
     of it, which is all it took."""
     d = tmp_path / ".hf_datasets" / "x" / "data" / "pagerank"
@@ -249,12 +249,56 @@ def test_a_name_without_the_target_is_not_parsed_into_one(tmp_path):
 
 
 def test_the_cached_median_is_the_one_the_reading_divides_by(tmp_path, monkeypatch):
-    """Reporting a median from some other file would make the ratio a decoration."""
+    """Reporting a median from some other file would make the ratio a decoration.
+
+    Pinned through `ALGOTUNE_BASELINE_CACHE_DIR` and not through `BENCH`: since the cache became
+    something the operator can name, the median has to follow the cache actually in use, and a test
+    that still built the path from `BENCH` would pass while the two diverged."""
     import json as _json
-    base = tmp_path / "looplab" / "benchmarks" / "algotune" / ".baseline_times"
+    base = tmp_path / ".baseline_times"
     base.mkdir(parents=True)
     (base / "pagerank__test__w22x1r3.json").write_text(
         _json.dumps({str(i): 100.0 + i for i in range(101)}), encoding="utf-8")
-    monkeypatch.setattr(ruler_selfcheck, "BENCH", str(tmp_path))
+    monkeypatch.setenv("ALGOTUNE_BASELINE_CACHE_DIR", str(base))
     assert ruler_selfcheck._cached_median_ms("pagerank", "test") == 150.0
     assert ruler_selfcheck._cached_median_ms("pagerank", "train") is None
+
+
+def test_an_operator_named_cache_is_the_one_used(tmp_path, monkeypatch):
+    """It used to be hard-coded, and the override was SILENT. `one_eval` put the bench cache into
+    the child's environment on top of whatever the caller had set, and passed `--baseline-times-dir`
+    at the same place -- so §293's registered re-timing, taken with the variable pointed at a
+    scratch directory, produced an ordinary-looking reading against the REAL cache and an empty
+    scratch directory, with nothing said. The whole number depends on which cache it divided by."""
+    monkeypatch.setenv("ALGOTUNE_BASELINE_CACHE_DIR", str(tmp_path / "scratch"))
+    assert ruler_selfcheck.baseline_dir() == str(tmp_path / "scratch")
+
+
+def test_without_one_the_bench_cache_is_the_default(monkeypatch):
+    monkeypatch.delenv("ALGOTUNE_BASELINE_CACHE_DIR", raising=False)
+    assert ruler_selfcheck.baseline_dir().endswith("algotune/.baseline_times")
+
+
+def test_the_cached_median_comes_from_the_cache_actually_in_use(tmp_path, monkeypatch):
+    """Reporting the bench cache's median while dividing by a scratch one would be the same lie one
+    line further down."""
+    import json as _json
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "pagerank__test__w22x1r3.json").write_text(
+        _json.dumps({str(i): 70.0 + i for i in range(101)}), encoding="utf-8")
+    monkeypatch.setenv("ALGOTUNE_BASELINE_CACHE_DIR", str(scratch))
+    assert ruler_selfcheck._cached_median_ms("pagerank", "test") == 120.0
+
+
+def test_the_child_is_told_the_same_cache_twice_over(tmp_path, monkeypatch):
+    """The env var and `--baseline-times-dir` both reach the child, and disagreeing is how the
+    override hid: one of them pointed at the scratch dir and the other at the bench."""
+    import ast
+    src = (Path(__file__).resolve().parents[1] / "benchmarks"
+           / "ruler_selfcheck.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "one_eval")
+    body = ast.dump(fn)
+    assert body.count("'cache'") >= 2, "one_eval no longer passes one resolved cache to both"

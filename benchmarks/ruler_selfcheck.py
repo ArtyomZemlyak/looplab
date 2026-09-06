@@ -78,7 +78,12 @@ def dataset_target_ms(task: str, root: str = f"{BENCH}/AlgoTune"):
 
     Printed beside the reading so the next person does not have to go and find it.
     """
-    for path in glob.glob(f"{root}/.hf_datasets/*/data/{task}/{task}_T*ms_*"):
+    # THE GLOB WAS DOING THE REGEX'S JOB, AND NEITHER KNEW IT. `{task}_T*ms_*` already forbids
+    # anything between the task name and the `_T` field, so a mutation loosening the regex to a bare
+    # `(\d+)` could not be caught -- and the fixture I wrote to catch it used `pagerank_v2_T100ms_`,
+    # a name this glob will never return. One of the two has to decide the shape; it is the regex,
+    # which can say which number it means.
+    for path in glob.glob(f"{root}/.hf_datasets/*/data/{task}/{task}*_T*ms_*"):
         got = re.search(r"_T(\d+)ms_", os.path.basename(path))
         if got:
             return float(got.group(1))
@@ -87,7 +92,7 @@ def dataset_target_ms(task: str, root: str = f"{BENCH}/AlgoTune"):
 
 def _cached_median_ms(task: str, subset: str, key: str = "w22x1r3"):
     """The median of the cached per-instance timings this reading is divided by."""
-    path = f"{BENCH}/looplab/benchmarks/algotune/.baseline_times/{task}__{subset}__{key}.json"
+    path = f"{baseline_dir()}/{task}__{subset}__{key}.json"
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -121,16 +126,31 @@ def build_solver(task: str, out_dir: str, probe_root: str = f"{BENCH}/model-prob
     return path
 
 
+def baseline_dir() -> str:
+    """The cache this reading divides by: the operator's if they named one, ours otherwise.
+
+    IT USED TO BE HARD-CODED, AND THE OVERRIDE WAS SILENT. `one_eval` passed
+    `ALGOTUNE_BASELINE_CACHE_DIR=<the bench cache>` into the child's environment on top of whatever
+    the caller had set, and also passed `--baseline-times-dir` pointing at the same place. So
+    running this with `ALGOTUNE_BASELINE_CACHE_DIR` set to a scratch directory -- which is exactly
+    how §293's registered re-timing was supposed to be taken -- produced an ordinary-looking reading
+    against the REAL cache, and an empty scratch directory, with nothing said. The whole number
+    depends on which cache it divided by, so the reading now names it.
+    """
+    return os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR") or str(HERE / "algotune" / ".baseline_times")
+
+
 def one_eval(task: str, solver: str, lane: str, subset: str, timeout: float = 900.0) -> dict:
+    cache = baseline_dir()
     env = dict(os.environ,
                DATA_DIR=f"{BENCH}/AlgoTune/.hf_datasets/oripress__AlgoTune/data",
-               ALGOTUNE_BASELINE_CACHE_DIR=str(HERE / "algotune" / ".baseline_times"),
+               ALGOTUNE_BASELINE_CACHE_DIR=cache,
                ALGOTUNE_MIN_TIMEOUT_S="120", ALGOTUNE_EVAL_WORKERS="auto")
     argv = ["taskset", "-c", lane, sys.executable,
             str(HERE / "algotune" / "looplab_eval.py"),
             "--algotune-root", f"{BENCH}/AlgoTune", "--task", task,
             "--solver", solver, "--solver-file-only",
-            "--baseline-times-dir", str(HERE / "algotune" / ".baseline_times"),
+            "--baseline-times-dir", cache,
             "--subset", subset]
     got = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
     try:
@@ -312,14 +332,19 @@ def main(argv=None) -> int:
     print(line)
     share = instance_share(args.task, statistics.median(secs) if secs else 0.0,
                            subset=args.subset)
-    if share:
-        target = dataset_target_ms(args.task)
+    if os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR"):
+        print(f"  (dividing by the cache you named: {baseline_dir()})")
+    target = dataset_target_ms(args.task)
     cached = _cached_median_ms(args.task, args.subset)
     if target and cached:
         print(f"  (the dataset name says the reference took {target:.0f} ms per instance on the "
               f"machine that BUILT it; our cached baseline says {cached:.1f} ms, "
               f"{target / cached:.1f}x that machine's speed)")
-    print(f"  (per-instance work is {100 * share:.0f} % of an evaluation's wall clock, so "
+    if share:
+        # RESTORED. Moving the cache line in dropped this guard for one edit, and without it a run
+        # whose `instance_share` came back empty prints "per-instance work is 0 %" -- a measurement
+        # where there was none.
+        print(f"  (per-instance work is {100 * share:.0f} % of an evaluation's wall clock, so "
               f"`eval_seconds` cannot see this drift at all)")
     if args.record:
         append_reading(args.record, args.task, args.subset, vals, median, args.stamp, args.lane)
