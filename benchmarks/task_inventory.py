@@ -53,6 +53,19 @@ def campaign_tasks(path=CAMPAIGN) -> list:
     return [t for t in got.group(1).replace("\\\n", " ").split() if t != "\\"]
 
 
+REFERENCE_INVALID = {
+    # task -> what its own checker says. Measured, not assumed; §311 for the one entry here.
+    "spectral_clustering":
+        "its own is_solution rejects 7 of its 100 reference solutions "
+        "(instances 1, 26, 55, 61, 62, 64, 84) as `argmax over a k-column subset (suspicious)`; "
+        "100 % validity is required, so nothing on this box can score it (§311)",
+}
+
+
+def _reference_invalid(task: str):
+    return REFERENCE_INVALID.get(task)
+
+
 def classify(task: str, rows, readings) -> dict:
     """One task's verdict, from the cache, its own recorded reading, and its source."""
     entry = next((r for r in rows if r["task"] == task and r.get("subset") == "test"), None)
@@ -63,6 +76,16 @@ def classify(task: str, rows, readings) -> dict:
         return {"task": task, "verdict": "no baseline", "reading": reading, "tail": tail,
                 "cpsat": cpsat, "why": "no test entry in the cache"}
     if reading is None:
+        # A TASK WHOSE OWN REFERENCE FAILS ITS OWN CHECKER IS NOT "NOT YET READ". §311 measured
+        # `spectral_clustering`: 7 of its 100 reference solutions are rejected by its own
+        # `is_solution`, which flags them as `argmax over a k-column subset (suspicious)` -- an
+        # anti-reward-hack heuristic firing on the reference. 100 % validity is required, so no
+        # solver can score it, and telling an operator to "run ruler_selfcheck --record" sends them
+        # to repeat a refusal.
+        why = _reference_invalid(task)
+        if why:
+            return {"task": task, "verdict": "unscorable reference", "reading": None, "tail": tail,
+                    "cpsat": cpsat, "why": why}
         return {"task": task, "verdict": "unread", "reading": None, "tail": tail, "cpsat": cpsat,
                 "why": "no self-check reading recorded; run ruler_selfcheck --record"}
     if abs(reading - 1.0) <= TOLERANCE:
@@ -99,7 +122,7 @@ def main(argv=None) -> int:
     if args.json:
         print(json.dumps(out, indent=2, sort_keys=True))
         return 0
-    order = ["rules as is", "rules at one worker", "unrulable",
+    order = ["rules as is", "rules at one worker", "unrulable", "unscorable reference",
              "off by more than the tolerance", "unread", "no baseline"]
     print(f"{len(tasks)} campaign tasks")
     for verdict in order:

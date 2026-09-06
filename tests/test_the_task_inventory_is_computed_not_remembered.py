@@ -129,3 +129,44 @@ def test_the_real_bench_sorts_into_the_measured_groups():
     assert counts.get("rules as is") == 10, counts
     assert counts.get("rules at one worker") == 6, counts
     assert counts.get("unrulable") == 3, counts
+
+
+def test_a_reference_that_fails_its_own_checker_is_not_merely_unread(tmp_path):
+    """§311: `spectral_clustering`'s own `is_solution` rejects 7 of its 100 reference solutions as
+    `argmax over a k-column subset (suspicious)` -- an anti-reward-hack heuristic firing on the
+    reference. 100 % validity is required, so nothing here can score it. Telling an operator to
+    "run ruler_selfcheck --record" would send them to repeat a refusal."""
+    old = ruler_check.CPSAT_ROOT
+    try:
+        ruler_check.CPSAT_ROOT = _cpsat(tmp_path, "spectral_clustering", False)
+        got = ti.classify("spectral_clustering", _rows("spectral_clustering", LIGHT), {})
+    finally:
+        ruler_check.CPSAT_ROOT = old
+    assert got["verdict"] == "unscorable reference", got
+    assert "7 of its 100" in got["why"] and "§311" in got["why"], got
+    assert "ruler_selfcheck --record" not in got["why"], got
+
+
+def test_any_other_unread_task_is_still_just_unread(tmp_path):
+    """The distinction has to cut both ways, or every unmeasured task inherits an excuse."""
+    old = ruler_check.CPSAT_ROOT
+    try:
+        ruler_check.CPSAT_ROOT = _cpsat(tmp_path, "t", False)
+        got = ti.classify("t", _rows("t", LIGHT), {})
+    finally:
+        ruler_check.CPSAT_ROOT = old
+    assert got["verdict"] == "unread", got
+    assert "ruler_selfcheck --record" in got["why"], got
+
+
+def test_a_task_with_a_reading_is_never_called_unscorable(tmp_path):
+    """The reference-invalid note must not outrank a measurement: if a reading exists, the reading
+    decides."""
+    old = ruler_check.CPSAT_ROOT
+    try:
+        ruler_check.CPSAT_ROOT = _cpsat(tmp_path, "spectral_clustering", False)
+        got = ti.classify("spectral_clustering", _rows("spectral_clustering", LIGHT),
+                          {"spectral_clustering": (0.99, "2026-09-06")})
+    finally:
+        ruler_check.CPSAT_ROOT = old
+    assert got["verdict"] == "rules as is", got
