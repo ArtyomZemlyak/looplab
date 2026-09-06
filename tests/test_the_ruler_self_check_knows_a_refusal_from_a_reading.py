@@ -302,3 +302,44 @@ def test_the_child_is_told_the_same_cache_twice_over(tmp_path, monkeypatch):
               if isinstance(n, ast.FunctionDef) and n.name == "one_eval")
     body = ast.dump(fn)
     assert body.count("'cache'") >= 2, "one_eval no longer passes one resolved cache to both"
+
+
+def test_the_reading_is_taken_under_the_interpreter_the_bench_scores_with():
+    """THE WORST ERROR IN THIS SERIES, pinned.
+
+    `run_probe.sh` scores every probe with `$ROOT/AlgoTune/.venv/bin/python`. This file used
+    `sys.executable`, so a self-check launched with `/opt/conda/bin/python` timed the reference under
+    a different numpy/scipy stack. Measured 2026-09-06 on `pagerank`: 109.999 ms under the venv
+    against 74.6-75.3 ms under conda -- a 1.46x gap, reported for three sweeps as a drifting ruler,
+    chased through six refuted hypotheses, and finally acted on: a correct baseline overwritten and a
+    probe re-scored under the wrong one.
+
+    Under the venv all four constants hold within 3 % of the standing sweep. A reading taken under
+    another stack is not a worse reading, it is a different experiment."""
+    import ast
+    src = (Path(__file__).resolve().parents[1] / "benchmarks"
+           / "ruler_selfcheck.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "one_eval")
+    dumped = ast.dump(fn)
+    assert "bench_python" in dumped, "one_eval no longer pins the interpreter"
+    assert "sys.executable" not in ast.unparse(fn), ast.unparse(fn)[:400]
+
+
+def test_the_pinned_interpreter_is_the_one_run_probe_uses():
+    """Pinned to a path nobody uses would be the same defect wearing a fix."""
+    probe_sh = (Path(__file__).resolve().parents[1] / "benchmarks" / "algotune"
+                / "run_probe.sh").read_text(encoding="utf-8")
+    assert "AlgoTune/.venv/bin/python" in probe_sh, "run_probe.sh changed its interpreter"
+    assert ruler_selfcheck.bench_python().endswith("AlgoTune/.venv/bin/python"), \
+        ruler_selfcheck.bench_python()
+
+
+def test_a_missing_bench_interpreter_is_a_refusal_not_a_fallback(monkeypatch, capsys):
+    """Falling back to whatever is available is exactly how this happened. Silence is the danger:
+    the wrong-stack reading looked entirely normal for three sweeps."""
+    monkeypatch.setattr(ruler_selfcheck, "BENCH_PYTHON", "/no/such/python")
+    rc = ruler_selfcheck.main(["--task", "pagerank"])
+    assert rc == 2, rc
+    assert "REFUSING" in capsys.readouterr().err

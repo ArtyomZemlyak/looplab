@@ -12510,3 +12510,63 @@ file had inserted, so they passed when run together and raised when run alone �
 from an import is not a red that comes from the behaviour. Both paths are now set in the file that
 needs them. A second mutation, `row["provenance"] = {} or json.loads(...)`, was a no-op — `{} or X`
 is `X` — so its survival meant nothing either; the real one is red.
+
+## §299 — RETRACTION: the drifting ruler was my own interpreter
+
+**Everything §219, §262, §265, §281, §292–§298 said about a drifting ruler is withdrawn. The
+constants in the standing sweep were right the whole time. The instrument was mine.**
+
+`run_probe.sh` scores every probe with `$ROOT/AlgoTune/.venv/bin/python`. `ruler_selfcheck.one_eval`
+used `sys.executable` — so a self-check launched with `/opt/conda/bin/python`, which is how I have
+launched every one of them, timed the reference under a **different numpy/scipy stack**. Measured
+today on `pagerank`, same task, same lane, same cache, minutes apart:
+
+```
+  venv  (what the bench scores with)   109.999 ms      cached baseline: 109.133 ms
+  conda (what I was measuring with)     74.6 / 75.1 / 75.3 ms
+```
+
+Under the interpreter the bench actually uses, all four constants hold:
+
+| task | the sweep says | measured under the venv | what I had reported |
+|---|---|---|---|
+| pagerank | 1.0024 | **0.9727 / 0.9663** | 1.4317 (+42.8 %) |
+| edge_expansion | 0.9847 | **1.0027 / 0.9997** | 0.9007 (−8.5 %) |
+| pde_heat1d | 0.9958 | **1.0136 / 0.9897** | 1.0676 (+7.2 %) |
+| discrete_log | 1.0162 | **1.0189 / 1.0097** | 1.0830 (+6.6 %) |
+
+Every one within 3.6 %, three of the four within 2 %.
+
+**How far it got.** This was not a stray number. It survived three sweeps; it was reported as a
+finding four times; it was chased through six hypotheses I refuted one by one — lane, thread
+environment, concurrent load, reference version, re-timing date, cgroup quota — and each refutation
+made the remaining mystery look *more* solid, because eliminating causes felt like progress. §293
+even wrote down a prediction before the measurement, which is the right discipline, and the
+measurement confirmed it: **a wrong instrument reproduces its own error perfectly.** Two independent
+methods agreed to within 0.04 (§296) — both of them running under conda. Agreement between two
+readings from the same broken stack is not corroboration.
+
+**And I acted on it.** §298 overwrote a correct `pagerank` baseline with one that was 1.46× too fast,
+and re-scored `pgr1` from 34.2751 to 23.0394 under it. Both are restored from the archive: the
+baselines are back at 109.133 / 110.466 ms, `pgr1`'s `final.json` is back at 34.2751, and the nine
+conda-era readings in the drift log are marked `interpreter: conda (WRONG -- see §299)` rather than
+deleted.
+
+**The fix.** The interpreter is named, not inherited: `bench_python()` returns
+`$BENCH/AlgoTune/.venv/bin/python`, the same one `run_probe.sh` scores with, and `main` refuses at
+the top if it is absent rather than falling back — falling back is exactly how this happened, and
+the fallback was silent. Four mutations red, including pinning to an interpreter the bench does not
+use, which would have been the same defect wearing a fix.
+
+**What this costs the record.** §296's "cached / fresh" table, §297's six-mechanism elimination,
+§298's replacement — all measured under the wrong stack, all withdrawn. What survives is real and
+uncomfortable: the tools that were supposed to catch a mismatched ruler (`ruler_check`'s drift
+alarm, `sweep_claims`' constants check, the provenance sidecar) were all built during this error and
+all faithfully reported it. **Every one of them was measuring my mistake and calling it the bench's.**
+The provenance sidecar §297 added would not have caught it either — it records workers, threads,
+affinity, load and quota, and **not the interpreter.** That field is the one thing it was missing,
+and it is added now.
+
+The shape is the document's own, at the largest size it has reached: not a breakage, a quiet
+mismatch between what I thought I was measuring and what I was measuring — sustained for three
+sweeps by the fact that everything I built to check it inherited the same mistake.

@@ -126,6 +126,30 @@ def build_solver(task: str, out_dir: str, probe_root: str = f"{BENCH}/model-prob
     return path
 
 
+BENCH_PYTHON = f"{BENCH}/AlgoTune/.venv/bin/python"
+
+
+def bench_python() -> str:
+    """The interpreter the BENCH evaluates under -- not whichever one launched this script.
+
+    THE WORST ERROR IN THIS SERIES CAME FROM `sys.executable`. `run_probe.sh` scores every probe with
+    `$ROOT/AlgoTune/.venv/bin/python`; this file used `sys.executable`, so a self-check launched with
+    `/opt/conda/bin/python` timed the reference under a DIFFERENT numpy/scipy stack. Measured
+    2026-09-06 on `pagerank`: 109.999 ms under the venv against 74.6-75.3 ms under conda, a 1.46x
+    gap. That gap was reported for three sweeps as a drifting ruler, chased through six refuted
+    hypotheses, and finally acted on -- a correct baseline was overwritten and a probe re-scored
+    under the wrong one. Both have been restored.
+
+    Under the venv all four constants hold: pagerank 0.9727, edge_expansion 1.0027, pde_heat1d
+    1.0136, discrete_log 1.0189 -- every one within 3 % of what the standing sweep says.
+
+    So the interpreter is named here rather than inherited, and `main` refuses outright if it is
+    missing: a reading taken under the wrong stack is not a worse reading, it is a different
+    experiment.
+    """
+    return BENCH_PYTHON
+
+
 def baseline_dir() -> str:
     """The cache this reading divides by: the operator's if they named one, ours otherwise.
 
@@ -146,7 +170,7 @@ def one_eval(task: str, solver: str, lane: str, subset: str, timeout: float = 90
                DATA_DIR=f"{BENCH}/AlgoTune/.hf_datasets/oripress__AlgoTune/data",
                ALGOTUNE_BASELINE_CACHE_DIR=cache,
                ALGOTUNE_MIN_TIMEOUT_S="120", ALGOTUNE_EVAL_WORKERS="auto")
-    argv = ["taskset", "-c", lane, sys.executable,
+    argv = ["taskset", "-c", lane, bench_python(),
             str(HERE / "algotune" / "looplab_eval.py"),
             "--algotune-root", f"{BENCH}/AlgoTune", "--task", task,
             "--solver", solver, "--solver-file-only",
@@ -305,6 +329,11 @@ def main(argv=None) -> int:
                          f" [{DEFAULT_LOG}]")
     ap.add_argument("--stamp", help="ISO timestamp for the recorded row; the caller owns the clock")
     args = ap.parse_args(argv)
+    if not os.path.exists(bench_python()):
+        print(f"REFUSING: the bench interpreter {bench_python()} is not on this box. A reading "
+              "taken under another Python is a different experiment, not a worse one.",
+              file=sys.stderr)
+        return 2
 
     with tempfile.TemporaryDirectory(prefix="ruler-selfcheck-") as tmp:
         solver = build_solver(args.task, tmp)

@@ -203,7 +203,7 @@ WRITE_PATCH = '''                    self._cache[subset] = baseline_times
                             # now leaves a sidecar saying under what it was taken. It cannot fix the
                             # entries already on disk; it stops the next one being a mystery.
                             try:
-                                import time as _ll_time2, socket as _ll_sock2
+                                import time as _ll_time2, socket as _ll_sock2, sys as _ll_sys2
                                 _ll_prov = {
                                     "written_at": _ll_time2.strftime("%Y-%m-%dT%H:%M:%S"),
                                     "host": _ll_sock2.gethostname(),
@@ -213,6 +213,11 @@ WRITE_PATCH = '''                    self._cache[subset] = baseline_times
                                     "omp_num_threads": _ll_os2.environ.get("OMP_NUM_THREADS"),
                                     "openblas_num_threads":
                                         _ll_os2.environ.get("OPENBLAS_NUM_THREADS"),
+                                    # THE FIELD §297 MISSED, and the only one that mattered: the
+                                    # 46 % "drift" it was written to explain was an interpreter
+                                    # difference (§299), which none of workers/threads/affinity/
+                                    # load/quota can show.
+                                    "interpreter": _ll_sys2.executable,
                                     "cpu_affinity": sorted(_ll_os2.sched_getaffinity(0)),
                                     "loadavg": _ll_os2.getloadavg(),
                                     "cpu_max": (open("/sys/fs/cgroup/cpu.max").read().strip()
@@ -239,6 +244,7 @@ _REQUIRED_FRAGMENTS = [
     ("lane regime key", 'f"__lane{_ll_lane}r3"'),
     ("worker regime key", 'f"__w{_ll_w}x{_ll_c}r3"'),
     ("write provenance", '"cpu_affinity": sorted(_ll_os2.sched_getaffinity(0))'),
+    ("provenance names the interpreter", '"interpreter": _ll_sys2.executable'),
     ("write gate", "LOOPLAB baseline cache NOT WRITTEN"),
 ]
 

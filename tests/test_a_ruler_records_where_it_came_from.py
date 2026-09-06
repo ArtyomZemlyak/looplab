@@ -126,3 +126,23 @@ def test_a_torn_sidecar_does_not_take_the_entry_down(tmp_path):
                                                                           encoding="utf-8")
     rows = ruler_check.entries(tmp_path)
     assert len(rows) == 1 and rows[0]["provenance"] == {}
+
+
+def test_the_sidecar_names_the_interpreter():
+    """The one field §297 did not record, and the only one that mattered.
+
+    The 46 % "drift" the sidecar was written to explain was an interpreter difference (§299) --
+    109.999 ms under the bench venv against 74.6 ms under conda on the same task, same lane, same
+    cache. None of workers, threads, affinity, load or quota can show that."""
+    emitted = pbc.WRITE_PATCH
+    assert '"interpreter": _ll_sys2.executable' in emitted, "the sidecar cannot name its Python"
+    names = [n for n, _ in pbc._REQUIRED_FRAGMENTS]
+    assert "provenance names the interpreter" in names, names
+
+
+def test_the_deployed_sidecar_names_it_too():
+    if not DEPLOYED.is_file():
+        import pytest
+        pytest.skip("no AlgoTune deployment on this box")
+    src = DEPLOYED.read_text(encoding="utf-8", errors="replace")
+    assert '"interpreter": _ll_sys2.executable' in src
