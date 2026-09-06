@@ -1033,10 +1033,21 @@ raises `open`, so until 2026-08-13 a node's eval code could delete or rename you
 every read of it was refused — `shutil.rmtree` of the source root included. The same twelve events are
 now refused, with a message that says so. `warn` still lets them through and logs them.
 
-What stays readable — and writable: the node workdir, the run directory, `/tmp`, site-packages, the
-model/HF cache, and every `dataset`/`data`/`references` mount **source** — a mount is the sanctioned
-read channel and is allow-listed even when it lives inside the editable tree. The fence is a no-op for
-a non-repo task and for the Docker tiers (the source is never bind-mounted into a container).
+**And it refuses to write the run's RECORD (2026-09-06).** The run directory holds what your node is
+scored INTO — `events.jsonl`, the snapshots, the traces — and the node's workdir lives inside it, so
+until then a training script could append a well-formed `node_evaluated` row naming its own node and
+elect itself. Now a write-flagged `open` or any of the twelve mutation events whose target is under
+the run directory is refused unless it is under the launch's own workdir (the launcher hands it to the
+child in `LOOPLAB_EVAL_WORKDIR`) or the fence's own directory; reads of the record stay legal. This
+rule holds on **every** task, not only a repo task — a toy or dataset node's `solution.py` is
+model-written code with the same reach — so a non-repo run carries a fence with no source roots and
+the record rule alone.
+
+What stays readable: the node workdir, the run directory, `/tmp`, site-packages, the model/HF cache,
+and every `dataset`/`data`/`references` mount **source** — a mount is the sanctioned read channel and
+is allow-listed even when it lives inside the editable tree. What stays writable: the node workdir,
+`/tmp`, an `edit: true` mount, and nothing else under the run directory. The fence is a no-op for the
+Docker tiers (neither the source tree nor the run dir is bind-mounted into a container).
 
 **What it cannot see, and you should know before relying on it.** It is a CPython audit hook, so it
 covers what goes through CPython and nothing else. A native reader — `safetensors`, `h5py`, `pyarrow`,

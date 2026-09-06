@@ -1561,7 +1561,11 @@ class Settings(BaseSettings):
     # to read the operator's editable SOURCE tree. "deny" (default) raises in the child and the
     # refusal — which names the fix — lands in the node's stderr; "warn" logs one line per distinct
     # path to stderr and to `<run>/.looplab-fence/violations.log` and lets the read through; "off"
-    # installs nothing. No-op for a non-repo task: with no editable source there is nothing to fence.
+    # installs nothing. Since 2026-09-06 it is installed for EVERY task, not only a repo task: the
+    # same hook refuses any WRITE under the run's own RECORD (events.jsonl, the snapshots, the
+    # traces) outside the launch's workdir and the fence directory, because a candidate could
+    # otherwise append its own `node_evaluated` row and elect itself (doc 52,
+    # `eval-may-write-the-run-record`). `runtime/read_allowlist.py` is the kernel-side twin.
     #
     # WHY DENY IS THE DEFAULT, and not warn. The failure this closes does not announce itself.
     # `runs/rubertlite-dr-unified-v6` node 4 trained a genuinely good model (train.log RECALL@100

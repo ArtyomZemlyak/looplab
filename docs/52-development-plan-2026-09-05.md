@@ -468,14 +468,14 @@ OPEN[no-reviewer-bundle-export] seeds (`LOOPLAB_EVAL_SEED`, `confirm_seed_base`)
 (`spans.jsonl`, `events.jsonl`) exist on disk and nothing packages them with code and claims for a
 reviewer — the survey's 38 % dimension, the field's RO-Crate export. proof:absent:RO-Crate@looplab
 
-OPEN[eval-may-write-the-run-record] the eval launch allow-list grants the candidate's process
-`readwrite` over the WHOLE run dir (`runtime/read_allowlist.py::derive`), the read fence's
-`MUTATION_EVENTS` cover only source roots, and the subprocess tier — the only tier the box runs — has
-no write fence, so a training script can append a well-formed `node_evaluated` row to `events.jsonl`
-or rewrite `task.snapshot.json`; the store's foreign-writer stop fires only on a MALFORMED row. Docs/36
-and EurekAgent's hook-protected result files both say the candidate may never elect. Fix: run dir
-read-only to the eval, writes only on the workdir and the fence directory, plus a mutation-event
-refusal as the message rung. proof:`present:_add(out, run_dir, "readwrite", declared=True)@looplab/runtime/read_allowlist.py`
+*Closed 2026-09-06 (row 2 shipped): the marker `eval-may-write-the-run-record` stood here. The eval
+launch allow-list granted the candidate's process `readwrite` over the whole run dir, the fence's
+mutation events covered only source roots, and a training script could append a well-formed
+`node_evaluated` row and elect itself. Now `read_allowlist.derive` grants the run dir READ (the
+workdir and `.looplab-fence/` readwrite), the fence refuses every write-flagged `open` and every
+mutation event under the record outside the launch's own workdir (`LOOPLAB_EVAL_WORKDIR`, handed to
+the child by `run_argv`) on EVERY task, and `tests/test_run_record_fence.py` reproduces the forged
+terminal unfenced and refuses it fenced. Deleted per the index rule.*
 
 OPEN[subprocess-tier-has-no-syscall-or-egress-fence] no seccomp filter exists anywhere in
 `looplab/`, Landlock TCP rules need ABI 4 and the box measured ABI 2, so on the default tier an eval

@@ -2019,8 +2019,9 @@ looplab landlock-check RUN_DIR [--no-probe]
 | `--probe / --no-probe` | `--probe` | Fork a child, apply the ruleset, and prove a read inside the allow-list succeeds while one outside it is refused. The fork is why the irreversible `restrict_self` cannot touch your shell. |
 
 What it prints, in order: the Landlock ABI this kernel offers; **the mounts the task declares**, each
-marked if it is not present on this box; the full allow-list (workdir, run dir, the `data:` /
-`references:` mount sources, the interpreter, the model cache, the machine tiers); and `added: N
+marked if it is not present on this box; the full allow-list (workdir readwrite, run dir READ — it is the run's record — plus its
+`.looplab-fence/` readwrite, the `data:` / `references:` mount sources, the interpreter, the model
+cache, the machine tiers); and `added: N
 skipped: M`. **A skipped rule is a DENIAL under an allow-list, never a no-op**, so any `skipped` is
 exit 1 and names the path that would be refused.
 

@@ -41,8 +41,8 @@ module installs a `sys.addaudithook` that inspects the `open` audit event — ra
 root. Because `PYTHONPATH` is inherited, every python the eval spawns (dataloader workers, a
 torchrun rank, a shell script's `python`) is fenced too, at no extra cost.
 
-It watches two more classes of event, and each is there because the `open` hook alone measurably
-did not hold:
+It also refuses to WRITE the run's own RECORD — see THE RUN RECORD below — and it watches two more
+classes of event, each there because the `open` hook alone measurably did not hold:
 * `os.chdir` — so the relative-path fast bail below stays true. It is NOT a refusal of the chdir
   itself in the general case (a node may legitimately walk into a directory); the event re-derives
   `_CWD_REACHES_ROOT` from the target, and when that is true a relative open pays an `abspath`
@@ -54,6 +54,32 @@ did not hold:
   THROUGH, `shutil.rmtree(<the source root itself>)` included — the root's own name carries no
   trailing separator, so opening it is not refused, and every file under it is then unlinked with
   `os.remove(<bare name>, dir_fd=...)`, which CPython audits with the RELATIVE name.
+
+THE RUN RECORD (2026-09-06)
+---------------------------
+The run directory holds the record an evaluation is scored INTO — `events.jsonl`, the two snapshots,
+the traces — and the evaluation's own workdir lives inside it (`<run>/nodes/node_N`), so until this
+date the launch allow-list granted the whole run dir `readwrite` and nothing in the hook looked at
+it. A training script could `open('../../events.jsonl', 'a')` and append a well-formed
+`node_evaluated` row naming its own node and a metric of its choosing; the store's foreign-writer
+stop fires only on a MALFORMED row, the fold applies the FIRST terminal, and the engine's own
+terminal then landed second. Docs/36's line is that the candidate may never elect, and this was
+the one channel through which it could. So the fence now carries the RECORD root: any `open`
+whose flags ask for a write (`O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`, baked into
+`_WRITE_FLAGS` — the `open` audit event carries the resolved flags for every shape, `builtins.open`
+modes and `os.open` alike, verified with a recording hook) and any registered MUTATION event whose
+target is under the run directory is refused UNLESS it is under a WRITABLE prefix: the launch's
+own workdir, handed to the child in `LOOPLAB_EVAL_WORKDIR` by `run_argv` because ONE fence serves
+every launch of the run, and the fence's own directory, where `_record` appends the diagnostic.
+Reads of the record stay legal (a node may read the run it belongs to), a write through a
+planted symlink is closed for the links the process makes itself (`os.symlink`/`os.link` targets
+are checked, as they are for the source roots), and the fence is now installed for EVERY run,
+not only a repo task's: a toy or dataset node's `solution.py` is model-written code with the same
+reach. It is the MESSAGE rung of this boundary exactly as for the source tree; the KERNEL rung is
+`read_allowlist.derive`, which grants the run dir `read` and the fence dir `readwrite` beside the
+per-launch workdir. A launch that carries the fence marker and NO workdir variable fails CLOSED:
+every write under the record is refused, loudly, which is the right failure for a launch path
+that forgot to say which directory is the node's.
 
 THE MESSAGE IS THE POINT. A refusal must be actionable by the repair loop, so it is a plain
 exception carrying `REFUSAL_MESSAGE` — which names the fix — and it surfaces in the node's own
@@ -156,6 +182,10 @@ workspace — +580 ns per create/remove pair, for the memoized `realpath` of its
 deletes ten thousand checkpoint shards spends 6 ms on this.
 (An earlier design note priced a 9-event SET-MEMBERSHIP variant at +3.9 % on the read path. That is
 not what shipped and not what this costs: membership was tested before the `open` compare there.)
+The RECORD rule (2026-09-06) adds nothing to the relative fast bail and, on the resolved-path
+branch, one integer `&` on the flags (paid by writes only) plus one `startswith` on a hit; its
+numbers, measured on the build container and not yet on the box, are in
+`docs/38-fence-coverage-audit-2026-08-13.md` §6.
 """
 from __future__ import annotations
 
@@ -177,6 +207,11 @@ from looplab.runtime.read_allowlist import mount_sources
 FENCE_DIR_ENV = "LOOPLAB_READ_FENCE_DIR"
 FENCE_DIRNAME = ".looplab-fence"
 VIOLATION_LOG = "violations.log"
+# The env var `run_argv` sets beside the marker: the directory THIS launch may write under the run
+# record. Per launch rather than baked into the fence, because one generated fence serves every
+# launch of the run (the node workdirs, the confirm-phase workdirs, the metric adapter's exec) and
+# only the launch knows which of them it is. Inherited by every child, like the marker.
+WORKDIR_ENV = "LOOPLAB_EVAL_WORKDIR"
 
 # The policy rungs, in increasing strictness. See `Settings.read_fence` for why `deny` is the
 # default rather than `warn`.
@@ -200,6 +235,15 @@ MUTATION_REFUSAL_MESSAGE = (
     "refused: {path} is under the operator's SOURCE tree, which this node may not create, delete, "
     "rename, truncate, link or change. This node runs in its own copy — write to, and clean up "
     "inside, your own workdir. Nothing your pipeline produced is in the source tree."
+)
+
+# The RECORD twin (2026-09-06). A third sentence because the fix is a third one: the run directory
+# is the record an evaluation is scored INTO, and the only place an evaluation writes is its own
+# workdir — the engine reads what it printed and what it declared, and writes the record itself.
+RECORD_REFUSAL_MESSAGE = (
+    "refused: {path} is the run's own RECORD (its event log, snapshots, traces and the other "
+    "nodes' workspaces), which an evaluation may read and never write. Write only inside your own "
+    "workdir: the engine records your metric from what you print and what you declare."
 )
 
 # WHERE EACH MUTATION EVENT CARRIES ITS PATHS — a registry, per CLAUDE.md, because the alternative
@@ -393,6 +437,14 @@ _MESSAGE = %(message)r
 _MUTATION_MESSAGE = %(mutation_message)r
 _MUTATE = %(mutations)r
 _RUN = %(run)r          # provenance: the run this fence was generated for
+# THE RUN RECORD: the run directory (events.jsonl, the snapshots, the traces), readable and never
+# writable, except under a WRITABLE prefix — the fence's own directory (baked) and this launch's
+# workdir (from the env, below). Empty for a fence that guards no record.
+_RECORD = %(record)r
+_RECORD_MESSAGE = %(record_message)r
+_WRITABLE = %(writable)r
+_WRITE_FLAGS = %(write_flags)r
+_WORKDIR_ENV = %(workdir_env)r
 
 _SEP = os.sep
 _DOTDOT = ".."
@@ -406,6 +458,18 @@ _realpath = os.path.realpath
 _realcache = {}
 _seen = set()
 _busy = threading.local()
+
+if _RECORD:
+    # The one per-launch input. Resolved ONCE at startup, symlinks included, because the record
+    # root was `realpath`-ed at generation and the compare is a prefix compare. Absent -> nothing
+    # under the record is writable but the fence directory: fail CLOSED, and loudly.
+    _wd = os.environ.get(_WORKDIR_ENV) or ""
+    if _wd:
+        try:
+            _wd = _realpath(_wd)
+        except Exception:
+            _wd = _abspath(_wd)
+        _WRITABLE = _WRITABLE + (_wd if _wd.endswith(_SEP) else _wd + _SEP,)
 
 # Is a RELATIVE open able to reach a fenced root from where this process stands? Normally no, and
 # that is what buys the syscall-free fast bail for the branch nearly every read takes. But a
@@ -487,6 +551,10 @@ def _cwd_reaches_root():
     except OSError:
         return True                # cannot prove it is safe -> resolve, and let `_fenced` decide
     d = d if d.endswith(_SEP) else d + _SEP
+    # A cwd under the RECORD but outside every writable prefix (a launcher standing in the run
+    # dir itself) makes a bare relative write reach the record without a `..`: resolve.
+    if _RECORD and d.startswith(_RECORD) and not (_WRITABLE and d.startswith(_WRITABLE)):
+        return True
     if not d.startswith(_ROOTS):
         return False
     return not (_ALLOW and d.startswith(_ALLOW))
@@ -498,6 +566,21 @@ def _fenced(p):
     if p is None or not p.startswith(_ROOTS):
         return None
     if _ALLOW and p.startswith(_ALLOW):
+        return None
+    return p
+
+
+def _record_write(p):
+    """The RECORD path a write would change, or None: under the run directory and outside every
+    writable prefix. Trailing-separator compare, like `_prefixed`, so the record directory itself
+    (`os.rmdir`, `os.chmod` of it) is inside the rule. The caller has resolved `p` and established
+    that the access is a WRITE — a read of the record is legal and pays nothing here."""
+    if not _RECORD:
+        return None
+    d = p if p.endswith(_SEP) else p + _SEP
+    if not d.startswith(_RECORD):
+        return None
+    if _WRITABLE and d.startswith(_WRITABLE):
         return None
     return p
 
@@ -624,6 +707,14 @@ def _fenced_target(path, dir_fd):
     the last component would refuse a node deleting its OWN symlink whose target happens to be a
     mount source. The residual — a symlinked final component under `chmod`/`utime`, which do
     follow — is the same class as the documented read-side one."""
+    r = _mutation_path(path, dir_fd)
+    return _prefixed(r) if r is not None else None
+
+
+def _mutation_path(path, dir_fd):
+    """The absolute path a mutation event names, dirname resolved, final component verbatim — the
+    one resolution BOTH the source-root check (`_fenced_target`) and the record check read, so the
+    two rules cannot disagree about which file an event is about."""
     r = _as_str(path)
     if r is None:
         return None
@@ -636,7 +727,7 @@ def _fenced_target(path, dir_fd):
                 return None
         r = _join(base, r)
     head, _sep, tail = r.rpartition(_SEP)
-    return _prefixed(_join(_real(head or _SEP), tail))
+    return _join(_real(head or _SEP), tail)
 
 
 def _dir_fd(args, index):
@@ -706,11 +797,27 @@ def _hook(event, args):
     # Hot path: one interned-string compare for every audited event that is not an open.
     if event == "open":
         try:
-            bad = _fenced(args[0])
+            p = _resolve(args[0])
+            bad = None
+            if p is not None and p.startswith(_ROOTS) and not (_ALLOW and p.startswith(_ALLOW)):
+                bad = p
         except Exception:
             return                   # a bug in the fence must never break an unrelated open
         if bad is not None:
             _report(bad, event, _MESSAGE)
+            return
+        # THE RECORD. Flags FIRST — one integer `&` on the resolved-path branch only — so a read
+        # pays nothing past the source check it already paid, and a relative open from the
+        # workdir still takes the syscall-free bail above (`p is None`).
+        if p is not None and _RECORD:
+            try:
+                flags = args[2]
+                hit = (flags.__class__ is int and (flags & _WRITE_FLAGS) != 0
+                       and _record_write(p) is not None)
+            except Exception:
+                return
+            if hit:
+                _report(p, event, _RECORD_MESSAGE)
         return
     if event != "os.chdir":
         # MUTATION. One dict lookup, and only for events that are not opens — a training process
@@ -725,11 +832,17 @@ def _hook(event, args):
             return
         for path_i, fd_i in slots:
             try:
-                bad = _fenced_target(args[path_i], _dir_fd(args, fd_i))
+                r = _mutation_path(args[path_i], _dir_fd(args, fd_i))
+                bad = _prefixed(r) if r is not None else None
             except Exception:
-                bad = None           # a bug in the fence must never break an unrelated call
+                r = bad = None       # a bug in the fence must never break an unrelated call
             if bad is not None:
                 _report(bad, event, _MUTATION_MESSAGE)   # outside the try: deny RAISES from here
+                return
+            # THE RECORD, on the same resolved path: a mutation under the run dir outside the
+            # writable prefixes — a rename INTO it, a link OF it, a truncate, a chmod, an rmdir.
+            if r is not None and _record_write(r) is not None:
+                _report(r, event, _RECORD_MESSAGE)
                 return
         return
     # `_CWD_REACHES_ROOT` is what keeps `_resolve`'s relative fast bail correct rather than merely
@@ -798,7 +911,10 @@ def _chain():
 
 
 if __name__ != "%(probe)s":
-    if _POLICY != "off" and _ROOTS:
+    # Armed for a fence that guards ANYTHING — source roots, the record, or both. A record-only
+    # fence (every non-repo run since 2026-09-06) has `_ROOTS = ()`, and gating on the roots alone
+    # left it a file on the PYTHONPATH that installed nothing: measured by the first cut of this.
+    if _POLICY != "off" and (_ROOTS or _RECORD):
         # Resolve the launcher-set cwd ONCE, before the hook is armed, so the very first relative
         # open is already judged correctly (and so this `getcwd` is not itself audited).
         _CWD_REACHES_ROOT = _cwd_reaches_root()
@@ -807,12 +923,27 @@ if __name__ != "%(probe)s":
 '''
 
 
-def render(roots, allow, *, policy: str, log: str = "", run: str = "") -> str:
-    """The generated `sitecustomize.py` source for one run's fence."""
+def render(roots, allow, *, policy: str, log: str = "", run: str = "",
+           record_root="", writable: Iterable = ()) -> str:
+    """The generated `sitecustomize.py` source for one run's fence.
+
+    `record_root` is the run directory the fence guards against WRITES ("" for a fence that
+    guards roots only — the Developer's probe renders that shape), and `writable` the prefixes
+    under it a launch may still write; the launch's own workdir joins them at startup from
+    `WORKDIR_ENV`. Both are resolved here, once, into the trailing-separator form the hot path
+    compares."""
+    record = _norm_root(record_root) if record_root else ""
+    writable_prefixes = tuple(w for w in (_norm_root(x) for x in writable) if w)
     return _TEMPLATE % {
         "roots": tuple(roots), "allow": tuple(allow), "policy": settle_policy(policy),
         "log": str(log), "message": REFUSAL_MESSAGE, "run": str(run), "probe": _PROBE_NAME,
         "mutation_message": MUTATION_REFUSAL_MESSAGE, "mutations": MUTATION_EVENTS,
+        "record": record or "", "record_message": RECORD_REFUSAL_MESSAGE,
+        "writable": writable_prefixes, "workdir_env": WORKDIR_ENV,
+        # Baked from the generating box, like `nt`: the write bits of the `open` audit event's
+        # resolved flags (the same for `builtins.open` modes and `os.open`, verified with a
+        # recording hook — 'w' is O_WRONLY|O_CREAT|O_TRUNC, 'a' adds O_APPEND, 'r+' is O_RDWR).
+        "write_flags": (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND),
         # Baked rather than probed in the child: the fence runs on the same box that generated it
         # (the Docker tiers are fenced by construction and skip the marker entirely), so this keeps
         # the POSIX hot path at one already-false boolean instead of an `os.path.isabs` call.
@@ -820,17 +951,19 @@ def render(roots, allow, *, policy: str, log: str = "", run: str = "") -> str:
     }
 
 
-def install(run_dir, *, roots, allow, policy: str) -> Optional[str]:
+def install(run_dir, *, roots, allow, policy: str, record: bool = True) -> Optional[str]:
     """Materialize the fence beside a run and return the directory to prepend to `PYTHONPATH`.
 
-    `None` when the fence would be a no-op (policy `off`, or no editable root survived
-    `_too_broad`) — the caller must then not set the marker at all, so a non-repo run's child env is
-    byte-identical to what it was before this module existed."""
-    if settle_policy(policy) == "off" or not roots:
+    `None` when the fence would be a no-op: policy `off`, or nothing to guard — no editable root
+    survived `_too_broad` AND `record=False`. With `record=True` (the default since 2026-09-06)
+    the run directory is guarded against writes, so a run with no source root at all still gets a
+    fence; the caller must not set the marker when this returns None."""
+    if settle_policy(policy) == "off" or not (roots or record):
         return None
     d = Path(run_dir) / FENCE_DIRNAME
     d.mkdir(parents=True, exist_ok=True)
-    src = render(roots, allow, policy=policy, log=str(d / VIOLATION_LOG), run=str(run_dir))
+    src = render(roots, allow, policy=policy, log=str(d / VIOLATION_LOG), run=str(run_dir),
+                 record_root=str(run_dir) if record else "", writable=(str(d),) if record else ())
     target = d / "sitecustomize.py"
     # Rewrite only on change: the eval workers call this concurrently, and an unconditional
     # write would let one worker truncate the file another interpreter is mid-import of.

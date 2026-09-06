@@ -829,6 +829,7 @@
   "repair_ledger": [],
   "repair_ledger_omitted": {},
   "report": null,
+  "require_approval": null,
   "research": [
     {
       "at_node": 2,

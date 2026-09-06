@@ -26,7 +26,8 @@ WHAT IS IN IT
 | tier | what | why |
 |---|---|---|
 | the node's workdir | readwrite | the node's own workspace; everything it produces |
-| the run directory | readwrite | logs, the fence dir, the stage logs it writes live |
+| the run directory | read | the RECORD an evaluation is scored into — `events.jsonl`, the snapshots, the traces, the other nodes' workspaces. Readable (a node may read the run it belongs to), never writable: until 2026-09-06 this row said `readwrite`, and a candidate could append its own `node_evaluated` row (doc 52, `eval-may-write-the-run-record`). The stage logs and `run_setup.log` are written by the ENGINE's drain, not by the child |
+| `<run>/.looplab-fence/` | readwrite | the fence's own `violations.log`, which the CHILD appends; granted only when the directory exists, i.e. when a fence is installed |
 | `data:` / `references:` mount SOURCES | read (readwrite when `edit: true`) | the sanctioned read channel — a mount source may legally live inside the editable tree, and `edit:true` is the operator saying in-place writes are allowed |
 | the interpreter: `sys.prefix`, `sys.base_prefix`, `sys.executable`'s dir | read | site-packages, the venv's `bin/`; without it python does not start |
 | `/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc` | read | the C runtime, CA certs, `nsswitch.conf` |
@@ -179,7 +180,14 @@ def derive(*, workdir, run_dir=None, repo_spec: Optional[dict] = None,
     out: dict = {}
     _add(out, workdir, "readwrite", declared=True)
     if run_dir:
-        _add(out, run_dir, "readwrite", declared=True)
+        # READ, not readwrite (2026-09-06): the run directory is the record. The workdir above is
+        # inside it and keeps its own readwrite rule — Landlock grants are per hierarchy, so the
+        # deeper rule is what the node's own writes resolve against. The fence directory is the
+        # one other thing under the record a child writes (its diagnostic), and it is granted only
+        # when it exists: an absent DECLARED path refuses the launch, and a run under
+        # `read_fence=off` has no fence directory and no child that writes one.
+        _add(out, run_dir, "read", declared=True)
+        _add(out, os.path.join(str(run_dir), ".looplab-fence"), "readwrite")
     for path, mode in mount_sources(repo_spec):
         _add(out, path, mode, declared=True)
     for item in extra or ():

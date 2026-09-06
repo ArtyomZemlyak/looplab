@@ -410,15 +410,19 @@ def test_a_prior_sitecustomize_still_runs(tmp_path):
 # --------------------------------------------------------------------------- the engine wiring
 
 
-def test_engine_stamps_the_marker_for_a_repo_task_only(tmp_path):
-    """A toy run must be byte-identical to what it was: no fence directory, and the unpinned env
-    stays the `None` three other modules read as 'whole box, legacy behavior'."""
+def test_engine_stamps_the_marker_for_every_run_and_the_roots_for_a_repo_task_only(tmp_path):
+    """Until 2026-09-06 a toy run got no fence at all ("no editable source, nothing to fence") — true
+    of READS and false of WRITES: the run RECORD is under every task's reach. Now every run carries
+    the marker; only a repo task's fence has source ROOTS. The unpinned branch is otherwise untouched
+    (no `CUDA_VISIBLE_DEVICES`), and the Docker tiers branch on that key's absence, not on the dict."""
     from tests.factories import make_engine
 
     toy = make_engine(tmp_path / "toy")
-    assert toy._resource_eval_env(None) is None
-    assert toy._read_fence_dir() is None
-    assert not (Path(toy.run_dir) / read_fence.FENCE_DIRNAME).exists()
+    env = toy._resource_eval_env(None)
+    assert env == {read_fence.FENCE_DIR_ENV: toy._read_fence_dir()}
+    generated = (Path(toy.run_dir) / read_fence.FENCE_DIRNAME / "sitecustomize.py").read_text()
+    assert "_ROOTS = ()" in generated                       # nothing to fence on the read side…
+    assert f"_RECORD = {os.path.realpath(str(toy.run_dir)) + os.sep!r}" in generated   # …the record is
 
     src, _sib, _rd, _wd, _models = _world(tmp_path / "w")
     repo = make_engine(tmp_path / "repo")

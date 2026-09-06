@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 from looplab.core.errors import ConfigRefusal
-from looplab.runtime.read_fence import FENCE_DIR_ENV, prepend_pythonpath
+from looplab.runtime.read_fence import FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath
 from looplab.runtime import landlock as _landlock
 
 # THE secret screen — MOVED to `core/envsafe.py`, re-exported here and NOT copied. Every existing
@@ -876,6 +876,13 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # container that the run had a fence.
     if not _docker_run:
         prepend_pythonpath(full_env, full_env.get(FENCE_DIR_ENV) or "")
+        # THE LAUNCH'S OWN WORKDIR, for the fence's record rule (2026-09-06): the one directory
+        # under the run record this process may write. Set, never defaulted — `wd` is per LAUNCH
+        # (a node's workdir, a confirm-phase workdir, the metric adapter's exec in the node
+        # workdir, the repo root for `setup`) and one generated fence serves all of them. Only
+        # beside the marker, so an unfenced launch's env stays byte-identical.
+        if full_env.get(FENCE_DIR_ENV):
+            full_env[WORKDIR_ENV] = str(wd)
         # KERNEL READ ALLOW-LIST (runtime/landlock.py), the rung the audit hook above cannot reach:
         # `safetensors`, a Rust `File::open`, a child `cat` and a `torchrun` rank raise no `open`
         # audit event at all. The engine hands a launch its derived allow-list in `LOOPLAB_LANDLOCK_ALLOWLIST`
