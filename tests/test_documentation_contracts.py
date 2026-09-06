@@ -100,7 +100,12 @@ def test_index_mentions_every_numbered_document():
     #   the same half-hour drift `af0c99c0` paid for one entry up, and the reason it is caught at
     #   all is that the count is a separate literal from the membership check. Two guards, because
     #   a document ADDED to the index still moves the inventory and only one of them can see that.
-    assert len(numbered) == 57, "the derived numbered-document inventory changed"
+    #   57 -> 58 (2026-09-06): doc 59, the bench-results analysis. The document, its index row, its
+    #   mkdocs nav row and this count move in one change — and the same change wires doc 58 into the
+    #   nav, which `f316f392` had not (57 was there, 58 was not; `omitted_files: info` cannot see it).
+    #   NOTE for the merge: `origin/master` independently holds a `50-` and a `51-` with different
+    #   content from this branch's 50/51 — the SEVENTH collision, two blocks this time.
+    assert len(numbered) == 58, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
