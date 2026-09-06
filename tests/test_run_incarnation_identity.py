@@ -168,3 +168,61 @@ def test_a_run_with_no_uid_still_reconciles_its_own_lessons():
     keying strictly on one would make it unable to reconcile anything it wrote."""
     assert row_belongs_to_run({"run_id": "demo"}, run_uid="", run_id="demo")
     assert not row_belongs_to_run({"run_id": "other"}, run_uid="", run_id="demo")
+
+
+# --- the three readers doc 50 EK-03 named (doc 52 row 4, 2026-09-06) -----------------------------
+
+def test_evidence_refs_and_claim_groups_qualify_by_incarnation():
+    """`_qualify_refs` keyed evidence by NAME, so two incarnations' node 0 were one ref and two
+    supporting lessons counted as one support. MUTATION: qualify by `run_id` again -> `n_support`
+    below is 1 and `run_refs` collapses to the name."""
+    from looplab.engine.claims import claim_assessments
+    from looplab.engine.claims_health import _qualify_refs
+
+    assert _qualify_refs({"run_id": "demo", "run_uid": _UID_A}, [0]) != \
+        _qualify_refs({"run_id": "demo", "run_uid": _UID_B}, [0])
+    assert _qualify_refs({"run_id": "demo"}, [0]) == ["demo:0"], "a uid-less row keeps its spelling"
+    assert _qualify_refs({"run_id": "demo", "run_uid": _UID_A}, [0]) == [f"demo@{_UID_A}:0"]
+
+    def _lesson(uid):
+        return {"statement": "hard negatives help", "outcome": "supported", "evidence": [0],
+                "run_id": "demo", "run_uid": uid, "task_id": "t"}
+
+    [claim] = claim_assessments([_lesson(_UID_A), _lesson(_UID_B)])
+    assert claim["n_support"] == 2, "two incarnations' evidence collapsed into one ref"
+    assert claim["runs"] == ["demo"], "the display list still shows the directory name"
+    assert claim["run_refs"] == sorted([_UID_A, _UID_B])
+    [legacy] = claim_assessments([{**_lesson(_UID_A), "run_uid": ""}])
+    assert legacy["run_refs"] == [f"{LEGACY_REF_PREFIX}demo"]
+
+
+def test_the_atlas_counts_two_incarnations_as_two_runs():
+    """`portfolio_atlas` unioned capsule `run_id`s with lesson run names. MUTATION: key on names
+    again -> `n_runs` is 1 for two incarnations of `demo`."""
+    from looplab.engine.claims_retrieval import portfolio_atlas
+
+    atlas = portfolio_atlas([], [_valid(_UID_A, 0.5), _valid(_UID_B, 0.9)])
+    assert atlas["n_runs"] == 2 and atlas["context_pack"]["coverage"]["n_runs"] == 2
+    # …and a lesson-only memory still counts its runs, by incarnation where it has one.
+    lessons = [{"statement": "s", "outcome": "supported", "evidence": [0], "run_id": "demo",
+                "run_uid": uid, "task_id": "t"} for uid in (_UID_A, _UID_B)]
+    assert portfolio_atlas(lessons, [])["n_runs"] == 2
+    # A capsule and a lesson from the SAME incarnation are one run, not two.
+    assert portfolio_atlas(lessons[:1], [_valid(_UID_A, 0.5)])["n_runs"] == 1
+
+
+def test_the_concept_shelf_inherits_from_the_incarnation_that_wrote_the_row():
+    """`run_concept_index` was keyed by name and `attribute_row` looked rows up by name, so a row
+    written by a DELETED incarnation of `demo` inherited the live `demo`'s concepts. MUTATION: drop
+    the uid key -> the gone-incarnation case below inherits the wrong run's tags."""
+    from looplab.engine.concept_shelf import ATTRIBUTION_RUN, attribute_row, run_concept_index
+
+    index = run_concept_index([{"run_id": "demo", "run_uid": _UID_A,
+                                "concepts": {"loss/contrastive": {"count": 1}}}])
+    assert index["demo"] == ["loss/contrastive"] and index[_UID_A] == ["loss/contrastive"]
+    live = attribute_row({"statement": "s", "run_id": "demo", "run_uid": _UID_A}, index)
+    assert live == (["loss/contrastive"], ATTRIBUTION_RUN)
+    gone = attribute_row({"statement": "s", "run_id": "demo", "run_uid": _UID_B}, index)
+    assert gone == ([], None), "a deleted incarnation's row must not inherit the live run's tags"
+    legacy = attribute_row({"statement": "s", "run_id": "demo"}, index)
+    assert legacy == (["loss/contrastive"], ATTRIBUTION_RUN), "a uid-less row still falls back to the name"

@@ -828,6 +828,7 @@ from looplab.engine.claims_assessments import (  # noqa: F401,E402
     _fuzzy_merge_claims,
     _stmt_tokens,
     _ingest_evidence,
+    _register_incarnation,
     _structured_assessments,
     claim_assessments,
 )

@@ -424,6 +424,13 @@ like `run:-1`: an authoritative-looking pointer to a node that cannot exist. It 
 rather than being silently dropped, for the same reason as every other poisoned element — repairing
 the row in place would leave the surrounding claim marked complete and trustworthy.
 
+A ref is qualified by the run that WROTE the row, and since 2026-09-06 by its incarnation: a row
+carrying `run_uid` cites `<run>@<uid>:<node>`, a row carrying none keeps `<run>:<node>`. Two runs
+named `demo` are two runs — their node 0s are two refs, a claim they both support counts two
+supports, and each claim lists its evidence's incarnations in `run_refs` beside the display names in
+`runs`; the atlas counts runs over those refs, and the concept shelf inherits a row's concepts from
+the incarnation that wrote it, never from whatever run now bears the name.
+
 D8 claim v3 repeats a validated per-run producer receipt on every retained row (or writes a non-indexed
 receipt sentinel when a non-empty source retains zero claims):
 `claims_total`, `claims_retained`, `claims_omitted`, and `producer_complete`. The writer scans for the first

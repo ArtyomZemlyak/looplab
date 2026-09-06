@@ -109,6 +109,7 @@ def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[d
             "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
             "unverified": unverified, "n_unverified": len(unverified),
             "runs": sorted({r for m in members for r in m["runs"]}),
+            "run_refs": sorted({r for m in members for r in m.get("run_refs", ())}),
             "scopes": sorted({r for m in members for r in m["scopes"]}),
             "sources": sorted({s for m in members for s in m.get("sources", [])}),
             "verification": sorted({v for m in members for v in m.get("verification", [])}),
@@ -119,6 +120,19 @@ def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[d
         })
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
     return out
+
+
+def _register_incarnation(group: dict, row: dict) -> None:
+    """`runs` keeps directory NAMES for display; `run_refs` keeps INCARNATIONS for counting (doc 50
+    EK-03; doc 52 row 4). A row with `run_uid` registers that uid, a row without one registers
+    `legacy:<name>` — `core/run_identity.py::run_ref`, imported at call time because the claims
+    barrel derives its re-export surface from `dir()` (see `claims_health._research_source_summary`).
+    The atlas counts runs over this set, so two incarnations of `demo` are two runs there and a
+    lesson-only memory is still not reported as zero."""
+    from looplab.core.run_identity import run_ref
+    ref = run_ref(_identity_text(row.get("run_uid"), 500), _identity_text(row.get("run_id"), 500))
+    if ref:
+        group.setdefault("run_refs", set()).add(ref)
 
 
 def _ingest_evidence(lessons, research_claims, resolve, *, weigh=None) -> None:
@@ -145,9 +159,10 @@ def _ingest_evidence(lessons, research_claims, resolve, *, weigh=None) -> None:
             continue
         if lesson.get("run_id"):
             group["runs"].add(_identity_text(lesson["run_id"], 500))
+        _register_incarnation(group, lesson)
         if lesson.get("task_id"):
             group["scopes"].add(_identity_text(lesson["task_id"], _MAX_DECISION_SCOPE))
-        refs = _qualify_refs(lesson.get("run_id"), _node_ids(lesson.get("evidence")))
+        refs = _qualify_refs(lesson, _node_ids(lesson.get("evidence")))
         stance = _lesson_claim_stance(lesson)
         if stance == "support":
             group["support"].update(refs)
@@ -165,9 +180,10 @@ def _ingest_evidence(lessons, research_claims, resolve, *, weigh=None) -> None:
             continue
         if claim.get("run_id"):
             group["runs"].add(_identity_text(claim["run_id"], 500))  # D8 registers run/scope now
+        _register_incarnation(group, claim)
         if claim.get("task_id"):
             group["scopes"].add(_identity_text(claim["task_id"], _MAX_DECISION_SCOPE))
-        refs = _qualify_refs(claim.get("run_id"), _node_ids(claim.get("node_ids")))
+        refs = _qualify_refs(claim, _node_ids(claim.get("node_ids")))
         verdict, method, _note = _research_verification(claim)
         group["verification"].add(f"{method}:{verdict}" if method else verdict)
         if verdict == "supported":
@@ -219,7 +235,8 @@ def _structured_assessments(lessons, research_claims, decisions, *,
                 "uid": sig["uid"], "contra_key": sig["contra_key"], "polarity": sig["polarity"],
                 "scope": sig["scope"], "metric": sig["metric"],
                 "support": set(), "oppose": set(), "unverified": set(),
-                "runs": set(), "scopes": set(), "sources": set(), "verification": set(), "_ev": {}}
+                "runs": set(), "run_refs": set(), "scopes": set(), "sources": set(),
+                "verification": set(), "_ev": {}}
         g["_ev"][s] = g["_ev"].get(s, 0)             # candidate representative statements (evidence-weighted)
         return g
 
@@ -314,7 +331,8 @@ def _structured_assessments(lessons, research_claims, decisions, *,
             "maturity": item["maturity"],
             "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
             "unverified": unverified, "n_unverified": len(unverified),
-            "runs": sorted(g["runs"]), "scopes": sorted(g["scopes"]), "sources": sorted(g["sources"]),
+            "runs": sorted(g["runs"]), "run_refs": sorted(g.get("run_refs", ())),
+            "scopes": sorted(g["scopes"]), "sources": sorted(g["sources"]),
             "verification": sorted(g["verification"]),
             "claim_uid": g["uid"], "scope": g["scope"], "polarity": g["polarity"],
             "metric": g["metric"],
@@ -393,8 +411,8 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         # (§21.20.13); this lean projection keeps scope/runs as metadata on the claim.
         return groups.setdefault(normalize_statement(s), {
             "statement": s, "support": set(), "oppose": set(),
-            "unverified": set(), "runs": set(), "scopes": set(), "sources": set(),
-            "verification": set()})
+            "unverified": set(), "runs": set(), "run_refs": set(), "scopes": set(),
+            "sources": set(), "verification": set()})
 
     _ingest_evidence(lessons, research_claims, lambda row: _group(row.get("statement")))
 
@@ -441,7 +459,8 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
             "support": sup, "oppose": opp,
             "n_support": len(sup), "n_oppose": len(opp),
             "unverified": unverified, "n_unverified": len(unverified),
-            "runs": sorted(g["runs"]), "scopes": sorted(g["scopes"]),
+            "runs": sorted(g["runs"]), "run_refs": sorted(g.get("run_refs", ())),
+            "scopes": sorted(g["scopes"]),
             "sources": sorted(g["sources"]), "verification": sorted(g["verification"]),
             "decision": d,
             "research_source": research_source,

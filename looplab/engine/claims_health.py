@@ -566,10 +566,20 @@ def _node_ids(raw) -> list:
     return [parsed for parsed in map(_parse_node_id, raw) if parsed is not None]
 
 
-def _qualify_refs(run_id, node_ids) -> list[str]:
-    """Run-QUALIFY evidence refs so (r1,node0) and (r2,node0) never collapse: a bare node id is run-local.
-    "?" marks a ref whose run is unknown (e.g. a D8 claim without a run_id)."""
-    r = _identity_text(run_id or "?", 500) or "?"
+def _qualify_refs(row, node_ids) -> list[str]:
+    """Run-QUALIFY evidence refs so (r1,node0) and (r2,node0) never collapse — and, since 2026-09-06,
+    so two INCARNATIONS of one directory name never collapse either (doc 50 EK-03; doc 52 row 4).
+
+    Takes the ROW, not a name: the incarnation lives beside the name, and a caller that handed over
+    the name alone is how the collapse happened. A row carrying `run_uid` is qualified
+    `<name>@<uid>:<node>`; a row carrying none keeps the historical `<name>:<node>` — the directory
+    name is the best that can be said about it, and `core/run_identity.py::run_ref`'s rule is that
+    the two are deliberately NOT merged. "?" marks a ref whose run is unknown (a D8 claim without a
+    run_id). The name stays in the uid form so the ref is still readable as "run, node"."""
+    row = row if isinstance(row, dict) else {}
+    name = _identity_text(row.get("run_id"), 500) or "?"
+    uid = _identity_text(row.get("run_uid"), 500)
+    r = f"{name}@{uid}" if uid else name
     return [f"{r}:{n}" for n in node_ids]
 
 
@@ -1020,6 +1030,10 @@ def claim_evidence_digest(claim: dict) -> str:
         "unverified", "runs", "scopes", "sources", "verification", "contradicts", "research_source",
         "claim_source",
     )
+    # `run_refs` (2026-09-06) is deliberately NOT digest material: it is derived from `runs` and
+    # the rows' incarnations, and the incarnation already reaches the token through the
+    # uid-qualified `support`/`oppose`/`unverified` refs — adding it would re-stale every decision
+    # on every box once for a field that changes nothing an operator reviewed.
     payload = {key: claim.get(key) for key in fields}
     research_source = _safe_research_source_summary(payload.get("research_source"))
     if research_source is not None:

@@ -492,13 +492,13 @@ proof:absent:gen_ai@looplab/core/tracing.py
 
 ### 4.2 From doc 50's residue and the in-code `CODEX AGENT` notes
 
-OPEN[claim-readers-still-key-on-run-id] `engine/claims_health.py::_qualify_refs` builds
-`f"{run_id}:{node}"` (it is DEFINED there; `claims_assessments.py` imports it), and
-`claims_retrieval.py::portfolio_atlas` / `concept_shelf.py::run_concept_index` still key on the
-directory name, while lessons, capsules and the rest of claims health moved to
-`core/run_identity.py::run_ref` / `row_belongs_to_run`. Two incarnations of one name collapse into
-one group, `producer_receipt_known` flips false and every one-sided verdict is demoted (doc 50 EK-03).
-proof:line:_qualify_refs&&run_id@looplab/engine/claims_health.py
+*Closed 2026-09-06 (row 4 shipped): the marker `claim-readers-still-key-on-run-id` stood here.
+`_qualify_refs` takes the row and qualifies a uid-bearing row's refs by incarnation
+(`<name>@<uid>:<node>`; a uid-less row keeps `<name>:<node>`), claim groups carry `run_refs` beside
+the display `runs`, `portfolio_atlas` counts runs over refs, `run_concept_index` indexes a summary
+under its uid too and `attribute_row` looks a uid-bearing row up by uid only; the run summaries
+carry `run_uid`. `tests/test_run_incarnation_identity.py` drives each reader with two incarnations
+of one name. Deleted per the index rule.*
 
 OPEN[refusal-codes-have-no-table] six `HTTPException(500)` sites answer an unreadable configuration
 snapshot where `run_commands.py` answers `503` — four in `serve/routers/runs.py`, two in

@@ -1833,7 +1833,10 @@ def test_the_three_shared_helpers_live_in_the_leaf_with_one_definition_each():
 # A change to this digest is not a failure, it is a QUESTION: which projection moved, and was that
 # intended? Re-run the case list, read the diff, then update the constant in the same change that
 # causes it — never separately, or the tripwire silently stops covering the thing that moved.
-_CLAIMS_PROJECTION_DIGEST = "5e5ad06efacc3debdc9fec1fe69e62b47b8bbcaaf3dbbad26f4a45d46f6b258b"
+# 2026-09-06 (doc 52 row 4): every claim projection gained `run_refs` — the evidence's INCARNATIONS
+# beside the display `runs` — and nothing else moved: stripping that one key from the new payload
+# restores the digest recorded before it (5e5ad06efacc3debdc9fec1fe69e62b47b8bbcaaf3dbbad26f4a45d46f6b258b).
+_CLAIMS_PROJECTION_DIGEST = "3824436e0530d29433ce3e2892452240be50e31d593f59a37ee6407b8781da6e"
 
 
 def _projection_corpus():

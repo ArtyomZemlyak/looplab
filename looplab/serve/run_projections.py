@@ -98,6 +98,9 @@ def run_summaries(srv, only=None) -> list:
             generation = run_generation_token(events)
             summary = {
                 "run_id": rd.name, "task_id": st.task_id, "goal": st.goal,
+                # The incarnation, so the concept shelf can inherit a memory row's concepts from
+                # the run that WROTE it rather than from whatever now bears its name (doc 52 row 4).
+                "run_uid": st.run_uid,
                 # A run id is reusable after reset/delete.  Portfolio consumers must include the
                 # durable event-log generation in their resource identity or an in-flight detail
                 # read for generation A can be joined to generation B's unchanged run id.

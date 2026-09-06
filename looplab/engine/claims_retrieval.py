@@ -704,10 +704,20 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # Run count spans BOTH sources — capsules AND the runs cited by lessons — so a lesson-only / legacy
     # memory (no opt-in capsules) is not reported as zero runs. The authoritative scoped corpus
     # join (cross_run_index) is the full-CR TODO; this at least unions what the two memory stores know.
-    run_ids = {c.get("run_id") for c in capsules if c.get("run_id")}
+    # COUNTED BY INCARNATION, NOT BY DIRECTORY NAME (doc 50 EK-03; doc 52 row 4): two runs named
+    # `demo` are two runs. A capsule groups under `run_ref` (uid, else `legacy:<name>`); a claim
+    # carries `run_refs` from `claims_assessments._register_incarnation`, and a pre-built claim
+    # dict without them falls back to its names spelled as legacy refs, so it still unions with a
+    # uid-less capsule of the same name and never with a uid-bearing one.
+    from looplab.core.run_identity import LEGACY_REF_PREFIX, run_ref
+    run_refs = {run_ref(c) for c in capsules if isinstance(c, dict) and run_ref(c)}
     for cl in claims:
-        run_ids.update(cl.get("runs") or [])
-    n_runs = len(run_ids)
+        refs = cl.get("run_refs")
+        if isinstance(refs, (list, tuple, set)) and refs:
+            run_refs.update(r for r in refs if isinstance(r, str) and r)
+        else:
+            run_refs.update(f"{LEGACY_REF_PREFIX}{r}" for r in (cl.get("runs") or []) if r)
+    n_runs = len(run_refs)
     # Keep the embedded context-pack coverage n_runs CONSISTENT with the top-level count (both the union of
     # capsule + lesson-cited runs), so one atlas payload never reports two different run counts — otherwise a
     # lesson-only memory says n_runs>0 at the top but coverage.n_runs==0, the very "zero runs" artifact the
