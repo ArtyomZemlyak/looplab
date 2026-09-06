@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, SecretStr, StrictBool
 
 from looplab.core.node_evidence import node_attempt
-from looplab.serve.http import comment_cursor_error, comment_filter_invalid
+from looplab.serve.http import comment_cursor_error, comment_filter_invalid, refusal
 from looplab.serve.metrics_adapters import fenced_node_metrics
 from looplab.events.comment_projection import (
     CommentCursorError, comments_page, project_comments)
@@ -381,22 +381,24 @@ def build_router(srv) -> APIRouter:
                 raise _generation_gone() from exc
             raise
         def validate_bound_generation():
+            # NO COMMAND SEQUENCER (2026-09-06, doc 52 row 5): this runs before AND after the
+            # projection, which is the CAS across the read; the exclusive lock only made every
+            # review read 503 whenever the owner's engine held the run.
             nonlocal rd
-            with srv.commands.sequence(rd):
-                try:
-                    rd = srv.commands.validate_paths(rd)
-                except HTTPException as exc:
-                    if exc.status_code == 404:
-                        raise _generation_gone() from exc
-                    raise
-                _assert_generation(rd, expected)
+            try:
+                rd = srv.commands.validate_paths(rd)
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    raise _generation_gone() from exc
+                raise
+            _assert_generation(rd, expected)
 
         validate_bound_generation()
         try:
             yield record, rd
         finally:
             # Also catches a reset/delete or an out-of-band replacement that completed while the
-            # projection was being assembled. The sequencer is held only for this validation.
+            # projection was being assembled.
             validate_bound_generation()
 
     def _run_file(rd, name: str):
@@ -483,10 +485,10 @@ def build_router(srv) -> APIRouter:
             if snap.exists():
                 try:
                     data = json.loads(snap.read_text(encoding="utf-8"))
-                except (OSError, ValueError, TypeError):
-                    raise HTTPException(500, "the run configuration could not be read")
+                except (OSError, ValueError, TypeError) as exc:
+                    raise refusal("config_snapshot_unreadable") from exc
                 if not isinstance(data, dict):
-                    raise HTTPException(500, "the run configuration could not be read")
+                    raise refusal("config_snapshot_not_object")
                 return _scrub_json({key: data[key] for key in _REVIEW_CONFIG_KEYS if key in data})
             # Never substitute the current process Settings for an old run: that would cross the run
             # boundary and disclose present-day deployment configuration to a legacy review link.  A

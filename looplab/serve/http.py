@@ -115,6 +115,40 @@ async def json_object(request, subject: str = "request body", *,
     return json_object_bytes(raw, subject, absent_is_empty=absent_is_empty)
 
 
+# THE REFUSAL VOCABULARY FOR INPUT THE SERVER COULD NOT READ (doc 50 SR-05; doc 52 §5.1 row 5).
+#
+# A route answers 503 WITH A `code` for a durable input it could not read — a snapshot that is
+# unreadable, undecodable or not an object — never 500, and never the exception's own text. Six
+# sites answered `HTTPException(500, f"… unreadable: {exc}")` where every sibling in
+# `run_commands.py` answers 503 with a code, and two of them reflected the `OSError` text, host path
+# included, to the browser. 500 is the FRAMEWORK's word for a fault in the server's own code (an
+# uncaught exception): a client that receives it reports a crash and retries nothing, while a 503
+# with a code says "the input is there and could not be read — look at it", which is a different
+# remedy. The table is the one place the status, the sentence and the remedy live;
+# `tests/test_refusal_vocabulary.py` scans `serve/` for a literal 500 and re-derives the used slugs
+# against this table in both directions, so a seventh site cannot ship a status of its own.
+REFUSALS: dict[str, tuple[int, str, str]] = {
+    "config_snapshot_unreadable": (
+        503, "the run configuration snapshot could not be read",
+        "Inspect config.snapshot.json in the run directory: it is unreadable, or not valid UTF-8 "
+        "JSON. Restore it from a backup or from another run of the same task."),
+    "config_snapshot_not_object": (
+        503, "the run configuration snapshot is not a JSON object",
+        "Restore config.snapshot.json from a backup or from another run of the same task."),
+}
+
+
+def refusal(slug: str) -> "HTTPException":  # noqa: F821 - see `_bad_request`
+    """The one refusal for a `REFUSALS` slug: its status and a structured body carrying the slug.
+
+    Never interpolate the exception: an `OSError`'s text carries the host path, and the body goes
+    to the browser and into every export of it."""
+    from fastapi import HTTPException
+
+    status, message, remediation = REFUSALS[slug]
+    return HTTPException(status, {"code": slug, "message": message, "remediation": remediation})
+
+
 def comment_filter_invalid() -> "HTTPException":  # noqa: F821 - see `_bad_request`
     """`node_id` and `node_generation` name ONE experiment lifecycle and are meaningless apart.
 

@@ -3,6 +3,8 @@ traces, provenance, artifacts, config and cost. Handler bodies are verbatim move
 `serve/server.py::make_app` (BACKLOG §4); captured locals now live on `srv` (AppState)."""
 from __future__ import annotations
 
+import logging
+
 from collections import OrderedDict
 import hashlib
 import hmac
@@ -33,7 +35,7 @@ from looplab.core.run_deletion import (RunDeletionFenceError, RunDeletionStorage
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed,
     load_run_reset_marker)
-from looplab.serve.http import if_none_match, json_object, json_object_bytes, request_body_contract
+from looplab.serve.http import if_none_match, json_object, json_object_bytes, request_body_contract, refusal
 from looplab.events.eventstore import (
     EventStore, EventStoreLockError, JsonlRecordInvalid,
     _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
@@ -409,7 +411,9 @@ async def _concept_lens_json_body(request: Request) -> dict:
 def _assert_lens_generation(srv, rd: Path, *, core_generation: Optional[str],
                             expected_generation: str, stale_message: str,
                             stale_remediation: str, prepared_message: str) -> tuple[Path, str]:
-    """The paid-concept-lens generation fence, re-checked INSIDE the run sequencer.
+    """The paid-concept-lens generation fence — INSIDE the run sequencer for the two POSTs
+    (resolve-recovered, abandon), and as a CAS across the read for the recovery GET, which takes
+    no lock since 2026-09-06 (doc 52 row 5).
 
     Three endpoints — recover, resolve-recovered, abandon — each wrote this out: validate the run
     paths, read the current generation, refuse if it is missing or moved since the caller looked,
@@ -1511,78 +1515,89 @@ def build_router(srv) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "X-LoopLab-Token, Authorization"
 
-        with srv.commands.sequence(rd):
-            rd, current_generation = _assert_lens_generation(
-                srv, rd, core_generation=core[RUN_GENERATION_FIELD],
-                expected_generation=expected_generation,
-                stale_message="The run changed before paid-lens recovery was inspected.",
-                stale_remediation="Reload Concepts and inspect only the current generation.",
-                prepared_message="The run changed while its recovery projection was prepared.")
+        # NO COMMAND SEQUENCER (2026-09-06, doc 52 row 5): a GET that took the exclusive
+        # cross-process lock was refused whenever a writer held the run. The fence is a CAS
+        # ACROSS the read instead — taken here, and again after the ledger is folded.
+        rd, current_generation = _assert_lens_generation(
+            srv, rd, core_generation=core[RUN_GENERATION_FIELD],
+            expected_generation=expected_generation,
+            stale_message="The run changed before paid-lens recovery was inspected.",
+            stale_remediation="Reload Concepts and inspect only the current generation.",
+            prepared_message="The run changed while its recovery projection was prepared.")
 
-            store = EventStore(rd / "events.jsonl")
-            claims, terminals, unresolved, conflict = _concept_lens_recovery_ledger(
-                store.read_all(), current_generation)
-            common = {
-                "schema": _CONCEPT_LENS_RECOVERY_SCHEMA,
-                "generation": current_generation,
+        store = EventStore(rd / "events.jsonl")
+        claims, terminals, unresolved, conflict = _concept_lens_recovery_ledger(
+            store.read_all(), current_generation)
+        _rd_after, generation_after = srv.commands.generation_fence(rd)
+        if generation_after != current_generation:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation,
+                "current_generation": generation_after or None,
+                "message": "The run changed while its recovery projection was read.",
+                "remediation": "Reload Concepts and inspect only the current generation.",
+            })
+        common = {
+            "schema": _CONCEPT_LENS_RECOVERY_SCHEMA,
+            "generation": current_generation,
+        }
+        if conflict or len(unresolved) > 1:
+            return {
+                **common,
+                "state": "conflict",
+                "code": "concept_lens_recovery_conflict",
+                "message": (
+                    "Paid-lens receipts are malformed or overlap; recovery is disabled until "
+                    "the durable ledger is repaired."
+                ),
             }
-            if conflict or len(unresolved) > 1:
+        if unresolved:
+            request_id = next(iter(unresolved))
+            claim = claims[request_id]
+            projection = {
+                **common,
+                "request_id": request_id,
+                "started_seq": claim["started_seq"],
+                "input_seq": claim["input_seq"],
+            }
+            process_receipt = srv.jobs.rejoin(request_id)
+            if process_receipt is not None:
+                job_id = process_receipt.get("job_id")
+                process_job = srv.jobs.get(job_id) if isinstance(job_id, str) else None
+                if (isinstance(job_id, str) and re.fullmatch(r"[0-9a-f]{16}", job_id)
+                        and process_job is not None
+                        and process_job.get("status") in {"running", "done"}):
+                    return {
+                        **projection,
+                        "state": "running",
+                        "job_id": job_id,
+                        "status": process_job["status"],
+                    }
+            return {**projection, "state": "orphaned"}
+        if terminals:
+            # Multiple completed requests are valid history. The latest claim is the only useful
+            # lost-receipt candidate; only overlapping unresolved work is ambiguous above.
+            request_id = max(
+                terminals, key=lambda identity: claims[identity]["started_seq"])
+            claim = claims[request_id]
+            terminal = terminals[request_id]
+            if not confirm_terminal_receipt(store.path):
                 return {
                     **common,
                     "state": "conflict",
-                    "code": "concept_lens_recovery_conflict",
-                    "message": (
-                        "Paid-lens receipts are malformed or overlap; recovery is disabled until "
-                        "the durable ledger is repaired."
-                    ),
+                    "code": "concept_lens_recovery_terminal_unconfirmed",
+                    "message": "The visible terminal receipt could not be confirmed durable.",
                 }
-            if unresolved:
-                request_id = next(iter(unresolved))
-                claim = claims[request_id]
-                projection = {
-                    **common,
-                    "request_id": request_id,
-                    "started_seq": claim["started_seq"],
-                    "input_seq": claim["input_seq"],
-                }
-                process_receipt = srv.jobs.rejoin(request_id)
-                if process_receipt is not None:
-                    job_id = process_receipt.get("job_id")
-                    process_job = srv.jobs.get(job_id) if isinstance(job_id, str) else None
-                    if (isinstance(job_id, str) and re.fullmatch(r"[0-9a-f]{16}", job_id)
-                            and process_job is not None
-                            and process_job.get("status") in {"running", "done"}):
-                        return {
-                            **projection,
-                            "state": "running",
-                            "job_id": job_id,
-                            "status": process_job["status"],
-                        }
-                return {**projection, "state": "orphaned"}
-            if terminals:
-                # Multiple completed requests are valid history. The latest claim is the only useful
-                # lost-receipt candidate; only overlapping unresolved work is ambiguous above.
-                request_id = max(
-                    terminals, key=lambda identity: claims[identity]["started_seq"])
-                claim = claims[request_id]
-                terminal = terminals[request_id]
-                if not confirm_terminal_receipt(store.path):
-                    return {
-                        **common,
-                        "state": "conflict",
-                        "code": "concept_lens_recovery_terminal_unconfirmed",
-                        "message": "The visible terminal receipt could not be confirmed durable.",
-                    }
-                return {
-                    **common,
-                    "state": "terminal",
-                    "request_id": request_id,
-                    "started_seq": claim["started_seq"],
-                    "input_seq": claim["input_seq"],
-                    "terminal": _concept_lens_terminal_response(
-                        terminal, core, lens_pack, request_id),
-                }
-            return {**common, "state": "none"}
+            return {
+                **common,
+                "state": "terminal",
+                "request_id": request_id,
+                "started_seq": claim["started_seq"],
+                "input_seq": claim["input_seq"],
+                "terminal": _concept_lens_terminal_response(
+                    terminal, core, lens_pack, request_id),
+            }
+        return {**common, "state": "none"}
 
     @router.post("/api/runs/{run_id}/concepts/lens/recovery/abandon")
     async def abandon_recovered_concept_lens(run_id: str, request: Request,
@@ -3045,17 +3060,19 @@ def build_router(srv) -> APIRouter:
                 "message": "expected_generation must be the exact generation returned by run state.",
                 "remediation": "Reload the run before requesting its files.",
             })
-        with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            current = srv.commands.run_generation(rd)
-            if current != expected:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected,
-                    "current_generation": current or None,
-                    "message": f"The run was reset or replaced {phase} its files were read.",
-                    "remediation": "Reload Files and request only the current run generation.",
-                })
+        # NO COMMAND SEQUENCER (2026-09-06, doc 52 row 5): the same reasoning as
+        # `_assert_historical_generation` — every caller takes this fence BEFORE and AFTER its read,
+        # and that CAS across the read is what makes the read correct; the exclusive lock only made
+        # the Files surface 503 whenever a writer held the run.
+        rd, current = srv.commands.generation_fence(rd)
+        if current != expected:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected,
+                "current_generation": current or None,
+                "message": f"The run was reset or replaced {phase} its files were read.",
+                "remediation": "Reload Files and request only the current run generation.",
+            })
         return current
 
     def _artifact_attempt_conflict(node_id: int, expected_attempt: Optional[int],
@@ -3513,9 +3530,10 @@ def build_router(srv) -> APIRouter:
         # but NOT an OSError or JSONDecodeError — so it used to escape into exactly the bare 500
         # traceback this clause exists to replace.
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise HTTPException(500, f"the run configuration snapshot is unreadable: {exc}") from exc
+            # 503 with a code, never a 500 carrying the OSError text (a host path): `http.REFUSALS`.
+            raise refusal("config_snapshot_unreadable") from exc
         if not isinstance(current, dict):
-            raise HTTPException(500, "the run configuration snapshot is not a JSON object")
+            raise refusal("config_snapshot_not_object")
         return _run_config_payload(rd, current)
 
     def _run_config_payload(rd: Path, snapshot: dict) -> dict:
@@ -3597,9 +3615,9 @@ def build_router(srv) -> APIRouter:
         try:                                     # same unreadable-vs-fault distinction as the GET
             current = json.loads(snap.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise HTTPException(500, f"the run configuration snapshot is unreadable: {exc}") from exc
+            raise refusal("config_snapshot_unreadable") from exc
         if not isinstance(current, dict):
-            raise HTTPException(500, "the run configuration snapshot is not a JSON object")
+            raise refusal("config_snapshot_not_object")
         current_revision = _run_config_revision(current)
         if expected_revision is not None and expected_revision != current_revision:
             raise HTTPException(409, {
@@ -3703,8 +3721,17 @@ def build_router(srv) -> APIRouter:
         except HTTPException:
             raise
         except Exception as exc:  # noqa: BLE001
+            # A FAULT, not a refusal — the one hand-raised 500 under `serve/`, allow-listed by
+            # name in `tests/test_refusal_vocabulary.py`: the snapshot persisted and the durable
+            # trust-gate append did not, and the client must see that as a PARTIAL write and
+            # retry the same PUT (`tests/test_server.py` pins the retry). The exception text stays
+            # in the server log: an OSError's carries a host path, and this body reaches the browser.
+            logging.getLogger(__name__).warning(
+                "config PUT for %s: snapshot updated but trust_gate event append failed: %s",
+                rd.name, exc)
             raise HTTPException(
-                500, f"snapshot updated but trust_gate event append failed: {exc}") from exc
+                500, "snapshot updated but trust_gate event append failed; retry the same PUT"
+            ) from exc
         return {
             "ok": True,
             "config": _run_config_payload(rd, updated),

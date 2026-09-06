@@ -500,12 +500,14 @@ under its uid too and `attribute_row` looks a uid-bearing row up by uid only; th
 carry `run_uid`. `tests/test_run_incarnation_identity.py` drives each reader with two incarnations
 of one name. Deleted per the index rule.*
 
-OPEN[refusal-codes-have-no-table] six `HTTPException(500)` sites answer an unreadable configuration
-snapshot where `run_commands.py` answers `503` — four in `serve/routers/runs.py`, two in
-`serve/routers/reviews.py` — and two of them interpolate the `OSError` text, host path included
-(doc 50 SR-05). The fix is one refusal-code table (`serve/http.py` already holds the body-parsing
-half) with a guard that no route answers `500` for unreadable input.
-proof:`present:raise HTTPException(500, f"the run configuration snapshot is unreadable: {exc}")@looplab/serve/routers/runs.py`
+*Closed 2026-09-06 (row 5 shipped): the marker `refusal-codes-have-no-table` stood here. The six
+sites read `serve/http.py::REFUSALS` (503 with a `code` and a remedy, never the `OSError` text);
+the one hand-raised 500 left under `serve/` is the partial-write fault in the config PUT, allow-listed
+by name with its reason and stripped of the exception text; `tests/test_refusal_vocabulary.py` scans
+`serve/` for a literal 500 and re-derives the emitted slugs against the table both ways. Three GET
+paths came off the exclusive sequencer in the same change (the Files fence, paid-lens recovery, the
+review binding), each a CAS across its read, driven by holding the lock from another thread;
+`start_status` keeps it because it reconciles a dead spawn's claim. Deleted per the index rule.*
 
 OPEN[run-setup-failure-is-not-a-refusal-type] `engine/eval_dispatch.py` raises a bare
 `RuntimeError("run_setup failed …")` where every other deliberate refusal about the operator's
@@ -660,8 +662,10 @@ proof:`present:export const TRAJECTORY_GAP@ui/src/crossRunRank.js`
 
 ### 4.4 Verified open, and NOT tagged — with the reason
 
-* **Two GETs still take the exclusive command sequencer** (`/concepts/lens/recovery`, `/log-page`):
-  count-shaped, no falsifier. Fixed with #5.
+* ~~Two GETs still take the exclusive command sequencer~~ — re-derived by AST on 2026-09-06 while
+  shipping #5: the GET paths that HELD it were the Files fence (`_assert_artifact_generation`), paid-lens
+  recovery and every review read (`_bound_run`), not `/log-page`; all three are CAS-across-the-read now,
+  and `tests/test_refusal_vocabulary.py` pins that `start_status` is the one GET body left on the lock.
 * **The log-integrity receipt counts lines as records** (a batch envelope is one line of up to 4,096
   events): no single line decides it.
 * **"Parallel sidecar ordering"** (doc 03), **"no first-class Evaluator"** (doc 17), the
