@@ -156,10 +156,13 @@ def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[st
         off = abs(median - 1.0)
         if off > tolerance and uses_cpsat(task):
             said.append(f"{task}: self-check reads {median:.4f} ({stamp[:10]}) -- but this task "
-                        "solves with CP-SAT, which is multi-threaded and nondeterministic, so it "
-                        "has no stable reference time to rule against. NOT a drifting cache: the "
-                        "nine CP-SAT tasks read 1.1375-1.8545 and the ten others 0.9021-1.0670, "
-                        "with no overlap")
+                        "solves with CP-SAT, whose runtime depends on how many cores it is given: "
+                        "x2.2 between one core and a 22-cpu lane on the same instance (§304). The "
+                        "reference asks for no `num_search_workers` and no seed, so the baseline "
+                        "pass and the candidate pass need not give it the same allocation. NOT a "
+                        "drifting cache, and not mere noise -- per-instance repeat spread is only "
+                        "x1.3 and averages away over a hundred instances. Fixable by pinning the "
+                        "allocation in BOTH passes; until then this number is not a ruler")
             continue
         if off > tolerance:
             said.append(f"{task}: its own self-check reads {median:.4f} ({stamp[:10]}), so the "

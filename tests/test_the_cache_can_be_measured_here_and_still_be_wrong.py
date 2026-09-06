@@ -106,8 +106,14 @@ def test_a_cpsat_task_is_named_as_unrulable_not_as_a_drifting_cache(tmp_path):
                                          {"min_dominating_set": (1.8627, "2026-09-06")})
     finally:
         ruler_check.CPSAT_ROOT = old
-    assert said and "no stable reference time" in said[0], said
-    assert "drifting cache" in said[0], said
+    assert said and "drifting cache" in said[0], said
+    # THE MECHANISM, NOT JUST THE LABEL. §303 said "nondeterministic" and §304 measured that the
+    # dominant cause is allocation: x2.2 between one core and a lane, against a per-instance repeat
+    # spread of only x1.3 which averages away over a hundred instances. A reader told "the solver is
+    # noisy" would reach for more repeats, which is precisely what does not help.
+    assert "x2.2" in said[0] and "num_search_workers" in said[0], said[0]
+    assert "not mere noise" in said[0], said[0]
+    assert "Fixable" in said[0], said[0]
 
 
 def test_a_plain_task_with_the_same_reading_is_still_a_drifting_cache(tmp_path):
