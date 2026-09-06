@@ -1136,15 +1136,17 @@ number written here. A count in this section that someone kept up to date would 
 vocabulary CLAUDE.md's open-item rules exist to abolish.
 
 OPEN[containment-is-unmeasured] 743 handlers catch `Exception`/`BaseException` in production and
-458 of them neither re-raise, log, record nor assign; 636 `# noqa: BLE001` annotations decorate
-them while no linter is configured anywhere in the tree, so the annotations document nothing and
+458 of them neither re-raise, log, record nor assign; 652 `# noqa: BLE001` annotations (re-derived
+2026-09-06; 636 on 2026-09-02) decorate them while no linter is configured anywhere in the tree, so the annotations document nothing and
 nothing counts a containment. The review found the cost at the seams (a swallowed budget stop at a
 selection site, a run dropped from the run list on a fold error, an outage that reads as a clean
 verdict, a refused case the finalize step still marks done). Adopt the linter with that rule and
 turn the existing annotations into a reviewed allow-list; then a `contain(span, reason)` helper so
-a containment is countable rather than invisible. proof:missing:.ruff.toml
+a containment is countable rather than invisible.
+proof:`missing:.ruff.toml+absent:[tool.ruff]@pyproject.toml`
 
-OPEN[claude-md-has-no-size-budget] the agent guide is 232,919 bytes — about 58k tokens on every
+OPEN[claude-md-has-no-size-budget] the agent guide is 238,234 bytes (2026-09-06; 232,919 on
+2026-09-02) — about 60k tokens on every
 turn, roughly 29 % of a 200k window before a single file is read — and 75 % of it is the package
 map, whose engine row alone is 61 KB. Re-deriving 28 of its named counts: 15 hold and 11 do not.
 The rules an agent needs every turn are a small fraction of it and the dated measurements are also
@@ -1161,11 +1163,13 @@ generated. proof:missing:docs/guide/api-reference.md
 
 OPEN[largest-ui-components-are-never-mounted] AssistantBar, RunView and RunList's default export —
 10,595 lines, 55 % of the six largest components — are named by 54 test files and mounted by none
-(`jsdom` is already a devDependency, so the harness is cheap);
+(`jsdom` is already a devDependency, and `ui/test/cardKanban.test.js` already mounts a real
+component through `vite.ssrLoadModule` + `renderToStaticMarkup`, so the harness is the extraction
+of a pattern that exists);
 their coverage is a compile check plus source-text pins, which cannot see a `disabled` gate flip,
 and the suite's own history records a dropped brace passing 767 tests. Seven hub panels are
 rendered by no test at all. One shared jsdom harness (fetch stub keyed by path, fake timers) and
-one gate-flip test per component. proof:missing:ui/test/_mount.js
+one gate-flip test per component. proof:absent:createElement(AssistantBar@ui/test
 
 ### The site markers
 

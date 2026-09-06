@@ -563,8 +563,11 @@ site that proves it is open.
     OPEN[timeseries-adapter-embeds-its-own-forecaster] the adapter generates its own exponential
     forecaster inline, so the task validates LoopLab's plumbing rather than any forecasting
     capability; retire this when a real backend is imported.
-    proof:`absent:import autogluon@looplab/adapters/timeseries.py`
-    *Mutated before it was written:* True as shipped, False the moment that import lands.]
+    proof:present:_TS_TEMPLATE@looplab/adapters/timeseries.py
+    *Mutated before it was written:* True as shipped, False the moment that import lands. Re-pointed
+    2026-09-06 (doc 52 §2.2): `autogluon` was one backend of many; the deciding symbol is the inline
+    template the adapter hands the sandbox, which any real backend deletes (the forecaster's own
+    `def` line sits INSIDE that string, which the guard rightly refuses as prose).]
 15. **Drift detection is absent (P2, M).** `trust/leakage.py` DID go past exact-match —
     `code_leakage_scan` (`:147`, self-described "static-dataflow-lite": preprocessor fit on full data
     before the split, `.fit()` on test data), plus `target_leakage` and `temporal_leakage`. But every
@@ -602,8 +605,10 @@ site that proves it is open.
    OPEN[mcts-has-no-llm-value-estimate] the tree values a node by its metric alone, so an unexplored
    branch nobody has evaluated is indistinguishable from a bad one; retire this when a value
    estimate exists.
-   proof:missing:looplab/search/lats.py
-   *Mutated before it was written:* True as shipped, False the moment that module exists.]
+   proof:absent:value_estimate@looplab/search/policy.py
+   *Mutated before it was written:* True as shipped, False the moment that module exists. Re-pointed
+   2026-09-06 (doc 52 §2.2): `lats.py` was a file that might arrive under another name; the item's
+   own text names the fix — a value estimate in `policy.py` — so the proof is bound to that name.]
 18. **Parallel eval is in-process only (P2, L).** `engine/evaluate.py:1375` takes an
     `anyio.CapacityLimiter` and `orchestrator.py:1503,2383` open task groups; there is no `ray`,
     `celery` or `dask` anywhere and no cross-machine dispatch. The budget-guard half of the row DID
@@ -620,8 +625,10 @@ site that proves it is open.
     OPEN[eval-parallelism-is-in-process-only] evals are bounded by one box's task group, so the
     second H200 is the ceiling and a queued node waits rather than dispatching; retire this when a
     cross-machine dispatcher exists.
-    proof:`absent:import ray@looplab/engine/evaluate.py`
-    *Mutated before it was written:* True as shipped, False the moment that import lands.]
+    proof:`present:res = await anyio.to_thread.run_sync(@looplab/engine/evaluate.py`
+    *Mutated before it was written:* True as shipped, False the moment that import lands. Re-pointed
+    2026-09-06 (doc 52 §2.2): `import ray` named one library of several; the line that decides the
+    item is the in-process thread hop every eval runs through, which any dispatcher replaces.]
 19. ~~**[added 2026-08-14] Claim ratification ignores node feasibility and trust flags (P1, S).**~~
     **[FIXED 2026-08-15, VERIFIED 2026-08-21 — this entry outlived its defect by six days.**
     The entry prescribed the fix by name: "reuse that exact join — `engine/metric_salvage.py::
@@ -2260,7 +2267,9 @@ are asserted equal, token for token, to the one span deliberately collapsed.
 copies. `traceview.py`'s expansion lived only in the first list and `authoring_projection.py` only in
 the second — the identical splice hazard, at sub-row scale. Collapsed into one list holding both.
 
-⬜ **Still open (cheap).** Nothing enforces one row per path. A ~10-line assertion in
+~~⬜ **Still open (cheap).**~~ **[CLOSED — re-derived 2026-09-06:
+`tests/test_documentation_contracts.py::test_the_package_map_names_each_package_exactly_once` is
+exactly this assertion, keyed on the path cell.]** Nothing enforced one row per path. A ~10-line assertion in
 `tests/test_documentation_contracts.py` over `CLAUDE.md`'s package-map table — first column unique —
 would have caught this on 2026-08-13 at 13:57 and would catch the next merge that does it. Note
 §0.3's `trust/` row is a *different* defect in the same table (the row is unique, it is just wrong
@@ -3357,7 +3366,7 @@ surface resolves ids through it (`events/digest.py::_folded_axes`/`folded_concep
 run that never quiesces records no consolidation now either.
 
 **WHAT THIS DOES NOT FIX, and it is the more expensive finding.** ⬜ **`skeleton_for()` matches no
-  OPEN[concept-skeleton-matches-no-run] proof:present:skeleton_for@looplab/search/concept_graph.py
+  OPEN[concept-skeleton-matches-no-run] proof:`present:def skeleton_for(task_type: str)@looplab/search/concept_graph.py+absent:repo_task@looplab/search/concept_graph.py`
 run on this box.** The curated taxonomy (`search/concept_graph.py`: 26 leaves + 10 axis roots + 10
 `<axis>/*` placeholders = 46 ids) is resolved from `state.task_id` against ONE registered pack,
 `dense-retrieval`, plus seven substring aliases. Every run here answers `repo_task`,
@@ -3375,7 +3384,7 @@ own it needs; it does **not** unify the paths the operator asked about, and sayi
 be wrong.
 
 ⬜ **The classifier REWRITES, it does not add.** `_on_node_concepts` assigns
-  OPEN[classifier-rewrites-authored-membership] proof:present:_on_node_concepts@looplab/events/replay.py
+  OPEN[classifier-rewrites-authored-membership] proof:`present:st.node_concepts[nid] = bounded@looplab/events/replay.py`
 (`st.node_concepts[nid] = bounded`), authored provenance has no protection (only OPERATOR does), and
 the authored ids survive only in the raw log — `events/digest.py` explicitly forbids readers from
 resurrecting `idea.concepts`. Measured on v8, which is the precedent: **2 of 24 authored ids survive
@@ -3431,7 +3440,9 @@ withholding removed, the stamp removed, and a comment-only evasion of the gate �
 Replayed over all 42 event logs under `runs/`, metrics, champions, feasible sets, violations,
 memberships and provenance are byte-identical: digest `3eda8c9d95dadd1b` before and after.
 
-⬜ **Remaining share of the same gate, not taken here:** `lessons.py::maybe_distill_lessons`
+~~⬜~~ **[CLOSED — re-derived 2026-09-06: both `lessons.py::maybe_distill_lessons` and
+`research_cadence.py::_maybe_refresh_report` now gate on `cadence.at_creation_boundary` (F1i); the
+paragraph below is the state as of 2026-08-18.]** **Remaining share of the same gate, not taken here:** `lessons.py::maybe_distill_lessons`
 (`lessons_distilled`: 0 on v7/v9/e5, 2 on v8) and `research_cadence.py::_maybe_refresh_report`
 (`report_generated`: 0 on v9 and e5). Both are one call to the same predicate; they are left out
 because neither was measured for what it costs to run mid-eval, and this change's whole claim is
@@ -3523,7 +3534,7 @@ stripped, and the golden fixture moves by exactly eight `"repairs": 0` lines and
    derived, not carried, and they cost one `max()` per repair row.
 
 **STILL OPEN.** ⬜ **The node graph still cannot say which experiment is running.** `util.js::
-  OPEN[node-graph-cannot-name-running-experiment] proof:present:workingId@ui/src/util.js
+  OPEN[node-graph-cannot-name-running-experiment] proof:`present:eval_started: bool = Field(default=False, exclude=True)@looplab/core/models.py`
 workingId` returns the HIGHEST-ID pending node, and `Node.eval_started` — the folded durable proof
 that an evaluation was announced — is `exclude=True`, so it never reaches the wire
 (`narration.js::pendingWork` re-derives it from the raw event tail and says so in a comment). On v9
@@ -4138,7 +4149,8 @@ no Genesis prompt, so nothing an operator authors against ever mentions the one 
 kill. That is what the marker above is pointed at.
 
 ⬜ **Auto-skill promotion still runs only from the wrap-up pass — NARROWED 2026-08-19, see §0.18.**
-  OPEN[auto-skill-promotion-run-end-only] proof:absent:promote_settled_skills@looplab/engine/lessons_distill.py
+  OPEN[auto-skill-promotion-run-end-only] proof:`present:def write_reflection_note(self, final: RunState)@looplab/engine/lessons_distill.py+absent:write_auto_skill(@looplab/engine/lessons.py`
+  (the ONE promotion writer, `memory.write_auto_skill`, is called only from `write_reflection_note`, whose contract is the FINAL state; the proof reads shipped when that contract changes or the mid-run distill module gains the writer — re-point on landing if the promotion lands under a third shape)
 The TWIN question is settled and needed no new run: `n_skills: 0` on v7/v8 is not the classifier
 over-rejecting, because **zero cards reached it** (v7 has no evaluated node at all; all three of v8's
 `supported` cards are record setters with `best_delta = None`). That rung now writes its own
@@ -4531,7 +4543,7 @@ restored the entry for being invisible.
   second request. The measured cost of leaving it is one untested top-ranked hypothesis per run that
   seeds a card before its first metric lands.
 
-OPEN[tail-truncation-drops-the-payload] no rule stops the next bounded surface putting its answer past its own cut. proof:present:RESULT_CAP@looplab/tools/_base.py
+OPEN[tail-truncation-drops-the-payload] no rule stops the next bounded surface putting its answer past its own cut. proof:present:RESULT_CAP@looplab/core/context_budget.py
 
   Both fixes are LOCAL: memos gained sections, the case record leads with its params. Neither
   establishes the general rule, which is what this entry is for — every bounded surface in the tree

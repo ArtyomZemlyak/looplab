@@ -440,7 +440,9 @@ A falsifier that cannot go false is the vacuous guard this repo has found nine t
   exploration term while `search/panel.py` and `search/proxy.py` keep only `res[0]`, so the K-idea
   panel ranks purely exploitatively and the pre-eval kill has no abstain-on-uncertainty rung
   (§5; LDM).
-  proof:absent:res[1]@looplab/search/panel.py+absent:res[1]@looplab/search/proxy.py
+  proof:absent:nearest@looplab/search/panel.py
+  (bound to the panel, the ranking caller: the in-tree exemplar tuple-unpacks, so `res[1]` would
+  never appear, and `proxy.py` already names `nearest` in prose)
 - **OPEN[repo-task-exposes-no-perception-hook]** — data profiling is gated on the task exposing
   `columns`, six adapters implement it, and `repo_task` — the family the real GPU runs use —
   implements neither it nor `data_samples`, so `EV_DATA_PROFILED` never fires, `state.data_profile`

@@ -1,42 +1,32 @@
-# 52 · Development plan (2026-09-05; revised 2026-09-06, third pass): what to build, improve and fix next
+# 52 · Development plan (2026-09-05; revised 2026-09-06, fourth pass): what to build, improve and fix next
 
-**Status: a PLAN over the open-item index, re-derived against `master` three times — 2026-09-05
-(the plan), 2026-09-06 morning (a second verification and an external SOTA pass), 2026-09-06 evening
-(a pass over EVERY document in `docs/` and the architecture, after which every open item this page
-ranks is an `OPEN[…]` marker or says why it cannot be one).** It ranks; it ships no engine change and
-flips no default. Its inputs are the three things this repo treats as the backlog — the greppable
-marker index (`grep -rn 'OPEN\['`, counted with the guard's own parser in
-`tests/test_open_item_index.py`), the whole-tree finding ledger of
-[doc 50](50-architecture-review-2026-09-02.md) with its ranked proposals P1–P15, and the five
-external-works items of [doc 51](51-external-works-synergy-2026-09-03.md) — read against the 71
-commits that landed between 2026-09-01 and 2026-09-04, against what the field's leading systems do
-in September 2026 (§3, every claim with its source), and, since the third pass, against the
-seventy-odd documents under `docs/` (§2.1).
+**Status: a PLAN over the open-item index, re-derived against `master` four times — 2026-09-05 (the
+plan), 2026-09-06 morning (a second verification and an external SOTA pass), 2026-09-06 evening (a
+pass over every document under `docs/`), and 2026-09-06 night (TEN independent review agents: three
+re-derived every marker in the index against the code, one attacked the plan's own claims and
+ranking against the tree, six checked §3 against primary sources in their subfield and proposed
+falsifiable gaps).** It ranks; it ships no engine change and flips no default. Every open item it
+ranks is an `OPEN[…]` marker or says why it cannot be one (§4.4).
 
-What the two revisions CHANGED in the tree, and it is deliberately small: two stale markers closed or
-converted in `docs/BACKLOG.md` (§2), one decline minted at its BACKLOG row (§2.1), and the markers
-minted in this page (§4) — each with a falsifier evaluated against the tree AND mutated in a
-throwaway copy with the shipped form of its fix before it was written. Nothing else moved.
+What the fourth pass CHANGED, all recorded in §2.2: one more stale marker deleted (its fix shipped
+2026-08-30 under a name the proof never used), one in-code marker converted to a decline on its own
+measurement, eighteen proofs re-pointed from a guessed name to the line that decides the item, seven
+of this page's own marker texts corrected where the agents showed the code does more than the text
+said, a false sentence in a module docstring fixed, and thirty-four markers minted for gaps the agents
+verified in the tree — every predicate evaluated against this head and mutated in a throwaway copy
+with the shipped form of its fix before it was written.
 
 Two constraints shape the ranking. **The `runs/` corpus is absent from this checkout**, so every
 figure quoted from a run below is quoted from the tree's own record and not re-derived; items whose
-next step is a corpus measurement are queued for the GPU box (§5.2) rather than ranked as if they
-could be advanced here. And the house rule that decides order is **cost of leaving it, measured where
-a measurement exists** — a marker whose own text re-ranks it down (the paid cadences, at 0.3 % of a
-run) is ranked down here too, whatever its severity label says.
+next step is a corpus measurement are queued for the GPU box (§5.2). And the house rule that decides
+order is **cost of leaving it, measured where a measurement exists**.
 
-Companion authorities: [doc 50](50-architecture-review-2026-09-02.md) (the finding ledger this plan
-consumes), [doc 27](27-agent-system-mega-review-2026-08-09.md) (agent-system items),
-[doc 25](25-architecture-modularity-review-2026-08-01.md) (the modularity ledger),
-[doc 34](34-review-deferred-decisions-2026-08-13.md) (product/architecture deferrals),
-[doc 10](10-autoresearch-improvement-research.md) and [doc 11](11-agent-systems-research.md) (the
-2026-07 SOTA sweeps this page's §3 updates), [doc 28](28-deep-research-sota-roadmap-2026-08-10.md)
-(the Deep Research ledger), [doc 41](41-external-works-synergy-2026-08-14.md) and
-[doc 51](51-external-works-synergy-2026-09-03.md) (the two external-works passes),
-[doc 45](45-claim-surfaces-2026-08-20.md) (why a recorded number is pinned to the site that decides
-it), [doc 36](36-agent-driven-decisions-2026-08-13.md) (the trust line every capability item must
-hold), [BACKLOG](BACKLOG.md) and [CODE_REVIEW](CODE_REVIEW.md) (the two prose ledgers whose live rows
-carry markers).
+Companion authorities: [doc 50](50-architecture-review-2026-09-02.md), [doc 27](27-agent-system-mega-review-2026-08-09.md),
+[doc 25](25-architecture-modularity-review-2026-08-01.md), [doc 34](34-review-deferred-decisions-2026-08-13.md),
+[doc 10](10-autoresearch-improvement-research.md), [doc 11](11-agent-systems-research.md),
+[doc 28](28-deep-research-sota-roadmap-2026-08-10.md), [doc 41](41-external-works-synergy-2026-08-14.md),
+[doc 51](51-external-works-synergy-2026-09-03.md), [doc 45](45-claim-surfaces-2026-08-20.md),
+[doc 36](36-agent-driven-decisions-2026-08-13.md), [BACKLOG](BACKLOG.md), [CODE_REVIEW](CODE_REVIEW.md).
 
 ---
 
@@ -44,500 +34,720 @@ carry markers).
 
 ### 1.1 The index, by home
 
-Counted by the guard's parser after this revision's edits: **131 open markers and
-21 declines**, in 26 files. (Before the first revision: 103 / 19 in 25
-files; after the second: 105 / 20 in 26.)
+Counted by the guard's parser after this revision's edits: **163 open markers and
+22 declines**, in 25 files. (2026-09-05: 103 / 19 in 25 files; after the
+third pass: 131 / 21 in 26.)
 
 | Home | Open | What lives there |
 |---|---:|---|
+| `docs/52` (this page, §4) | 64 | the SOTA gaps, the doc 50 residue, and every item the docs and agent passes found open and falsifiable |
 | `docs/25` modularity ledger | 30 | god-module splits, duplicated scaffolds, hand-rolled guards — judgement calls, not defects |
-| `docs/52` (this page, §4) | 30 | the SOTA gaps and every item the docs pass found open, falsifiable and untagged |
-| `docs/BACKLOG.md` | 21 | product gaps (Pareto, drift, MLflow, MCTS value, distributed eval), cadence and watchdog residue, the claim ladder |
+| `docs/BACKLOG.md` | 21 | product gaps, cadence and watchdog residue, the claim ladder |
 | `docs/27` agent-system review | 14 | budgets, receipts, cancellation, prompt governance, the eval ladder |
-| `docs/51` external works | 5 | the cheap capability items (skills, kNN uncertainty, perception hook, literature) |
+| `docs/51` external works | 5 | skills, kNN uncertainty, perception hook, literature |
 | `docs/50`, `docs/34`, `docs/CODE_REVIEW.md` | 4 + 4 + 4 | whole-tree items; the four deferred product decisions; the four surviving review rows |
-| `looplab/` (in code, at the site) | 14 | the loop holds, the eval method, the card lane, the payload registry, the legacy route, two caches, two measurements |
+| `looplab/` (in code, at the site) | 13 | the loop holds, the eval method, the ASHA mask, the payload registry, the legacy route, two caches, two measurements |
 | `tests/` | 3 | three guards that state their own limit |
-| `docs/29`, `docs/46` | 1 + 1 | the F3 follow-up; the `.py`-only params guard |
-
-Of doc 50's twelve site markers, three closed in the sweep (the sibling-cancelling eval boundary,
-the unlabelled assistant tool results, the read fence on the command sequencer) and nine stand.
+| `docs/29` | 1 | the F3 follow-up |
 
 ### 1.2 What the 71 commits since 2026-09-01 closed, against doc 50's proposals
 
-| Proposal | State on 2026-09-06 | Residue — now a marker where a falsifier exists (§4) |
+| Proposal | State on 2026-09-06 | Residue — a marker where a falsifier exists (§4) |
 |---|---|---|
-| P2 per-child containment | **done** (`engine_error` terminal; `adapter` refused at submit) | — |
-| P3 one run identity for readers | mostly done (`core/run_identity.py::run_ref` / `row_belongs_to_run`; lessons, capsules, claims health) | `claims_assessments.py::_qualify_refs` / `_ingest_evidence`, `claims_retrieval.py::portfolio_atlas`, `concept_shelf.py::run_concept_index` still key on `run_id` → `claim-readers-still-key-on-run-id` |
-| P5 unwedge Replay | **done** (`unique_destination` in `serve/reset_route.py`) | — |
-| P6 six vocabularies | 4 of 6 (engine terminal reasons in `core/models.py`, stage statuses in `runtime/command_eval.py`, command statuses in `serve/protocol.py`, the `KIND_*`/`META_*` constants now read by `search/card_selection.py`) | `EVENT_PAYLOAD_KEYS` → `event-payloads-have-no-registry`; the systemic-stop reason → `systemic-stop-reason-has-no-registry`; permission still decided by `perm_modes._ACTION_RISK` (untagged: a design choice, doc 50 TO-10) |
-| P9 closed task schema | unknown keys refused at every launch layer — the config file, the task document (refused on SUBMIT, grandfathered on RELOAD through `repo_task.py::_grandfathered`, deliberately not `extra="forbid"`), the stage manifest | no `schema` stamp on `task.snapshot.json`; no per-kind reader key table beyond `READER_PATH_KEYS` (untagged: no falsifier that survives a rename) |
-| P10 read-side HTTP rules | one fold per request (`appstate.request_fold_scope`); `generation_fence` exists; `serve/http.py` exists with the body-parsing half | two GETs still take the exclusive sequencer (`/concepts/lens/recovery`, `/log-page`) — §4.2, count-shaped, no falsifier; no refusal-code table → `refusal-codes-have-no-table` |
-| P4 one untrusted-evidence boundary | 3 surfaces (assistant, concept tagger, MCP cache key) | `agents/strategist.py`, `engine/triage.py`, `agents/unified_agent.py`, `tools/literature.py` carry no label → `no-single-untrusted-evidence-envelope` |
-| P15 small fixes | most landed (receipts, reaper, parser, fsync, off-by-one, approval bypass) | `EnvironmentRefusal` for `run_setup` → `run-setup-failure-is-not-a-refusal-type` |
+| P2 per-child containment | **done** | — |
+| P3 one run identity for readers | mostly done (`core/run_identity.py::run_ref` / `row_belongs_to_run`) | `claims_health.py::_qualify_refs` and two readers still key on `run_id` → `claim-readers-still-key-on-run-id` |
+| P5 unwedge Replay | **done** | — |
+| P6 six vocabularies | 4 of 6 | `event-payloads-have-no-registry`; the run-level stop vocabulary compared as a bare literal at eight sites → `run-stop-reason-compared-as-a-bare-literal` |
+| P9 closed task schema | unknown keys refused at every launch layer (the task document refuses on SUBMIT and grandfathers on RELOAD by design) | no `schema` stamp on `task.snapshot.json` (untagged: no falsifier that survives a rename) |
+| P10 read-side HTTP rules | one fold per request; `generation_fence` exists; `serve/http.py` holds the body-parsing half | six `HTTPException(500)` sites in `serve/routers/runs.py` and `reviews.py` → `refusal-codes-have-no-table`; two GETs still on the sequencer (§4.4) |
+| P4 one untrusted-evidence boundary | 3 surfaces | `no-single-untrusted-evidence-envelope` |
+| P15 small fixes | most landed | `run-setup-failure-is-not-a-refusal-type` |
 | P1 loop offload | **not started** — and re-measured (§1.4) | `repair-path-holds-the-engine-loop`, `serial-node-build-holds-the-loop` |
-| P7 containment made countable | not started (no `.ruff.toml`, no `contain(` helper) | `containment-is-unmeasured` |
-| P8 typed engine state | not started (no attribute guard) | `engine-attributes-have-no-declaring-site-guard`, then `eval-attempt-is-one-giant-method` |
-| P11 generated references | not started (`docs/guide/configuration.md` hand-maintained; `test_config_docs_sync` compares names, not defaults; no API reference) | `settings-doc-guard-compares-names-not-defaults`, `http-surface-has-no-generated-reference` |
-| P12 CLAUDE.md byte budget | not started — and the file GREW: **238,234 bytes / 705 lines** here against 232,919 / 658 on 2026-09-02 | `claude-md-has-no-size-budget` |
-| P13 UI mount harness | not started (no `ui/test/_mount.js`) | `largest-ui-components-are-never-mounted` |
-| P14 cross-run store hygiene | not started | untagged: a schema registry's shape is a design call; the three readers above are its first concrete row |
+| P7 containment made countable | not started (652 `noqa: BLE001` under `looplab/`, no linter) | `containment-is-unmeasured` |
+| P8 typed engine state | not started | `engine-attributes-have-no-declaring-site-guard`, then `eval-attempt-is-one-giant-method` |
+| P11 generated references | not started | `settings-doc-guard-compares-names-not-defaults`, `http-surface-has-no-generated-reference` |
+| P12 CLAUDE.md byte budget | not started — the file is **238,234 bytes** (232,919 on 2026-09-02) | `claude-md-has-no-size-budget` |
+| P13 UI mount harness | the PATTERN exists (`ui/test/cardKanban.test.js` mounts a real component through `vite.ssrLoadModule` + `renderToStaticMarkup`); the three giant components are outside it | `largest-ui-components-are-never-mounted` |
+| P14 cross-run store hygiene | not started | untagged: a design call |
 
 ### 1.3 Suite health at this baseline
 
-* The seven tests doc 50 found red are no longer red: four were fixed in the sweep and the three
-  `test_dev_probe` cases now **skip** where Landlock is not enforced instead of failing.
-* The doc guards (`test_open_item_index`, `test_claim_pins`, `test_documentation_contracts`,
-  `test_config_docs_sync`) are green on this head, including after this revision's marker edits.
-* `ui/`: `npm test` — **1,527 passed, 0 failed** (2026-09-05, this container).
-* Full Python suite (`-m "not docker"`, four `pytest-split` shards, this container, 2026-09-05):
-  **0 failures, 0 errors, 80 skips over 13,059 passing tests** — counted from the progress glyphs,
-  because the doubled `-q` suppressed pytest's own summary line.
+* The seven tests doc 50 found red are no longer red; the doc guards are green after every edit of
+  this revision.
+* `ui/`: `npm test` — **1,527 passed, 0 failed** (2026-09-05).
+* Full Python suite (`-m "not docker"`, four `pytest-split` shards, 2026-09-05): **0 failures, 0
+  errors, 80 skips over 13,059 passing tests**.
 
-Sizes that the structural items below are about, measured here: `engine/orchestrator.py` 6,708
-lines, `engine/evaluate.py` 3,865 (its `_evaluate` 1,898 by its own marker), `serve/routers/runs.py`
-3,859, `ui/src/AssistantBar.jsx` 4,469, `ui/src/RunView.jsx` 3,148, `ui/src/RunList.jsx` 2,986,
-`tools/machine_runs_tools.py` 1,987, `agents/roles.py` 1,779.
+Sizes, re-measured by the agents on 2026-09-06 and drifting UP since doc 25's 2026-08-19 figures:
+`engine/evaluate.py::_evaluate` **1,989** lines by AST (doc 25 said 1,471; the in-code marker says
+1,898), `agents/roles.py` 1,779 (was 1,465), `tools/machine_runs_tools.py` 1,987, `agents/factory.py::make_roles`
+222 (was 193), `ui/src/RunView.jsx` 3,148, `ui/src/AssistantBar.jsx` 4,469, `engine/orchestrator.py` 6,708.
 
-### 1.4 The loop holds, as measured by their own markers
+### 1.4 The loop holds, as measured by their own markers — and one the plan had parked
 
-* **Repair path** (`engine/evaluate.py`): driven, a 5 ms ticker sees ZERO loop ticks during a
-  triage whose median is 116–276 s (one recorded case 88.3 min). Not re-ranked.
-* **Serial node build** (`engine/orchestrator.py`): the largest hold on the box (608.6 min over 13
-  builds on v11), but the marker's own 2026-09-04 measurement says the harm is a CEILING, not a cost —
-  an eval runs in a subprocess and a busy loop does not slow it; the cost is a FREE GPU with
-  BUILDABLE work, which needs board state per instant that spans alone cannot give.
-* **Paid cadences**: 15.5 min against 5,026.6 min of evaluation on a full 24 h run, 0.3 %. Ranked
-  down by its own marker, and here.
+* **Repair path** (`engine/evaluate.py`): ZERO loop ticks during a triage whose median is 116–276 s
+  (one case 88.3 min). Not re-ranked.
+* **Serial node build** (`engine/orchestrator.py`): 608.6 min over 13 builds on v11. The marker calls
+  its harm a ceiling because an eval in a subprocess is not slowed by a busy loop — but the critic
+  agent found the harm the marker's own file records: a dead node waited **62 minutes** for its
+  terminal while both H200s idled, because the loop was inside a build. The build lane goes INTO
+  the offload row (#12), not the box queue.
+* **Paid cadences**: 0.3 % of a run. Ranked down by its own marker.
 
 ---
 
 ## 2. Verification passes: what they changed
 
-### 2.0 The second pass (2026-09-06, morning)
+### 2.0 Second pass (2026-09-06, morning)
 
-Every one of the 103 markers was read against its proof and, where the proof names a symbol the fix
-might have landed under another name, against the tree. Two did not describe the tree, and both were
-fixed IN THAT CHANGE rather than listed as work:
+Two markers did not describe the tree and were fixed in that change: `judge-bench-cannot-see-a-post-exit-stage-failure`
+(deleted — the evidence it asked for shipped 2026-08-20 as `train_monitor.py::stage_contract_context`
+under a name its proof never spelled) and `judge-bench-covers-two-judges-of-four` (converted to a
+decline on its own numbers: 7 critic decisions; a novelty gate no outcome label can score).
 
-* **`judge-bench-cannot-see-a-post-exit-stage-failure` — CLOSED (deleted).** It asked for "the
-  declared `expect`/`assert` contract, in front of the judge while the stage still runs" and proved
-  itself open by `absent:monitor_expect_context@looplab/engine/train_monitor.py`. That evidence shipped
-  on 2026-08-20 under another name — `train_monitor.py::stage_contract_context`, spliced into the
-  judge's tick under `Settings.train_monitor_contract` (ON) — and was scored on the committed
-  450-decision corpus (CLAUDE.md's `train_monitor.py` row: 12 decisions fire, 12 wasted / 0
-  productive, 6 -> 9 of 27 wasted attempts caught). The guard stayed green for seventeen days over a
-  shipped item because no symbol was ever spelled `monitor_expect_context`.
-* **`judge-bench-covers-two-judges-of-four` — converted to a DECLINE.** Its own text says why the
-  remaining two judges will not be benched: the repair critic has 7 decisions in the whole corpus and
-  the novelty gate rejects ideas that are never run, so no outcome label can exist for it.
+### 2.1 Third pass (2026-09-06, evening): every document, re-derived
 
-### 2.1 The third pass (2026-09-06, evening): every document, and the architecture, re-derived
-
-Method: every file under `docs/` was scanned for its open-status vocabulary (`STILL OPEN`, `⬜`,
-`🟡`, `DEFERRED`, `PARTIAL`, "not shipped", "unbuilt"), every hit was read in context, and every
-candidate that named a symbol was checked against the tree by grep on this head. The architecture
-was re-read through [doc 02](02-architecture.md), the ADRs in [doc 03](03-decisions.md), the
-tracing model in [doc 08](08-tracing-architecture.md), the package map and invariants in CLAUDE.md,
-and the guide's process diagram page. The result, per pool:
+Every file under `docs/` was scanned for its open-status vocabulary, every hit read in context, every
+candidate that names a symbol checked against the tree. Per pool — with the fourth pass's corrections
+folded in where an agent showed the third pass was wrong:
 
 | Pool | What the pass found | Disposition |
 |---|---|---|
-| Docs 01–05 (design, ADRs) | ADR-11's hardening targets are SHIPPED where they mattered (deny-by-default egress via `--network`, cgroup/ulimit caps, allow-listed installs in `runtime/deps.py`, the reproduction manifest in `core/setup_identity.py`, approvals as command events); two are SUPERSEDED by the shipped shape (OpenTelemetry `gen_ai` conventions by doc 08's own span model; gateway tokens by the sandbox's secret refusal in `core/envsafe.py`); the Settings-level dollar cap is absent and already tracked (`no-shared-reserve-commit-run-budget`) | one open DECISION, untagged: "parallel sidecar ordering" (doc 03 §Open) — a design question with no statable falsifier |
-| Doc 06 (implementation plan) | every partial is done; the "remaining seams" (LanceDB, an MCP server bus, gVisor, gateway tokens) are design substitutions recorded in the ADRs, not open work; the co-evolving evaluator shipped as `trust/harden.py` | nothing to tag |
-| Docs 10–12 (2026-07 roadmap) | shipped: T1 preset, T2 gate ladder, T4 embeddings, T5 novelty, T6 fold cache, T7 response cache (`core/llm.py::_ResponseCache`), P1 cards, P3 ablation, P4 operator bandit (off by default), M2/M3 lessons, D2 hygiene, D4 novelty-before-compute, D5 harden loop, D7 `weighted_parent`, D8 memo verification, D9 concurrent research, D10 best-of-N, D11 compressor slot. OPEN and now tagged: T3/D1 for the repo family (§4 `repo-task-champion-is-picked-on-the-candidates-own-metric`), T8 (`merge-operator-is-mean-of-params-not-code`), P2/D13 (`no-plan-artifact-with-endgame-reserve`), M1 (`lessons-are-not-operator-scoped`), D3 (`strategist-consult-is-cadence-not-stagnation-triggered`) | 5 markers |
-| Doc 13, 14, 15, 16 (July reviews) | closed lists; doc 16's residue re-derived: the SSE blocking `q.get` is fixed (the comment at the site records the old shape), the enum gaps closed 2026-09-02; "aggregate context truncation" and "fork/inject effect-before-gate" are P2/P3 rows nobody has reproduced since July | untagged, stated |
-| Doc 17 (capability matrix) | typed `DevelopmentResult` → tracked (`developer-output-has-no-immutable-envelope`); the run manifest, default-deny auth on the shared hub, the deadline watcher and temporal CV all shipped; the "no first-class Evaluator" ⬜ is a naming/architecture question (verification IS a distributed subsystem here by design); the "distance-from-seed" lever → `no-distance-from-seed-signal` | 1 marker, 1 design question untagged |
-| Docs 18, 18-desktop, 19, 20, 21, 23, 24 (UI and workspace reviews) | Approve/Ratify shipped, the DecisionFreshness API shipped, the atlas claims of doc 21 shipped as F7, doc 23 shipped, doc 20's distributed direction → `eval-parallelism-is-in-process-only`; browser-level accessibility evidence (axe, screen reader, touch, cross-browser, visual regression) is still absent | untagged: product work whose cost nobody has measured |
-| Doc 22 (parallelism) | phases 0–3 shipped; phase 4's "golden for a 2-wide parallel build" was never added → `parallel-build-has-no-golden-replay` | 1 marker |
-| Docs 25, 27, 34 | their markers stand (30 / 14 / 4) | — |
-| Doc 26 (Ouroboros) | #2 action-trace audit + `hack_adjusted` reporting → `no-hack-adjusted-score-reporting`; #9 prior-injection hit-rate audit → `prior-injection-hit-rate-unmeasured`; #4 verifier quorum shipped as the R1-c tie-break; #13 beacons shipped as diagnostics; #12 reviewed self-evolution is a programme, untagged | 2 markers |
-| Doc 28 (Deep Research ledger) | NOT SHIPPED by its own status line, and the tree agrees: none of `ResearchPlan`, `ProgressLedger`, `EvidenceItem` exists → `deep-research-plan-is-not-durable`, `research-evidence-has-no-exact-span-identity`; DR-03..13 stand behind them in the ledger | 2 markers |
-| Doc 29 (operator backlog) | F1–F9 BUILT / SHIPPED / DECLINED; the one nested follow-up is tagged | — |
-| Docs 30–33, 35–37, 39, 40, 42–44, 47–49 | options papers, audits and day reports; no open work beyond what their tagged items already carry | — |
-| Doc 38 (fence audit) | the engine-side `EACCES` translation for triage is NOT built → `landlock-refusal-is-not-translated-for-triage`; the GPU validation is the tagged `landlock-is-opt-in-by-default` | 1 marker |
-| Doc 41 §8 | step 1 tagged, step 2 closed 2026-08-15, step 3 → the hit-rate marker, step 4 → the two doc 28 markers, step 5 → `no-external-benchmark-number-exists` | — |
-| Docs 45, 46 | tagged (`claim-legacy-prompt-branches`, `declared-params-guard-reads-only-py`) | — |
-| Doc 50 residue (untagged findings the plan ranked) | EK-03, SR-05, ES2-06, ES1-06, XP-05, XP-07, XP-08, DX-03 → markers (§4); SR-02's two GETs → §4.2 | 8 markers |
-| Doc 51, A7 | their markers stand; A7's Strategist-developer row shipped 2026-09-03 | — |
-| `docs/BACKLOG.md` §0.1 | #2, #3, #4, #8, #9, #11, #19 closed; #5, #7, #12–#18 tagged; **#6 → DECLINED at its row** (the P0 rested on "this box serves local models", which it does not; the local instrument reports 33 asks / 0 repaired / 0 failed); #10 → `cross-run-trajectory-overlay-unbuilt` | 1 decline, 1 marker |
-| `docs/BACKLOG.md` §0.2 (low-cost residue) | re-derived: the repair critic's verdict IS durable now (`EV_REPAIR_CRITIC`), `Dag.jsx` knows `salvaged`, `stage_budget_refusal` reaches `write_file`/`edit_file`, `kill_background` exists; STILL TRUE: the read-model watermark hashes `(seq, type)` only → `readmodel-watermark-ignores-event-data`; the log-integrity receipt counts lines as records — §4.2, no falsifier; the two idiom duplications (socket shutdown, timeout nulling) are cross-referenced residue | 1 marker |
-| `docs/BACKLOG.md` §2 Themes A–I | A2 (k-NN surrogate, not TPE/RF) is a design substitution its row states; A3 (`bohb`) shipped; C5 declined; H2 → the §0.1 #6 decline; A4, F2, G3, I1–I5 tagged (`mcts-…`, the overlay marker, `eval-parallelism-…`, the product markers) | — |
-| `docs/BACKLOG.md` §4–§6 | §4's flat-import codemod is nil (the remaining `looplab.server` strings are the LOGGER's name, doc 50 XP-14); §5's launch-readiness gate → `launch-readiness-gate-is-two-copies`; §6's model-free `assert` → `stage-assert-has-no-model-free-numeric-form`, D5 → `stage-rows-are-last-wins-per-name`; the reward-hack/hardened-suite residual is CLOSED (`ExploitSuite.scan` takes `grader_import_ok`) | 3 markers |
-| `docs/CODE_REVIEW.md` | every 🟡 row is closed or carries a marker; nothing untagged remains | — |
-| `docs/ROADMAP.md`, `PROMPT_REVIEW.md`, `RESEARCH_NOTES.md`, `GRAPH_GROUPING_REDESIGN.md` | superseded by BACKLOG; PROMPT_REVIEW's deferred rows are BACKLOG §5/§6 rows, handled above | — |
-| `docs/guide/*` | user contract, accurate; the architecture guide's "the trigger is still open" is the v12 exporter incident, since instrumented by `TRACE_WORKER_STOP_REASONS` — a record, not open work | — |
-| In-code `CODEX AGENT` notes (9) | not re-derived one by one in this pass; doc 50 EV-09 asks for each to be tagged or closed | next pass |
+| Docs 01–05 (design, ADRs) | ADR-11's hardening targets SHIPPED where they mattered (deny-by-default egress via `--network`, cgroup/ulimit caps, allow-listed installs, the reproduction manifest, approvals as command events); two SUPERSEDED (OpenTelemetry `gen_ai` conventions by doc 08's span model — still open as a low-rank bridge item, `otel-bridge-carries-no-genai-semconv`; gateway tokens by the sandbox's secret refusal); the dollar cap tracked (`no-shared-reserve-commit-run-budget`, promoted by the infrastructure agent) | one open DECISION untagged: "parallel sidecar ordering" (doc 03 §Open) |
+| Doc 06 | every partial done; LanceDB / MCP server bus / gVisor / gateway tokens are design substitutions recorded in the ADRs | nothing to tag |
+| Docs 10–12 (2026-07 roadmap) | shipped: T1, T2, T4, T5, T6, T7 (`core/llm.py::_ResponseCache`), P1, P3, P4 (off by default), M2/M3, D2, D4, D5, D7 (`weighted_parent`), D8, D9, D10, D11. **Corrected by the fourth pass**: T8 is HALF shipped — `merge_mode="auto"` resolves to `ensemble` for every LLM Developer and `engine/node_build.py::_ensemble_idea` is the A0b recombination merge, but the Developer receives a directive and never the parents' code (`speculation.py` hands it `parents[0]`); D3's stall rule EXISTS (`agents/strategist.py::improves_since_best` against `stall_window`, greedy⇄broad, deep research at 2×) and only the consult's TIMING ignores it; M1's in-run half exists (`events/digest.py::lineage_lessons` + `sibling_digest`), the cross-run half does not | markers rewritten: `merge-operator-is-mean-of-params-not-code`, `strategist-consult-is-cadence-not-stagnation-triggered`, `lessons-are-not-operator-scoped`, `no-plan-artifact-with-endgame-reserve` |
+| Docs 13–16 (July reviews) | closed lists; doc 16's SSE blocking read is fixed, the enum gaps closed 2026-09-02 | untagged, stated |
+| Doc 17 (capability matrix) | typed Developer result tracked (`developer-output-has-no-immutable-envelope`); manifest, default-deny auth, deadline watcher, temporal CV shipped; "no first-class Evaluator" is a naming question | `no-distance-from-seed-signal` (demoted by the search agent: no measured precedent; edit-TYPE annotation is what the field measured) |
+| Docs 18–24 (UI, workspace) | Approve/Ratify and DecisionFreshness shipped; doc 21's atlas claims shipped as F7; doc 20's direction → `eval-parallelism-is-in-process-only` (re-pointed) | accessibility evidence untagged (cost unmeasured) |
+| Doc 22 | phases 0–3 shipped; phase 4's golden never added | `parallel-build-has-no-golden-replay`; the shipped shape is a bulk-synchronous barrier → `parallel-build-is-a-bulk-synchronous-barrier` |
+| Docs 25, 27, 34 | markers stand (30 / 14 / 4); seven proofs re-pointed (§2.2) | — |
+| Doc 26 | #2 → `no-hack-adjusted-score-reporting` (shape corrected: the Mislead gap); #9 → `prior-injection-hit-rate-unmeasured` (renamed to a citation rate; needs `injected-priors-leave-no-structured-record` first) | — |
+| Doc 28 | NOT SHIPPED and the tree agrees | `deep-research-plan-is-not-durable`, `research-evidence-has-no-exact-span-identity` |
+| Doc 29 | F1–F9 built / shipped / declined | — |
+| Doc 38 | engine-side `EACCES` translation NOT built | `landlock-refusal-is-not-translated-for-triage` (order corrected: WITH the Landlock validation, before the flip) |
+| Doc 41 §8 | steps 1, 3, 4, 5 tracked; step 2 closed 2026-08-15 | — |
+| Docs 45, 46 | 45 tagged; **46's marker was STALE** (§2.2) | deleted |
+| Doc 50 residue | EK-03, SR-05, ES2-06, ES1-06, XP-05, XP-07, XP-08, DX-03 → markers | — |
+| `docs/BACKLOG.md` | §0.1 #6 declined at its row; #10 → `cross-run-trajectory-overlay-unbuilt`; §0.2's watermark → marker, its log-integrity row untagged (§4.4); §5 → `launch-readiness-gate-is-two-copies`; §6 → `stage-assert-has-no-model-free-numeric-form`, `stage-rows-are-last-wins-per-name`; two `⬜` glyphs the critic found closed (§0.5's row-uniqueness guard, §0.14's `at_creation_boundary` call sites) flipped | — |
+| `docs/CODE_REVIEW.md`, ROADMAP, PROMPT_REVIEW, RESEARCH_NOTES, guide | every review row closed or tagged; the rest superseded by BACKLOG or accurate | — |
+| In-code `CODEX AGENT` notes (9) | re-derived by the critic: five are live open work and now carry markers (§4.2), two are covered by existing markers (`paid-eval-has-no-attempt-scoped-receipt`, `eval-lanes-admit-without-reserving-time`), one is a resolved note, one (`replay.py`'s lexicographic concept-rename rule) is a fold-authority design question | — |
 
-Two SOTA-derived items from §3 that the morning pass left as "design rows" are now markers too,
-because each has a falsifier that flipped under mutation: `operator-bandit-has-no-model-arm` and
-`skills-load-flat-not-by-tier`; and the BAITBENCH-shaped measurement is `developer-hack-rate-unmeasured`.
+### 2.2 Fourth pass (2026-09-06, night): ten agents
+
+**Markers.** All 131 were re-derived against the code, not the doc. **One more was stale**:
+`declared-params-guard-reads-only-py` (doc 46) — the fix landed 2026-08-30 as
+`core/param_carriers.py::document_numeric_paths` wired through `engine/repair_verify.py::_carrier_kind`,
+and its proof `present:endswith(".py")` can never go false because the `.py` branch legitimately
+stays the Python extractor. Deleted. **One converted to a decline**: `card-lane-fills-outside-the-policy-population`
+was bound to a symbol the repo decided never to write (the legal-set prescription was built and
+reverted on 2026-09-03: on the board `tests/test_card_driven_selection.py` uses it retains exactly ONE
+card per turn for MCTS and Evolutionary, deleting the lane rather than narrowing it). **Eighteen
+proofs re-pointed** from a guessed fix name, a docstring, a prompt string, a re-export, or a literal
+that survives every correct fix, to the line that decides the item where one exists and otherwise to
+the name the item's own text gives the fix (said in the marker, re-pointed on landing): in BACKLOG
+`mcts-has-no-llm-value-estimate`, `eval-parallelism-is-in-process-only` (the in-process thread hop
+in `evaluate.py`, which any dispatcher replaces, rather than one library's import),
+`timeseries-adapter-embeds-its-own-forecaster`,
+`concept-skeleton-matches-no-run`, `classifier-rewrites-authored-membership`,
+`node-graph-cannot-name-running-experiment`, `auto-skill-promotion-run-end-only`,
+`tail-truncation-drops-the-payload` (`tools/_base.py::RESULT_CAP` is a re-export); in doc 27
+`prompt-bundle-unpinned-across-hot-reload`, `no-shared-reserve-commit-run-budget` (both out of the
+guard's prose allow-list, which shrinks by two); in doc 25 `unconverted-stat-signature-ledger`,
+`generation-conflict-envelopes-hand-built`, `eligible-cards-recomputed-in-one-election`; in doc 34
+`trace-exporter-hardens-per-span-not-per-batch`, `card-trace-scans-whole-run-span-index`; in doc 51
+`knn-uncertainty-dropped-by-two-of-three-callers` (the in-tree exemplar tuple-unpacks, so `res[1]`
+would never appear); in doc 50 `containment-is-unmeasured` (both linter-config shapes, `.ruff.toml`
+and `[tool.ruff]`) and `largest-ui-components-are-never-mounted` (the mount itself rather than a
+harness filename). Twenty-odd more proofs are still bound to a guessed name; each says so in its
+text and re-points on landing.
+
+**This page's own claims, corrected by the critic and the three marker agents.** `refusal-codes-have-no-table`
+named `serve/http.py`, which has zero `500` sites — the six live in `serve/routers/runs.py` (4) and
+`reviews.py` (2), two of them interpolating the exception text. `systemic-stop-reason-has-no-registry`
+described a hazard with no reader (the sentence is interpolated and nothing compares against it) —
+replaced by `run-stop-reason-compared-as-a-bare-literal`, the eight `.lower() == "error"` sites that
+ARE the unguarded vocabulary. `claim-readers-still-key-on-run-id` and `lessons-are-not-operator-scoped`
+pinned files that do not hold the code (`_qualify_refs` is defined in `claims_health.py`; retrieval
+lives in `lessons_priors.py`). `containment-is-unmeasured` counted 636 annotations; the tree has 652
+under `looplab/`. The T8 / D3 / M1 corrections above. And `looplab/trust/reward_hack.py`'s docstring
+said the detector is OFF by default while `Settings.reward_hack_detect` has been `True` since
+2026-08-23 — a false sentence beside a default, fixed in this change rather than tagged.
+
+**The plan's ranking, corrected by the critic.** (1) The real MLE-bench path grades EVERY node on the
+private test set and feeds it back as the search metric, and `holdout.py::build_holdout_idx` returns
+an empty partition for that kind — so "holdout-selected" was unreachable and the campaign would have
+published a test-selected number (§4.1, `mlebench-search-optimises-the-private-grade`; new #3). (2)
+The hidden split for `repo_task` is unenforceable today (the eval's allow-list grants `readwrite`
+over the whole run dir, the read fence is blind to native readers, Landlock is off) and the lever
+AIRA₂ measured is host-side CONSISTENT per-node scoring, with the never-seen final pick only
+"marginal" — #6's shape changed and its size is L. (3) The eval may WRITE the run record
+(`eval-may-write-the-run-record`; new #2). (4) The endgame reserve and the ensemble merge half-exist;
+#12 re-scoped. (5) #16 rested on numbers already banked; the live residue is the blind
+`run.out[-4000:]` the stage checker is handed (`stage-checker-is-handed-a-blind-tail`). (6) The
+profile A/B is confounded by `trust_gate="gate"` and needs ≥3 seeds per arm. (7) The model arm is
+inert until `operator_bandit` is on.
+
+**§3, corrected by the six literature agents.** Every number in §3.1 re-verified against its
+primary source; the corrections are in the table itself: ML-Master 2.0's ablation is leave-one-out
+(L1, the in-run traces, is the 50-point tier — not L2 + L3), AIRA₂'s "linear" is throughput while
+rank saturates at 4 GPUs, the survey's 26 are entries over 24 runnable systems, Kosmos's number is
+from arXiv 2511.02824 (57.9 % for synthesis statements), AlphaEvolve's August bound is arXiv
+2608.16884, ShinkaEvolve's circle packing is "new SOTA at 150 samples". Added: ScienceFlow (70.22 %
+full-set on ≤2 GPUs), AiScientist (File-as-Bus ablation −31.82 Lite points), MARS's cost-constrained
+MCTS, the leaderboard's own protocol (README is the board, ≥3 seeds, mean ± SEM, last row
+2026-03-06, test-set-feedback rows flagged), and the field's verification numbers (MLReplicate 59 %,
+SciIntegrity 34.2 %, artifact oracles at 60 % sensitivity / 45 % specificity, Protocol Validity's
+Mislead gap). Thirty-four gaps minted from the agents' findings, each predicate verified and flipped.
 
 ---
 
-## 3. SOTA, September 2026 — and what "better than SOTA" has to mean here
+## 3. SOTA, September 2026 — verified against primary sources
 
 ### 3.1 The field's numbers
 
-Every number below is from the cited primary source (list at the end of this page); none was
-re-derived here, and LoopLab has NO comparable number of its own — see §3.4.
-
-| System | What it is | Reported result |
+| System | What it is | Reported result (source in §8) |
 |---|---|---|
-| Famou-Agent 2.0 (Baidu) | multi-agent framework; "evolution strategies, long-horizon memory, infrastructure" | **64.44 %** any-medal, MLE-bench full 75, Gemini-3-Pro-Preview, 24 h (2026-02-23, official leaderboard); 80.3 % on Lite |
-| AIBuildAI | — | 63.11 % full, Claude-Opus-4.6, 24 h (2026-03-06) |
-| CAIR MARS+ | modular agent with reflective search (doc 13) | 62.67 % full, 24 h |
-| MLEvolve (InternScience) | progressive MCTS with cross-branch fusion, stagnation detection, BM25+FAISS experience memory | 61.33 % full at 12 h on the leaderboard; **65.3 % ± 0.8** with Gemini-3.1-Pro-preview per its README |
-| ML-Master 2.0 | Hierarchical Cognitive Caching: L1 traces, L2 phase-level distilled knowledge, L3 cross-task priors | 56.44 % full (DeepSeek-V3.2); Lite ablation **22.7 % → 54.5 % → 72.7 %** as L2 then L3 are added |
-| AIRA₂ (Meta) | async multi-GPU worker pool + Hidden Consistent Evaluation + ReAct debug agents | MLE-bench-30 percentile rank **81.5 % at 24 h / 83.1 % at 72 h** (Gemini 3.1); 1 GPU 56.8 % → 8 GPUs 71.8 % (linear); HCE alone **+13.0 / +18.4** points; the earlier "validation overfitting" was evaluation NOISE |
-| Arbor (RUC) | long-lived coordinator + short-lived executors in git worktrees + a persistent hypothesis tree with insights propagated upward; a change is kept only if it clears `merge_threshold` on a HELD-OUT split | **86.36 %** any-medal on MLE-bench Lite with GPT-5.5; 2.5× the held-out gain of Codex / Claude Code on six real tasks |
-| EurekAgent | "agent environment engineering": permissions, artifacts (git-tracked solutions), budget (time-helper API + deadline warnings), human-in-the-loop; controller-owned result files the agent cannot modify | **85.71 % any-medal / 71.43 % gold** on SEVEN curated Lite tasks, one run each, GLM-5.1, one GPU |
-| HASTE | skills accumulated in three tiers (global / domain / competition) and loaded by tier | **77.3 %** Lite, Claude Sonnet 4.6, 12 h; tiered loading 100 % vs flat loading 62.5 % — the same as NO skills — on 8 competitions; warm starts use 52 % fewer refinement iterations; single seed |
-| Frontis-MA1 / OpenMLE (FrontisAI) | a 35B model post-trained on four operators (Draft / Improve / Debug / Crossover) plus async search and "benchmark-independent experience priors" | Lite, 12 h, ONE RTX 4090 at 12 GB: 39.39 % → 60.61 % (Evo) → **71.21 %** (Evo-Max) |
-| ShinkaEvolve (Sakana) | evolutionary program search: novelty rejection before evaluation, adaptive parent sampling, a bandit over an LLM ensemble | ICLR 2026; circle packing beyond AlphaEvolve's; CLI-backed mutation models since 2026-05 |
-| AlphaEvolve (DeepMind) | evolutionary coding agent with automated evaluators | 2026-08: matrix-multiplication exponent bound pushed below 2.371177 |
-| Kosmos (Edison / FutureHouse) | literature + data analysis + world model, ~200 rollouts per 12 h run | independent scientists rated 79.4 % of statements accurate |
-| karpathy/autoresearch | edit `train.py`, 5-minute fixed budget, keep/revert on `val_bpb`, ~12 experiments/hour | the "autoresearch" pattern (2026-03) |
-| Survey of AI scientists (2608.05179) | 26 systems coded on seven dimensions | 83 % release code, **38 %** release seeds or traces, 38 % report any novelty verification; "no LLM-era system … demonstrates an externally validated in-loop oracle" |
-| BAITBENCH (2608.30724) | optional, rule-compliant shortcuts planted in ML tasks | **57.1 %** of runs reward-hack, five of seven agents above 50 %, above 50 % even when told not to |
+| Famou-Agent 2.0 (Baidu) | multi-agent; "evolution strategies, long-horizon memory, infrastructure" (Baidu's post; the FM-Agent repo documents 1.0 only) | **64.44 ± 1.18 %** any-medal, MLE-bench full 75, Gemini-3-Pro-Preview, 24 h (README leaderboard, 2026-02-23); Lite 80.30 ± 1.52 |
+| AIBuildAI (2604.14455) | manager + designer / coder / tuner sub-agents, hierarchical | 63.11 ± 0.44 % full, Claude-Opus-4.6, 24 h (2026-03-06) |
+| CAIR MARS+ / MARS (2602.02660, ICML 2026) | cost-constrained MCTS, Design–Decompose–Implement, comparative reflective memory (63 % of used lessons cross-branch) | 62.67 ± 0.77 % full (MARS+), 56.0 % (MARS) |
+| MLEvolve (2606.06473) | Progressive Monte Carlo GRAPH search with cross-branch fusion and stagnation detection; a global retrospective memory (BM25 + FAISS, RRF) | 61.33 ± 1.33 % full at 12 h on the board; **65.3 ± 0.8 %** with Gemini-3.1-Pro-preview; Lite ablation: −13.64 without the memory |
+| PiEvolve (Fractal) | graph-structured evolutionary search, no paper | 61.33 ± 0.77 % full; Lite 80.30 — THREE main-board systems tie at 80.30 Lite |
+| ML-Master 2.0 (2601.10402) | Hierarchical Cognitive Caching: L1 traces, L2 phase-distilled knowledge, L3 cross-task priors | 56.44 % full (DeepSeek-V3.2-Speciale); Lite LEAVE-ONE-OUT, one run each: −L1 **22.7**, −L2 59.1, −L3 54.5, full 72.7 — the in-run traces are the 50-point tier |
+| ScienceFlow (Huawei, 2608.14354) | research segments with checkpointed executable states; re-anchoring; evidence-aware execution controller | **70.22 ± 1.18 %** full, 3 runs, 24 h, **≤2 GPUs**, DeepSeek-V4-Flash — the best full-set number, off-board |
+| AiScientist (2604.13018) | "thin control over thick state": a File-as-Bus workspace | 81.82 % Lite with BOTH Gemini-3-Flash and GLM-5; removing File-as-Bus costs **−31.82** points |
+| AIRA₂ (2603.26499, v2) | steady-state async pool, static 1 worker : 1 GPU, remote execution in ephemeral containers; Hidden Consistent Evaluation; ReAct debug agents | MLE-bench-30 percentile rank **81.5 ± 3.2 at 24 h / 83.1 at 72 h** (AIRA†₂, Gemini 3.1, 8 GPUs, 3 seeds); Gemini 3.0: 1 / 4 / 8 GPUs = 56.8 / 71.2 / 71.8 at 24 h (63.5 / 76.5 / 76.0 at 72 h) — THROUGHPUT linear, rank saturates at 4; HCE alone **+13.0 / +18.4**; the "overfitting" of prior work was evaluation noise |
+| Arbor (2606.11926) | long-lived coordinator, short-lived executors in git worktrees, a persistent hypothesis tree with upward insight propagation; a change merges only if it clears a held-out margin (`merge_threshold: 5.0` in the README; the paper's algorithm is a strict `>`) | **86.36 %** any-medal Lite with GPT-5.5 (seeds undisclosed); 2.5× the held-out gain of Codex / Claude Code on six tasks |
+| EurekAgent (2606.13662) | environment engineering: Docker per run with a grader container and hidden `/hidden_eval`, default-deny GPU helper, hook-protected controller-owned result files, a callable time helper plus deadline injection, cost tracked but hidden; 3 parallel sessions, per-STAGE budgets | **85.71 % any-medal / 71.43 % gold** on SEVEN curated Lite tasks, one run each, GLM-5.1, one GPU |
+| HASTE (2606.30911) | skills in three tiers, loaded by tier | **77.3 %** Lite, Claude Sonnet 4.6, 12 h, single seed; tiered 100 % vs flat 62.5 % = NO skills on 8 competitions, flat burning 2× output tokens; warm starts 52 % fewer iterations; its "hit rate" (42 → 85 %) is the KEEP-fraction of attempted changes; no demotion anywhere |
+| Frontis-MA1 / OpenMLE (2607.28568) | a 35B model post-trained on Draft / Improve / Debug / Crossover + async search + experience priors | Lite, 12 h, ONE RTX 4090 at 12 GB: 39.39 → 60.61 → **71.21 %** |
+| CobraAgent (Dalpha) | vendor page only | 79.11 % overall (Low 86.36) — unverified |
+| Leaderboard protocol | the README IS the board; ≥3 seeds, mean ± SEM; last dated row 2026-03-06; "additional submissions" flagged test-set feedback: Disarray 90.91 Lite (a four-model ensemble), LoongFlow 77.27 | so "the top cluster" must be read per protocol (§3.3) |
+| ShinkaEvolve (2509.19349) | novelty rejection (embedding rejection does the work; the LLM novelty judge is "marginal"), weighted parent sampling, a bandit over an LLM ensemble; mutation mix diff / full / cross = 0.45 / 0.45 / 0.1 | ICLR 2026; new circle-packing SOTA at 150 samples |
+| AlphaEvolve | evolutionary coding agent with automated evaluators; evaluation cascade | 2026-08-17: ω < 2.371177 from 2.371339 (arXiv 2608.16884) |
+| Model routing (LEVI 2605.09764, DEI 2605.27130, cross-tier 2608.10694) | operator × model routers, heterogeneous LLM ensembles, cheapest tier on the high-volume loop | 3.3–6.7× smaller budget for the top score (35× on one problem); +124 % QD-score at iso-budget; 96 % of search tokens on the cheapest tier at 5.6–14× lower cost |
+| EvoTrace (2605.20086) | traces of four evolutionary frameworks, nine edit types, replay interventions | ~30 % of added lines are byte-identical to lines deleted earlier in the lineage, rising in 118 / 121 runs; a 24-call Bayesian sweep over one program's hyperparameters matches the run's final best on 13 / 15; two of four frameworks overfit their evaluator on ≥30 % of problems |
+| Kosmos (2511.02824) | world model + parallel literature / data agents, every statement cited | 102 statements from 3 reports: 79.4 % accurate; 85.5 % data-analysis, 82.1 % literature, **57.9 % synthesis** |
+| karpathy/autoresearch | edit `train.py`, 5-minute fixed budget, keep / revert on `val_bpb` | ~12 experiments / hour (2026-03) |
+| Survey of AI scientists (2608.05179) | 26 entries (24 runnable systems) coded on seven dimensions | 83 % release code, **38 %** release seeds or traces, 38 % report a novelty method, 67 % disclose a result-selection policy; "no LLM-era system … demonstrates an externally validated in-loop oracle" |
+| Verification numbers | MLReplicate (2605.16616); SciIntegrity-Bench (2605.10246); From Runnable to Verifiable (2608.09567); Protocol Validity / HackDetect (2607.22368); BAITBENCH (2608.30724); SpecBench (2605.21384) | 59 % of accepted automated reviews carry fabricated or unsupported claims; 34.2 % integrity-problem rate, fabrication 20.6 → 3.2 % without completion pressure; artifact-embedded oracles at 60 % sensitivity / 45 % specificity; 67 % of ML-research traces exploit an exposure, score inflation 0.45–1.00 (the Mislead gap G = S_exploit − S_intended); 57.1 % of runs reward-hack, above 50 % when told not to; the visible-vs-held-out pass gap grows 28 points per tenfold code size |
 
-### 3.2 The techniques that recur, against what LoopLab has
-
-"Has" was checked by symbol on this head, not by reading a doc.
+### 3.2 The techniques that recur, against what LoopLab has — verified by symbol
 
 | Technique | Who | LoopLab today | Verdict |
 |---|---|---|---|
-| **Hidden consistent evaluation / holdout-gated selection** — the champion is chosen on a split the search never optimised, held constant across candidates | AIRA₂ (+13.0 / +18.4 points), Arbor (`merge_threshold` on held-out), MLE-bench's hidden grader | `engine/holdout.py` implements D1 holdout-gated promotion (`holdout_select=True`, `holdout_fraction=0.25`, `holdout_top_k=3`) — for HOST-GRADED tasks with a predictions file only. `adapters/repo_task.py`, the family every real GPU run here uses, has no hidden split: the champion is elected on the metric the candidate's own script prints (`metric_subject` says what the number is ABOUT, not whether the split was hidden) | **GAP #1** — the largest measured selection effect in the field is open on exactly the runs this box pays for |
-| **Throughput: async worker pool, linear in GPUs** | AIRA₂ (56.8 → 71.8 % for 1 → 8 GPUs), OpenMLE-Evo, Arbor's executors | in-process eval task group + speculative prefetch, `eval_parallel` AUTO; two GPUs; the loop holds of §1.4 subtract from it; `eval-parallelism-is-in-process-only` | **GAP #2**, in two halves: the loop (P1) and the box's size (the cross-machine pool) |
-| **Hierarchical memory** — traces → phase knowledge → cross-task priors, loaded by tier | ML-Master 2.0 (22.7 → 54.5 → 72.7 %), HASTE (flat loading = no skills), MLEvolve, Famou 2.0 | L1 = spans + event log; L2 = `failure_reflection` / `watchdog_reflection` (ON), memos, cards/beliefs; L3 = fingerprint-keyed lessons incl. negatives, skills, concept capsules, claims, hybrid BM25+vector retrieval | structurally at parity; the measured gaps are the skill LIFECYCLE (doc 51), tiered LOADING (HASTE's result), operator scoping (doc 10 M1) and the prior-injection hit rate nobody has measured (doc 26 §4.2 #9) — **GAP #3**, four markers |
-| **Search: multi-branch tree with insight propagation, stagnation detection, cross-branch fusion; evolutionary novelty rejection + parent sampling + model bandit; ablation-targeted refinement + ensembling; a Crossover operator** | MLEvolve, Arbor, ShinkaEvolve, MLE-STAR, Frontis-MA1 | greedy / evolutionary / MCTS / ASHA / BOHB policies over folded state, cards + beliefs, graded novelty, `engine/ablation.py` (MLE-STAR refine_block), `search/policy.py::_bandit_pick` over OPERATORS, `weighted_parent`, foresight + surrogate + panel; the only multi-parent operator is `merge_idea` = MEAN OF NUMERIC PARAMS; the Strategist consults on a CADENCE, never on stagnation | search breadth at parity or ahead; **GAP #4** is the endgame (no code-level crossover, no top-k ensemble), the stagnation trigger, the model arm, and the fact that the knobs that matter live in `PROFILES["thorough"]` and are OFF under the shipped `profile="default"` |
-| **Verification and anti-hacking as the differentiator** | the survey's 38 %; BAITBENCH's 57.1 %; EurekAgent's controller-owned result files; claim-level auditability (AAR) | replayable log, `metric_subject`, read fence + Landlock, `reward_hack`, `leakage` (Pearson + Spearman), salvage rules, claims ledger with verifier verdicts, W3C-PROV export, redaction of every persisted tail | **AHEAD** — this is the axis on which "better than SOTA" is credible; what is missing is the PROOF: no published number, no hack-adjusted score, no hack-rate measurement of its own Developer, Landlock off by default |
-| **Budget and time awareness** — a time helper the agent can call, deadline warnings, fixed-budget experiments | EurekAgent, autoresearch | `effective_eval_time_budget`, the time and memory cues, `train_monitor`'s projected overrun, `budget_aware` (OFF by default); no plan artifact with an endgame reserve | parity on the cues; `no-plan-artifact-with-endgame-reserve` |
-| **Literature and data grounding** | Kosmos (every statement cited), Mechanist, OmniScientist, AutoMind's KB, MLE-STAR's web-seeded drafts | `tools/literature.py` (not durable), knowledge tools, `EV_DATA_PROFILED` for six adapters and NOT for `repo_task`; doc 28's durable research plan and exact-span evidence unbuilt | doc 51's five items plus the two doc 28 markers — all falsifiable |
-| **Human-in-the-loop steering** | EurekAgent's TUI + web monitor, Arbor's tree | cards / kanban, branch-from-history, standing watches, assistant, reviews | parity or ahead |
-| **Environment engineering** — permissions, artifacts, budgets as the product | EurekAgent | sandbox tiers, fences, receipts, the durable-op kit | ahead |
+| **Host-side CONSISTENT per-node scoring on a label-hidden split, then a final pick on a never-seen split** | AIRA₂ (+13.0 / +18.4 is the consistent-scoring half; the never-seen final pick is "marginal"), Arbor's held-out merge margin, HarnessOpt-Bench, MLE-bench's hidden grader | `engine/holdout.py` implements the MARGINAL half (a finish-time top-k re-score) and only for host-graded list-label tasks; `build_holdout_idx` returns an empty partition for `kind == "mlebench"`, whose `apply_host_grade` feeds the PRIVATE grade back to the search; `repo_task` selects on the candidate's own printed number, which is exactly what AIRA₂ replaced | **GAP #1** on both families: `mlebench-search-optimises-the-private-grade`, `repo-task-champion-is-picked-on-the-candidates-own-metric` |
+| **Throughput** | AIRA₂ (static 1:1, remote execution; +14.4 points 1 → 4 GPUs, +0.6 for 4 → 8), ScienceFlow (best full-set number on ≤2 GPUs), Arbor, EurekAgent (3 sessions) | in-process task group + prefetch; two GPUs; the loop holds of §1.4; the build lane is a bulk-synchronous barrier | **GAP #2**: the loop first (#12), the barrier next, the cross-machine pool only at ≥4 workers |
+| **Memory** | ML-Master 2.0 (L1 is the decisive tier), HASTE (tiered loading), MLEvolve (−13.64), SkillZip Pro (naive compression costs up to 26 points), SkillAudit / Co-Evolving / ReMe (retention keyed on a READ-side utility), "Break It Down" (task-level skills are net-negative), AIRA-dojo (the only per-operator scoping ablation, and it is null) | L1 held (spans, log, `sibling_digest`, `lineage_lessons`) and served mostly by PULL; L2/L3 present; write-side ranking only (`lesson_hygiene.py::lesson_rank_key`); no record of which priors a proposal was shown; skills flat, unbounded, never demoted | **GAP #3** re-ordered: record → bounds → utility/demotion → tiers → scoping last |
+| **Search** | model routing (four iso-budget confirmations), stagnation-adaptive control (MLEvolve, FML-bench, GEAR), crossover that reads both parents (Frontis-MA1) or their traces (MGM), proxy evaluators that prioritise only (Janus), edit-type diagnostics (EvoTrace), cost-constrained MCTS (MARS) | policies over folded state, cards, graded novelty (this run's history only), ablation refine, operator bandit (OFF), `weighted_parent`, foresight + surrogate; `_ensemble_idea` merge exists but sees no parent code; the stall rule exists and does not time the consult; `proxy.py` KILLS rather than prioritises; no model arm; no cost term | **GAP #4**: re-scoped to what is genuinely absent |
+| **Verification** | AAR's four measures (provenance coverage / soundness, contradiction transparency, audit effort), claims as PROV individuals with evidence bindings, MLE-bench's rule-violation + plagiarism detectors, Protocol Validity's Mislead gap, transcript judges (EvilGenie) | the RECORD is ahead (replayable log, `metric_subject`, verifier verdicts, W3C-PROV, redaction); DETECTION is shape-based and blind to all four 2026 hack classes with numbers; `/prov` exports no claim; no number on the field's own measures | **ahead on mechanisms, unmeasured on the field's measures** |
+| **Budget and time** | EurekAgent's callable clock + deadline injection; Token Budgets (2606.04056: fan-out races in 11 / 63 incidents, asyncio overshoot 30 / 30 without a reservation) | the budget reaches a role ONCE as a prompt cue; no tool returns elapsed / remaining; the eval process gets no deadline; per-client `CostAccountant` limits with no reserve | not parity: three markers |
+| **Grounding** | Kosmos, Mechanist, OmniScientist; RQ-Bench's "novelty mirage" for LLM-judged novelty | literature not durable; novelty gates never consult literature; no perception hook on `repo_task` | doc 51's items + two |
+| **Environment engineering** | EurekAgent (controller-owned result files the agent cannot touch), Sandlock (FS + TCP + IPC + syscall policy without root, ~5 ms) | fences and receipts are ahead — but the eval's allow-list grants `readwrite` over the run dir and the subprocess tier has no syscall or egress fence | qualified: two markers |
 
 ### 3.3 What "better than SOTA" has to mean for LoopLab
 
-Not "a higher medal rate at any cost": the survey and BAITBENCH say the field's numbers are produced
-by systems that release traces 38 % of the time and hack 57 % of the time when a shortcut is
-available. The credible target has three parts, and the order is the order of leverage:
-
-1. **A number nobody at the top publishes: medal rate WITH holdout selection, hack-adjusted, from a
-   replayable log.** LoopLab already has the machinery for every adjective; it has never produced the
-   noun. One MLE-bench Lite campaign through the trust layer (`no-external-benchmark-number-exists`,
-   with `no-hack-adjusted-score-reporting` as the reporting half) is the external proof, and the
-   target is the top cluster (77–86 % Lite) on the honest number.
-2. **The same selection discipline on the box's own tasks.** The dense-retrieval runs this box pays
-   for choose a champion on the candidate's printed metric. A hidden consistent split for `repo_task`
-   is the single largest measured lever in the field (AIRA₂'s +13 / +18.4) and it is one declaration
-   plus a host-side score stage (`repo-task-champion-is-picked-on-the-candidates-own-metric`).
-3. **Throughput that scales with what the box has**, which is P1's loop offload first and the
-   cross-machine pool after — and, before either, the research-grade knobs measured against the
-   default on the same task, because the field's technique map says the difference is large and this
-   repo has shipped it as a preset nobody has A/B'd (`research-grade-profile-is-not-the-default`).
+1. **A number nobody at the top publishes**, in the field's own vocabulary: medal rate on the
+   README's protocol (≥3 seeds, mean ± SEM), with a Mislead gap (`S_exploit − S_intended`) beside it,
+   the two official detectors run, holdout selection honoured, seeds and traces released as a
+   reviewer bundle. The target is stated per protocol: the main-board Lite ceiling is 80.30 (three
+   systems); paper-only claims run to 86.36; test-set-feedback rows to 90.91.
+2. **The same selection discipline on the box's own tasks**: consistent host-side scoring on a
+   hidden split for `repo_task`, with the never-seen final pick as the secondary half.
+3. **Throughput that scales with what the box has**: the loop offload, the build barrier, then a
+   pool once it can reach four workers.
 
 ### 3.4 What this pass could not establish
 
-LoopLab's own position on any external benchmark. `docs/MLEBENCH.md` documents the real host-graded
-path and records no completed run; doc 41 §8 step 5 asked for one on 2026-08-14 and it has not
-happened. Every "ahead / parity / gap" verdict in §3.2 is therefore a verdict about MECHANISMS
-present in the tree, not about outcomes — which is exactly the field's verification gap, turned on
-this repo.
+LoopLab's own position on any external benchmark: `docs/MLEBENCH.md` records no completed run, and
+the run it would record today selects on the private test set (§4.1). Every "ahead" verdict is about
+mechanisms.
 
 ---
 
 ## 4. The open items, as markers
 
-Every marker below was minted with a falsifier evaluated against the tree on 2026-09-06 AND mutated
-in a throwaway copy with the shipped form of its fix (the predicate flipped in every case). Per the
-house rule, the fix must land under the NAMED symbol or re-point the proof — §2.0 is what happens
-otherwise. Grouped by where the item came from; the rank is in §5.
+Every marker below has a falsifier evaluated against the tree on 2026-09-06 and mutated in a
+throwaway copy with the shipped form of its fix (the predicate flipped in every case). Where a proof
+is bound to a guessed fix name it says so; a fix landing under another name re-points it in the same
+change.
 
-### 4.1 From the SOTA pass (§3)
+### 4.1 From the SOTA pass and the six literature agents
 
 OPEN[repo-task-champion-is-picked-on-the-candidates-own-metric] the real GPU task family
-(`adapters/repo_task.py`) elects its champion on the metric the candidate's own script prints:
-`engine/holdout.py`'s holdout-gated selection exists only for host-graded tasks with a predictions
-file, and the repo task document declares no hidden split at all, so the field's largest measured
-selection effect (AIRA₂: +13.0 / +18.4 percentile points from Hidden Consistent Evaluation) is open on
-exactly the runs this box pays for. The fix is a `holdout` declaration on the repo task document — a
-host-side score stage over a split the candidate never reads, bound like `metric_subject` — and
-selection through the existing `holdout_select` rule. proof:absent:holdout@looplab/adapters/repo_task.py
+(`adapters/repo_task.py`) elects its champion on the number the candidate's own scorer prints —
+exactly the self-report AIRA₂ replaced with host-side CONSISTENT scoring on a label-hidden split
+(+13.0 / +18.4 percentile points), the never-seen final pick being the "marginal" half. `engine/holdout.py`
+holds only that marginal half, and only for host-graded tasks; the repo task document declares no
+split, `command_eval.py` has no host-side stage, and a "hidden" split is unenforceable while the eval's
+allow-list grants the run dir and Landlock is off — so this is L, and the honest first slice is
+CONSISTENT (host-scored, held constant across candidates) before HIDDEN. Under the survey's coding
+LoopLab is L4-m today; this is the move to L4-v. proof:absent:holdout@looplab/adapters/repo_task.py
 
-OPEN[merge-operator-is-mean-of-params-not-code] the only multi-parent operator averages numeric
-parameters (`search/operators.py::merge_idea`); there is no code-level crossover and no end-of-run
-ensemble of the top-k, which the leaderboard systems carry as their endgame (MLE-STAR and KompeteAI
-ensembling, Frontis-MA1's Crossover operator). The fix is `operators.py::merge_code` — a merge that
-reads both parents' committed code — plus a reserved endgame ensemble where a predictions file exists
-(doc 10 T8 / P2). proof:`absent:def merge_code@looplab/search/operators.py`
+OPEN[mlebench-search-optimises-the-private-grade] on the real MLE-bench path `engine/holdout.py::apply_host_grade`
+grades EVERY node's submission against the private test set and writes it back as `res.metric`, and
+`build_holdout_idx` returns an empty partition for `kind == "mlebench"` — so the search hill-climbs
+the private grade, the champion is a max over N test draws (the 9–13-point oracle gap AIRA₂ cites),
+and the protocol (no score feedback during a run; one final grade) is violated. The fix is a
+search-time host score on an agent-invisible split carved from the PUBLIC train data (AIRA₂'s
+D_search) and one private grade at finish. Precondition for the campaign.
+proof:`present:self._e._host_grader.get("kind") == "mlebench"@looplab/engine/holdout.py`
 
-OPEN[research-grade-profile-is-not-the-default] `PROFILES["thorough"]` holds the knobs the field's
-technique map says matter (`operator_bandit`, `ablate_every=3`, `confirm_top_k=3` / `confirm_seeds=3`,
-`trust_gate="gate"`, `budget_aware`, `complexity_cue`) and the shipped default is `profile="default"`
-with every one of them off. Whether the default should move is a MEASURED decision — one paired run
-per profile on the same task on the box — and until that number exists the gap is recorded, not
-assumed; the honest close is either the flip or a decline carrying the delta.
-proof:`present:profile: str = "default"@looplab/core/config.py`
+OPEN[merge-operator-is-mean-of-params-not-code] `merge_mode="auto"` resolves to `ensemble` for every
+LLM Developer and `engine/node_build.py::_ensemble_idea` issues a recombination directive (mean params
+plus 120-char parent rationales) — but the Developer is handed ONE parent's code (`speculation.py`
+passes `parents[0]`), while Frontis-MA1's Crossover applies its construction to BOTH parents and MGM
+hybridises the other lineage's TRACE. The field weights crossover low (ShinkaEvolve's mix: 0.1), so
+the fix is the cheap one: give `_ensemble_idea`'s Developer both parents' committed files and traces;
+a host-side top-k prediction ensemble needs a predictions file and is not the repo family's row.
+proof:`present:parents[0] if self._merge_mode == "ensemble" and parents else None@looplab/engine/speculation.py`
+
+OPEN[endgame-reserve-has-no-champion-sweep] `agents/strategist.py::RuleStrategist._decide_machinery`
+reserves the endgame at `node_budget_frac >= 0.8` for an ensemble only; EvoTrace measured a 24-call
+Bayesian sweep over one program's exposed hyperparameters matching or exceeding the evolutionary
+final-best on 13 / 15 tasks, and `prefer_sweep` / `SurrogateResearcher` exist and are never invoked
+there. proof:absent:endgame_sweep@looplab/agents/strategist.py
+
+OPEN[research-grade-profile-is-not-the-default] `PROFILES["thorough"]` holds `operator_bandit`,
+`ablate_every=3`, `confirm_top_k=3` / `confirm_seeds=3`, `trust_gate="gate"`, `budget_aware`,
+`complexity_cue`; the shipped default is `profile="default"` with all seven off. The decision is a
+MEASUREMENT on the box, and the critic showed the naive A/B is confounded — `thorough` also flips a
+SELECTION policy (`trust_gate`) and buys confirm evals — so the arms are: knobs without the gate, the
+gate alone, ≥3 seeds per arm, `generalization_gap` reported. FML-bench: strategy complexity alone
+does not guarantee performance; measure, do not flip. proof:`present:profile: str = "default"@looplab/core/config.py`
+
+OPEN[embedding-novelty-gate-declined-on-one-incident] `PROFILES["thorough"]` excludes
+`novelty_semantic` on one live incident (node 61) while ShinkaEvolve's ablation reports "substantial
+performance gains" from embedding rejection and only "marginal" gains from the LLM judge — LoopLab's
+shipped default (`novelty_mode="llm"`, `novelty_semantic=False`) is the inverse of the field's
+ablation; one more arm of the profile A/B decides it. proof:missing:docs/audit/novelty-gate-ab.md
+
+OPEN[eval-noise-floor-is-never-measured] no run records the repeated-seed spread of one candidate's
+metric, so whether a champion's margin exceeds evaluation noise — AIRA₂'s explanation of the field's
+"overfitting" — is undecidable; `confirm_top_k=0` / `confirm_seeds=0` by default and
+`trust/gate.py::one_se_better` is wired only into confirm. The instrument is the same ≥3-seed arm the
+profile A/B needs. proof:absent:eval_noise@looplab+absent:noise_floor@looplab/trust
 
 OPEN[no-external-benchmark-number-exists] `adapters/mlebench_real.py` and `docs/MLEBENCH.md` ship the
-real host-graded MLE-bench path and no completed run is recorded anywhere in the tree, so LoopLab's
-position against the 61–65 % full-set / 77–86 % Lite cluster is unknown, and every "ahead" verdict in
-§3.2 is about mechanisms rather than outcomes. The deliverable is an audit page recording one
-MLE-bench Lite campaign with raw, hack-adjusted and holdout-selected numbers and the seeds and traces
-the survey says 62 % of systems withhold. proof:missing:docs/audit/mlebench-lite-campaign.md
+real host-graded path and no completed run is recorded anywhere in the tree. BLOCKED behind
+`mlebench-search-optimises-the-private-grade` (today's path would publish a test-selected number),
+the seed protocol, the percentile-rank record and the two official detectors; the audit page carries
+the survey's Table 10 columns (code + prompts, seeds / traces, result-selection policy, novelty
+method, HITL entry points, harness + cost). proof:missing:docs/audit/mlebench-lite-campaign.md
 
-OPEN[operator-bandit-has-no-model-arm] `search/policy.py::_bandit_pick` learns WHICH OPERATOR to
-fire from folded yields and nothing learns WHICH MODEL should generate it: the per-role models this
-repo already routes (`researcher_model`, `developer_model`, …) are fixed for the run, while
-ShinkaEvolve's bandit over an LLM ensemble is where its sample efficiency comes from. The fix is a
-`model_arm` on the same yield table — breadth per cost, a policy change that widens no trusted input.
-proof:absent:model_arm@looplab/search/policy.py
+OPEN[mlebench-campaign-has-no-seed-protocol] the README's submission rule is ≥3 seeds reported as
+mean ± SEM; `docs/MLEBENCH.md` names no seed count and no aggregation.
+proof:absent:seed@docs/MLEBENCH.md
 
-OPEN[skills-load-flat-not-by-tier] `tools/skills.py` serves every skill the same way, with no
-global / domain / task tier and no tier-ordered loading — and HASTE measured flat loading at 62.5 %
-medal rate on 8 competitions, the same as loading NO skills, against 100 % for tiered loading of the
-identical inventory. Ranked behind doc 51's skill-body and skill-demotion markers, because a tier of
-unbounded bodies is still unbounded. proof:absent:tier@looplab/tools/skills.py
+OPEN[mlebench-grader-records-no-percentile-rank] `adapters/mlebench_grade.py` records score, medal
+and `above_median`; AIRA₂ and OpenAI report MLE-bench-30 PERCENTILE RANK, so LoopLab's number could
+not be read on their scale. proof:absent:percentile@looplab/adapters/mlebench_grade.py
+
+OPEN[mlebench-path-runs-neither-official-detector] `mle-bench/extras` ships an LLM rule-violation
+detector over logs + code and a Dolos plagiarism check against downloaded kernels, both run in the
+paper; neither has a counterpart in the tree.
+proof:absent:rule_violation@looplab/adapters/mlebench_real.py+absent:plagiarism@looplab
+
+OPEN[no-hack-adjusted-score-reporting] the trust layer flags reward hacks, leakage and salvage on the
+row and no report projects an adjusted score beside the raw one. The field has since defined the
+shape: Protocol Validity's Mislead gap, `G = S_exploit − S_intended` (inflation 0.45–1.00 on ML-research
+traces), reported as the pair and its gap rather than a flag-count subtraction.
+proof:absent:mislead_gap@looplab
 
 OPEN[developer-hack-rate-unmeasured] nothing has measured how often LoopLab's own Developer takes a
-planted, rule-compliant shortcut (BAITBENCH's shape: 57.1 % of runs across seven frontier agents, above
-50 % even when told not to), with the detectors ON and OFF — so the §3.2 "ahead on verification"
-verdict is a statement about mechanisms and not a number. The deliverable is an audit page over three
-synthetic tasks with optional shortcuts, on the box. proof:missing:docs/audit/developer-hack-rate.md
+planted, rule-compliant shortcut. BAITBENCH released its three tasks, its two-stage transcript judge
+and annotated hack transcripts, so the instrument is S, not L; EvilGenie found held-out tests add
+"only minimal improvement" over a transcript judge, so the A/B is NOT detectors on / off (the shape
+detectors cannot see a rule-compliant shortcut by construction); SciIntegrity's infeasible-task trap
+and completion pressure are the two extra arms. Precondition of the campaign's Mislead column.
+proof:missing:docs/audit/developer-hack-rate.md
 
-### 4.2 From doc 50's untagged residue
+OPEN[leakage-scan-has-no-multi-test-detector] `trust/leakage.py` flags fit-before-split, fit-on-test,
+row overlap and temporal overlap; LeakageDetector 2.0's third class — repeated evaluation against the
+same test split followed by selection — is undetected, and on `repo_task` the candidate's own scorer
+IS that split. proof:absent:multi_test@looplab/trust/leakage.py
 
-OPEN[claim-readers-still-key-on-run-id] the sweep moved lessons, capsules and claims health onto
-`core/run_identity.py::run_ref` / `row_belongs_to_run`, and three readers still key on the directory
-NAME: `claims_assessments.py::_qualify_refs` / `_ingest_evidence`, `claims_retrieval.py::portfolio_atlas`,
-`concept_shelf.py::run_concept_index`. On the half of the corpus where names are reused, two
-incarnations' rows collapse into one group, `producer_receipt_known` flips false and every one-sided
-verdict is demoted (doc 50 EK-03). The fix routes each through the shared rule with the
-two-incarnation fixture the other readers got.
-proof:absent:run_ref@looplab/engine/claims_assessments.py+absent:row_belongs_to_run@looplab/engine/claims_assessments.py
+OPEN[operator-bandit-has-no-model-arm] `search/policy.py::_bandit_pick` learns WHICH OPERATOR fires
+from folded yields and nothing learns WHICH MODEL generates it; four independent 2026 results say the
+lever is real at iso-budget (LEVI 3.3–6.7×, DEI +124 % QD-score, cross-tier 5.6–14×, ShinkaEvolve's
+bandit > single > fixed). The shape is an operator × model ROUTER with the cheap tier on the
+high-volume implement loop (`agent_stage_models[role]` is the static precedent) — INERT until
+`operator_bandit` is on, which the profile A/B decides. proof:absent:model_arm@looplab/search/policy.py
 
-OPEN[refusal-codes-have-no-table] `serve/http.py` holds the body-parsing half of the read-side rules
-and no refusal-code table: six `HTTPException(500)` sites answer an unreadable snapshot where every
-sibling answers `503`, and one reflects an `OSError` text carrying a host path (doc 50 SR-05). The fix
-is one table of refusal codes in that module with a guard that no route answers `500` for unreadable
-input. proof:absent:503@looplab/serve/http.py
+OPEN[mcts-selection-has-no-cost-term] MARS's cost-constrained MCTS balances expected gain against
+execution expense; every policy in `search/policy.py` ranks by metric alone and `budget_aware` is a
+prompt cue. proof:absent:eval_cost@looplab/search/policy.py
 
-OPEN[run-setup-failure-is-not-a-refusal-type] a failed `run_setup` surfaces as a bare error with its
-42 frames rather than as the `EnvironmentRefusal` every other deliberate refusal about the operator's
-environment wears (doc 50 ES2-06; `core/errors.py::OperatorRefusal` is the marker type).
+OPEN[edit-cycling-and-edit-type-unannotated] nothing classifies a node's committed diff by edit type
+or detects lines re-introduced byte-identically after a deletion earlier in the lineage — EvoTrace:
+~30 % of added lines, rising in 118 / 121 runs, with gains concentrated in three of nine edit types;
+`tools/node_diff.py` already reads both nodes' committed files. Replaces the seed-distance scalar as
+the field-measured diagnostic. proof:absent:reintroduc@looplab/tools/node_diff.py+absent:edit_type@looplab/tools/node_diff.py
+
+OPEN[proxy-prediction-accuracy-unmeasured] the pre-execution judges the field ships MEASURE
+themselves (Meta's research preference models 0.684 → 0.729; predict-before-execute 61.5 % pairwise;
+Rehearse's judge decaying 82.8 → 56.9 % late in a loop); `search/proxy.py::ProxyScorer` (k-NN over
+params) has no measured accuracy, no CLI audit, and KILLS (`proxy_skipped`) where Janus's calibrated
+proxies only prioritise. proof:absent:pairwise_accuracy@looplab/search/proxy.py
+
+OPEN[foresight-selective-accuracy-unmeasured] `search/foresight.py::foresight_scoreboard` reports the
+predict-before-execute hit rate as a prompt sentence; nothing records it by position in the run,
+where Rehearse measured selective accuracy falling 82.8 → 56.9 % "while the judge remains willing to
+decide". Box-only. proof:missing:docs/audit/foresight-hit-rate.md
+
+OPEN[smoke-full-rank-fidelity-unmeasured] `EvalSpec.profiles` (smoke / full) is LoopLab's evaluation
+cascade rung — AlphaEvolve's cascade, OpenEvolve's `cascade_evaluation`, LEVI's rank-preserving proxy
+benchmark — and nothing measures whether smoke rank order survives at full, which is what decides
+whether promotion may read it. Box-only. proof:missing:docs/audit/smoke-full-rank-fidelity.md
+
+OPEN[skills-load-flat-not-by-tier] `tools/skills.py` serves one flat dict with no global / domain /
+task tier; HASTE measured flat loading at 62.5 % on 8 competitions — the same as NO skills, at 2× the
+output tokens — against 100 % tiered. SkillZip Pro's warning applies to doc 51's `clip`: cut whole
+sections, never bytes (an unprotected 71 % compression lost 26 accuracy points). Ranked behind the
+skill-body and demotion markers: a tier of unbounded bodies is still unbounded.
+proof:absent:tier@looplab/tools/skills.py
+
+OPEN[injected-priors-leave-no-structured-record] the cross-run prior is prose spliced into both role
+prompts (`engine/lessons_priors.py::_render_role_prior`), lesson rows carry no id, and no event names
+which rows a proposal was shown — so no utility signal can be computed and the prior citation-rate
+audit has no instrument (the `CODEX AGENT` note in `tools/cross_run_tools.py` says the same of tool
+results). The fix is a fold-ignored diagnostic `EV_PRIOR_INJECTED` (role, per-row statement digests)
+appended by the main task at load. proof:absent:prior_injected@looplab/events/types.py
+
+OPEN[lesson-rank-has-no-utility-term] `engine/lesson_hygiene.py::lesson_rank_key` ranks by similarity,
+confidence × evidence count and recency — all write-side — and forgetting happens only by CONTRADICTION,
+never by uselessness, while SkillAudit, Co-Evolving and ReMe each key retention on a read-side
+outcome. Depends on the record above. proof:absent:utility@looplab/engine/lesson_hygiene.py
+
+OPEN[eval-process-is-not-told-its-deadline] the runtime exports `LOOPLAB_EVAL_SEED` / `LANDLOCK` /
+`READ_FENCE_DIR` / `DOCKER_IMAGE` and no deadline, so a candidate cannot size its last epoch at
+runtime — EurekAgent's time helper and deadline warning are what its roles use.
+proof:absent:LOOPLAB_EVAL_DEADLINE@looplab/runtime/command_eval.py
+
+OPEN[agents-cannot-read-their-own-clock] no tool returns elapsed / remaining time and the tool loop
+injects no deadline warning; a Developer or repair session is tree-killed at `agent_timeout` having
+been told its budget once, at proposal time. proof:absent:remaining_time@looplab/tools+absent:deadline@looplab/agents/tool_loop.py
+
+OPEN[no-trace-to-training-data-export] Frontis-MA1 (39.39 → 60.61 % from execution-grounded SFT / RL
+on operator traces) and SandMLE (+20–67 % relative) train operators from exactly the corpus
+`spans.jsonl` holds; `cli/export_cmds.py` exports MLflow and a notebook only. Enabling work, ranked
+late. proof:absent:sft@looplab/cli/export_cmds.py
+
+OPEN[memo-synthesis-statements-have-no-provenance-coverage] `trust/memo_verify.py` reads only the
+`claims` list; `summary` / `findings` / `directions` — the synthesis statements Kosmos measured at
+57.9 % accurate — are neither bound to evidence nor counted, so AAR's first measure cannot be computed
+for a LoopLab memo. Instrument first: a coverage number per memo section.
+proof:absent:provenance_coverage@looplab/trust/memo_verify.py
+
+OPEN[memo-quoted-numbers-unmatched-against-cited-metrics] the deterministic verifier declines to
+match numbers (a regex cannot tell an arXiv id from a metric) and leaves numeric correctness to the
+LLM verifier; MLReplicate's 59 % says fabricated numbers are what survives review, and matching a
+decimal against the CITED nodes' recorded metrics needs no classifier. Measure the match rate over
+the corpus first. proof:missing:docs/audit/memo-number-fidelity.md
+
+OPEN[novelty-gates-never-consult-literature] both novelty gates and `search/graded_novelty.py` grade
+against this run's history and never against retrieved literature — the form RQ-Bench measured as a
+"novelty mirage"; doc 51's `retrieved-literature-is-never-durable` is the retrieval half.
+proof:absent:literature@looplab/engine/novelty.py
+
+OPEN[prov-export-carries-no-claims] `serve/routers/runs.py::prov` exports solution entities,
+experiment activities and two agents, and no claim entity with its evidence binding and verifier
+verdict, though `research_completed` holds both; the field's PROV-O profile (2608.18312) is
+claims-as-individuals. proof:absent:verdict@looplab/serve/routers/runs.py
+
+OPEN[failure-diagnosis-emits-one-cause-not-competing-hypotheses] the diagnostician returns one
+`failure_kind` with a findings trail (`FINDINGS_CAP = 6`) and never alternative explanations with
+independent severity; SAGE's multi-hypothesis attribution moved metrics-bearing outputs 42 → 92 %; the
+live classifier scores 88 / 118 on `failure_triage.v1`. proof:absent:hypotheses@looplab/engine/failure_diagnosis.py
+
+OPEN[no-research-lifecycle-benchmark-number] `adapters/` holds toy / dataset / repo / MLE-bench and no
+adapter for an experiment-level benchmark (EXP-Bench 461 tasks, ResearchClawBench 40, AARRI 82,
+InnovatorBench 20), so the noun LoopLab is — a research loop, not a medal agent — has no external
+number even after the campaign. proof:missing:docs/audit/research-lifecycle-benchmark.md
+
+OPEN[no-reviewer-bundle-export] seeds (`LOOPLAB_EVAL_SEED`, `confirm_seed_base`) and traces
+(`spans.jsonl`, `events.jsonl`) exist on disk and nothing packages them with code and claims for a
+reviewer — the survey's 38 % dimension, the field's RO-Crate export. proof:absent:RO-Crate@looplab
+
+OPEN[eval-may-write-the-run-record] the eval launch allow-list grants the candidate's process
+`readwrite` over the WHOLE run dir (`runtime/read_allowlist.py::derive`), the read fence's
+`MUTATION_EVENTS` cover only source roots, and the subprocess tier — the only tier the box runs — has
+no write fence, so a training script can append a well-formed `node_evaluated` row to `events.jsonl`
+or rewrite `task.snapshot.json`; the store's foreign-writer stop fires only on a MALFORMED row. Docs/36
+and EurekAgent's hook-protected result files both say the candidate may never elect. Fix: run dir
+read-only to the eval, writes only on the workdir and the fence directory, plus a mutation-event
+refusal as the message rung. proof:`present:_add(out, run_dir, "readwrite", declared=True)@looplab/runtime/read_allowlist.py`
+
+OPEN[subprocess-tier-has-no-syscall-or-egress-fence] no seccomp filter exists anywhere in
+`looplab/`, Landlock TCP rules need ABI 4 and the box measured ABI 2, so on the default tier an eval
+can `connect()` anywhere and the two audit-invisible mutators `dev_probe` found (`mknod`, `mkfifo`)
+have no kernel rung; Sandlock enforces FS + TCP + IPC + syscall policy without root at ~5 ms startup on
+exactly this constraint set. Doc 38's "seccomp irrelevant" verdict was about path-based READ refusal
+and stands. proof:absent:seccomp@looplab/runtime
+
+OPEN[otel-bridge-carries-no-genai-semconv] the OTel bridge opens spans with LoopLab's own attribute
+names and no `gen_ai.operation.name` or `gen_ai.usage.*`; the GenAI conventions are Development-status
+with no release in their new repository (2026-06). Deferred until they cut one.
+proof:absent:gen_ai@looplab/core/tracing.py
+
+### 4.2 From doc 50's residue and the in-code `CODEX AGENT` notes
+
+OPEN[claim-readers-still-key-on-run-id] `engine/claims_health.py::_qualify_refs` builds
+`f"{run_id}:{node}"` (it is DEFINED there; `claims_assessments.py` imports it), and
+`claims_retrieval.py::portfolio_atlas` / `concept_shelf.py::run_concept_index` still key on the
+directory name, while lessons, capsules and the rest of claims health moved to
+`core/run_identity.py::run_ref` / `row_belongs_to_run`. Two incarnations of one name collapse into
+one group, `producer_receipt_known` flips false and every one-sided verdict is demoted (doc 50 EK-03).
+proof:line:_qualify_refs&&run_id@looplab/engine/claims_health.py
+
+OPEN[refusal-codes-have-no-table] six `HTTPException(500)` sites answer an unreadable configuration
+snapshot where `run_commands.py` answers `503` — four in `serve/routers/runs.py`, two in
+`serve/routers/reviews.py` — and two of them interpolate the `OSError` text, host path included
+(doc 50 SR-05). The fix is one refusal-code table (`serve/http.py` already holds the body-parsing
+half) with a guard that no route answers `500` for unreadable input.
+proof:`present:raise HTTPException(500, f"the run configuration snapshot is unreadable: {exc}")@looplab/serve/routers/runs.py`
+
+OPEN[run-setup-failure-is-not-a-refusal-type] `engine/eval_dispatch.py` raises a bare
+`RuntimeError("run_setup failed …")` where every other deliberate refusal about the operator's
+environment wears `core/errors.py::EnvironmentRefusal` (a subclass of both, so the swap is
+source-compatible); the refusal reads as an engine crash (doc 50 ES2-06).
 proof:absent:EnvironmentRefusal@looplab/engine/eval_dispatch.py
 
-OPEN[systemic-stop-reason-has-no-registry] `orchestrator.py::systemic_failure_stop_reason` mints its
-stop sentence as a bare literal, the one engine-minted terminal vocabulary the 2026-09-02 registry
-pass left out (doc 50 ES1-06); a typo'd reader compares against a string nothing guards. The fix is a
-`SYSTEMIC_STOP` constant beside `ENGINE_TERMINAL_REASONS` with the two-way scan.
-proof:absent:SYSTEMIC_STOP@looplab/engine/orchestrator.py
+OPEN[run-stop-reason-compared-as-a-bare-literal] the run-level stop vocabulary is decided by eight
+`str(... or "").lower() == "error"` comparisons (`serve/run_commands.py` ×2, `serve/appstate.py`,
+`engine/orchestrator.py` ×2, `engine/finalize.py`, `events/finalize_scope.py`, `cli/run_cmds.py`)
+against a word no registry holds — the engine-terminal registry of 2026-09-02 covers NODE reasons.
+A drifted spelling at one site silently changes what "finished cleanly" means there.
+proof:`present:str(state.stop_reason or "").lower() == "error"@looplab/serve/run_commands.py`
 
-OPEN[no-single-untrusted-evidence-envelope] the untrusted-text rule reaches the assistant, the
-concept tagger and the MCP cache key and not the surfaces that move engine decisions: the Strategist
-(`agents/strategist.py`, whose answer sets `eval_parallel` / `policy` / `timeout`), the crash-triage and
-repair-critic prompts (`engine/triage.py` reads a candidate's stderr verbatim), the arXiv / web results
-(`tools/literature.py`). Doc 50 XP-05's fix is ONE envelope — `core/evidence.py`, label plus guard
-sentence — used by every splice, behind a Settings flag with a legacy-snapshot default of off because
-prompt strings are contracts. proof:missing:looplab/core/evidence.py
+OPEN[no-single-untrusted-evidence-envelope] the untrusted-text rule reaches the assistant, the concept
+tagger and the MCP cache key and not the surfaces that move engine decisions: the Strategist (whose
+answer sets `eval_parallel` / `policy` / `timeout`), the crash-triage and repair-critic prompts
+(verbatim stderr), the arXiv / web results. Doc 50 XP-05's fix is ONE envelope — `core/evidence.py`,
+label plus guard sentence — behind a Settings flag with a legacy-snapshot default of off, because
+prompt strings are contracts; the field's apply / defer / reject controller (2608.05235) is its shape.
+proof:missing:looplab/core/evidence.py
 
 OPEN[engine-attributes-have-no-declaring-site-guard] `Engine` touches 772 attribute names across 20
 mixins, 91 assigned only outside `__init__`, 47 from more than one file, with 143 silent handlers in
-the same package to absorb the `AttributeError` a typo produces (doc 50 XP-08; the `_AshaStub`
-incident). The cheap half of the fix is an AST guard that every `self._x` read in `engine/` has exactly
-one declaring site; the typed state records come after it.
+the package to absorb the `AttributeError` a typo produces (doc 50 XP-08; the `_AshaStub` incident).
+The cheap half is an AST guard that every `self._x` read in `engine/` has exactly one declaring site.
 proof:missing:tests/test_engine_attribute_sites.py
 
 OPEN[layering-rules-are-not-machine-checked] 38 % of intra-package import edges are function-local
-and only a third of the stated layering rules are guarded (`runtime` purity, `agents→search`, the
-private seams); nothing guards `core` or `events` purity, `engine↛serve`, `tools↛serve`, `adapters`
-(doc 50 XP-07). The fix is one AST guard over the package matrix with the deferred-import allowance
-explicit per edge. proof:missing:tests/test_package_layering.py
+and only a third of the stated layering rules are guarded; nothing guards `core` or `events` purity,
+`engine↛serve`, `tools↛serve`, `adapters` (doc 50 XP-07). One AST guard over the package matrix with
+the deferred-import allowance explicit per edge. proof:missing:tests/test_package_layering.py
 
-OPEN[settings-doc-guard-compares-names-not-defaults] `tests/test_config_docs_sync.py` asserts that
-every `Settings` field has a row in `docs/guide/configuration.md` and never that the row's DEFAULT is
-the field's (doc 50 DX-03); CLAUDE.md's sync rule says every row must carry the CORRECT default, and
-by hand it does today. The fix compares each documented default against `Settings` and fails on the
-first drift. proof:absent:default@tests/test_config_docs_sync.py
+OPEN[settings-doc-guard-compares-names-not-defaults] `tests/test_config_docs_sync.py` asserts every
+`Settings` field has a row in `docs/guide/configuration.md` and never that the row's DEFAULT is the
+field's (doc 50 DX-03); the one default compared anywhere is `inline_repair_reasons`, in a different
+file. proof:absent:default@tests/test_config_docs_sync.py
 
-### 4.3 From the docs pass (§2.1)
+OPEN[stage-checker-is-handed-a-blind-tail] `runtime/command_eval.py::_call_stage_check` is the last
+judge in the engine handed a blind 4,000-character tail of the stage's stdout with no log tools — the
+same slice-vs-look defect the three watchdog judges were fixed for — and BACKLOG §0.9 records it as
+the still-open residue behind the 2.33 GPU-h re-train; `train_monitor.repair_log_tools` is the
+provider it should be given. proof:`present:run.out[-4000:]@looplab/runtime/command_eval.py`
 
-OPEN[lessons-are-not-operator-scoped] cross-run lessons are keyed by task fingerprint and retrieved
-for every proposal regardless of the OPERATOR about to fire (`engine/lessons.py` — draft, improve,
-merge, ablate all read one pool), while AIRA's per-operator scoped memory and ML-Master's
-parent-plus-siblings context are the recurring winning design (doc 10 M1, "designed, still
-unbuilt"). The fix is an `operator_scoped` retrieval keyed on `(fingerprint, operator)` beside the
-existing pool. proof:absent:operator_scoped@looplab/engine/lessons.py
+OPEN[sse-retransmits-the-whole-folded-state] `serve/routers/runs.py`'s state stream serializes and
+retransmits the complete, growing folded state on every event (its own `CODEX AGENT` note), so a long
+run's tab costs O(events × state) bytes; the fix is a delta stream keyed on the seq the client last
+saw. proof:`present:f"data: {json.dumps(payload)}\n\n")@looplab/serve/routers/runs.py`
 
-OPEN[no-plan-artifact-with-endgame-reserve] a run has no durable plan: budget allocation across
-phases, an endgame reserve for confirmation and ensembling, and re-planning on stagnation live in
-nobody's record (doc 10 P2, doc 11 D13). The fix is an `EV_PLAN` event the fold applies and an
-endgame reserve the dispatcher honours. proof:absent:EV_PLAN@looplab/events/types.py+absent:endgame@looplab/engine/orchestrator.py
+OPEN[cross-run-tools-are-a-process-wide-flag] `serve/assistant.py` mounts `CrossRunTools` on one
+process-wide `cross_run_enabled` flag, not per principal (its own `CODEX AGENT` note: a multi-user
+security gap on the shared hub). proof:`present:if cross_run_enabled:@looplab/serve/assistant.py`
 
-OPEN[strategist-consult-is-cadence-not-stagnation-triggered] `engine/strategy.py` consults the
-Strategist every `strategist_every` nodes and never because the run has STOPPED IMPROVING; the
-stagnation signal that MLEvolve's stagnation detection and doc 11 D3's FML-bench result key on is
-mentioned only in the Strategist's prompt (`agents/strategist.py`). The fix is a deterministic
-plateau trigger over folded metrics that makes a consult due early, with the cadence as the fallback.
-proof:absent:stagnat@looplab/engine/strategy.py+absent:plateau@looplab/engine/strategy.py
+OPEN[parallel-build-is-a-bulk-synchronous-barrier] `engine/orchestrator.py`'s parallel build is a
+join over a `parallel_build_batch` task group — a barrier, not the steady-state pool AIRA₂ dispatches
+into as soon as any worker is free (its own `CODEX AGENT` note; doc 22's shape correction). The
+in-box half of the throughput gap, before any cross-machine pool.
+proof:`present:self.tracer.span("parallel_build_batch"@looplab/engine/orchestrator.py`
 
-OPEN[no-hack-adjusted-score-reporting] the trust layer flags reward hacks, leakage and salvage on the
-row and no report projects a HACK-ADJUSTED score beside the raw one — the number a benchmark
-publication would need and the number doc 26 §4.2 #2 asked for. The fix is a `hack_adjusted` field on
-the run summary and the report, derived from the flags already folded.
-proof:absent:hack_adjusted@looplab
+OPEN[cross-run-tool-results-leave-no-invocation-record] `tools/cross_run_tools.py` renders a memory
+read into the prompt and records neither the exact rendered result nor an invocation id a later
+decision could be joined to (its own `CODEX AGENT` note) — the tool-result twin of the prior-record
+gap, and the second precondition of the citation-rate audit.
+proof:absent:invocation_id@looplab/tools/cross_run_tools.py
 
-OPEN[prior-injection-hit-rate-unmeasured] every cross-run prior (lessons, skills, capsules, claims)
-is injected into prompts and nothing measures whether an injected prior was USED by the proposal that
-followed or changed its outcome (doc 26 §4.2 #9, doc 41 §8 step 3) — so memory growth is unbounded by
-any utility signal. The deliverable is an audit over the box's logs: injected priors × cited-in-idea ×
-metric delta. proof:missing:docs/audit/prior-injection-hit-rate.md
+OPEN[write-tool-reopens-the-approved-path-by-name] `tools/write_tools.py` proves containment on a
+resolved pathname before approval and then reopens the path BY NAME for the atomic replacement, so a
+concurrent symlink or junction swap of an ancestor can redirect an approved write outside the allowed
+root (its own `CODEX AGENT` note); descriptor-relative no-follow opens with a final identity re-check
+are the fix. proof:`present:p, content, preimage_mode, preimage_state, preimage_mode)@looplab/tools/write_tools.py`
+
+### 4.3 From the docs pass (§2.1), corrected
+
+OPEN[lessons-are-not-operator-scoped] cross-run LESSONS are retrieved by task fingerprint and role
+(`engine/lessons_priors.py::_render_role_prior`: fingerprint Jaccard ≥ 0.34, harmonic recall, top-5)
+regardless of the operator about to fire; the in-run parent-plus-siblings context DOES exist
+(`events/digest.py::lineage_lessons`, `sibling_digest`). The only per-operator scoping ablation in the
+field (AIRA-dojo) is null, so this is LAST in the memory stack and closes as a decline if the
+citation-rate audit shows no operator effect. proof:absent:operator_scoped@looplab/engine/lessons_priors.py
+
+OPEN[no-plan-artifact-with-endgame-reserve] the endgame reserve EXISTS as a rule
+(`RuleStrategist._decide_machinery`: `node_budget_frac >= 0.8` → `merge_mode: "ensemble"`,
+`ablate_every: 0`, durable through `EV_STRATEGY_DECISION`); what is absent is a durable PLAN artifact
+— budget allocation across phases, a reserve the DISPATCHER honours rather than a consult that may
+never fire, re-planning on stagnation (doc 10 P2, doc 11 D13). proof:absent:EV_PLAN@looplab/events/types.py
+
+OPEN[strategist-consult-is-cadence-not-stagnation-triggered] the plateau reading EXISTS —
+`agents/strategist.py::improves_since_best` is computed into `StrategyContext` and
+`RuleStrategist._decide_machinery` branches on it against `stall_window` (greedy⇄broad, deep research
+at 2×) — and `engine/strategy.py::_should_consult` still fires on `cadence_due` alone, so the reaction
+waits for the next cadence tick. The fix is one condition: due when `improves_since_best >=
+stall_window`. FML-bench's stagnation-adaptive agent beat all six baselines; Rehearse's judge decay is
+a second trigger. proof:absent:stagnat@looplab/engine/strategy.py+absent:plateau@looplab/engine/strategy.py
+
+OPEN[prior-injection-hit-rate-unmeasured] nothing measures whether an injected prior (lesson, skill,
+capsule, claim) was CITED by the proposal that followed or changed its outcome, so memory growth is
+unbounded by any utility signal; the field's only "was it used" number is dialogue QA (2603.02473).
+Named a CITATION rate to avoid HASTE's keep-fraction sense of "hit rate"; needs the two record
+markers above first. Box-only. proof:missing:docs/audit/prior-injection-hit-rate.md
 
 OPEN[deep-research-plan-is-not-durable] Deep Research planning survives only inside one tool-loop
-context: no `ResearchPlan`, no `ProgressLedger`, no replayable episode state, so a resume repeats a
-settled question and a crash after the attempt receipt loses the branch (doc 28 DR-01, its own P0).
-proof:absent:ResearchPlan@looplab/agents/deep_research.py+absent:ProgressLedger@looplab/agents/deep_research.py
+context: no `ResearchPlan`, no `ProgressLedger`, no replayable episode state (doc 28 DR-01). Four
+independent 2026 works converge on it (AAR, SCION's Research Execution Plan, auditable records with
+applicability boundaries, claims as individuals). One fix with doc 27's
+`inner-agent-phases-not-event-sourced`. proof:absent:ResearchPlan@looplab/agents/deep_research.py+absent:ProgressLedger@looplab/agents/deep_research.py
 
-OPEN[research-evidence-has-no-exact-span-identity] a research memo's evidence is a URL plus a short
-snippet — no immutable `EvidenceItem` with locator, hash and provenance — so a verifier verdict cannot
-be re-checked later and a claim cannot resolve to a stable evidence id (doc 28 DR-02, its own P0;
-Kosmos cites every statement to code or literature). proof:absent:EvidenceItem@looplab
+OPEN[research-evidence-has-no-exact-span-identity] a memo's evidence is a URL plus a snippet — no
+immutable `EvidenceItem` with locator, hash and provenance (doc 28 DR-02) — so a verifier verdict
+cannot be re-checked later; one durable record with doc 51's `retrieved-literature-is-never-durable`.
+proof:absent:EvidenceItem@looplab
 
 OPEN[landlock-refusal-is-not-translated-for-triage] under `landlock="enforce"` a refused read arrives
-as `EACCES` → `PermissionError`, the silent-skip shape the read fence's own exception type exists to
-avoid, and nothing at the repair boundary rewrites that failure into the fence's sentence before the
-triage judge reads it (doc 38 §3 item 2). Blocked behind the default flip (`landlock-is-opt-in-by-default`).
-proof:absent:EACCES@looplab/engine/crash_repair.py+absent:EACCES@looplab/engine/failure_diagnosis.py
+as `EACCES` → `PermissionError`, the silent-skip shape the read fence's own exception type avoids, and
+nothing at the repair boundary rewrites it into the fence's sentence before the triage judge reads it
+(doc 38; ActPlane's "opaque errors that confuse the agent"). Lands WITH the Landlock GPU validation,
+before the default moves. proof:absent:EACCES@looplab/engine/crash_repair.py+absent:EACCES@looplab/engine/failure_diagnosis.py
 
-OPEN[parallel-build-has-no-golden-replay] doc 22's phase 4 specified "a new golden for a 2-wide
-parallel-build run" pinning id monotonicity, one terminal per node and a deterministic fold, and
-`tests/test_golden_replay.py` still holds only the serial golden — the only golden this concurrency
-seam has is the one that cannot see it. proof:absent:parallel@tests/test_golden_replay.py
+OPEN[parallel-build-has-no-golden-replay] doc 22's phase 4 specified a golden for a 2-wide
+parallel-build run pinning id monotonicity, one terminal per node and a deterministic fold;
+`tests/test_golden_replay.py` holds only the serial golden. proof:absent:parallel@tests/test_golden_replay.py
 
-OPEN[no-distance-from-seed-signal] nothing measures how far a candidate has moved from the seed
-program, so "still the baseline with a comment" and a real change are indistinguishable to selection
-and to novelty (doc 17 §11; ResearchStudio's Scoop-Check is the precedent). A pure function over
-committed code — a diff-size and structure distance — is the fix.
+OPEN[no-distance-from-seed-signal] nothing measures how far a candidate moved from the seed program
+(doc 17 §11; MLGym's "models usually improve by finding better hyperparameters" is what it would
+show). Demoted: no measured precedent in the window; the edit-type marker is the field-measured
+diagnostic. Guessed names — re-point on landing.
 proof:absent:distance_from_seed@looplab/search+absent:seed_distance@looplab/search
 
 OPEN[stage-assert-has-no-model-free-numeric-form] a stage's `expect.assert` is judged by an LLM
-against the stage's printed tail, so it is only as good as what the stage prints and it was measurably
-unstable (the 2.33 GPU-h re-train in BACKLOG §0.9); the obvious next step — a declared numeric
-relation the ENGINE evaluates against a named key the stage prints — is not built (BACKLOG §6).
-proof:absent:expect_numeric@looplab/runtime/command_eval.py+absent:numeric_assert@looplab/runtime/command_eval.py
+against the stage's printed tail; a declared numeric relation the ENGINE evaluates against a named key
+the stage prints (CapCode's cap, Arbor's margin are the shape) is not built — `STAGE_EXPECT_KEYS` is
+the closed pair `("files", "assert")`. proof:`line:STAGE_EXPECT_KEYS&&"assert")@looplab/runtime/command_eval.py`
 
-OPEN[stage-rows-are-last-wins-per-name] `replay.py::_on_stage_finished` keeps one row per stage
-NAME, so after an inline repair the attempt that actually spent the training wall-clock is not on the
-node's record (BACKLOG §6 D5); the repair-epoch stamp says which attempt a surviving row belongs to,
-not what the replaced attempts cost. Accounting and UI only; metrics and replay are unaffected.
-proof:`present:n.stages[i] = rec@looplab/events/replay.py`
+OPEN[stage-rows-are-last-wins-per-name] `replay.py::_on_stage_finished` keeps one row per stage NAME,
+so after an inline repair the attempt that spent the training wall-clock leaves no row (BACKLOG §6
+D5). Per-attempt rows change the FOLD output for every repaired node, so this lands after the
+corpus-digest baseline the `EvalAttempt` split takes. proof:`present:n.stages[i] = rec@looplab/events/replay.py`
 
 OPEN[readmodel-watermark-ignores-event-data] `readmodel.py::coverage_watermark` digests the ordered
-`(seq, type)` prefix and nothing about event DATA, so a log whose `node_evaluated.metric` was edited
-in place still certifies `current` while the fold answers the new value (BACKLOG §0.2, driven).
+`(seq, type)` prefix and nothing about event DATA, so a log whose `node_evaluated.metric` was edited in
+place still certifies `current` (BACKLOG §0.2, driven).
 proof:`present:rows = [[int(getattr(e, "seq", -1)), str(getattr(e, "type", ""))] for e in events]@looplab/events/readmodel.py`
 
-OPEN[launch-readiness-gate-is-two-copies] "is this task launchable" is spelled twice —
-`adapters/repo_task.py::EvalSpec._command_or_stages` and `serve/tui_format.py::spec_ready`, whose own
-docstring points at the backlog row — and there is no `/api/validate` (BACKLOG §5).
-proof:`present:def spec_ready@looplab/serve/tui_format.py`
+OPEN[launch-readiness-gate-is-two-copies] one rule of "is this task launchable" is spelled twice —
+`adapters/repo_task.py::EvalSpec._command_or_stages` and `serve/tui_format.py::spec_ready`, whose
+docstring says it mirrors the backend and whose other checks are a superset — and there is no
+`/api/validate` (BACKLOG §5). proof:`present:def spec_ready@looplab/serve/tui_format.py`
 
 OPEN[cross-run-trajectory-overlay-unbuilt] the run-comparison screen ranks runs of one task and cannot
-overlay their metric TRAJECTORIES, because the run-list payload carries `nodes` as a count and no
-series; `ui/src/crossRunRank.js` names the gap in its own constant (BACKLOG §0.1 #10).
+overlay their metric TRAJECTORIES, because the run-list payload carries `nodes` as a count;
+`ui/src/crossRunRank.js` names the gap in its own constant (BACKLOG §0.1 #10).
 proof:`present:export const TRAJECTORY_GAP@ui/src/crossRunRank.js`
 
 ### 4.4 Verified open, and NOT tagged — with the reason
 
-* **Two GETs still take the exclusive command sequencer** (`/api/runs/{run_id}/concepts/lens/recovery`,
-  `/api/runs/{run_id}/log-page`; doc 50 SR-02's residue). Count-shaped: the literal survives at the
-  eight legitimate POST sites, and the index has no count predicate. Fix it with #3 in §5.
-* **The log-integrity receipt counts lines as records** (`eventstore.py::log_divergence`; a batch
-  envelope is one line of up to 4,096 events; BACKLOG §0.2). No single line decides it.
-* **"Parallel sidecar ordering"** (doc 03 §Open): a design decision, no symbol.
-* **"No first-class Evaluator"** (doc 17): a naming question about a subsystem that is distributed by
-  design.
-* **Browser-level accessibility evidence** (doc 18): product work whose cost nobody has measured.
-* **Two idiom duplications** (the socket-shutdown idiom, the timeout-nulling spelling): cross-referenced
-  residue, cheaper open than tracked.
-* **The nine in-code `CODEX AGENT` notes**: not re-derived one by one this pass (doc 50 EV-09).
+* **Two GETs still take the exclusive command sequencer** (`/concepts/lens/recovery`, `/log-page`):
+  count-shaped, no falsifier. Fixed with #5.
+* **The log-integrity receipt counts lines as records** (a batch envelope is one line of up to 4,096
+  events): no single line decides it.
+* **"Parallel sidecar ordering"** (doc 03), **"no first-class Evaluator"** (doc 17), the
+  concept-rename fold's lexicographic rule (`replay.py`): design questions.
+* **Browser-level accessibility evidence** (doc 18): cost unmeasured.
+* **Two idiom duplications**: cross-referenced residue.
+* **Not re-derived this pass**: BACKLOG §0.6b #1 (`eval.inputs` declared by no task), §0.11 (Reattach
+  spawns a driver), §0.8 #1; `docs/11` still quotes AIRA₂'s v1 numbers (a dated doc, historically
+  accurate).
 
 ### 4.5 Deliberately NOT on the plan
 
-* **The paid cadences off the loop** (0.3 % of a run, re-measured 2026-09-04).
-* **A legal-action set for the card lane.** Built on 2026-09-03 and REVERTED; a product decision.
-* **Claim refutation flowing down as undercut.** Its trigger has not fired.
-* **The semantic belief key.** Unbuilt and unvalidated; design first, on the corpus.
-* **The doc 25 modularity ledger** (30 items) as a programme; paid when the file is open.
-* **The declines** (§1.1). Each carries a number; none is reopened here.
+The paid cadences (0.3 %); the card-lane legal set (now a decline); claim undercut (trigger unfired);
+the semantic belief key (unvalidated); the doc 25 ledger as a programme; islands / migration
+(ShinkaEvolve ran migration 0.0 at budgets like ours); harness self-evolution (gains localised in the
+reflection slot on frozen small backbones — if ever, evolve `failure_reflection`-class text only);
+the 22 declines.
 
 ---
 
 ## 5. The final ranked plan
 
-One ordered list. Rank is cost of leaving it, with the SOTA leverage of §3 folded in; "S/M/L" is
-effort in this tree's own terms (S: one change with one driven test; M: days with a design note; L: a
-shape change with its own doc). **Every row names the marker(s) it retires**, so closing a row is a
-deletion and this list can be re-derived from `grep -rn 'OPEN\['` at any time.
+One ordered list. Rank is cost of leaving it, with §3's leverage folded in and the critic's
+dependency corrections applied. "S/M/L" is effort in this tree's terms. **Every row names the
+marker(s) it retires**, so the list re-derives from `grep -rn 'OPEN\['`.
 
 ### 5.1 Do in this order
 
 | # | Item | Why here | Size | Retires |
 |---|---|---|---|---|
-| 1 | Pin `require_approval` into `core/config.py::RUN_START_PINNED_FIELDS`, with a resume test that a snapshot EDIT cannot move the approval gate | invariant #6 does not cover the one setting that gates a paid finish; one line | S | `require-approval-not-pinned-at-run-start` |
-| 2 | The three claim readers through `run_ref` / `row_belongs_to_run`, each with the two-incarnation fixture | the half still standing refuses every ratification when two runs share a name | S | `claim-readers-still-key-on-run-id` |
-| 3 | A refusal-code table in `serve/http.py` with a guard; in the same change the last two GETs off the exclusive sequencer through `generation_fence` | six `500` sites; a read waiting on a cross-process `flock` behind a live run's writes | S | `refusal-codes-have-no-table` (+ §4.4's first row) |
-| 4 | `run_setup` failure as an `EnvironmentRefusal`; the systemic-stop sentence into the terminal-reason registry with its two-way scan | two P15 rows the sweep left | S | `run-setup-failure-is-not-a-refusal-type`, `systemic-stop-reason-has-no-registry` |
-| 5 | One launch-readiness gate behind a `/api/validate` route | two copies, one pointing at the backlog from its own docstring | S | `launch-readiness-gate-is-two-copies` |
-| 6 | **Hidden consistent evaluation for `repo_task`**: a `holdout` declaration (a host-side score stage over a split the candidate never reads, bound like `metric_subject`), `generalization_gap` folded for repo runs, selection through `holdout_select`; replay-digest proof that runs without the declaration are byte-identical | the largest measured selection lever in the field, open on the box's own runs | M | `repo-task-champion-is-picked-on-the-candidates-own-metric` |
-| 7 | **A `DeveloperResult` envelope, then the repair path off the loop** (`_triage_crash` / `_repair` / `_repair_critic` under `to_thread` with the capture-sink discipline of `novelty.py`; a loop-liveness twin of `tests/test_propose_does_not_freeze_the_loop.py` per site) | zero loop ticks during a 116–276 s median hold, one case 88.3 min; the envelope is the precondition | M | `developer-output-has-no-immutable-envelope`, `repair-path-holds-the-engine-loop` |
-| 8 | **The research-grade knobs, measured**: one paired run per profile (`default` vs `thorough`) on the same repo task on the box; then the flip or the decline | the field's technique map says the difference is large; this repo shipped the preset and never A/B'd it | S code, box time | `research-grade-profile-is-not-the-default` |
-| 9 | **One untrusted-evidence envelope** (`core/evidence.py`) behind a Settings flag (legacy default off) on the Strategist, triage / critic stderr and arXiv / web results; a test derived from `PROMPT_KEYS` | the Strategist sets `eval_parallel` / `policy` / `timeout` from a note with no rule | M | `no-single-untrusted-evidence-envelope` |
-| 10 | **Containment made countable, not fixed**: ruff `BLE001` as a census, the 634 `noqa`s as a reviewed allow-list, a `contain(span, reason)` helper, the AST funnel "every broad `except` around a paid call re-raises `BudgetExceeded` first" | the cost was found at the seams; the funnel has a known victim and no guard | M | `containment-is-unmeasured` (census half) |
-| 11 | **A stagnation trigger for the Strategist**: a deterministic plateau reading over folded metrics that makes a consult due early | the cheapest search-side item with a field-measured precedent (MLEvolve, FML-bench); the cadence stays as the fallback | S–M | `strategist-consult-is-cadence-not-stagnation-triggered` |
-| 12 | **Code-level merge and an endgame ensemble**: `operators.py::merge_code` reading both parents' committed code; a top-k prediction ensemble with a reserved budget where a predictions file exists — and the plan artifact that reserves it | the leaderboard systems' endgame; the only multi-parent operator here averages params | M | `merge-operator-is-mean-of-params-not-code`, `no-plan-artifact-with-endgame-reserve` |
-| 13 | **The memory stack, in order**: the five doc 51 items (bound `use_skill` through `clip`; a demotable skill status; `knn_idw`'s uncertainty spent in `panel.py` and `proxy.py`; a `columns` / `data_samples` hook on `repo_task`; a registered `EV_LITERATURE_RETRIEVED`), then tiered loading, then operator scoping, with the hit-rate audit shipped in the same change as the first consolidation | HASTE: flat loading equals no skills; ML-Master 2.0: L2 + L3 are 50 points on Lite; nothing here measures the hit rate | S × 5, then M | all five doc 51 markers, `skills-load-flat-not-by-tier`, `lessons-are-not-operator-scoped`, `prior-injection-hit-rate-unmeasured` |
-| 14 | **CLAUDE.md on a byte budget**: `CLAUDE_MD_MAX_BYTES` with a shrink-only baseline; rules, map, invariants and conventions stay; dated ledgers move to the docs and docstrings that hold them behind pins; the two unmapped packages added | 238 KB and growing; every agent turn pays it before reading a file | M | `claude-md-has-no-size-budget` |
-| 15 | **The engine attribute guard**, then per-cluster typed state records | 772 attributes, 91 lazily minted, 143 silent handlers to absorb the typo; the guard is what makes #26 safe | S, then M | `engine-attributes-have-no-declaring-site-guard` |
-| 16 | **A model-free numeric `assert`** for stage contracts: a declared relation the engine evaluates against a named key the stage prints | the LLM-judged `assert` cost a 2.33 GPU-h re-train; `check_failed` is 13.4 of 20.1 saveable hours in the bench | M | `stage-assert-has-no-model-free-numeric-form` |
-| 17 | **One MLE-bench Lite campaign** through the trust layer on the box, with `hack_adjusted` reported beside raw and holdout-selected numbers, seeds and traces, as an audit page | the external proof, and the noun this repo's adjectives have never produced | S code, L wall-clock | `no-external-benchmark-number-exists`, `no-hack-adjusted-score-reporting` |
-| 18 | **Guards that compare, not grep**: settings defaults compared against `Settings`; the API reference generated from `app.openapi()` under the strict build; the CLI reference from Typer | four hand-kept tables; a new route lands green and undocumented | M | `settings-doc-guard-compares-names-not-defaults`, `http-surface-has-no-generated-reference` |
-| 19 | **A UI mount harness** (`ui/test/_mount.js`) and one gate-flip test per giant component; the trajectory overlay on the comparison screen once the run row carries a series | 10.6k lines mounted by no test; a dropped brace once passed 767 tests | M | `largest-ui-components-are-never-mounted`, `cross-run-trajectory-overlay-unbuilt` |
-| 20 | **Verification of the seams**: a golden for a 2-wide parallel build; a layering guard over the package matrix; per-attempt stage rows; a watermark that hashes data | each is one test or one line, and each closes a hole a review found and nothing guards | S × 4 | `parallel-build-has-no-golden-replay`, `layering-rules-are-not-machine-checked`, `stage-rows-are-last-wins-per-name`, `readmodel-watermark-ignores-event-data` |
-| 21 | **Retire the legacy `/control` route**: port the 41 suite call sites to `/commands`, delete it; the per-POST `EventStore` rescan shrinks with it | a lost-response retry re-appends paid intents there | M | `legacy-control-route-is-not-retired`, `eventstore-rescans-the-log-per-control-post` |
-| 22 | **A model arm for the operator bandit** (ShinkaEvolve's shape) over the per-role models this repo already routes | breadth per cost; a policy change, no new trusted input | M | `operator-bandit-has-no-model-arm` |
-| 23 | **The Deep Research P0 slice** (doc 28's own decision: DR-01 + DR-02 as one design slice): a durable `ResearchPlan` / `ProgressLedger` and an exact-span `EvidenceItem` ledger | replayable research state and re-checkable evidence are what make the memo's verifier verdicts mean anything later | M–L | `deep-research-plan-is-not-durable`, `research-evidence-has-no-exact-span-identity` |
-| 24 | **A distance-from-seed signal** as a pure function over committed code, fed to novelty and selection as an annotation | "still the baseline" and a real change are indistinguishable today | S–M | `no-distance-from-seed-signal` |
-| 25 | **The event payload contract**: describe the 65 undescribed constants and the 15 undocumented types, then `EVENT_PAYLOAD_KEYS` and a generated event-log page | invariant #5's additive rule cannot be checked against handler code | M | `event-payloads-have-no-registry` |
-| 26 | **The `EvalAttempt` phase object** along `_evaluate`'s own phase comments, every append and lock staying put; verified by the corpus-digest replay | 1,898 lines reading 51 attributes | L, after #15 | `eval-attempt-is-one-giant-method`, doc 25's `evaluate-prestart-and-terminal-blocks-inline` |
-| 27 | **Cross-machine eval dispatch** with AIRA₂'s decoupling shape (an orchestrator that dispatches to whichever worker is free; the log stays the single writer) | throughput is linear in GPUs for the field's best; the box has two | L, after #7 | `eval-parallelism-is-in-process-only` |
-| 28 | **After the Landlock default flips**: the `EACCES` translation at the repair boundary | a kernel refusal must not read as a missing file to the triage judge | S, after the flip | `landlock-refusal-is-not-translated-for-triage` |
-| 29 | The remaining product rows, each when its trigger fires or the file is open: MLflow autolog (S), Pareto front where selection reads it under `trust_gate=select` (M), a drift detector (M), an LLM value estimate for MCTS (M), the feature-engineering operator (M), a real forecasting backend (M); and the doc 25 / doc 27 / doc 34 ledgers when their files are open | real gaps with driven falsifiers, lower leverage than everything above | — | the six BACKLOG product markers; the 48 ledger markers |
+| 1 | Pin `require_approval` into `RUN_START_PINNED_FIELDS`, with a resume test | invariant #6 does not cover the one setting that gates a paid finish | S | `require-approval-not-pinned-at-run-start` |
+| 2 | **The eval may not write the run record**: run dir read-only to the eval, writes on the workdir and the fence directory only, a mutation-event refusal as the message rung; a test that a forged `node_evaluated` row from a stage cannot land | a candidate can elect itself today; the store's foreign-writer stop sees only malformed rows | M | `eval-may-write-the-run-record` |
+| 3 | **Stop hill-climbing the private grade on the real MLE-bench path**: a search-time host score on an agent-invisible split from the public train data, one private grade at finish, the partition no longer empty for that kind | the campaign would otherwise publish a test-selected number | M | `mlebench-search-optimises-the-private-grade` |
+| 4 | The three claim readers through `run_ref` / `row_belongs_to_run` with the two-incarnation fixture | one-sided verdicts demoted whenever two runs share a name | S | `claim-readers-still-key-on-run-id` |
+| 5 | A refusal-code table with a guard, and the last two GETs off the sequencer | six `500` sites, two leaking a host path; a read behind a cross-process `flock` | S | `refusal-codes-have-no-table` |
+| 6 | `run_setup` as an `EnvironmentRefusal`; the run-level stop word into a registry with a two-way scan over its eight sites | a refusal reads as a crash; a bare literal decides "finished cleanly" | S | `run-setup-failure-is-not-a-refusal-type`, `run-stop-reason-compared-as-a-bare-literal` |
+| 7 | **The Strategist consult due on plateau**: `_should_consult` gains `or improves_since_best >= stall_window` | the reading exists; one condition; FML-bench's adaptive agent beat all six baselines | S | `strategist-consult-is-cadence-not-stagnation-triggered` |
+| 8 | One launch-readiness gate behind `/api/validate` | two copies, one pointing at the backlog | S | `launch-readiness-gate-is-two-copies` |
+| 9 | **The stage checker gets the log tools** the three watchdog judges already have | the last blind 4,000-char judge; the re-train BACKLOG §0.9 recorded | S–M | `stage-checker-is-handed-a-blind-tail` |
+| 10 | **Consistent host-side scoring for `repo_task`**, in two slices: (a) a host-side score stage held constant across candidates, `generalization_gap` folded for repo runs; (b) the split made HIDDEN once #2 and the Landlock validation hold, selection through `holdout_select`; replay-digest proof that undeclared runs are byte-identical | the field's largest measured selection effect, open on the box's own runs; L4-m → L4-v | L | `repo-task-champion-is-picked-on-the-candidates-own-metric` |
+| 11 | **The profile A/B, properly designed** on the box: knobs without the gate / the gate alone / the embedding-novelty arm, ≥3 seeds per arm, `generalization_gap` and the noise floor reported | the built quality machinery ships off, undecided; the arms decide three markers at once | S code, box time | `research-grade-profile-is-not-the-default`, `embedding-novelty-gate-declined-on-one-incident`, `eval-noise-floor-is-never-measured` |
+| 12 | **A `DeveloperResult` envelope, then the repair path AND the serial build lane off the loop** (one helper on the proposal pool, capture-sink discipline, a loop-liveness test per site) | zero ticks during a 116–276 s median hold; a dead node waited 62 min for its terminal while both GPUs idled | M | `developer-output-has-no-immutable-envelope`, `repair-path-holds-the-engine-loop`, `serial-node-build-holds-the-loop` |
+| 13 | **One untrusted-evidence envelope** (`core/evidence.py`) behind a flag, on the Strategist, triage / critic stderr, arXiv / web | model-authored text reaches decision-moving surfaces unlabelled | M | `no-single-untrusted-evidence-envelope` |
+| 14 | **Containment made countable**: ruff `BLE001` as a census, the 652 `noqa`s as an allow-list, `contain(span, reason)`, the paid-call `BudgetExceeded` funnel | 460 silent handlers; a swallowed budget stop at a selection site | M | `containment-is-unmeasured` |
+| 15 | **Budget and time as facts the agents can read**: a reserve-commit run budget at `llm_broker.borrow()` calibrated from the `llm_usage` ledger; a clock tool + deadline warning in the tool loop; `LOOPLAB_EVAL_DEADLINE` for the eval process | Token Budgets: asyncio fan-out overshoots 30 / 30 without a reservation; EurekAgent's roles read their clock | M | `no-shared-reserve-commit-run-budget`, `agents-cannot-read-their-own-clock`, `eval-process-is-not-told-its-deadline` |
+| 16 | **The durable research record** as one slice: a `ResearchPlan` / `ProgressLedger` the fold applies, an exact-span `EvidenceItem` ledger, retrieved literature as a registered event, inner agent phases event-sourced | four 2026 works converge on it; every memo-quality number below needs it | M–L | `deep-research-plan-is-not-durable`, `research-evidence-has-no-exact-span-identity`, `retrieved-literature-is-never-durable`, `inner-agent-phases-not-event-sourced` |
+| 17 | **The memory stack, in the measured order**: doc 51's skill body bound (whole sections) and demotable status, the kNN uncertainty spent, the repo-task perception hook; the prior and tool-result RECORDS; then the citation-rate audit on the box; then a read-side utility term and forgetting; then tiered loading; operator scoping last or declined | L1 is the decisive tier and is held; flat loading equals no skills; task-level skills are net-negative; the only scoping ablation is null | S × 4, S × 2, box, M, M | `skill-body-served-whole-and-unbounded`, `skill-status-never-demoted-on-later-evidence`, `knn-uncertainty-dropped-by-two-of-three-callers`, `repo-task-exposes-no-perception-hook`, `injected-priors-leave-no-structured-record`, `cross-run-tool-results-leave-no-invocation-record`, `prior-injection-hit-rate-unmeasured`, `lesson-rank-has-no-utility-term`, `skills-load-flat-not-by-tier`, `lessons-are-not-operator-scoped` |
+| 18 | **The endgame, re-scoped**: both parents' code and traces to `_ensemble_idea`'s Developer; a durable `EV_PLAN` whose reserve the dispatcher honours; a champion sweep in the reserve | the merge sees one parent; the reserve is a consult that may never fire; EvoTrace's 13 / 15 | M | `merge-operator-is-mean-of-params-not-code`, `no-plan-artifact-with-endgame-reserve`, `endgame-reserve-has-no-champion-sweep` |
+| 19 | **An operator × model router** on the bandit's yield table, cheap tier on the implement loop — after #11 turns the bandit on | four iso-budget confirmations; inert until `operator_bandit` is on | M | `operator-bandit-has-no-model-arm` |
+| 20 | **CLAUDE.md on a byte budget** | 238 KB and growing; every agent turn pays it | M | `claude-md-has-no-size-budget` |
+| 21 | **The engine attribute guard**, then the `EvalAttempt` split along `_evaluate`'s phase comments, with a corpus-digest baseline taken FIRST | 772 attributes, 91 lazily minted; 1,989 lines | S, then L | `engine-attributes-have-no-declaring-site-guard`, `eval-attempt-is-one-giant-method`, doc 25's `evaluate-prestart-and-terminal-blocks-inline` |
+| 22 | **Hack-adjusted reporting and its instruments**: the Mislead-gap pair on the run summary; the BAITBENCH tasks + judge run against LoopLab's own Developer on the box; the two official MLE-bench detectors; a multi-test leakage rung | the "ahead on verification" verdict becomes a number; the campaign's adjusted column needs the judge | S + box + M + M | `no-hack-adjusted-score-reporting`, `developer-hack-rate-unmeasured`, `mlebench-path-runs-neither-official-detector`, `leakage-scan-has-no-multi-test-detector` |
+| 23 | **The MLE-bench Lite campaign** on the box, after #3 and #22: ≥3 seeds mean ± SEM, percentile rank recorded, raw and Mislead-adjusted numbers, a reviewer bundle of seeds + traces + code + claims, the survey's Table 10 columns | the external proof; the noun this repo's adjectives have never produced | S code, L wall-clock | `no-external-benchmark-number-exists`, `mlebench-campaign-has-no-seed-protocol`, `mlebench-grader-records-no-percentile-rank`, `no-reviewer-bundle-export` |
+| 24 | **A model-free numeric `assert`** for stage contracts (a declared relation the engine evaluates; CapCode's cap, Arbor's margin) | the LLM-judged form is only as good as what the stage prints | M | `stage-assert-has-no-model-free-numeric-form` |
+| 25 | **Guards that compare, not grep**: settings defaults against `Settings`; an API reference from `app.openapi()`; the CLI reference from Typer | a new route lands green and undocumented | M | `settings-doc-guard-compares-names-not-defaults`, `http-surface-has-no-generated-reference` |
+| 26 | **Mount the three giant components** through the `cardKanban.test.js` pattern, one gate-flip test each, the harness extracted; the trajectory overlay once the run row carries a series | the pattern exists; the components are outside it | S–M | `largest-ui-components-are-never-mounted`, `cross-run-trajectory-overlay-unbuilt` |
+| 27 | **Verification of the seams**: a 2-wide parallel golden; a layering guard; per-attempt stage rows (after #21's baseline); a watermark that hashes data; the write tool's descriptor-relative reopen | each one test or one line, each a hole a review found | S × 5 | `parallel-build-has-no-golden-replay`, `layering-rules-are-not-machine-checked`, `stage-rows-are-last-wins-per-name`, `readmodel-watermark-ignores-event-data`, `write-tool-reopens-the-approved-path-by-name` |
+| 28 | **The kernel rungs, together**: the Landlock GPU validation on the box, the `EACCES` translation at the repair boundary landing WITH it, then the default flip; a seccomp / egress fence for the subprocess tier on Sandlock's shape | the refusal must not read as a missing file to the judge; the default tier can `connect()` anywhere | box + S + M | `landlock-is-opt-in-by-default`, `landlock-refusal-is-not-translated-for-triage`, `subprocess-tier-has-no-syscall-or-egress-fence` |
+| 29 | **Retire the legacy `/control` route**; the per-POST rescan shrinks with it; the SSE state stream as deltas; the cross-run flag per principal | a lost-response retry re-appends paid intents; O(events × state) bytes per tab; a shared-hub gap | M | `legacy-control-route-is-not-retired`, `eventstore-rescans-the-log-per-control-post`, `sse-retransmits-the-whole-folded-state`, `cross-run-tools-are-a-process-wide-flag` |
+| 30 | **The event payload contract**, the PROV export carrying claims with verdicts, the GenAI semconv bridge when the spec ships | invariant #5 unverifiable; `/prov` exports no claim | M, S, deferred | `event-payloads-have-no-registry`, `prov-export-carries-no-claims`, `otel-bridge-carries-no-genai-semconv` |
+| 31 | **Search diagnostics**: edit-type and re-introduction annotation over `node_diff.py`; a cost term in MCTS; the proxy's pairwise accuracy, foresight's selective accuracy and smoke→full rank fidelity measured on the box; the seed-distance scalar when a run pays for it | the field measures its judges; LoopLab's kill and prioritise on unmeasured ones | S, M, box × 3, S | `edit-cycling-and-edit-type-unannotated`, `mcts-selection-has-no-cost-term`, `proxy-prediction-accuracy-unmeasured`, `foresight-selective-accuracy-unmeasured`, `smoke-full-rank-fidelity-unmeasured`, `no-distance-from-seed-signal` |
+| 32 | **The memo's own measures**: provenance coverage per section; a number-fidelity audit against cited metrics; literature in the novelty gates (after #16); competing hypotheses in failure diagnosis | 57.9 % synthesis accuracy is the field's number for the unchecked fields; 59 % fabricated among accepted | S, S, M, M | `memo-synthesis-statements-have-no-provenance-coverage`, `memo-quoted-numbers-unmatched-against-cited-metrics`, `novelty-gates-never-consult-literature`, `failure-diagnosis-emits-one-cause-not-competing-hypotheses` |
+| 33 | **Throughput beyond the box and the noun's own benchmark**: the build barrier into a steady-state lane; a cross-machine pool with static per-worker GPU pinning and remote execution once it can reach four workers; the trace export for operator training; an experiment-level benchmark adapter | rank saturates at 4 GPUs; the best full-set number ran on ≤2; Frontis trained on exactly this corpus | M, L, S, box | `parallel-build-is-a-bulk-synchronous-barrier`, `eval-parallelism-is-in-process-only`, `no-trace-to-training-data-export`, `no-research-lifecycle-benchmark-number` |
+| 34 | The remaining product rows and ledgers when their trigger fires or the file is open: MLflow autolog, Pareto in selection under `select`, a drift detector, the MCTS value estimate, the FE operator, a forecasting backend; CODE_REVIEW's Windows job object and categorical leakage; doc 29's F3 byte total; the doc 25 / 27 / 34 ledgers | real gaps with driven falsifiers, lower leverage | — | the six BACKLOG product markers, `windows-tree-kill-is-not-atomic`, `target-leakage-misses-non-monotone-and-categorical`, `f3-workspace-byte-total`, the 48 ledger markers |
 
 ### 5.2 The box-only queue (needs `runs/` or a GPU)
 
-In the order they pay: (1) #8, the profile A/B; (2) the serial-build harm report — per `card_build`
-span, was a GPU FREE with a claimable card while the loop was held (`serial-node-build-holds-the-loop`);
-(3) #17, the MLE-bench Lite campaign; (4) the hack-rate audit (`developer-hack-rate-unmeasured`);
-(5) the prior-injection hit-rate audit (`prior-injection-hit-rate-unmeasured`); (6) the first-propose
-split between `research_cadence.py::_ground_run_start` and the first propose
-(`first-propose-runs-with-every-gpu-idle`); (7) ASHA's promotion mask soundness
-(`asha-promotion-mask-blocks-all-production`); (8) `TrainingVerdict.fault`'s outcome label
-(`monitor-fault-has-no-outcome-label`); (9) researcher questions under the prose ask
-(`researcher-questions-not-appended`); (10) Landlock's default via `looplab landlock-check`
-(`landlock-is-opt-in-by-default`); (11) the two caches' counts (`knowledge-index-re-embeds-every-record`,
-`repeated-sweep-refolds-the-whole-corpus`); (12) crash lead time in the bench corpus builder
-(`crash-predictability-unmeasured`).
+In the order they pay: (1) #11, the profile A/B with its three arms; (2) the hack-rate audit
+(`developer-hack-rate-unmeasured`) — before the campaign; (3) the serial-build harm report beside #12
+(`serial-node-build-holds-the-loop`); (4) #23, the campaign; (5) the prior citation-rate audit
+(`prior-injection-hit-rate-unmeasured`); (6) the first-propose split
+(`first-propose-runs-with-every-gpu-idle`); (7) ASHA's promotion mask — the 2.08 starved hours are
+already in hand, the soundness question is not (`asha-promotion-mask-blocks-all-production`); (8)
+`TrainingVerdict.fault`'s outcome label (`monitor-fault-has-no-outcome-label`); (9) researcher
+questions (`researcher-questions-not-appended`); (10) the Landlock validation with the `EACCES`
+translation (#28); (11) the two caches' counts; (12) crash lead time
+(`crash-predictability-unmeasured`); (13) smoke→full fidelity, foresight and proxy accuracy (#31); (14)
+the research-lifecycle benchmark (#33).
 
 ### 5.3 Dependencies stated once
 
-`DeveloperResult` before the repair offload (#7); the attribute guard before the `EvalAttempt` split
-(#15 → #26); the loop offload before the cross-machine pool (#7 → #27); doc 51's skill bounds before
-tiered loading and operator scoping (#13, in that order); the payload registry before a generated
-event page (#25 → #18's last table); the CLAUDE.md diet (#14) before anything that adds prose to it;
-the plan artifact with #12, because the endgame ensemble is what the reserve is for; the Landlock
-flip before #28.
+#2 before #10(b) (a hidden split needs a run dir the eval cannot write); #3 and #22 before #23; the
+`DeveloperResult` envelope before the offload (#12); the attribute guard and a digest baseline before
+the `EvalAttempt` split and the per-attempt stage rows (#21 → #27); #11 before #19 (the bandit must
+be on); the two record markers before the citation-rate audit (#17); #16 before literature in the
+novelty gates (#32); the Landlock validation before the flip, the translation WITH the validation
+(#28); the CLAUDE.md diet (#20) before anything that adds prose to it.
 
 ---
 
@@ -545,44 +755,38 @@ flip before #28.
 
 `master` at `bf860b7` (2026-09-04); plan branch `claude/prioritize-development-plan-0k77gb`.
 
-* Doc guards and the seven formerly-red tests: green (this container, 2026-09-05 and after each
-  2026-09-06 marker edit).
-* `ui/`: 1,527 passed / 0 failed.
-* Full Python suite (`-m "not docker"`, four `pytest-split` shards): 0 failures / 0 errors / 80 skips /
-  13,059 passed. A later reader re-runs rather than trusts it.
+* Doc guards green after every marker edit of this revision; `ui/` 1,527 / 0; the full Python
+  suite 0 failures / 0 errors / 80 skips / 13,059 passed (2026-09-05). A later reader re-runs.
 
 ## 7. How to work this plan
 
-* One row is one change with one driven test; a row's close is the DELETION of the marker it names,
-  never an edit to this page. When this page and the tree disagree, the tree is right and this page
-  is stale — it is dated for that reason.
+* One row is one change with one driven test; a row's close is the DELETION of the marker it names.
+  When this page and the tree disagree, the tree is right.
 * No new marker without a falsifier the guard re-derives AND that flipped under mutation; no decline
-  without a number. A proof names the fix's OWN symbol or the defect's own text — §2.0 is the cost of a
-  name guessed in advance, and a fix that lands under another name re-points the proof in the same
-  change.
-* A measurement precedes a policy: #8, #17 and every §5.2 row ship the instrument first.
-* The trust line is not negotiable on any capability row: an advisory rung may re-rank, refuse or
-  annotate; it may not mint a metric, a champion, a violation or a selection. A hidden split (#6) is
-  admissible precisely because it can only REFUSE a champion the search metric would have elected.
+  without a number. A proof names the fix's OWN symbol or the defect's own line — this revision
+  re-pointed eighteen that did not.
+* A measurement precedes a policy: #11, #22, #23 and every §5.2 row ship the instrument first.
+* The trust line is not negotiable: an advisory rung may re-rank, refuse or annotate; it may not
+  mint a metric, a champion, a violation or a selection. #10's host-side score is admissible because
+  the engine computes it; a candidate-printed number may only ever REFUSE.
 
 ## 8. Sources for §3
 
-Primary sources, fetched 2026-09-06; the forwarded numbers are theirs, not re-derived here.
+Primary sources, fetched 2026-09-06 by the six literature agents; the numbers are theirs.
 
-* MLE-bench official leaderboard rendition — https://www.mlebench.com/
-* MLEvolve — https://github.com/InternScience/MLEvolve
-* ML-Master 2.0, "Toward Ultra-Long-Horizon Agentic Science: Cognitive Accumulation for Machine Learning Engineering" — https://arxiv.org/abs/2601.10402
-* AIRA₂, "Overcoming Bottlenecks in AI Research Agents" — https://arxiv.org/abs/2603.26499
-* Arbor, "Toward Generalist Autonomous Research via Hypothesis-Tree Refinement" — https://arxiv.org/abs/2606.11926 and https://github.com/RUC-NLPIR/Arbor
-* EurekAgent, "Agent Environment Engineering is All You Need for Autonomous Scientific Discovery" — https://arxiv.org/abs/2606.13662
-* HASTE, "Why Solve It Twice? Hierarchical Accumulation of Skills for Transfer-Efficient ML Engineering" — https://arxiv.org/abs/2606.30911
-* Frontis-MA1 / OpenRSI — https://arxiv.org/abs/2607.28568 and https://github.com/FrontisAI/OpenRSI
-* Famou-Agent 2.0 — https://github.com/baidubce/FM-Agent
-* ShinkaEvolve — https://arxiv.org/abs/2509.19349 and https://github.com/SakanaAI/ShinkaEvolve
-* AlphaEvolve, 2026-08 matrix-multiplication result — https://github.com/google-deepmind/alphaevolve_results
-* Kosmos / Edison Scientific — https://www.futurehouse.org/about
-* karpathy/autoresearch — https://github.com/karpathy/autoresearch
-* "Autonomous Research Agents: A Survey of AI Scientists and the Verification Gap" — https://arxiv.org/abs/2608.05179
-* BAITBENCH, "Measuring Agent Reward Hacking with Optional Shortcuts Planted in ML Tasks" — https://arxiv.org/abs/2608.30724
-* "From Fluent to Verifiable: Claim-Level Auditability for Deep Research Agents" — https://arxiv.org/abs/2602.13855
-* AARRI-Bench, "Act As a Real Researcher" — https://arxiv.org/abs/2606.07462
+* MLE-bench README leaderboard and extras — https://github.com/openai/mle-bench ; https://github.com/openai/mle-bench/blob/main/extras/README.md ; https://arxiv.org/abs/2410.07095 ; rendition https://www.mlebench.com/
+* Famou-Agent 2.0 — https://x.com/Baidu_Inc/status/2042856173171347534 ; https://github.com/baidubce/FM-Agent (1.0)
+* AIBuildAI — https://arxiv.org/abs/2604.14455 · MARS — https://arxiv.org/abs/2602.02660 · PiEvolve — https://fractal.ai/ai-research/pievolve
+* MLEvolve — https://arxiv.org/abs/2606.06473 ; https://github.com/InternScience/MLEvolve
+* ML-Master 2.0 — https://arxiv.org/abs/2601.10402 · ML-Master 1.0 — https://arxiv.org/abs/2506.16499
+* ScienceFlow — https://arxiv.org/abs/2608.14354 · AiScientist — https://arxiv.org/abs/2604.13018
+* AIRA₂ — https://arxiv.org/abs/2603.26499 · AIRA-dojo — https://arxiv.org/abs/2507.02554 ; https://github.com/facebookresearch/aira-dojo
+* Arbor — https://arxiv.org/abs/2606.11926 ; https://github.com/RUC-NLPIR/Arbor
+* EurekAgent — https://arxiv.org/abs/2606.13662 ; https://github.com/THU-Team-Eureka/EurekAgent
+* HASTE — https://arxiv.org/abs/2606.30911 · Frontis-MA1 / OpenRSI — https://arxiv.org/abs/2607.28568 ; https://github.com/FrontisAI/OpenRSI
+* CobraAgent (vendor) — https://dalphakr.github.io/CobraAgent/ · KompeteAI — https://arxiv.org/abs/2508.10177 · FML-bench — https://arxiv.org/abs/2605.17373 · GEAR — https://arxiv.org/abs/2605.13874 · SwarmResearch — https://arxiv.org/abs/2607.02807 · Rehearse — https://arxiv.org/abs/2607.27687 · Research preference models — https://arxiv.org/abs/2608.13940 · SandMLE — https://arxiv.org/abs/2604.04872 · Break It Down — https://arxiv.org/abs/2608.20274 · CBR R&D-Agent — https://arxiv.org/abs/2606.05250
+* ShinkaEvolve — https://arxiv.org/abs/2509.19349 ; https://github.com/SakanaAI/ShinkaEvolve · AlphaEvolve ω bound — https://arxiv.org/abs/2608.16884 · EvoTrace — https://arxiv.org/abs/2605.20086 · LEVI — https://arxiv.org/abs/2605.09764 · DEI — https://arxiv.org/abs/2605.27130 · cross-tier — https://arxiv.org/abs/2608.10694 · Janus — https://arxiv.org/abs/2608.08189 · Mendel Gödel Machine — https://arxiv.org/abs/2608.07645 · OpenEvolve — https://github.com/codelion/openevolve · karpathy/autoresearch — https://github.com/karpathy/autoresearch
+* SkillZip / ReZip — https://arxiv.org/abs/2608.05604 ; https://arxiv.org/abs/2608.11079 ; SkillZip Pro — https://arxiv.org/abs/2608.30785 · SkillAudit — https://arxiv.org/abs/2606.14239 · Co-Evolving skills — https://arxiv.org/abs/2606.08755 · AFTER — https://arxiv.org/abs/2606.23127 · Retrieval vs utilization — https://arxiv.org/abs/2603.02473 · EvoMem — https://arxiv.org/abs/2608.10795
+* Survey of AI scientists — https://arxiv.org/abs/2608.05179 · Kosmos — https://arxiv.org/abs/2511.02824 · AAR — https://arxiv.org/abs/2602.13855 · Claims as individuals — https://arxiv.org/abs/2608.18312 · Trajectories to evidence — https://arxiv.org/abs/2608.05235 · Runnable to verifiable — https://arxiv.org/abs/2608.09567 · SAGE / MHFA — https://arxiv.org/abs/2606.31478 · RQ-Bench — https://arxiv.org/abs/2606.12071 · MLReplicate — https://arxiv.org/abs/2605.16616 · SciIntegrity-Bench — https://arxiv.org/abs/2605.10246 · SCION — https://arxiv.org/abs/2607.03863 · AARRI-Bench — https://arxiv.org/abs/2606.07462 · ResearchClawBench — https://arxiv.org/abs/2606.07591 · EXP-Bench — https://arxiv.org/abs/2505.24785 · AI Scientist-v2 — https://arxiv.org/abs/2504.08066
+* Protocol Validity / HackDetect — https://arxiv.org/abs/2607.22368 · BAITBENCH — https://arxiv.org/abs/2608.30724 · SpecBench — https://arxiv.org/abs/2605.21384 · Reward Hacking Benchmark — https://arxiv.org/abs/2605.02964 · EvilGenie — https://arxiv.org/abs/2511.21654 · CapCode — https://arxiv.org/abs/2606.07379 · HarnessOpt-Bench — https://arxiv.org/abs/2608.06301 · What Fits Doesn't Overfit — https://arxiv.org/abs/2606.11045 · GRACE-DS — https://arxiv.org/abs/2606.16000 · LeakageDetector 2.0 — https://arxiv.org/abs/2509.15971
+* Sandlock — https://arxiv.org/abs/2605.26298 · ActPlane — https://arxiv.org/abs/2606.25189 · Token Budgets — https://arxiv.org/abs/2606.04056 · OTel GenAI conventions — https://github.com/open-telemetry/semantic-conventions-genai · Landlock ABI — https://docs.kernel.org/userspace-api/landlock.html

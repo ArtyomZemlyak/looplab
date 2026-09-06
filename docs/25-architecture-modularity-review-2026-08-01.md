@@ -4333,7 +4333,7 @@ and a recovery/replay contract that `ShareStore` has no analogue for.
 
 #### SC-11 · MEDIUM · inconsistency · effort: medium — **PARTIALLY RESOLVED (2026-08-08)**
 
-> **OPEN[unconverted-stat-signature-ledger]** the two tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 21 unconverted sites, pinned as a number that may not grow. proof:present:UNCONVERTED_SIGNATURE_SITES@tests/test_file_identity_tiers.py
+> **OPEN[unconverted-stat-signature-ledger]** the two tiers exist in `core/atomicio.py` and the ledger of hand-rolled stat signatures is bounded but not empty — 21 unconverted sites, pinned as a number that may not grow. proof:`line:UNCONVERTED_SIGNATURE_SITES&&= 21@tests/test_file_identity_tiers.py`
 
 **Event-log rewrite/race detection implemented six different ways across serve/**
 
@@ -4978,7 +4978,7 @@ asserting the invocation is never reached, not merely that the response is an er
 
 #### SR-09 · MEDIUM · duplication · effort: small — **PARTIALLY RESOLVED (2026-08-02)**
 
-> **OPEN[generation-conflict-envelopes-hand-built]** the ~26 hand-built `run_generation_changed` 409 envelopes are still hand-built; re-derived 2026-08-19 the literal occurs at **35** sites under `serve/`. proof:present:run_generation_changed@looplab/serve
+> **OPEN[generation-conflict-envelopes-hand-built]** the ~26 hand-built `run_generation_changed` 409 envelopes are still hand-built; re-derived 2026-08-19 the literal occurs at **35** sites under `serve/`; the proof is bound to the helper's stated name because the literal itself survives every correct fix — re-point on landing. proof:absent:generation_conflict(@looplab/serve
 
 **Generation-fence 409 envelopes hand-built ~26 times; comment-cursor error duplicated between reviews and collaboration**
 
@@ -5416,7 +5416,7 @@ charged to only its first parent.
 
 #### SE-04 · MEDIUM · excessive-logic · effort: small — **PARTIALLY RESOLVED (2026-08-08)**
 
-> **OPEN[eligible-cards-recomputed-in-one-election]** the coverage-input hoist landed; `eligible_cards(selection_state, policy)` is still computed at two sites in one selection pass. proof:present:eligible_cards(selection_state,@looplab/search/card_selection.py
+> **OPEN[eligible-cards-recomputed-in-one-election]** the coverage-input hoist landed; `eligible_cards(selection_state, policy)` is still computed at two sites in one selection pass. proof:`line:card.id: card for card in eligible_cards(selection_state&&policy)@looplab/search/card_selection.py`
 >
 > **Citation rot, re-derived 2026-08-19:** the symbol this remaining half names, `_speculative_selection`, exists nowhere under `looplab/` — only in three comments. The two live calls are `search/card_selection.py:1628` and `:1656`.
 

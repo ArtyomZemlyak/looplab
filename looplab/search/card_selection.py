@@ -1127,11 +1127,13 @@ def _score_for_policy(
                       coverage_inputs=coverage_inputs)
 
 
-# OPEN[card-lane-fills-outside-the-policy-population] for the population policies this widens the
+# DECLINED[card-lane-fills-outside-the-policy-population] for the population policies this widens the
 # COUNT with no legal-action SET: driven on a five-node board, MCTS proposed one improve and the lane
 # executed it AND an improve of the worst node; Evolutionary the same. Only ASHA derives a lane, and
-# the fidelity matrix pins itself greedy-only, so nothing covers it.
-# proof:absent:legal_card_keys@looplab/search/card_selection.py
+# the fidelity matrix pins itself greedy-only, so nothing covers it. Declined 2026-09-06: the
+# prescription was built and reverted (below) — a product decision, not a defect. measured: on the
+# `tests/test_card_driven_selection.py` board the legal-set filter retains exactly 1 Card per turn
+# for MCTS and for Evolutionary, i.e. it deletes the lane — docs/52-development-plan-2026-09-05.md §2.2
 #
 # THE PRESCRIPTION THAT STOOD HERE — "give every policy the lane set `_asha_lane` already implements
 # and filter candidates by it before the limit" — WAS BUILT AND REVERTED (2026-09-03), because it

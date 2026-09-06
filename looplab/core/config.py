@@ -1118,7 +1118,7 @@ class Settings(BaseSettings):
     redact_output: bool = True
     # B5 reward-hacking detector: a host-side monitor that flags suspicious wins (grader/answer-key
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
-    # audit event in the Trust panel. Off by default. Whether a flag CHANGES selection is governed by
+    # audit event in the Trust panel. Off by default until 2026-08-23. Whether a flag CHANGES selection is governed by
     # `trust_gate` below (default: audit-only, never changes selection).
     # ON by default since 2026-08-23 (operator). Audit-only by construction: whether a flag changes
     # selection is `trust_gate`'s decision, and that still defaults to audit, so this buys VISIBILITY

@@ -224,8 +224,6 @@ def test_the_index_is_not_empty_and_not_a_single_file():
 # are noise rather than evidence. Listed by name and bounded so the set can only shrink — the same
 # shape `test_file_identity_tiers` uses for its unconverted signatures.
 PROSE_ONLY_PROOFS = {
-    "prompt-bundle-unpinned-across-hot-reload",
-    "no-shared-reserve-commit-run-budget",
     "claim-legacy-prompt-branches",
 }
 

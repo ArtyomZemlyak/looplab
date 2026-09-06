@@ -182,7 +182,7 @@ Research only.
 >
 > - **OPEN[prompt-bundle-unpinned-across-hot-reload]** the PromptStore is still re-read on every use
 >   with no run/phase-pinned revision; the only run-start pins are the `run_started` settings and the
->   two `core/setup_identity.py` digests. proof:present:(hot-reload)@looplab/core/prompts.py
+>   two `core/setup_identity.py` digests. proof:absent:revision@looplab/core/prompts.py
 > - **OPEN[inner-agent-phases-not-event-sourced]** none of `agent_phase_started` /
 >   `agent_checkpointed` / `agent_phase_completed` exists; the inner trajectory lives only in
 >   `spans.jsonl`, which replay does not read. proof:absent:agent_phase_started@looplab/events/types.py
@@ -192,7 +192,7 @@ Research only.
 >   proof:absent:eval_invocation_id@looplab/engine/evaluate.py
 > - **OPEN[no-shared-reserve-commit-run-budget]** `CostAccountant` still takes a per-client limit,
 >   `llm_broker` is concurrency ADMISSION with no reserve, and `engine/costs.py` commits post hoc, so
->   concurrent roles cannot reserve against one cap. proof:present:dollar-cap@looplab/core/llm.py
+>   concurrent roles cannot reserve against one cap. proof:`absent:def reserve@looplab/core/llm.py`
 > - **OPEN[research-cap-counts-passes-not-provider-calls]** the cap is still incremented once per
 >   research PASS in the spine, not debited at the provider broker, so the named ceiling undercounts
 >   real spend. proof:absent:concurrent_research_max_calls@looplab/core/llm_broker.py
