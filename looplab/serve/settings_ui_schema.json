@@ -1339,6 +1339,13 @@
           "help": "D8 push half: the one-line deep-research takeaway that rides in every Researcher, crash-triage and repair-critic prompt is prefixed with the memo’s own verifier tally (e.g. “8 of 8 claims UNSUPPORTED”) and the fact that nothing verifies a memo summary. The verifier only ever checks a memo’s CLAIMS, so the pushed summary is the one field of the memo nothing checks — on rubertlite-dr-unified-v8 that line reached 293 real prompts and none of them carried a verdict. It annotates only: the summary is still delivered in full and nothing here can move a metric, a champion, selectability or a violation. Turn it OFF to reproduce the historical prompt byte for byte."
         },
         {
+          "key": "evidence_envelope",
+          "label": "Untrusted-evidence envelope",
+          "type": "bool",
+          "default": true,
+          "help": "One envelope for the text a role did not write (core/evidence.py): the Strategist’s system prompt ends with a guard sentence and every tool result it reads is fenced between UNTRUSTED_RUN_EVIDENCE and END UNTRUSTED_RUN_EVIDENCE; the crash-triage judge’s stderr tail, repair history and code tail, and the repair critic’s trajectory, ride inside the same fence under their own guard; the arXiv and web tools stamp their own results so the Researcher and the Deep-Research stage see the marker too. The same sentence the Boss and the assistant already carry, with each role’s own powers named — a Strategist that cannot be talked into a policy or a timeout, a judge that cannot be talked into a verdict, a critic that cannot be talked into ending a chain. Annotates only: nothing here can move a metric, a champion, selectability or a violation. Turn it OFF to reproduce every one of those prompts byte for byte; a run launched before the field resumes with it OFF."
+        },
+        {
           "key": "research_verify",
           "label": "Deep-research verifier",
           "type": "bool",

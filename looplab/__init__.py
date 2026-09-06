@@ -43,6 +43,7 @@ _LAYOUT = {
     "agents_md": "tools",
     "appconfig": "core",
     "envsafe": "core",   # the secret screen + the DECLARED ENVIRONMENT rule all three levels share
+    "evidence": "core",  # the ONE untrusted-evidence envelope: label + guard sentence + fence
     "appstate": "serve",
     "node_activity": "serve",  # generation-scoped public building/queue/evaluation projection
     "eval_occupancy": "events",  # durable eval-start/terminal occupancy analytics

@@ -94,6 +94,7 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 _SSRF_OPENER = urllib.request.build_opener(_SSRFRedirectHandler)
 
+from looplab.core.evidence import EVIDENCE_LABEL, fence_untrusted
 from looplab.tools._base import fn_spec
 
 _DDG = "https://html.duckduckgo.com/html/"
@@ -197,11 +198,16 @@ class WebTools:
     """`web_search` + `web_fetch`. `enabled=False` (or a network failure) -> a graceful message."""
 
     def __init__(self, enabled: bool = True, max_results: int = 5, timeout: float = 8.0,
-                 max_bytes: int = 4000):
+                 max_bytes: int = 4000, envelope: bool = False):
         self.enabled = enabled
         self.max_results = max_results
         self.timeout = timeout
         self.max_bytes = max_bytes
+        # THE UNTRUSTED-EVIDENCE ENVELOPE — see `tools/literature.py::LiteratureTools.__init__`:
+        # a fetched page is the least trustworthy text any role here reads, and it reached the
+        # Strategist's and the Deep-Research loop's prompts bare. OFF by default (prompt contract);
+        # `agents/factory.py` and `agents/deep_research.py` thread `Settings.evidence_envelope`.
+        self.envelope = bool(envelope)
 
     def specs(self) -> list[dict]:
         return [
@@ -224,10 +230,15 @@ class WebTools:
         if not self.enabled:
             return "(web tools disabled — enable web_search to use general web grounding)"
         if name == "web_search":
-            return self._search(str((args or {}).get("query", "")).strip())
+            return self._deliver(self._search(str((args or {}).get("query", "")).strip()))
         if name == "web_fetch":
-            return self._fetch(str((args or {}).get("url", "")).strip())
+            return self._deliver(self._fetch(str((args or {}).get("url", "")).strip()))
         return f"(unknown tool: {name})"
+
+    def _deliver(self, text: str) -> str:
+        # Everything a search or a fetch answers, refusals included: "(blocked: …)" and
+        # "(unavailable: …)" carry a peer's or a server's own words in their tail.
+        return fence_untrusted(text, EVIDENCE_LABEL) if self.envelope else text
 
     def _get(self, url: str, data: bytes | None = None) -> str:
         req = urllib.request.Request(url, data=data, headers={"User-Agent": _UA})

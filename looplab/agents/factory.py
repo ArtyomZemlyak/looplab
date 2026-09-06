@@ -21,6 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from looplab.core.evidence import envelope_enabled
 from looplab.core.llm import make_llm_client, make_llm_client_for, resolve_llm_target
 from looplab.core.prompts import PromptStore
 
@@ -187,7 +188,9 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
         providers.append(SkillTools(_skill_dirs))
     if getattr(settings, "literature_search", False):       # E3 arXiv grounding (network-optional)
         from looplab.tools.literature import LiteratureTools
-        providers.append(LiteratureTools(enabled=True))
+        # The tool stamps its own results when the envelope is on (`core/evidence.py`), so the
+        # abstracts arrive marked in every loop this provider list reaches.
+        providers.append(LiteratureTools(enabled=True, envelope=envelope_enabled(settings)))
     return providers
 
 
@@ -200,7 +203,7 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
     providers = _shared_providers(task, settings, run_dir, role="strategist")
     if getattr(settings, "web_search", False):              # web search/fetch (network-optional)
         from looplab.tools.web import WebTools
-        providers.append(WebTools(enabled=True))
+        providers.append(WebTools(enabled=True, envelope=envelope_enabled(settings)))
     if not providers:
         return None
     if len(providers) == 1:
@@ -302,6 +305,10 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
                         agent_time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
                         # The triage judge's own wall, latent unless the shared one above is 0.
                         triage_time_budget_s=getattr(settings, "triage_time_budget_s", 1200.0),
+                        # The untrusted-evidence envelope on the triage judge and the repair critic
+                        # (`core/evidence.py`, doc 52 row 13); the Strategist takes its own inside
+                        # `make_strategist`.
+                        evidence_envelope=envelope_enabled(settings),
                         loop_opts=loop_opts_from_settings(settings))   # B1 stuck + C1 plan + C2 summary
 
 

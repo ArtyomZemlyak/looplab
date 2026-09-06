@@ -538,6 +538,13 @@ attempt N cannot read attempt N-1's curve as its own. That snapshot is why the l
 at the top of every attempt rather than lazily at the failure — by then there is no "before" left to
 take.
 
+Since 2026-09-06 what the judge reads is also **marked**: with `evidence_envelope` on, the stderr
+tail, the repair history and the code tail ride between `UNTRUSTED_RUN_EVIDENCE` and its closing
+fence, every tool result its loop returns is fenced the same way, and the system prompt ends with
+the guard sentence naming what that text must not be able to do — pick the verdict, relabel the
+failure kind the engine tagged, or buy a dependency install. See
+[the untrusted-evidence envelope](#the-untrusted-evidence-envelope).
+
 ### Why the kill bar is a bar and not a ladder
 
 `train_monitor_kill_confidence` is 0.8, and a `broken` verdict under it does nothing. That looks
@@ -757,6 +764,34 @@ bucket are explicitly labelled. The prompt also states how many active experimen
 External, repository, memory, prior-run, and free-form current-run text (including
 rationales/errors/logs) is always covered by an immutable untrusted-data boundary, even when an
 operator hot-overrides the rest of the Deep Research system prompt.
+
+### The untrusted-evidence envelope
+
+Every role above reads text it did not write — a candidate's stderr, a sibling run's rationale, an
+arXiv abstract, a fetched page — and until 2026-09-06 the rule about how to read it lived in three
+hand-written copies: the two Researcher prompts' `_UNTRUSTED_MEMORY_RULE`, the Boss's
+`BOSS_EVIDENCE_GUARD` and the assistant's twin, plus a result fence only the assistant asked for.
+The roles whose answer moves an engine decision — the Strategist (`policy` / `timeout` /
+`eval_parallel`), the crash-triage judge (a node's verdict) and the repair critic (whether a repair
+chain ends) — read the same text with no rule at all, and the arXiv / web results arrived unmarked
+in every loop that held those tools.
+
+`looplab/core/evidence.py` is now the one place the three parts live: the label
+`UNTRUSTED_RUN_EVIDENCE`, the guard-sentence builder `untrusted_evidence_guard(lead, powers=…)`
+(the fixed clauses are shared; each role names what is untrusted for it and what it must not be
+talked into), and the fence `fence_untrusted(text, label)` that opens and closes a block and
+neutralizes any spelling of its own markers inside it. `serve/llm_context.py` and
+`agents/tool_loop.py` re-export their historical names, so the Boss and the assistant are unchanged.
+
+`evidence_envelope` (on for new runs; a snapshot written before the field resumes with it **off**)
+switches the three new consumers together: the Strategist's system prompt ends with its guard and
+its agent variant fences every tool result; the triage judge's stderr tail, repair history and code
+tail, and the critic's trajectory, ride inside the fence under their own guard, and their pilot loop
+fences its tool results; `LiteratureTools` and `WebTools` stamp their own results, so the Researcher
+and the Deep-Research loop see the marker too (the fence is idempotent, so a tool-stamped result
+inside a loop that stamps everything is not double-marked). `false` reproduces every one of those
+prompts byte for byte — a prompt is a contract — and nothing here reaches a metric, a champion,
+selectability or a violation. `tests/test_evidence_envelope.py` drives each surface both ways.
 
 ## Knowledge, skills & prompts
 

@@ -959,10 +959,13 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     # knowledge gets the configured embedder/Memora/case layer, and memory/skills/literature follow
     # the same gates.  Deep Research still owns only its WebTools addition below.
     from looplab.agents.factory import _shared_providers
+    from looplab.core.evidence import envelope_enabled
     providers = _shared_providers(task, settings, run_dir, role="researcher")
     if getattr(settings, "web_search", False):
         from looplab.tools.web import WebTools
-        providers.append(WebTools(enabled=True))
+        # Marked at the tool (`core/evidence.py`, doc 52 row 13): this loop states the boundary in
+        # `_UNTRUSTED_RESEARCH_DATA_RULE` and its fetched pages used to arrive bare beside it.
+        providers.append(WebTools(enabled=True, envelope=envelope_enabled(settings)))
     tools = None
     if providers:
         from looplab.agents.agent import CompositeTools

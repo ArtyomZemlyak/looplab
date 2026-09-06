@@ -1209,6 +1209,30 @@ class Settings(BaseSettings):
     # unsupported about the CITATION, so suppression would drop real findings over bad footnotes.
     # It reaches no metric, champion, selectability decision or violation (docs/36).
     memo_verdict_cue: bool = True
+    # THE UNTRUSTED-EVIDENCE ENVELOPE (`core/evidence.py`, doc 52 row 13; doc 50 XP-05). May the
+    # three decision-moving roles that read text they did not write be TOLD so, at system
+    # authority, and have that text MARKED? ON: the Strategist's system prompt ends with the guard
+    # sentence and every result its tool loop returns is fenced between `UNTRUSTED_RUN_EVIDENCE`
+    # and `END UNTRUSTED_RUN_EVIDENCE`; the crash-triage judge's stderr tail, repair history and
+    # code tail ride inside the same fence under the same guard, and so does the repair critic's
+    # trajectory; the arXiv and web tools stamp their own results, so the Researcher and the
+    # Deep-Research loop see the marker too. It is the sentence the Boss and the assistant already
+    # carried, built by the ONE builder, with each role's own `powers` clause — a Strategist that
+    # cannot be talked into a policy or a timeout, a judge that cannot be talked into a verdict, a
+    # critic that cannot be talked into ending a chain.
+    #
+    # Measured (doc 50 XP-05): 3 of 9 in-scope system prompts carried a rule, none of them the
+    # surfaces whose answer sets `eval_parallel` / `policy` / `timeout` or a node's terminal; the
+    # triage and critic prompts spliced the candidate's stderr verbatim, and the web / arXiv
+    # results arrived unmarked in every loop that held those tools.
+    #
+    # `false` reproduces every one of those prompts BYTE FOR BYTE (the `developer_probe` /
+    # `memo_verdict_cue` same-position pattern; `tests/test_evidence_envelope.py` pins each
+    # surface both ways). It takes a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row on `developer_probe`'s
+    # ground — a DIFFERENT PROMPT — because a resumed pre-field run must keep the prompts it was
+    # launched with. It ANNOTATES and withholds nothing: no metric, champion, selectability
+    # decision or violation can move on it (docs/36).
+    evidence_envelope: bool = True
     # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
     # params-ignored; on host-graded tasks the metric checks become a submission-output check)
     # surfaced in the Trust panel. Broad findings are advisory; `critic:hardcoded_metric` can gate under
@@ -2747,6 +2771,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # already states that `developer_probe=false` restores the old prompt BYTE FOR BYTE — which is
     # what makes this row a restoration rather than a guess.
     "developer_probe": False,
+    # THE UNTRUSTED-EVIDENCE ENVELOPE, added 2026-09-06 defaulting ON (doc 52 row 13). (a) holds.
+    # (b) is `developer_probe`'s DIFFERENT-PROMPT ground exactly: the Strategist, triage and critic
+    # system prompts gain a guard sentence and their user turns gain a fence around the candidate's
+    # own text, and the Strategist's tool results arrive fenced — so the two values produce two
+    # different prompts for three roles. (c) is `False`, pointable at every commit before this one,
+    # and the field's own comment states that `false` restores every prompt byte for byte.
+    "evidence_envelope": False,
     # THE REPAIR CRITIC'S CADENCE, added 2026-08-13 defaulting to 3 (F8). (a) holds. (b) is paid
     # work AND an intervention, the two strongest columns at once: from the 4th durable repair on a
     # node, `agents/unified_agent.py::repair_critic` is a SECOND model asked whether the chain is

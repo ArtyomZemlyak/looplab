@@ -530,13 +530,20 @@ writer and the eleven readers (eight `==`, three `!=` in `finalize.py`) go throu
 `tests/test_run_stop_word.py` scans the tree for the literal comparison and pins the reader set
 both ways. Deleted per the index rule.*
 
-OPEN[no-single-untrusted-evidence-envelope] the untrusted-text rule reaches the assistant, the concept
-tagger and the MCP cache key and not the surfaces that move engine decisions: the Strategist (whose
-answer sets `eval_parallel` / `policy` / `timeout`), the crash-triage and repair-critic prompts
-(verbatim stderr), the arXiv / web results. Doc 50 XP-05's fix is ONE envelope — `core/evidence.py`,
-label plus guard sentence — behind a Settings flag with a legacy-snapshot default of off, because
-prompt strings are contracts; the field's apply / defer / reject controller (2608.05235) is its shape.
-proof:missing:looplab/core/evidence.py
+*Closed 2026-09-06 (row 13 shipped): the marker `no-single-untrusted-evidence-envelope` stood here.
+`core/evidence.py` is the one envelope — `EVIDENCE_LABEL`, the guard-sentence builder the Boss and
+the assistant already used, and the result fence (idempotent on its own output only, so a tool that
+stamps its result composes with a loop that stamps everything) — behind `Settings.evidence_envelope`
+(on; `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` off). It reaches the Strategist (guard + fenced tool results
+in the agent variant), the crash-triage judge and the repair critic (guard + the stderr tail /
+history / code tail / trajectory inside the fence + fenced pilot-loop results) and the arXiv / web
+tools, which stamp their own results so the Researcher and the Deep-Research loop see the marker.
+Off is every historical prompt byte for byte; `tests/test_evidence_envelope.py` drives each surface
+both ways. The apply / defer / reject shape is present as its REJECT arm only — an instruction found
+inside evidence is never applied and these roles have no operator present mid-call to defer to.
+Not done here: the Researcher's and the Deep-Research loop's OTHER tool results (run tools, repo
+scouts, memory) still arrive bare under their system rules; MCP results and a remote server's
+self-description in the tool schema (doc 50 TO-06) are untouched. Deleted per the index rule.*
 
 OPEN[engine-attributes-have-no-declaring-site-guard] `Engine` touches 772 attribute names across 20
 mixins, 91 assigned only outside `__init__`, 47 from more than one file, with 143 silent handlers in

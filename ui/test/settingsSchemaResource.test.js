@@ -118,7 +118,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   FIFTEENTH occurrence, and the Python guard caught it first for the eleventh time.
   //   186 -> 187 (2026-09-06): `stage_check_tools`, whether the inter-stage checker may query the
   //   checked stage's own log instead of deciding from its last 4,000 characters (doc 52 row 9).
-  assert.equal(Object.keys(schema.fieldByKey).length, 187)
+  //   187 -> 188 (2026-09-06): `evidence_envelope`, the one untrusted-evidence envelope on the
+  //   Strategist, the triage judge, the repair critic and the arXiv / web tools (doc 52 row 13).
+  assert.equal(Object.keys(schema.fieldByKey).length, 188)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')
