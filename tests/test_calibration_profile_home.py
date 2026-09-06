@@ -119,7 +119,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               never launches a coding agent) legitimately moves THIS pin, which binds the complete
 #               settings map, while it must NOT revoke a preserved snapshot merely for predating it.
 #               See `search/speculation_quality.py`'s directional field check.
-_EXPECTED_DIGEST = "sha256:7fa03f47dea26bc0d9aa9b644096ebdb09a68c09d8301e64333ff42fce18a434"
+#   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
+#               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
+#               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
+#               0.0, so no replicate's dispatch moves; the envelope moves regardless, because the
+#               digest binds the complete non-variant map.
+_EXPECTED_DIGEST = "sha256:16926f758dabd370e8d9460a386f199427dbe81ba1c33b6f3a97e5b71c47c284"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -443,7 +448,7 @@ _EXPECTED_DIGEST = "sha256:7fa03f47dea26bc0d9aa9b644096ebdb09a68c09d8301e64333ff
 #               — where a replicate calibrated before it would have run that stage to its wall.
 #               That is a different number of evaluations on the same failing node, which is
 #               precisely what a speculation receipt asserts about.
-_EXPECTED_FIELD_COUNT = 220
+_EXPECTED_FIELD_COUNT = 221
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

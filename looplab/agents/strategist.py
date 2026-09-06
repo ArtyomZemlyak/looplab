@@ -352,6 +352,11 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
         # to build the grid), preserving the "Researcher is the decision-maker" division.
         if isinstance(ops.get("prefer_sweep"), bool):
             clean["prefer_sweep"] = ops["prefer_sweep"]
+        # The endgame reserve's champion sweep (doc 52 row 18): a Strategist may switch it OFF
+        # (`endgame_sweep=false` keeps the reserve for the ensemble alone); the reserve itself is
+        # the plan's and not this field's.
+        if isinstance(ops.get("endgame_sweep"), bool):
+            clean["endgame_sweep"] = ops["endgame_sweep"]
         if clean:
             out["operators"] = clean
     fid = strat.get("fidelity")
@@ -483,11 +488,17 @@ class RuleStrategist:
         # and spend the reserve on a final ENSEMBLE of the strongest solutions at full fidelity —
         # top MLE-bench systems reserve an explicit final-ensemble/confirm window rather than
         # exploring until the budget dies. (The confirm phase then runs at finish as usual.)
+        # Since 2026-09-06 (doc 52 row 18) the RESERVE itself is the plan's (`engine/plan.py`), which
+        # the dispatcher honours whether or not this consult ever lands; this rule still sets the
+        # machinery for it — the ensemble merge and, `endgame_sweep`, the champion sweep proposed
+        # by the k-NN surrogate (EvoTrace: a 24-call sweep over one program's exposed
+        # hyperparameters matched or beat the evolutionary final-best on 13 of 15 tasks).
         if ctx.node_budget_frac >= 0.8 and ctx.phase in ("explore", "exploit"):
             return {"policy": "greedy", "fidelity": "full",
-                    "operators": {"merge_mode": "ensemble", "ablate_every": 0},
+                    "operators": {"merge_mode": "ensemble", "ablate_every": 0, "endgame_sweep": True},
                     "rationale": f"endgame ({ctx.node_budget_frac:.0%} of node budget spent): "
-                                 "reserve for a final ensemble of the top solutions, no new breadth",
+                                 "reserve for a final ensemble of the top solutions and a champion "
+                                 "sweep, no new breadth",
                     "source": "rule"}
 
         # High failure rate -> stop spending breadth on broken code; deepen repair, narrow search.
@@ -705,6 +716,7 @@ class _StrategyOut(BaseModel):
     merge_mode: Optional[str] = None
     complexity_cue: Optional[bool] = None
     prefer_sweep: Optional[bool] = None
+    endgame_sweep: Optional[bool] = None
     request_research: Optional[bool] = None
     timeout: Optional[float] = Field(default=None, gt=0)
     eval_parallel: Optional[int] = Field(default=None, ge=0, le=1024)
@@ -818,7 +830,9 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         "endgame or on a compounding lead, else balanced; "
         "optional ablate_every, merge_mode mean|ensemble, complexity_cue, prefer_sweep — set "
         "prefer_sweep=true to bias the researcher toward an in-process hyperparameter sweep when "
-        "evals are costly and the space is numeric; set request_research=true when the run is "
+        "evals are costly and the space is numeric; endgame_sweep=false keeps the plan's endgame "
+        "reserve for the ensemble alone (default: the reserve also sweeps the champion with the "
+        "k-NN surrogate); set request_research=true when the run is "
         "stalled or confused and would benefit from a deep-research step over a stratified run "
         "summary + the "
         "web before continuing; optional timeout (>0), eval_parallel (0..1024), and llm_parallel "
@@ -887,6 +901,8 @@ def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
         ops["complexity_cue"] = out.complexity_cue
     if out.prefer_sweep is not None:
         ops["prefer_sweep"] = out.prefer_sweep
+    if out.endgame_sweep is not None:
+        ops["endgame_sweep"] = out.endgame_sweep
     if ops:
         strat["operators"] = ops
     return strat

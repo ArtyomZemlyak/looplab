@@ -43,6 +43,7 @@ _LAYOUT = {
     "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
+    "plan": "engine",  # the PLAN artifact + the endgame reserve the dispatcher honours (doc 52 row 18)
     "agents_md": "tools",
     "appconfig": "core",
     "envsafe": "core",   # the secret screen + the DECLARED ENVIRONMENT rule all three levels share

@@ -2292,6 +2292,11 @@ class RunState(BaseModel):
     # the engine applies before consulting the Strategist (human-wins parity with pause/hint).
     active_strategy: Optional[dict] = None
     strategy_history: list[dict] = Field(default_factory=list)
+    # THE PLAN (doc 52 row 18; `engine/plan.py`): the latest folded `plan` row — phases with node
+    # counts and the endgame reserve (`endgame_start`, `reserve`, `kinds`) the dispatcher reads —
+    # and the timeline of re-plans. Additive: an old log folds to None / [] (invariant #5).
+    plan: Optional[dict] = None
+    plan_history: list[dict] = Field(default_factory=list)
     pending_strategy: Optional[dict] = None
     # A1 ASHA: rung-promotion audit trail {rung, survivors} for the UI (successive-halving view).
     rungs: list[dict] = Field(default_factory=list)

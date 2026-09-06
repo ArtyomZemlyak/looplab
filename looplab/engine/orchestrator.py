@@ -34,7 +34,7 @@ from looplab.events.types import (EV_RUN_LOOP_EXITED, EV_TRACE_EXPORT_HEALTH,
     EV_APPROVAL_REQUESTED,
     EV_COMMAND_ACK,
     EV_CARD_ADDED,
-    EV_DATA_PROFILED, EV_DATA_PROVENANCE,
+    EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_PLAN,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_FORK_UNFULFILLED, EV_HOST_GRADING,
     EV_INJECT_DONE, EV_INJECT_FAILED,
     EV_FINALIZE_STEP,
@@ -92,6 +92,7 @@ from looplab.engine.finalize import (
 from looplab.events.finalize_protocol import FINALIZE_STEP_BEGUN
 from looplab.engine.holdout import HoldoutGrader
 from looplab.engine.lessons import LessonMemory
+from looplab.engine.plan import META_SWEEP
 from looplab.engine.options import EngineOptions
 from looplab.engine.workspace import WorkspaceSeeder
 # Pure triage/fingerprint helpers extracted to looplab/engine/triage.py, imported back under
@@ -652,6 +653,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         concurrent_consolidate = _opt("concurrent_consolidate")
         report_every = _opt("report_every")
         merge_mode = _opt("merge_mode")
+        endgame_reserve_frac = _opt("endgame_reserve_frac")
         complexity_cue = _opt("complexity_cue")
         budget_aware = _opt("budget_aware")
         failure_reflection = _opt("failure_reflection")
@@ -790,6 +792,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             merge_mode = ("ensemble" if getattr(developer, "is_code_generating", False)
                           else "mean")
         self._merge_mode = merge_mode
+        # doc 52 row 18: the plan's endgame reserve and whether its reserve sweeps the champion (a
+        # Strategist may switch the sweep off through `operators.endgame_sweep`).
+        self._endgame_reserve_frac = float(endgame_reserve_frac or 0.0)
+        self._endgame_sweep = True
+        self._endgame_surrogate = None
         self._complexity_cue = complexity_cue
         self._prefer_sweep = False   # A7: Strategist-set bias toward intra-node sweeps (audit-driven)
         self._budget_aware = budget_aware
@@ -1979,7 +1986,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     continue
                 state = fold(fresh_events)
 
-            actions = self._select_actions(state)
+            # THE PLAN (doc 52 row 18): written / re-cut on the main task at this creation boundary,
+            # then read back off the fold so the reserve below is the durable row's, never a local's.
+            if self._ensure_plan(state):
+                state = fold(self.store.read_all())
+            actions = self._plan_gate(state, self._select_actions(state))
             if not actions:
                 if await self._handle_no_actions(state, decision_seq=decision_seq) == "break":
                     break
@@ -2899,6 +2910,51 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # A receipt this run could not land is not a receipt: report "not appended" and let the next
         # turn re-decide, rather than claiming a halving decision the log does not carry.
         return retry_tail_cas(self.store, _plan, on_exhaust=lambda: False)
+
+    def _ensure_plan(self, state: RunState) -> bool:
+        """Write the plan row when none exists, or a re-cut one when due (`engine/plan.py`);
+        True when a row was appended. Main task only; a 0 reserve fraction writes nothing."""
+        from looplab.engine.plan import build_plan, replan
+        if self._endgame_reserve_frac <= 0.0 or getattr(self, "_speculation_gate_calibration", False):
+            return False
+        n_seeds = int(getattr(self.policy, "n_seeds", getattr(self, "n_seeds", 0)) or 0)
+        max_nodes = int(getattr(self.policy, "max_nodes", 0) or 0)
+        if max_nodes <= 0:
+            return False
+        if state.plan is None:
+            row = build_plan(max_nodes=max_nodes, n_seeds=n_seeds,
+                             reserve_frac=self._endgame_reserve_frac, at_node=len(state.nodes),
+                             endgame_sweep=self._endgame_sweep)
+        else:
+            from looplab.agents.strategist import stall_rung, strategist_stall_window
+            rung, _started = stall_rung(
+                state, strategist_stall_window(getattr(self, "strategist", None)))
+            row = replan(state.plan, max_nodes=max_nodes, n_seeds=n_seeds,
+                         reserve_frac=self._endgame_reserve_frac, at_node=len(state.nodes),
+                         stall_rung=rung, endgame_sweep=self._endgame_sweep)
+        if row is None:
+            return False
+        self.store.append(EV_PLAN, row)
+        return True
+
+    def _plan_gate(self, state: RunState, actions: list[dict]) -> list[dict]:
+        """The reserve the dispatcher honours (`engine/plan.py::endgame_actions`): inside the
+        endgame, breadth is replaced by the top-2 ensemble and champion sweeps."""
+        from looplab.engine.plan import endgame_actions
+        if state.plan is None:
+            return actions
+        return endgame_actions(state, state.plan, actions, sweep=self._endgame_sweep)
+
+    def _sweep_researcher(self, researcher):
+        """The k-NN surrogate the endgame's champion sweep proposes with (doc 52 row 18): bounds
+        inferred from the run's own evaluated params, the run's Researcher as its fallback below
+        warm-up, the run's `surrogate_explore` weight. Built once per engine."""
+        from looplab.search.surrogate import SurrogateResearcher
+        if self._endgame_surrogate is None or self._endgame_surrogate.fallback is not researcher:
+            self._endgame_surrogate = SurrogateResearcher(
+                {}, fallback=researcher, explore=getattr(self, "_surrogate_explore", 0.1),
+                infer_bounds=True)
+        return self._endgame_surrogate
 
     def _select_actions(self, state: RunState) -> list[dict]:
         """Apply the explicit macro-selection authority order for one fresh fold."""
@@ -5756,9 +5812,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             from looplab.search.lock_in import capability_expansion_due
             if capability_expansion_due(state, streak_threshold=_LOCK_IN_STREAK)[0]:
                 authoritative_operator = KIND_EXPAND
+        # doc 52 row 18: an endgame champion sweep proposes through the k-NN surrogate (the LLM
+        # Researcher below warm-up); every other improve proposes exactly as before.
+        proposer = (self._sweep_researcher(researcher)
+                    if action.get(META_SWEEP) and self._endgame_reserve_frac > 0.0 else researcher)
         with self.tracer.span("propose") as _span:
             idea = _link(self._canonicalize_idea_operator(
-                researcher.propose(state, parent), authoritative_operator))
+                proposer.propose(state, parent), authoritative_operator))
             stamp_proposal_span(_span, idea, node_id=prospective_node_id)
         if idea is None:
             return None
@@ -5921,7 +5981,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     built = self._implement_result(
                         _didea,
                         pnodes[0] if self._merge_mode == "ensemble" and pnodes else None,
-                        developer=developer, state=state)
+                        developer=developer, state=state,
+                        # doc 52 row 18: the other lineages, code and traces, not a 120-char digest
+                        co_parents=pnodes[1:] if self._merge_mode == "ensemble" else ())
             # The `debug` build branch is GONE (F5). It called `developer.repair` on a FRESH node
             # seeded from the failed parent's files — inline repair with a node-budget slot attached
             # to it. Its whole justification was that the in-node loop had a fixed count and had to

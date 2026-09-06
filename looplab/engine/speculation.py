@@ -1066,10 +1066,13 @@ class SpeculationMixin:
             elif kind == "merge":
                 parents = [state.nodes[node_id] for node_id in reservation.parent_ids]
                 directed = self._directed_idea(idea.model_copy(deep=True), state)
+                # An ensemble seeds from the primary parent and SEES the others (doc 52 row 18):
+                # `co_parents` are the lineages it must recombine, code and traces.
                 built = self._implement_result(
                     directed,
                     parents[0] if self._merge_mode == "ensemble" and parents else None,
-                    developer=developer, state=state)
+                    developer=developer, state=state,
+                    co_parents=parents[1:] if self._merge_mode == "ensemble" else ())
             elif kind == "debug":
                 parent = state.nodes[action["parent_id"]]
                 repair = getattr(developer, "repair", None)

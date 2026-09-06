@@ -171,6 +171,12 @@ EV_LLM_USAGE = "llm_usage"  # durable sanitized provider-call delta; folded cumu
 EV_ABLATE = "ablate"
 EV_POLICY_DECISION = "policy_decision"
 EV_STRATEGY_DECISION = "strategy_decision"
+# THE PLAN ARTIFACT (doc 52 row 18; doc 10 P2 / doc 11 D13): the run's budget allocation across
+# phases with an ENDGAME RESERVE the dispatcher honours — `engine/plan.py`. FOLDED (`RunState.plan`),
+# written by the main task at the first creation boundary and re-cut on a live `max_nodes` change
+# or a hard stall. The endgame used to be a Strategist consult at 80 % of the node budget that could
+# never fire (the consult is cadenced); the plan is the durable rule the reserve is read from.
+EV_PLAN = "plan"
 EV_HYPOTHESIS_RANKED = "hypothesis_ranked"   # FOREAGENT board prioritization: order + confidence + trace
 EV_RUNG_PROMOTED = "rung_promoted"
 EV_AGENT_DECISION = "agent_decision"

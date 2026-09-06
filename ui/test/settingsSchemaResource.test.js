@@ -122,7 +122,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   Strategist, the triage judge, the repair critic and the arXiv / web tools (doc 52 row 13).
   //   188 -> 190 (2026-09-06): `llm_cost_limit` + `llm_token_limit`, the run's LLM spend caps
   //   reserved at the broker's permit (doc 52 row 15).
-  assert.equal(Object.keys(schema.fieldByKey).length, 190)
+  //   190 -> 191 (2026-09-06): `endgame_reserve_frac`, the plan's endgame reserve the dispatcher
+  //   honours — the top-2 ensemble once, then champion sweeps (doc 52 row 18).
+  assert.equal(Object.keys(schema.fieldByKey).length, 191)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')

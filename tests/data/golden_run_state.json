@@ -828,6 +828,8 @@
   "paused": false,
   "pending_hints": [],
   "pending_strategy": null,
+  "plan": null,
+  "plan_history": [],
   "policy_chosen": 5,
   "policy_reason": "exploit best",
   "policy_scores": {

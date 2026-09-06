@@ -607,6 +607,8 @@ class StrategyCadenceMixin:
             self._ablate_code_blocks = bool(ops["ablate_code_blocks"])
         if "prefer_sweep" in ops and may("prefer_sweep"):
             self._prefer_sweep = bool(ops["prefer_sweep"])
+        if "endgame_sweep" in ops and may("endgame_sweep"):
+            self._endgame_sweep = bool(ops["endgame_sweep"])   # doc 52 row 18: the reserve's sweep
         # Resource budgets the Strategist may retune live (gated by the governance matrix). self.timeout
         # is read fresh per eval and self._eval_parallel rebuilds the CapacityLimiter each batch, so a
         # mid-run change takes effect on the next node without any rewiring.

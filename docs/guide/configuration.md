@@ -82,8 +82,8 @@ older binary can still load a snapshot a newer one wrote.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **190 of the 223 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 190 catalogued keys.
+server-owned curated catalogue with **191 of the 224 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 191 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,
@@ -809,6 +809,7 @@ never touches.
 | `ablate_every` | `LOOPLAB_ABLATE_EVERY` | `0` | Ablation-driven refinement every N improves (0 = off; greedy only) |
 | `ablate_code_blocks` | `LOOPLAB_ABLATE_CODE_BLOCKS` | `false` | Treat each pipeline code block as an ablation unit (MLE-STAR) |
 | `merge_mode` | `LOOPLAB_MERGE_MODE` | `auto` | `auto` (ensemble when the Developer writes code, else mean) · `mean` (param mean) · `ensemble` (code recombination) |
+| `endgame_reserve_frac` | `LOOPLAB_ENDGAME_RESERVE_FRAC` | `0.2` | The plan's endgame reserve: this fraction of `max_nodes` is kept for the top-2 ensemble (once) and champion sweeps proposed by the k-NN surrogate, and the dispatcher honours it — no new breadth inside the reserve. `0` = no plan (the historical dispatch); a resumed pre-plan run keeps `0` |
 | `complexity_cue` | `LOOPLAB_COMPLEXITY_CUE` | `false` | Inject a complexity hint keyed on the node's child count |
 | `feature_engineering` | `LOOPLAB_FEATURE_ENGINEERING` | `false` | Instruct the agent to add engineered features (CAAFE-style; CV gate enforced) |
 | `best_of_n` | `LOOPLAB_BEST_OF_N` | `1` | Generate N implementations per node, keep the best by execution-free reward (1 = off). REFUSED at launch (`search/best_of_n.py::refuse_unrankable_best_of_n`) when the active Developer answers on `last_files` rather than on the code `implement()` returns (every repo task) — the selector would rank N identical sentinels and always pick candidate 0 after paying for N builds; see `docs/BACKLOG.md` §0.18 |
@@ -853,7 +854,7 @@ Card selector grants it to the Strategist without changing the default flag-off 
 an explicit `card_scoring: []` revokes that grant. This
 is **enforced at runtime** (`_agent_may`) at every **agent** seam, so removing a role from a knob
 truly locks it — not just a UI hint: the Strategist's whole applied control surface (`policy`,
-`policy_params`, `ablate_every`, `merge_mode`, `complexity_cue`, `ablate_code_blocks`, `prefer_sweep`,
+`policy_params`, `ablate_every`, `merge_mode`, `complexity_cue`, `ablate_code_blocks`, `prefer_sweep`, `endgame_sweep`,
 `novelty_stance`, `developer`, `fidelity`, `timeout`, `eval_parallel`, `llm_parallel`,
 `llm_lane_limits`, `card_scoring`) is gated in
 `_apply_strategy`. Old snapshots that have only `max_parallel`/`parallel_build` grants remain valid;

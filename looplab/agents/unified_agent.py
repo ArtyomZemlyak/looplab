@@ -206,13 +206,19 @@ class UnifiedAgent(WrapsDeveloper):
             self._sync_audit()
         return code
 
-    def implement_from(self, idea: Idea, parent) -> str:
+    def implement_from(self, idea: Idea, parent, *, co_parents=()) -> str:
         """Parent-aware implement: delegate when the inner developer supports it (repo tasks), so an
-        improve patches the parent's solution instead of regenerating from the baseline."""
+        improve patches the parent's solution instead of regenerating from the baseline. The
+        ensemble's `co_parents` (doc 52 row 18) travel only to a delegate that accepts them."""
         dev = self._for_stage("implement")
         impl = getattr(dev, "implement_from", None)
         try:
-            code = impl(idea, parent) if callable(impl) else dev.implement(idea)
+            if callable(impl) and co_parents:
+                from looplab.engine.node_build import accepts_co_parents
+                code = (impl(idea, parent, co_parents=co_parents) if accepts_co_parents(impl)
+                        else impl(idea, parent))
+            else:
+                code = impl(idea, parent) if callable(impl) else dev.implement(idea)
         finally:
             self._sync_audit()          # see `implement` — a raising delegate must not leave a stale mirror
         return code

@@ -46,6 +46,10 @@ EXPECTED = {
     "lessons_every": (4, 0),
     "lessons_refresh_every": (4, 0),
     "merge_mode": ("auto", "mean"),
+    # The plan's endgame reserve (doc 52 row 18): ON in the product surface (the Strategist's old
+    # 80 % rule as a durable `plan` row the dispatcher honours), 0 in bare-library `EngineOptions`
+    # so a direct `Engine(...)` gains no authority over its caller's dispatch it did not ask for.
+    "endgame_reserve_frac": (0.2, 0.0),
     "reflection_priors": (True, False),
     "report_every": (3, 0),
     "watchdog_reflection": (True, False),

@@ -1832,7 +1832,7 @@ class ValidatingDeveloper(WrapsDeveloper):
         fb_call = (lambda: fb_repair(idea, code, error)) if callable(fb_repair) else None
         return self._attempt_loop(idea, lambda i: inner_repair(i, code, error), fb_call)
 
-    def implement_from(self, idea: Idea, parent) -> str:
+    def implement_from(self, idea: Idea, parent, *, co_parents=()) -> str:
         """Parent-aware implement, forwarded through the validation retry loop (arch-review §4 P1-9):
         without exposing this, the engine's `getattr(developer, 'implement_from')` capability probe
         saw only the validator's plain `implement` and regenerated the child from the pristine baseline
@@ -1841,6 +1841,10 @@ class ValidatingDeveloper(WrapsDeveloper):
         impl_from = getattr(self.inner, "implement_from", None)
         if not callable(impl_from):
             return self.implement(idea)
+        if co_parents:
+            from looplab.engine.node_build import accepts_co_parents
+            if accepts_co_parents(impl_from):
+                return self._attempt_loop(idea, lambda i: impl_from(i, parent, co_parents=co_parents))
         return self._attempt_loop(idea, lambda i: impl_from(i, parent))
 
     def repair_from(self, idea: Idea, node, error: str) -> str:

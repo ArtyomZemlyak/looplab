@@ -334,6 +334,9 @@ DEFAULT_AGENT_CONTROL: dict[str, list[str]] = {
     "merge_mode": ["strategist"],
     "complexity_cue": ["strategist"],
     "ablate_code_blocks": ["strategist"],
+    # The plan's endgame sweep (doc 52 row 18): the Strategist may keep the reserve for the
+    # ensemble alone; the reserve itself is the plan's and no role may move it.
+    "endgame_sweep": ["strategist"],
     "prefer_sweep": ["strategist"],
     "novelty_stance": ["strategist"],
     "developer": ["strategist"],
@@ -810,6 +813,13 @@ class Settings(BaseSettings):
     # recombination is the strongest single merge (removing it costs ~9 pp), so it is the default
     # wherever it can work. Falls back to mean when the Developer can't ensemble.
     merge_mode: str = "auto"
+    # THE ENDGAME RESERVE (doc 52 row 18; `engine/plan.py`): the fraction of `max_nodes` the run's
+    # PLAN keeps for the endgame — the top-2 ensemble once, then champion sweeps proposed by the k-NN
+    # surrogate — and which the dispatcher honours instead of opening breadth until the budget dies.
+    # 0 = no plan, the historical dispatch. Product default 0.2 = the Strategist's old 80 % rule,
+    # now a durable `plan` row rather than a consult that may never fire; `EngineOptions` keeps 0.0
+    # so a bare `Engine(...)` gains no dispatch authority it did not ask for.
+    endgame_reserve_frac: float = Field(default=0.2, ge=0.0, le=0.9)
     # A0d (AIRA): inject a dynamic complexity hint into the draft/improve prompt keyed on the
     # node's child count (few children -> keep minimal; many -> escalate to ensembling/HPO).
     complexity_cue: bool = False
@@ -2786,6 +2796,9 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # already states that `developer_probe=false` restores the old prompt BYTE FOR BYTE — which is
     # what makes this row a restoration rather than a guess.
     "developer_probe": False,
+    # doc 52 row 18: a resumed pre-plan run keeps its historical dispatch — no reserve appears
+    # mid-run under a rule its first half never had.
+    "endgame_reserve_frac": 0.0,
     # THE UNTRUSTED-EVIDENCE ENVELOPE, added 2026-09-06 defaulting ON (doc 52 row 13). (a) holds.
     # (b) is `developer_probe`'s DIFFERENT-PROMPT ground exactly: the Strategist, triage and critic
     # system prompts gain a guard sentence and their user turns gain a fence around the candidate's

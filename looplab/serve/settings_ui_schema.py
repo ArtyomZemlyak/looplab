@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 190
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 191
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -159,7 +159,9 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # 2026-09-06: +`llm_cost_limit` +`llm_token_limit` (doc 52 row 15): the run's LLM spend caps,
 # reserved at the broker's permit. Rows because a spend ceiling is exactly the operator-typed
 # knob a form exists for, beside `max_seconds` / `max_eval_seconds`.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "ec3866421172ec11dcb73c6badc10a1aff9d03a6287f4b1d8f51066f633b1070"
+# 2026-09-06: +`endgame_reserve_frac` (doc 52 row 18): the plan's endgame reserve the dispatcher
+# honours. A row because it is a BUDGET allocation the operator decides beside `max_nodes`.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "1c8d0c2e54f7fdff0e84da18e14a1fcce19b438604ceb8158117b5acee63ffa8"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

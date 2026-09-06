@@ -304,20 +304,21 @@ answers grade the search champion once at finish (`holdout_evaluated`, `protocol
 `tests/test_mlebench_search_split.py` pins that the search never sees a public test id and the
 private grade never sees a hidden train id. Deleted per the index rule.*
 
-OPEN[merge-operator-is-mean-of-params-not-code] `merge_mode="auto"` resolves to `ensemble` for every
-LLM Developer and `engine/node_build.py::_ensemble_idea` issues a recombination directive (mean params
-plus 120-char parent rationales) — but the Developer is handed ONE parent's code (`speculation.py`
-passes `parents[0]`), while Frontis-MA1's Crossover applies its construction to BOTH parents and MGM
-hybridises the other lineage's TRACE. The field weights crossover low (ShinkaEvolve's mix: 0.1), so
-the fix is the cheap one: give `_ensemble_idea`'s Developer both parents' committed files and traces;
-a host-side top-k prediction ensemble needs a predictions file and is not the repo family's row.
-proof:`present:parents[0] if self._merge_mode == "ensemble" and parents else None@looplab/engine/speculation.py`
+*Closed 2026-09-06 (row 18 shipped): the marker `merge-operator-is-mean-of-params-not-code` stood
+here. Both engine merge sites pass `co_parents=parents[1:]` into `node_build._implement_result`,
+which hands them to a Developer whose `implement_from` takes the keyword (`accepts_co_parents`) —
+the validating wrapper and the unified facade forward it — and
+`adapters/repo_developer.py::co_parent_block` renders each co-parent's trace (stage rows, repairs,
+the last error) and the files that differ from the working set, under fixed caps. A Developer
+without the keyword is called exactly as before. `tests/test_endgame_plan.py` drives it. Deleted
+per the index rule.*
 
-OPEN[endgame-reserve-has-no-champion-sweep] `agents/strategist.py::RuleStrategist._decide_machinery`
-reserves the endgame at `node_budget_frac >= 0.8` for an ensemble only; EvoTrace measured a 24-call
-Bayesian sweep over one program's exposed hyperparameters matching or exceeding the evolutionary
-final-best on 13 / 15 tasks, and `prefer_sweep` / `SurrogateResearcher` exist and are never invoked
-there. proof:absent:endgame_sweep@looplab/agents/strategist.py
+*Closed 2026-09-06 (row 18 shipped): the marker `endgame-reserve-has-no-champion-sweep` stood here.
+The plan's endgame (`engine/plan.py::endgame_actions`) mints the top-2 ensemble once and then
+champion SWEEPS — an `improve` of the champion stamped `META_SWEEP` whose parameters
+`Engine._sweep_researcher`'s k-NN `SurrogateResearcher` proposes (bounds inferred from the run's
+own evaluated params, the LLM Researcher below warm-up); the Strategist's endgame rule names
+`operators.endgame_sweep` and may switch the sweep off. Deleted per the index rule.*
 
 OPEN[research-grade-profile-is-not-the-default] `PROFILES["thorough"]` holds `operator_bandit`,
 `ablate_every=3`, `confirm_top_k=3` / `confirm_seeds=3`, `trust_gate="gate"`, `budget_aware`,
@@ -628,11 +629,13 @@ regardless of the operator about to fire; the in-run parent-plus-siblings contex
 field (AIRA-dojo) is null, so this is LAST in the memory stack and closes as a decline if the
 citation-rate audit shows no operator effect. proof:absent:operator_scoped@looplab/engine/lessons_priors.py
 
-OPEN[no-plan-artifact-with-endgame-reserve] the endgame reserve EXISTS as a rule
-(`RuleStrategist._decide_machinery`: `node_budget_frac >= 0.8` → `merge_mode: "ensemble"`,
-`ablate_every: 0`, durable through `EV_STRATEGY_DECISION`); what is absent is a durable PLAN artifact
-— budget allocation across phases, a reserve the DISPATCHER honours rather than a consult that may
-never fire, re-planning on stagnation (doc 10 P2, doc 11 D13). proof:absent:EV_PLAN@looplab/events/types.py
+*Closed 2026-09-06 (row 18 shipped): the marker `no-plan-artifact-with-endgame-reserve` stood here.
+`events/types.py::EV_PLAN` is a FOLDED plan artifact (`RunState.plan` / `plan_history`) that
+`engine/plan.py::build_plan` cuts from `Settings.endgame_reserve_frac` — seed / search / endgame
+phases with a reserve — written by the main task at the first creation boundary, re-cut by
+`replan` on a live budget change and on a hard stall (`stall_rung` ≥ 2: the endgame starts now),
+and honoured by the dispatcher through `Engine._plan_gate` on every selected action set. Deleted
+per the index rule.*
 
 *Closed 2026-09-06 (row 7 shipped): the marker `strategist-consult-is-cadence-not-stagnation-triggered`
 stood here. `engine/strategy.py::_should_consult` is also due on a plateau: `engine/cadence.py::plateau_due`

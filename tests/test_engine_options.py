@@ -68,6 +68,8 @@ ATTR_BY_FIELD = {
     # The run's LLM spend caps, reserved at the broker's permit (`core/llm_budget.py`, doc 52 row 15).
     "llm_cost_limit": "_llm_cost_limit",
     "llm_token_limit": "_llm_token_limit",
+    # The plan's endgame reserve (`engine/plan.py`, doc 52 row 18).
+    "endgame_reserve_frac": "_endgame_reserve_frac",
     "memory_dir": "memory_dir",
     "require_approval": "require_approval",
     "archive_resolution": "archive_resolution",
@@ -351,6 +353,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # frozen in tests/test_options_divergence.py (the product may spend on a Strategist consult
         # or a classifier pass beside a running GPU; a direct `Engine(...)` may not gain that unasked).
         cadence_while_evaluating=settings.cadence_while_evaluating,
+        # …and the plan's endgame reserve (doc 52 row 18), ON in Settings (0.2) and 0 in the bare
+        # library for the reason frozen in tests/test_options_divergence.py.
+        endgame_reserve_frac=settings.endgame_reserve_frac,
     )
 
     # (b) the NEW single-bundle style.

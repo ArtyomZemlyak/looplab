@@ -181,6 +181,7 @@ class EngineOptions:
     concurrent_consolidate: bool = False        # consolidate the hypothesis board on the eval-window bg loop (off = today)
     report_every: int = 0                # regenerate the run report every N created nodes (0 = manual only)
     merge_mode: str = "mean"             # A0b: "mean" | "ensemble" ("auto" resolves in Engine.__init__)
+    endgame_reserve_frac: float = 0.0    # doc 52 row 18: the plan's endgame reserve (0 = historical dispatch)
     complexity_cue: bool = False         # A0d: breadth-keyed prompt hint
     budget_aware: bool = False           # A5: surface remaining eval budget into the prompt
     failure_reflection: bool = False     # A4: reflect on recent failed branches in the prompt

@@ -82,6 +82,19 @@ def developer_crash_records(node_id: int, generation: int, code: str, pause_reas
 _OMIT = object()
 
 
+def accepts_co_parents(fn) -> bool:
+    """Whether a Developer's `implement_from` takes the `co_parents` keyword (doc 52 row 18) — a
+    named parameter or `**kwargs`. The probe is what lets the engine hand an ensemble's other
+    lineages to a Developer that can read them and call every other one exactly as before."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "co_parents" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 class NodeBuildMixin:
     """The engine's node-building helper cluster. See the module docstring for the mixin
     convention (`self` is the Engine)."""
@@ -164,29 +177,39 @@ class NodeBuildMixin:
         to the plain `implement(idea)` for developers that don't take a parent (draft, offline)."""
         return self._implement_result(idea, parent, developer=developer, state=state).code
 
-    def _implement_result(self, idea, parent=None, *, developer=None, state=None) -> DeveloperResult:
+    def _implement_result(self, idea, parent=None, *, developer=None, state=None,
+                          co_parents=()) -> DeveloperResult:
         """`_implement`, returning the whole `DeveloperResult` envelope (doc 52 row 12).
 
         The `str`-returning `_implement` above is kept for its callers and the suite; every site
         that then READ a side channel off the instance (`last_files`, the footprint, the rollback
         ask) reads this envelope instead, which is what lets the paid call leave the loop thread —
         see `agents/roles.py::DeveloperResult` for why the freeze was the only thing that made the
-        instance reads safe."""
+        instance reads safe.
+
+        `co_parents` (doc 52 row 18) are the OTHER parents of an ensemble merge: the Developer is
+        seeded with `parent`'s files as its working set and, when its `implement_from` accepts the
+        keyword, is shown the co-parents' code and traces too — a recombination that sees one
+        lineage is an improve with a longer rationale. A Developer without the keyword is called
+        exactly as before."""
         developer = developer or self.developer
         bind_state = getattr(developer, "bind_state", None)
         if callable(bind_state):
             bind_state(state)
         impl_from = getattr(developer, "implement_from", None)
         if parent is not None and callable(impl_from):
+            if co_parents and accepts_co_parents(impl_from):
+                return self._run_developer(developer, impl_from, idea, parent,
+                                           co_parents=tuple(co_parents))
             return self._run_developer(developer, impl_from, idea, parent)
         return self._run_developer(developer, developer.implement, idea)
 
-    def _run_developer(self, developer, fn, *args) -> DeveloperResult:
+    def _run_developer(self, developer, fn, *args, **kwargs) -> DeveloperResult:
         """ONE Developer call and the capture of its outputs, as one atomic step under the
         instance's lock (`developer_call_lock`). The lock is what makes two offloaded calls on a
         SHARED instance safe: they queue here, in a worker, instead of on the event loop."""
         with developer_call_lock(developer):
-            code = fn(*args)
+            code = fn(*args, **kwargs)
             return self._capture_developer_result(developer, code)
 
     @staticmethod

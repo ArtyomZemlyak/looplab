@@ -91,7 +91,7 @@ from looplab.events.types import (
     EV_APPLIED_PARAMS_BACKFILLED,
     EV_SCORE_METRICS_BACKFILLED,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
-    EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
+    EV_PLAN, EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_LITERATURE_RETRIEVED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
     EV_RESUME_SERVED,
     EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
@@ -2913,6 +2913,16 @@ def _on_strategy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
         history["developer_application"] = d["developer_application"]
     st.strategy_history.append(history)
 
+def _on_plan(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # doc 52 row 18: the run's plan artifact. Latest wins; the history keeps every re-cut. The row
+    # is validated by its writer (`engine/plan.py::build_plan`) and read back defensively here.
+    if not isinstance(d, dict) or not isinstance(d.get("phases"), list):
+        return
+    st.plan = dict(d)
+    st.plan_history.append({"at_node": d.get("at_node"), "reason": d.get("reason"),
+                            "endgame_start": d.get("endgame_start"), "reserve": d.get("reserve")})
+
+
 def _on_hypothesis_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # FOREAGENT board prioritization: latest wins. The order does not re-rank evaluated nodes; the sole
     # board derivation `_derive_cards` uses it to stamp Card.priority (the compatibility priority
@@ -4281,6 +4291,7 @@ _HANDLERS = {
     EV_ABLATE: _on_ablate,
     EV_POLICY_DECISION: _on_policy_decision,
     EV_STRATEGY_DECISION: _on_strategy_decision,
+    EV_PLAN: _on_plan,
     EV_HYPOTHESIS_RANKED: _on_hypothesis_ranked,
     EV_RUNG_PROMOTED: _on_rung_promoted,
     EV_AGENT_DECISION: _on_agent_decision,

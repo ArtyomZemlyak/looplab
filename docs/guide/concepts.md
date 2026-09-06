@@ -782,6 +782,31 @@ an extrapolation, and killing what the surrogate understands least is backwards.
 audit row carries `nearest` and `abstained` beside the score. All three stay pure functions of
 folded state, so all three stay replay-safe.
 
+**The plan and the endgame reserve (2026-09-06).** A run now writes a durable `plan` event at its
+first creation boundary (`engine/plan.py`): the node budget cut into `seed` / `search` /
+`endgame` phases, the last one a RESERVE of `endgame_reserve_frac × max_nodes` slots (product
+default `0.2`, i.e. the Strategist's old "80 % spent" rule as a row the dispatcher reads instead
+of a consult that may never land). Inside the reserve the dispatcher replaces breadth with the
+endgame's own sequence — the top-2 **ensemble** once (the Developer is handed the primary parent
+as its working set AND the co-parents' code and traces, see below), then **champion sweeps**: an
+`improve` of the champion whose parameters the k-NN surrogate proposes (`search/surrogate.py`,
+bounds inferred from the run's own evaluated params; the LLM Researcher below warm-up — EvoTrace
+measured a 24-call sweep over one program's exposed hyperparameters matching or beating the
+evolutionary final-best on 13 of 15 tasks). A selected Card that already is an endgame action
+keeps its slot. The plan is re-cut when the live node budget changes and on a HARD stall (two
+stall windows before the endgame has begun: the endgame starts now). A Strategist may keep the
+reserve for the ensemble alone (`operators.endgame_sweep: false`); the reserve itself is the
+plan's and no role moves it. `0` disables the plan (a bare `Engine(...)` and every resumed pre-plan
+run keep the historical dispatch).
+
+**An ensemble merge sees both parents.** `merge_mode=ensemble` used to seed the Developer with
+ONE parent's files and describe the other in 120 characters of rationale — a recombination that
+reads one lineage is an improve with a longer prompt. Since 2026-09-06 the Developer's
+`implement_from` accepts `co_parents`: the other lineages' traces (stage rows, repairs, the last
+error) and the files that DIFFER from the working set, under fixed caps
+(`adapters/repo_developer.py::co_parent_block`). A Developer without the keyword is called exactly
+as before.
+
 ## Operators
 
 The win comes from rich operators, not exotic search. The Researcher/Developer apply:

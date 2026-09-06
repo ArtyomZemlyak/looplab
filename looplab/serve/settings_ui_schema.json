@@ -197,6 +197,13 @@
           "help": "A0b: auto (default) = ensemble whenever the Developer generates real code, mean otherwise; mean = legacy mean-param merge; ensemble = Developer recombines parent solutions (code-level)."
         },
         {
+          "key": "endgame_reserve_frac",
+          "label": "Endgame reserve",
+          "type": "float",
+          "default": 0.2,
+          "help": "The plan's endgame reserve (doc 52 row 18): this fraction of max_nodes is kept for the top-2 ensemble and champion sweeps proposed by the k-NN surrogate, and the dispatcher honours it. 0 = no plan (the historical dispatch)."
+        },
+        {
           "key": "complexity_cue",
           "label": "Complexity cue",
           "type": "bool",
