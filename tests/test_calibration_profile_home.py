@@ -93,7 +93,11 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
-_EXPECTED_DIGEST = "sha256:0bf504d16e279cea185408d77ebe093fecadfecfab73dfdcbd44357fd3c5e33e"
+#   2026-09-04  + developer_probe_max_calls  (a NEW FIELD: the probe-cap experiment instrument,
+#               0 = uncapped, doc 56 §190-§195. Field set 220 -> 221, so branch (1) of the
+#               assertion below; re-pinned 2026-09-06 — the addition tripped four repo guards
+#               (doc 56 §191) and not this one, because the suite was read through a `-k` run.)
+_EXPECTED_DIGEST = "sha256:74faf6b4a9913b90defc376eef098bb94e0bda6d281cf274a7f0920bacfba5cb"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -420,7 +424,7 @@ _EXPECTED_DIGEST = "sha256:0bf504d16e279cea185408d77ebe093fecadfecfab73dfdcbd443
 #               neither parent's digest describes it. Old receipts SHOULD stop verifying: whether
 #               a single-command eval is health-checked at all is part of the envelope a
 #               speculation receipt was measured in.
-_EXPECTED_FIELD_COUNT = 220
+_EXPECTED_FIELD_COUNT = 221
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

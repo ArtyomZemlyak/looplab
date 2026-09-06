@@ -61,24 +61,17 @@ def _skip_when_the_kernel_cannot_confine(monkeypatch, request):
     not a module-level `pytestmark`. An arm that explicitly asks for `confine_reads=False` (the hook
     is the confinement there) also runs everywhere, unchanged.
     """
-    # OPEN[landlock-skip-guard-defeated-by-any-skipif] the exclusion below matches ANY `skipif`
-    # marker, and one launcher-driving test also bypasses the wrapper by calling `execute_result`
-    # directly — two tests here are RED, not skipped, on every kernel without Landlock.
-    # proof:present:get_closest_marker("skipif")@tests/test_dev_probe.py
-    # REVIEW 2026-08-30 (baseline-red): `test_the_engines_own_interpreter_is_what_answers` carries
-    # an unrelated os.name skipif, so this guard waves it through and it fails on
-    # `landlock_create_ruleset failed`; `test_a_confinement_that_cannot_be_built_refuses_to_run_
-    # and_says_so` never traverses the wrapped `execute` (and its premise also breaks where the
-    # interpreter prefix is single-component — see the marker in dev_probe.py::_confined_allow).
-    # The header here says these guards restored the "suite runs fully offline" contract; it is
-    # broken again, 2 red out of the box on this container. Key the exclusion on the SPECIFIC
-    # Landlock skip (a custom marker), and gate `execute_result`, the funnel `execute` delegates
-    # to.
-    if not _NO_LANDLOCK or request.node.get_closest_marker("skipif"):
+    # The exclusion is keyed on the SPECIFIC marker the fail-closed test carries
+    # (`landlock_refusal`), not on any `skipif`: keyed on `skipif`, an unrelated os.name skipif
+    # waved `test_the_engines_own_interpreter_is_what_answers` through and it failed on
+    # `landlock_create_ruleset failed` (2026-08-30 review, baseline-red). And the gate sits on
+    # `execute_result`, the funnel `execute` delegates to, so a test that calls the funnel directly
+    # is skipped too instead of red.
+    if not _NO_LANDLOCK or request.node.get_closest_marker("landlock_refusal"):
         return
-    original = DevProbeTools.execute
+    original = DevProbeTools.execute_result
 
-    def _guarded(self, name, args):
+    def _guarded(self, name, args, **kw):
         # Only a call that would really LAUNCH a child. The argument-validation arms
         # (`{}`, `None`, blank code, over-long code) are refused by `_probe` before any interpreter
         # starts, so they are kernel-independent and must keep running here.
@@ -86,15 +79,16 @@ def _skip_when_the_kernel_cannot_confine(monkeypatch, request):
         launches = bool(code.strip()) and len(code) <= _MAX_CODE_CHARS
         if name == "run_probe" and launches and getattr(self, "confine_reads", True):
             pytest.skip(f"the probe's kernel read rung fails closed here: {_NO_LANDLOCK}")
-        return original(self, name, args)
+        return original(self, name, args, **kw)
 
-    monkeypatch.setattr(DevProbeTools, "execute", _guarded)
+    monkeypatch.setattr(DevProbeTools, "execute_result", _guarded)
 
 
 def _probe(code, **kw):
     return DevProbeTools(timeout_s=kw.pop("timeout_s", 30), **kw).execute("run_probe", {"code": code})
 
 
+@pytest.mark.landlock_refusal
 @pytest.mark.skipif(not _NO_LANDLOCK, reason="this kernel HAS Landlock, so nothing is refused")
 def test_a_confined_probe_refuses_to_run_at_all_where_the_kernel_cannot_confine_it():
     """FAIL CLOSED, said out loud. The alternative — running unconfined and reporting success — is

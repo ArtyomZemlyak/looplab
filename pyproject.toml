@@ -29,6 +29,7 @@ dev = [
     "fastapi>=0.110",    # server/assistant tests import TestClient and app helpers directly.
     "uvicorn>=0.27",     # keep the dev test environment aligned with the runnable UI server.
     "pytest-split>=0.10", # deterministic CI shards keep portability gates bounded.
+    "numpy>=1.26",       # the AlgoTune bench tests import it unconditionally (doc 57: 22 red without it).
 ]
 # Documentation site (MkDocs + Material). `mkdocs serve` for a live preview; CI builds & deploys it.
 docs = ["mkdocs-material>=9.5,<10", "pymdown-extensions>=10"]
@@ -79,6 +80,7 @@ addopts = "-q"
 # Selection-only markers (`-m "not live"` / `-m "not docker"`); the module-level skipif gates in
 # the test files remain the enforcement — a marked test still auto-skips when its backend is absent.
 markers = [
+    "landlock_refusal: the one test that asserts the confined probe FAILS CLOSED where Landlock is absent (tests/test_dev_probe.py)",
     "live: needs a reachable LLM endpoint (auto-skipped offline)",
     "docker: needs a Docker daemon",
 ]
