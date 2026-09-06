@@ -41,6 +41,7 @@ _LAYOUT = {
     "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
     "agent": "agents",
     "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)
+    "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
     "agents_md": "tools",
     "appconfig": "core",
     "envsafe": "core",   # the secret screen + the DECLARED ENVIRONMENT rule all three levels share

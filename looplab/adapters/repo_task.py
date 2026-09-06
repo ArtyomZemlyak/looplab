@@ -1584,6 +1584,62 @@ class RepoTask(BaseModel):
     def assets(self) -> dict[str, str]:
         return {}                              # repo/data are tree-mounted, not flat assets
 
+    # THE PERCEPTION HOOK (doc 52 row 17; doc 51 §6). Data profiling is gated at setup on the task
+    # exposing `columns`, and until 2026-09-06 this family — every real GPU run on the operator's
+    # box — exposed neither `columns` nor `data_samples`: `data_profiled` never fired,
+    # `state.data_profile` stayed None, and `foresight.verified_report` primed predict-before-execute
+    # with no view of the data at all. Both hooks read ONLY the declared `data:` mounts (the sources
+    # `runtime/read_allowlist.py` already sanctions), bounded by `adapters/perception.py`'s rows /
+    # bytes / tables / columns caps, deterministic, never executing anything; a mount that holds
+    # nothing tabular (a checkpoint, a corpus of shards) profiles as `{}` — recorded, not guessed.
+    def columns(self) -> dict[str, list]:
+        """`{"<mount>:<column>": values}` over the first `perception.SAMPLE_ROWS` rows of the
+        primary table of each declared data mount (the file itself when it is tabular, else a
+        top-level `train*`, else the first CSV/TSV/JSON/JSONL/Parquet), at most `MAX_TABLES`
+        tables and `MAX_COLUMNS` columns in declaration order."""
+        from looplab.adapters import perception as _perception
+        out: dict[str, list] = {}
+        tables = 0
+        for name, spec in self.data.items():
+            table = _perception.mount_table(spec.path)
+            if table is None:
+                continue
+            cols = _perception.tabular_columns(
+                table, _perception.SAMPLE_ROWS, max_json_bytes=_perception.MAX_JSON_BYTES)
+            if not cols:
+                continue
+            tables += 1
+            for col, values in cols.items():
+                if len(out) >= _perception.MAX_COLUMNS:
+                    break
+                out[f"{name}:{col}"] = values
+            if tables >= _perception.MAX_TABLES or len(out) >= _perception.MAX_COLUMNS:
+                break
+        return out
+
+    def data_samples(self) -> dict[str, str]:
+        """Bounded previews of each declared data mount for `DataTools` (`read_asset`,
+        `data_schema`, `data_profile`): a directory mount lists its entries and samples its primary
+        table; a file mount samples its head, or its size when it is binary. Keyed by mount name
+        (`<name>/` for a directory) and by table file name; best-effort, never raises."""
+        from looplab.adapters import perception as _perception
+        out: dict[str, str] = {}
+        for name, spec in self.data.items():
+            path = spec.path
+            try:
+                if os.path.isdir(path):
+                    entries = sorted(os.listdir(path))
+                    _perception.add_sample(out, name.rstrip("/") + "/", _perception.dir_listing(entries))
+                    pick = _perception.primary_table(path, entries, _perception.TABULAR_SUFFIXES)
+                    if pick:
+                        _perception.add_sample(
+                            out, pick, _perception.file_sample(os.path.join(path, pick)))
+                elif os.path.isfile(path):
+                    _perception.add_sample(out, os.path.basename(path), _perception.file_sample(path))
+            except OSError:
+                continue
+        return out
+
     def _declared_editable_mounts(self) -> list[dict]:
         """Normalize the single-repo shorthand + the multi `editables` into one list of
         {name, path, surface, protect, seed_mode}. name="." mounts at the workspace root.

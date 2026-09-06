@@ -449,12 +449,13 @@ A falsifier that cannot go false is the vacuous guard this repo has found nine t
   `support_radius`, the explored region's own leave-one-out radius — read by `should_skip` and
   recorded on `proxy_scored` (`nearest`, `abstained`). `tests/test_knn_uncertainty.py` drives all
   three callers. Deleted per the index rule.*
-- **OPEN[repo-task-exposes-no-perception-hook]** — data profiling is gated on the task exposing
-  `columns`, six adapters implement it, and `repo_task` — the family the real GPU runs use —
-  implements neither it nor `data_samples`, so `EV_DATA_PROFILED` never fires, `state.data_profile`
-  stays `None`, and `foresight.verified_report` primes predict-before-execute with no view of the
-  data at all (§6; OmniScientist).
-  proof:`absent:def columns@looplab/adapters/repo_task.py`
+- *Closed 2026-09-06 (doc 52 row 17 shipped): the marker `repo-task-exposes-no-perception-hook`
+  stood here. `adapters/repo_task.py::columns` / `data_samples` read the declared `data:` mounts
+  through the shared `adapters/perception.py` readers (the primary table per mount, 200 rows, at
+  most 4 tables and 64 columns, keys `<mount>:<column>`; a binary or non-tabular mount profiles as
+  `{}`), so `data_profiled` fires at setup, `RunState.data_profile` is folded, `foresight.verified_report`
+  is primed and `DataTools` serves the repo family. `tests/test_repo_task_perception.py` drives it
+  end to end through a real engine run. Deleted per the index rule.*
 - *Closed 2026-09-06 (doc 52 row 16 shipped): the marker `retrieved-literature-is-never-durable`
   stood here. `events/types.py::EV_LITERATURE_RETRIEVED` is registered (`BACKGROUND_APPENDABLE`),
   `engine/research_cadence.py::_record_deep_research` appends it beside the memo with the papers

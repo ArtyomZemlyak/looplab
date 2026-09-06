@@ -1191,6 +1191,28 @@ independent flags. **Default: everything allowed EXCEPT editing the original.**
 - For a **dataset**-kind task (no repo), permission objects are flattened to their `path` — the
   mount/edit machinery is repo-task infrastructure; the dataset kind reads data by absolute path.
 
+### What the run SEES of your data (the perception hook)
+
+Since 2026-09-06 (doc 52 row 17) a repo task exposes the same two perception hooks the dataset
+kind always had, so the grounding pre-phase is no longer off for the family every real GPU run
+uses:
+
+- **`columns()`** reads the *primary table* of each declared data mount — the file itself when it
+  is tabular (`.csv` / `.tsv` / `.json` / `.jsonl` / `.parquet`, the last only when `pyarrow` is
+  importable), else a top-level `train*` table inside a directory mount, else the first tabular
+  file there — and returns `{"<mount>:<column>": values}` over the first 200 rows, at most 4 tables
+  and 64 columns in declaration order. The engine profiles it at setup (`data_profiled`), the fold
+  keeps it on `RunState.data_profile`, and `search/foresight.py::verified_report` primes
+  predict-before-execute with it. A mount that holds nothing tabular (a checkpoint, a corpus of
+  shards) profiles as `{}` — recorded, not guessed.
+- **`data_samples()`** gives the Researcher's `read_asset` / `data_schema` / `data_profile` tools a
+  bounded preview of every mount: a directory's entry listing (100 entries) and its primary
+  table's head (64 KiB, whole lines), a file's head, or a binary file's size.
+
+Both read only the declared mounts — the sources `runtime/read_allowlist.py` already sanctions —
+never execute anything, and never raise; the bounds live in `adapters/perception.py`, which the
+dataset kind now reads through too.
+
 Every legacy spelling still works — `{"kind":"repo","editable_path":...,"eval":{...,"metric":{"kind":...}},"onboard":...}`
 parses unchanged, so old task files and snapshots keep running (`examples/repo_task.json` is the
 legacy form; `examples/repo_composable_task.json` the composable form; and
