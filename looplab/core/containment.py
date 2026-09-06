@@ -80,6 +80,34 @@ def _is_budget_stop(exc: BaseException) -> bool:
     return isinstance(exc, BudgetExceeded)
 
 
+def contained_summary(spans) -> tuple[int, int, list[tuple[str, int]]]:
+    """`(total, stamped_spans, top_reasons)` over span records as `spans.jsonl` holds them.
+
+    The READ side of the stamp, beside the stamp: `cli/inspect_cmds.py::timings` prints it, and a
+    second reader (the judge bench, a report) gets the same rule rather than a second reading of
+    the attribute. `top_reasons` is `(reason (ExcType), count)`, most frequent first, at most eight.
+    """
+    total = 0
+    stamped = 0
+    reasons: dict[str, int] = {}
+    for sp in spans or ():
+        if not isinstance(sp, dict):
+            continue
+        attrs = sp.get("attributes") or {}
+        n = attrs.get(CONTAINED_ATTR)
+        if type(n) is int and n > 0:
+            total += n
+            stamped += 1
+        for ev in (sp.get("events") or []):
+            if isinstance(ev, dict) and ev.get("name") == CONTAINED_EVENT:
+                key = str(ev.get("reason") or "unstated")
+                exc = str(ev.get("exc") or "")
+                label = f"{key} ({exc})" if exc else key
+                reasons[label] = reasons.get(label, 0) + 1
+    top = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+    return total, stamped, top
+
+
 def containment_counts() -> dict[str, int]:
     """A snapshot of the process-wide count by reason (tests and diagnostics)."""
     with _COUNTS_LOCK:

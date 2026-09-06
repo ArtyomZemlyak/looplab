@@ -2363,6 +2363,28 @@ STAGE_ENV_UNSUPPORTED = ("stage {stage!r} declares `env` but this run's containe
                          "carry it.")
 
 
+def _deadline_wrap(ex: "_EvalExec", wrap_argv, container_env: dict, timeout: float):
+    """`(wrap_argv, env)` with the eval's own clock added (`sandbox.eval_deadline_env`).
+
+    The subprocess tier needs nothing here — `run_argv` sets the pair from its own `timeout` — so
+    the returned wrap is the caller's own unless the wrap is a REAL docker wrap that can be rebound,
+    in which case the container gets the same two variables the host process gets. A docker wrap
+    that cannot be rebound keeps its wrap: unlike a DECLARED stage `env` (refused by `_stage_wrap`,
+    because the operator asked for it), the clock is advisory and silently absent is the honest
+    fallback for a container the runtime cannot reach into.
+    """
+    from looplab.runtime.sandbox import eval_deadline_env
+    clock = eval_deadline_env(timeout)
+    if not clock:
+        return wrap_argv, dict(container_env or {})
+    rebind = getattr(ex.wrap, "rebind_env", None)
+    merged = {**(container_env or {}), **clock}
+    if getattr(ex.wrap, "_docker", False) and callable(rebind):
+        stage_wrap = rebind(merged)
+        return (lambda argv, hc: stage_wrap(argv, hc)), merged
+    return wrap_argv, merged
+
+
 def _stage_wrap(ex: "_EvalExec", stage_env: dict):
     """`(wrap_argv, problem)` for a stage whose declared `env` must reach the child on THIS tier.
 
@@ -2799,8 +2821,12 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             # the candidate's will. A forged stall marker turned that fail-closed verdict back into
             # an accepted self-reported metric; read the out-of-band flag instead.
             run.signals = {}
+            # The eval's own clock rides both tiers (`LOOPLAB_EVAL_DEADLINE`, doc 52 row 15):
+            # `run_argv` sets it for the host process from `_sto`; a container needs it forwarded.
+            _swrap_argv_dl, _senv_dl = _deadline_wrap(ex, _swrap_argv, _senv_decl, _sto)
             run.rc, run.out, run.err, run.timed_out = run_argv(
-                _swrap_argv(ex.bound(_scmd, _sto), str(ex.wd)), ex.wd, _sto + ex.grace, _senv,
+                _swrap_argv_dl(ex.bound(_scmd, _sto), str(ex.wd)), ex.wd, _sto + ex.grace,
+                merge_env(_senv, _senv_dl) if _senv_dl else _senv,
                 ex.max_output_bytes, ex.cancel,
                 log_path=ex.log(f"{_sname}.log"), health_check=True,
                 stall_timeout=_stall_window_for(ex.stall_timeout, _sto, ex.stall_cap),
@@ -2978,8 +3004,10 @@ def _run_single(command: list, ex: _EvalExec, *, timeout: float) -> _EvalRun:
         # accepted a CRASHED run's self-reported score. This path is the common RepoTask eval, so
         # it needs the out-of-band flag just as much as the staged one.
         run.signals = {}
+        _wrap_dl, _env_dl = _deadline_wrap(ex, ex.wrap_argv, {}, timeout)   # the eval's own clock
         run.rc, run.out, run.err, run.timed_out = run_argv(
-            ex.wrap_argv(ex.bound(command, timeout), str(ex.wd)), ex.wd, timeout + ex.grace, ex.env,
+            _wrap_dl(ex.bound(command, timeout), str(ex.wd)), ex.wd, timeout + ex.grace,
+            merge_env(ex.env, _env_dl) if _env_dl else ex.env,
             ex.max_output_bytes, ex.cancel,
             log_path=ex.log("eval.log"), health_check=bool(ex.divergence_watch),
             stall_timeout=_stall_window_for(ex.stall_timeout, timeout, ex.stall_cap),

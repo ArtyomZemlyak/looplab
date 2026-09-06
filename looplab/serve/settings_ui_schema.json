@@ -574,6 +574,22 @@
           "help": "Ceiling on cumulative time spent INSIDE evals (survives resume)."
         },
         {
+          "key": "llm_cost_limit",
+          "label": "LLM cost limit",
+          "type": "float",
+          "default": 0.0,
+          "placeholder": "0 = no cap",
+          "help": "The run’s LLM spend cap in the provider’s own currency (USD on every priced gateway), reserved at the broker’s permit BEFORE a request is queued: committed + reserved + this call’s estimate (the run’s own mean per priced call) may not exceed it, so a fan-out cannot overshoot by N calls the way a post-hoc check does. A refusal raises the same hard budget stop the accountant raises. 0 = no cap. On a gateway that reports no prices the committed cost is a floor and this cap is inert — use the token limit."
+        },
+        {
+          "key": "llm_token_limit",
+          "label": "LLM token limit",
+          "type": "int",
+          "default": 0,
+          "placeholder": "0 = no cap",
+          "help": "The run’s LLM spend cap in TOTAL TOKENS, reserved at the broker’s permit exactly like the cost cap (the estimate is the run’s own mean tokens per call). The one that holds against a local model that prices nothing. 0 = no cap."
+        },
+        {
           "key": "timeout",
           "label": "Per-eval timeout (s)",
           "type": "float",

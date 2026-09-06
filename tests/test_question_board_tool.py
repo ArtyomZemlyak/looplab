@@ -142,7 +142,7 @@ def test_BOTH_wirings_exist_and_the_developer_binds_the_attribute_it_actually_ha
     import inspect
 
     from looplab.adapters import repo_developer
-    from looplab.agents import factory
+    from looplab.agents import providers as factory   # the shared providers left `factory.py` on 2026-09-06
 
     dev = inspect.getsource(repo_developer.LLMRepoDeveloper._scout_tools)
     tree = ast.parse(dev.strip().replace("\n    ", "\n"))
@@ -152,6 +152,7 @@ def test_BOTH_wirings_exist_and_the_developer_binds_the_attribute_it_actually_ha
     # a positive substring pin over a whole module, satisfiable by a comment reading
     # `# QuestionBoardTools` anywhere in it, in a test whose own docstring says it is driven by AST
     # because comments are not AST nodes. The Developer half two lines up already did it right.
+    # Scanned in `agents/providers.py` since the 2026-09-06 extraction (`test_agent_factory_split`).
     factory_names = {n.id for n in ast.walk(ast.parse(inspect.getsource(factory)))
                      if isinstance(n, ast.Name)}
     assert "QuestionBoardTools" in factory_names, "the researcher half must exist too"

@@ -82,8 +82,8 @@ older binary can still load a snapshot a newer one wrote.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **188 of the 221 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 188 catalogued keys.
+server-owned curated catalogue with **190 of the 223 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 190 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,
@@ -179,6 +179,8 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `n_seeds` | `LOOPLAB_N_SEEDS` | `3` | Seeds per evaluation / rung-0 width |
 | `max_seconds` | `LOOPLAB_MAX_SECONDS` | — | Hard wall-clock ceiling for the whole run |
 | `max_eval_seconds` | `LOOPLAB_MAX_EVAL_SECONDS` | — | Hard ceiling on cumulative time *inside* evals (survives resume) |
+| `llm_cost_limit` | `LOOPLAB_LLM_COST_LIMIT` | `0.0` (no cap) | The run's LLM spend cap in the provider's own currency, RESERVED at the broker's permit before a request is queued (`core/llm_budget.py`, doc 52 row 15): committed + reserved + this call's estimate — the run's own mean per priced call — may not exceed it, so a fan-out cannot overshoot by N calls the way a post-hoc check does. A refusal raises the same hard budget stop the accountant raises, through the same funnels; the committed half is the durable `llm_usage` ledger, so the cap survives a resume. Inert on a gateway that reports no prices (committed cost is a floor there) |
+| `llm_token_limit` | `LOOPLAB_LLM_TOKEN_LIMIT` | `0` (no cap) | The same reserve-commit cap in TOTAL TOKENS (estimate = the run's own mean tokens per call); the one that holds against a local model that prices nothing |
 
 ### One experiment per GPU — who decides, and what happens when two runs want the same cards
 

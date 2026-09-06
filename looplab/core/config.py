@@ -1329,6 +1329,21 @@ class Settings(BaseSettings):
     # runs), separate from wall-clock. Survives resume (summed from the event log). The real
     # guard against a silent multi-hour sweep when an eval is a minutes-hours training run.
     max_eval_seconds: float | None = None
+    # THE RUN'S LLM SPEND, AS A RESERVE-COMMIT BUDGET (`core/llm_budget.py`, doc 52 row 15; doc 27's
+    # `no-shared-reserve-commit-run-budget`). Until 2026-09-06 there was no run-level cap on model
+    # spend at all: `CostAccountant.limit` was per CLIENT and nothing set it, and the accountant only
+    # learns a call's cost when the response lands — so N callers in flight under any cap would
+    # overshoot it by up to N calls (the fan-out overshoot Token Budgets measured at 30 of 30).
+    # These two caps are checked at the broker's `borrow()`, BEFORE a request is queued, against
+    # committed + reserved + this call's estimate, where the estimate is the run's own mean per
+    # committed call (so nothing is reserved before the first call lands). A refusal raises
+    # `BudgetExceeded` — the same hard stop the accountant raises, through the same funnels.
+    # `llm_cost_limit` is in the provider's own currency (USD for every priced gateway here) and is
+    # a FLOOR on a gateway that reports no prices; `llm_token_limit` counts total tokens and is the
+    # one that holds against a local model. 0 = no cap. Neither takes a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`
+    # row: a cap can only REMOVE calls, and a pre-field snapshot resumes at 0 = today's behaviour.
+    llm_cost_limit: float = Field(default=0.0, ge=0.0)
+    llm_token_limit: int = Field(default=0, ge=0)
     # Cross-run memory (I19, ADR-10): if set, the best result of each run is stored as
     # a case here, and the cases become retrievable knowledge for future runs.
     memory_dir: str | None = Field(default_factory=lambda: str(_LL_HOME / "memory"))

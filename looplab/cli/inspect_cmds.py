@@ -386,34 +386,13 @@ def tokens(run_dir: Path = typer.Argument(...),
 
 
 def _echo_containments(spans: list) -> None:
-    """HOW MANY OF THIS RUN'S SPANS SWALLOWED A FAILURE (doc 52 row 14).
-
-    `core/containment.py::contain` stamps `contained` (a count) and a `contained` event (reason +
-    exception type) on the span it ran under, so a run whose watchdog ticks or agentic calls degraded
-    to their fallbacks says so here instead of reading as a clean run. Printed only when something
-    was contained — a run with no stamp keeps the historical report byte for byte, including every
-    pre-row-14 run on disk, whose spans carry no such key.
-    """
-    from collections import defaultdict
-
-    from looplab.core.containment import CONTAINED_ATTR, CONTAINED_EVENT
-    total = 0
-    stamped = 0
-    reasons: dict = defaultdict(int)
-    for sp in spans:
-        attrs = sp.get("attributes") or {}
-        n = attrs.get(CONTAINED_ATTR)
-        if type(n) is int and n > 0:
-            total += n
-            stamped += 1
-        for ev in (sp.get("events") or []):
-            if isinstance(ev, dict) and ev.get("name") == CONTAINED_EVENT:
-                key = str(ev.get("reason") or "unstated")
-                exc = str(ev.get("exc") or "")
-                reasons[f"{key} ({exc})" if exc else key] += 1
+    """HOW MANY OF THIS RUN'S SPANS SWALLOWED A FAILURE (doc 52 row 14): the read side of
+    `core/containment.py::contain`, printed only when something was contained so a run with no
+    stamp — every pre-row-14 run on disk included — keeps the historical report byte for byte."""
+    from looplab.core.containment import contained_summary
+    total, stamped, top = contained_summary(spans)
     if not total:
         return
-    top = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
     typer.echo(f"\ncontained failures: {total} across {stamped} span(s) — swallowed by a handler that "
                f"stamped the span (core/containment.py::contain); not an error count, an honesty count")
     for key, count in top:

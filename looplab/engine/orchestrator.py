@@ -114,6 +114,7 @@ from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefusal
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.setup_identity import setup_config_hash, setup_manifest_digest
+from looplab.core.llm_budget import RunBudget
 from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
                                      in_llm_lane, llm_broker_scope, llm_lane_scope)
 from looplab.search.card_selection import (
@@ -1077,9 +1078,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                   and int(_llm_parallel_opt) > 0 else None)
         except (TypeError, ValueError, OverflowError):
             _startup_llm_total = None
+        # THE RUN'S SPEND BUDGET, one object every role's provider call reserves against at the
+        # broker's permit (`core/llm_budget.py`, doc 52 row 15). Built before the broker so the
+        # broker can carry it; fed by the durable ledger's sink (`engine/costs.py`) and seeded from
+        # the `llm_usage` rows on a resume, so the cap holds across restarts.
+        self._llm_cost_limit = _opt("llm_cost_limit")
+        self._llm_token_limit = _opt("llm_token_limit")
+        self._llm_budget = RunBudget(cost_limit=self._llm_cost_limit,
+                                     token_limit=self._llm_token_limit)
         self._llm_broker = LLMConcurrencyBroker(
             total=_startup_llm_total,
             lane_limits=default_llm_lane_limits(_startup_llm_total),
+            budget=self._llm_budget,
         )
         self._llm_lane_limits_explicit = False
         self._free_gpus: list[int] = list(self._gpu_ids)   # free-list handed out per concurrent eval
@@ -1612,7 +1622,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._main_loop_thread_ident = threading.get_ident()
         broker = getattr(self, "_llm_broker", None)
         if broker is None:  # defensive for test/library engines constructed through __new__
-            broker = self._llm_broker = LLMConcurrencyBroker()
+            broker = self._llm_broker = LLMConcurrencyBroker(
+                budget=getattr(self, "_llm_budget", None))
         try:
             with llm_broker_scope(broker), llm_lane_scope("engine"):
                 # THE RUN-SCOPED EVAL TASK GROUP (backlog F1f, doc 33 option 1 — "adopting
@@ -5497,7 +5508,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         broker = getattr(self, "_llm_broker", None)
         if broker is None:
             self._llm_broker = LLMConcurrencyBroker(
-                total=total, lane_limits=default_llm_lane_limits(total))
+                total=total, lane_limits=default_llm_lane_limits(total),
+                budget=getattr(self, "_llm_budget", None))
             return
         snapshot = broker.snapshot()
         current_lanes = snapshot["lane_limits"]

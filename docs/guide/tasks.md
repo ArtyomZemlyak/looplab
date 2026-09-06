@@ -313,6 +313,18 @@ spent rather than after.
 
 ### Declaring an eval's environment
 
+**What every stage's environment carries without being asked (since 2026-09-06, doc 52 row 15).**
+Beside `LOOPLAB_EVAL_SEED` (the seed the confirm phase varies) the runtime now exports the eval's
+own clock: `LOOPLAB_EVAL_DEADLINE`, the Unix time (seconds, with millis) at which THIS stage is
+killed, and `LOOPLAB_EVAL_TIMEOUT_S`, the ceiling it was derived from. `sandbox.run_argv` sets the
+pair for every host launch from the stage's own `timeout` (so each stage of a pipeline sees its own
+wall, not a pool), and `command_eval` forwards the same pair into a container, where `docker run`
+inherits nothing. A training script can read them to decide whether another epoch fits, or to
+checkpoint and score before the kill instead of being killed mid-step with no metric; the
+Developer's own time-budget note tells it they exist. A value you declare yourself (an `eval_env`
+entry, a stage `env`) wins over the derived one, and a deadline-grace extension the judge may grant
+at the wall is NOT in the number — plan on the declared ceiling.
+
 **A stage can declare what it needs SET, and so can the task and the run.** `expect` states what a
 stage writes and `needs` what it reads; until 2026-08-13 nothing could say what it needs in its
 *environment*, so an environment variable's only home was CODE. What that cost, measured: on

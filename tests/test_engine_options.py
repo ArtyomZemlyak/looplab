@@ -65,6 +65,9 @@ ATTR_BY_FIELD = {
     "confirm_seed_base": "confirm_seed_base",
     "max_seconds": "max_seconds",
     "max_eval_seconds": "max_eval_seconds",
+    # The run's LLM spend caps, reserved at the broker's permit (`core/llm_budget.py`, doc 52 row 15).
+    "llm_cost_limit": "_llm_cost_limit",
+    "llm_token_limit": "_llm_token_limit",
     "memory_dir": "memory_dir",
     "require_approval": "require_approval",
     "archive_resolution": "archive_resolution",

@@ -93,6 +93,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
+#   2026-09-06  + llm_cost_limit + llm_token_limit (doc 52 row 15: the run's LLM spend caps, reserved
+#               at the broker's permit — `core/llm_budget.py`). The "field set changed too" branch,
+#               218 -> 220, verified by diffing the field set against the previous pin (exactly
+#               [llm_cost_limit, llm_token_limit] added, [] removed). Both default to 0 = no cap, so
+#               no calibration evidence moves; the envelope is the Settings schema and old receipts
+#               stop verifying, as for every field below.
 #   2026-09-06  + evidence_envelope           (doc 52 row 13: the ONE untrusted-evidence envelope on
 #               the Strategist, the crash-triage judge, the repair critic and the arXiv / web
 #               tools). The "field set changed too" branch again, 217 -> 218, verified by DIFFING
@@ -113,7 +119,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               never launches a coding agent) legitimately moves THIS pin, which binds the complete
 #               settings map, while it must NOT revoke a preserved snapshot merely for predating it.
 #               See `search/speculation_quality.py`'s directional field check.
-_EXPECTED_DIGEST = "sha256:7f2c3015db8263050459db48bba082ee66b87f513aac91cafc7a2c56267b26d5"
+_EXPECTED_DIGEST = "sha256:7fa03f47dea26bc0d9aa9b644096ebdb09a68c09d8301e64333ff42fce18a434"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -437,7 +443,7 @@ _EXPECTED_DIGEST = "sha256:7f2c3015db8263050459db48bba082ee66b87f513aac91cafc7a2
 #               — where a replicate calibrated before it would have run that stage to its wall.
 #               That is a different number of evaluations on the same failing node, which is
 #               precisely what a speculation receipt asserts about.
-_EXPECTED_FIELD_COUNT = 218
+_EXPECTED_FIELD_COUNT = 220
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

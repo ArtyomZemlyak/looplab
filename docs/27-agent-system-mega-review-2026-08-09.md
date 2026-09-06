@@ -190,9 +190,13 @@ Research only.
 >   serve/governance half shipped. `EV_NODE_EVAL_STARTED` carries only `node_id`+`generation`: no
 >   attempt-scoped invocation id and no completed receipt.
 >   proof:absent:eval_invocation_id@looplab/engine/evaluate.py
-> - **OPEN[no-shared-reserve-commit-run-budget]** `CostAccountant` still takes a per-client limit,
->   `llm_broker` is concurrency ADMISSION with no reserve, and `engine/costs.py` commits post hoc, so
->   concurrent roles cannot reserve against one cap. proof:`absent:def reserve@looplab/core/llm.py`
+> - **[closed 2026-09-06 (doc 52 row 15) — `core/llm_budget.py::RunBudget` is ONE reserve-commit
+>   budget per run, attached to the broker: `LLMConcurrencyBroker.borrow()` reserves a call's
+>   estimate (the run's own mean per committed call) before queuing and refuses with
+>   `BudgetExceeded` when committed + reserved + estimate would cross `Settings.llm_cost_limit` /
+>   `llm_token_limit`; the durable ledger's sink commits and a resume seeds from the `llm_usage`
+>   rows. `tests/test_run_budget.py` drives it. The marker `no-shared-reserve-commit-run-budget`
+>   stood here; deleted per the index rule.]**
 > - **OPEN[research-cap-counts-passes-not-provider-calls]** the cap is still incremented once per
 >   research PASS in the spine, not debited at the provider broker, so the named ceiling undercounts
 >   real spend. proof:absent:concurrent_research_max_calls@looplab/core/llm_broker.py

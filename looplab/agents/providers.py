@@ -131,4 +131,8 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
         # The tool stamps its own results when the envelope is on (`core/evidence.py`), so the
         # abstracts arrive marked in every loop this provider list reaches.
         providers.append(LiteratureTools(enabled=True, envelope=envelope_enabled(settings)))
+    # The loop's own clock (`tools/clock.py`, doc 52 row 15): every role this list reaches runs
+    # under a wall budget it was told once, in prose; `remaining_time` lets it ask again.
+    from looplab.tools.clock import ClockTools
+    providers.append(ClockTools())
     return providers

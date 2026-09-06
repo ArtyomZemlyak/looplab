@@ -49,7 +49,10 @@ import threading
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Iterator, Mapping, Optional, TypeVar, cast
+from typing import TYPE_CHECKING, Callable, Iterator, Mapping, Optional, TypeVar, cast
+
+if TYPE_CHECKING:
+    from looplab.core.llm_budget import RunBudget
 
 
 LLM_LANES = ("build", "deep_research", "novelty_dedup", "enrichment", "engine")
@@ -205,7 +208,13 @@ class LLMConcurrencyBroker:
     """
 
     def __init__(self, total: Optional[int] = None,
-                 lane_limits: Optional[Mapping[str, Optional[int]]] = None):
+                 lane_limits: Optional[Mapping[str, Optional[int]]] = None,
+                 budget: Optional["RunBudget"] = None):
+        # THE RUN'S SPEND, reserved at admission (doc 52 row 15; `core/llm_budget.py`). A permit is
+        # the one place every outbound provider request of every role passes through, so it is
+        # where a fan-out can be told "the run cannot afford all of you" BEFORE the requests leave.
+        # None (the default, and every caller that predates it) reserves and refuses nothing.
+        self._budget = budget
         self._condition = threading.Condition()
         self._total = _positive_limit(total, label="LLM total")
         self._lane_limits = normalize_llm_lane_limits(lane_limits)
@@ -250,10 +259,32 @@ class LLMConcurrencyBroker:
                 return lane
         return None
 
+    @property
+    def budget(self) -> Optional["RunBudget"]:
+        return self._budget
+
     @contextmanager
     def borrow(self, lane: str) -> Iterator[None]:
-        """Borrow one atomic total+lane permit, FIFO in-lane and round-robin cross-lane."""
+        """Borrow one atomic total+lane permit, FIFO in-lane and round-robin cross-lane.
+
+        With a `RunBudget` attached the permit is also a RESERVATION: one call's estimate is held
+        from before the ticket is queued until the permit is returned, and a reservation the run
+        cannot afford raises `BudgetExceeded` here — the same exception, through the same funnels,
+        as an accountant whose landed call crossed its limit. Held while WAITING on purpose: a
+        queued call is still a call the run has decided to make, and letting N waiters each
+        reserve nothing is the overshoot this exists to stop.
+        """
         lane = normalize_llm_lane(lane)
+        reservation = self._budget.reserve() if self._budget is not None else None
+        try:
+            with self._borrow_permit(lane):
+                yield
+        finally:
+            if self._budget is not None:
+                self._budget.release(reservation)
+
+    @contextmanager
+    def _borrow_permit(self, lane: str) -> Iterator[None]:
         with self._condition:
             ticket = _Ticket(self._next_seq, lane)
             self._next_seq += 1
@@ -311,6 +342,7 @@ class LLMConcurrencyBroker:
                 "waiting_by_lane": {lane: len(q) for lane, q in self._queues.items()},
                 "peak": self._peak,
                 "peak_by_lane": dict(self._peak_by_lane),
+                "budget": self._budget.snapshot() if self._budget is not None else None,
             }
 
 

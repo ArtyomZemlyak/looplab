@@ -906,6 +906,11 @@ class LLMRepoDeveloper:
         if state is not None:
             board.bind_state(state)
         extra.append(board)
+        # The session's own clock (`tools/clock.py`, doc 52 row 15): this role is tree-killed at
+        # `developer_session_time_budget_s` having been told the number once, at the top of the
+        # session; `remaining_time` is how it asks again before starting something long.
+        from looplab.tools.clock import ClockTools
+        extra.append(ClockTools())
         roots = [e["path"] for e in (getattr(self, "_editables", None) or []) if e.get("path")]
         if not roots:
             return extra
@@ -1251,7 +1256,14 @@ class LLMRepoDeveloper:
             "incomparable with its siblings, so spend the ceiling you were given before you spend "
             "the comparison. "
             "Do not shrink the experiment past the point where it answers the "
-            "researcher's question; shrink the schedule, and say in your notes what you cut.")
+            "researcher's question; shrink the schedule, and say in your notes what you cut. "
+            # THE EVAL PROCESS IS TOLD ITS OWN CLOCK (doc 52 row 15): every stage's environment
+            # carries the wall it will be killed at, so the code can size its last epoch or
+            # checkpoint and exit cleanly instead of being killed mid-step with no metric.
+            "Every stage's environment carries LOOPLAB_EVAL_DEADLINE (the Unix time, in seconds, at "
+            "which THAT stage is killed) and LOOPLAB_EVAL_TIMEOUT_S (its declared ceiling): read them "
+            "at runtime to decide whether another epoch fits, and checkpoint or score and exit "
+            "cleanly before the deadline rather than being killed mid-step with no metric.")
 
     def _operator_stage_list(self) -> list:
         """The validated OPERATOR-declared `cmd.stages` pipeline, or []. Gated on the SAME shared

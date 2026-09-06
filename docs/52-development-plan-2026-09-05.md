@@ -430,14 +430,19 @@ confidence × evidence count and recency — all write-side — and forgetting h
 never by uselessness, while SkillAudit, Co-Evolving and ReMe each key retention on a read-side
 outcome. Depends on the record above. proof:absent:utility@looplab/engine/lesson_hygiene.py
 
-OPEN[eval-process-is-not-told-its-deadline] the runtime exports `LOOPLAB_EVAL_SEED` / `LANDLOCK` /
-`READ_FENCE_DIR` / `DOCKER_IMAGE` and no deadline, so a candidate cannot size its last epoch at
-runtime — EurekAgent's time helper and deadline warning are what its roles use.
-proof:absent:LOOPLAB_EVAL_DEADLINE@looplab/runtime/command_eval.py
+*Closed 2026-09-06 (row 15 shipped): the marker `eval-process-is-not-told-its-deadline` stood here.
+`sandbox.eval_deadline_env` derives `LOOPLAB_EVAL_DEADLINE` + `LOOPLAB_EVAL_TIMEOUT_S` from the
+stage's own ceiling, `run_argv` sets the pair for every host launch (a declaration wins) and
+`command_eval._deadline_wrap` forwards it into a rebindable container; the Developer's time-budget
+note names them. `tests/test_eval_deadline_env.py` drives both tiers. Deleted per the index rule.*
 
-OPEN[agents-cannot-read-their-own-clock] no tool returns elapsed / remaining time and the tool loop
-injects no deadline warning; a Developer or repair session is tree-killed at `agent_timeout` having
-been told its budget once, at proposal time. proof:absent:remaining_time@looplab/tools+absent:deadline@looplab/agents/tool_loop.py
+*Closed 2026-09-06 (row 15 shipped): the marker `agents-cannot-read-their-own-clock` stood here.
+`tools/clock.py::ClockTools.remaining_time` answers from the `LoopClock` that `drive_tool_loop`
+publishes before every tool execution, composed into the shared providers and the Developer's
+scouts, and the loop appends a deadline note once when the remaining wall drops under a fifth of
+the budget or two minutes. `tests/test_agent_clock.py` drives it. Not done: the Researcher's and
+the Strategist's time cues still state the budget once in prose (the tool is how they ask again).
+Deleted per the index rule.*
 
 OPEN[no-trace-to-training-data-export] Frontis-MA1 (39.39 → 60.61 % from execution-grounded SFT / RL
 on operator traces) and SandMLE (+20–67 % relative) train operators from exactly the corpus

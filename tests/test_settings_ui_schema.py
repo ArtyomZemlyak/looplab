@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 188
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 190
+    # 188 -> 190 catalogued rows on 2026-09-06: `llm_cost_limit` + `llm_token_limit`, the run's LLM
+    # spend caps reserved at the broker's permit (`core/llm_budget.py`, doc 52 row 15). Rows beside
+    # `max_seconds` / `max_eval_seconds`: a spend ceiling is exactly the operator-typed knob a form
+    # exists for, and until then the run had no LLM cap at all.
     # 187 -> 188 catalogued rows on 2026-09-06: `evidence_envelope`, the ONE untrusted-evidence
     # envelope (`core/evidence.py`, doc 52 row 13) on the Strategist, the crash-triage judge, the
     # repair critic and the arXiv / web tools. A row for the reason the three rows below are:
@@ -201,7 +205,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # constructor default it replaced was therefore the only value a composed run could ever have.
     # 219 -> 220 Settings on 2026-09-06: `stage_check_tools`. See the catalogue note above.
     # 220 -> 221 Settings on 2026-09-06: `evidence_envelope`. See the catalogue note above.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 221
+    # 221 -> 223 Settings on 2026-09-06: `llm_cost_limit` + `llm_token_limit`. See the catalogue note.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 223
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

@@ -123,6 +123,10 @@ class EngineOptions:
     confirm_seed_base: int = 1           # D1: first confirm seed; 1 keeps confirm splits disjoint
     max_seconds: Optional[float] = None
     max_eval_seconds: Optional[float] = None
+    # The run's LLM spend caps, reserved at admission (`core/llm_budget.py`, doc 52 row 15).
+    # 0 = no cap on BOTH sides: a cap can only refuse calls, so the same default is no divergence.
+    llm_cost_limit: float = 0.0
+    llm_token_limit: int = 0
     memory_dir: Optional[str] = None
     require_approval: bool = False
     archive_resolution: float = 1.0

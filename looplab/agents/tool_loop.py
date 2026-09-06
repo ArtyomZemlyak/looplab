@@ -25,6 +25,7 @@ from typing import Optional
 
 from looplab.core import tracing
 from looplab.core.containment import contain
+from looplab.tools.clock import LoopClock, set_current_clock
 from looplab.core.llm import BudgetExceeded
 from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult,
                                  capability_manifest)
@@ -204,6 +205,26 @@ _TRUNC_NOTE = ("\n…[truncated by the tool-result cap — {n} chars omitted; "
 # the note fires only when the new result is byte-identical to the previous one for that call, so
 # it is always true. `{k}` = length of the identical-result streak.
 _REPEAT_NOTE = ("\n(note: this exact call has now run {k}× this phase with an IDENTICAL result)")
+
+# THE DEADLINE NOTE (doc 52 row 15; `tools/clock.py`): appended ONCE to a tool result when the
+# remaining wall clock drops under the larger of a fifth of the budget and two minutes. It rides a
+# result the model is already reading — the repeat note's channel — and it names the emit, because
+# what a session out of time must do is stop investigating and answer.
+_DEADLINE_NOTE = ("\n(deadline: {remaining:.0f}s of this session's {budget:.0f}s wall-clock budget "
+                  "remain — finish and call `{emit}` now)")
+_DEADLINE_WARN_FRACTION = 0.2
+_DEADLINE_WARN_MIN_S = 120.0
+
+
+def _deadline_note(clock: "LoopClock", emit_name: str) -> str:
+    """The note, or "" while the wall is comfortably far (or there is none)."""
+    remaining = clock.remaining()
+    if remaining is None:
+        return ""
+    threshold = max(_DEADLINE_WARN_MIN_S, _DEADLINE_WARN_FRACTION * float(clock.time_budget_s))
+    if remaining > threshold:
+        return ""
+    return _DEADLINE_NOTE.format(remaining=remaining, budget=float(clock.time_budget_s), emit=emit_name)
 
 
 # The fence MOVED to `core/evidence.py` (doc 52 row 13) beside the guard sentence it enforces, so
@@ -626,6 +647,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     tool_specs = _compose_loop_tool_specs(tools, emit_spec, self_plan=self_plan)
     current_plan = ""
     started = time.monotonic()
+    # The loop's own clock, published before every tool execution so `remaining_time` (tools/clock.py)
+    # answers for THIS loop, and read by the deadline note below. `deadline_warned` makes the note
+    # fire once: a warning on every result past the threshold is the noise the threshold exists to avoid.
+    clock = LoopClock(started=started, time_budget_s=float(time_budget_s or 0.0),
+                      max_turns=int(max_turns or 0))
+    deadline_warned = False
     # D11: history compression runs on the dedicated cheap compressor when configured, else the
     # loop's own client. A configured compressor that failed validation/construction is different:
     # use the deterministic local truncation fallback instead of spending against the main client.
@@ -826,9 +853,16 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                       arg=next((str(v) for v in (args or {}).values() if v), ""))
                 # Execute + trace + cap + repeat-ledger + provenance hook — see `_run_tool_call`,
                 # which owns the always-execute rule (P3) and the identical-result repeat note.
+                clock.turn = turn_idx
+                set_current_clock(clock)
                 result, repeat_note = _run_tool_call(tools, name, args, repeat_state=repeat_state,
                                                      on_tool_result=on_tool_result,
                                                      cancel_check=_cancelled)
+                if not deadline_warned:
+                    _note = _deadline_note(clock, emit_name)
+                    if _note:
+                        deadline_warned = True
+                        repeat_note = repeat_note + _note
             result = _cap_tool_result(str(result))   # idempotent final bound (cancel/plan stubs too)
             # LABEL what a tool returned, when the caller asked for it. AFTER the cap, so truncation
             # can never remove the closing fence and leave an unterminated block.

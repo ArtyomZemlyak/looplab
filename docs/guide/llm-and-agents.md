@@ -186,6 +186,21 @@ one wrong variable is one problem, not seven.
 The client (`OpenAICompatibleClient`) runs on the **openai SDK over an httpx transport** (migrated from the old stdlib-urllib transport for reliable timeouts + a streaming idle-guard); `openai`/`httpx` are declared deps but import-guarded so offline/replay still imports. A LiteLLM client is also available. Structured
 output uses tool-calling with an automatic text-parse fallback, so weaker models still work.
 
+### The run's spend cap: a reserve-commit budget
+
+Until 2026-09-06 a run had no cap on model spend at all: `CostAccountant.limit` was per client and
+nothing set it, and an accountant only learns a call's cost when the response lands — so N callers
+in flight under any post-hoc cap overshoot it by up to N calls. `llm_cost_limit` (the provider's
+own currency) and `llm_token_limit` (total tokens; the one that holds against a local model that
+prices nothing) are checked at the broker's permit, BEFORE a request is queued
+(`core/llm_budget.py::RunBudget`): committed + reserved + this call's estimate — the run's own mean
+per committed call, so nothing is reserved before the first call lands — may not exceed the cap. A
+refusal raises `BudgetExceeded`, the same hard stop the accountant raises, through the same funnels
+(`tests/test_containment_census.py` pins them), so the run ends the way a tripped ceiling always
+has. The committed half is fed by the durable `llm_usage` ledger and seeded from it on a resume, so
+the cap survives a restart; `looplab tokens` reconciles against that same ledger. Both default to
+0 = no cap (doc 52 row 15).
+
 ## Reasoning / thinking
 
 `llm_reasoning` controls the chain-of-thought sent in the request (defaults to `high` — the agent
@@ -616,6 +631,17 @@ their "no turn cap" into a cap. And it is **not a lost verdict**: `drive_tool_lo
 announces the budget through its `on_budget` observer — so the operator is told the investigation was
 cut short, and `node_repaired.budget_exhausted` records which bound ended it — and then forces the
 emit from everything gathered. The triage still answers; it stops browsing.
+
+**And since 2026-09-06 the session can read the clock it runs under** (doc 52 row 15;
+`tools/clock.py`). Every agentic loop — the Developer's stages / plan / implement / repair sessions,
+the Researcher's propose, the Strategist, the triage judge — carries a `remaining_time` tool that
+answers elapsed, remaining and the turn count from the loop's own clock, published by
+`drive_tool_loop` before every tool execution (so a nested phase reads its own numbers and the
+outer loop its own again afterwards). The PUSH half is a deadline note appended ONCE to a tool
+result when the remaining wall drops under a fifth of the budget or two minutes, whichever is
+larger, naming the emit to call — a role that was told its budget once, in prose, at the start and
+then killed at the wall now hears about the wall while it can still act. It reads; the loop still
+decides, and the kill is still the kill.
 
 A session-scoped *"this exact call+result has been served m times"* rung was measured and **refused**,
 recorded here so it is not re-proposed: over 2,472 tool-using sessions the max-serve distribution is

@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
@@ -28,6 +29,27 @@ from typing import Optional, Protocol
 from looplab.core.errors import ConfigRefusal
 from looplab.runtime.read_fence import FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath
 from looplab.runtime import landlock as _landlock
+
+# THE EVAL PROCESS'S OWN CLOCK (doc 52 row 15; the doc 52 marker `eval-process-is-not-told-its-deadline`).
+# The runtime exported the seed, the fence, the Landlock ruleset and the image, and never the one
+# number a training script needs to size its last epoch: when it will be killed. `run_argv` sets
+# both for every launch — the wall as a Unix timestamp and the ceiling it was derived from — and
+# `command_eval` forwards the same pair into a container, where `docker run` inherits nothing.
+# `setdefault`, so a caller that already declared either (a test, an operator's `eval_env`) wins.
+EVAL_DEADLINE_ENV = "LOOPLAB_EVAL_DEADLINE"
+EVAL_TIMEOUT_ENV = "LOOPLAB_EVAL_TIMEOUT_S"
+
+
+def eval_deadline_env(timeout: float, *, now: Optional[float] = None) -> dict[str, str]:
+    """The two variables for a launch that will be killed `timeout` seconds from `now` (wall time)."""
+    try:
+        ceiling = float(timeout)
+    except (TypeError, ValueError):
+        return {}
+    if not (ceiling > 0) or ceiling == float("inf"):
+        return {}
+    start = time.time() if now is None else float(now)
+    return {EVAL_DEADLINE_ENV: f"{start + ceiling:.3f}", EVAL_TIMEOUT_ENV: f"{ceiling:.3f}"}
 
 # THE secret screen — MOVED to `core/envsafe.py`, re-exported here and NOT copied. Every existing
 # `from looplab.runtime.sandbox import is_secret_env` (eight modules, `tests/test_secret_env_pattern.py`)
@@ -866,6 +888,8 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # and always keep what the engine explicitly passes in `env` (e.g. LOOPLAB_EVAL_SEED).
     base = {k: v for k, v in os.environ.items() if not is_secret_env(k, v)}
     full_env = {**base, **{k: str(v) for k, v in (env or {}).items()}}
+    for _k, _v in eval_deadline_env(timeout).items():
+        full_env.setdefault(_k, _v)      # the eval's own clock; an explicit declaration wins
     # SOURCE-TREE READ FENCE (runtime/read_fence.py). The engine hands a fenced launch the fence
     # directory in `LOOPLAB_READ_FENCE_DIR`; prepending it to PYTHONPATH is what makes CPython import
     # the generated `sitecustomize` at startup and install the audit hook that refuses reads of the
