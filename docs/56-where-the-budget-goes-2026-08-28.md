@@ -12413,3 +12413,51 @@ dropping the direction.
 **The cache is still not overwritten**, for §295's reason: it would reprice `pgr1`'s TEST 34.2751 to
 about 23.4, and that is a decision to take on purpose rather than as the tail of a diagnosis. What
 has changed is that nobody can now read a pagerank score without the tool saying what it divides by.
+
+## §297 — six mechanisms tested, none reproduces it, and the ruler records nothing
+
+Chasing §296's 46 %, the first useful measurement was per-instance rather than aggregate. Cached
+divided by fresh, instance by instance:
+
+| task | ratio median | p10 | p90 | cv |
+|---|---|---|---|---|
+| pagerank | 1.446 | 1.362 | 1.551 | **0.103** |
+| edge_expansion | 0.887 | 0.786 | 0.983 | 0.136 |
+| discrete_log | 1.036 | 0.903 | 1.169 | 0.123 |
+| pde_heat1d | 1.019 | 0.905 | 1.169 | 0.231 |
+
+`pagerank`'s gap is the **most uniform of the four** — every instance is slower in the cache by
+about the same factor. That rules out a mixed or partly-corrupt file and points at a single global
+condition at the time of writing. So I went looking for the condition:
+
+- **threads** — `OMP/OPENBLAS/MKL/NUMEXPR=1` gives 75.3 ms, defaults give 75.1 ms. No.
+- **load** — three concurrent readings on the other lanes while timing: 76.1 ms against 74.6 idle.
+  A 1–2 % effect. No.
+- **lane** — 1.4131 / 1.3581 / 1.4099 on three bench lanes (§293). No.
+- **the reference** — `AlgoTuneTasks/pagerank/` untouched since `init`, byte-identical to the copy
+  `pgr1` staged. No.
+- **the re-timing date** — the TRAIN twin, untouched since 08-31, disagrees by *more* (1.4908). No.
+- **the cgroup quota** — `cpu.max 9000000 100000` in **all 257** recorded snapshots. No.
+
+Three independent fresh timings land at 74.581 / 75.055 / 75.338 ms. The cache says 109.133. I
+cannot reproduce it, and I am going to say that plainly rather than pick the least-refuted story.
+
+**What I can fix is why it is undiagnosable.** The cache stores the times and nothing else — while
+every other artefact here says where it came from: a probe's `INSTRUMENT.txt`, a snapshot's
+`PROVENANCE.txt`, the regime key in the cache's own filename. So a baseline write now leaves a
+sidecar recording exactly the six things I just spent a sweep testing: worker count, thread
+environment, CPU affinity, load average, cgroup quota, and when. It cannot fix the entries already
+on disk; it stops the next one being a mystery.
+
+Deploying it needed a detour worth recording. `patch_baseline_cache.py --algotune-root …` reported
+**"patched but STALE — missing: write provenance"** and refused to upgrade in place; `--revert` had
+no `.orig`; and a `git checkout` of `baseline_manager.py` came back with **eleven** LOOPLAB markers
+already in it, because this checkout has the patch committed. So the block was applied to the
+deployed file directly and verified fragment by fragment — all five present, the file parses, a
+write now produces its sidecar, and an ordinary reading is unchanged (`discrete_log` 1.0791 against
+the 1.0830 measured before the change).
+
+**A test of mine was trivially true and said nothing.** It asserted each provenance field appeared
+in `patch_baseline_cache.py` — but every required fragment also appears inside `_REQUIRED_FRAGMENTS`
+itself, so the search could never fail, and a mutation deleting `cpu_affinity` from the emitted
+patch passed. It now checks `WRITE_PATCH`, the string actually emitted. Five mutations red.

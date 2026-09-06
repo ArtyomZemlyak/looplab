@@ -190,6 +190,41 @@ WRITE_PATCH = '''                    self._cache[subset] = baseline_times
                             with open(_ll_tmp, "w", encoding="utf-8") as _ll_fh2:
                                 _ll_json2.dump(baseline_times, _ll_fh2)
                             _ll_os2.replace(_ll_tmp, _ll_key)
+                            # A RULER WITH NO PROVENANCE CANNOT BE DIAGNOSED. On 2026-09-06 the
+                            # cached `pagerank` baseline was found to be 1.45x above three
+                            # independent fresh timings, uniformly across all 100 instances
+                            # (cv 0.10). Six mechanisms were tested and none reproduced it: lane,
+                            # BLAS/OMP thread count, concurrent load, reference version, the date of
+                            # the re-timing, and the cgroup quota (constant across 257 snapshots).
+                            # The reason it stayed undiagnosable is that this file writes the times
+                            # and nothing else -- while every other artefact on this bench records
+                            # where it came from (a probe's INSTRUMENT.txt, a snapshot's
+                            # PROVENANCE.txt, the regime key in this very filename). So each write
+                            # now leaves a sidecar saying under what it was taken. It cannot fix the
+                            # entries already on disk; it stops the next one being a mystery.
+                            try:
+                                import time as _ll_time2, socket as _ll_sock2
+                                _ll_prov = {
+                                    "written_at": _ll_time2.strftime("%Y-%m-%dT%H:%M:%S"),
+                                    "host": _ll_sock2.gethostname(),
+                                    "entries": len(baseline_times),
+                                    "eval_workers": _ll_os2.environ.get("ALGOTUNE_EVAL_WORKERS"),
+                                    "min_timeout_s": _ll_os2.environ.get("ALGOTUNE_MIN_TIMEOUT_S"),
+                                    "omp_num_threads": _ll_os2.environ.get("OMP_NUM_THREADS"),
+                                    "openblas_num_threads":
+                                        _ll_os2.environ.get("OPENBLAS_NUM_THREADS"),
+                                    "cpu_affinity": sorted(_ll_os2.sched_getaffinity(0)),
+                                    "loadavg": _ll_os2.getloadavg(),
+                                    "cpu_max": (open("/sys/fs/cgroup/cpu.max").read().strip()
+                                                if _ll_os2.path.exists("/sys/fs/cgroup/cpu.max")
+                                                else None),
+                                }
+                                with open(_ll_key + ".provenance.json", "w",
+                                          encoding="utf-8") as _ll_pf:
+                                    _ll_json2.dump(_ll_prov, _ll_pf, indent=2, sort_keys=True)
+                            except Exception as _ll_pexc:   # noqa: BLE001 - never lose the ruler
+                                logging.warning("LOOPLAB baseline provenance not written (%s)",
+                                                _ll_pexc)
                             logging.info("LOOPLAB baseline cache WRITE %s (%d entries)",
                                          _ll_key, len(baseline_times))
                         except Exception as _ll_exc2:   # noqa: BLE001 - the measurement still stands
@@ -203,6 +238,7 @@ _REQUIRED_FRAGMENTS = [
     ("env-driven cache dir", "os.environ.get(\n            'ALGOTUNE_BASELINE_CACHE_DIR'"),
     ("lane regime key", 'f"__lane{_ll_lane}r3"'),
     ("worker regime key", 'f"__w{_ll_w}x{_ll_c}r3"'),
+    ("write provenance", '"cpu_affinity": sorted(_ll_os2.sched_getaffinity(0))'),
     ("write gate", "LOOPLAB baseline cache NOT WRITTEN"),
 ]
 
