@@ -6,6 +6,7 @@ boundaries so an oversized or wrong-shaped sidecar cannot crash the engine or ex
 """
 from __future__ import annotations
 
+import re
 import hashlib
 import itertools
 import json
@@ -886,18 +887,20 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
 
 
 MAX_RESEARCH_EVIDENCE_REFS = 12
-_EVIDENCE_ID_CHARS = frozenset("0123456789abcdef")
+# A record id is `<kind>-` + 24 lowercase hex (`core/research_record.py` mints `ev-`/`lit-` ids
+# from a sha256 PREFIX); it is deliberately not a digest, and a full 64-hex digest is checked only
+# through `jsonutil.valid_digest_ref`, the one reader of that shape.
+_RECORD_ID = re.compile(r"\A(ev|lit)-[0-9a-f]{24}\Z")
 _PLAN_STATUSES = ("pending", "in_progress", "done")
 
 
 def _evidence_id(value) -> bool:
-    return (isinstance(value, str) and value.startswith("ev-") and len(value) == 27
-            and set(value[3:]) <= _EVIDENCE_ID_CHARS)
+    return isinstance(value, str) and value.startswith("ev-") and bool(_RECORD_ID.match(value))
 
 
 def _hex_digest(value) -> str:
-    text = value if isinstance(value, str) else ""
-    return text.lower() if len(text) == 64 and set(text.lower()) <= _EVIDENCE_ID_CHARS else ""
+    from looplab.core.jsonutil import valid_digest_ref
+    return value if valid_digest_ref(value) else ""
 
 
 def sanitize_research_plan(value, budget: list[int]) -> Optional[dict]:
@@ -963,8 +966,7 @@ def sanitize_literature_items(value) -> list[dict]:
         if not isinstance(row, dict):
             continue
         lit_id = row.get("id")
-        if not (isinstance(lit_id, str) and lit_id.startswith("lit-") and len(lit_id) == 28
-                and set(lit_id[4:]) <= _EVIDENCE_ID_CHARS):
+        if not (isinstance(lit_id, str) and lit_id.startswith("lit-") and _RECORD_ID.match(lit_id)):
             continue
         title = _text(row.get("title", ""), 400, budget, single_line=True)
         if not title:
