@@ -344,6 +344,13 @@ export LOOPLAB_LLM_REASONING="${LOOPLAB_LLM_REASONING:-medium}"
 DEFAULT_REASONING_EXTRA='{"provider":{"order":["siliconflow/fp8"],"allow_fallbacks":false}}'
 export LOOPLAB_LLM_REASONING_EXTRA="${LOOPLAB_LLM_REASONING_EXTRA:-$DEFAULT_REASONING_EXTRA}"
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET_USD"
+# The Developer's stage-pipeline guidance block is OFF on this bench (docs/60 A6): measured over
+# the probe corpus, `declare_stages` was called 0 times while the block cost 4.8-6.0 % of every $1
+# run (docs/56 §24) -- an AlgoTune task declares exactly one `score` stage. It stays ON in the
+# engine default because ML tasks write `looplab_stages.json` manifests for real; the switch
+# belongs to the profile that measured the zero. `LOOPLAB_DEVELOPER_STAGE_GUIDANCE=1` in the
+# environment keeps the historical prompt for a control that needs it.
+export LOOPLAB_DEVELOPER_STAGE_GUIDANCE="${LOOPLAB_DEVELOPER_STAGE_GUIDANCE:-0}"
 
 # ARM A'S BUDGET DOES NOT LIVE HERE, and pretending otherwise is how two arms end up on two
 # budgets under one banner. `BUDGET_USD` reaches `LOOPLAB_LLM_BUDGET_USD`, which is LoopLab's

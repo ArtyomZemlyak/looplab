@@ -263,6 +263,13 @@ export ALGOTUNE_MIN_TIMEOUT_S=120
 # nobody shows you». Одна и та же карточка, разные предложения, и число сравнивается как одно.
 export PYTHONPATH="$ROOT/looplab${PYTHONPATH:+:$PYTHONPATH}"
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET"
+# The Developer's stage-pipeline guidance block is OFF on this bench (docs/60 A6): measured over
+# the probe corpus, `declare_stages` was called 0 times while the block cost 4.8-6.0 % of every $1
+# run (docs/56 §24) -- an AlgoTune task declares exactly one `score` stage. It stays ON in the
+# engine default because ML tasks write `looplab_stages.json` manifests for real; the switch
+# belongs to the profile that measured the zero. `LOOPLAB_DEVELOPER_STAGE_GUIDANCE=1` in the
+# environment keeps the historical prompt for a control that needs it.
+export LOOPLAB_DEVELOPER_STAGE_GUIDANCE="${LOOPLAB_DEVELOPER_STAGE_GUIDANCE:-0}"
 
 # WHICH INSTRUMENT THIS PROBE RAN ON, written into its own tree.
 #
