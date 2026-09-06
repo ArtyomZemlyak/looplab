@@ -297,6 +297,11 @@ site that proves it is open.
    fourth, `Engine._apply_strategy`, already applies a `developer`), and a mention
    in `_strategist_brief`, which today never tells the model developers are switchable at all.
 6. **The schema-aligned parser is a fallback, not the default (P0, S).** `core/parse.py:195
+   DECLINED[schema-parser-default-flip] the fallback stays the fallback. measured: the local
+   instrument this repo built for the question reports 33 asks, 0 repaired, 0 failed on this box —
+   the P0 rested on "this box serves local models", which it does not — docs/BACKLOG.md §0.1
+   (declined 2026-09-06; a box that does serve local models re-opens this under a new slug with
+   its own number).
    ::_coerce_to_model` IS a real error-correcting SAP (case-insensitive key match, per-field
    coercion, extras dropped) — but `core/config.py:1483` is `llm_parser: str = "tool_call"` and
    `parse.py:213::_ORDER["tool_call"] = ["tool_call", "baml"]`, so it only runs after native FC has
