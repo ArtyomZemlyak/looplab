@@ -27,6 +27,7 @@ import argparse
 import glob
 import json
 import os
+import statistics
 import sys
 from pathlib import Path
 
@@ -181,6 +182,7 @@ def check_ruler_constants(bench: str):
     """
     latest: dict = {}
     quiet: dict = {}
+    pool: dict = {}
     try:
         for line in open(Path(bench) / DRIFT_LOG, encoding="utf-8", errors="replace"):
             line = line.strip()
@@ -202,6 +204,16 @@ def check_ruler_constants(bench: str):
             # and this check is the thing that would have said so.
             if busy == 0 and (task not in quiet or stamp > quiet[task][1]):
                 quiet[task] = (float(med), stamp, busy)
+            # AND EVERY QUIET PER-REP VALUE, not only the sitting's median. §317: twelve quiet
+            # readings of `pde_heat1d` -- a task whose p90/p10 is 1.4 and whose ruler was verified
+            # fresh to 0.02 % -- run from 0.9898 to 1.0683. One reading carries +-4 %, which is
+            # twice the tolerance it is judged against, so a single median generates false drift
+            # on demand. It generated three predictions here, two of them refuted, before the
+            # spread was measured instead of assumed.
+            if busy == 0:
+                pool.setdefault(task, []).extend(
+                    float(v) for v in (row.get("values") or [med])
+                    if isinstance(v, (int, float)))
     except OSError as exc:
         return False, f"cannot read the drift log: {type(exc).__name__}"
 
@@ -238,11 +250,27 @@ def check_ruler_constants(bench: str):
         under = "" if quiet.get(task) else (
             f", taken with {busy} cpu(s) busy outside its lane" if busy else
             ", taken before the box's load was recorded with the reading")
+        # THE VERDICT IS THE POOLED QUIET READS AND THEIR OWN SCATTER, not one median against a
+        # fixed 2 %. A constant is called moved only when it sits outside mean +- 2 standard errors
+        # AND outside the tolerance: the first test is what stops a +-4 % instrument reporting a
+        # 3 % drift every other sitting, the second is what stops a very tight instrument reporting
+        # a difference too small to act on.
+        vals = pool.get(task) or []
+        n = len(vals)
+        if n >= 2:
+            mean = statistics.fmean(vals)
+            sem = statistics.stdev(vals) / (n ** 0.5)
+            delta = (mean - quoted) / quoted
+            moved = abs(mean - quoted) > 2 * sem and abs(delta) > DRIFT_TOLERANCE
+            off += 1 if moved else 0
+            said.append(f"{task}: list {quoted:.4f}, {n} quiet read(s) mean {mean:.4f} "
+                        f"+-{sem:.4f} ({100 * delta:+.1f} %){'  <-- ' if moved else ''}")
+            continue
         delta = (got - quoted) / quoted
         mark = "" if abs(delta) <= DRIFT_TOLERANCE else "  <-- "
         if abs(delta) > DRIFT_TOLERANCE:
             off += 1
-        said.append(f"{task}: list {quoted:.4f}, measured {got:.4f} on {stamp[:10]}{under} "
+        said.append(f"{task}: list {quoted:.4f}, ONE reading {got:.4f} on {stamp[:10]}{under} "
                     f"({100 * delta:+.1f} %){mark}")
     return off == 0, "; ".join(said)
 

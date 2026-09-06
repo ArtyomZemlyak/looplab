@@ -13320,8 +13320,10 @@ Three of point 5's four constants now hold on a quiet box: pagerank −0.3 %, di
 edge_expansion +1.0 %.
 
 **And §315's "invisible on the ten deterministic tasks" is wrong.** `pde_heat1d` is deterministic
-(p90/p10 = 1.4) and reads **1.0198** and **1.0387** in two quiet sittings hours apart, drifting
-away from unity rather than scattering around it. Prediction 6 said a second sitting would land
+(p90/p10 = 1.4) and reads **1.0198** and **1.0387** in two quiet sittings hours apart. (The words
+that followed here — "drifting away from unity rather than scattering around it" — were themselves
+a conclusion from a sample of two, and §317 refutes them with ten more readings. The task's mean
+really is above unity; the reasoning in this paragraph is not what establishes it.) Prediction 6 said a second sitting would land
 within 1.5 % of unity if that were sampling; it landed at +4.3 %, all four values between 1.025 and
 1.068. Prediction 7 then said the cached ruler must be stale — re-timed on the quiet box it came
 back **14 478 ms against the cached 14 482**, identical to 0.02 %.
@@ -13331,3 +13333,45 @@ verified-fresh ruler, at 2–4 %, and CP-SAT amplifies it about fifteenfold. The
 still stand and a fifth is added: it is not the ruler's age either. What it costs is now stated
 rather than assumed — a probe scored on `pde_heat1d` carries roughly 3 % in the candidate's favour
 before the candidate does anything.
+
+## §317 — one reading is not a measurement, and §316's own conclusion was one
+
+§316 said `pde_heat1d` "drifts away from unity rather than scattering around it", from two quiet
+sittings at 1.0198 and 1.0387. A third quiet sitting, same box, same cache, same lane, read
+**0.9985**, and a fourth — three reps inside one sitting — read **1.0447, 0.9898, 1.0267**. So the
+scatter is not between sittings, it is between reps minutes apart, and my "drifting, not scattering"
+was a conclusion drawn from a sample of two.
+
+Prediction 9, that each rep leaves orphaned forkservers pinned to the lane and the readings climb
+with them, was refuted too: an orphan sampler ran through the whole sitting and read **zero, all 22
+samples**, while the readings still moved 5.5 % between consecutive reps.
+
+Twelve quiet values of a task whose p90/p10 is 1.4 and whose ruler was verified fresh to 0.02 %:
+
+```
+1.0129 1.0268 1.0094 1.0451 1.0335 1.0438 1.0250 1.0683 0.9985 1.0447 0.9898 1.0267
+```
+
+**One reading carries about ±4 %, and it was being judged against a 2 % tolerance.** That is a false
+alarm generator, and it generated this one: three predictions in two sittings, two of them refuted,
+chasing a "drift" that a single median cannot resolve.
+
+`check_ruler_constants` now pools every quiet per-rep value for a task and reports
+`mean ± standard error` with the count, calling a constant moved only when it lies outside
+**both** two standard errors and the tolerance — the first stops a ±4 % instrument reporting drift
+every other sitting, the second stops a very tight one reporting a quarter of a percent. Four
+mutations red, including one that pools only the medians and so throws the spread away, and one
+that keeps the scatter test but drops the tolerance clause.
+
+With the evidence pooled, the four constants read:
+
+| task | list | quiet reads | mean | |
+|---|---|---|---|---|
+| discrete_log | 1.0162 | 4 | 1.0192 ± 0.0034 | +0.3 % |
+| edge_expansion | 0.9847 | 4 | 0.9948 ± 0.0016 | +1.0 % |
+| pagerank | 1.0024 | 3 | 0.9968 ± 0.0029 | −0.6 % |
+| pde_heat1d | 0.9958 | 8 | **1.0331 ± 0.0068** | **+3.7 %** |
+
+So `pde_heat1d`'s constant really has moved — five standard errors, with a fresh ruler underneath it
+— and the other three hold. The conclusion §316 reached is the one that survives; the reasoning it
+used to get there did not, and the difference is eight readings.

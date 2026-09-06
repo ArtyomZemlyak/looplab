@@ -393,3 +393,64 @@ def test_the_reason_a_constant_is_unmeasured_is_globbed_not_remembered(tmp_path)
     # pde_heat1d is not staged, and the sentence carries the count the glob actually found.
     assert "pde_heat1d: UNMEASURED here (no probe has staged its reference module here (1 staged" \
         in detail, detail
+
+
+def _drift_log(tmp_path, rows):
+    d = tmp_path / "looplab" / "benchmarks" / "algotune"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "ruler_selfcheck_log.jsonl").write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8")
+    (tmp_path / "model-probes").mkdir(exist_ok=True)
+    return str(tmp_path)
+
+
+def _reads(task, values, stamp="2026-09-06T21:00:00"):
+    """One recorded sitting on a quiet box."""
+    return {"task": task, "subset": "test", "lane": "33-43,81-91", "regime": "w22x1r3",
+            "busy_cpus_outside_lane": 0, "stamp": stamp,
+            "values": values, "median": sorted(values)[len(values) // 2]}
+
+
+def test_a_constant_is_judged_against_the_scatter_of_its_own_readings(tmp_path):
+    """§317. `pde_heat1d` is deterministic (p90/p10 = 1.4) and its ruler was verified fresh to
+    0.02 %, yet twelve quiet readings run from 0.9898 to 1.0683. One reading carries +-4 %, twice
+    the 2 % tolerance it was being judged against, so a single median manufactured drift on demand
+    -- three predictions here, two refuted, before the spread was measured instead of assumed.
+
+    A TIGHT instrument that really has moved must still be caught, and a NOISY one that has not
+    must not be: the two fixtures below differ only in scatter, with the same mean and the same
+    distance from the quoted constant."""
+    tight = _drift_log(tmp_path / "tight",
+                       [_reads("pagerank", [1.030, 1.031, 1.029, 1.030, 1.031, 1.029])])
+    ok, detail = sweep_claims.check_ruler_constants(tight)
+    assert not ok and "<--" in detail, detail
+    assert "6 quiet read(s) mean 1.0300" in detail, detail
+
+    noisy = _drift_log(tmp_path / "noisy",
+                       [_reads("pagerank", [0.980, 1.080, 0.985, 1.075, 1.010, 1.050])])
+    ok2, detail2 = sweep_claims.check_ruler_constants(noisy)
+    # Same mean, same 3 % from the quoted 1.0024, and NOT called moved: +-0.018 of standard error
+    # covers the gap. The other three constants are unmeasured here, so the check still returns
+    # False -- what is asserted is that pagerank itself carries no arrow.
+    pagerank_line = [p for p in detail2.split("; ") if p.startswith("pagerank")][0]
+    assert "<--" not in pagerank_line, pagerank_line
+
+
+def test_a_single_reading_says_so_rather_than_pretending_to_a_mean(tmp_path):
+    one = _drift_log(tmp_path / "one", [_reads("pagerank", [1.030])])
+    _, detail = sweep_claims.check_ruler_constants(one)
+    line = [p for p in detail.split("; ") if p.startswith("pagerank")][0]
+    assert "ONE reading 1.0300" in line, line
+
+
+def test_a_difference_too_small_to_act_on_is_not_a_moved_constant(tmp_path):
+    """The scatter test alone is not enough. Six readings of 1.0050 +-0.0002 sit eleven standard
+    errors from the quoted 1.0024 and a quarter of a percent away from it -- statistically certain
+    and operationally nothing. Without the tolerance clause this check would send an operator to
+    re-time a ruler over 0.26 %, which is how a drift report becomes background noise."""
+    tight = _drift_log(tmp_path / "sure-but-small",
+                       [_reads("pagerank", [1.0049, 1.0051, 1.0050, 1.0052, 1.0048, 1.0050])])
+    _, detail = sweep_claims.check_ruler_constants(tight)
+    line = [p for p in detail.split("; ") if p.startswith("pagerank")][0]
+    assert "<--" not in line, line
+    assert "+0.3 %" in line, line
