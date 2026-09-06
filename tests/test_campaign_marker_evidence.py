@@ -69,9 +69,12 @@ assert _CUT_BANNER in CAMPAIGN.read_text(encoding="utf-8"), (
     "final_banner no longer prints this heading; re-point these assertions and RE-CHECK that the "
     "cut task-arms are still named inside the banner rather than only making the tests green")
 
+# `marker_is_immediate_exit` joined 2026-09-06 with the `exited_immediately` state: `already_measured`
+# and `final_banner` call it, and `record_done` reads `IMMEDIATE_EXIT_S`, which the preamble sets
+# and this harness therefore has to stub (mirroring the script's own default, like LANE_LAYOUT).
 _FUNCTIONS = ("run_started_evidence", "successful_calls", "next_attempt",
-              "marker_is_harness_cut", "marker_is_operator_skip", "already_measured",
-              "record_done", "refuse_to_start", "final_banner")
+              "marker_is_harness_cut", "marker_is_operator_skip", "marker_is_immediate_exit",
+              "already_measured", "record_done", "refuse_to_start", "final_banner")
 
 
 def _harness() -> str:
@@ -93,7 +96,7 @@ def _harness() -> str:
     # harness, which extracts the function away from its assignment. The value mirrors the script's
     # own default rather than inventing one.
     parts = ["set -u", "LANE_COUNT=4", "CORES_PER_LANE=22", 'LANE_LAYOUT="whole_cores"',
-             'ARM="${ARM:-B}"', 'T="${T:-svm}"']
+             'IMMEDIATE_EXIT_S="${IMMEDIATE_EXIT_S:-60}"', 'ARM="${ARM:-B}"', 'T="${T:-svm}"']
     for name in _FUNCTIONS:
         found = re.search(rf"^{name}\(\) \{{.*?^\}}$", src, re.M | re.S)
         assert found, f"campaign.sh no longer defines {name}()"

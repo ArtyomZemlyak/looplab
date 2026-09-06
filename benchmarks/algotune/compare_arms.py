@@ -341,12 +341,31 @@ def arm_a_failure(algotune_root: Path, task: str, model_fragment: str = "") -> t
 #               operator's Ctrl-C, so it got NO marker and the task was re-run from scratch for
 #               ever, spending a fresh full budget each time to stall in the same place.
 HARNESS_CUT_STATES: tuple[str, ...] = ("wall_cut", "stall_cut")
+# AN IMMEDIATE EXIT: rc=0 in under `campaign.sh::IMMEDIATE_EXIT_S` seconds. NOT a harness cut --
+# nothing of ours stopped the run -- but the same treatment for the same reason: terminal (a
+# `.done`, so a blind resume leaves it alone), REPORTED and NEVER AVERAGED, because a run that
+# exited in five seconds did not reach the ceiling every other row is compared at. Measured on the
+# 2026-08-24 campaign (docs/58 s58.1): 16 of 20 arm-A markers recorded 3-19 s as
+# `ran_to_completion`, and this file averaged whatever `agent_summary.json` held for them. Its own
+# name rather than a third member of the tuple above because `campaign.sh::already_measured` keys
+# `RETRY_WALL_CUT=1` on that tuple's shell mirror, and an immediate exit reopens under
+# `RETRY_IMMEDIATE_EXIT=1` instead: an endpoint outage is worth re-running once repaired; a wall cut
+# may not be.
+IMMEDIATE_EXIT_STATE = "exited_immediately"
+# THE STATES A ROW MAY CARRY AND STILL NOT BE A MEASUREMENT AT THE BUDGET. Every reader that
+# decides "print but do not average" reads THIS tuple, so a fourth such state is one edit here and
+# in `campaign.sh::record_done`, not one per reader. `HARNESS_CUT_STATES` stays its own name for
+# the readers whose question really is "did this harness stop the run" (the resume flag, the
+# banner's HARD_TIMEOUT sentence).
+NOT_AT_BUDGET_STATES: tuple[str, ...] = HARNESS_CUT_STATES + (IMMEDIATE_EXIT_STATE,)
 # (row phrase, footer phrase) — one row is about ONE arm and the footer counts many, so they cannot
 # be one string without the grammar going wrong in whichever place it was not written for.
 _CUT_PHRASES = {
     "wall_cut": ("cut at the wall clock (rc=124)", "were cut at the WALL CLOCK (rc=124)"),
     "stall_cut": ("stall-cut (its own log stopped growing)",
                   "were STALL-CUT (the run's own log stopped growing)"),
+    IMMEDIATE_EXIT_STATE: ("EXITED IMMEDIATELY (rc=0 in seconds, no completion)",
+                           "EXITED IMMEDIATELY (rc=0 within seconds, which is not a completion)"),
 }
 
 
@@ -395,6 +414,8 @@ def marker_state(final_dir: Path | None, arm: str, task: str, runs_root: Path | 
             return "wall_cut"
         if "state=stall_cut" in text:
             return "stall_cut"
+        if f"state={IMMEDIATE_EXIT_STATE}" in text:
+            return IMMEDIATE_EXIT_STATE
         # A TASK-ARM THE OPERATOR SKIPPED IS NOT ONE THAT FINISHED, and the difference has to
         # survive into the table. `campaign.sh::already_measured` skips on ANY non-empty marker
         # that is not a wall cut, so writing one is how a running campaign is told to stop taking
@@ -606,16 +627,17 @@ def main() -> int:
             # that are is the mixed-population failure this whole module is written against.
             why = why or f"arm B {state} (campaign.sh wrote no .done marker)"
             vb = None
-        elif vb is not None and state in HARNESS_CUT_STATES:
+        elif vb is not None and state in NOT_AT_BUDGET_STATES:
             # A HARNESS CUT IS NOT A BUDGET. The number is real — the champion was scored — but the
             # run it came from was stopped by this harness rather than by the ceiling every other row
             # is compared at, so it is REPORTED and not AVERAGED. Kept visible rather than dropped
             # because the operator needs to see that the bound is binding at all: three of the five
             # cuts measured on 2026-08-23 had not reached the budget, one of them at $0.14 of $1.00.
+            # An IMMEDIATE EXIT takes the same door: not stopped by us, but not at the budget either.
             why = why or f"arm B {_cut_phrase(state)}, not by the budget"
-        if va is not None and state_a in HARNESS_CUT_STATES:
+        if va is not None and state_a in NOT_AT_BUDGET_STATES:
             why = why or f"arm A {_cut_phrase(state_a)}, not by the budget"
-        cut = next((st for st in (state, state_a) if st in HARNESS_CUT_STATES), None)
+        cut = next((st for st in (state, state_a) if st in NOT_AT_BUDGET_STATES), None)
         # THE ROW'S STATE HAS TO SPEAK FOR BOTH ARMS. It carries arm B's marker, with arm A's
         # consulted only for the cut flag above -- so an arm-A `operator_skip` reached the table as
         # arm B's `done` and the "skipped" line never printed. A harness cut still outranks it (a
@@ -690,7 +712,7 @@ def main() -> int:
     if unmeasured:
         print(f"of those, {len(unmeasured)} arm-B row(s) are the ARENA producing no measurement "
               f"(not a wrong solver): " + ", ".join(unmeasured))
-    for _st in HARNESS_CUT_STATES:
+    for _st in NOT_AT_BUDGET_STATES:
         _cut = sorted(t for t, _, _, _, st, _ in rows if st == _st)
         if _cut:
             print(f"{len(_cut)} task-arm(s) {_cut_phrase(_st, footer=True)} rather than by the budget, so their "

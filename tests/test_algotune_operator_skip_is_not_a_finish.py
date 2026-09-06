@@ -96,8 +96,8 @@ def test_a_wall_cut_is_still_a_wall_cut(tmp_path):
 # The functions are EXTRACTED and RUN rather than pattern-matched: the property is what the banner
 # says over a directory that holds a skip, and the rest of the script cannot execute here.
 CAMPAIGN = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "campaign.sh"
-_BANNER_FUNCTIONS = ("marker_is_harness_cut", "marker_is_operator_skip", "already_measured",
-                     "final_banner")
+_BANNER_FUNCTIONS = ("marker_is_harness_cut", "marker_is_operator_skip",
+                     "marker_is_immediate_exit", "already_measured", "final_banner")
 
 
 def _campaign_bash(script: str) -> subprocess.CompletedProcess:

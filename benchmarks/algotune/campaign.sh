@@ -97,6 +97,19 @@ STALL_TIMEOUT="${STALL_TIMEOUT:-2400}"        # 40 min of total silence = hung, 
 # The graded champion pass is bounded by a WALL of its own (see its call site): it is a
 # known-shape workload with no agent in it, and it is legitimately quiet while it scores.
 CHAMPION_TIMEOUT="${CHAMPION_TIMEOUT:-14400}"
+# A TASK-ARM CANNOT COMPLETE IN FIVE SECONDS, and until 2026-09-06 the marker vocabulary had no
+# way to say so. Measured on the 2026-08-24 campaign (docs/58 s58.1): 16 of the 20 arm-A markers in
+# `final-A-wauto.log` / `final-A-w1.log` record `wall` between 3 and 19 s with
+# `rc=0 state=ran_to_completion attempt=a1` -- the gateway's model group had gone to `503 No
+# available workers` -- while the four task-arms that really ran took 2,063-2,179 s. The rc=0 meter
+# rung in `record_done` (2026-08-25) now withholds the marker when the meter proves the run bought
+# NOTHING; this is the clock half of the same fact, for the runs the meter cannot see (no meter, an
+# untagged log, or one successful call before the endpoint died). Below this many seconds an rc=0
+# exit is recorded as `state=exited_immediately`, which every reader treats as terminal, printed and
+# NEVER averaged -- the same treatment as a harness cut, for the same reason: the run did not reach
+# the ceiling every other row is compared at. 60 s is more than three times the longest of the
+# sixteen and under three percent of the shortest genuine run.
+IMMEDIATE_EXIT_S="${IMMEDIATE_EXIT_S:-60}"
 
 # `timeout 0` means "no timeout" to GNU coreutils, so one spelling serves both settings and there is
 # no second code path to keep in step.
@@ -870,10 +883,30 @@ marker_is_operator_skip() {   # $1 = marker text
   return 1
 }
 
+# THE ONE SHELL SPELLING of "this run exited before it could have measured anything", mirroring
+# `compare_arms.py::IMMEDIATE_EXIT_STATE`. Written by `record_done`'s rc=0 arm when the wall is
+# under `IMMEDIATE_EXIT_S`; see that variable for the sixteen markers that forced it.
+#
+# A THIRD PREDICATE, NOT A THIRD CASE ARM IN `marker_is_harness_cut`, for the resume rule's sake:
+# that predicate decides what `RETRY_WALL_CUT=1` reopens, and an immediate exit is neither a clock
+# nor a decision. It is almost always an environment condition (an endpoint down, a credential
+# refused after one call), which is exactly the kind a re-run under a repaired transport would not
+# meet -- so it IS reopenable, under its own flag, `RETRY_IMMEDIATE_EXIT=1`. Blind resumes stay
+# safe: without the flag the marker is terminal like every other `.done`.
+marker_is_immediate_exit() {   # $1 = marker text
+  case "$1" in
+    *state=exited_immediately*) return 0 ;;
+  esac
+  return 1
+}
+
 already_measured() {   # $1 = marker path. Success = do NOT run this task-arm again.
   [ -s "$1" ] || return 1
   if marker_is_harness_cut "$(cat "$1")"; then
     [ "${RETRY_WALL_CUT:-0}" = "1" ] && return 1
+  fi
+  if marker_is_immediate_exit "$(cat "$1")"; then
+    [ "${RETRY_IMMEDIATE_EXIT:-0}" = "1" ] && return 1
   fi
   return 0
 }
@@ -905,9 +938,12 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
   # recover "the clock killed this" from an integer gets it wrong: `compare_arms.py` learned to
   # match the substring `rc=124`, and nothing else did -- `final_banner` counted a wall cut into
   # `COMPLETE` and `campaign_status.py` printed it as a finished task. The vocabulary is closed:
-  #   state=ran_to_completion   rc=0,   the run ended on its own terms
+  #   state=ran_to_completion   rc=0,   the run ended on its own terms, after IMMEDIATE_EXIT_S
+  #   state=exited_immediately  rc=0,   the run exited 0 in under IMMEDIATE_EXIT_S -- terminal,
+  #                                     printed, never averaged; `RETRY_IMMEDIATE_EXIT=1` reopens
   #   state=stopped_after_start rc=2,   a typed OperatorRefusal from a run that HAD started
   #   state=wall_cut            rc=124, `timeout` sent SIGTERM at HARD_TIMEOUT
+  #   state=stall_cut           rc=143, the stall guard killed a silent lane (below)
   # `attempt=` joins the marker to the meter rows this attempt wrote (`next_attempt`); a marker
   # written outside `run_one` -- i.e. by a test driving this function -- says `attempt=none`.
   #
@@ -950,6 +986,16 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
       if [ "$OK_CALLS" = "0" ]; then
         echo "  [$(date +%H:%M:%S)][$4] NO SUCCESSFUL CALLS in ${WALL}s (rc=0) -- endpoint down?" \
              "no marker written, task still owed"
+        return 0
+      fi
+      # THE CLOCK HALF of the rung above, for the runs the meter cannot see: the sixteen 3-19 s
+      # "completions" of 2026-08-24 predate the meter guard, and a run that made ONE successful
+      # call before the endpoint died passes it today. The threshold is recorded beside the wall so
+      # a reader can re-derive the verdict from the marker alone.
+      if [ "$WALL" -lt "$IMMEDIATE_EXIT_S" ]; then
+        echo "wall=$WALL rc=0 state=exited_immediately threshold_s=$IMMEDIATE_EXIT_S $REGIME ok_calls=$OK_CALLS attempt=${ATTEMPT:-none}" > "$1"
+        echo "  [$(date +%H:%M:%S)][$4] EXITED IMMEDIATELY: rc=0 after ${WALL}s (< ${IMMEDIATE_EXIT_S}s)" \
+             "-- recorded, not a completion, not averaged; RETRY_IMMEDIATE_EXIT=1 reopens it"
         return 0
       fi
       echo "wall=$WALL rc=0 state=ran_to_completion $REGIME ok_calls=$OK_CALLS attempt=${ATTEMPT:-none}" > "$1" ;;
@@ -1086,6 +1132,8 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
   SKIPPED=""
   SKIPPED_N=0
   CUT_N=0
+  IMMEDIATE=""
+  IMMEDIATE_N=0
   for M in "$1/$2"-*.done; do
     [ -s "$M" ] || continue
     _MK="$(cat "$M")"
@@ -1094,20 +1142,39 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
       SKIPPED_N=$((SKIPPED_N + 1))
     elif marker_is_harness_cut "$_MK"; then
       CUT_N=$((CUT_N + 1))
+    elif marker_is_immediate_exit "$_MK"; then
+      IMMEDIATE="$IMMEDIATE $(basename "${M%.done}")"
+      IMMEDIATE_N=$((IMMEDIATE_N + 1))
     fi
   done
-  # The TRIGGER stays the skips alone, deliberately: a banner that names no MEASURED count claims
-  # nothing, so the wall-cut-only case keeps the plain `COMPLETE (N/N markers)` it has always
-  # printed and only the arithmetic below had to be corrected.
-  if [ "$SKIPPED_N" -gt 0 ]; then
-    echo "[$(date +%H:%M:%S)] SKIPPED BY THE OPERATOR --$SKIPPED"
-    echo "  These carry a .done marker that was WRITTEN rather than earned, so a resume will not"
-    echo "  run them and nothing measured them. compare_arms.py reads these same markers, prints"
-    echo "  them as SKIPPED and leaves those pairs out of the means. Delete a marker to queue that"
-    echo "  task-arm again; RETRY_WALL_CUT does NOT reopen a skip, because a skip is a decision."
+  # AN IMMEDIATE EXIT IS NOT A MEASUREMENT EITHER, and it is the one this banner was written to
+  # miss: the 2026-08-24 campaign printed `FINAL CAMPAIGN COMPLETE` over sixteen of them. Named,
+  # with the wall each one recorded, because "16 of 20 exited in under a minute" is the sentence
+  # that says the endpoint was down, and no count of markers can say it.
+  if [ "$IMMEDIATE_N" -gt 0 ]; then
+    echo "[$(date +%H:%M:%S)] EXITED IMMEDIATELY (rc=0 in under ${IMMEDIATE_EXIT_S:-?} s) --$IMMEDIATE"
+    for M in $IMMEDIATE; do
+      echo "    $M: $(cat "$1/$M.done")"
+    done
+    echo "  A task-arm cannot complete in seconds. These carry a .done marker so a blind resume"
+    echo "  leaves them alone, but they are NOT completions: compare_arms.py prints them and keeps"
+    echo "  them out of every mean. Sixteen of twenty looked exactly like this on 2026-08-24 when"
+    echo "  the gateway went to 503. Fix the cause, then RETRY_IMMEDIATE_EXIT=1 re-runs exactly these."
+  fi
+  # The TRIGGER is the skips and the immediate exits, deliberately: a banner that names no MEASURED
+  # count claims nothing, so the wall-cut-only case keeps the plain `COMPLETE (N/N markers)` it has
+  # always printed and only the arithmetic below had to be corrected.
+  if [ "$SKIPPED_N" -gt 0 ] || [ "$IMMEDIATE_N" -gt 0 ]; then
+    if [ "$SKIPPED_N" -gt 0 ]; then
+      echo "[$(date +%H:%M:%S)] SKIPPED BY THE OPERATOR --$SKIPPED"
+      echo "  These carry a .done marker that was WRITTEN rather than earned, so a resume will not"
+      echo "  run them and nothing measured them. compare_arms.py reads these same markers, prints"
+      echo "  them as SKIPPED and leaves those pairs out of the means. Delete a marker to queue that"
+      echo "  task-arm again; RETRY_WALL_CUT does NOT reopen a skip, because a skip is a decision."
+    fi
     echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers;" \
-         "$((DONE_N - SKIPPED_N - CUT_N)) MEASURED, $SKIPPED_N SKIPPED," \
-         "$CUT_N STOPPED BY THE HARNESS) ====="
+         "$((DONE_N - SKIPPED_N - CUT_N - IMMEDIATE_N)) MEASURED, $SKIPPED_N SKIPPED," \
+         "$CUT_N STOPPED BY THE HARNESS, $IMMEDIATE_N EXITED IMMEDIATELY) ====="
     return 0
   fi
   echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers) ====="
