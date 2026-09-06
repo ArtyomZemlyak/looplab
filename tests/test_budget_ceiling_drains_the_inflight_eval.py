@@ -252,6 +252,122 @@ def test_dispatch_evals_without_a_ceiling_is_unchanged(monkeypatch):
     assert [ev.terminals for ev in host.evals] == [["node_evaluated:0"], ["node_evaluated:1"]]
 
 
+# ------------------------------------- the serial RESOURCE WAIT (docs/57, the window the host above
+# could not see: it has no `_wait_reserve_node_resources`, so the `hasattr` skips the whole wait)
+
+class _WaitingDispatchHost(_DispatchHost):
+    """A serial host whose queue head must WAIT for the GPU pool — the cross-run lease that can
+    hold a node for hours — and whose overlapped research crosses the ceiling DURING that wait.
+
+    Two dials, both in wait ticks: `free_after` says on which tick the pool grants a reservation,
+    `ceiling_at` says after which tick the research task raises. Every tick yields once
+    (`anyio.sleep(0)`), which is the real shape too — the sink is appended by a task on the same
+    event loop, so a captured stop can only ever become visible across an `await`.
+    """
+
+    def __init__(self, *, free_after: int, ceiling_at: int):
+        super().__init__(queued=1)
+        self.free_after = free_after
+        self.ceiling_at = ceiling_at
+        self.ticks = 0
+        self.released: list = []
+        self.registered: list = []
+
+    def _spawn_research(self, tg, state) -> bool:
+        async def _research() -> None:
+            while self.ticks < self.ceiling_at:
+                await anyio.sleep(0)
+            raise BudgetExceeded(CEILING)
+
+        tg.start_soon(_research)
+        return True
+
+    async def _wait_reserve_node_resources(self, node, *, resource_pin, wait_once):
+        assert wait_once, "the serial branch waits ONE bounded tick per fold"
+        self.ticks += 1
+        await anyio.sleep(0)                       # the bounded condition wait, as a checkpoint
+        return {"gpu_ids": [0]} if self.ticks >= self.free_after else None
+
+    def _card_resource_pin_for_node(self, state, node):
+        return None
+
+    def _node_resource_reservation_is_current(self, state, node, reservation) -> bool:
+        return True
+
+    def _register_eval_resource_reservation(self, node_id, generation, reservation) -> None:
+        self.registered.append((node_id, generation))
+
+    def _clear_eval_resource_reservation(self, node_id, generation) -> None:
+        pass
+
+    def _release_gpus(self, gpu_ids) -> None:
+        self.released.append(list(gpu_ids or []))
+
+    async def _evaluate(self, node_id, _limiter, _max_es) -> None:
+        self.started.append(node_id)             # started AFTER the ceiling = the defect
+
+
+def _dispatch_with_pending_node(host, monkeypatch):
+    """Like `_dispatch`, with a fold whose node 0 is a live, pending, generation-0 node — the
+    lifecycle gates `_eval_admission_current` re-checks inside the wait all hold, so the ONLY thing
+    that can refuse the admission is the ceiling."""
+    from looplab.core.models import NodeStatus
+
+    node = types.SimpleNamespace(id=0, attempt=0, status=NodeStatus.pending, tombstoned=False)
+    monkeypatch.setattr(
+        "looplab.engine.orchestrator.fold",
+        lambda _events: types.SimpleNamespace(
+            total_eval_seconds=0.0, nodes={0: node}, aborted_nodes=set(),
+            paused=False, finished=False, stop_requested=None))
+
+    async def _drive():
+        await host._dispatch_evals([{"node_id": 0}], object(), None)
+
+    return _drive
+
+
+def test_a_ceiling_captured_DURING_the_resource_wait_starts_no_evaluation(monkeypatch):
+    """The marker's shape: the pool is held elsewhere for three ticks, the research task crosses the
+    ceiling after the first, and the pool then frees. Before the fix the wait loop re-folded and
+    re-checked every lifecycle gate on every tick and never the ceiling, so node 0 was admitted and
+    STARTED on a run that was already over."""
+    host = _WaitingDispatchHost(free_after=3, ceiling_at=1)
+    with pytest.raises(BudgetExceeded):
+        anyio.run(_dispatch_with_pending_node(host, monkeypatch))
+    assert host.started == [], "an evaluation was started after the ceiling"
+    assert host.registered == [] and host.released == []
+
+
+def test_a_ceiling_that_lands_with_the_reservation_hands_the_devices_back(monkeypatch):
+    """The other instant: the stop is captured across the very `await` that GRANTS the devices.
+    The eval must still not start, and the reservation must be released rather than leaked into a
+    pool no evaluation will ever return it to."""
+    host = _WaitingDispatchHost(free_after=1, ceiling_at=1)
+    with pytest.raises(BudgetExceeded):
+        anyio.run(_dispatch_with_pending_node(host, monkeypatch))
+    assert host.started == []
+    assert host.released == [[0]], "the reservation granted under the ceiling was not released"
+    assert host.registered == [], "a reservation was registered for an eval that never ran"
+
+
+def test_the_resource_wait_still_admits_the_eval_when_no_ceiling_fires(monkeypatch):
+    """The all-clear path through the SAME wait: the pool frees on tick 3, no stop is ever captured,
+    and the eval runs on the reservation it waited for."""
+    host = _WaitingDispatchHost(free_after=3, ceiling_at=10 ** 9)
+    host._spawn_research = lambda tg, state: True      # no research task, so nothing can raise
+    anyio.run(_dispatch_with_pending_node(host, monkeypatch))
+    assert host.started == [0]
+    assert host.registered == [(0, 0)]
+    assert host.released == [[0]], "the eval's own reservation is released once in its `finally`"
+
+
+def test_the_recheck_is_the_sink_and_nothing_else():
+    from looplab.engine.orchestrator import budget_stop_recheck
+
+    assert not budget_stop_recheck([])
+    assert budget_stop_recheck([BudgetExceeded(CEILING)])
+
+
 # ------------------------------------------------------------------- the facade's own contract
 
 def test_the_facade_defers_only_the_ceiling_and_passes_everything_else_through():

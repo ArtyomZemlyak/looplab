@@ -260,6 +260,29 @@ class _DeferredBudgetStop:
 _HEAD_BYPASS_LIMIT = 3
 
 
+def budget_stop_recheck(budget_stop: list) -> bool:
+    """Did the spend ceiling fire while the SERIAL dispatcher was waiting for resources?
+
+    `_dispatch_evals`' serial branch tests its deferred-stop sink at the top of the queue loop and
+    nowhere else, and the resource wait below that test can last HOURS: the host GPU-pool lease
+    waits on every co-hosted run (CLAUDE.md: "potentially for hours"), re-folding every 0.5 s and
+    re-checking the LIFECYCLE gates — never the ceiling. A `BudgetExceeded` the overlapped research
+    captured during that wait was therefore never consulted, and one more evaluation was admitted
+    and STARTED on a run that was already over (docs/57 `serial-dispatch-admits-one-eval-past-the-
+    ceiling`): GPU burnt for nothing, and its first paid call then raised the ceiling from INSIDE
+    the eval, the terminal-losing shape the drain does not cover. The parallel branch gates at its
+    refill point for exactly this reason; this is that gate for the serial wait, asked at the two
+    instants a captured stop can first be seen — the head of each wait tick, and the moment a
+    reservation comes back — because the sink is appended by a task on the same event loop, so it
+    can only move across an `await`.
+
+    A named predicate rather than an inline `if budget_stop:` so the rule has a home a test can
+    point at; the dispatch test could not see the window before, because its host had no
+    `_wait_reserve_node_resources` and the `hasattr` skipped the whole wait.
+    """
+    return bool(budget_stop)
+
+
 
 
 class _InjectedNodePlan(NamedTuple):
@@ -4661,25 +4684,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         reservation = None
                         generation = None
                         skip_eval = False
-                        # OPEN[serial-dispatch-admits-one-eval-past-the-ceiling] the only ceiling
-                        # gate on this branch is the loop-top `break`, and the resource wait below
-                        # can last HOURS — a `budget_stop` captured during it is never consulted,
-                        # so one more evaluation is admitted and STARTED after the ceiling.
-                        # proof:absent:budget_stop_recheck@looplab/engine/orchestrator.py
-                        # REVIEW 2026-08-30 (money): the host GPU-pool lease waits on every
-                        # co-hosted run (CLAUDE.md: "potentially for hours"), the wait loop
-                        # re-folds every 0.5 s and re-checks lifecycle — and not the ceiling. The
-                        # admitted eval burns GPU on a run that is already over, and its first
-                        # paid call then raises BudgetExceeded from INSIDE the eval, the
-                        # terminal-losing shape the drain does not cover. The parallel branch
-                        # gates at its refill point for exactly this reason; this wait has no
-                        # equivalent. The dispatch test cannot see it: its host has no
-                        # `_wait_reserve_node_resources`, so the `hasattr` skips the window.
-                        # Consult `budget_stop` inside the wait loop (or right before
-                        # `_evaluate`).
+                        # The wait below is the one place on this branch where a deferred ceiling
+                        # can land between the loop-top `break` and `_evaluate` — see
+                        # `budget_stop_recheck` for the hours it cost. It is asked at the head of
+                        # every tick and again the instant a reservation is granted; a stop found
+                        # there skips the eval, and the loop-top test then ends the queue.
                         if node is not None and hasattr(self, "_wait_reserve_node_resources"):
                             generation = node.attempt
                             while True:
+                                if budget_stop_recheck(budget_stop):
+                                    skip_eval = True
+                                    break
                                 # Resource waits must not pin a stale fold forever.  A GPU->CPU Card
                                 # re-pin does not release a GPU (and therefore does not bump the pool
                                 # epoch), so re-fold after every bounded condition tick and fence the
@@ -4712,6 +4727,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 )
                                 if reservation is None:
                                     continue
+                                # The ceiling may have fired during the `await` that just granted
+                                # these devices. Hand them back and start nothing: the eval would
+                                # spend GPU on a run that is over and raise from inside itself.
+                                if budget_stop_recheck(budget_stop):
+                                    self._release_gpus(reservation.get("gpu_ids"))
+                                    reservation = None
+                                    skip_eval = True
+                                    break
                                 admitted = fold(self.store.read_all())
                                 live = admitted.nodes.get(node.id)
                                 if self._skip_if_aborted(a, admitted):
