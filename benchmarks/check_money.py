@@ -290,6 +290,12 @@ def _failure_kind(row) -> str:
     guessed at.
     """
     status = str(row.get("status") or "?")
+    # The meter's own refusal (2026-09-06): a request it would have held in its RPM queue past the
+    # client's header timeout is answered 429 at once and recorded with `kind: rpm_queue_refused`.
+    # It is neither the upstream declining nor our ceiling, and filing it as `http-429` would send
+    # the reader to the gateway for a wait that never left this box.
+    if str(row.get("kind") or "") == "rpm_queue_refused":
+        return "meter-rpm-refused"
     try:
         latency = float(row.get("latency_ms") or 0.0) / 1000.0
     except (TypeError, ValueError):

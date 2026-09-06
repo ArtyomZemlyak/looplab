@@ -340,6 +340,10 @@ def test_the_failure_kinds_are_decided_by_signature_not_by_status_alone():
     assert cm._failure_kind({"status": "503", "latency_ms": 1300.0, "stream": True}) == "upstream-503"
     assert cm._failure_kind({"status": "400", "latency_ms": 100.0, "stream": True}) == "http-400"
     assert cm._failure_kind({}) == "http-?"
+    # the meter's own RPM-queue refusal is named by its `kind`, never by its 429
+    assert cm._failure_kind({"status": "429", "kind": "rpm_queue_refused", "latency_ms": 1.0,
+                             "stream": True}) == "meter-rpm-refused"
+    assert cm._failure_kind({"status": "429", "latency_ms": 1.0, "stream": True}) == "http-429"
 
 
 def test_the_endpoint_line_dates_every_refusal(tmp_path):
