@@ -27,12 +27,13 @@ single box, for four reasons:
 | `patch_invalid_solution_analysis.py` | Patches the evaluator and `evaluate_results.py` so AlgoTune's per-instance `invalid_solution_analysis` — the code context of the `is_solution` line that rejected an instance, which AlgoTuner's own agent is shown three of — survives into `evaluate_summary.json` and therefore into the bridge's `no_speedup` block. Without it a wrong solver is told *how often* and never *why*. Idempotent, keeps a `.analysis.orig`, `--revert` undoes it. |
 | `extract_champion.py` | Writes the champion node's `solver.py` out of a run's folded event log, for the final test scoring. |
 | `setup_algotune.sh` | Applies every deviation from upstream a published number depends on. Idempotent; run on each machine and after any `git pull` in the checkout. |
-| `campaign.sh` | The campaign driver. `ARM=A` / `ARM=B`, one arm per invocation, tasks in parallel lanes sized to the machine. |
+| `campaign.sh` | One ARM per invocation (`ARM=A` / `ARM=B`), tasks in parallel lanes sized to the machine. Writes the per-task-arm `.done` markers every reader keys on — see "What the record carries" below for the closed state vocabulary. |
+| `run_final.sh` | The whole campaign: arm A to completion, then arm B in the same regime, through `campaign.sh`. ONE attempt per task-arm (no loop in the file, `RETRY_*` refused), ONE configuration (recorded before the first task, a resume under a different one refused), every log line carrying the ISO date, and a refusal to run under `/var/tmp` without `ALLOW_VOLATILE_ROOT=1` — the three things the uncommitted 2026-08-24 driver got wrong (docs/58 §58.1, §58.7). |
 | `pick_tasks.py` | Ranks all 154 tasks by evaluation cost — how the 20-task list was chosen, committed so the choice is reproducible. |
 | `campaign_status.py` | Live status while a campaign runs: what finished vs what actually SCORED (`N/A` is neither a zero nor a low score). **Per arm, out of that arm's own files**: arm A from `reports/agent_summary.json`, arm B from `B-<task>.final.json` — only arm A writes the summary, so reading it for arm B printed arm A's number under arm B's banner. |
-| `compare_arms.py` | Summarises a campaign: arm A from `reports/agent_summary.json`, arm B from the LoopLab run's folded event log. A missing arm prints `--`, never `0`. |
+| `compare_arms.py` | Summarises a campaign: arm A from `reports/agent_summary.json`, arm B from `B-<task>.final.json` (the champion's TEST score; the run's own metric is a TRAIN number and only a fallback). A missing arm prints `--`, never `0`, and two numbers are averaged together ONLY when both record the same width and the same baseline digest — otherwise the row and the footer say why. |
 | `.baseline_cache.json` | Written at runtime; the per-task AGGREGATE baseline (stabilises the denominator). Not committed. |
-| `.baseline_times/` | Written at runtime; the per-INSTANCE reference timings (saves the wall clock). Not committed. |
+| `.baseline_times/` | Written at runtime by the patched `BaselineManager`; the per-INSTANCE reference timings, one file per `<task>__<subset><regime>.json`. Not committed. The sha256 of the entry a score divided by is stamped on that score (`baseline_cache_sha256`), which is what makes two numbers comparable or provably not. |
 
 ## Running this on another machine
 
@@ -137,10 +138,32 @@ python benchmarks/algotune/make_task.py \
 looplab run /path/to/workspaces/algotune_svm.json --out runs/algotune-svm-looplab --backend llm
 ```
 
+**The whole campaign, both arms** (the driver the 2026-08-24 campaign ran on was never committed
+and died with `/var/tmp`; this one lives here):
+
+```bash
+source benchmarks/box-jhub-l40s.sh            # the box's paths and gateway (puts the bench under /var/tmp)
+benchmarks/meter/start_meter.sh                # once per boot
+ALLOW_VOLATILE_ROOT=1 benchmarks/algotune/run_final.sh
+```
+
+It runs arm A to completion and then arm B in the same regime, one attempt per task-arm, and
+records the measuring configuration into `$CAMPAIGN_OUT/run_final.CONFIGURATION` before the first
+task; a resume over the same output directory under different settings is refused with a diff. It
+exits 3 if either arm did not finish and prints the summary command rather than running it.
+
+**A single probe** (`run_probe.sh <model> <label> <lane> [task] [meter] [budget]`) is a CONTROL
+when it runs the shipped card and settings, and an ARM when `PROBE_MAKE_TASK_ARGS` or
+`PROBE_LOOPLAB_SETTINGS` varies either. An arm refuses to start (exit 4) unless
+`<probe dir>/PREREGISTERED.txt` already names the primary outcome, the size in paired batches, the
+power at that size and the `benchmarks/arm_power.py` command line that computed it — docs/56 §187
+measured 24 unpreregistered probes buying a power of 0.24. The instrument record pins the file's
+digest.
+
 **Summarising a campaign:**
 
 ```bash
-python benchmarks/algotune/compare_arms.py --algotune-root /path/to/AlgoTune --runs-root /path/to/camp-runs --reference
+python benchmarks/algotune/compare_arms.py --algotune-root /path/to/AlgoTune --runs-root /path/to/camp-runs --final-dir /path/to/campaign --reference
 ```
 
 **Re-timing the shipped reference solvers on this machine:**
@@ -174,10 +197,14 @@ class caches in `self._cache`, *process memory*. So the whole reference pass was
 per node; only its result was being thrown away.
 
 Measured 2026-08-19: the pass advances at ~2.4 s/instance and one task's pass took **100 instances /
-~15 minutes**. `run_evaluator.py` wraps `BaselineManager.get_baseline_times` in a disk cache keyed by
-`(task, subset)` and runs the upstream script unmodified through `runpy`. It never caches across
-tasks or across the train/test split — those are different reference sets — and honours
-`force_regenerate`. Disable with `--no-baseline-cache`.
+~15 minutes**. `patch_baseline_cache.py` patches `BaselineManager` itself (an in-process wrapper was
+tried first and is gone) to keep the per-instance timings on disk, one file per
+`<task>__<subset><regime>.json` under `ALGOTUNE_BASELINE_CACHE_DIR`. It never caches across tasks,
+across the train/test split, or across evaluation REGIMES — those are different reference sets, and
+on this box the serial and the parallel reference for one task differ by 24 % — and the bridge
+refuses to score when its regime's entry is absent while another regime's is present
+(`baseline_regime_mismatch`), or when the entry appeared during the pass (`baseline_measured_in_pass`:
+the arena timed the reference, not the candidate). `--revert` undoes the patch.
 
 ### The budget must be SPEND, not wall-clock
 
@@ -224,23 +251,14 @@ restarting the process" — and pins the benchmark to a fixed CPU set (below).
 
 ### Pin the CPUs, and reap the workers
 
-OPEN[readme-stale-self-descriptions] four sentences in this README describe machinery that no
-longer exists or no longer behaves as stated, each one an instruction an operator would follow.
-proof:present:BENCH_CPUS@benchmarks/algotune/README.md
-REVIEW 2026-08-25 (docs): (1) the paragraph below names a `taskset` mask variable that NO shipped
-file reads — pinning is per-lane (`LANE_CPUS`, owned by campaign.sh's lane scheduler), so an
-operator exporting the named variable believes they have pinned and nothing changes. (2) The
-"budget must be SPEND" section above still describes `run_evaluator.py` and a `--no-baseline-cache`
-flag — neither exists anywhere in the tree; that was the abandoned in-process wrapper whose
-replacement (`patch_baseline_cache.py`) says the wrapper "is gone". (3) "The campaign uses 4 h
-purely as a hung-process guard" — campaign.sh now defaults `HARD_TIMEOUT=0` (no wall) with the
-40-minute STALL bound instead. (4) docs/52's launch block and fence_foreign_results.sh still name
-`run_both_arms.sh` / `run_final.sh`, drivers not in the repo. Fix: rewrite the four sentences to
-the shipped mechanisms; each is one edit at the place this marker's window names.
-
-Both arms carry the **same** `taskset` mask (`BENCH_CPUS`, default `0-5`), leaving the rest for the
-campaign driver, the LLM client and the OS. A timing taken on a busy core is not comparable to one
-taken on an idle core, and no amount of averaging recovers that after the fact.
+Pinning is **per lane**, owned by `campaign.sh`'s lane scheduler: `CORES_PER_LANE` (default 2)
+dedicated cores per task-arm, `LANES` lanes (default: as many as fit, leaving two cores for the
+driver, the LLM client and the OS), `CORE_OFFSET` to run a second campaign beside a live one on
+disjoint cores. Both arms run under the same lane layout, and every `.done` marker records the
+`cpus=`, `lanes=` and `cores_per_lane=` it ran with so a mismatch is visible afterwards. There is
+no single mask variable to export — a task-arm floating across every core is what the lanes exist
+to prevent. A timing taken on a busy core is not comparable to one taken on an idle core, and no
+amount of averaging recovers that after the fact.
 
 Two traps found doing this:
 
@@ -342,8 +360,12 @@ than 10 s per instance on a task whose target is `oracle_time_limit: 100` ms is 
 scores 0 either way.
 
 **Corollary for the wall-clock net:** it must sit far ABOVE what a task-arm needs. A run cut by the
-clock writes nothing, so a binding net does not shorten the campaign — it deletes rows from it. The
-campaign uses 4 h purely as a hung-process guard.
+clock writes nothing, so a binding net does not shorten the campaign — it deletes rows from it.
+Measured 2026-08-24, a 4 h wall cut 13 of arm A's 19 task-arms and three of those had not spent the
+budget they were compared at, so the wall is now OFF by default (`HARD_TIMEOUT=0`) and a STALL bound
+replaces it: `STALL_TIMEOUT` (default 2400 s) kills a lane only when its own event log has not grown
+for that long. Either kill is recorded as its own marker state (`wall_cut` / `stall_cut`), shown and
+never averaged.
 
 ### The first eval of a task downloads its dataset
 
@@ -368,6 +390,45 @@ was really just base64_encoding being enormous.
 > our integration is out-of-process, equal *budgets* are not equal *work*. Compare the cost structure
 > of the two loops before trusting any timing — the same question applies to FML-bench (`conda run`
 > per command) and to MLE-bench.
+
+## What the record carries
+
+Every reader — `campaign.sh`'s own resume and banner, `campaign_status.py`, `compare_arms.py` —
+keys on the same two records, and both are closed vocabularies.
+
+**The `.done` marker** (`<arm>-<task>.done`, one line, written by `campaign.sh::record_done` only
+for a TERMINAL state) names its state in words, with `rc=` beside it for markers written before
+the field existed:
+
+| `state=` | meaning | averaged? | reopened by |
+|---|---|---|---|
+| `ran_to_completion` | rc=0 after `IMMEDIATE_EXIT_S` (60 s), with a successful call on the meter | yes | — |
+| `exited_immediately` | rc=0 in under `IMMEDIATE_EXIT_S`; the marker carries `wall=` and `threshold_s=`. Sixteen of the twenty arm-A markers of 2026-08-24 were 3–19 s "completions" while the gateway was down (docs/58 §58.1) | **no** | `RETRY_IMMEDIATE_EXIT=1` |
+| `stopped_after_start` | rc=2 (a typed `OperatorRefusal`, usually the spend ceiling) from a run whose event log proves it started | yes | — |
+| `wall_cut` / `stall_cut` | killed by `HARD_TIMEOUT` / the stall guard — a clock, not the budget | **no** | `RETRY_WALL_CUT=1` |
+| `operator_skip` | written by hand to stop a running campaign taking new work | **no** | delete the marker |
+
+rc=0 with the meter proving NO successful call, a refusal to start (exit 2 with no event log) and
+an interruption (130/137/143) get NO marker and stay owed. Every marker also carries the REGIME
+(`cpus=`, `lanes=`, `cores_per_lane=`, `layout=`) and, since 2026-09-06, the RULER —
+`eval_workers=`, `regime=`, `baseline_sha256=` — because arm A's number passes through no
+`final.json` and the marker is the only place it can carry one (`campaign.sh::ruler_fields`, run
+under the lane's `taskset`; `?` = could not derive, `none` = derived and the cache was cold).
+
+**The score line** (`looplab_eval.py`'s stdout JSON; `B-<task>.final.json` is the champion's) always
+carries, beside `speedup`: `eval_regime` (the key, `__lane<N>r3` serial or `__w<W>x<C>r3`
+parallel, plus the resolved `workers`); `eval_workers`, the resolved count as a string
+(top-level numerics are swept into a node's `extra_metrics`, so it is deliberately not an int);
+`baseline_cache_file` and `baseline_cache_sha256`, the entry the ratio's denominator came from
+and its digest — or `null` with `baseline_cache_missing` saying why; and `no_speedup.reason` for
+any non-positive number. Width moves a speedup ~1.6× on this box and eight campaign numbers were
+re-scored without recording it (docs/58 §58.3), which is why the width is on every line.
+
+**Pairing.** `compare_arms.py` averages arm A against arm B for a task only when neither side is
+cut, skipped, owed or refused AND both record the same regime, the same width and the same
+baseline digest. Anything else is printed with its number and the reason it was not paired
+(`NOT PAIRED: …` on the row, a footer naming each task). A row from before these fields existed
+is refused, not assumed to match.
 
 ## Things that will bite you
 

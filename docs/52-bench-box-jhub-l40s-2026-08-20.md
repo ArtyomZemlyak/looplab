@@ -282,9 +282,12 @@ it at a merge. Collapsed to one and re-measured over the rebased tree: 214 field
 
 ### Unattended operation
 
-`run_both_arms.sh` waits out arm A, records the suite verdict, runs arm B in the SAME regime, then
-summarises and snapshots — because arm B must start when arm A frees the cores and nobody is awake
-at that moment. `benchmarks/watchdog.sh` restarts the meter if it stops answering (both arms fail on
+`benchmarks/algotune/run_final.sh` (in the repo since 2026-09-06; the `run_both_arms.sh` /
+`run_final.sh` this paragraph used to name lived only under `/var/tmp` and died with the container,
+docs/58 §58.7 item 9) runs arm A to completion and then arm B in the SAME regime, one attempt per
+task-arm, one recorded configuration, every log line dated; `campaign.sh` snapshots after each arm
+and the driver prints the summary command — because arm B must start when arm A frees the cores and
+nobody is awake at that moment. `benchmarks/watchdog.sh` restarts the meter if it stops answering (both arms fail on
 connection refused, and a failed task-arm writes no score) and RECORDS everything else — disk,
 orphaned forkservers, a campaign that is alive but whose logs stopped growing. It repairs one thing
 and reports the rest, because an unattended repair of a measurement is worse than a gap in one.
