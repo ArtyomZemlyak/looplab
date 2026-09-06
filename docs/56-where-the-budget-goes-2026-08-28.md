@@ -12252,3 +12252,46 @@ which is the honest state, not a conclusion.
 
 `sweep_claims` now carries the reading: `pagerank: list 1.0024, measured 1.4317 on 2026-09-06
 (+42.8 %)`. The constant is no longer unmeasured; it is measured and wrong by a wide margin.
+
+## §293 — pagerank's 43 %: three more suspects dead, and a prediction written down first
+
+§292 left the offset unexplained. Two more experiments this sweep, and one piece of context that
+makes it legible.
+
+**It is not the lane.** The same reading on three different bench lanes: 1.4131, 1.3581, 1.4099.
+
+**It is not memory-bandwidth contention.** That was the standing hypothesis — `pagerank` is
+graph-traversal and might suffer under load where `edge_expansion` does not (§214 measured 0.8865
+solo against 0.8861 loaded for that task). Run three-way concurrent on top of a live probe, pagerank
+gives 1.3581–1.4131 against a solo 1.4317: contention costs **1–7 %**, not 45 %. Real, larger than
+edge_expansion's zero, and nowhere near the offset.
+
+**And it is not the per-instance share**, which was the other candidate: `pde_heat1d` has the highest
+share of an evaluation spent on real work — **67 %** against pagerank's 35 % — and reads +7.2 %.
+
+The context that makes it legible is on the dataset file names. Every task's dataset here is
+`_T100ms_`: 100 ms per instance on the machine that BUILT it. Against our own cached baselines:
+
+| task | our baseline | vs the dataset's machine |
+|---|---|---|
+| discrete_log | 2.2 ms | 46× faster |
+| edge_expansion | 45.4 ms | 2.2× |
+| pde_heat1d | 146.4 ms | 0.7× |
+| **pagerank** | **109.1 ms** | **0.9×** |
+
+`pagerank` is the only task whose cached baseline barely beats the number the dataset's own machine
+hit. That is a hint the baseline is HIGH, not that this box is fast — but it is a hint, not a
+measurement, and `make_task.py` says in as many words that `T100ms` is a target rather than a
+reading of anything here.
+
+**The prediction, written before the measurement that will settle it.** When `pgr1` finishes and the
+baseline can be re-timed without moving a live probe's denominator: if the cache is high, a fresh
+baseline lands near **76 ms** (109.1 / 1.43); if this box is genuinely fast on pagerank, it
+reproduces near **109 ms**. Recording which outcome means what, before running it, is the only thing
+that stops the result from meaning whatever I need it to.
+
+Shipped alongside: `ruler_selfcheck` now prints the dataset target beside every reading, so the
+cross-task context that took this sweep to assemble is one line in the output. Four mutations red —
+including one that survived first: reading the target with a bare `(\d+)` passes every real file
+name, because there the target happens to be the first number. The fixture now puts something in
+front of it.

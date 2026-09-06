@@ -63,6 +63,39 @@ SWEEP_SAYS = {"pagerank": 1.0024, "pde_heat1d": 0.9958,
               "edge_expansion": 0.9847, "discrete_log": 1.0162}
 
 
+def dataset_target_ms(task: str, root: str = f"{BENCH}/AlgoTune"):
+    """The reference time the machine that BUILT the dataset hit, off the file name (`..._T100ms_...`).
+
+    NOT a measurement of this box -- `make_task.py` says so in as many words -- but the only
+    cross-task yardstick there is, and it is what made §292's anomaly legible. Every task's dataset
+    here says `T100ms`, so the ratio of our own cached baseline to 100 ms says how much faster this
+    box is on that task than the dataset's was:
+
+        edge_expansion   45.4 ms  ->  2.2x faster
+        pde_heat1d      146.4 ms  ->  0.7x
+        discrete_log      2.2 ms  ->  46x
+        pagerank        109.1 ms  ->  0.9x   <- the only one that barely beats the target
+
+    Printed beside the reading so the next person does not have to go and find it.
+    """
+    for path in glob.glob(f"{root}/.hf_datasets/*/data/{task}/{task}_T*ms_*"):
+        got = re.search(r"_T(\d+)ms_", os.path.basename(path))
+        if got:
+            return float(got.group(1))
+    return None
+
+
+def _cached_median_ms(task: str, subset: str, key: str = "w22x1r3"):
+    """The median of the cached per-instance timings this reading is divided by."""
+    path = f"{BENCH}/looplab/benchmarks/algotune/.baseline_times/{task}__{subset}__{key}.json"
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    times = sorted(float(v) for v in data.values() if isinstance(v, (int, float)))
+    return times[len(times) // 2] if times else None
+
+
 def build_solver(task: str, out_dir: str, probe_root: str = f"{BENCH}/model-probes") -> str:
     """Write a SELF-CONTAINED `solver.py` whose `solve()` is the reference's own.
 
@@ -280,7 +313,13 @@ def main(argv=None) -> int:
     share = instance_share(args.task, statistics.median(secs) if secs else 0.0,
                            subset=args.subset)
     if share:
-        print(f"  (per-instance work is {100 * share:.0f} % of an evaluation's wall clock, so "
+        target = dataset_target_ms(args.task)
+    cached = _cached_median_ms(args.task, args.subset)
+    if target and cached:
+        print(f"  (the dataset name says the reference took {target:.0f} ms per instance on the "
+              f"machine that BUILT it; our cached baseline says {cached:.1f} ms, "
+              f"{target / cached:.1f}x that machine's speed)")
+    print(f"  (per-instance work is {100 * share:.0f} % of an evaluation's wall clock, so "
               f"`eval_seconds` cannot see this drift at all)")
     if args.record:
         append_reading(args.record, args.task, args.subset, vals, median, args.stamp, args.lane)

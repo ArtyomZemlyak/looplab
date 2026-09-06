@@ -213,3 +213,48 @@ def test_the_lane_reaches_the_log_from_the_command_line_not_just_the_function():
         or any(k.arg == "lane" for k in c.keywords)
         for c in calls)
     assert passes_lane, "the recording call site drops the lane on the floor"
+
+
+def test_the_dataset_target_is_read_off_the_file_name(tmp_path):
+    """§292's anomaly only became legible next to this: every task's dataset here says `T100ms`, so
+    the ratio of our own cached baseline to 100 ms says how much faster this box is on that task
+    than the dataset's machine was -- edge_expansion 2.2x, pagerank 0.9x, the only one that barely
+    beats the target."""
+    d = tmp_path / ".hf_datasets" / "oripress__AlgoTune" / "data" / "pagerank"
+    d.mkdir(parents=True)
+    (d / "pagerank_T100ms_n4798_size100_test.jsonl").write_text("", encoding="utf-8")
+    assert ruler_selfcheck.dataset_target_ms("pagerank", str(tmp_path)) == 100.0
+
+
+def test_a_missing_dataset_is_not_a_zero_target(tmp_path):
+    """A zero would divide, and a made-up target is worse than none."""
+    assert ruler_selfcheck.dataset_target_ms("nosuchtask", str(tmp_path)) is None
+
+
+def test_the_target_is_the_T_field_not_the_first_number_in_the_name(tmp_path):
+    """`_T(\d+)ms_` and not `(\d+)`. In the real names the target happens to come first, so a
+    mutation to a bare number search passed every fixture -- this one puts something else in front
+    of it, which is all it took."""
+    d = tmp_path / ".hf_datasets" / "x" / "data" / "pagerank"
+    d.mkdir(parents=True)
+    (d / "pagerank_v2_T100ms_n4798_size100_test.jsonl").write_text("", encoding="utf-8")
+    assert ruler_selfcheck.dataset_target_ms("pagerank", str(tmp_path)) == 100.0
+
+
+def test_a_name_without_the_target_is_not_parsed_into_one(tmp_path):
+    d = tmp_path / ".hf_datasets" / "x" / "data" / "pagerank"
+    d.mkdir(parents=True)
+    (d / "pagerank_n4798_size100_test.jsonl").write_text("", encoding="utf-8")
+    assert ruler_selfcheck.dataset_target_ms("pagerank", str(tmp_path)) is None
+
+
+def test_the_cached_median_is_the_one_the_reading_divides_by(tmp_path, monkeypatch):
+    """Reporting a median from some other file would make the ratio a decoration."""
+    import json as _json
+    base = tmp_path / "looplab" / "benchmarks" / "algotune" / ".baseline_times"
+    base.mkdir(parents=True)
+    (base / "pagerank__test__w22x1r3.json").write_text(
+        _json.dumps({str(i): 100.0 + i for i in range(101)}), encoding="utf-8")
+    monkeypatch.setattr(ruler_selfcheck, "BENCH", str(tmp_path))
+    assert ruler_selfcheck._cached_median_ms("pagerank", "test") == 150.0
+    assert ruler_selfcheck._cached_median_ms("pagerank", "train") is None
