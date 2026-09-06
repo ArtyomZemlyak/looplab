@@ -2059,6 +2059,19 @@ LOOPLAB_LANDLOCK=enforce looplab run …  # then ONE real eval, and check it com
 The evidence that justifies the flip is that eval, not this command — this only tells you the ruleset
 is well-formed, contains your declarations, and applies.
 
+### The syscall fence's own check
+
+The sibling kernel rung, [`Settings.syscall_fence`](configuration.md) (`runtime/seccomp.py`, doc 52
+row 28), is validated the same way but through its module rather than a `looplab` command:
+
+```bash
+python -m looplab.runtime.seccomp egress      # or: mutators
+```
+
+prints whether this box can install the filter (`available=yes|no: <reason>`) and, in a child under
+the policy, what `mkfifo`, a file write, `socket(AF_INET)`, `socket(AF_INET6)`, `socket(AF_UNIX)` and
+a pipe answer — `REFUSED errno 1` is the fence. Exit `2` when the rung is unavailable here.
+
 ## `tensorboard`
 
 Serve TensorBoard over a run's per-node training logs — online curves for all metrics the training

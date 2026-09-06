@@ -186,7 +186,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime import landlock, read_fence
+from looplab.runtime import landlock, read_fence, seccomp
 from looplab.tools._base import (RESULT_CAP, CancelSignal, ToolCapability, ToolResult,
                                  clip, fn_spec, stream_tails)
 
@@ -384,6 +384,16 @@ if _LL_REASON:
         "LOOPLAB probe: the kernel no-write rung could not be applied (%%s). The audit hook and "
         "RLIMIT_FSIZE 0 still hold, so nothing can put BYTES in a file, but a native writer "
         "(pyarrow/h5py/ctypes) can still CREATE an empty one.\\n" %% (_LL_REASON,))
+%(seccomp)s
+# The kernel SYSCALL rung (runtime/seccomp.py, doc 52 row 28): `mknod`/`mknodat` answer EPERM, so
+# the two mutators the audit hook cannot see and RLIMIT_FSIZE cannot bound — a device node and a
+# FIFO hold no bytes — have a kernel refusal even on a box without Landlock (this one). Same posture
+# as the ruleset above: best-effort with a STATED limit, one line on the probe's own stderr.
+_SC_REASON = %(seccomp_fn)s()
+if _SC_REASON:
+    sys.stderr.write(
+        "LOOPLAB probe: the kernel no-mknod rung could not be applied (%%s). A native caller can "
+        "still create a device node or a FIFO.\\n" %% (_SC_REASON,))
 # The probe's cwd is its disposable workspace replica, so a staged module must be importable by the
 # name the Developer knows it by. `python <launcher>` puts the LAUNCHER's directory on sys.path, not
 # the cwd, and without this `import train` fails for a file the model can see with os.listdir().
@@ -442,7 +452,9 @@ def render_launcher(program_path: str) -> str:
                         # reorders a table is a diff nobody can read.
                         "mutations": tuple(sorted(read_fence.MUTATION_EVENTS)),
                         "landlock": landlock.no_mutation_source(),
-                        "landlock_fn": landlock.NO_MUTATION_FUNCTION}
+                        "landlock_fn": landlock.NO_MUTATION_FUNCTION,
+                        "seccomp": seccomp.no_mutation_source(),
+                        "seccomp_fn": seccomp.NO_MUTATION_FUNCTION}
 
 
 class DevProbeTools:

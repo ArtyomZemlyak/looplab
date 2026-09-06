@@ -291,6 +291,7 @@ _LAYOUT = {
     "read_allowlist": "runtime",   # the ONE derivation of what an eval may read, from the
     #                              operator's declared mounts
     "landlock": "runtime",         # the kernel read allow-list applied at the launch
+    "seccomp": "runtime",          # the kernel syscall policy applied at the launch (doc 52 row 28)
     "stage_identity": "runtime",   # what a stage RAN ON and what it MADE: the reuse key a cache
     #                              would consult + the produced artifacts' content identity
     "applied_params": "runtime",   # what the CONFIGURATION that ran said the declared coordinates

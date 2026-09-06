@@ -175,6 +175,7 @@ to spend them.
 """
 from __future__ import annotations
 
+import os
 import re
 
 from pathlib import Path
@@ -885,6 +886,71 @@ def engine_observed_facts(res) -> str:
             "No watchdog of ours claimed this run: the stall, divergence and training monitors all "
             "report out of band, and a kill by any of them would have been classified without "
             "asking you. So whatever ended this process, it was not us.\n")
+
+
+# The two kernel refusal shapes as CPython prints them. `EACCES` -> `PermissionError: [Errno 13]`
+# is Landlock's answer to a read outside the allow-list; `EPERM` -> `[Errno 1] Operation not
+# permitted` is the seccomp filter's answer to a policed syscall.
+_EACCES_RE = re.compile(r"PermissionError: \[Errno 13\] Permission denied: '([^'\n]{1,512})'")
+_EPERM_RE = re.compile(r"\[Errno 1\] Operation not permitted")
+
+
+def fence_refusal_note(res, *, landlock: str = "off", syscall_fence: str = "off",
+                       exists=os.path.exists) -> str:
+    """The fence's OWN sentence for a kernel refusal in `res.stderr`, or `""` (doc 52 row 28).
+
+    WHY THIS EXISTS. `runtime/read_fence.py` refuses with a non-`OSError` carrying its fix, and that
+    is deliberate: `except OSError: <fall back>` is the silent-skip shape. The two kernel rungs
+    cannot do that — Landlock answers `EACCES` and seccomp answers `EPERM`, both `OSError`s — so
+    under `landlock="enforce"` a refused read reached the triage judge and the repair Developer as
+    `PermissionError: [Errno 13] Permission denied: '/data/x.pt'`, which reads as a missing or
+    unreadable file and invites exactly the wrong repair (retry, another path, a permissions fix,
+    an `except OSError`). ActPlane names this class "opaque errors that confuse the agent". This
+    rewrites nothing in the record: it APPENDS the fence's sentence beside the engine's other
+    observed facts, at the triage intake (`engine_facts`) and in the repair headline, so both
+    readers see the refusal for what it is.
+
+    IT DECIDES NOTHING, like `failure_headline`: the reason stays `crash`, the diagnostician is still
+    asked, and it fires only when the engine KNOWS the rung was on — a `PermissionError` on an
+    unfenced run is a permissions problem and says so by this function's silence. `exists` is the
+    one fact it adds about the path (present on the box vs absent), injectable for tests.
+    """
+    err = getattr(res, "stderr", None)
+    if not isinstance(err, str) or not err:
+        return ""
+    lines = []
+    if str(landlock or "off") == "enforce":
+        paths = sorted(set(_EACCES_RE.findall(err)))[:4]
+        if paths:
+            described = []
+            for path in paths:
+                try:
+                    present = bool(exists(path))
+                except (OSError, ValueError, TypeError):
+                    present = False
+                described.append(
+                    f"`{path}` exists on this box and is outside what this eval may read" if present
+                    else f"`{path}` is outside what this eval may read (and is not present on this box)")
+            lines.append(
+                "KERNEL READ ALLOW-LIST (`landlock=enforce`): the `EACCES` / `PermissionError "
+                "[Errno 13]` is the fence, not a missing or unreadable file — "
+                + "; ".join(described)
+                + ". The fix is a DECLARATION that names it (a `data:`/`references:` mount or "
+                "`eval.inputs`), never a retry, another path, a chmod or an `except OSError`.")
+    policy = str(syscall_fence or "off")
+    if policy in ("mutators", "egress") and _EPERM_RE.search(err):
+        what = ("`mknod`/`mkfifo`" if policy == "mutators"
+                else "`mknod`/`mkfifo` and any IPv4/IPv6 `socket()` — a download, a client, a "
+                     "listener, loopback included")
+        lines.append(
+            f"SYSCALL FENCE (`syscall_fence={policy}`): the `EPERM` / `[Errno 1] Operation not "
+            f"permitted` from {what} is the fence, not a permissions problem on the box. The fix is "
+            "to stop needing the call — stage data through the task's declared inputs and keep local "
+            "IPC to files or Unix sockets; a retry or another library makes the same syscall.")
+    if not lines:
+        return ""
+    return ("--- A KERNEL FENCE REFUSED SOMETHING (the engine's own boundary, stated so it is not "
+            "read as a missing file) ---\n" + "\n".join(lines) + "\n")
 
 
 def diagnosis_code_tools(engine, workdir):

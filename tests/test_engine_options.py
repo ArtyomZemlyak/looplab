@@ -183,6 +183,8 @@ ATTR_BY_FIELD = {
     # attribute at the one place the `node_evaluated` payload is built, and a test sets it directly.
     "auto_extra_metrics": "auto_extra_metrics",
     "landlock": "_landlock",
+    # Private for the same reason `landlock` is: settled at construction, read by `resources.py`.
+    "syscall_fence": "_syscall_fence",
 }
 
 

@@ -551,7 +551,8 @@ What binding does and does not buy, stated plainly:
   refusal fires before the scorer runs) and not coverage. It is a `require` effect and not an `audit`
   one because the rungs are ordered: `audit` is what you turn on to find out whether `require` is
   affordable, so it records and never gates. What makes "read elsewhere" impossible is the read boundary
-  — `read_fence` (on by default) and, opt-in, the kernel allow-list `landlock`.
+  — `read_fence` (on by default) and, opt-in, the kernel rungs: the read allow-list `landlock` and the
+  syscall policy `syscall_fence` (`mutators` / `egress`, `runtime/seccomp.py`).
 
 When that derived contract does fail, the refusal says whose failure it is. The `needs` on the `score`
 stage is written by the engine, not by the Developer, and the Developer may edit neither that stage nor

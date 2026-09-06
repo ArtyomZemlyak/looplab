@@ -124,7 +124,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   reserved at the broker's permit (doc 52 row 15).
   //   190 -> 191 (2026-09-06): `endgame_reserve_frac`, the plan's endgame reserve the dispatcher
   //   honours — the top-2 ensemble once, then champion sweeps (doc 52 row 18).
-  assert.equal(Object.keys(schema.fieldByKey).length, 191)
+  //   191 -> 192 (2026-09-06): `syscall_fence`, the kernel syscall policy beside `landlock` (doc 52
+  //   row 28). The Python half moved in the same change, as this tripwire's history demands.
+  assert.equal(Object.keys(schema.fieldByKey).length, 192)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')

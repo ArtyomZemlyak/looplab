@@ -29,6 +29,7 @@ from typing import Optional, Protocol
 from looplab.core.errors import ConfigRefusal
 from looplab.runtime.read_fence import FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath
 from looplab.runtime import landlock as _landlock
+from looplab.runtime import seccomp as _seccomp
 
 # THE EVAL PROCESS'S OWN CLOCK (doc 52 row 15; the doc 52 marker `eval-process-is-not-told-its-deadline`).
 # The runtime exported the seed, the fence, the Landlock ruleset and the image, and never the one
@@ -939,6 +940,14 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
                 sys.executable,
                 _landlock.format_env([(str(wd), "readwrite")] + _landlock.parse_env(_ll)),
                 argv)
+        # THE SYSCALL FENCE (runtime/seccomp.py, doc 52 row 28), outermost so its filter is in force
+        # for the allow-list launcher too: the engine stamps the policy name in `LOOPLAB_SYSCALL_FENCE`
+        # (`engine/resources.py::_fenced_env`); absent — the default, `Settings.syscall_fence="off"` —
+        # nothing here changes. A launcher, not a `preexec_fn`, for the reason recorded above; the
+        # kernel inherits the filter across `exec`, so one application covers the process tree.
+        _sc = full_env.get(_seccomp.SECCOMP_ENV) or ""
+        if _sc:
+            argv = _seccomp.launch_argv(sys.executable, _sc, argv)
     # Run the child in UTF-8 mode so its `open()`/stdio default to UTF-8 even on Windows (whose
     # default is cp1252). LLM-written solutions and real benchmark data (mle-bench CSVs) are UTF-8 and
     # routinely crash with a cp1252 UnicodeDecodeError on the Windows host path. (The Docker/untrusted

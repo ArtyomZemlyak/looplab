@@ -177,7 +177,11 @@ def test_every_closed_vocabulary_field_is_validated():
                        # would install no ruleset while the operator believes the eval is bounded —
                        # the same "looks exactly like the enforced case until it matters" shape as
                        # `read_fence` above.
-                       "metric_subject", "landlock"}
+                       "metric_subject", "landlock",
+                       # `syscall_fence` (off|mutators|egress) joined 2026-09-06 (doc 52 row 28), the
+                       # same shape as `landlock` one rung over: a mis-cased `syscall_fence="Egress"`
+                       # would install no filter while the operator believes the eval cannot dial out.
+                       "syscall_fence"}
 
 
 @pytest.mark.parametrize("field,bad", [
@@ -188,6 +192,7 @@ def test_every_closed_vocabulary_field_is_validated():
     ("read_fence", "Deny"),
     ("metric_subject", "Require"),
     ("landlock", "Enforce"),
+    ("syscall_fence", "Egress"),
 ])
 def test_a_near_miss_value_fails_loudly_and_names_the_vocabulary(field, bad):
     with pytest.raises(ValueError) as info:

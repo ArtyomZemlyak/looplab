@@ -22,7 +22,7 @@ import anyio
 
 from looplab.core.hardware import detect_gpus
 from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
-from looplab.runtime import landlock, read_allowlist, read_fence
+from looplab.runtime import landlock, read_allowlist, read_fence, seccomp
 from looplab.runtime.sandbox import GpuPinUnenforceable, is_secret_env
 
 
@@ -860,13 +860,19 @@ class ResourceSchedulingMixin:
         run that has no fence. So the dict is materialized only when there is a fence to carry."""
         fence = self._read_fence_dir()
         allow = self._landlock_allow()
-        if not fence and not allow:
+        # The SYSCALL policy (`runtime/seccomp.py`, doc 52 row 28), a name rather than a derived
+        # list: `off` — the default — stamps nothing, so an unfenced launch's env stays byte-identical.
+        policy = str(getattr(self, "_syscall_fence", "off") or "off")
+        syscall = policy if policy in seccomp.POLICIES and policy != "off" else None
+        if not fence and not allow and not syscall:
             return env
         out = dict(env or {})
         if fence:
             out[read_fence.FENCE_DIR_ENV] = fence
         if allow:
             out[landlock.LANDLOCK_ENV] = allow
+        if syscall:
+            out[seccomp.SECCOMP_ENV] = syscall
         return out
 
     def _landlock_allow(self) -> Optional[str]:

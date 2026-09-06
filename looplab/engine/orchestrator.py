@@ -645,6 +645,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         metric_subject = _opt("metric_subject")
         auto_extra_metrics = _opt("auto_extra_metrics")
         landlock = _opt("landlock")
+        syscall_fence = _opt("syscall_fence")
         max_nodes = _opt("max_nodes")
         policy_name = _opt("policy_name")
         ablate_every = _opt("ablate_every")
@@ -1229,6 +1230,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # allow-list from the operator's declared mounts and stamps it into the child env; the
         # boundary itself is applied in the child, between fork and exec.
         self._landlock = str(landlock or "off")
+        # The syscall policy (`runtime/seccomp.py`), stamped beside the allow-list by
+        # `engine/resources.py::_fenced_env`; applied in the child by an exec'd launcher.
+        self._syscall_fence = str(syscall_fence or "off")
         self._run_setup_done = False             # run-level (once) dependency setup guard
         self._run_setup_lock = _threading.Lock()   # _run_eval runs on parallel worker threads; the
         #   check-then-set on _run_setup_done races without this, launching run_setup (pip) N times

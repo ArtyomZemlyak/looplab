@@ -374,7 +374,10 @@ site that proves it is open.
    by flipping the default and watching it go False.
    OPEN[landlock-is-opt-in-by-default] an untrusted eval gets the host-side filesystem fence only
    when an operator asks for it, so the container rungs above carry the default alone; retire this
-   when a ruleset has been through a real GPU eval and the default flips.
+   when a ruleset has been through a real GPU eval and the default flips. *(2026-09-06, doc 52 row
+   28: the `EACCES` translation and the seccomp syscall rung landed ahead of the validation — this
+   container's `landlock_create_ruleset` answers `ENOSYS`, so the GPU eval is the box's to run, and
+   the default moves only with it.)*
    proof:`present:landlock: str = "off"@looplab/core/config.py`
    **The re-derivation is the finding, not the fix.** Three ranked entries were checked against the
    tree on 2026-08-21 and none described it — #19 fixed six days earlier by the very symbol it

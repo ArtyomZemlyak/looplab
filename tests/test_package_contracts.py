@@ -54,6 +54,10 @@ def test_runtime_holds_only_process_execution_modules():
                      # POLICY over all three — which rung, whether a violation is minted — lives in
                      # `engine/`, which is the split this package boundary exists to hold.
                      "metric_subject", "read_allowlist", "landlock",
+                     # `seccomp` (2026-09-06, doc 52 row 28) is `landlock` one question over: WHICH
+                     # SYSCALLS the launched child may make, applied by the same exec'd-launcher
+                     # shape; the policy that chooses it lives in `engine/`.
+                     "seccomp",
                      # `stage_identity` (2026-08-17) is the same kind of fact one question over:
                      # WHAT a stage ran on and WHAT it produced, both derived from bytes at the
                      # instants the eval path already has them (before the command, and when the

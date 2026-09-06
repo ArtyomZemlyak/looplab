@@ -168,6 +168,8 @@ class EngineOptions:
     # Kernel read allow-list: off|enforce (see Settings.landlock for why off is the default and for
     # the exact evidence that would move it).
     landlock: str = "off"
+    # Kernel syscall policy: off|mutators|egress (see Settings.syscall_fence).
+    syscall_fence: str = "off"
     # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
     n_seeds: int = 3
     max_nodes: int = 8

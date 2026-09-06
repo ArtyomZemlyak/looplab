@@ -1243,6 +1243,18 @@
           "help": "Apply a Landlock ruleset to the eval process and everything it spawns, derived from what the operator declared: the node workdir, the run dir, every data:/references: mount source, the interpreter, the model cache and the machine tiers. It does NOT replace the source-tree read fence, which stays as the message rung — an audit hook cannot see a read that never reaches Python (safetensors loads a 92 MB checkpoint with zero `open` audit events), and Landlock refuses with EACCES, which an `except OSError` fallback can swallow. OFF by default because the largest unknown is unretired: enforcement and the +2.1%/open cost are verified, but only on open/read microbenchmarks — nobody has run a ruleset through a real GPU eval, and one missing surface refuses mid-training rather than degrading. Validate with `looplab landlock-check <run_dir>` before enabling."
         },
         {
+          "key": "syscall_fence",
+          "label": "Kernel syscall fence",
+          "type": "enum",
+          "options": [
+            "off",
+            "mutators",
+            "egress"
+          ],
+          "default": "off",
+          "help": "A seccomp syscall policy for the eval process and everything it spawns, installed by an exec'd launcher with no root and no extra package. `mutators` makes mknod/mkfifo answer EPERM — the two mutators the source-tree fence cannot see and the file-size cap cannot bound. `egress` also refuses every IPv4/IPv6 socket, LOOPBACK INCLUDED: a filter sees a syscall's register arguments and never the address a later connect() would dial, so a torchrun/NCCL rendezvous over 127.0.0.1 does not run under it and a download inside the eval fails. OFF by default for that reason and because neither policy has been through a real GPU eval. A refusal reaches the triage judge and the repair Developer rewritten as the fence's own sentence, never as a missing file. Validate on the box with `python -m looplab.runtime.seccomp egress`."
+        },
+        {
           "key": "require_approval",
           "label": "Require approval (HITL)",
           "type": "bool",

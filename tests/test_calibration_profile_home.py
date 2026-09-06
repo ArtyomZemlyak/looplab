@@ -127,7 +127,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-09-06  + model_arms (doc 52 row 19: the operator x model router's arms, uncurated and
 #               open-keyed). 221 -> 222, both pins re-set. Inert for a calibration replicate —
 #               the profile's `EngineOptions` declares no arm and the toy policy runs no bandit.
-_EXPECTED_DIGEST = "sha256:80ccca377ef2f10b94f676d4583b88a38d6feaac4879f39816fd100012ce05fb"
+_EXPECTED_DIGEST = "sha256:32c9eca685430b3476542825122a00d996aefbb2a7c383bb5394365aae9dd47c"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -451,7 +451,13 @@ _EXPECTED_DIGEST = "sha256:80ccca377ef2f10b94f676d4583b88a38d6feaac4879f39816fd1
 #               — where a replicate calibrated before it would have run that stage to its wall.
 #               That is a different number of evaluations on the same failing node, which is
 #               precisely what a speculation receipt asserts about.
-_EXPECTED_FIELD_COUNT = 222
+#   2026-09-06  + syscall_fence  (doc 52 row 28: the kernel SYSCALL policy beside `landlock`). The
+#               'field set changed too' branch. Inert for a calibration replicate exactly as
+#               `landlock` is — it ships `off` and the toy profile turns no rung on — and the guard
+#               is deliberately not clever enough to exempt an inert knob: the digest binds the
+#               COMPLETE non-variant envelope. `_EXPECTED_FIELD_COUNT` goes 222 -> 223 and both pins
+#               are re-set.
+_EXPECTED_FIELD_COUNT = 223
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

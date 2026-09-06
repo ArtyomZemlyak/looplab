@@ -115,7 +115,7 @@ from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagn
                                               diagnosis_repair_lead,
                                               coerce_evidence, coerce_findings,
                                               diagnosed_failure_reason, diagnosis_tools,
-                                              engine_observed_facts, evidence_citation_resolves,
+                                              engine_observed_facts, fence_refusal_note, evidence_citation_resolves,
                                               resolve_findings)
 # NOTE what is deliberately NOT imported here: `UNCLASSIFIED_REASON` and `REASON_SOURCE_UNDIAGNOSED`.
 # This file never spells either — `diagnosed_failure_reason` returns them as a PAIR, which is the
@@ -2996,7 +2996,8 @@ class EvaluateMixin:
             depth=a._depth,
             attempts_left=_repair_attempts_left(a.attempt, a._repair_cap),
             log_tools=_repair_tools,
-            engine_facts=engine_observed_facts(a.res),
+            engine_facts=engine_observed_facts(a.res) + fence_refusal_note(
+                a.res, landlock=self._landlock, syscall_fence=self._syscall_fence),
             monitor_verdicts=a._monitor_verdicts))
         action = a.triage.get("action", DEFAULT_TRIAGE_ACTION)
         # WHAT THE FAILURE WAS, RE-READ BY THE JUDGE THAT JUST READ IT. Applied HERE, on the
@@ -3313,7 +3314,9 @@ class EvaluateMixin:
                     a.node, self._repair_error_context(
                         a.reason, _err_in, state=a.state, node=a.node,
                         headline=failure_headline(
-                            getattr(a.res, "stderr", "") or "", self._redact))
+                            getattr(a.res, "stderr", "") or "", self._redact),
+                        fence_note=fence_refusal_note(
+                            a.res, landlock=self._landlock, syscall_fence=self._syscall_fence))
                     + developer_stuck_contract(DEVELOPER_STUCK_PREFIX),
                     a.state))
             except BudgetExceeded:

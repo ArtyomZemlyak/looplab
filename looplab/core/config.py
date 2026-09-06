@@ -1777,6 +1777,18 @@ class Settings(BaseSettings):
     # derived allow-list, with `looplab landlock-check <run_dir>` reporting zero skipped rules. Until
     # that exists this rung is opt-in and the audit hook is the shipped boundary.
     landlock: str = "off"
+    # SYSCALL FENCE (`runtime/seccomp.py`, doc 52 row 28): a kernel syscall policy for the eval
+    # process and everything it spawns, on Sandlock's shape — a classic-BPF filter installed by an
+    # exec'd launcher, no root, no libseccomp. "off" (default) installs nothing; "mutators" makes
+    # `mknod`/`mknodat` answer EPERM (the two mutators the audit hook cannot see and RLIMIT_FSIZE
+    # cannot bound); "egress" also refuses `socket(AF_INET|AF_INET6)` — LOOPBACK INCLUDED, because
+    # a filter sees register arguments and never the address a later `connect()` would dial, so a
+    # `torchrun`/NCCL rendezvous over 127.0.0.1 does not run under it (the address-aware rungs are
+    # Landlock TCP at ABI 4 and a network namespace; neither is measured). Off for the reason
+    # `landlock` is: `egress` breaks a download inside the eval and a loopback rendezvous, and
+    # neither policy has been through a real GPU eval. The probe carries `mutators` always.
+    # Validate on the box with `python -m looplab.runtime.seccomp egress`.
+    syscall_fence: str = "off"
     llm_model: str = "qwen3:8b"
     # === LLM / transport ==================================================================
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
@@ -2410,6 +2422,8 @@ class Settings(BaseSettings):
         # nothing above itself. `tests/test_metric_subject.py` pins all three pairs equal.
         ("metric_subject", ("off", "audit", "require")),
         ("landlock", ("off", "enforce")),
+        # Same reason again — `runtime/seccomp.py::POLICIES`; `tests/test_syscall_fence.py` pins them equal.
+        ("syscall_fence", ("off", "mutators", "egress")),
         ("backend", ("toy", "llm")),
         ("developer_backend", lambda: DEVELOPER_BACKENDS),
         ("llm_parser", lambda: _parser_names()),

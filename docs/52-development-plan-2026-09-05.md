@@ -539,12 +539,16 @@ mutation event under the record outside the launch's own workdir (`LOOPLAB_EVAL_
 the child by `run_argv`) on EVERY task, and `tests/test_run_record_fence.py` reproduces the forged
 terminal unfenced and refuses it fenced. Deleted per the index rule.*
 
-OPEN[subprocess-tier-has-no-syscall-or-egress-fence] no seccomp filter exists anywhere in
-`looplab/`, Landlock TCP rules need ABI 4 and the box measured ABI 2, so on the default tier an eval
-can `connect()` anywhere and the two audit-invisible mutators `dev_probe` found (`mknod`, `mkfifo`)
-have no kernel rung; Sandlock enforces FS + TCP + IPC + syscall policy without root at ~5 ms startup on
-exactly this constraint set. Doc 38's "seccomp irrelevant" verdict was about path-based READ refusal
-and stands. proof:absent:seccomp@looplab/runtime
+*Closed 2026-09-06 (row 28 shipped, the code parts): the marker
+`subprocess-tier-has-no-syscall-or-egress-fence` stood here. `runtime/seccomp.py` is the syscall rung on
+Sandlock's shape — a classic-BPF filter installed by an exec'd launcher, no root, no libseccomp —
+behind `Settings.syscall_fence` (`off` | `mutators` | `egress`): `mutators` makes `mknod`/`mknodat`
+answer `EPERM` (the two audit-invisible mutators), `egress` also refuses `socket(AF_INET|AF_INET6)`,
+loopback included, because a filter sees register arguments and never an address — the address-aware
+rungs (Landlock TCP at ABI 4, a network namespace) are named, not claimed. Measured on this box, where
+`landlock_create_ruleset` answers `ENOSYS`: install 219 µs, +29 ns per syscall, `mkfifo` and
+`AF_INET` refused in a child. The probe carries `mutators` always. Off by default for the evidence
+`landlock` waits on. Deleted per the index rule.*
 
 OPEN[otel-bridge-carries-no-genai-semconv] the OTel bridge opens spans with LoopLab's own attribute
 names and no `gen_ai.operation.name` or `gen_ai.usage.*`; the GenAI conventions are Development-status
@@ -739,11 +743,14 @@ the stage's first turn, folded onto `RunState.research_evidence`, and joined to 
 verdict can be re-checked against the bytes it was drawn from. The literature half is doc 51's
 `retrieved-literature-is-never-durable`, closed in the same change. Deleted per the index rule.*
 
-OPEN[landlock-refusal-is-not-translated-for-triage] under `landlock="enforce"` a refused read arrives
-as `EACCES` → `PermissionError`, the silent-skip shape the read fence's own exception type avoids, and
-nothing at the repair boundary rewrites it into the fence's sentence before the triage judge reads it
-(doc 38; ActPlane's "opaque errors that confuse the agent"). Lands WITH the Landlock GPU validation,
-before the default moves. proof:absent:EACCES@looplab/engine/crash_repair.py+absent:EACCES@looplab/engine/failure_diagnosis.py
+*Closed 2026-09-06 (row 28 shipped, the code parts): the marker
+`landlock-refusal-is-not-translated-for-triage` stood here. `engine/failure_diagnosis.py::fence_refusal_note`
+appends the fence's own sentence beside the engine's observed facts — at the triage intake
+(`engine_facts`) and in the repair headline — whenever the engine KNOWS a kernel rung was on and the
+stderr carries its shape: `EACCES` / `PermissionError [Errno 13]` under `landlock=enforce` (naming the
+path and whether it exists on the box), `EPERM` / `[Errno 1]` under a `syscall_fence` policy (naming
+what the policy refuses). It decides nothing: the reason stays `crash` and the diagnostician is still
+asked. Landed ahead of the GPU validation, which this container cannot run. Deleted per the index rule.*
 
 *Closed 2026-09-06 (row 27 shipped): the marker `parallel-build-has-no-golden-replay` stood here.
 `tests/test_golden_replay.py` holds the parallel arm on doc 22's own construction — a real 2-wide
