@@ -54,6 +54,67 @@ def entries(directory) -> list[dict]:
     return out
 
 
+DRIFT_LOG = Path(__file__).resolve().parent / "algotune" / "ruler_selfcheck_log.jsonl"
+DRIFT_TOLERANCE = 0.15      # of the cached value; see below for why it is not tighter
+
+
+def latest_readings(path=DRIFT_LOG) -> dict:
+    """The most recent reference-against-itself reading per task, from the recorded series."""
+    out: dict = {}
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            task, med, stamp = row.get("task"), row.get("median"), str(row.get("stamp") or "")
+            if not isinstance(med, (int, float)) or not task:
+                continue
+            if task not in out or stamp > out[task][1]:
+                out[task] = (float(med), stamp)
+    return out
+
+
+def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[str]:
+    """Cache entries whose own recorded self-check says they no longer time this box.
+
+    A reading of 1.0 means the cached baseline and a fresh timing agree. Measured 2026-09-06 by
+    timing all four references into a scratch cache and dividing:
+
+        task             cached/fresh   self-check reading
+        edge_expansion       0.868          0.9007
+        pde_heat1d           1.016          1.0676
+        discrete_log         1.052          1.0830
+        pagerank             1.463          1.4317
+
+    The two columns are independent -- one re-times the reference, the other runs it as a candidate
+    against the cache -- and they agree to within 0.04 on every task. So the reading IS a measure of
+    how wrong the cache is, and `pagerank`'s cache is high by **46 %** while the other three sit
+    within 13 %. Being "re-measured HERE", which is what the standing sweep says of every entry, is
+    not the same as being still true.
+
+    The tolerance is 15 % and not tighter on purpose: three of the four tasks disagree by 2-13 %
+    and none of them is a problem worth an alarm every sweep. It is set to catch the one that is.
+    """
+    said = []
+    for task, (median, stamp) in sorted(readings.items()):
+        if not any(r["task"] == task for r in rows if r["ok_name"]):
+            continue
+        off = abs(median - 1.0)
+        if off > tolerance:
+            said.append(f"{task}: its own self-check reads {median:.4f} ({stamp[:10]}), so the "
+                        f"cached baseline is {'high' if median > 1 else 'low'} by "
+                        f"{100 * off:.0f} % -- every score on this task divides by it")
+    return said
+
+
 def problems(rows, expect_regime: str | None = None, min_instances: int = 100) -> list[str]:
     """What is WRONG with the cache, as sentences. Empty list = nothing to say.
 
@@ -100,6 +161,7 @@ def main(argv=None) -> int:
         print(f'{row["task"]:22s} {row["subset"]:>6s} {row["regime"]:>10s} {row["n"]:4d} '
               f'{row["median"]:10.2f}  {when}')
     bad = problems(rows, args.expect_regime, args.min_instances)
+    bad += stale_entries(rows, latest_readings())
     for line in bad:
         print(f"  PROBLEM: {line}")
     if not bad:

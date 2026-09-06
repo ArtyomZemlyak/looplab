@@ -12373,3 +12373,43 @@ cache lives.
 `eval_train`, 37 % of its dollar before the first node and **0 % after the last**, champion a 62-line
 Cython kernel, 53 minutes to first build. Its last node was also its best, so §84's rule cost it
 nothing — the first probe on the task, and the corpus for pagerank is now exactly one.
+
+## §296 — "re-measured HERE" is not the same as still true
+
+With the bench idle, all four references were timed fresh into scratch caches — one task per lane —
+and divided by what the cache holds. Beside the reference-against-itself readings, taken separately
+by a different method:
+
+| task | cached / fresh | self-check reading |
+|---|---|---|
+| edge_expansion | 0.868 | 0.9007 |
+| pde_heat1d | 1.016 | 1.0676 |
+| discrete_log | 1.052 | 1.0830 |
+| **pagerank** | **1.463** | **1.4317** |
+
+The two columns are independent — one re-times the reference, the other runs it as a *candidate*
+against the cache — and they agree to within **0.04 on every task**. So the self-check reading is a
+measure of how wrong the cache is, which was the assumption all along and is now a measurement.
+
+And the answer is not "everything drifted". Three caches sit within 13 %; `pagerank`'s is high by
+**46 %**, and `edge_expansion`'s is *low* by 13 % — a direction the other three do not share. The
+standing sweep says of every entry that it was **re-measured HERE**, which is true and turns out to
+be a different claim from being still right.
+
+`ruler_check` — point 5's own tool, where the operator already looks — now says so:
+
+```
+  PROBLEM: pagerank: its own self-check reads 1.4317 (2026-09-06), so the cached baseline is high
+           by 43 % -- every score on this task divides by it
+```
+
+The tolerance is **15 %** and deliberately not tighter: 0.9007, 1.0676 and 1.0830 are the real
+readings for the other three and none is worth an alarm every sweep — a threshold that fires on all
+four teaches its reader to skip it. The direction is stated because it is what an operator acts on:
+a low cache inflates every score on the task, a high one deflates it, and "off by 30 %" says
+neither. Five mutations red, including tightening the tolerance until the healthy three fire and
+dropping the direction.
+
+**The cache is still not overwritten**, for §295's reason: it would reprice `pgr1`'s TEST 34.2751 to
+about 23.4, and that is a decision to take on purpose rather than as the tail of a diagnosis. What
+has changed is that nobody can now read a pagerank score without the tool saying what it divides by.
