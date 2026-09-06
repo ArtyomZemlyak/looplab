@@ -12144,3 +12144,36 @@ Also visible in the same output, and worth recording: **four arm probes ended on
 ZERO** — `capA10` (best 249.3451, last 0.0000), `capB11` (237.3300 → 0.0000), `capB8`, `freeB5`.
 §84's rule is the only reason those four have a number, inside the arm that was measuring something
 else entirely.
+
+## §290 — a reassuring all-clear over zero probes examined
+
+`pgr1` is the first probe on `pagerank` — launched to make that task's ruler constant checkable at
+all (§287). Running `outlier_check` against it produced:
+
+```
+1 running probe(s) against 119 finished edge_expansion runs
+  no probe is outside the corpus on any process variable
+```
+
+**Nothing was examined.** The probe's path is built from `--task`, so `runs/edge_expansion/` matched
+nothing for a pagerank run and the loop `continue`d in silence — while the header counted the probe
+and the footer gave it a clean bill. The all-clear and the healthy case print the same sentence,
+which is how the sentence stops being read.
+
+Now:
+
+```
+  pgr1       runs pagerank, not edge_expansion -- NOT COMPARED; re-run with --task pagerank
+  NOTHING WAS COMPARED: no running probe is on edge_expansion
+```
+
+and the exit code is 2. The all-clear now carries its own denominator (`1 of 1 compared`) and can
+still fall silent when a probe really is on the right task — an alarm that cannot go quiet teaches
+its reader to skip it. Four mutations red: skipping in silence again, reading an empty examination
+as clean, never counting anything as examined, and never resolving the probe's own task.
+
+**And the anomaly that started the sweep was mine.** `pgr1` read `$0.0518` two sweeps running and I
+took it for a stall. It is not: 17 `llm_usage` events, `$0.0592`, `events.jsonl` one second old, all
+17 generations in `deep_research` — the slow opening phase, which §288 measured as the one phase that
+does get the budget line. Two samples close together in probe-time, not a stuck run. Checking cost
+one query; assuming would have cost a diagnosis.

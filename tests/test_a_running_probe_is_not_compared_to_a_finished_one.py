@@ -216,3 +216,68 @@ def test_a_probe_later_than_the_whole_corpus_is_named(tmp_path, monkeypatch, cap
     outlier_check.main(["--root", str(tmp_path)])
     out = capsys.readouterr().out
     assert "no node yet at $0.8000" in out and "100 % of finished runs had one" in out, out
+
+
+def _run_task(root: Path, name: str, task: str, costs, node_after=None):
+    d = root / name / "runs" / task / "run"
+    d.mkdir(parents=True)
+    events, spent = [], 0.0
+    for c in costs:
+        events.append({"type": "llm_usage", "data": {"cost": c}})
+        spent += c
+        if node_after is not None and spent >= node_after:
+            events.append({"type": "node_evaluated", "data": {"node_id": 0, "metric": 200.0}})
+            node_after = None
+    (d / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    (d / "spans.jsonl").write_text(
+        json.dumps({"name": "generation", "attributes": {"phase": "plan_step", "cost": "1.0"}})
+        + "\n", encoding="utf-8")
+    return d
+
+
+def test_a_probe_on_another_task_is_named_not_skipped(tmp_path, monkeypatch, capsys):
+    """The probe's path is built from `--task`, so a run on a different task matched nothing and the
+    loop skipped it in silence -- while the header said "1 running probe(s)" and the footer said "no
+    probe is outside the corpus". Seen live with `pgr1` (pagerank) against the default
+    edge_expansion corpus: a reassuring all-clear over zero probes examined."""
+    for i in range(6):
+        _run_task(tmp_path, f"done{i}", "edge_expansion", [0.1] * 10, node_after=0.3)
+    _run_task(tmp_path, "elsewhere", "pagerank", [0.1] * 3)
+    monkeypatch.setattr(outlier_check.lanes, "probes",
+                        lambda root: [{"probe": "elsewhere", "lane": "0-10", "pid": 1}])
+    rc = outlier_check.main(["--root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "runs pagerank, not edge_expansion -- NOT COMPARED" in out, out
+    assert "--task pagerank" in out, out
+    assert rc == 2, (rc, out)
+
+
+def test_an_empty_examination_is_not_an_all_clear(tmp_path, monkeypatch, capsys):
+    for i in range(6):
+        _run_task(tmp_path, f"done{i}", "edge_expansion", [0.1] * 10, node_after=0.3)
+    _run_task(tmp_path, "elsewhere", "pagerank", [0.1] * 3)
+    monkeypatch.setattr(outlier_check.lanes, "probes",
+                        lambda root: [{"probe": "elsewhere", "lane": "0-10", "pid": 1}])
+    outlier_check.main(["--root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "NOTHING WAS COMPARED" in out, out
+    assert "no probe is outside the corpus" not in out, out
+
+
+def test_a_probe_on_the_right_task_still_reads_as_an_all_clear(tmp_path, monkeypatch, capsys):
+    """The alarm must be able to fall silent, or its reader learns to skip it."""
+    for i in range(6):
+        _run_task(tmp_path, f"done{i}", "edge_expansion", [0.1] * 10, node_after=0.3)
+    _run_task(tmp_path, "live", "edge_expansion", [0.1] * 4, node_after=0.3)
+    monkeypatch.setattr(outlier_check.lanes, "probes",
+                        lambda root: [{"probe": "live", "lane": "0-10", "pid": 1}])
+    rc = outlier_check.main(["--root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0 and "NOTHING WAS COMPARED" not in out, (rc, out)
+    assert "1 of 1 compared" in out, out
+
+
+def test_probe_task_reads_the_tree_not_the_flag(tmp_path):
+    _run_task(tmp_path, "p", "discrete_log", [0.1])
+    assert outlier_check.probe_task(str(tmp_path), "p") == "discrete_log"
+    assert outlier_check.probe_task(str(tmp_path), "nobody") is None

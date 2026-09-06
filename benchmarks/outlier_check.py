@@ -149,6 +149,12 @@ def late_share(corpus_firsts, spend: float) -> float:
     return 100.0 * sum(1 for x in corpus_firsts if x <= spend) / len(corpus_firsts)
 
 
+def probe_task(root: str, name: str):
+    """The task a probe is actually running, from its own tree."""
+    found = sorted(glob.glob(f"{root}/{name}/runs/*/run/events.jsonl"))
+    return found[0].split("/runs/")[1].split("/")[0] if found else None
+
+
 def corpus_first_nodes(root: str, task: str, min_spend: float = 0.9) -> list:
     """First-node spend per finished run; `inf` for a run that never produced one."""
     out = []
@@ -196,12 +202,23 @@ def main(argv=None) -> int:
     n = len(next(iter(dist.values())))
     firsts = corpus_first_nodes(args.root, args.task)
     print(f"{len(live)} running probe(s) against {n} finished {args.task} runs")
+    examined = 0
     cache: dict = {}
     flagged = 0
     for name in sorted(live):
         found = sorted(glob.glob(f"{args.root}/{name}/runs/{args.task}/run/events.jsonl"))
         if not found:
+            # A PROBE ON ANOTHER TASK IS NOT A CLEAN PROBE, IT IS AN UNEXAMINED ONE. The probe's
+            # path is built from `--task`, so a run on a different task matches nothing here and
+            # the loop used to `continue` in silence -- while the header still said "1 running
+            # probe(s)" and the footer still said "no probe is outside the corpus on any process
+            # variable". Seen live on 2026-09-06 with `pgr1` (pagerank) against the default
+            # edge_expansion corpus: a reassuring all-clear over zero probes examined.
+            mine = probe_task(args.root, name)
+            print(f"  {name:10s} runs {mine or 'no task tree'}, not {args.task} -- NOT COMPARED"
+                  + (f"; re-run with --task {mine}" if mine else ""))
             continue
+        examined += 1
         got = measure(found[0], found[0].replace("events.jsonl", "spans.jsonl"))
         # READ THE CORPUS AT THE PROBE'S AGE, NOT AT ITS OWN END. A share of generation spend is a
         # PARTIAL quantity for a running probe and a COMPLETE one for a corpus run, and the phases
@@ -251,8 +268,14 @@ def main(argv=None) -> int:
         for line in said:
             flagged += 1
             print(f"      OUTSIDE: {line}")
+    if not examined:
+        # NOT AN ALL-CLEAR. Nothing was looked at, and saying "nothing is wrong" over an empty
+        # examination is the same sentence a healthy bench produces -- which is how it goes unread.
+        print(f"  NOTHING WAS COMPARED: no running probe is on {args.task}")
+        return 2
     if not flagged:
-        print("  no probe is outside the corpus on any process variable")
+        print(f"  no probe is outside the corpus on any process variable "
+              f"({examined} of {len(live)} compared)")
     return 0
 
 
