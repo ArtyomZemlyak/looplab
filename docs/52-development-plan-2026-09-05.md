@@ -360,11 +360,16 @@ detector over logs + code and a Dolos plagiarism check against downloaded kernel
 paper; neither has a counterpart in the tree.
 proof:absent:rule_violation@looplab/adapters/mlebench_real.py+absent:plagiarism@looplab
 
-OPEN[no-hack-adjusted-score-reporting] the trust layer flags reward hacks, leakage and salvage on the
-row and no report projects an adjusted score beside the raw one. The field has since defined the
-shape: Protocol Validity's Mislead gap, `G = S_exploit − S_intended` (inflation 0.45–1.00 on ML-research
-traces), reported as the pair and its gap rather than a flag-count subtraction.
-proof:absent:mislead_gap@looplab
+*Closed 2026-09-06 (row 22, second slice shipped): the marker `no-hack-adjusted-score-reporting` stood
+here. `engine/champion_caveats.py::mislead_gap` publishes the pair on every `/api/runs` row
+(`serve/run_projections.py`): `exploit` (the champion, under the run's own rungs) beside `intended`
+(the best feasible node with no hard trust signal and a measured, unsalvaged number) and their `gap`
+in the run's direction — 0 when the champion is itself intended, null when nothing survives the
+filter, with `excluded` counting what the filter dropped — from the same two predicates the caveats
+use (`hard_flagged_ids`, `metric_unmeasured`), never a re-reading of the rows. Nine driven cases in
+`tests/test_mislead_gap.py` (audit inflation, `min` sign, an admitted salvage, `gate`, a constraint
+violation in neither population, ties). The campaign's adjusted column (row 23) reads this field.
+Deleted per the index rule.*
 
 OPEN[developer-hack-rate-unmeasured] nothing has measured how often LoopLab's own Developer takes a
 planted, rule-compliant shortcut. BAITBENCH released its three tasks, its two-stage transcript judge

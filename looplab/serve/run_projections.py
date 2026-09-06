@@ -19,7 +19,7 @@ import stat
 from looplab.core.atomicio import file_identity
 from looplab.core.run_deletion import (RUN_DELETION_FENCE_PREFIX, RunDeletionStorageError,
                                        load_run_deletion_fence, run_deletion_snapshot_token)
-from looplab.engine.champion_caveats import champion_metric_caveats
+from looplab.engine.champion_caveats import champion_metric_caveats, mislead_gap
 from looplab.engine.comparability import record_of
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.digest import concept_rollup as _concept_rollup, theme_rollup as _theme_rollup
@@ -134,6 +134,12 @@ def run_summaries(srv, only=None) -> list:
                 # never that a detector ran (`reward_hack_detect` is off by default). Cached WITH the
                 # fold, so it costs one derivation per changed log rather than one per poll.
                 "best_metric_caveats": champion_metric_caveats(st),
+                # HOW MUCH of that number the intended protocol supports (doc 52 row 22): the
+                # Protocol Validity pair — the champion beside the best node the record says nothing
+                # against, and their gap in the run's direction — from the same two predicates the
+                # caveats use (`engine/champion_caveats.py::mislead_gap`). `None` without a champion;
+                # a clean run reads `gap: 0` with `excluded: 0`. Additive; a legacy client ignores it.
+                "mislead_gap": mislead_gap(st),
                 # WHAT THIS NUMBER MAY BE RANKED AGAINST (`engine/comparability.py`). The row's own
                 # `task_id` + `direction` is what every cross-run surface currently partitions on,
                 # and `ui/src/crossRunRank.js` says in its own words why that is not enough: "a

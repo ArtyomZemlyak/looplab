@@ -780,6 +780,18 @@ champion carries a hard reward-hack/leakage signal a `trust_gate: audit` run enf
 is the complementary half of the same two families the cross-run exclusion joins — salvaged-and-admitted
 rather than salvaged-and-excluded, flagged-and-not-enforced rather than flagged-and-enforced — and it is
 derived from those same two predicates, never re-read off the rows (`engine/champion_caveats.py`).
+
+**And since 2026-09-06 the row also says HOW MUCH of the number the intended protocol supports**
+(doc 52 row 22): `mislead_gap` is Protocol Validity's pair — `exploit` (the champion, crowned under
+whatever rungs the run was configured with) beside `intended` (the best node the record says nothing
+against: feasible, no hard reward-hack/leakage signal, measured rather than salvaged) and their `gap`
+in the run's direction, positive when the published number is better than the intended protocol
+supports and `0` when the champion is itself an intended node. `excluded` counts the scored nodes
+the filter dropped, so a clean run (`gap: 0`, `excluded: 0`) reads differently from a run whose
+champion happened to be clean while half its population was flagged; `intended`/`gap` are `null`
+when no node survives the filter, and the whole record is `null` without a champion. It is derived
+from the same two predicates as the caveats (`hard_flagged_ids`, `metric_unmeasured`), for the same
+reason.
 Measured over the 46 preserved runs when it shipped: 37 carry a best metric and none of them is
 caveated by either, so those two fence a reachable state rather than describing the corpus.
 
