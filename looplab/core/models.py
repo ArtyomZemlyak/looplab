@@ -1289,6 +1289,23 @@ BENIGN_TERMINAL_REASONS: frozenset[str] = frozenset({
     "aborted", "card_dropped", "proxy_skipped", "superseded", "frozen",
 })
 
+# THE RUN-LEVEL STOP WORD (doc 52 §5.1 row 6). `run_finished.reason` / `RunState.stop_reason` was
+# decided at ELEVEN sites by `str(x or "").lower() == "error"` against a word no registry held —
+# the two registries above cover NODE terminals. One site WRITES it (`cli/run_cmds.py`'s guarded
+# abort) and the others read it to answer "did this run finish cleanly, or does it still owe a
+# finalize?" (`serve/run_commands.py`, `serve/appstate.py`, `engine/orchestrator.py`,
+# `engine/finalize.py`, `events/finalize_scope.py`, `cli/run_cmds.py`), so a drifted spelling at
+# one site silently changed that answer there and nowhere else. `is_error_stop` is the ONE
+# comparison, case-folded exactly as every site was; `tests/test_run_stop_word.py` scans the tree
+# for the literal comparison and pins the reader set in both directions.
+RUN_STOP_ERROR = "error"
+
+
+def is_error_stop(reason) -> bool:
+    """Whether a run-level stop reason is the guarded-abort word — a run that finished with an
+    error still owes its finalize, so every reader treats it as NOT finished cleanly."""
+    return str(reason or "").lower() == RUN_STOP_ERROR
+
 
 def is_developer_error(code) -> bool:
     """True when `code` is the in-band Developer-crash sentinel rather than real solution code."""

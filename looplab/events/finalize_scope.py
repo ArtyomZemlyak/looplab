@@ -11,6 +11,7 @@ unchanged; it remains where the finalization WRITER lives, and this is only the 
 """
 from __future__ import annotations
 
+from looplab.core.models import is_error_stop
 from looplab.events.finalize_protocol import (
     FINALIZE_STEP_ABANDONED,
     FINALIZE_STEP_BEGUN,
@@ -116,7 +117,7 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
                 continue
             # An outer invocation guard can record the exception raised after ``begun``. It must not
             # steal the original terminal intent; recovery republishes the exact staged payload.
-            if str(data.get("reason") or "").lower() == "error":
+            if is_error_stop(data.get("reason")):
                 continue
         return False
     return True
@@ -139,7 +140,7 @@ def incomplete_finalize_scope(events) -> str | None:
         )
         is_finished = (
             event.type == EV_RUN_FINISHED
-            and str(data.get("reason") or "").lower() != "error"
+            and not is_error_stop(data.get("reason"))
             and _adjacent_claim(event)
         )
         scope = data.get("scope") if is_begun else data.get("finalize_scope")

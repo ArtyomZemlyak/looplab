@@ -17,7 +17,7 @@ import time
 from typing import TYPE_CHECKING
 
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
-from looplab.core.models import RunState
+from looplab.core.models import RunState, is_error_stop
 from looplab.core.tracing import TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS
 from looplab.engine.costs import in_memory_cost_total, reconcile_cost_accountants
 from looplab.events.eventstore import EventStoreConcurrencyError
@@ -97,7 +97,7 @@ def _scope_terminal(events, scope: str):
             for event in reversed(events)
             if event.type == EV_RUN_FINISHED
             and (event.data or {}).get("finalize_scope") == scope
-            and str((event.data or {}).get("reason") or "").lower() != "error"
+            and not is_error_stop((event.data or {}).get("reason"))
             and _adjacent_claim(event)
         ),
         None,
@@ -169,7 +169,7 @@ def _scope_is_effective_terminal(events, state: RunState, scope: str) -> bool:
     data = event.data or {}
     return (
         data.get("finalize_scope") == scope
-        and str(data.get("reason") or "").lower() != "error"
+        and not is_error_stop(data.get("reason"))
         and _adjacent_claim(event)
     )
 
@@ -539,7 +539,7 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
     # forever and strand the run as non-terminal in every projection — strictly worse than the narrow
     # mis-acknowledgement this guard exists to prevent. Only a finish proven to be someone else's is
     # skipped.
-    if str(finish_data.get("reason") or "").lower() == "error":
+    if is_error_stop(finish_data.get("reason")):
         _own_finish = _scope_finish_event(events, scope)
         _finish_is_foreign = (_own_finish is not None
                               and _own_finish.seq != state.last_finish_seq)
@@ -653,7 +653,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
     legacy_initial = bool(
         not entry_finished
         and completed.finished
-        and str(finish_data.get("reason") or "").lower() != "error"
+        and not is_error_stop(finish_data.get("reason"))
     )
     should_finalize = bool(completed.finalization_pending() or scoped_terminal or legacy_initial)
 

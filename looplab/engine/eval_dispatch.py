@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.errors import EnvironmentRefusal
 from looplab.core.models import (EXTRA_METRIC_AUTO, apply_engine_extra_metric_channels,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
 from looplab.engine.shared import effective_researcher_eval_timeout
@@ -472,8 +473,15 @@ class EvalDispatchMixin:
             # apply or did not help, which is exactly when the operator needs the name most.
             unsat = deps.unsatisfied_requirements((err or "") + (out or ""))
             named = ("; no distribution for: " + ", ".join(sorted(unsat))) if unsat else ""
-            raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}){named}; see {log}\n"
-                               + self._redact((err or out or "")[-500:]))
+            # An `EnvironmentRefusal` (doc 52 §5.1 row 6), not a bare RuntimeError: this is the
+            # operator's own setup command failing on the operator's own box — a refusal about the
+            # environment, which the CLI boundary prints as one sentence naming the fix instead of
+            # the 42-frame traceback that reads as an engine crash. Same base class, so every
+            # `except RuntimeError` on the way up still catches it.
+            raise EnvironmentRefusal(
+                f"run_setup failed (exit={rc}, timed_out={timed}){named}; see {log}. Fix the "
+                f"`eval.setup` command or the declared requirements it installs, then resume.\n"
+                + self._redact((err or out or "")[-500:]))
 
     def _retry_without_unsatisfiable(self, declared, out, err, cwd, to, log):
         """Retry the DERIVED declaration install once, minus the lines pip could not resolve.

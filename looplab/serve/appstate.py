@@ -26,7 +26,7 @@ from typing import Callable, Optional
 from fastapi import HTTPException
 
 from looplab.core.atomicio import file_identity
-from looplab.core.models import Event
+from looplab.core.models import Event, is_error_stop
 from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope
@@ -833,7 +833,7 @@ class AppState:
         # stop intentionally has both stop_requested and paused set. An error finish is not a
         # successful finalize either: explicit retry preserves the stop and re-enters wrap-up.
         if finalize_incomplete or (st.stop_requested and (
-                not st.finished or str(st.stop_reason or "").lower() == "error")):
+                not st.finished or is_error_stop(st.stop_reason))):
             return PHASE_FINALIZING
         if st.finished:
             return PHASE_FINISHED

@@ -48,6 +48,7 @@ from looplab.core.concepts import (
 )
 from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
 from looplab.core.models import (
+    is_error_stop,
     CARD_STATEMENT_MAX_CHARS,
     Idea, IdeaEmission, durable_idea_payload, effective_card_footprint, idea_field_carried,
     idea_proposal_digest,
@@ -1519,7 +1520,7 @@ def _decide_run_abort(service, rd: Path, event_type: str, state, alive: bool,
             "retry after engine_running becomes false", retryable=True)
     if pending_finalize:
         return "attach", None
-    if state.finished and str(state.stop_reason or "").lower() != "error":
+    if state.finished and not is_error_stop(state.stop_reason):
         return "noop", None
     return "append", None
 

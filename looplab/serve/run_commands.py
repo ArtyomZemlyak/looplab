@@ -37,7 +37,7 @@ import orjson
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.pathsafe import filesystem_identity
-from looplab.core.models import Event
+from looplab.core.models import Event, is_error_stop
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
 from looplab.engine.finalize import incomplete_finalize_scope
@@ -1413,7 +1413,7 @@ class RunCommandService:
             return True
         state = state or observation.state()
         return bool(state.finalization_pending() or (state.stop_requested and (
-            not state.finished or str(state.stop_reason or "").lower() == "error")))
+            not state.finished or is_error_stop(state.stop_reason))))
 
     def _pending_finalize_intent(
             self, rd: Path, observation: Optional[CommandObservation] = None):
@@ -2874,7 +2874,7 @@ class RunCommandService:
         if kind == "finished_and_stopped":
             state = observation.state()
             if (not state.finished or self._engine_state(rd) is not False
-                    or str(state.stop_reason or "").lower() == "error"):
+                    or is_error_stop(state.stop_reason)):
                 return False
             if not state.stop_requested:
                 return False

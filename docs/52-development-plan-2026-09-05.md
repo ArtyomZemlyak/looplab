@@ -509,18 +509,15 @@ paths came off the exclusive sequencer in the same change (the Files fence, paid
 review binding), each a CAS across its read, driven by holding the lock from another thread;
 `start_status` keeps it because it reconciles a dead spawn's claim. Deleted per the index rule.*
 
-OPEN[run-setup-failure-is-not-a-refusal-type] `engine/eval_dispatch.py` raises a bare
-`RuntimeError("run_setup failed …")` where every other deliberate refusal about the operator's
-environment wears `core/errors.py::EnvironmentRefusal` (a subclass of both, so the swap is
-source-compatible); the refusal reads as an engine crash (doc 50 ES2-06).
-proof:absent:EnvironmentRefusal@looplab/engine/eval_dispatch.py
+*Closed 2026-09-06 (row 6 shipped): the marker `run-setup-failure-is-not-a-refusal-type` stood here.
+`engine/eval_dispatch.py` raises `EnvironmentRefusal` for a failed `run_setup`, with the fix in the
+sentence; every `except RuntimeError` above it still catches it. Deleted per the index rule.*
 
-OPEN[run-stop-reason-compared-as-a-bare-literal] the run-level stop vocabulary is decided by eight
-`str(... or "").lower() == "error"` comparisons (`serve/run_commands.py` ×2, `serve/appstate.py`,
-`engine/orchestrator.py` ×2, `engine/finalize.py`, `events/finalize_scope.py`, `cli/run_cmds.py`)
-against a word no registry holds — the engine-terminal registry of 2026-09-02 covers NODE reasons.
-A drifted spelling at one site silently changes what "finished cleanly" means there.
-proof:`present:str(state.stop_reason or "").lower() == "error"@looplab/serve/run_commands.py`
+*Closed 2026-09-06 (row 6 shipped): the marker `run-stop-reason-compared-as-a-bare-literal` stood
+here. `core/models.py::RUN_STOP_ERROR` / `is_error_stop` are the word and the one comparison; the
+writer and the eleven readers (eight `==`, three `!=` in `finalize.py`) go through them, and
+`tests/test_run_stop_word.py` scans the tree for the literal comparison and pins the reader set
+both ways. Deleted per the index rule.*
 
 OPEN[no-single-untrusted-evidence-envelope] the untrusted-text rule reaches the assistant, the concept
 tagger and the MCP cache key and not the surfaces that move engine decisions: the Strategist (whose

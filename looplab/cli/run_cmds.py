@@ -34,6 +34,7 @@ from looplab.adapters.tasks import kinds_for, validate_task
 from looplab.adapters.toytask import ToyTask
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
 from looplab.core import appconfig
+from looplab.core.models import RUN_STOP_ERROR, is_error_stop
 from looplab.serve.run_files import run_config_write_lock
 from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
                          _apply_speculation_calibration_profile,
@@ -114,7 +115,7 @@ def _run_engine_guarded(eng: Engine):
             error_text = str(e)[:500]
         except BaseException:  # an adversarial __str__ must not replace the root exception
             error_text = type(e).__name__
-        error = {"reason": "error", "error": error_text}
+        error = {"reason": RUN_STOP_ERROR, "error": error_text}
         try:
             events = eng.store.read_all()
             current = fold(events)
@@ -282,7 +283,7 @@ def classify_prior_run(prior, prior_events) -> str:
     if terminal_projection_incomplete(prior, prior_events):
         return "finalization_pending"
     if prior.stop_requested and (
-            not prior.finished or str(prior.stop_reason or "").lower() == "error"):
+            not prior.finished or is_error_stop(prior.stop_reason)):
         return "pending_finalize"
     if prior.finished:
         return "finished"

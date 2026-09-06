@@ -109,7 +109,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS,  # noqa: F401
                                    _rule_triage, _shallow_fingerprint)
 from looplab.core.models import (
     Idea, Node, NodeStatus, RunState, durable_idea_payload, effective_card_footprint,
-    is_developer_error)
+    is_developer_error, is_error_stop)
 from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefusal
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
@@ -1801,7 +1801,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # That is a retryable failed wrap-up, not the abort's terminal result; republish the
             # stable abort scope and let scoped finalization deduplicate every completed side effect.
             if (state.finished and state.stop_requested
-                    and str(state.stop_reason or "").lower() == "error"):
+                    and is_error_stop(state.stop_reason)):
                 abort = next(
                     (event for event in reversed(decision_events)
                      if event.type == EV_RUN_ABORT),
@@ -3824,7 +3824,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # durable stop is still pending. Treat that as NOT already finalized so the retry below can
         # write run_finished(aborted) and re-run budget/archive/case/cost wrap-up exactly once.
         entry_finished = bool(_entry.finished and self._pending_finalize_scope is None and not (
-            _entry.stop_requested and str(_entry.stop_reason or "").lower() == "error"))
+            _entry.stop_requested and is_error_stop(_entry.stop_reason)))
         # Restore Card authority before replaying the active Strategy: its conditional governance
         # grant for card_scoring depends on this run-start-pinned value, not the ambient snapshot.
         if _entry.run_id:

@@ -27,7 +27,7 @@ from typing import BinaryIO, Mapping, Optional
 import orjson
 
 from looplab.core.atomicio import same_file_entry
-from looplab.core.models import Event, RunState
+from looplab.core.models import Event, RunState, is_error_stop
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import decode_event_record, event_sequence_continues
 from looplab.events.replay import fold
@@ -298,7 +298,7 @@ class CommandObservation:
     def has_non_error_finish_after(self, after_seq: int) -> bool:
         return any(
             event.seq > after_seq
-            and str((event.data or {}).get("reason") or "").lower() != "error"
+            and not is_error_stop((event.data or {}).get("reason"))
             for event in self._run_finishes
         )
 
