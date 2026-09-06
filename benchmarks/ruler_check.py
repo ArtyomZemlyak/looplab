@@ -158,11 +158,13 @@ def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[st
             said.append(f"{task}: self-check reads {median:.4f} ({stamp[:10]}) -- but this task "
                         "solves with CP-SAT, whose runtime depends on how many cores it is given: "
                         "x2.2 between one core and a 22-cpu lane on the same instance (§304). The "
-                        "reference asks for no `num_search_workers` and no seed, so the baseline "
-                        "pass and the candidate pass need not give it the same allocation. NOT a "
-                        "drifting cache, and not mere noise -- per-instance repeat spread is only "
-                        "x1.3 and averages away over a hundred instances. Fixable by pinning the "
-                        "allocation in BOTH passes; until then this number is not a ruler")
+                        "reference asks for no `num_search_workers` and no seed, so it takes "
+                        "whatever the process is allowed. NOT a drifting cache, and not mere noise "
+                        "-- per-instance repeat spread is only x1.3 and averages away over a "
+                        "hundred instances. The obvious remedy is NOT available: §305 measured 20 "
+                        "single-core pinned workers during an evaluation, so both passes already "
+                        "get the same nominal allocation. Cause still open; this number is not a "
+                        "ruler")
             continue
         if off > tolerance:
             said.append(f"{task}: its own self-check reads {median:.4f} ({stamp[:10]}), so the "

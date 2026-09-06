@@ -12758,3 +12758,42 @@ guaranteeing identical affinity for the reference timing and the candidate timin
 to the scoring harness that alter every CP-SAT number this bench would ever produce, so it is a
 decision to take deliberately, and it is not mine to take quietly. What is now measured is the size
 of the prize: nine of twenty tasks, currently unusable, and one number (×2.2) that says why.
+
+## §305 — the remedy §304 proposed was already in place, and one instrument said otherwise
+
+§304 ended with a proposed fix: give CP-SAT the same allocation in the baseline pass and the
+candidate pass. Before recommending it further I went to check whether the passes actually differ.
+
+**First instrument, and it lied by omission.** `looplab_parallel` logs
+`evaluating N instances on W workers x C core(s)` when it pins. That line appears **zero** times in
+a self-check run and **zero** times in `pgr1`'s whole `run.log`. Read alone, that says the pinning
+path is never engaged.
+
+**Second instrument, and it disagrees.** Sampling `/proc` during a live evaluation, counting the
+affinity width of every python process touching the lane:
+
+```
+  {1: 20, 22: 6, 96: 14}
+```
+
+**Twenty processes pinned to a single core.** The path is engaged; the log line simply is not
+visible at the child's logging level. This is the sweep list's own rule — repeating one instrument
+is useless, a different one is needed — and it cost nothing to obey and would have cost a wrong
+recommendation to skip.
+
+So both passes already receive the same nominal allocation, 22 workers × 1 core, pinned, with a
+matching thread budget. **§304's remedy is not available because it is already done**, and the cause
+of the 1.14–1.85 readings is still open. The `ruler_check` message has been corrected to say so
+rather than send the next reader to do what is already in place; a test now asserts the old remedy
+is *absent* from it.
+
+What remains as the live hypothesis, unmeasured: twenty pinned single-core workers all running
+CP-SAT at once contend for shared cache and memory bandwidth, and the number of concurrently-active
+workers differs between the two passes as each drains its tail. That is testable — run the two
+passes with one worker instead of twenty and see whether the reading falls to 1.0 — and it is the
+next measurement, not a conclusion.
+
+**The pattern is worth naming, because it is now three for three.** §299 retracted a drifting ruler
+that was my interpreter. §304 proposed a fix that §305 refuted within the hour. Each time the error
+was not in the bench but in the instrument I reached for, and each time the correction came from
+picking up a *different* instrument rather than repeating the first one more carefully.

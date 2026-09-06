@@ -116,8 +116,13 @@ def test_a_cpsat_task_is_named_as_unrulable_not_as_a_drifting_cache(tmp_path):
     # THE WHOLE REMEDY, not the word that introduces it: a mutation cutting "the allocation in BOTH
     # passes; until then this number is not a ruler" left "Fixable by pinning the " standing, and
     # the assertion held over a sentence that no longer said what to do.
-    assert "pinning the allocation in BOTH passes" in said[0], said[0]
-    assert "this number is not a ruler" in said[0], said[0]
+    # AND THE REMEDY THAT WAS REFUTED WITHIN THE HOUR. §304 proposed "pin the allocation in both
+    # passes"; §305 sampled /proc during an evaluation and found 20 single-core pinned workers, so
+    # both passes already get the same nominal allocation. A message still offering that fix would
+    # send the next reader to do what is already done.
+    assert "obvious remedy is NOT available" in said[0], said[0]
+    assert "Cause still open" in said[0], said[0]
+    assert "pinning the allocation in BOTH passes" not in said[0], said[0]
 
 
 def test_a_plain_task_with_the_same_reading_is_still_a_drifting_cache(tmp_path):
