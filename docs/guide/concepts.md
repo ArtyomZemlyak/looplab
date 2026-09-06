@@ -1053,6 +1053,14 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   own statement that the result stands — so a deliberately-reused success is never called stale.
   Both numbers are derived by the fold from the log's ORDER, so no event gained a field and runs
   already on disk are attributed retroactively.
+- **Every attempt keeps its own row** (2026-09-06, doc 52 row 27). `node.stages` is a per-NAME
+  projection, so after a repair the attempt that spent the training wall-clock had no row at all —
+  only the attempt that passed. `node.stage_attempts` is the per-attempt ledger: every
+  `stage_finished` row as that attempt's own statement (`name`/`status`/`exit_code`/`seconds`, the
+  repair epoch it ran in, the lifecycle `generation`, its `seq`), appended before the per-name merge
+  and never rewritten by it, kept across resets. `Node.stage_wall_clock()` sums it per stage —
+  attempts, seconds, how many reused rather than ran, the generations spanned. Accounting only:
+  nothing that decides reads it, and a legacy log folds to an empty ledger.
 - **Host-side scoring** (2026-09-06, doc 52 row 10a) — a repo task may declare `cmd.host_scorer`,
   the operator's own scoring program at an absolute path outside every editable root; the engine
   appends it as the final protected `score` stage, its number is the node's `metric`, the

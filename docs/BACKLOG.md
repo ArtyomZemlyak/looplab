@@ -6133,6 +6133,11 @@ deliberately deferred, with rationale:
   wall-clock survives. What did NOT ship is the row's actual proposal: records are still keyed by
   stage NAME (last-real-wins), not attempt-indexed, and no readmodel sums attempts. Residue (§0.2) —
   accounting/UI only, as the row itself says.]
+  **[2026-09-06 — the accounting shipped (doc 52 row 27):** `Node.stage_attempts` is the
+  attempt-indexed record — every `stage_finished` row as the attempt's own statement, appended by
+  `replay._on_stage_finished` before the per-name merge and kept across resets — and
+  `Node.stage_wall_clock()` is the sum per stage. `stages` stays the per-name projection every
+  surface reads.]
 
 ### Deferred cleanup
 - ✅ **Tool-consolidation follow-through (S–M).** Dedup the paginated file-reader family —

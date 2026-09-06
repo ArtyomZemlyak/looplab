@@ -608,10 +608,16 @@ Both tables are shrink-only backlogs. The guard found a dead setting on its firs
 so the single-command divergence watchdog never armed on a product run from 2026-08-30 to 2026-09-06 —
 wired now, with a driven test at the `run_command_eval` seam. Deleted per the index rule.*
 
-OPEN[layering-rules-are-not-machine-checked] 38 % of intra-package import edges are function-local
-and only a third of the stated layering rules are guarded; nothing guards `core` or `events` purity,
-`engine↛serve`, `tools↛serve`, `adapters` (doc 50 XP-07). One AST guard over the package matrix with
-the deferred-import allowance explicit per edge. proof:missing:tests/test_package_layering.py
+*Closed 2026-09-06 (row 27 shipped): the marker `layering-rules-are-not-machine-checked` stood
+here. `tests/test_package_layering.py` is one AST guard over the package matrix: `MODULE_LEVEL` is the
+module-level graph two-way (a new upward edge and a stale row are both red), `DEFERRED` names every
+function-local-only edge with the reason it stays deferred (32 edges, two-way), `LEAF_ONLY` states the
+one module-level edge that may reach only leaves (`tools→engine`), `PURE` pins `core`/`events`/
+`runtime`/`sweep` at ANY level, the engine never reaches `serve` and nothing reaches `cli`; typing-only
+imports are classified so they can never count. Measured on landing: 1,533 cross-package import
+sites, 826 (53.9 %) function-local, and one stated sentence false — CLAUDE.md's "`tools` reaches
+`engine` only function-locally" (three module-level leaf imports), corrected to the rule the tree
+keeps. Deleted per the index rule.*
 
 *Closed 2026-09-06 (row 25 shipped): the marker `settings-doc-guard-compares-names-not-defaults`
 stood here. `tests/test_config_docs_sync.py::test_every_documented_default_is_the_fields_declared_default`
@@ -662,11 +668,17 @@ through the engine-installed sink from wherever the loop runs; the answer's byte
 and outside a run it is a no-op. The `CODEX AGENT` note is gone with the gap. Deleted per the
 index rule.*
 
-OPEN[write-tool-reopens-the-approved-path-by-name] `tools/write_tools.py` proves containment on a
-resolved pathname before approval and then reopens the path BY NAME for the atomic replacement, so a
-concurrent symlink or junction swap of an ancestor can redirect an approved write outside the allowed
-root (its own `CODEX AGENT` note); descriptor-relative no-follow opens with a final identity re-check
-are the fix. proof:`present:p, content, preimage_mode, preimage_state, preimage_mode)@looplab/tools/write_tools.py`
+*Closed 2026-09-06 (row 27 shipped): the marker `write-tool-reopens-the-approved-path-by-name` stood
+here. `tools/write_tools.py::_publish_bytes` walks from the approved root to the target's directory one
+component at a time with `O_NOFOLLOW|O_DIRECTORY`, creates missing components with `mkdir(dir_fd=…)`,
+stages the temp, re-reads the pre-image and replaces THROUGH that descriptor, and re-identifies the root
+against the `(st_dev, st_ino)` captured when the roots were resolved — the approved write, the edit, the
+delete and both Undo restores go through it (the patch tool publishes through `git apply`, which refuses
+a path beyond a symbolic link itself). Windows has no `dir_fd`, so there the by-name publish stays with
+`_ancestors_are_plain` re-checked before staging and before the replace — a narrower window, stated.
+`tests/test_write_publish_containment.py` drives the attack (an approver that swaps an ancestor for a
+symlink between the proof and the publish) on both paths and reproduces the escape with both guards
+off. Deleted per the index rule.*
 
 ### 4.3 From the docs pass (§2.1), corrected
 
@@ -733,9 +745,15 @@ nothing at the repair boundary rewrites it into the fence's sentence before the 
 (doc 38; ActPlane's "opaque errors that confuse the agent"). Lands WITH the Landlock GPU validation,
 before the default moves. proof:absent:EACCES@looplab/engine/crash_repair.py+absent:EACCES@looplab/engine/failure_diagnosis.py
 
-OPEN[parallel-build-has-no-golden-replay] doc 22's phase 4 specified a golden for a 2-wide
-parallel-build run pinning id monotonicity, one terminal per node and a deterministic fold;
-`tests/test_golden_replay.py` holds only the serial golden. proof:absent:parallel@tests/test_golden_replay.py
+*Closed 2026-09-06 (row 27 shipped): the marker `parallel-build-has-no-golden-replay` stood here.
+`tests/test_golden_replay.py` holds the parallel arm on doc 22's own construction — a real 2-wide
+fan-out (`parallel_build=2` + a role factory) over the toy task — pinning the fan-out invariants (two
+ids reserved before either build lands, serial reservation, dense ids, one terminal per node), fold
+determinism over one read and a second `EventStore` open, and that two runs with the same scripted
+roles fold to ONE state once run identity and wall-clock fields are masked while their logs may differ
+in order; `tests/data/golden_parallel_projection.json` is the checked-in order-independent projection
+of what the search finds, which is the golden a nondeterministic byte order permits. Deleted per the
+index rule.*
 
 OPEN[no-distance-from-seed-signal] nothing measures how far a candidate moved from the seed program
 (doc 17 §11; MLGym's "models usually improve by finding better hyperparameters" is what it would
@@ -754,15 +772,21 @@ half, fails CLOSED on a key never printed, the relations and the values read rec
 number produced past its declared bound. Driven end to end through `run_command_eval`
 (`tests/test_numeric_contract.py`). Deleted per the index rule.*
 
-OPEN[stage-rows-are-last-wins-per-name] `replay.py::_on_stage_finished` keeps one row per stage NAME,
-so after an inline repair the attempt that spent the training wall-clock leaves no row (BACKLOG §6
-D5). Per-attempt rows change the FOLD output for every repaired node, so this lands after the
-corpus-digest baseline the `EvalAttempt` split takes. proof:`present:n.stages[i] = rec@looplab/events/replay.py`
+*Closed 2026-09-06 (row 27 shipped): the marker `stage-rows-are-last-wins-per-name` stood here.
+`Node.stage_attempts` is the per-attempt ledger: `replay._on_stage_finished` appends every
+`stage_finished` row as the attempt's own statement (`name`/`status`/`exit_code`/`seconds`, its repair
+epoch, the lifecycle generation, its `seq`) BEFORE the per-name merge, which stays exactly as it was —
+`stages` remains the projection every surface reads, so no consumer moved; `Node.stage_wall_clock()`
+sums the ledger per stage. Additive per invariant #5 (the serial golden regenerated as pure
+insertions), driven by `tests/test_stage_attempt_ledger.py` on the repair shape, the D5 reuse shape, a
+reset and an abandoned-lifecycle row. Deleted per the index rule.*
 
-OPEN[readmodel-watermark-ignores-event-data] `readmodel.py::coverage_watermark` digests the ordered
-`(seq, type)` prefix and nothing about event DATA, so a log whose `node_evaluated.metric` was edited in
-place still certifies `current` (BACKLOG §0.2, driven).
-proof:`present:rows = [[int(getattr(e, "seq", -1)), str(getattr(e, "type", ""))] for e in events]@looplab/events/readmodel.py`
+*Closed 2026-09-06 (row 27 shipped): the marker `readmodel-watermark-ignores-event-data` stood here.
+`readmodel.py::coverage_watermark` digests the ordered `(seq, type, ts, data)` prefix under the
+`rmcov2:` recipe; a read model minted under `rmcov1:` compares unequal once and rebuilds.
+`tests/test_readmodel_watermark.py` drives the defect — the `node_evaluated.metric` rewritten in place,
+same seq/type/count/max-seq — to `stale`, and pins that a legacy-recipe watermark can certify nothing
+under the new one. Deleted per the index rule.*
 
 *Closed 2026-09-06 (row 8 shipped): the marker `launch-readiness-gate-is-two-copies` stood here.
 The one rule was already the server's — `serve/launch.py::preflight_start`, which `/api/start` and

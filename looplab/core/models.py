@@ -1536,6 +1536,16 @@ class Node(BaseModel):
     # describes a superseded attempt (`stage_row_superseded`).
     stages: list = Field(default_factory=list)
     failed_stage: Optional[str] = None
+    # EVERY `stage_finished` row this node recorded, in log order: the per-ATTEMPT ledger (doc 52
+    # row 27; BACKLOG §6 D5). `stages` above is the per-NAME projection every surface reads —
+    # last-wins, `repairs`-stamped — and after an inline repair it cannot show the attempt the
+    # repair replaced: the attempt that spent the training wall-clock left no row at all. Each row
+    # here is that attempt's OWN statement (`name`/`status`/`exit_code`/`seconds`, the repair epoch
+    # it ran in, the lifecycle `generation`, its `seq`), appended by `replay._on_stage_finished`
+    # BEFORE the per-name merge and never rewritten by it; append-only across resets, so the
+    # wall-clock a node spent is summable (`stage_wall_clock`). Additive (invariant #5): a legacy
+    # log folds to `[]`, and nothing that DECIDES reads it — accounting only.
+    stage_attempts: list = Field(default_factory=list)
     # Inline repairs applied to THIS lifecycle generation — the count of folded `node_repaired`
     # rows, which is `engine/evaluate.py::_durable_repair_ledger`'s `attempt` seen from the fold
     # side (a `salvage_cause_fix` row re-states the ordinal it FOLLOWS rather than opening a new
@@ -1639,6 +1649,36 @@ class Node(BaseModel):
         @property (not a pydantic field/computed_field): excluded from model_dump, so event/snapshot
         serialization is byte-identical."""
         return self.confirmed_mean if self.confirmed_mean is not None else self.metric
+
+    def stage_wall_clock(self) -> dict[str, dict]:
+        """Per stage NAME, what EVERY attempt in `stage_attempts` spent (doc 52 row 27).
+
+        `{name: {"attempts", "seconds", "reused", "generations"}}` — the attempt count, the summed
+        `seconds` over every row that recorded a finite number, how many of those attempts REUSED
+        the stage rather than ran it (a `reused` row spent nothing and says so), and the lifecycle
+        generations the attempts span. The accounting `stages` cannot give: its last-wins row for
+        `train` after a repair is the attempt that passed, and the 120 minutes the failed attempt
+        spent before it are on no row there. `{}` for a legacy log. A plain method, so nothing about
+        `model_dump` or the event envelope moves.
+        """
+        out: dict[str, dict] = {}
+        for row in self.stage_attempts:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                continue
+            entry = out.setdefault(row["name"],
+                                   {"attempts": 0, "seconds": 0.0, "reused": 0, "generations": []})
+            entry["attempts"] += 1
+            if row.get("status") == "reused":
+                entry["reused"] += 1
+            seconds = row.get("seconds")
+            if (isinstance(seconds, (int, float)) and not isinstance(seconds, bool)
+                    and math.isfinite(seconds)):
+                entry["seconds"] += float(seconds)
+            generation = row.get("generation")
+            if (isinstance(generation, int) and not isinstance(generation, bool)
+                    and generation not in entry["generations"]):
+                entry["generations"].append(generation)
+        return out
 
 
 def stage_row_superseded(row, repairs) -> bool:

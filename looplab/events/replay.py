@@ -1776,6 +1776,13 @@ def _on_stage_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
         rec = {"name": d.get("name"), "status": d.get("status"),
                "exit_code": d.get("exit_code"), "seconds": d.get("seconds"),
                "repairs": n.repairs}
+        # THE PER-ATTEMPT LEDGER, appended BEFORE the per-name merge below and never rewritten by it
+        # (doc 52 row 27; BACKLOG §6 D5): each row is the attempt's own statement — its epoch is
+        # `n.repairs` as recorded here, never the merge's MAX — so the attempt a repair supersedes
+        # keeps the wall-clock it spent. Append-only across resets (`node_reset` clears `stages`,
+        # not this), stamped with the lifecycle generation (`Node.attempt`, the field that keeps its
+        # original name for projection compatibility) so a reader can partition.
+        n.stage_attempts.append({**rec, "generation": n.attempt, "seq": e.seq})
         for i, s in enumerate(n.stages):
             if s.get("name") == rec["name"]:
                 # A "reused" marker means a re-eval SKIPPED this stage (an earlier attempt already

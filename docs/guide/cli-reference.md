@@ -570,7 +570,8 @@ The engine builds this file once, at the end of `finalize_run`. So a run that is
 that crashed — has none at all, and until 2026-08-14 a published one could not say whether it covered
 the whole log: a control event appended after the run finished left it silently behind. Two things
 changed. The projection now carries a **watermark** (schema version, last `seq` folded, event count,
-and a digest of the `(seq, type)` prefix, written in the same transaction as the rows), and this
+and a digest of the ordered `(seq, type, ts, data)` prefix — the payload too, so a row edited in
+place reads as `stale` — written in the same transaction as the rows), and this
 command makes the build reachable at any moment.
 
 `--check` prints `status=current|stale|unknown` and exits **1** unless the answer is `current`. It
