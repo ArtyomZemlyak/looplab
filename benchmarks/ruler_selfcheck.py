@@ -164,6 +164,28 @@ def baseline_dir() -> str:
     return os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR") or str(HERE / "algotune" / ".baseline_times")
 
 
+def observed_regime(task: str, subset: str) -> str | None:
+    """The regime key the run ACTUALLY divided by, read off the cache after the fact.
+
+    Not the requested one. §305 asked for `ALGOTUNE_EVAL_WORKERS=1`, got twenty-two, wrote
+    `__w22x1r3` and reported a number that read like a one-worker measurement; the override that
+    caused it is gone (§306), but recording the intent would reintroduce the same class of lie for
+    free. What is on disk after the evaluation is what the reading was divided by.
+
+    §314 is why this belongs in the row at all: max_clique_cpsat reads 1.5291 at twenty-two workers
+    and 0.9922 at one, on the same quiet box against baselines built in each regime. Two rows
+    carrying the same task name and no regime are not a series -- they are two different questions.
+    """
+    hits = sorted(Path(baseline_dir()).glob(f"{task}__{subset}__*.json"),
+                  key=lambda q: q.stat().st_mtime, reverse=True)
+    for hit in hits:
+        if hit.name.endswith(".provenance.json"):
+            continue
+        tail = hit.stem.split("__")[-1]
+        return tail or None
+    return None
+
+
 def one_eval(task: str, solver: str, lane: str, subset: str, timeout: float = 900.0) -> dict:
     cache = baseline_dir()
     env = dict(os.environ,
@@ -241,7 +263,8 @@ def busy_cpus_outside_lane() -> int | None:
 
 
 def append_reading(path, task: str, subset: str, values, median: float, stamp=None,
-                   lane: str | None = None, busy: int | None = None) -> dict:
+                   lane: str | None = None, busy: int | None = None,
+                   regime: str | None = None) -> dict:
     """Append one dated reading, so the drift becomes a SERIES rather than a single number.
 
     §214 measured `edge_expansion` at 0.8861 against the sweep's 0.9847 and could say the cached
@@ -272,7 +295,7 @@ def append_reading(path, task: str, subset: str, values, median: float, stamp=No
     """
     row = {"stamp": stamp or datetime.datetime.now().isoformat(timespec="seconds"),
            "task": task, "subset": subset, "lane": lane,
-           "busy_cpus_outside_lane": busy,
+           "busy_cpus_outside_lane": busy, "regime": regime,
            "values": [round(float(v), 6) for v in values],
            "median": round(float(median), 6)}
     path = Path(path)
@@ -451,7 +474,8 @@ def main(argv=None) -> int:
     if args.record:
         seen = [b for b in busy_seen if b is not None]
         append_reading(args.record, args.task, args.subset, vals, median, args.stamp,
-                       args.lane, max(seen) if seen else None)
+                       args.lane, max(seen) if seen else None,
+                       observed_regime(args.task, args.subset))
         print(f"  recorded to {args.record}")
     if said is not None and abs(median - said) > 0.02:
         print("  DRIFT: the cached baseline and today's box no longer agree. Within one task this "

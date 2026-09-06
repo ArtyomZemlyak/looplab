@@ -74,8 +74,19 @@ DRIFT_LOG = Path(__file__).resolve().parent / "algotune" / "ruler_selfcheck_log.
 DRIFT_TOLERANCE = 0.15      # of the cached value; see below for why it is not tighter
 
 
-def latest_readings(path=DRIFT_LOG) -> dict:
-    """The most recent reference-against-itself reading per task, from the recorded series."""
+CAMPAIGN_REGIME = "w22x1r3"   # what a campaign's candidates run under; see task_inventory
+
+
+def latest_readings(path=DRIFT_LOG, regime: str | None = None,
+                    accept_unstamped: bool = False) -> dict:
+    """The most recent reference-against-itself reading per task, from the recorded series.
+
+    `regime` filters to rows taken in one evaluation regime -- `w22x1r3` for the twenty-two-wide
+    one a campaign uses, `lane22r3` for serial. §314: max_clique_cpsat reads 1.5291 at twenty-two
+    workers and 0.9922 at one, on the same idle box against baselines built in each regime, so a
+    "latest reading" that mixes the two answers neither question. Rows written before the regime
+    was recorded carry no key and are returned only when no filter is asked for.
+    """
     out: dict = {}
     try:
         fh = open(path, encoding="utf-8", errors="replace")
@@ -93,6 +104,21 @@ def latest_readings(path=DRIFT_LOG) -> dict:
             task, med, stamp = row.get("task"), row.get("median"), str(row.get("stamp") or "")
             if not isinstance(med, (int, float)) or not task:
                 continue
+            if regime is not None:
+                got = row.get("regime")
+                # `accept_unstamped` is for the campaign regime only: every row written before the
+                # key existed was taken twenty-two wide, so dropping them would report a box that
+                # has read twenty tasks as having read four. It must NEVER be used to fill the
+                # serial slot -- that is how an unstamped twenty-two-wide row would come to prove
+                # one-worker rulability.
+                # AND THE FLAG IS HONOURED FOR ONE REGIME ONLY. The first cut left that to the
+                # caller and said so in a comment; a comment is not a guard, and the one thing it
+                # was guarding is the claim this whole field exists to support -- that a task rules
+                # at ONE worker. An unstamped row was taken twenty-two wide, so it can stand in for
+                # a twenty-two-wide reading and for nothing else.
+                if got != regime and not (accept_unstamped and got is None
+                                          and regime == CAMPAIGN_REGIME):
+                    continue
             if task not in out or stamp > out[task][1]:
                 out[task] = (float(med), stamp)
     return out

@@ -1255,6 +1255,17 @@ def main() -> int:
             return None
         if not present or any(name.endswith(f"{mine}.json") for name in present):
             return None
+        # THE OPT-IN, because the guard is against SILENCE and not against a second regime. §314
+        # measured `max_clique_cpsat` at 1.5291 with twenty-two evaluation workers and 0.9922 with
+        # one, so a campaign that scores CP-SAT tasks serially needs `__lane22r3` entries to exist
+        # BESIDE the twenty-two-wide ones -- and this guard made minting them impossible in the
+        # real cache without deleting the others first. Six tasks refused three times each before
+        # the flag existed. An explicitly requested new regime is announced on stderr, and the
+        # reading that follows records the key it actually divided by, so nothing is silent.
+        if os.environ.get("ALGOTUNE_ALLOW_NEW_REGIME") == "1":
+            print(f"LOOPLAB: minting a NEW baseline regime {mine!r} beside {', '.join(present)} "
+                  "because ALGOTUNE_ALLOW_NEW_REGIME=1", file=sys.stderr)
+            return None
         return mine, ", ".join(present)
 
     if (_mismatch := _regime_mismatch()) is not None:

@@ -13142,3 +13142,95 @@ in no snapshot: a bundle carries git, and a gitignored file is not in git. This 
 once already, on 2026-08-29. The series is the only artefact that can say WHEN a ruler and the box
 parted (§214) and it cannot be recomputed after the fact, so it is now un-ignored with a `!` rule
 and committed. Noticed only because `git status` did not list it after three readings were appended.
+
+## §314 — the CP-SAT excess is not contention, and "rules at one worker" was never read
+
+§301 asked whether a campaign may score CP-SAT tasks against a one-worker ruler while the
+candidates run twenty-two wide. Three measurements on an idle box, each with its prediction
+recorded first, answer it — and two of the three predictions were wrong.
+
+**Prediction 1 (refuted).** Every ruler on disk was timed 05:18–05:38 at loadavg 354–1817, and the
+readings that classified nine CP-SAT tasks were taken 06:27–06:57 with three or four lanes busy, so
+the excess above unity should be contention baked into the baseline. Re-timing on an idle box:
+
+| task | cached baseline | quiet baseline | sum ratio |
+|---|---|---|---|
+| max_clique_cpsat | 42 767 ms | 46 411 ms | 0.92 |
+| min_dominating_set | 53 009 ms | 49 961 ms | 1.06 |
+
+Two per cent and eleven, not the 1.6× and 1.3× the readings showed. The contention is not in the
+baseline.
+
+**Prediction 2 (refuted).** Then it is on the reading side, and reading the quiet baseline on a
+quiet box comes home. It does not: max_clique_cpsat reads **1.5291** (1.4618–1.8145) and
+min_dominating_set **1.2367** (1.0517–1.5806), on an idle box, against baselines built on that same
+idle box minutes earlier.
+
+**Prediction 3 (held).** With both passes at `ALGOTUNE_EVAL_WORKERS=1`, max_clique_cpsat reads
+**0.9922** (0.9775–1.0022) — unity, and the spread collapses from ±23 % to ±2.5 %.
+
+So the excess is an asymmetry between the baseline pass and the candidate pass that exists **only at
+twenty-two workers**, on an otherwise idle box. Baseline-against-baseline reproduces to 8 %;
+baseline-against-candidate is off by 50 %. §301's answer is therefore not "a ruler timed under
+conditions the scored runs will not see": at twenty-two wide the harness cannot reproduce unity for
+these tasks *at all*, so CP-SAT tasks must be scored serially or not scored.
+
+### What the inventory was asserting
+
+`classify` called six tasks **rules at one worker** from "CP-SAT and a light tail" — an inference,
+printed in the same column as measured numbers, with no one-worker reading anywhere in the readings
+log. (The numbers existed in `ruler_check.tail_ratio`'s docstring from an earlier sitting; a
+docstring is not a series.) The verdict now requires a serial-regime reading and otherwise says
+**unread at one worker**, which drops the box from "16 of 20 scorable" to **10 of 20** until those
+readings are taken. Its stated reason — "contention at 22 workers, not the solver" — was wrong and
+is replaced by what was measured.
+
+Readings now record the regime they were taken in, read **off the cache after the fact** rather than
+from `ALGOTUNE_EVAL_WORKERS`: §305 asked for one worker, got twenty-two, and reported a number that
+read like a serial measurement. `latest_readings(regime=…)` splits the series, because 1.5291 and
+0.9922 under one task name are two different questions.
+
+Two defects fell out of doing it. The regime guard in `looplab_eval.py` — right to refuse a silent
+regime switch — made minting a serial ruler beside a twenty-two-wide one impossible in the real
+cache; six tasks refused three times each. It now takes `ALGOTUNE_ALLOW_NEW_REGIME=1`, announced on
+stderr, because the guard is against silence and not against a second regime. And `classify`
+formatted `{tail:.0f}` on a `None` in a branch only CP-SAT tasks reach, which every entry on this
+box happens to avoid by having 100 per-instance times.
+
+Four mutations red: recording the requested regime instead of the observed one, dropping the regime
+from the row, ignoring the regime filter, and claiming one-worker rulability with no serial reading.
+
+### The six serial rulers, and the same trap one level up
+
+The six readings the inventory now demands were taken on the free lane, `ALGOTUNE_EVAL_WORKERS=1`,
+each against a serial baseline minted beside the twenty-two-wide one:
+
+| task | 22 wide | one worker |
+|---|---|---|
+| max_clique_cpsat | 1.6028 | 1.0967 |
+| max_common_subgraph | 1.4820 | 1.0113 |
+| queens_with_obstacles | 1.2667 | 1.0154 |
+| rectanglepacking | 1.2151 | 1.0329 |
+| multi_dim_knapsack | 1.1534 | 1.0401 |
+| set_cover_conflicts | 1.1375 | 1.0341 |
+
+Sixteen of twenty are scorable again — the same count as before, now with a measured number behind
+each of the six instead of an inference.
+
+Two of my own instruments broke on the second regime the moment it existed, both silently:
+
+* `latest_readings()` returns the newest row per task, so four tasks' `reading` column switched from
+  their twenty-two-wide number to their serial one within minutes of the section above being
+  written. Fixed by asking for a regime explicitly.
+* `classify` picked the cache entry by first match, and `lane22r3` sorts before `w22x1r3`, so
+  `max_common_subgraph`'s tail fell from 15.0 to 1.4 with nothing measured.
+
+And the legacy rule needed enforcing rather than documenting: rows written before the key existed
+were all taken twenty-two wide, so they may stand in for a wide reading and never for a serial one.
+The first cut left that to the caller and said so in a comment; the mutation that ignored the
+comment survived, and the test that killed it is the one that asks for an unstamped row in the
+serial slot.
+
+`max_clique_cpsat` also read **0.9922** in one serial sitting and **1.0967** in the next, both on an
+idle box, so a serial verdict is now checked against the same unity tolerance as everything else
+rather than accepted for existing.
