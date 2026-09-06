@@ -120,9 +120,15 @@ def test_a_cpsat_task_is_named_as_unrulable_not_as_a_drifting_cache(tmp_path):
     # passes"; §305 sampled /proc during an evaluation and found 20 single-core pinned workers, so
     # both passes already get the same nominal allocation. A message still offering that fix would
     # send the next reader to do what is already done.
-    assert "obvious remedy is NOT available" in said[0], said[0]
-    assert "Cause still open" in said[0], said[0]
+    # AND THE FIX, once it was found. §304 proposed pinning (already done, §305); §307 measured
+    # that the worker COUNT is what does it -- three of four CP-SAT tasks come home to 1.0 at one
+    # worker. A message that still said "cause still open" would send the reader looking for
+    # something already located.
+    assert "THE FIX IS THE WORKER COUNT" in said[0], said[0]
+    assert "1.4820 -> 1.0141" in said[0], said[0]
+    assert "22x slower to build" in said[0], said[0]
     assert "pinning the allocation in BOTH passes" not in said[0], said[0]
+    assert "Cause still open" not in said[0], said[0]
 
 
 def test_a_plain_task_with_the_same_reading_is_still_a_drifting_cache(tmp_path):

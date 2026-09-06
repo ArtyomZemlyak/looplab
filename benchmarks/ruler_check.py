@@ -161,10 +161,12 @@ def stale_entries(rows, readings, tolerance: float = DRIFT_TOLERANCE) -> list[st
                         "reference asks for no `num_search_workers` and no seed, so it takes "
                         "whatever the process is allowed. NOT a drifting cache, and not mere noise "
                         "-- per-instance repeat spread is only x1.3 and averages away over a "
-                        "hundred instances. The obvious remedy is NOT available: §305 measured 20 "
-                        "single-core pinned workers during an evaluation, so both passes already "
-                        "get the same nominal allocation. Cause still open; this number is not a "
-                        "ruler")
+                        "hundred instances. THE FIX IS THE WORKER COUNT (§307): the same task read at "
+                        "ALGOTUNE_EVAL_WORKERS=1 comes home -- max_common_subgraph 1.4820 -> "
+                        "1.0141, queens_with_obstacles 1.2667 -> 1.0142, max_clique_cpsat 1.6028 "
+                        "-> 0.9974 -- because twenty-two pinned single-core workers all running "
+                        "CP-SAT contend differently in the two passes. A one-worker ruler is 22x "
+                        "slower to build and keys __lane22r3, so it is a different cache")
             continue
         if off > tolerance:
             said.append(f"{task}: its own self-check reads {median:.4f} ({stamp[:10]}), so the "
