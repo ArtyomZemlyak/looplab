@@ -377,6 +377,10 @@ class _EvalResetHost(_Pool):
     # here would let the double diverge from production exactly where the invariant lives.
     _assert_speculative_selection_confirmed = (
         EvaluateMixin._assert_speculative_selection_confirmed)
+    # Since the EvalAttempt split (doc 52 row 21) `_evaluate` is a driver and the pre-start fence
+    # is `_eval_admit`; the probe below is raised INSIDE it (`_resource_eval_env`), so it is the one
+    # phase this double has to carry — borrowed real, for the same reason as the invariant above.
+    _eval_admit = EvaluateMixin._eval_admit
 
     async def _contain_eval_crash(self, node_id, generation, exc):
         """OPT OUT of the crash containment, because this double's exception is a PROBE.

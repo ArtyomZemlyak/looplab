@@ -1180,9 +1180,9 @@ def test_the_triage_driven_install_is_gated_on_a_crash_like_its_sibling():
     after logging an early import warning could drive a pip install into the shared interpreter."""
     import inspect
 
-    from looplab.engine import evaluate as ev
+    from tests._source_scan import eval_attempt_source
 
-    src = inspect.getsource(ev.EvaluateMixin._evaluate)
+    src = eval_attempt_source()      # both gates are DECIDE_REPAIR's since the split
     gates = [line for line in src.splitlines() if "_auto_install_deps" in line]
     assert len(gates) == 2 and all('reason == "crash"' in line for line in gates), gates
 
@@ -1356,10 +1356,9 @@ def test_the_retrain_charge_cannot_ride_on_node_repaired():
     makes the separate event necessary; if someone reorders the loop so the append follows the
     decision, this test is where they will find out that the event can then be folded back in.
     """
-    import inspect
-    from looplab.engine.orchestrator import Engine
+    from tests._source_scan import eval_attempt_source
 
-    src = inspect.getsource(Engine._evaluate)
+    src = eval_attempt_source()      # all three sites are APPLY_REPAIR's since the split
     append_at = src.index("EV_NODE_REPAIRED, repair_payload")
     # Keyed on the CALLEE NAME, not the whole call expression. The expression used to be pinned
     # verbatim (`_repair_forces_full_retrain(res, next_start)`) and adding the rule's fourth
@@ -1386,10 +1385,9 @@ def test_the_attempt_loop_actually_seeds_from_the_durable_ledgers():
     second Engine over the same run dir; the three ledger readers are pure and fully driven above,
     so what is left uncovered is the wiring, which is what this pins.
     """
-    from tests._source_scan import called_names
-    from looplab.engine.orchestrator import Engine
+    from tests._source_scan import eval_attempt_called_names
 
-    called = called_names(Engine._evaluate)
+    called = eval_attempt_called_names()     # SEED_LEDGERS is where they are called since the split
     for fn in ("_durable_repair_ledger", "_durable_dep_rounds", "_durable_full_retrains"):
         assert fn in called, (
             f"{fn} is no longer called by the attempt loop — that budget silently went back to being "

@@ -138,9 +138,9 @@ def test_the_gate_reads_the_setting_rather_than_a_literal():
     commented-out copy of the old hardcoded tuple is as much of a drift risk as a live one."""
     from looplab.engine import evaluate
 
-    from tests._source_scan import attributes_read
+    from tests._source_scan import eval_attempt_attributes_read
 
-    reads = attributes_read(evaluate.EvaluateMixin._evaluate)
+    reads = eval_attempt_attributes_read()      # the driver and its phases (the gate is DECIDE_REPAIR)
     assert "self._inline_repair_reasons" in reads, (
         "the gate must READ the setting — a hardcoded reason list here silently changes which "
         "failures buy an inline repair, for every run")

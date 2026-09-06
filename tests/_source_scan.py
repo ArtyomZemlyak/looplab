@@ -145,3 +145,48 @@ def scan(pattern: re.Pattern | str, *, pkg: Path = PKG) -> dict[str, set[str]]:
         for name in compiled.findall(text):
             found.setdefault(name, set()).add(str(path.relative_to(pkg)))
     return found
+
+
+# --------------------------------------------------------------------------- the eval attempt loop
+# `_evaluate` is a DRIVER over `EvalAttempt` and nine phase methods since 2026-09-06 (doc 52 row 21).
+# A guard that used to read "the attempt loop" off `inspect.getsource(EvaluateMixin._evaluate)` now
+# reads the driver plus every phase, IN THE ORDER THE DRIVER RUNS THEM — so an index-order pin over
+# the concatenation still says what it said about one method, and a "called exactly once" pin counts
+# across the phases. Prefer naming the phase when the property belongs to one.
+EVAL_PHASES = ("_eval_admit", "_eval_prepare_workdir", "_eval_seed_ledgers", "_eval_run_attempt",
+               "_eval_settle_outcome", "_eval_salvage", "_eval_decide_repair", "_eval_apply_repair",
+               "_eval_write_terminal")
+
+
+def eval_attempt_functions() -> list:
+    """The driver, the nine phases in driver order, then the reset terminal the phases share."""
+    from looplab.engine.evaluate import EvaluateMixin
+
+    return [getattr(EvaluateMixin, name)
+            for name in ("_evaluate",) + EVAL_PHASES + ("_eval_record_superseded",)]
+
+
+def eval_attempt_source() -> str:
+    """Every function of the attempt loop, as source, concatenated in driver order."""
+    return "\n".join(inspect.getsource(f) for f in eval_attempt_functions())
+
+
+def eval_attempt_dedented_source() -> str:
+    """The same concatenation, dedented so `ast.parse` accepts it (a method's body on its own)."""
+    return "\n".join(textwrap.dedent(inspect.getsource(f)) for f in eval_attempt_functions())
+
+
+def eval_attempt_tree() -> ast.Module:
+    """One module holding every function of the attempt loop, in driver order."""
+    return ast.parse(eval_attempt_dedented_source())
+
+
+def eval_attempt_called_names() -> list[str]:
+    """`called_names` over the whole attempt loop, in driver order."""
+    return [name for f in eval_attempt_functions() for name in called_names(f)]
+
+
+def eval_attempt_attributes_read() -> set[str]:
+    """`attributes_read` over the whole attempt loop."""
+    return set().union(*(attributes_read(f) for f in eval_attempt_functions()))
+

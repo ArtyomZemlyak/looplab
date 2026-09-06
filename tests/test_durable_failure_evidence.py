@@ -108,11 +108,11 @@ def test_the_column_is_omitted_rather_than_written_empty():
         if isinstance(node, ast.IfExp) and "error_evidence" in ast.unparse(node):
             guarded += 1
         # the terminal: `if err_evidence: data["error_evidence"] = ...`
-        if isinstance(node, ast.If) and ast.unparse(node.test).strip() == "err_evidence":
+        if isinstance(node, ast.If) and ast.unparse(node.test).strip() in ("err_evidence", "a.err_evidence"):
             guarded += 1
     assert guarded == 2, "both write sites must be guarded on truthiness, not written unconditionally"
-    assert '"error_evidence": err_evidence' not in src.replace(
-        '**({"error_evidence": err_evidence} if err_evidence else {})', "")
+    assert '"error_evidence": a.err_evidence' not in src.replace(
+        '**({"error_evidence": a.err_evidence} if a.err_evidence else {})', "")
 
 
 # ------------------------------------------------------------------ THE guard

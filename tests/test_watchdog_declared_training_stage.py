@@ -504,7 +504,9 @@ def test_f_a_repairable_stop_does_not_terminalize_in_the_kill_branch():
     from _source_scan import function_tree
     from looplab.engine.evaluate import EvaluateMixin
 
-    tree = function_tree(EvaluateMixin._evaluate)
+    from _source_scan import eval_attempt_tree
+
+    tree = function_tree(EvaluateMixin._eval_settle_outcome)   # the kill branch's phase since the split
     branches = [node for node in ast.walk(tree)
                 if isinstance(node, ast.If) and "kill_signal.get('kill')" in ast.unparse(node.test)]
     assert len(branches) == 1, "the watchdog-kill branch is no longer unique; re-derive this test"
@@ -527,9 +529,9 @@ def test_f_a_repairable_stop_does_not_terminalize_in_the_kill_branch():
     assert "EV_NODE_FAILED" in unrepairable and "return" in unrepairable
 
     # ...and the reason that reaches the repair loop is the WATCHDOG's, not the exit code's.
-    assigns = [node for node in ast.walk(tree)
+    assigns = [node for node in ast.walk(eval_attempt_tree())      # the classification is SALVAGE's
                if isinstance(node, ast.Assign)
-               and any(getattr(t, "id", None) == "reason" for t in node.targets)
+               and any(ast.unparse(t) in ("reason", "a.reason") for t in node.targets)
                and "_failure_reason" in ast.unparse(node.value)]
     assert assigns and all(isinstance(a.value, ast.BoolOp) and isinstance(a.value.op, ast.Or)
                            and "watchdog_reason" in ast.unparse(a.value.values[0])

@@ -550,14 +550,15 @@ def test_h4_neither_bit_claims_the_node_actually_stopped():
     from looplab.events import types
 
     # The gate that makes a claimed kill non-binding on an already-successful eval.
-    source = inspect.getsource(evaluate.EvaluateMixin._evaluate)
-    assert 'kill_signal.get("kill") and not ok' in source
+    source = inspect.getsource(evaluate.EvaluateMixin._eval_settle_outcome)   # the outcomes' phase
+    assert 'a.kill_signal.get("kill") and not a.ok' in source
 
     # ...and it is not the only pre-emption: `superseded` (a reset) and an operator `abort` both
     # return from `_evaluate` BEFORE the kill branch is reached, so a `kill: true` row can sit beside
     # either of those terminals too. Pin all three, in the order the function tests them.
     positions = [source.index(marker) for marker in
-                 ("if superseded:", "if aborted and not ok:", 'if kill_signal.get("kill") and not ok:')]
+                 ("if a.superseded:", "if a.aborted and not a.ok:",
+              'if a.kill_signal.get("kill") and not a.ok:')]
     assert positions == sorted(positions), "the kill branch must stay LAST of the four outcomes"
 
     note = inspect.getsource(types)

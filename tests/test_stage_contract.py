@@ -583,18 +583,15 @@ def test_the_attempt_loop_actually_consults_the_rollback_rule_and_records_its_an
     multi-stage evaluation that fails at a LATER stage, a Developer that answers with a
     `rollback_stage`, and a second Engine over the same run dir; the rule and both ledger readers are
     pure and fully driven above, so what is left uncovered is the wiring, which is what this pins."""
-    from _source_scan import called_names
-    from looplab.engine.orchestrator import Engine
+    from _source_scan import eval_attempt_called_names, eval_attempt_source
 
-    names = called_names(Engine._evaluate)
+    names = eval_attempt_called_names()      # APPLY_REPAIR's calls, reached through the driver
     # `called_names` resolves the DOTTED spelling, so the mixin method is `self._rollback_start` —
     # asserting the bare name would silently pass on nothing.
     assert "self._rollback_start" in names, "the attempt loop never asks the rollback rule"
     assert "_durable_rollbacks" in names, "the once-per-stage bound is not seeded from the log"
     # and the row the bound reads back must be written
-    import inspect
-    src = inspect.getsource(Engine._evaluate)
-    assert "EV_STAGE_ROLLBACK" in src
+    assert "EV_STAGE_ROLLBACK" in eval_attempt_source()
 
 
 def test_the_rollback_event_is_diagnostic_so_no_reader_keys_on_its_position():

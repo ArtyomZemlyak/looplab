@@ -23,6 +23,15 @@ in exactly the right way, so `tests/test_evaluate_named_rules.py` is the first c
 their branches have had. The residue is genuinely a driver — the one-terminal invariant, the
 attempt loop's control flow, and the loop-local counters those rules round-trip through.
 
+Since 2026-09-06 (doc 52 row 21) that driver is EXPLICIT: `_evaluate` opens the span, builds one
+`EvalAttempt` — the record of the lifecycle's evaluation, the fifty loop-carried locals declared once
+— and runs the nine `_eval_*` phases (`_eval_admit`, `_eval_prepare_workdir`, `_eval_seed_ledgers`,
+then per attempt `_eval_run_attempt` -> `_eval_settle_outcome` -> `_eval_salvage` ->
+`_eval_decide_repair` -> `_eval_apply_repair`, and `_eval_write_terminal`). A phase reports the loop
+control it cannot execute as a closed `PHASE_*` signal. The cut moved text and nothing else: each
+phase body is the old region with its locals spelled `a.<name>`, proven AST-equivalent to that
+rewrite statement by statement, with every append, `_write_lock` block, fold and branch in place.
+
 `fold` is imported from its canonical home here (the orchestrator's module-global `fold` seam —
 monkeypatched by two tests — does not reach `_evaluate`: those patches gate node CREATION).
 Invariant #2 lives in this file: exactly ONE terminal event per node, emitted at the end of the
@@ -31,9 +40,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import time
 from collections.abc import Mapping
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import functools
 
@@ -202,12 +213,9 @@ def _effective_repair_cap(inline_repair_attempts: int) -> int:
     return int(inline_repair_attempts) or _UNLIMITED_REPAIR_CEILING
 
 
-# OPEN[eval-attempt-is-one-giant-method] `_evaluate` is 1,898 lines reading 51 engine attributes,
-# with 20 appends, 15 `_write_lock` blocks and 4 folds; six test files `inspect.getsource` it, at
-# seven sites, to find things.
-# The phases its own comments name (admit / run_attempt / settle_outcome / salvage / decide_repair /
-# apply_repair / write_terminal) are the split, with every append and lock staying where it is.
-# proof:`absent:class EvalAttempt@looplab/engine/evaluate.py`
+# (The marker `eval-attempt-is-one-giant-method` stood here until 2026-09-06 — doc 52 row 21. `_evaluate`
+# is now a driver over `EvalAttempt` and nine `_eval_*` phase methods; every append, lock and fold is
+# where it was, proven statement-for-statement AST-equivalent at the cut. Deleted per the index rule.)
 def _repair_attempts_left(attempt: int, cap: int) -> int:
     """How many repairs this node may still make — against the bound that will actually stop it.
 
@@ -808,6 +816,118 @@ _LOG = logging.getLogger(__name__)
 #     recording this one that way hides the exact crossing the invariant exists to make impossible.
 _EVAL_DELIBERATE_STOPS = (KeyboardInterrupt, SystemExit, BudgetExceeded,
                           SpeculativeEvaluationInvariantError)
+
+
+
+# THE ATTEMPT LOOP'S SIGNAL VOCABULARY (doc 52 row 21). A phase method reports the `break` /
+# `continue` / `return` it cannot execute on the driver's loop as ONE of these, and the driver
+# dispatches on identity. CLOSED: `tests/test_eval_attempt_phases.py` resolves every `return`
+# constant in the phases against this set, because a misspelt signal does not fail — it reads as
+# "go on to the next phase" and turns a stop into another attempt (`orchestrator.py`'s rule for the
+# run loop's own signals, one method over).
+PHASE_NEXT = "next"          # this attempt goes on to its next phase
+PHASE_RETRY = "retry"        # start the next attempt (`continue`)
+PHASE_SETTLED = "settled"    # leave the attempt loop and write the terminal (`break`)
+PHASE_RETURN = "return"      # the node is closed — a terminal was written, or a reset owns it
+PHASE_SIGNALS = frozenset({PHASE_NEXT, PHASE_RETRY, PHASE_SETTLED, PHASE_RETURN})
+
+
+@dataclass(slots=True)
+class EvalAttempt:
+    """One node lifecycle's evaluation, as the record the `_eval_*` phases read and write.
+
+    `_evaluate` was a 2,016-line method whose attempt loop carried fifty locals across seven regions
+    its own comments named (doc 50 XP-08 / ES2-10, doc 52 row 21). This is the box those locals moved
+    into, declared ONCE with the phase that binds each — so a phase is a method that can be driven on
+    its own against a prepared record, and a name the phases never declared raises (`slots=True`)
+    instead of minting silently. Nothing here decides anything: every rule stayed in its phase.
+
+    Field defaults are "unset" markers only — `_eval_seed_ledgers` assigns every loop-carried value
+    from the durable rows before the first attempt, exactly as the loop's prologue did.
+    """
+    node_id: int
+    max_es: Optional[float] = None
+    sp: Any = None                            # the `evaluate` trace span the driver opened
+    # `-1` until ADMIT binds the lifecycle; the containment handler names the lifecycle it closes
+    # through this, and a re-fold there would read whatever generation is CURRENT at failure time.
+    generation: int = -1
+    # --- bound by ADMIT
+    events_at_start: list = field(default_factory=list)
+    state: Any = None
+    node: Any = None
+    start_seq: int = -1
+    _resource_reservation: Any = None
+    eval_env: Any = None
+    # --- bound by PREPARE_WORKDIR
+    workdir: Any = None
+    _superseded_marker: Any = None
+    _manifest_stamp: Any = None
+    # --- seeded by SEED_LEDGERS from the durable rows; carried across attempts
+    _repair_cap: int = 0
+    attempt: int = 0
+    unparseable_repairs: int = 0
+    dep_rounds: int = 0
+    prior_repair_seconds: float = 0.0
+    chain_pipeline_s: float = 0.0
+    total_eval: float = 0.0
+    triage_outcome: Any = None
+    salvaged: Any = None
+    salvage_cause_repaired: bool = False
+    declaration_repaired: Any = None
+    err: str = ""
+    reason: str = "crash"
+    _reason_source: Any = None
+    _engine_reason: Any = None
+    _evidence: Any = None
+    _evidence_resolved: Any = None
+    _summary: Any = None
+    _findings: Any = None
+    repair_log: list = field(default_factory=list)
+    best_depth: int = -1
+    next_start: Any = None
+    full_retrains: int = 0
+    rolled_to: set = field(default_factory=set)
+    rollback_refusal: str = ""
+    # --- per attempt: RUN_ATTEMPT binds the first six, SETTLE_OUTCOME the next seven, SALVAGE
+    #     `err_evidence`, DECIDE_REPAIR the last three
+    _t0: float = 0.0
+    _log_snapshot: Any = None
+    _log_plan: Any = None
+    _seen: dict = field(default_factory=dict)          # the intervention watcher's one verdict
+    kill_signal: dict = field(default_factory=dict)
+    res: Any = None
+    superseded: bool = False
+    operator_card_dropped: bool = False
+    aborted: bool = False
+    attempt_eval_seconds: float = 0.0
+    ok: bool = False
+    watchdog_reason: Any = None
+    watchdog_err: str = ""
+    err_evidence: Any = None
+    _depth: int = 0
+    triage: Any = None
+    _monitor_verdicts: Any = None
+
+    # The three workdir helpers that were closures over `workdir`/`generation` in the old method.
+    def mark_superseded_workdir(self) -> None:
+        try:
+            self.workdir.mkdir(parents=True, exist_ok=True)
+            self._superseded_marker.write_text(str(self.generation), encoding="ascii")
+        except OSError:
+            import shutil
+            shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def stamp_workdir(self, n) -> None:
+        try:
+            self._manifest_stamp.write_text(_workdir_manifest_digest(n), encoding="ascii")
+        except OSError:
+            pass          # unstamped => the next reuse check fails closed and rematerializes
+
+    def workdir_matches(self, n) -> bool:
+        try:
+            return self._manifest_stamp.read_text(encoding="ascii").strip() == _workdir_manifest_digest(n)
+        except (OSError, ValueError):
+            return False
 
 
 class EvaluateMixin:
@@ -1901,1951 +2021,50 @@ class EvaluateMixin:
         # operator stop reach this worker, and answering one with a `node_failed` would invent a
         # failure out of a deliberate intervention. `KeyboardInterrupt`/`SystemExit` likewise — the
         # process is going down and a terminal claiming the node failed would be a lie about why.
-        _contained_generation = [-1]
+        #
+        # THE PHASES (doc 52 row 21). The body below is a DRIVER over `EvalAttempt` — the record of one
+        # node lifecycle's evaluation — and nine `_eval_*` phase methods, cut along the comments the
+        # 2,000-line method used to carry: ADMIT (the pre-start fence), PREPARE_WORKDIR,
+        # SEED_LEDGERS (every loop-carried counter off the durable rows), then per attempt
+        # RUN_ATTEMPT -> SETTLE_OUTCOME -> SALVAGE -> DECIDE_REPAIR -> APPLY_REPAIR, and
+        # WRITE_TERMINAL. Every append, every `_write_lock` block, every fold and every branch is
+        # where it was; a phase reports the `break`/`continue`/`return` it cannot execute as one of
+        # the CLOSED `PHASE_*` signals, resolved from real `ast.Return` constants by
+        # `tests/test_eval_attempt_phases.py` (a typo'd signal would read as "next phase" and turn a
+        # stop into another attempt — `orchestrator.py`'s loop-signal rule, one method over). The
+        # attempt record is a slots dataclass, so an attribute the phases never declared raises
+        # instead of minting silently (`engine/attribute_sites.py`'s rule for the engine itself).
+        a = EvalAttempt(node_id=node_id, max_es=max_es)
         try:
-         async with limiter:
-          with self.tracer.span("evaluate", new_trace=True, node_id=node_id) as sp:
-            events_at_start = self.store.read_all()
-            state = fold(events_at_start)
-            node = state.nodes.get(node_id)
-            # The dispatcher checks this before and after resource admission, but _evaluate is also a
-            # defensive public seam used by recovery/tests. An operator Card drop that predates this
-            # worker must close the pending lifecycle at zero cost; the watcher below intentionally
-            # considers only post-start events so it can charge genuinely consumed compute.
-            prestart_stop = getattr(self, "_skip_if_aborted", None)
-            if node is not None and callable(prestart_stop) \
-                    and prestart_stop({"node_id": node_id}, state):
-                return
-            # A batch is selected from an earlier fold. Before this worker actually starts, reset
-            # (especially implement/propose), abort, tombstone, pause or finish may have won. Never
-            # evaluate blank/not-yet-rebuilt code or terminalize a superseded lifecycle.
-            if (node is None or node.status is not NodeStatus.pending or node.tombstoned
-                    or node.id in state.aborted_nodes or node.rerun_from is not None
-                    or state.paused or state.finished or state.stop_requested):
-                return
-            # The one gate that keeps a speculative miss provably free: no unconfirmed prediction may
-            # cross into the sandbox. See `_assert_speculative_selection_confirmed`.
-            self._assert_speculative_selection_confirmed(state, node)
-            generation = node.attempt       # immutable identity of THIS worker's node lifecycle
-            # ...and published to the containment handler at the top, which has no other way to name
-            # the lifecycle it is closing. Re-folding there would read whatever generation is CURRENT
-            # at failure time, which after a concurrent reset is a different lifecycle than the one
-            # that raised — and a terminal on the wrong generation is worse than none.
-            _contained_generation[0] = generation
-            # The trace is opened before the fold above so pre-start exits remain observable. Once
-            # this worker has an exact lifecycle, stamp the root; the span index uses that root receipt
-            # to keep reset attempts disjoint while every nested generation/tool stays in this trace.
-            sp.set("generation", generation)
-            start_seq = events_at_start[-1].seq if events_at_start else -1
-            sp.set("operator", node.operator)
-            # The dispatcher owns this reservation for the complete node lifecycle. Keeping the same
-            # devices across every inline repair/retry prevents a repaired process from jumping onto a
-            # sibling's GPU; the dispatcher releases it exactly once in its worker `finally`.
-            _resource_reservation = self._eval_resource_reservation(node_id, generation)
-            # The dispatcher registered this reservation under its ADMISSION-time generation, but
-            # `generation` here is node.attempt from a fresher fold. An eval-stage node_reset landing in
-            # that window (attempt+1, still pending, rerun_from None) passes the prestart guard above and
-            # misses the current-generation lookup — and `_resource_eval_env(None)` would yield an
-            # UNPINNED env that sees every sibling's GPU. If the dispatcher still holds this node's
-            # reservation under the superseded key, fail closed (return without a terminal) so the
-            # dispatcher re-admits the reset lifecycle under its current generation and re-pins it,
-            # instead of degrading to whole-box visibility. The presence of a stale-generation reservation
-            # is the authoritative signal that this node was dispatcher-admitted — a never-admitted
-            # recovery/test call holds no stale key and is exempt. Gate on that reservation, NOT on the
-            # live mutable `_eval_parallel`: a Strategist/operator that lowers eval_parallel to 1 mid-batch
-            # (while pinned siblings are still draining) must not flip this into an unpinned launch. A
-            # serial re-admit of a whole-pool-unpinned node is harmless (it just re-runs unpinned).
-            if (
-                _resource_reservation is None
-                and self._eval_reservation_under_other_generation(node_id, generation)
-            ):
-                return
-            try:
-                eval_env = self._resource_eval_env(
-                    _resource_reservation, inherit_host=True)
-            except GpuPinUnenforceable as exc:
-                # an explicit positive declaration on a zero-device inventory is a
-                # fail-closed, zero-compute terminal — never an unpinned launch and never an endless
-                # resource wait. The dispatcher's finally still releases/clears the marker exactly once.
-                async with self._write_lock:
-                    self.store.append(EV_NODE_FAILED, {
-                        "node_id": node_id, "generation": generation,
-                        "error": str(exc)[:400], "reason": "gpu_unavailable",
-                        "eval_seconds": 0.0})
-                    self._maybe_crash()
-                return
-            # A6 proxy/predictive scoring: cheaply predict this candidate's metric from the observed
-            # history and skip a full eval for the doomed bottom fraction (cost lever). Deterministic
-            # + replay-safe: the skip is recorded as node_failed reason="proxy_skipped" and a
-            # proxy_scored audit event. OFF by default (kill_fraction=0 -> never skips).
-            if self.proxy_scorer is not None and self.proxy_kill_fraction > 0:
-                # The pair, not the point estimate (doc 52 row 17): the kill abstains on a candidate
-                # whose nearest evaluated neighbour is beyond the explored region's own radius, and
-                # the row records the distance and the abstention beside the score (additive).
-                scored = self.proxy_scorer.score_with_uncertainty(state, node)
-                if scored is not None:
-                    pred, nearest = scored
-                    abstained = self.proxy_scorer.abstains(state, node, nearest)
-                    skip = self.proxy_scorer.should_skip(state, node, pred, nearest)
-                    sp.set_many(proxy_score=round(pred, 6), proxy_skipped=skip,
-                                proxy_nearest=round(nearest, 6), proxy_abstained=abstained)
-                    async with self._write_lock:
-                        self.store.append(EV_PROXY_SCORED,
-                                          {"node_id": node_id, "generation": generation,
-                                           "score": round(pred, 6), "skipped": skip,
-                                           "nearest": round(nearest, 6), "abstained": abstained})
-                        if skip:
-                            self.store.append(EV_NODE_FAILED, {
-                                "node_id": node_id, "generation": generation,
-                                "error": "skipped by proxy scorer (predicted in the doomed bottom fraction)",
-                                "reason": "proxy_skipped", "eval_seconds": 0.0})
-                            self._maybe_crash()
-                    if skip:
+            async with limiter:
+                with self.tracer.span("evaluate", new_trace=True, node_id=node_id) as sp:
+                    a.sp = sp
+                    if await self._eval_admit(a) is PHASE_RETURN:
                         return
-            # DURABLE EVAL-START BOUNDARY (events/types.py::EV_NODE_EVAL_STARTED). This is the LAST
-            # instant at which "this build never ran" is still true: every line below writes a node
-            # workdir and then executes the node's own code. Both zero-compute exits above (an
-            # unenforceable GPU pin, a proxy skip) have already terminalized, so the boundary is never
-            # stamped on a lifecycle that really did cost nothing.
-            #
-            # WHY AN EVENT, weighed against the alternatives. The log records evaluation cost only at
-            # the TERMINAL (`events/replay.py::_charge_terminal_cost`) and appends `stage_finished`
-            # rows inside that terminal's own write-lock block, so a process killed mid-training left
-            # a node byte-identical to one that was never dispatched. The only thing that told them
-            # apart was the IN-MEMORY `eval_inflight` set, which a resumed process starts empty — so
-            # after a crash the refund fired on 40 GPU-minutes of real work. Persisting that set needs
-            # a durable write anyway; a sidecar file is not a function of the log (invariant #4/#5);
-            # and no existing durable fact is written between dispatch and the sandbox. Refusing every
-            # refund whose lifecycle is unprovable is the remaining option and IS what happens for a
-            # node without `eval_start_boundary` — this event is what lets a node that CAN prove it
-            # keep the refund the calibration numbers depend on.
-            #
-            # Every current engine-created lifecycle carries `eval_start_boundary`. A speculative
-            # card session normally wrote the receipt at admission in the MAIN task (keeping it out
-            # of the election's CAS window); ordinary dispatch, recovery, the legacy dispatcher and
-            # direct library callers reach this funnel backstop. The one durable row therefore both
-            # protects speculative budget accounting and moves the public activity projection from
-            # "waiting for a slot" to "evaluating" before sandbox work begins.
-            async with self._write_lock:
-                self._record_eval_start_boundary(node)
-            workdir = self.run_dir / "nodes" / f"node_{node_id}"
-            # Phase 2 stage-scoped re-run: REUSE the existing workdir (earlier stages' artifacts — the
-            # checkpoint `train` wrote) instead of re-seeding it, which would wipe them.
-            _superseded_marker = workdir / ".looplab-superseded"
-            def _mark_superseded_workdir() -> None:
-                try:
-                    workdir.mkdir(parents=True, exist_ok=True)
-                    _superseded_marker.write_text(str(generation), encoding="ascii")
-                except OSError:
-                    import shutil
-                    shutil.rmtree(workdir, ignore_errors=True)
-            # Stage reuse is the ONE path that evaluates a workdir it did not just build, so it must
-            # prove the bytes on disk are the manifest the folded node claims. `node_repaired` is
-            # appended BEFORE the repaired files are written (both under the same attempt), so a
-            # process death in that window leaves state claiming the repair while the workdir still
-            # holds the pre-repair source. A later stage-scoped reset then sets `rerun_stage` without
-            # any superseded marker (only the live process writes one, and it died), and reuse would
-            # skip materialization and score the OLD bytes as if they were the repair.
-            # The stamp closes that: it is written only after the files are on disk, so a crash in the
-            # gap leaves it naming the previous manifest and reuse is refused. Fail-closed by
-            # construction — a missing/unreadable/mismatched stamp just forces the full materialize
-            # that every other entry path already does, costing artifacts, never correctness.
-            _manifest_stamp = workdir / ".looplab-manifest"
-            def _stamp_workdir(n) -> None:
-                try:
-                    _manifest_stamp.write_text(_workdir_manifest_digest(n), encoding="ascii")
-                except OSError:
-                    pass          # unstamped => the next reuse check fails closed and rematerializes
-            def _workdir_matches(n) -> bool:
-                try:
-                    return _manifest_stamp.read_text(encoding="ascii").strip() == _workdir_manifest_digest(n)
-                except (OSError, ValueError):
-                    return False
-            _reuse = bool(node.rerun_stage and workdir.exists()
-                          and not _superseded_marker.exists() and _workdir_matches(node))
-            if not _reuse:
-                self._materialize(node, workdir)    # seed tree -> node edits -> task assets
-                _stamp_workdir(node)                # the workdir now IS this manifest
-            # THE BUILD DELTA, here rather than on the eval-start receipt: the question is about
-            # BYTES ON DISK, and until the line above there are none. Fold-ignored and diagnostic,
-            # so a concurrent eval task may append it (invariant #1); best-effort throughout, so it
-            # can never cost this node its evaluation.
-            self._record_node_build_delta(node)
-            if not _reuse:
-                # A stage-scoped re-run whose workdir was GONE has nothing to reuse — the re-seed just
-                # wiped any artifacts. Skipping earlier stages now would run the restarted stage against
-                # MISSING inputs, so drop the start_stage and re-run the FULL pipeline instead.
-                if node.rerun_stage:
-                    node.rerun_stage = None
-            # Bind mutable TensorBoard/metric sidecars to this exact lifecycle before launching any
-            # user code.  A reset can reuse the node directory (stage restart), so the serving layer
-            # also filters points by this start time instead of relabelling an older curve.
-            try:
-                begin_metrics_attempt(workdir, generation)
-            except Exception:  # noqa: BLE001 - telemetry must never block the evaluation itself
-                pass
-            # Hybrid crash repair: each attempt runs the eval (with the mid-eval abort watcher) and,
-            # if it CRASHES, the agent triages it and may repair the code IN PLACE and re-run — all
-            # within this one node (no new tree node, no max_nodes spent). Exactly ONE terminal event
-            # (node_evaluated/node_failed) is emitted at the end so first_terminal budget accounting
-            # and resume re-entry are intact; only NON-terminal `node_repaired` events are written
-            # mid-loop.
-            #
-            # WHAT STOPS THE LOOP (redesigned 2026-08-05 — see the ledger note further down for what
-            # this replaced and why). Two things, in this order:
-            #   1. THE TRIAGE MODEL, consulted once per attempt with this node's whole repair history
-            #      (`repair_log`). Its `abandon` is the primary stop: the model that reads the failure
-            #      is the only participant that can say "I no longer know how to fix this". This costs
-            #      no additional LLM calls — the loop already made exactly one triage call per attempt
-            #      to decide repair-vs-reject; it now decides repair-vs-STOP on better evidence.
-            #   2. `inline_repair_attempts`, a hard operator backstop (0 = no operator cap, which now
-            #      means `_UNLIMITED_REPAIR_CEILING` rather than nothing — see that constant). It
-            #      exists because the judge can be wrong in the expensive direction, and because a
-            #      judge that cannot ANSWER must not silently mean "keep going" (those verdicts are
-            #      `unanswerable`/`unreadable` and are handled below, not here).
-            #
-            # AND IT IS A LEDGER, NOT A PROCESS COUNTER. Both of those bounds — the budget and the
-            # history the judge reads — are seeded from the DURABLE `node_repaired` rows, so a resume
-            # continues this node's repair chain instead of starting a new one on top of it. See
-            # `_durable_repair_ledger` for the four-resume measurement that made it necessary.
-            import threading
-            _repair_cap = _effective_repair_cap(self._inline_repair_attempts)
-            attempt, _durable_rows, unparseable_repairs = _durable_repair_ledger(
-                events_at_start, node_id, generation)
-            # Seeded from the log for the same reason `attempt` is: a bound that a resume refunds is
-            # not a bound. `_MAX_DEP_ROUNDS` exists so an offline or misnamed package cannot loop,
-            # and `inline_repair_retrain_cap` is a guard on GPU hours — both were process-local.
-            dep_rounds = _durable_dep_rounds(events_at_start, node_id, generation)
-            # …and the COST floor's own seed, for the same reason and from the same log. See
-            # `_durable_repair_seconds` / `repair_judgment.repair_redone_work_stop`: this is the
-            # bound that reaches the repair chains `inline_repair_retrain_cap` structurally cannot
-            # charge — the ones that re-run a stage without discarding a completed one.
-            prior_repair_seconds = _durable_repair_seconds(events_at_start, node_id, generation)
-            # THE LICENSE IS PRICED AT THE LARGEST DECLARATION THE CHAIN HAS SEEN, because the SPEND
-            # it is compared against was earned under all of them. `chain_seconds` accumulates
-            # wall-clock spent under the PRE-repair manifest, while the pipeline cost is re-resolved
-            # from the POST-repair one each attempt — so a repair that legitimately SHRINKS its
-            # declared stage timeouts (right-sizing after an epoch cut) retroactively re-priced
-            # seconds that were inside the license when they were spent, leaving the fix exactly ONE
-            # eval and, if that attempt failed for any reason, a terminal charging old-declaration
-            # work at the new rate. A high-water mark cannot be gamed upward past the operator's own
-            # number: `stage_budget_refusal` already refuses a declaration above
-            # `eval_spec_time_budget`, so the ceiling on this maximum is the budget the operator set.
-            # RESIDUAL, stated rather than hidden: it is per-PROCESS. A resume re-seeds it from the
-            # manifest it resumes with, which is the same declaration the pre-fix code used for the
-            # whole chain — so a resumed chain is never priced looser than before, only a live one
-            # is priced honestly.
-            chain_pipeline_s = 0.0
-            total_eval = 0.0                 # summed subprocess wall-clock across all attempts (cost)
-            async def _record_superseded() -> None:
-                async with self._write_lock:
-                    self.store.append(EV_NODE_FAILED, {
-                        "node_id": node_id, "generation": generation,
-                        "error": "superseded by node reset", "reason": "superseded",
-                        "eval_seconds": total_eval})
-                _mark_superseded_workdir()
-            triage_outcome = None            # ("abandon"|"reject_idea", rationale) for the terminal event
-            # THE SALVAGED METRIC, when this node's eval failed for something that is not "the
-            # metric is absent" and the operator's own declared reader can still find the value the
-            # eval produced. Loop-local because salvage is decided per ATTEMPT and consumed by the
-            # ONE terminal below — it never becomes a second terminal (invariant #2).
-            salvaged = None
-            salvage_cause_repaired = False
-            # …and the OTHER outcome of the same block: the node whose repaired declaration then
-            # PASSED its artifact re-check, which is not a salvage at all (F1e). Its provenance
-            # record carries no violation and is consumed by the same single terminal; the two are
-            # mutually exclusive by construction — `salvaged` is cleared the moment this is set.
-            declaration_repaired = None
-            err = ""
-            reason = "crash"
-            # WHO CHOSE `reason`, and what the ENGINE's own answer was — the two columns that keep
-            # the durable rows honest now that a model may re-read three of the twelve
-            # classifications (`triage.py`'s fact/reading split). `_engine_reason` is set beside
-            # every classification and is never overwritten by a judge, so the authenticated column
-            # survives on the row whatever the model said and any audit can still be run against it.
-            # Both default to the engine, which is what every path that never reaches a judge —
-            # no `unified_agent`, a dead transport, an unreadable verdict, a floor stop, a reason the
-            # operator excluded from `inline_repair_reasons` — leaves them at.
-            _reason_source = REASON_SOURCE_ENGINE
-            _engine_reason = reason
-            # WHERE THE DIAGNOSTICIAN LOOKED, or None on every path that never consulted one. Both
-            # are OMITTED from a durable row when None rather than written empty: an absent key
-            # means "nobody was asked", which is deliberately not the same fact as "asked and cited
-            # nothing" (`failure_diagnosis.EVIDENCE_SOURCE_NONE`).
-            _evidence = None
-            _evidence_resolved = None
-            # …and the ACCOUNT plus the trail behind it, on the same rule. `None`/`None` and not
-            # `""`/`[]`, deliberately: an empty summary and an empty list are a diagnostician that
-            # was asked and wrote nothing down, which is a real and different answer from one that
-            # was never asked. The durable rows omit the keys in both cases and an old row omits
-            # them too — the reader-side default (invariant #5) is "nobody looked".
-            _summary = None
-            _findings = None
-            # THE EVIDENCE THE JUDGE DECIDES ON: this node's repair history, newest last. One row per
-            # attempt — what failed, what the fix claimed it would do, and which files it actually
-            # touched. Rows made in THIS process are appended from loop locals (every field is already
-            # in hand); rows from earlier processes are rebuilt from the durable `node_repaired`
-            # events above, because `state` is the fold taken at eval START and `RunState` keeps only
-            # the latest code, never the trajectory.
-            #
-            # The judge is handed the trajectory precisely so it can tell "moving" from "circling",
-            # and a resume used to hand it an empty history for a node with eight durable repairs —
-            # the same defect as the process-local budget, seen from the other side: the model was
-            # asked to judge a chain while being shown none of it, and answered `repair` because
-            # nothing it could see said otherwise.
-            #
-            # These three columns are chosen against the two ways the loop failed. A repair going in
-            # CIRCLES is visible as a repeating error next to repeating changed-file sets — which is
-            # what the deleted signature counter tried to measure with a regex, and which a reader of
-            # the actual text does not need a regex for. A repair making real PROGRESS is visible as a
-            # moving failure next to fixes that touch different code. The model gets the trajectory,
-            # not a scalar someone else already reduced it to.
-            repair_log: list[dict] = list(_durable_rows)
-            # A repair that returned something that is not Python at all. Counted directly rather than
-            # inferred from the SyntaxError it produces: the error text can vary per attempt (a
-            # provider request id), the FACT cannot. See `_UNPARSEABLE_REPAIR_LIMIT`. Durable for the
-            # same reason as the budget: it bounds a per-NODE condition (a provider answering with
-            # prose), so a process-local count let a resume grant three more truncations.
-            # `unparseable_repairs` is seeded from the ledger above.
-            # Best pipeline depth any attempt has reached (stages passed/reused before the failure) —
-            # surfaced to the judge as the other, non-textual evidence that a repair did real work.
-            best_depth = -1
-            # Multi-stage reuse across repair attempts: `next_start` is the stage to run FROM on the next
-            # eval — _UNSET on the first eval (derives node.rerun_stage), then set by the safe-reuse
-            # predicate after each repair (a stage name = reuse the completed earlier stages, e.g. skip
-            # re-train when only the score script was fixed; None = a full re-run). `full_retrains` counts
-            # the EXPENSIVE full re-runs a repair forced, bounded by inline_repair_retrain_cap.
-            next_start = _UNSET
-            full_retrains = _durable_full_retrains(events_at_start, node_id, generation)
-            # ROLLBACK state, both halves durable for the same reason the budget above is. `rolled_to`
-            # is the set of suspects already spent (at most one re-run per stage per node);
-            # `rollback_refusal` carries the engine's answer to a REFUSED request forward into the next
-            # repair prompt, because a Developer told nothing simply re-asserts the same guess — the
-            # thrash the rungs exist to stop would then just move up one level.
-            rolled_to = _durable_rollbacks(events_at_start, node_id, generation)
-            rollback_refusal = ""
-            while True:
-                _t0 = time.time()
-                # repair/retry attempts reuse the workdir and sandbox stage logs append.
-                # When anything will READ those logs, snapshot every existing one before this attempt
-                # starts, so no reader can rank, classify or diagnose from prior-attempt bytes. Keep
-                # the all-off path free of extra filesystem work (`off == today`).
-                _eval_spec = getattr(self, "_eval_spec", None)
-                # WHO WILL READ THESE LOGS, and therefore whether this attempt owes them a "before".
-                # A named rule (`train_monitor.needs_log_snapshot`) rather than an inline `or`,
-                # because its THIRD reader — the repair triage below — reads only after the attempt
-                # has already died, so the snapshot has to be taken on behalf of something that has
-                # not asked for anything yet. See that function for the whole argument.
-                _watching_logs = needs_log_snapshot(self, _eval_spec)
-                _log_snapshot = snapshot_training_logs(workdir) if _watching_logs else None
-                # Which log each phase of THIS attempt writes. Both watchdogs live across the WHOLE
-                # eval — setup, every stage, and the ALWAYS-appended `score` stage — so without the
-                # resolved pipeline they can only guess whose bytes they are reading, and the freshest
-                # `*.log` is `setup.log` during a pip install and `score.log` after the training has
-                # already SUCCEEDED. `_resolved_stages` re-resolves exactly what `_run_eval` will run
-                # ([] = the single-command path, whose `eval.log` IS the training log).
-                _log_plan = eval_log_plan(self._resolved_stages(node, workdir)) if _watching_logs else None
-                # Mid-eval intervention: a watcher polls while the eval runs in a worker thread. An
-                # exact node lifecycle mutation or operator drop of THIS node's Card sets the cancel
-                # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). The pre-eval
-                # skip only catches not-yet-started nodes — this kills a running one.
-                cancel = threading.Event()
-                # The watcher's verdict, handed back through a dict because a sibling task in the
-                # group cannot rebind this frame's locals (see `_watch_for_intervention`). Read
-                # into `aborted`/`superseded`/`operator_card_dropped` once the group has closed;
-                # nothing inside it consults them.
-                _seen: dict = {}
-                kill_signal: dict = {}       # filled by the training monitor if it kills a broken run (Phase 3)
-                # The Card identity this worker can be dropped through, read while `node` is still
-                # the fold this attempt started from — it is not rebound until after the group.
-                _card_id = getattr(getattr(node, "idea", None), "card_id", None)
-                async with anyio.create_task_group() as _tg:
-                    _tg.start_soon(self._watch_for_intervention, node_id, generation, start_seq,
-                                   _card_id, cancel, _seen)
-                    # Training-log monitor (ON by default in the product Settings since 2026-08-04;
-                    # still off in a bare `Engine(...)`/`EngineOptions`): a sibling task that tails this eval's live
-                    # training log on a timer while it runs in the worker thread, asks the Developer to
-                    # judge its health, and records the verdict (advisory unless kill is enabled).
-                    # Cancelled with the eval by `_tg.cancel_scope.cancel()` below. Gated on the
-                    # command-eval path (`_eval_spec`): only those write the per-stage `<stage>.log` the
-                    # monitor tails — the solution.py path (toy/dataset) has no live log to watch.
-                    if getattr(self, "_train_monitor", False) and getattr(self, "_eval_spec", None):
-                        _idea = getattr(node, "idea", None)
-                        _rationale = (getattr(_idea, "rationale", "") or "")[:400] if _idea else ""
-                        _mkey = ((self._eval_spec.get("metric") or {}).get("key", "metric")
-                                 if isinstance(self._eval_spec, dict) else "metric")
-                        _mon_ctx = f"Optimizing metric {_mkey!r}." + (
-                            f" Experiment: {_rationale}" if _rationale else "")
-                        _tg.start_soon(self._monitor_training, node_id, generation, workdir, cancel,
-                                       _mon_ctx, kill_signal, _log_snapshot, _log_plan)
-                    # ASHA live-curve rank watchdog (ON by default in the product Settings since
-                    # 2026-08-04; still off in a bare `Engine(...)`): a sibling task that reads the live
-                    # log's latest INTERMEDIATE metric and ranks it against finished siblings; advisory
-                    # unless asha_live_kill. Same command-eval gate (needs a live log + the metric spec).
-                    if getattr(self, "_asha_live", False) and isinstance(getattr(self, "_eval_spec", None), dict):
-                        _mspec = self._eval_spec.get("metric") or {}
-                        _tg.start_soon(self._monitor_asha, node_id, generation, workdir, cancel,
-                                       _mspec, state.direction, kill_signal, _log_snapshot, _log_plan)
-                    # The lifecycle reservation selected by the dispatcher stays unchanged through this
-                    # retry. CUDA_VISIBLE_DEVICES contains physical ids (logical→physical remap), while
-                    # an unspecified serial eval keeps eval_env=None and sees the whole box as before.
-                    try:
-                        # CODEX AGENT: an evaluator may finish paid/external side effects here, but its
-                        # terminal event is appended much later. A process death in that gap makes resume
-                        # run the evaluator again. Persist an attempt-scoped outcome/outbox before exposing
-                        # success, or require a reconciliable idempotency key at the evaluator boundary.
-                        res = await anyio.to_thread.run_sync(
-                            self._run_eval, node, str(workdir), eval_env, None, cancel, next_start
-                        )
-                    except GpuPinUnenforceable as exc:
-                        # Fail-closed device pin the Docker daemon/runtime cannot enforce. Terminalize
-                        # THIS node instead of letting the raise cancel every in-flight sibling eval in
-                        # the batch and re-crash deterministically on every resume; the reservation is
-                        # still released by the dispatcher's finally.
-                        cancel.set()
-                        _tg.cancel_scope.cancel()
-                        # Cancelling the task-group scope cancels THIS host task at its next checkpoint,
-                        # and the write-lock acquisition below IS such a checkpoint. Without a shield the
-                        # pending CancelledError preempts the append: the promised node_failed is skipped,
-                        # the task group swallows its own scope's cancellation, and execution falls through
-                        # to `ok = (res.metric ...)` with `res` still unbound (UnboundLocalError — NO
-                        # terminal written, and a deterministic re-crash on every resume, exactly what this
-                        # handler exists to prevent). Shield the terminal so scope cancellation cannot
-                        # preempt it; the acquire is bounded (the watcher/monitor siblings only briefly
-                        # read or append under the same lock and are already being cancelled).
-                        with anyio.CancelScope(shield=True):
-                            async with self._write_lock:
-                                self.store.append(EV_NODE_FAILED, {
-                                    "node_id": node_id, "generation": generation,
-                                    "error": str(exc)[:400], "reason": "gpu_unpinnable",
-                                    # Add THIS attempt's elapsed (`time.time() - _t0`) — the normal path
-                                    # accumulates it only after the task group exits (line 330), which this
-                                    # early return skips, so recording the bare accumulator would drop the
-                                    # Docker/runtime probe + setup cost from the immutable eval budget.
-                                    "eval_seconds": round(total_eval + (time.time() - _t0), 3)})
-                                self._maybe_crash()
-                        return
-                    cancel.set()                  # eval finished on its own …
-                    _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
-                # Settle the watcher's ONE verdict now the group has closed. Same three questions the
-                # watcher used to answer by assigning three `nonlocal`s; asking them here keeps the
-                # branch order below (`superseded` -> `aborted` -> watchdog kill) unchanged.
-                _intervention = _seen.get("kind")
-                superseded = _intervention == "reset"
-                operator_card_dropped = _intervention == "card_drop"
-                aborted = _intervention in {"abort", "card_drop"}
-                # THIS attempt's own eval wall-clock, captured beside the cumulative one because the
-                # durable cost ledger needs the per-attempt number: `total_eval` restarts at 0 in a
-                # resumed process, so no single `node_repaired` row could carry a running total that
-                # survives re-entry (`_durable_repair_seconds` sums the rows for exactly that
-                # reason). Read here rather than at the append below, where `time.time() - _t0` has
-                # since accumulated the triage and repair LLM calls, which are not eval seconds.
-                attempt_eval_seconds = round(time.time() - _t0, 3)
-                total_eval = round(total_eval + (time.time() - _t0), 3)   # cumulative eval cost (#2)
-                # STALL SALVAGE: a stage the stall-watchdog tree-killed AFTER it had already printed its
-                # metric (a completed train+eval that only hung on teardown — a distributed finalize
-                # deadlock / wedged CUDA op) still counts: the metric is real, the non-zero exit is only
-                # the kill. Self-gating — `res.metric is not None` on a stall means the value WAS emitted
-                # before the silence. NOT for a real deadline timeout (that is still mid-training).
-                ok = (res.metric is not None and not res.timed_out
-                      and (res.exit_code == 0 or getattr(res, "stalled", False)))
-                if superseded:
-                    # The reset discards this lifecycle's metric/state, not compute already spent. A
-                    # stale-generation terminal is fold-budget-only: replay rejects its state fields
-                    # but charges eval_seconds once for this immutable generation.
-                    await _record_superseded()
-                    return                         # the reset owns the next lifecycle generation
-                if aborted and not ok:                       # killed mid-eval by the operator (and the
-                    async with self._write_lock:             # eval didn't already finish cleanly first)
-                        self.store.append(EV_NODE_FAILED, {
-                            "node_id": node_id, "generation": generation,
-                            "error": (
-                                "Card dropped by operator (killed mid-eval)"
-                                if operator_card_dropped
-                                else "aborted by operator (killed mid-eval)"
-                            ),
-                            "reason": "card_dropped" if operator_card_dropped else "aborted",
-                            "eval_seconds": total_eval})
-                        self._maybe_crash()
-                    return
-                # Set only by a REPAIRABLE watchdog stop (see just below); `None` on every other
-                # path, including the terminal kill, which returns before anything reads it.
-                watchdog_reason, watchdog_err = None, ""
-                if kill_signal.get("kill") and not ok:       # a live watchdog tree-killed the run early
-                    # ONE terminal event; the watchdog names the reason so the fold/failure-reflection
-                    # knows WHY: the training monitor leaves it default ('monitor_broken'), the ASHA
-                    # watchdog sets terminal_reason='asha_underperforming'. The advisory record
-                    # (EV_TRAIN_MONITOR_ALERT / EV_ASHA_RANK) already ran live; replay reconstructs the
-                    # node from this terminal and never re-invokes the watchdog.
-                    _kreason = str(kill_signal.get("terminal_reason") or "monitor_broken")
-                    if _kreason in self._inline_repair_reasons:
-                        # A stop the watchdog attributed to the IMPLEMENTATION, not to the idea.
-                        # It does NOT terminalize here: it falls through into the same failure
-                        # handling every other repairable reason takes, so the Developer gets its
-                        # own code back with the diagnosis attached and the experiment is retried
-                        # once the bug is fixed. Nothing about the repair machinery needed to
-                        # change — `cancel` and `kill_signal` are per-ATTEMPT (built inside this
-                        # loop), so the retry starts from a clean signal, and the repair critic,
-                        # the attempt cap and the redone-work floor all bound it exactly as they
-                        # bound a crash. A reason the operator has narrowed OUT of
-                        # `inline_repair_reasons` lands in the terminal below instead, which is the
-                        # same answer that setting gives every other failure class.
-                        watchdog_reason = _kreason
-                        watchdog_err = str(kill_signal.get("reason", ""))[:400]
-                    else:
-                        async with self._write_lock:
-                            self.store.append(EV_NODE_FAILED, {
-                                "node_id": node_id, "generation": generation,
-                                "error": ("live watchdog stopped the run early: "
-                                          + str(kill_signal.get("reason", ""))[:400]),
-                                "reason": _kreason, "eval_seconds": total_eval})
-                            self._maybe_crash()
-                        return
-                # THE PIPELINE RECORD, ONCE PER ATTEMPT — not once per NODE. Multi-stage eval
-                # (Phase 1): each stage's pass/fail lands BEFORE the terminal so the fold + trace show
-                # mine ✓ / train ✗, and a later stage-scoped re-run knows which stages already passed.
-                # Empty on the classic single-command eval, so that path appends nothing, as before.
-                #
-                # This used to be appended ONLY after the attempt loop, from the LAST attempt's `res`,
-                # and that made the log lie about every REPAIRED multi-stage node. Once the reuse
-                # predicate starts skipping a completed earlier stage, every later attempt reports it
-                # as `{"status": "reused", "exit_code": 0, "seconds": 0.0}` — so the ONE record the log
-                # ever received was the zero-work marker, and the fold's own defence against exactly
-                # that (`events/replay.py::_on_stage_finished`: "a reused marker must NOT clobber that
-                # attempt's REAL completion record ... else the node reads as if it trained in 0s") was
-                # VACUOUS, because the real record it protects was never written by anyone.
-                # `tests/test_events_replay.py::test_fold_reused_stage_marker_does_not_clobber_real_record`
-                # drove that guard from hand-built events, so nothing went red.
-                # Measured on runs/rubert-dr-0807: node 2 trained for ~6,900 s and its folded stage
-                # record read `train reused / exit 0 / 0.0 s`; node 0's Developer-declared `mine` stage
-                # ran four times (two crashes, then two successes) and read `mine reused / 0.0 s`.
-                # The replayable stage-state authority could not tell "this stage succeeded and its
-                # artifacts were reused" from "this stage never ran in this run at all", which is the
-                # difference between a healthy pipeline and a silently skipped one.
-                #
-                # One append per attempt is what the fold was always written to read, and the
-                # de-duplication rule stays THERE (last-wins by name, a real record beats a reused
-                # marker in either arrival order) rather than being re-derived here — a second,
-                # hand-synced copy of that rule in the writer is how the two would drift apart again.
-                # COST, stated because it is a real one: `stage_finished` is FOLDED, so under
-                # `eval_parallel > 1` these rows can move `speculation.py::_proposal_authority_seq` and
-                # discard a concurrently-prepared paid proposal (invariant 1). They could already do
-                # that — the terminal block appended the same rows from the same concurrent evals —
-                # what changes is the RATE, bounded by attempts x stages. Making them diagnostic
-                # instead is not available: the fold reads them.
-                async with self._write_lock:
-                    for _st in (res.stages or []):
-                        self.store.append(EV_STAGE_FINISHED,
-                                          {"node_id": node_id, **_st, "generation": generation})
-                if ok:
-                    break
-                # The WATCHDOG's reason wins over the exit-code classifier when it stopped this
-                # attempt: `res` is a tree-killed process (exit -9, no traceback), which
-                # `_failure_reason` reads as `oom`/`crash` — the exact conflation `FAILURE_REASONS`
-                # documents, and it would send the Developer to halve a batch size that was never
-                # the problem.
-                reason = watchdog_reason or _failure_reason(res)
-                # Re-stamped per ATTEMPT, beside the classification it describes: a chain whose
-                # third attempt is judged and whose fourth is not must not carry the third's
-                # attribution into the fourth's row.
-                _engine_reason, _reason_source = reason, REASON_SOURCE_ENGINE
-                # …and the diagnostician's citation with them, for the identical reason: a chain
-                # whose third attempt was diagnosed and whose fourth was not must not carry the
-                # third's evidence into the fourth's durable row. The SUMMARY and the findings are
-                # reset here for a sharper version of the same reason: a stale summary is an account
-                # of a DIFFERENT failure written in confident prose on this attempt's row, which is
-                # strictly worse than an absent one — a reader cannot tell it apart from a correct
-                # one, and that is exactly the property the summary is trusted for.
-                _evidence, _evidence_resolved = None, None
-                _summary, _findings = None, None
-                # The node's whole account of what went wrong — see `_eval_failure_text`, which is
-                # where the no-metric hint and the blank-stderr fallback now live.
-                err = self._eval_failure_text(res)
-                # …and what the RECORD keeps, which is wider on purpose. Bound here, beside `err`,
-                # so the two windows onto the same bytes are visibly siblings rather than one being
-                # discovered later at a write site. See `_durable_failure_evidence`.
-                err_evidence = self._durable_failure_evidence(res)
-                if watchdog_reason:
-                    # The diagnosis FIRST: it is the only part of this text that says what to
-                    # change, and the killed process's own tail says only that it was killed.
-                    err = (f"The live training watchdog stopped this run: {watchdog_err}\n"
-                           "It judged the cause to be the IMPLEMENTATION rather than the idea, so "
-                           "this is a repair, not a result. Fix what it named.\n\n" + err)
-                # METRIC SALVAGE. Asked HERE — after the eval has failed, before any repair is
-                # considered and long before the terminal — because this is the only point at which
-                # the answer can still change which terminal the node gets. `engine/metric_salvage.py`
-                # owns every rule; this is the call and its consequences.
-                #
-                # `_t0` is THIS attempt's wall-clock start, which is the freshness floor a FILE reader
-                # is held to: an artifact left by an earlier attempt in the deliberately-reused
-                # workdir is older than it, so it cannot be salvaged as this attempt's result.
-                #
-                # On a hit the loop BREAKS with `ok` true. It does not repair-and-re-evaluate, which
-                # is the whole point: the measured case cost 76 GPU-minutes and the number those
-                # minutes bought was already on disk. The CAUSE is still fixed — `_repair_salvaged_cause`
-                # commits the Developer's correction to the declaration through the ordinary
-                # `node_repaired` event, without paying for another evaluation to confirm it — so a
-                # salvaged node does not carry its broken manifest into its next attempt.
-                salvaged = self._salvage_eval_metric(res, reason, workdir, _t0)
-                if salvaged is not None:
-                    # THE GATES THAT QUALIFY A METRIC, applied to this one before anything downstream
-                    # can treat it as measured. `run_command_eval` runs the operator's constraints,
-                    # extra readers and drift cross-check in its TAIL, which every early return that
-                    # produces a salvageable failure skips — so a salvaged node used to reach the
-                    # terminal with `violations == []` and, under `metric_salvage="select"`, could
-                    # become champion with the operator's hard bounds never applied.
-                    _gates = self._salvage_qualifying_gates(salvaged, res, workdir, _t0)
-                    if _gates["drift"]:
-                        # The cross-reader could not corroborate the salvaged value. `drift` is in
-                        # NEVER_SALVAGED_REASONS precisely because re-admitting a metric the trust
-                        # gate discarded is worse than losing it — the same fact, found one step
-                        # later, gets the same answer. The divergence is recorded (the terminal block
-                        # appends `spec_drift` from `res.drift`) and the node keeps failing.
-                        res.drift = _gates["drift"]
-                        err = (err + "\n[metric salvage refused: the drift cross-check could not "
-                                     f"corroborate the recovered metric {salvaged.metric!r}]")
-                        salvaged = None
-                    else:
-                        res.metric = salvaged.metric
-                        res.violations = list(res.violations or []) + _gates["violations"]
-                        res.extra_metrics = {**(res.extra_metrics or {}),
-                                             **_gates["extra_metrics"]} or None
-                        # DECLARED, unambiguously: `salvage_gates` reads only `eval_spec["metrics"]`
-                        # — the operator's own reader specs, with `adapter` refused — so these are
-                        # the guarded channel even though the eval as a whole failed. Tagged at the
-                        # merge because that is where the source is known; the salvage helper
-                        # returns values, not authority.
-                        res.extra_metrics_provenance = {
-                            **(res.extra_metrics_provenance or {}),
-                            **{k: EXTRA_METRIC_DECLARED for k in _gates["extra_metrics"]}} or None
-                        ok = True
-                        node, attempt, salvage_cause_repaired, _fix = (
-                            await self._repair_salvaged_cause(
-                                node, state, workdir, generation, salvaged, err, reason, attempt,
-                                _stamp_workdir))
-                        # THE CONTRACT, RE-ASKED AGAINST THE CORRECTED DECLARATION (backlog F1e).
-                        # Measured on `rubertlite-dr-unified-v6` node 3: its stage exited 0, WROTE
-                        # its checkpoint, printed the number, and failed its declared artifact
-                        # contract because the declaration missed the testbed's composed
-                        # `<run_name>_<model>` suffix. The best number the run had (0.728113) then
-                        # carried a `metric_salvaged` violation, was excluded from
-                        # `feasible_nodes()`, and could neither become champion nor be bred from.
-                        # ONE node — see `metric_salvage.py`'s RE-CHECK section for why this is
-                        # deliberately not a claim about any operator.
-                        #
-                        # The metric was never actually unmeasured: the pipeline DID write the
-                        # artifact, and the fix above has just corrected the sentence that named it.
-                        # So the CHECK is re-asked — never the stage, which is the whole economy of
-                        # this design — and if it passes the node is recorded as MEASURED. It is
-                        # asked HERE, before the terminal constitutes the salvage, so a node that
-                        # passes carries no `metric_salvaged` violation, no salvage provenance and
-                        # no `salvaged_error`: it never enters the salvage path at all.
-                        # `metric_salvage.py`'s RE-CHECK section owns every admission rule, and what
-                        # the promotion does NOT prove is written down there too.
-                        declaration_repaired = self._recheck_repaired_contract(
-                            res, node, workdir, salvaged, _fix, err)
-                        if declaration_repaired is not None:
-                            # NOT a salvage. `res.metric` and the qualifying gates' violations stay
-                            # exactly as computed above — a re-checked contract says nothing about
-                            # the operator's CONSTRAINTS, which still ran and still bind.
-                            salvaged = None
-                        break
-                # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
-                # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
-                # agent can reject the idea. This is what lets torch/XGBoost/CatBoost (e.g. a GRU
-                # model) run on a fresh box instead of dying as `idea_rejected`. Bounded by
-                # _MAX_DEP_ROUNDS + the `_dep_attempted` cache; does NOT consume a repair attempt (env
-                # prep is not a code fix), and the unchanged node is simply re-evaluated.
-                if (self._auto_install_deps and reason == "crash" and dep_rounds < _MAX_DEP_ROUNDS):
-                    installed = await anyio.to_thread.run_sync(self._prepare_env, res.stderr)
-                    if installed:
-                        dep_rounds += 1
-                        async with self._write_lock:
-                            self.store.append(EV_DEPS_INSTALLED, {
-                                "node_id": node_id, "generation": generation,
-                                "packages": installed, "round": dep_rounds,
-                                "resolved": self._drain_dep_receipts(installed)})
-                        continue   # re-run now that the library is present (no repair attempt spent)
-                # Eval-budget stop: the inline-repair loop re-runs FULL evals with no budget check
-                # between attempts — the loop-top / per-eval guards only see `total_eval_seconds` from
-                # TERMINAL events, and no terminal is emitted mid-repair, so a node can overshoot the
-                # eval budget by multiples inside ONE node. Abandon once this node's cumulative eval
-                # time would cross the ceiling.
-                # RE-FOLD before comparing. `state` is the fold taken at eval START, so under
-                # eval_parallel>1 every terminal a sibling appended since this worker began is
-                # invisible to it and the "cumulative ceiling" undercounts run-wide
-                # total_eval_seconds — the repair loop kept re-running full evals well past
-                # max_eval_seconds whenever siblings burned the remaining budget mid-loop. This is
-                # invariant 4 (never carry derived state across loop iterations); one fold is cheap
-                # next to the full eval it is guarding.
-                if max_es is not None:
-                    spent = fold(self.store.read_all()).total_eval_seconds
-                    if spent + total_eval >= max_es:
-                        triage_outcome = ("abandon", "eval budget exhausted during inline repair")
-                        break
-                # Pipeline depth reached by THIS attempt (stages passed/reused before the failure).
-                # Non-textual evidence of forward progress, handed to the judge alongside the error
-                # trajectory: a node whose failure keeps moving to a LATER stage is visibly working,
-                # however similar two error strings look.
-                _depth = len([s for s in (res.stages or [])
-                              if isinstance(s, dict) and s.get("status") in ("ok", "reused")])
-                best_depth = max(best_depth, _depth)
-                # ONE BUDGET, AND IT IS DURABLE. `inline_repair_attempts` bounds the repairs this node
-                # may make, full stop; `attempt` is the count of durable `node_repaired` rows for this
-                # lifecycle, so a resume continues the chain rather than restarting it. 0 still means
-                # "no OPERATOR cap" (what an existing run resumes with) and is settled to the engine's
-                # own `_UNLIMITED_REPAIR_CEILING` by `_effective_repair_cap` — read that constant for
-                # what an operator with 0 in their snapshot gets and why it is not simply 12.
-                #
-                # It used to be two: an `environment` ledger for repairs that only reconciled the code
-                # with the installed libraries and an `experiment` ledger for everything else, each
-                # bounded by the same number (so 2N worst case). That is removed. A budget is about
-                # TIME AND MONEY — a re-eval costs the same whether the previous fix was a library
-                # migration or a modelling decision — and "whose fault was this repair" is not a
-                # question the operator asked. The real problem it was aimed at (six stale-dependency
-                # migrations eating the whole allowance before the node reached its research question)
-                # is answered by making the ONE budget big enough to cover the longest real chain on
-                # record and letting the judge stop early when there is nothing left to try, rather
-                # than by giving the loop a second allowance to spend.
-                # THE FLOOR, and since F8 that is all this is. It used to be the TRANSITION — an
-                # `attempt < 12` that decided "keep repairing vs give up and open a Debug node" — and
-                # a count cannot tell a chain converging on a fix from one rewriting the same line
-                # for an hour. `repair_judgment.repair_floor_stop` is the same bound with a truth
-                # table and a name, and the shipped default for `inline_repair_attempts` is now 0, so
-                # what normally binds is a judgment (the triage judge, the Developer's own "I do not
-                # know how to fix this", and the critic below) with this ceiling underneath.
-                floor_stop = repair_floor_stop(
-                    attempt=attempt, operator_cap=int(self._inline_repair_attempts or 0),
-                    ceiling=_UNLIMITED_REPAIR_CEILING)
-                # THE COST FLOOR, and it is the one that reaches the chains the retrain cap cannot.
-                # `_repair_forces_full_retrain` charges `inline_repair_retrain_cap` only for a
-                # repair that DISCARDS completed earlier-stage work, which is correct and is why a
-                # first-stage chain — v8 node 3 re-running an 82-minute `mine`, driven to 51 full
-                # evaluations and 0 charges with no judge wired — is charged nothing at all. So the
-                # same operator number is also spent in SECONDS, against what the task DECLARES one
-                # full pipeline costs. Read `repair_judgment.repair_redone_work_stop` for why this
-                # is not simply "charge the cap for a first-stage repair too" (measured: that
-                # abandons v8 node 3 one attempt before its `mine` stage passed).
-                #
-                # Checked SECOND so the message order matches `repair_floor_stop`'s own rule — an
-                # operator who spelled a count cap must read about the bound they set — and computed
-                # only when a cap is actually in force, so the `cap = 0` legacy path pays no stage
-                # resolution. The pipeline is re-resolved per attempt rather than hoisted: a repair
-                # may rewrite `looplab_stages.json`, so a hoisted number would license the chain
-                # against a pipeline the node no longer has.
-                if floor_stop is None and self._inline_repair and self._inline_repair_retrain_cap:
-                    # `eval_spec_time_budget` AND NOT the raw `timeout` key, which is the base
-                    # profile's number and not the one this eval runs under. A spec spelling
-                    # `timeout: 600` beside `profiles: {full: {timeout: 21600}}` gets 21600 from
-                    # `build_command` the moment a node selects that profile, so licensing the chain
-                    # against 600 charged a 6-hour attempt at a 10-minute pipeline's rate and fired
-                    # this floor on the FIRST failure — no repair ever attempted, and a terminal
-                    # quoting a pipeline cost 36x below the one the run actually declared.
-                    # `declared_pipeline_seconds`' own docstring already named the right number
-                    # ("`_eval_pipeline`'s resolved timeout"); this is the derivation the rest of the
-                    # engine quotes to both roles (docs/29 F1h), so the floor and the budget the
-                    # Developer sized its schedule against are now one number.
-                    from looplab.runtime.command_eval import eval_spec_time_budget
-                    _pipeline_s = declared_pipeline_seconds(
-                        self._resolved_stages(node, workdir),
-                        eval_spec_time_budget(self._eval_spec)
-                        if isinstance(self._eval_spec, dict) else None)
-                    # See `chain_pipeline_s` above: the spend is cumulative over every manifest
-                    # this chain has run, so the license must be too.
-                    try:
-                        chain_pipeline_s = max(chain_pipeline_s, float(_pipeline_s or 0.0))
-                    except (TypeError, ValueError):
-                        pass
-                    floor_stop = repair_redone_work_stop(
-                        chain_seconds=prior_repair_seconds + total_eval,
-                        pipeline_seconds=chain_pipeline_s,
-                        retrain_cap=int(self._inline_repair_retrain_cap or 0))
-                # Inline-repair gate: feature on, repairable reason, no floor reached, a Developer that
-                # can repair, and something to repair (whole-file code, multi-file edits, or a repo).
-                if (not self._inline_repair
-                        or reason not in self._inline_repair_reasons
-                        or floor_stop is not None
-                        or not callable(getattr(self.developer, "repair", None))
-                        or not (node.code or node.files or self._repo_spec)):
-                    if floor_stop is not None and self._inline_repair:
-                        # Which bound stopped it, said out loud. An operator whose snapshot says 0
-                        # never chose 50 and must not read a terminal that implies they did.
-                        triage_outcome = ("abandon", floor_stop)
-                    break
-                # THE STOP DECISION. One call per attempt — the same call the loop already made — now
-                # carrying this node's repair history, so the model is answering "given everything
-                # that has been tried here, do you still know what to change?" instead of judging a
-                # single traceback in isolation. `abandon` is its stop.
-                #
-                # `attempts_left` is now always a real number, including for a run with no operator
-                # cap: there IS a bound in that case (the ceiling), and the whole point of telling the
-                # judge is that "a stop and a cap-out are not the same surprise". Telling it `None` on
-                # exactly the runs that carry the loosest bound was the least useful place to be coy.
-                # THE LOG TOOLS THIS TRIAGE MAY LOOK WITH. Built HERE, at the call, because this frame
-                # is the only place that holds all three of the things `monitor_log_sources` needs —
-                # the workdir, THIS attempt's resolved log plan and the byte snapshot taken before it
-                # started — and because `_triage_crash` is instance-monkeypatched by tests, which must
-                # keep replacing the whole decision rather than half of a construction.
-                #
-                # `_log_snapshot` is what makes this safe to hand a role: it was taken before this
-                # attempt ran, so `attempt_byte_floor` puts the floor exactly where this attempt's
-                # bytes begin and a repairer diagnosing attempt N cannot read attempt N-1's curve as
-                # its own. That is the same floor `read_training_tail_raw` respects — one boundary,
-                # now three readers.
-                #
-                # OFF THE EVENT LOOP, and it is not a plain argument evaluation: `monitor_log_sources`
-                # GLOBS the workdir and then `open`s + probes each stage log for this attempt's byte
-                # floor. On the geesefs/S3 mounts a run root usually lives on, a directory lookup that
-                # misses costs 105-950 ms (`core/fence.py::_warm_directory_lookup` measured it), so
-                # building it inline stalled the whole engine loop — every concurrent eval, both
-                # watchdogs and the run loop — for the duration. It is the same defect
-                # `train_monitor._monitor_training` was fixed for on 2026-08-15, at the one call site
-                # where the consumer is NOT itself offloaded, so the hand-off has to be its own.
-                #
-                # `abandon_on_cancel=True` by the rule the orchestrator's own reads state: this is a
-                # PURE READ that spends nothing, appends nothing and rebinds no run-scoped state — it
-                # returns a fresh provider — so a pause/abort may drop it without leaving anything
-                # half-done. The paid call BELOW is the opposite case and is deliberately untouched
-                # here (see `_repair_critic`'s comment for the convention those three share).
-                #
-                # SINCE 2026-08-20 IT IS ALSO THE CODE, not only the logs: `diagnosis_tools`
-                # composes `repair_log_tools` with `RepoScoutTools` rooted at the node WORKDIR, the
-                # same pair `train_monitor.monitor_tools` hands the live watchdog and for the same
-                # reason — a log can show a loss frozen and only the source says whether the
-                # objective can descend as written. Logs go FIRST in the composite so a name
-                # collision cannot shadow `read_log`, which is the only reader that knows this
-                # attempt's byte floor.
-                #
-                # THE MONITOR VERDICTS ARE READ IN THE SAME HOP, and the read is deliberately FRESH
-                # rather than from `events_at_start`. Every alert it wants was appended DURING the
-                # attempt that just died, so a snapshot taken before the node started contains, by
-                # construction, none of them — this is the one place in the node loop where that
-                # distinction is the whole point of the read.
-                #
-                # IT RODE HERE ON THE LOOP THREAD UNTIL 2026-08-30, and the honest number is small:
-                # `read_all()` warm plus the O(whole log) `_durable_monitor_verdicts` walk measured
-                # 1.0 + 0.51 ms on the largest healthy log on this box (e5small-dr-unified-v4, 10.3
-                # MB, 12,579 events) and 0.7 + 0.22 ms on rubertlite-dr-unified-v8 — once per FAILED
-                # attempt, i.e. tens of milliseconds across a whole run. The note that used to sit
-                # here said "every concurrent eval's terminal and the whole serve/read side stall
-                # behind them", which overstates it by three orders of magnitude against the paid
-                # propose call that motivated the comparison. It is folded in anyway because the
-                # hop is ALREADY PAID one line up and the term is O(log) in a run that only grows:
-                # what the loop thread is worth is not decided per call site.
-                #
-                # A worker-thread READ is sanctioned by invariant #1's own note — `EventStore`
-                # serializes `append`/`read_all` through its own locks — and nothing in this hop
-                # writes: `_durable_monitor_verdicts` is a pure filter over rows, which is what makes
-                # it safe to move where `_stage_card_creates`' proposal needed a capture sink first.
-                def _repair_inputs():
-                    return (diagnosis_tools(self, workdir, _log_plan, _log_snapshot),
-                            _durable_monitor_verdicts(self.store.read_all(), node_id, generation))
-
-                _repair_tools, _monitor_verdicts = await anyio.to_thread.run_sync(
-                    _repair_inputs, abandon_on_cancel=True)
-                # OFF THE LOOP THREAD since 2026-09-06 (doc 52 row 12). The three paid repair-path
-                # calls — this triage, `_repair_result` and `_repair_critic` below — were plain sync
-                # calls on the engine loop: driven with a 5 ms ticker, ZERO loop ticks passed during
-                # one, so watchdog kills, operator aborts and sibling terminals waited out a 116-276 s
-                # median (one recorded case 88.3 min). The propose lanes were offloaded 2026-08-30;
-                # this path could not follow until the Developer's per-call outputs became a RETURN
-                # VALUE (`agents/roles.py::DeveloperResult`), because the freeze was what serialised
-                # concurrent repairs on the shared instance. Through the proposal SINK helper, like
-                # the propose lanes: a worker copies the caller's context (the tracer span, the LLM
-                # lane), and any proposal receipt a judge's tool loop buffers is published from the
-                # main task on the way out. `BudgetExceeded` propagates through it unchanged.
-                triage = await self._offload_under_proposal_sink(functools.partial(
-                    self._triage_crash, state, node, err, attempt + 1, reason=reason,
-                    repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
-                    depth=_depth,
-                    attempts_left=_repair_attempts_left(attempt, _repair_cap),
-                    log_tools=_repair_tools,
-                    engine_facts=engine_observed_facts(res),
-                    monitor_verdicts=_monitor_verdicts))
-                action = triage.get("action", DEFAULT_TRIAGE_ACTION)
-                # WHAT THE FAILURE WAS, RE-READ BY THE JUDGE THAT JUST READ IT. Applied HERE, on the
-                # verdict this attempt already paid for, and before every branch below that
-                # consumes `reason`: the directive `_repair_error_context` renders, the
-                # triage-driven install (which a judged `oom` now correctly suppresses — "a too-slow
-                # or too-big run is never fixed by installing something", as that branch's own
-                # comment says), the judge history the F8 critic compares causes across, and the
-                # durable rows. It is deliberately BELOW the `inline_repair_reasons` gate and below
-                # `_salvage_eval_metric`, both of which run on the deterministic answer: the loop
-                # recomputes `reason` from `_failure_reason(res)` at the top of every attempt, so no
-                # judged reason can switch inline repair on or off, and none can reach salvage.
-                #
-                # `diagnosed_failure_reason` is the whole rule and it is deliberately not
-                # restated here: an ENGINE-FINAL classification — the three watchdog verdicts, the
-                # engine's own clock, the drift refusal, the setup flag, the two filesystem stage
-                # contracts — is returned unchanged and the diagnostician's answer is not consulted
-                # at all, so a model cannot contradict a fact the engine holds out of band.
-                #
-                # WHAT SALVAGE DEPENDS ON IS THE ORDERING, NOT THE VOCABULARY, and that is worth
-                # stating because the vocabulary argument got weaker on 2026-08-20 while the
-                # containment did not move. `_salvage_eval_metric` above ran on the DETERMINISTIC
-                # answer, several branches earlier, and the loop recomputes `reason` from
-                # `_failure_reason(res)` at the top of every attempt — so no diagnosed reason has
-                # ever reached the salvage gate or the `inline_repair_reasons` gate, whatever it
-                # says. `failure_diagnosis` keeps the disjointness from
-                # `metric_salvage.NEVER_SALVAGED_REASONS` as a second, independent guarantee.
-                #
-                # BELOW the two engine verdicts' handling by construction rather than by ordering:
-                # `unanswerable` and `unreadable` are not in `AGENT_TRIAGE_ACTIONS`, so a call that
-                # could not produce a stop decision has not produced a classification either — and
-                # since 2026-08-20 that answers `unclassified` rather than silently keeping the
-                # engine's residual, because a diagnostician that FAILED and one that AGREED must
-                # not write the same row. `reject_idea` overwrites `reason` two branches down with
-                # `idea_rejected`, which is the engine's word for "the lineage is wrong" and not a
-                # classification of the eval at all — it stays the last word, and `_reason_source`
-                # below records that the engine chose it.
-                reason, _reason_source = diagnosed_failure_reason(reason, triage)
-                # WHERE THE DIAGNOSTICIAN SAID IT LOOKED, and whether that citation resolves. The
-                # evidence is not decoration: no out-of-band probe exists for a failure KIND (see
-                # `failure_diagnosis`' EVIDENCE section for why every candidate is either the text
-                # rule just deleted or unavailable), so a re-resolvable citation is the strongest
-                # thing available and is what makes a wrong verdict auditable afterwards.
-                #
-                # It RECORDS and never REFUSES: demoting an uncited-but-correct diagnosis to
-                # `unclassified` would lose it, and the rate at which a live model mis-formats a
-                # citation is not yet known here. The number becomes countable on the durable rows;
-                # promoting it to a gate is a decision for whoever reads that number.
-                #
-                # REDACTED, and its absence here was the EIGHTH persisted output channel — the same
-                # defect the C2 sweep found in `node_failed.triage_rationale` and closed on the very
-                # next screen down, missed one field over. `evidence_quote` is by its own schema
-                # description "the one line that settles it, quoted": bytes a model copied verbatim
-                # out of a stage log, landing on a durable row that travels into `events.jsonl`, the
-                # trace, the UI and every export. Measured over the preserved stage logs, a 500-char
-                # window is where a model can quote from safely by accident (0 masks across 257
-                # logs) and anything wider is not (3 at 8 KB, 36 at 16 KB, 384 at 64 KB) — and this
-                # role now reads with TOOLS, so its quotable window is the whole file. The screen
-                # runs BEFORE the 300-char cap, like both siblings, so masking cannot be truncated
-                # away; `coerce_evidence`/`coerce_findings` own that ordering.
-                _evidence = coerce_evidence(triage, self._redact)
-                _evidence_resolved = evidence_citation_resolves(_evidence, workdir)
-                # WHAT ACTUALLY HAPPENED, IN PROSE A READER CAN USE WITH NOTHING ELSE IN FRONT OF
-                # THEM. This is the deliverable and the rest of this block is its trail: the
-                # diagnostician has just read the stage logs, the config and the program the eval
-                # ran, and until now every bit of that was discarded when the call returned. The
-                # bytes were never the thing that was lost — 787 MB of stage logs sit in `runs/`
-                # across the eight preserved runs and nothing deletes them — what was lost is the
-                # causal statement and the numbers in it. See `coerce_diagnosis_summary` for the
-                # bar, which is about CONTENT: a summary that points at a log instead of naming the
-                # allocation size, the parameter, the stage and the exception has failed it.
-                _summary = coerce_diagnosis_summary(triage, self._redact)
-                # …and the trail behind it, each citation re-resolved inside the workdir fence by
-                # the same rule the singular one above uses. FREE — the resolution was already being
-                # done for `reason_evidence` — and deliberately nothing more than that: a citation
-                # that does not resolve is MARKED and kept, never retried and never dropped, because
-                # the finding stands on its own text and the summary stands without any of it.
-                #
-                # THE PROMPT IS UNTOUCHED BY ALL OF THIS. `err` is byte-identical to what it always
-                # was, and this whole block runs AFTER the triage call it describes — nothing here
-                # is spliced into anything the engine pays for.
-                _findings = resolve_findings(coerce_findings(triage, self._redact), workdir)
-                if action == "abandon":
-                    triage_outcome = ("abandon", triage.get("rationale", ""))
-                    break
-                if action == "reject_idea":   # the idea itself is wrong -> mark the lineage; steer to a new idea
-                    reason = "idea_rejected"
-                    # Not a classification of the eval — it is the ENGINE's word for "this lineage
-                    # is wrong", set from the action and not from `failure_kind`. So the attribution
-                    # goes back to the engine even though a model's verdict is what triggered it:
-                    # `reason_source` answers "who classified the failure", and nobody did here.
-                    _reason_source = REASON_SOURCE_ENGINE
-                    triage_outcome = ("reject_idea", triage.get("rationale", ""))
-                    break
-                # A JUDGE THAT PRODUCED NO USABLE VERDICT, in the two shapes that are not the same
-                # condition (`engine/triage.py`'s verdict contract owns the distinction). Both have
-                # already been re-asked by `_triage_crash`; reaching here means the non-answer
-                # persisted, so neither may read as "keep going".
-                #
-                # THIS BLOCK IS ABOVE THE TRIAGE-DRIVEN INSTALL ON PURPOSE. It used to sit below it,
-                # and the install `continue`s on success — so a judge that answered `unanswerable`
-                # every round bought itself a full eval per successful install: measured, 7 evals and
-                # six packages (faiss-cpu, tensorboardX, fastai, gensim, textblob, umap-learn) pushed
-                # into the SHARED eval interpreter before the breaker ever fired. That install exists
-                # because the agent's RATIONALE proves it read the traceback and named a library the
-                # traceback could not — a premise a non-answer denies outright. A verdict nobody could
-                # read is not evidence about anything, least of all about what to pip install.
-                if action in (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION):
-                    _judge_err = str(triage.get("rationale", ""))[:400] or "no verdict returned"
-                    if action == UNANSWERABLE_TRIAGE_ACTION:
-                        # THE TRANSPORT FAILED. Not a verdict about this node: the triage model was
-                        # wired and the call did not complete — the same dead-provider condition the
-                        # circuit breaker exists for, and exactly how the 2345-repair incident began.
-                        # Routed to that breaker (terminal + RUN-level pause) rather than to a quiet
-                        # per-node abandon the operator would have to infer a provider outage from.
-                        triage_outcome = ("abandon", "the repair-stop judge could not be reached — "
-                                                     "treating it as a provider failure, not as "
-                                                     "permission to keep repairing")
-                        reason = "developer_crash"
-                        err = (f"crash-triage failed: {_judge_err}\n[the model that decides whether "
-                               f"to keep repairing this node could not be reached, so the node was "
-                               f"stopped rather than repaired blind. Its last eval error was: "
-                               f"{err[-200:]}]")
-                        await self._auto_pause_provider_failure(
-                            f"the crash-triage model could not be reached while deciding whether to "
-                            f"keep repairing node {node_id} — {_judge_err}")
-                    else:
-                        # THE MODEL ANSWERED SOMETHING UNREADABLE. The endpoint is demonstrably alive
-                        # — it produced bytes — so this is a per-NODE stop and NOTHING MORE. Pausing
-                        # the run here was a measured defect: one out-of-enum verdict on a SyntaxError
-                        # in the agent's own generated code raised a run-level pause carrying
-                        # `node_id=None` (not clearable by a node reset) that told the operator to
-                        # check credits, key and base URL — using the MODEL's own rationale as the
-                        # evidence — and under `eval_parallel > 1` took every healthy in-flight
-                        # sibling down with it. It terminalizes like an `abandon`, keeping the eval's
-                        # own `reason`, so a node reset re-opens it and the run continues.
-                        triage_outcome = ("abandon", f"the repair-stop judge answered something the "
-                                                     f"engine could not read as a verdict, so this "
-                                                     f"node stopped rather than repairing blind — "
-                                                     f"{_judge_err}")
-                    break
-                # A library the traceback never NAMED. `_prepare_env` above installs only what the
-                # crash reports as missing; when a library degrades an absent dependency into a
-                # NameError/AttributeError (an `is_x_available()` guard), the agent's diagnosis is
-                # the only place the name exists. Considered here rather than after the repair,
-                # because an install is not a code repair: it spends no repair attempt at all
-                # (exactly like the traceback-driven round above), so an exhausted budget must not
-                # be what stops the engine from making the node runnable. Bounded by the same
-                # `_MAX_DEP_ROUNDS` + once-per-module `_dep_attempted` cache; the fail-closed
-                # conditions live with the extraction (runtime/deps.py).
-                # GATED ON THE ENGINE'S OWN ANSWER (`_engine_reason`), NOT ON THE DIAGNOSIS, and
-                # the distinction became load-bearing on 2026-08-20. The gate exists because
-                # `inline_repair_reasons` also admits `timeout` and the watchdog kills, whose `err`
-                # is whatever the killed process last wrote — so a training run killed at the
-                # deadline after logging an early import warning could be read as unresolved-name
-                # shaped and drive a pip install into the SHARED eval interpreter. A too-slow or
-                # too-big run is never fixed by installing something.
-                #
-                # That is a statement about what the ENGINE observed, so it must read the engine's
-                # column. Keying it on `reason` — which `diagnosed_failure_reason` has just
-                # rewritten one branch above — put a side effect on the shared interpreter under a
-                # model's control in BOTH directions, and the first one showed up as a red test
-                # immediately: a judge that answered `repair` + `missing_dependency="accelerate"`
-                # with no `failure_kind` mints `unclassified`, and the install it had just asked for
-                # silently did not happen. The mirror is worse and is why this is not fixed by
-                # widening the tuple — a judge could otherwise ENABLE an install by answering
-                # `crash` about a deadline the engine's own clock recorded.
-                #
-                # What is deliberately NOT preserved is the half-measure's claim that a judged `oom`
-                # "correctly suppresses" the install. It never carried weight: `deps.
-                # triage_install_candidates` already fails closed on `unresolved_name_failure`, the
-                # curated allowlist and (at the caller) `is_present`, and an allocator traceback is
-                # not unresolved-name shaped, so it offers nothing to install whatever the kind says.
-                # Text may NOMINATE — the rationale still has to name the distribution — and the
-                # engine's own facts DECIDE.
-                if (self._auto_install_deps and _engine_reason == "crash"
-                        and dep_rounds < _MAX_DEP_ROUNDS):
-                    installed = await anyio.to_thread.run_sync(
-                        self._prepare_env_from_triage, triage, err)
-                    if installed:
-                        dep_rounds += 1
-                        async with self._write_lock:
-                            self.store.append(EV_DEPS_INSTALLED, {
-                                "node_id": node_id, "generation": generation,
-                                "packages": installed, "round": dep_rounds, "source": "triage",
-                                "resolved": self._drain_dep_receipts(installed)})
-                        continue   # re-run with the library present (no repair attempt spent)
-                # THE CRITIC (F8). The triage judge just said "repair" — the question it answers is
-                # "given this failure, do I know what to change?", and a model answers that
-                # optimistically and one step at a time. The question nothing was asking is about the
-                # SHAPE of the chain: are the attempts addressing different causes, or circling one?
-                # That is what defeated every counter here. `rubert-dr-0804` produced 369 distinct
-                # error signatures on one wall, so the anti-stuck recurrence counter never saw a
-                # repetition; v6 node 5 halved a batch size three times, so no count was near its cap.
-                # Both are obvious to something reading the trajectory and invisible to something
-                # counting it.
-                #
-                # DELIBERATELY BELOW THE INSTALL BRANCHES. A dependency round spends no repair
-                # attempt and changes the environment, so a chain that looks repetitive across two
-                # `ModuleNotFoundError`s is a chain that is actually progressing — asking above the
-                # install would judge a trajectory the engine was in the middle of invalidating.
-                #
-                # It can ONLY stop, and it never touches `reason`: the terminal below carries the
-                # eval's own authenticated failure classification exactly as an `abandon` does, so no
-                # metric, champion, selectability or violation moves on this verdict. Doc 36's line.
-                if critic_due(attempt, self._repair_critic_after):
-                    # Called DIRECTLY, exactly like `_triage_crash` and `_repair` above rather than
-                    # through `to_thread`. Not an oversight: all three are `@in_llm_lane` methods
-                    # whose lane admission is selected through a ContextVar, and the two that already
-                    # exist establish the convention. A third call shape here would make this the one
-                    # place in the loop where the lane's propagation has to be reasoned about.
-                    _judged = repair_log[-_JUDGE_HISTORY_ROWS:]
-                    # The SAME verdicts the triage judge just read, from the same durable
-                    # rows — the critic decides whether this chain lives and must not be
-                    # reading a thinner record than the judge whose work it is grading.
-                    critic = await self._offload_under_proposal_sink(functools.partial(
-                        self._repair_critic, state, node, _judged, attempt + 1,
-                        monitor_verdicts=_monitor_verdicts))
-                    # THE VERDICT REACHES THE DURABLE RECORD, WHATEVER IT IS. Until 2026-08-15 the
-                    # critic left no trace of what it ANSWERED: its span carried
-                    # `{attempt, node_id, generation}`, a `continue` appended nothing at all, and a
-                    # stop was visible only indirectly as the `abandon` prose below. Measured on
-                    # `rubertlite-dr-unified-v8`, whose chains were genuinely progressing: 0
-                    # occurrences of the word "critic" in `events.jsonl` against several
-                    # consultations — i.e. exactly the case where a missing record goes unnoticed,
-                    # because the verdicts happened to be right.
-                    #
-                    # WHY THE ROW EXISTS AT ALL, given that `continue` moves nothing: F8's premise is
-                    # that a JUDGEMENT replaces a counter as the stop rule, and a judgement that
-                    # leaves no trace cannot be reviewed, tuned or trusted — `repair_critic_after`
-                    # cannot be calibrated by anyone who cannot see what the critic has been saying.
-                    # `after` and `durable_repairs` ride on the row for exactly that: the cadence
-                    # question is "was this consultation worth paying for?", and answering it needs
-                    # the threshold that fired beside the chain it fired on.
-                    #
-                    # DIAGNOSTIC, and the membership assertion below is the enforcement of that
-                    # (invariant #1's shape, the same one `deps_installed` above and
-                    # `full_retrain_charged` below are appended under). The fold never reads it, so
-                    # no metric, champion, selectability or violation can move on a critic verdict
-                    # even by accident — the row is evidence about a decision, never an input to one.
-                    # It is written BEFORE the stop is acted on so a chain that ends here still has
-                    # its reason durable, and on EVERY consultation so the negative case ("the critic
-                    # looked and said keep going") is a fact in the log rather than an absence.
-                    assert EV_REPAIR_CRITIC_VERDICT in DIAGNOSTIC_EVENTS
-                    async with self._write_lock:
-                        self.store.append(EV_REPAIR_CRITIC_VERDICT, {
-                            "node_id": node_id, "generation": generation,
-                            # The repair this verdict GATED (1-based, matching `node_repaired.attempt`
-                            # and the span), beside the count of durable repairs it judged.
-                            "attempt": attempt + 1, "durable_repairs": attempt,
-                            "after": self._repair_critic_after,
-                            "verdict": critic.get("action"),
-                            "source": critic.get("source"),
-                            "rationale": str(critic.get("rationale", ""))[:300],
-                            "judged": critic_evidence(_judged)})
-                    if critic.get("action") == CRITIC_STOP:
-                        triage_outcome = ("abandon", (
-                            "the repair critic stopped this chain — "
-                            + (str(critic.get("rationale", "")).strip()
-                               or "successive attempts were addressing the same cause")))
-                        break
-                # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
-                # Snapshot the PRE-repair file set now (node is still the pre-repair fold) so we can
-                # compute the repair's REAL change set below — `developer.last_files` is the node's whole
-                # cumulative solution for the repo developer (repair_from preloads every node file), so a
-                # raw key set would always intersect the train stage and defeat checkpoint reuse.
-                # Deletions get the same NODE-side baseline: post-repair `last_deleted` is cumulative
-                # (repair_from seeds it from node.deleted), so only THIS repair's deletion DELTA may
-                # veto checkpoint reuse — and like `prev_files`, the baseline must be read off the
-                # NODE, not the shared developer: at this instant `developer.last_deleted` belongs to
-                # whatever node it built LAST (see the `_repair` docstring), so a sibling's stale
-                # deletions would mask a real repair deletion from the fail-closed reuse guard (or
-                # veto reuse for a deletion this node never made).
-                prev_files = dict(getattr(node, "files", {}) or {})
-                prev_deleted = set(getattr(node, "deleted", []) or [])
-                # A REFUSED rollback rides in FRONT of the eval error, not instead of it: the model
-                # still has to fix something, and the refusal only tells it which door is shut and
-                # why. Cleared on read so one refusal is carried exactly one attempt forward.
-                # THE DIAGNOSTICIAN'S ACCOUNT LEADS THE TEXT IT DIAGNOSED, for a reason the
-                # diagnostician itself chose. `check_false_positive`'s directive has said "Read its
-                # rationale above before you touch anything" since it shipped, and nothing put the
-                # rationale above it — that kind exists to say "the declared check is wrong, here is
-                # WHY", and the Developer was handed only the refusal being disputed. The rule is
-                # `failure_diagnosis.diagnosis_repair_lead` rather than an inline `if` so its truth
-                # table is drivable: this call site is three hundred lines inside `_evaluate`.
-                # `_summary` is already redacted and capped (`coerce_diagnosis_summary`).
-                _diag_lead = diagnosis_repair_lead(_summary, _reason_source, err)
-                # A refused rollback still rides in FRONT of everything: it tells the model which
-                # door is shut, which it needs before it reads why the run was judged at all.
-                _err_in = (f"{rollback_refusal}\n\n{_diag_lead}{err}" if rollback_refusal
-                           else f"{_diag_lead}{err}")
-                rollback_refusal = ""
-                with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
-                    try:
-                        # The stuck contract rides on the ERROR CONTEXT rather than inside
-                        # `_repair_error_context`, so it reaches every Developer implementation
-                        # (whole-file, repo, CLI-backed) through the one argument they all take, and
-                        # so the build-time `implement` path — which has nothing to be stuck about —
-                        # never sees it. Appended after the per-reason directive on purpose: "here is
-                        # what went wrong and what to do about it" then "…and here is how to say you
-                        # cannot", never the other way round.
-                        # THE ENVELOPE, off the loop (doc 52 row 12): the whole `DeveloperResult`
-                        # comes back from the worker, captured under the instance's lock in the
-                        # same breath as the call, so nothing below reads the shared instance.
-                        repaired = await self._offload_under_proposal_sink(functools.partial(
-                            self._repair_result,
-                            node, self._repair_error_context(
-                                reason, _err_in, state=state, node=node,
-                                headline=failure_headline(
-                                    getattr(res, "stderr", "") or "", self._redact))
-                            + developer_stuck_contract(DEVELOPER_STUCK_PREFIX),
-                            state))
-                    except BudgetExceeded:
-                        raise      # the hard budget stop propagates, exactly as in `_triage_crash`
-                    except Exception as _repair_exc:  # noqa: BLE001 - see below; never escapes an eval
-                        # A DEVELOPER THAT RAISES INSTEAD OF RETURNING THE SENTINEL. Only
-                        # `adapters/repo_developer.py` converts its own session failure into the
-                        # in-band "(developer error: …)" string; `agents/roles.py::LLMDeveloper.repair`
-                        # calls `complete_text` uncaught, `ValidatingDeveloper._attempt_loop` does not
-                        # catch either, and this was the one `_repair` call site with no handler above
-                        # it (the other two are inside `_create_node`, which already terminalizes the
-                        # build and requests the build_crash pause). So a 401/402/outage on a NON-repo
-                        # task escaped `_evaluate` entirely: measured — zero terminals, zero pauses,
-                        # zero repairs, and on the serial path it takes the whole run down, so the
-                        # circuit breaker below never engaged for exactly the workloads that need it.
-                        # Normalizing the raise into the sentinel routes it through the ONE reviewed
-                        # exit for "the repair call failed at the provider" rather than adding a
-                        # second, differently-behaved one. `except Exception` deliberately does not
-                        # catch `BaseException`, so cancellation and KeyboardInterrupt still travel.
-                        repaired = DeveloperResult.failed(f"{DEVELOPER_ERROR_PREFIX} {_repair_exc})")
-                new_code = repaired.code
-                # THE DEVELOPER'S PER-CALL OUTPUTS, OFF THE ENVELOPE. Until 2026-09-06 these five
-                # were snapshotted off the SHARED instance "IMMEDIATELY, before any `await`", because
-                # under max_parallel>1 a sibling task's repair() would overwrite `developer.last_files`
-                # in the gap and this row would record (and re-materialize) ANOTHER node's edits as
-                # this node's — and what made even that snapshot safe was the freeze: the paid call
-                # ran on the loop thread, so no sibling could run during it. The envelope is captured
-                # under the instance's own lock in the same breath as the call (`_run_developer`),
-                # so there is no gap left to read across, and the ordering discipline the old
-                # comments carried ("read BEFORE the not-a-repair gate below, which awaits") is now a
-                # property of the record rather than of the line order.
-                repaired_files = dict(repaired.last_files)
-                repaired_deleted = list(repaired.last_deleted)
-                # The rollback REQUEST: the suspect earlier stage this repair blamed, "" for none.
-                _rollback_ask = repaired.last_rollback_stage
-                # WHICH BOUND ENDED THE SESSION. Bounded and coerced because it rides a durable row;
-                # empty for a session that finished on its own terms, which is the common case
-                # (median repair uses 13 % of its clock).
-                _budget_exhausted = repaired.last_budget_exhausted
-                # DID THE SESSION EVER TRY TO WRITE. `changed: []` says the tree did not move; this
-                # says whether the model reached for the write surface at all, and the pair is what
-                # turns `inert` from one word into two distinct failures with different remedies.
-                _edit_calls = int(repaired.last_edit_calls)
-                # THE DEVELOPER SAYING "I DO NOT KNOW HOW TO FIX THIS" (F8). The first of the two
-                # signals the operator asked for, and the one that already existed as a capability
-                # and had no way to be expressed: a Developer that knew it was beaten could only
-                # return another fix it did not believe in, which every counter downstream read as an
-                # ordinary attempt.
-                #
-                # ABOVE `_repair_provider_failure` ON PURPOSE, and this ordering is load-bearing. The
-                # declaration is not Python, so that function would classify it `unparseable`, charge
-                # the provider-failure counter, and — three declarations in — terminalize the node as
-                # `developer_crash` AND pause the whole RUN naming a provider that is answering
-                # perfectly. "The model has no fix left" and "the model's session is dead" are
-                # opposite facts with opposite recoveries; `core/models.py::DEVELOPER_STUCK_PREFIX`
-                # is a separate sentinel for exactly that reason.
-                #
-                # NO REPAIR IS SPENT and no `node_repaired` is written: nothing was repaired. The
-                # node terminalizes below carrying the eval's own authenticated `reason` — this is a
-                # stop, not a re-classification of what failed.
-                if is_developer_stuck(new_code):
-                    _stuck_why = developer_stuck_reason(new_code) or "no reason given"
-                    triage_outcome = ("abandon", "the Developer declared it does not know how to fix "
-                                                 f"this — {_stuck_why}"[:400])
-                    break
-                # WAS THIS A REPAIR AT ALL, OR A DEAD PROVIDER? The four answers and the incident
-                # each one was retrofitted for live in `_repair_provider_failure`. The unparseable
-                # counter round-trips through the return value — it is per-NODE, not per-attempt, so
-                # losing it here would silently restore the unbounded loop it bounds.
-                _dev_err, unparseable_repairs = _repair_provider_failure(
-                    node.code, new_code, repaired_files, repaired_deleted, unparseable_repairs)
-                if _dev_err is not None:
-                    triage_outcome = ("abandon", "the repair CALL failed at the provider — no "
-                                                 "repaired code was produced")
-                    reason = "developer_crash"
-                    # `REASON_SOURCE_ENGINE`, and it stays that after the 2026-08-20 split: the
-                    # engine observed the dead provider itself, and `developer_crash` is its OWN
-                    # word for "this node's Developer session died", not a classification of the
-                    # eval that anyone was asked about. A diagnostician's non-answer is a different
-                    # fact and is recorded as `unclassified`/`undiagnosed` where it happens, above.
-                    _reason_source = REASON_SOURCE_ENGINE
-                    err = (f"{_dev_err}\n[the Developer's own session failed, so this node was never "
-                           f"repaired. Its last eval error was: {err[-200:]}]")
-                    await self._auto_pause_provider_failure(
-                        "the Developer's LLM provider failed while repairing node "
-                        f"{node_id}, so the repair returned an error instead of code — {_dev_err}")
-                    break
-                repaired_footprint = self._repaired_footprint(
-                    node, new_code, repaired_files, _resource_reservation)
-                attempt += 1
-                # THE CHANGE SET, COMPUTED BEFORE THE APPEND. It used to be derived after it (a pure
-                # function of four locals all in hand here either way), and it is the column that
-                # separates a repair chain that is working from one rewriting the same lines — so it
-                # has to be IN the durable row, not only in the process-local one, or a resumed
-                # judge reads a history with the evidence column blank. Both halves are DELTAS
-                # against the pre-repair node, never the cumulative sets the developer hands back —
-                # see `_repair_change_set`. `new_deleted` is consumed by the reuse predicate below.
-                changed, new_deleted = _repair_change_set(
-                    prev_files, prev_deleted, repaired_files, repaired_deleted)
-                # The whole-file fallback is gated on the code having actually MOVED, not merely on
-                # it being non-empty. A repair that hands back the artifact it was given rendered
-                # `it changed: <whole-file solution>` to the judge — the column asserting a change
-                # the bytes disprove, on exactly the rows where the truth matters most. `node` is
-                # still the pre-repair fold here, so `node.code` is what `new_code` replaced.
-                _code_changed = (new_code or "") != (node.code or "")
-                _changed_col = sorted(changed)[:12] or (["<whole-file solution>"] if _code_changed
-                                                        else [])
-                # DID IT DO WHAT IT SAID? The change set above is what the repair DID; the rationale
-                # a line below is what it SAID. Nothing ever compared them, and on the shipped corpus
-                # ~25 % of explained repairs named a change their diff does not contain — 13 of them
-                # changed nothing whatsoever and still bought a full re-evaluation. See
-                # `engine/repair_verify.py` for the measurement, the two-tier design and above all
-                # why only the byte-anchored verdict is allowed to stop anything.
-                #
-                # Computed HERE, beside the change set and before the append, for the same reason
-                # `changed` is: it belongs in the DURABLE row. A resumed judge that reads the history
-                # without this column is back to being told what each fix intended and never what it
-                # accomplished.
-                _verification = verify_repair(
-                    triage.get("rationale", ""), changed=changed, deleted=new_deleted,
-                    code_changed=_code_changed,
-                    region=changed_region(prev_files, repaired_files, node.code, new_code))
-                # AND DID IT MOVE A DECLARED COORDINATE? A different question from the one above,
-                # asked of different inputs: the Researcher's `idea.params` (in `node_created`, never
-                # written by a repair) against the `.py` bytes this repair just committed. The
-                # rationale is not read at all, so this sits in `REPAIR_INERT`'s trust tier — see
-                # `repair_verify`'s docstring for the v8-node-3 incident, where the run's CHAMPION
-                # ran at `batch_size 4096 / grad_accum 4` while every record of it — `idea.params`
-                # AND the node's own `config.yaml` — said 8192 / 2, and for why the reuse rule that
-                # made a `.py`-only edit the cheap route is deliberately NOT loosened for it.
-                # `baseline_files` narrows this to what THIS repair introduced: a divergence the
-                # Developer authored at build time is a fact about the node, not about the attempt,
-                # and the node-wide question is asked by `champion_caveats` off folded state.
-                _param_overrides = [o.as_row() for o in declared_param_overrides(
-                    node.idea.params, repaired_files, code=new_code,
-                    baseline_files=prev_files, baseline_code=node.code or "")]
-                async with self._write_lock:
-                    repair_payload = {
-                        "node_id": node_id, "generation": generation,
-                        "attempt": attempt, "code": new_code,
-                        "files": repaired_files,
-                        "deleted": repaired_deleted,
-                        "error_in": err, "triage_action": "repair",
-                        # THE RECORD'S OWN WINDOW, beside the prompt's. Omitted when empty so a row
-                        # with no column ("this predates the widening") stays distinguishable from a
-                        # row with an empty one ("the eval wrote nothing to stderr") — the same
-                        # additive, absence-is-a-fact rule `evidence` and `engine_reason` follow two
-                        # lines below. Nothing on the prompt path reads it; `_durable_repair_ledger`
-                        # keeps building the judge's history from `error_in`, unchanged.
-                        **({"error_evidence": err_evidence} if err_evidence else {}),
-                        # Same screen as `node_failed.triage_rationale` below, and for the same
-                        # reason — this is the judge's own words about a crash, on a DURABLE row, and
-                        # its two sibling log-derived verdicts (`train_monitor` / `asha_monitor`'s
-                        # `reason`) have gone through `_redact` since B3. `error_in` beside it is
-                        # already covered: `err` derives from the redacted `_stderr_tail`.
-                        "rationale": self._redact(str(triage.get("rationale", "")))[:300],
-                        # The judge's evidence columns, made durable (invariant #5: additive, and the
-                        # fold ignores them — `_on_node_repaired` reads code/files/deleted/footprint
-                        # only). `_durable_repair_ledger` reads exactly these back after a resume;
-                        # `unparseable_repairs` rides along because it bounds the same per-NODE
-                        # condition and had the same process-local lifetime.
-                        "changed": _changed_col,
-                        "stages_passed": _depth,
-                        # The verification rung's answer, in the same durable row as the evidence it
-                        # was derived from. `verified` is a member of `repair_verify.REPAIR_VERDICTS`
-                        # and emphatically NOT of `triage.py::TRIAGE_ACTIONS` — it is a fact about
-                        # bytes, not a verdict about the node, and no model may emit one (the two
-                        # vocabularies are cross-referenced in both modules). `unmet` is capped
-                        # because it is model-derived text riding in an event payload.
-                        "verified": _verification.verdict,
-                        "unmet": list(_verification.unmet[:12]),
-                        # WHY THE DIFF WAS EMPTY, when the answer is one the ENGINE holds. `verified`
-                        # says WHAT the repair did to the tree; this says whether the session that
-                        # produced it was CUT SHORT. Measured over `runs/` by pairing each
-                        # `inline_repair` session with its own verdict: 12 of the 12 `inert` repairs
-                        # in the corpus ran past `session_time_budget_s`, and 0 of the 65 that
-                        # finished inside it are inert — so `inert` alone has been an undiagnosed
-                        # proxy for "ran out of clock", and "the agent decided no edit was warranted"
-                        # and "the agent was still reading when the budget ended" have opposite
-                        # remedies. `tool_loop.py` computed and announced this all along
-                        # (`_note_budget`) and nothing subscribed.
-                        #
-                        # OMITTED WHEN EMPTY, exactly like `param_overrides` below and for the stated
-                        # reason: an absent key on an old row means "nobody looked", which is not the
-                        # same fact as "looked and the session was not cut short". Additive and
-                        # fold-ignored (invariant #5); no metric, champion, selectability or
-                        # violation moves on it, and `INERT_REPAIR_LIMIT` is untouched.
-                        **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
-                        "edit_calls": _edit_calls,
-                        # A DECLARED COORDINATE THIS REPAIR MOVED, if any. Additive and fold-ignored
-                        # (invariant #5), and OMITTED when empty rather than written as `[]`: an
-                        # absent key on an old row means "nobody looked", which is not the same fact
-                        # as "looked and found none" — the same distinction `_durable_repair_ledger`
-                        # already keeps for `verified`. Unlike `unmet` this is NOT model-derived
-                        # text: every field is a number or a path out of bytes the engine holds, so
-                        # it is capped for event-payload hygiene and not for trust.
-                        **({"param_overrides": _param_overrides[:PARAM_OVERRIDE_CAP]}
-                           if _param_overrides else {}),
-                        # The cause of the failure this repair answers — F8's critic compares
-                        # causes across attempts. Additive (invariant #5); the fold ignores it.
-                        #
-                        # It used to be described here as "the AUTHENTICATED cause", and since
-                        # 2026-08-20 that is true of `engine_reason` and of `reason` only when
-                        # `reason_source` says `engine`: a judge may re-read the three kinds
-                        # `_failure_reason` inferred from the dead process's TEXT (`triage.py`'s
-                        # fact/reading split), and `crash` was the wrong word for every one of the
-                        # 25 out-of-memory failures in `runs/`. The three columns are written
-                        # together so the row never has to be interpreted: what the engine acted on,
-                        # who chose it, and what the deterministic classifier said. The
-                        # authenticated column is never overwritten, so a reader that wants the old
-                        # guarantee reads `engine_reason` and gets exactly it.
-                        "reason": reason,
-                        "reason_source": _reason_source,
-                        "engine_reason": _engine_reason,
-                        # THE EVIDENCE THE DIAGNOSIS STANDS ON — `{source, locator, quote}` plus the
-                        # engine's own re-resolution of the citation. Additive and fold-ignored
-                        # (invariant #5); OMITTED when the diagnostician was never consulted, so an
-                        # absent key on an old row means "nobody was asked" rather than "asked and
-                        # cited nothing". This is what makes a wrong classification auditable after
-                        # the fact, which is the only check available here — see
-                        # `engine/failure_diagnosis.py` for why no probe of the CONCLUSION exists.
-                        **({"reason_evidence": _evidence} if _evidence else {}),
-                        **({"reason_evidence_resolved": _evidence_resolved}
-                           if _evidence_resolved is not None else {}),
-                        # WHAT HAPPENED, IN PROSE — same additive, fold-ignored, omitted-when-absent
-                        # rule as the pair above, and the absence means the same thing: nobody was
-                        # asked. This is the column that makes the row readable a week later
-                        # without the run, and it is deliberately NOT `rationale`, which says what
-                        # the repair intends to DO and is read back by `repair_verify`.
-                        **({"reason_summary": _summary} if _summary else {}),
-                        # …and the trail behind it, same rule again. Each item carries the model's
-                        # account (`source`/`locator`/`quote`/`means`) beside the ENGINE's
-                        # re-resolution of it (`resolved`), so a reader never has to guess which
-                        # part the model could have written. A citation that did not resolve is
-                        # MARKED `resolved: false` and KEPT: the finding stands on its own text, and
-                        # a reader owed the summary above is not owed a working link.
-                        **({"reason_findings": _findings} if _findings else {}),
-                        # The wall-clock of the eval this repair answers. Additive (invariant #5);
-                        # the fold ignores it. It is what makes the COST floor durable across a
-                        # resume — see `_durable_repair_seconds`, which sums these rows, and
-                        # `repair_judgment.repair_redone_work_stop`, which spends the operator's
-                        # `inline_repair_retrain_cap` in seconds on the chains that cap cannot
-                        # charge in counts.
-                        "eval_seconds": attempt_eval_seconds,
-                        "unparseable_repairs": unparseable_repairs}
-                    if repaired_footprint is not None:
-                        repair_payload.update({
-                            "idea_footprint": repaired_footprint,
-                            "footprint_finalized": True,
-                        })
-                    # This commits the repaired code to folded state BEFORE the files below are
-                    # materialized, so state briefly claims a repair the workdir does not hold. The
-                    # window is closed on the READ side rather than by reordering (either order skews
-                    # one way or the other): the workdir carries a manifest stamp written only after
-                    # its files land, and stage reuse — the one path that evaluates a workdir it did
-                    # not just build — refuses to proceed unless that stamp matches the folded node.
-                    # See `_stamp_workdir` / `_workdir_matches` at the top of this method.
-                    self.store.append(EV_NODE_REPAIRED, repair_payload)
-                node = fold(self.store.read_all()).nodes[node_id]   # node.code now == repaired code
-                if node.attempt != generation:
-                    await _record_superseded()
-                    return                   # reset raced the repair; never adopt its newer lifecycle
-                self._write_node_files(node, workdir)               # re-materialize before re-eval
-                _stamp_workdir(node)     # only NOW does the workdir match the repaired manifest
-                if fold(self.store.read_all()).nodes[node_id].attempt != generation:
-                    await _record_superseded()
-                    return                   # reset raced the filesystem write; force clean next materialize
-                # Choose the NEXT eval's start stage: REUSE the completed earlier stages (the train
-                # checkpoint is still on disk — _write_node_files overlays, never wipes) when the repair
-                # provably didn't touch them, so a fixed score/eval script doesn't pay to re-train. Else
-                # a full re-run — bounded by inline_repair_retrain_cap so a repair that keeps rewriting
-                # training code can't burn many full trains (the attempt budget bounds the COUNT of
-                # repairs, not their cost). The workdir persists across attempts, so a reused
-                # checkpoint is valid. (`changed`/`new_deleted` were computed above the append.)
-                # THE ROW THE JUDGE WILL READ on the next attempt — the in-process twin of what
-                # `_durable_repair_ledger` rebuilds from the event just written, kept because every
-                # field is already in hand and re-reading the log per attempt would be a full scan for
-                # nothing. "Which files this fix actually touched" is the column that separates a
-                # repair chain that is working from one that is rewriting the same lines: the
-                # developer's own rationale says what it INTENDED to change, this says what it did.
-                repair_log.append({
-                    "attempt": attempt,
-                    "error": err[-_JUDGE_ERROR_CHARS:],
-                    "fix": str(triage.get("rationale", ""))[:200],
-                    "changed": _changed_col,
-                    "verified": _verification.verdict,
-                    "unmet": list(_verification.unmet[:12]),
-                    # Same fact, same omit-when-empty rule, same reason as the durable row above:
-                    # `_format_repair_log` renders this row and the rebuilt one identically, so a
-                    # divergence here would show one node two different histories depending on
-                    # whether the process had resumed.
-                    **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
-                    "edit_calls": _edit_calls,
-                    # Same omit-when-empty rule as the durable row above, and for the same reason:
-                    # `_format_repair_log` renders this row and the rebuilt one identically, so a
-                    # `[]` here and an absent key there would render two different histories for
-                    # one node depending on whether the process had resumed.
-                    **({"param_overrides": _param_overrides[:PARAM_OVERRIDE_CAP]}
-                       if _param_overrides else {}),
-                    "reason": reason,
-                    # THE ENGINE'S OWN COLUMN, beside the one a diagnostician may have chosen, so the
-                    # F8 critic's `cause` is a fact and not a verdict — see
-                    # `repair_judgment.authenticated_cause` for why `c862045c` makes this mandatory
-                    # rather than tidy. The in-process row and the durable one must carry the same
-                    # pair, or a chain judged before a resume and after it compares different columns.
-                    "engine_reason": _engine_reason,
-                    "stages_passed": _depth})
-                # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`
-                # means the engine compared the bytes and nothing moved: the files this loop is about
-                # to re-materialize are the ones already on disk, `_safe_reuse_start` will reuse
-                # every completed stage because the change set is empty, and the eval it is about to
-                # pay for is the eval that just failed. Repeating that is not a retry, it is a
-                # transcription error with a GPU attached — rubertlite-dr-unified-v4 node 6 spent two
-                # in a row at ~2.7 h each, and rubertlite-dense-retrieval node 57 three.
-                #
-                # ONE is allowed: a developer can legitimately burn a turn budget reading before it
-                # edits, and stopping a node on that would be a regression. The bound is on the
-                # STREAK, so a chain that recovers is never charged for what it already fixed
-                # (`inert_streak`), and it is read off `repair_log` — which is seeded from the
-                # durable rows — so a resume continues the streak instead of refunding it.
-                #
-                # This is the only verdict the loop acts on. `REPAIR_UNMET` is model-derived and
-                # rides into the judge's history as evidence; see `engine/repair_verify.py`.
-                _inert = inert_streak(repair_log)
-                if _inert >= INERT_REPAIR_LIMIT:
-                    triage_outcome = ("abandon", (
-                        f"the last {_inert} repair attempts changed nothing at all — the engine "
-                        "compared the repaired files against the ones already on disk and they are "
-                        "byte-identical, so re-evaluating would re-run inputs this node has already "
-                        "run; abandoning in-node repair — the node ends here, and the loop's next "
-                        "proposal is fresh work rather than another attempt at this one"))
-                    break
-                _stages = self._resolved_stages(node, workdir)
-                # `deleted` and the eval spec's `cwd` ride along so the predicate can fail closed on
-                # its blind spots: a deletion is invisible to the reachability closure (the file was
-                # unlinked by _write_node_files above), and a non-default cwd re-bases the stage
-                # scripts so the changed-vs-reachable intersection would prove nothing.
-                _cwd = (self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None
-                # `prev_manifest` is the PRE-repair stage manifest as the engine last COMMITTED it —
-                # `prev_files` off the fold, snapshotted above the repair call, never the copy on
-                # disk. It is what lets the predicate narrow its manifest clause to the entries at
-                # or before the reuse point instead of forfeiting on the whole file; reading it from
-                # the workdir instead would hand that decision to a stage that can rewrite its own
-                # manifest while it runs. `params` expands `%params%` on both sides through the same
-                # rule `_resolve_stages` used, and a repair never writes `idea.params`.
-                next_start = self._safe_reuse_start(
-                    _stages, res.failed_stage, changed, workdir,
-                    deleted=new_deleted, cwd=_cwd,
-                    prev_manifest=prev_files.get(STAGE_MANIFEST_NAME),
-                    params=node.idea.params)
-                # ROLLBACK, asked only when the Developer named a suspect. It OVERRIDES `next_start`
-                # in the one direction the reuse predicate structurally cannot express: backwards,
-                # onto a stage that already completed. Consulted AFTER `_safe_reuse_start` and never
-                # instead of it — the reuse answer is what the run falls back to when the ladder
-                # refuses, and computing it first also means a refusal costs the node nothing.
-                _rolled_back = False
-                if _rollback_ask:
-                    _suspect, _refusal = self._rollback_start(
-                        _stages, res.failed_stage, _rollback_ask, changed, workdir,
-                        already_rolled_back=rolled_to, cwd=_cwd)
-                    if _suspect:
-                        next_start, _rolled_back = _suspect, True
-                        rolled_to = rolled_to | {_suspect}
-                    else:
-                        rollback_refusal = _refusal or ""
-                    async with self._write_lock:
-                        # BOTH outcomes are recorded. The refusals are the auditable half: a node
-                        # whose every rollback is refused is a Developer stuck on one guess, and that
-                        # is invisible if only the accepted ones are written. Diagnostic + fold-
-                        # ignored, so this append is splice-neutral by construction (see the event's
-                        # own note in events/types.py); on the main task under the write lock like
-                        # every other append in this loop.
-                        self.store.append(EV_STAGE_ROLLBACK, {
-                            "node_id": node_id, "generation": generation, "attempt": attempt,
-                            "stage": _rollback_ask, "failed_stage": str(res.failed_stage or ""),
-                            "accepted": bool(_suspect),
-                            "refusal": str(_refusal or "")[:300]})
-                # Which repairs count against the retrain cap, and why a renamed stage still does, is
-                # `_repair_forces_full_retrain`. Asked BEFORE incrementing so cap=N runs exactly N.
-                if _repair_forces_full_retrain(res, next_start, rolled_back=_rolled_back):
-                    if (self._inline_repair_retrain_cap
-                            and full_retrains >= self._inline_repair_retrain_cap):
-                        # The message names WHICH of the two ways this repair discarded completed
-                        # work, because they call for different next moves by whoever reads the
-                        # terminal: "keeps rewriting training code" is a Developer circling, while
-                        # "rolled the pipeline back" says the pipeline itself was suspected and the
-                        # allowance for testing that is now spent.
-                        #
-                        # The NON-rollback branch is byte-identical to what it has always been, on
-                        # purpose. It is an operator-facing string two tests pin, and rewording it to
-                        # cover both cases at once ("expensive re-run(s)") stranded both of them on a
-                        # substring that no longer existed — a contract change dressed as a tidy-up.
-                        # A new case gets a new sentence; it does not get to edit the old one.
-                        triage_outcome = ("abandon",
-                            (f"repair rolled the pipeline back to stage {next_start!r} — "
-                             f"{full_retrains} expensive re-run(s) already spent"
-                             if _rolled_back else
-                             "repair keeps changing earlier-stage (training) code — "
-                             f"{full_retrains} full re-train(s) already spent")
-                            + "; abandoning in-node repair to avoid burning compute — the node ends "
-                            "here, and the loop's next proposal is fresh work rather than another "
-                            "attempt at this one")
-                        break
-                    full_retrains += 1
-                    # Recorded HERE, where the compute is actually committed, so a resume reads the
-                    # charge back instead of being handed a fresh allowance (`_durable_full_retrains`).
-                    # Diagnostic and fold-ignored, so this append is splice-neutral by construction and
-                    # needs no BACKGROUND_APPENDABLE membership; it is on the main task under the write
-                    # lock like every other append in this loop.
-                    async with self._write_lock:
-                        self.store.append(EV_FULL_RETRAIN_CHARGED, {
-                            "node_id": node_id, "generation": generation,
-                            "spent": full_retrains, "attempt": attempt})
-                # loop -> re-run the eval with the corrected code (reusing earlier stages when safe)
-            sp.set_many(eval_seconds=total_eval, exit_code=res.exit_code, timed_out=res.timed_out,
-                        metric=res.metric, ok=ok, repair_attempts=attempt)
-            if res.violations:
-                sp.set("violations", len(res.violations))
-            if res.drift is not None:
-                sp.set("drift", True)
-            # ASHA past-experiment curve (#7): a bounded per-RUNG [[rung, metric], ...] (canonical
-            # geometric rungs) mined from the eval's CAPTURED stdout when the task declares a stdout_json
-            # `resource_key`, so a future live node — snapping its sample to the same rung — finds a sibling
-            # checkpoint across the whole run. Additive/only-when-present → old logs fold byte-identically.
-            # Computed OUTSIDE the write-lock: it parses `res.stdout` (run_argv's bounded ~64 KB tail — for a
-            # staged eval, the FINAL stage's output) and depends only on the eval result + `_eval_spec`,
-            # nothing the lock guards, so doing it under the global append lock needlessly serialized every
-            # other writer once per completed node. (Widening the tail to a teed full-curve accumulator is a
-            # follow-up; the fold + reader already degrade safely to the tail.)
-            _curve = None
-            if ok:
-                _spec = getattr(self, "_eval_spec", None)
-                _curve = extract_resource_curve(
-                    res.stdout, _spec.get("metric") if isinstance(_spec, dict) else None)
-            async with self._write_lock:
-                # (The `stage_finished` rows are NOT written here any more — they are appended inside
-                # the attempt loop, once per attempt, which is the only way a repaired node's log can
-                # carry the stage that really ran rather than the last attempt's `reused` marker. See
-                # the block above `if ok: break`. Every path that reaches this terminal has already
-                # appended THIS attempt's rows, so they still land BEFORE the terminal, as required.)
-                if res.drift is not None:               # Phase 4: uncorroborated metric (audit)
-                    self.store.append(EV_SPEC_DRIFT,
-                                      {"node_id": node_id, **res.drift, "generation": generation})
-                if ok:
-                    # THE ONE PLACE the extra-metric CHANNEL policy is applied, because it is the one
-                    # place the record is written. `Settings.auto_extra_metrics` (default ON =
-                    # today's behaviour) decides whether undeclared numbers scraped off the
-                    # candidate's stdout may enter the record at all; the tag decides whether a
-                    # reader can tell. The gate is expressed over the TAG
-                    # (`authenticated_extra_metrics_only`) so the two can never disagree about which
-                    # values are which — and since the tag learned to name the engine's OWN spliced
-                    # probe source (`EXTRA_METRIC_ENGINE`), turning the flag off no longer deletes
-                    # the CUDA proof the calibration receipt gate re-derives from this very payload.
-                    #
-                    # A GATE HERE AND NOT AT CAPTURE, deliberately: both auto-capture channels
-                    # (`command_eval` for repo tasks, the two `sandbox.py` tiers for solution.py)
-                    # funnel through this payload, so one choke point covers both instead of two
-                    # half-plumbed switches. And this is a WRITE-side policy only — the fold never
-                    # consults it, so an already-recorded run replays identically under either value
-                    # (`tests/test_auto_extra_metrics.py`), which is what keeps invariant #6 honest
-                    # without adding a key to the `run_started` payload whose exact key SET
-                    # `search/speculation_quality.py` compares for equality.
-                    _extras = normalize_extra_metrics(res.extra_metrics)
-                    _extra_channels = normalize_extra_metric_channels(res.extra_metrics_provenance)
-                    _extra_dirs = normalize_extra_metric_directions(res.extra_metrics_direction)
-                    if not bool(getattr(self, "auto_extra_metrics", True)):
-                        _extras, _extra_channels = authenticated_extra_metrics_only(
-                            _extras, _extra_channels)
-                    # The direction map may only describe values that SURVIVED the gate above. A
-                    # direction for a dropped key is an orphan: it says which way is better about a
-                    # number this record does not carry, and the next reader to join the two would
-                    # be reading a fact about nothing. Restricted rather than gated a second time,
-                    # so it cannot drift from whichever rule dropped the values.
-                    _extra_dirs = {k: v for k, v in _extra_dirs.items() if k in _extras}
-                    _eval_payload = {
-                        "node_id": node_id, "generation": generation,
-                        "metric": res.metric,
-                        "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": total_eval,
-                        "extra_metrics": _extras,   # #5 multi-objective
-                        "violations": res.violations or [],
-                        # Intra-node sweep: the whole grid's per-trial results, carried on the ONE
-                        # node_evaluated event (the sweep is a single atomic eval — eval_seconds is
-                        # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
-                        "trials": res.trials or [],
-                    }
-                    # THE CANDIDATE'S OWN NUMBER (doc 52 row 10a), only on a host-scored node that
-                    # printed one — absent otherwise, on the rule the two keys below state.
-                    if getattr(res, "self_metric", None) is not None:
-                        _eval_payload["self_metric"] = res.self_metric
-                    # Written only when there is something to say. `extra_metrics` is unconditional
-                    # (it is `{}` on the ordinary node), but a new UNCONDITIONAL key would change the
-                    # `node_evaluated` bytes of every node in every run — including the CUDA-probe
-                    # calibration nodes whose evidence the speculation gate re-derives — for no
-                    # information at all. Absent == "this node reported no extra metrics".
-                    if _extra_channels:
-                        _eval_payload["extra_metrics_provenance"] = _extra_channels
-                    # Same "only when there is something to say" rule, and for the same reason: an
-                    # unconditional key would rewrite the `node_evaluated` bytes of every node in
-                    # every run — the calibration nodes included — to say `{}`. Absent == nobody
-                    # declared which way is better about anything here, which is the honest reading
-                    # of every log written before this shipped.
-                    if _extra_dirs:
-                        _eval_payload["extra_metrics_direction"] = _extra_dirs
-                    if _curve:                     # computed above, outside the write-lock (see the #7 note)
-                        _eval_payload["resource_curve"] = _curve
-                    if salvaged is not None:
-                        # A SALVAGED METRIC IS NEVER SILENTLY EQUAL TO A MEASURED ONE. Two records,
-                        # because they answer two different questions and only one of them is read by
-                        # anything today:
-                        #   * `metric_provenance` is the ACCOUNT — which rung recovered the value,
-                        #     out of which declared reader, which stage had failed, and whether the
-                        #     cause was then corrected. Additive, so old logs and old readers are
-                        #     unaffected (invariant #5).
-                        #   * the `metric_salvaged` VIOLATION row is the ENFORCEMENT. The fold's rule
-                        #     is `feasible = not violations`, so under the default `audit` mode this
-                        #     node keeps its metric and its evaluated status — it counts, it is in the
-                        #     budget, the UI and the digest and the lineage all see it — while
-                        #     `RunState.feasible_nodes()` excludes it, which is what champion
-                        #     selection and breeding read. A provenance field alone would satisfy
-                        #     "the selection path CAN tell" and not "does": nothing on that path
-                        #     reads an unknown event key. `metric_salvage="select"` is the operator's
-                        #     opt-in to a salvaged metric competing on equal terms.
-                        _prov = salvaged.as_event()
-                        _prov["cause_repaired"] = bool(salvage_cause_repaired)
-                        # The failure the salvage overrode, kept verbatim on the SUCCESS terminal.
-                        # A node that reads as evaluated must still be able to tell whoever looks
-                        # what went wrong, or the salvage has merely moved the silence.
-                        #
-                        # INSIDE the provenance record, not beside it as its own event key. It was a
-                        # top-level `salvaged_error` and the fold ignores unknown keys — so the one
-                        # place it was meant to be read (a replayed `RunState`, which is what the UI,
-                        # the report and every read-model see) never had it, and `looplab replay`
-                        # silently dropped the only account of what the node's failure had been.
-                        # `metric_provenance` IS folded, so putting it here is what makes the promise
-                        # true rather than adding a second field for the fold to learn.
-                        _prov["salvaged_error"] = str(err)[:600]
-                        _eval_payload["metric_provenance"] = _prov
-                        _eval_payload["violations"] = (
-                            list(_eval_payload["violations"])
-                            + salvaged.violation_rows(getattr(self, "metric_salvage",
-                                                              DEFAULT_METRIC_SALVAGE)))
-                    elif declaration_repaired is not None:
-                        # A MEASURED metric with provenance — the F1e case. The declared contract
-                        # failed, the Developer's fix corrected the declaration, and the artifact
-                        # check then PASSED against it, so the pipeline is known to have produced
-                        # what it declared and nothing about the number was ever in doubt. NO
-                        # violation row and nothing on the selection path: this node competes for
-                        # champion and can be bred from, which is the entire point.
-                        #
-                        # The record is still written (decision (d) in `metric_salvage.py`'s
-                        # `declaration_repair_provenance`): "the manifest was wrong and we fixed it"
-                        # is worth knowing even when the number is sound — it is the only durable
-                        # trace that the node's recorded code is not byte-for-byte what produced its
-                        # recorded metric, and the only way an operator sees that every MERGE node
-                        # in a run needed the same correction.
-                        _eval_payload["metric_provenance"] = declaration_repaired
-                    # THE SUBJECT — what this number is a claim ABOUT. Folded onto the SAME
-                    # `metric_provenance` dict rather than beside it, for the reason `salvaged_error`
-                    # records one branch up: the fold ignores unknown top-level keys, so a second
-                    # event key would be invisible in every replayed `RunState` — which is what the
-                    # UI, the report and every read-model see.
-                    #
-                    # It MERGES with whatever the salvage/declaration-repair branches already put
-                    # there. Those answer "which rung produced this number"; this answers "about
-                    # what", and a salvaged number still has a subject. Merging also means a reader
-                    # keeps one key to look at, which is the property `metric_provenance` was folded
-                    # for in the first place.
-                    #
-                    # `.get`, not truthiness: `res.metric_subject` is None on the `off` rung and on
-                    # every path that never reached a metric read, and an old log has no key at all —
-                    # invariant #5's additive-with-reader-side-defaults rule, which is not optional
-                    # here because EVERY existing run's log has no provenance.
-                    _subject_prov = getattr(res, "metric_subject", None)
-                    if isinstance(_subject_prov, dict):
-                        _eval_payload["metric_provenance"] = {
-                            **(_eval_payload.get("metric_provenance") or {}), **_subject_prov}
-                    # THE HOST SCORER'S RECEIPT (doc 52 row 10a) — WHAT PRODUCED the number, beside
-                    # what it is ABOUT: `{argv, program, program_sha256, program_size}`, digested at
-                    # the score stage's start, merged onto the same provenance dict for the reason
-                    # the subject is. Two nodes whose receipts differ were not scored by the same
-                    # program, and that is the fact a "consistent scoring" claim rests on.
-                    _host_prov = getattr(res, "host_scorer", None)
-                    if isinstance(_host_prov, dict):
-                        _eval_payload["metric_provenance"] = {
-                            **(_eval_payload.get("metric_provenance") or {}),
-                            "host_scorer": _host_prov}
-                        # THE ENFORCEMENT, under `require`: an UNBOUND metric gets the EXISTING
-                        # `metric_salvaged` violation row, so the fold's `feasible = not violations`
-                        # keeps it out of `feasible_nodes()` — counted, in the budget, in the UI and
-                        # the lineage, and never champion and never bred from. A provenance field
-                        # alone would satisfy "the selection path CAN tell" and not "does": nothing
-                        # on that path reads an unknown event key. No second exclusion vocabulary is
-                        # minted — see `unbound_subject_violation_rows` for why the row is the same
-                        # name and what a new slug would silently cost.
-                        _eval_payload["violations"] = (
-                            list(_eval_payload["violations"])
-                            + unbound_subject_violation_rows(
-                                _subject_prov, res.metric,
-                                str(getattr(self, "metric_subject", "audit") or "audit")))
-                    # THE COMPARABILITY KEY — what this number may be RANKED AGAINST. Merged onto the
-                    # same `metric_provenance` dict as the subject, for the reason recorded one branch
-                    # up: the fold ignores unknown TOP-LEVEL keys, so a second event key would be
-                    # invisible in every replayed `RunState`, which is what the UI, the report, the
-                    # cross-run panel and `looplab inspect` all read.
-                    #
-                    # TWO RECORDS, not one, because they answer different questions and only one of
-                    # them is an identity: `eval_inputs` is the EVIDENCE (which files, which digests,
-                    # and the named reason when one did not bind — what an operator debugging a
-                    # `unknown` key has to look at), `comparability` is the KEY (a digest plus the
-                    # authority it was decided at — what a ranking surface compares). A surface that
-                    # had to re-derive the key from the evidence would be a second copy of
-                    # `comparability_record`, and the first thing to drift.
-                    #
-                    # UNCONDITIONAL, and never a violation. This records what a number may be compared
-                    # with; it does not decide whether the number is sound, so it mints no row, gates
-                    # nothing and cannot cost a node its terminal. `None` — the answer for every task
-                    # that declares neither inputs nor a comparison contract — writes NO key at all
-                    # rather than an empty one, because two empty keys would compare EQUAL and
-                    # "two runs that recorded nothing are the same evaluation" is the exact statement
-                    # this mechanism exists to refuse.
-                    _inputs_prov = getattr(res, "eval_inputs", None)
-                    # …and the SUBSTRATE this number was produced on, read LIVE rather than from
-                    # the folded pin: the pin is what `run_started` recorded and is blind to a fix
-                    # the operator promoted into the editable repo an hour ago, which is exactly the
-                    # move that has to split two nodes. Discriminator only — see
-                    # `comparability.py::comparability_record` — so a wrong or missing answer can
-                    # never CERTIFY a comparison, and a task with no editable repo records none.
-                    #
-                    # IN A THREAD, and that is not tidiness. `_substrate_fingerprint` spawns
-                    # `git rev-parse` / `git status` / `git diff` with real timeouts, or walks a tree
-                    # with `rglob`+`stat` for a non-git source. Until 2026-08-25 it ran on the event
-                    # loop at EVERY node terminal — where it had previously only ever run at setup
-                    # and resume — and a wedged FUSE mount would have frozen eval finalisation,
-                    # terminals and GPU dispatch for the whole of its timeout. This engine has
-                    # already paid that bill once, for a propose phase.
-                    try:
-                        _substrate = (await anyio.to_thread.run_sync(self._substrate_fingerprint)
-                                      if self._repo_spec else None)
-                    except Exception:  # noqa: BLE001 — an unreadable tree is `unknown`, never a failure
-                        _substrate = None
-                    _cmp = comparability_record(task=self._task_snapshot_for_comparability(),
-                                                inputs_prov=_inputs_prov, substrate=_substrate)
-                    if isinstance(_inputs_prov, dict) or _cmp is not None:
-                        _merged = dict(_eval_payload.get("metric_provenance") or {})
-                        if isinstance(_inputs_prov, dict):
-                            _merged["eval_inputs"] = _inputs_prov
-                        if _cmp is not None:
-                            _merged["comparability"] = _cmp
-                        _eval_payload["metric_provenance"] = _merged
-                    # THE APPLIED COORDINATES — what the configuration that ran said this node's
-                    # declared `Idea.params` were worth (`runtime/applied_params.py`, bound at the
-                    # metric read in `eval_dispatch`).
-                    #
-                    # MERGED ONTO `metric_provenance` and NOT given a top-level event key, for the
-                    # reason the subject record already relies on: the fold ignores unknown TOP-LEVEL
-                    # keys, so a second key would be invisible in every replayed `RunState` — which
-                    # is what the UI, the report, the exports and `looplab inspect` all read.
-                    #
-                    # UNCONDITIONAL AND NEVER A VIOLATION. `Idea.params` is a PROPOSAL under
-                    # `params_style: "none"`; a node that adjusted for a real constraint (an OOM, a
-                    # time budget) did the right thing and must still be allowed to win. This says
-                    # what it ran at; it mints no row, excludes nothing, and cannot cost a node its
-                    # terminal. Absent when the node declares no comparable coordinate or no carrier
-                    # could be read — never an empty record, which would be the claim "the
-                    # configuration was checked and said nothing".
-                    _applied_prov = getattr(res, "applied_params", None)
-                    if isinstance(_applied_prov, dict):
-                        _eval_payload["metric_provenance"] = dict(
-                            _eval_payload.get("metric_provenance") or {},
-                            applied_params=_applied_prov)
-                    self.store.append(EV_NODE_EVALUATED, _eval_payload)
-                    # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
-                    # emission does not rewrite the metric, but the folded trust_gate policy
-                    # can exclude high-precision signals from champion/breeding under gate/block.
-                    # Both the surface and the findings over it are NAMED rules (doc 25 ES-03) — the
-                    # `code_digest` below must be the digest of the exact bytes that were scanned, so
-                    # the surface is read once, here, and handed to the scan.
-                    scan_src = self._trust_scan_surface(node)
-                    detectors = self._trust_scan_detectors(scan_src)
-                    sigs = self._trust_scan_signals(node, res, state, workdir, scan_src,
-                                                    detectors)
-                    # THE CLEAN CASE LEAVES A RECEIPT, and that is the whole point of this row: the
-                    # `if sigs:` below writes only on a hit, so until 2026-08-19 a run whose every
-                    # node was scanned clean was byte-identical to a run whose scan call had been
-                    # deleted — and identical again to a run with every detector switched off, which
-                    # is what four of the six preserved logs on this box actually are. Appended
-                    # UNCONDITIONALLY (an empty `detectors` list is itself the durable claim "the
-                    # engine got here and nothing was configured to look"), and it carries no
-                    # candidate text — what was scanned is named by its digest, which is the SAME
-                    # value the flagged row below publishes, from one function.
-                    #
-                    # AFTER the terminal, not folded into it. The BACKLOG's own sketch was a field on
-                    # `node_evaluated`; that needs the scan to run BEFORE the terminal append, which
-                    # would put five detector calls — three of them over agent-authored source, one
-                    # of them a filesystem walk — between an evaluation and the one row the run
-                    # cannot afford to lose. A separate row can be lost to a kill in this window
-                    # instead, and then it reads `unknown`, which is the correct default and the
-                    # exact reading `trust/scan_receipt.py` guarantees for it.
-                    self.store.append(EV_TRUST_SCAN, _scan_receipt.trust_scan_receipt(
-                        node_id, generation, detectors, len(sigs), scan_src))
-                    if sigs:
-                        # P1-7 versioned TrustEvidence: bind the evidence to a schema version + a digest
-                        # of the exact scanned surface (provenance — which bytes produced these signals),
-                        # so a stored flag isn't a bare {node_id, signals}. Additive; the fold reads the
-                        # new fields with defaults, so old logs are unaffected.
-                        # (No local `import hashlib` here: it would make `hashlib` a function-local
-                        # name for ALL of _evaluate, so any earlier use in this method would raise
-                        # UnboundLocalError — the exact trap _workdir_manifest_digest's docstring
-                        # records having to move out of this method to dodge. Module-level import.)
-                        self.store.append(EV_REWARD_HACK_SUSPECTED,
-                                          {"node_id": node_id, "generation": generation,
-                                           "signals": sigs,
-                                           "evidence_version": TRUST_SCAN_EVIDENCE_VERSION,
-                                           # ONE digest rule for both rows (`trust/scan_receipt.py`),
-                                           # so the receipt above and this evidence commit to the
-                                           # same subject by construction rather than by two equal
-                                           # inline `hashlib.sha256(...)` calls that agree until
-                                           # someone edits one of them.
-                                           "code_digest": _scan_receipt.scan_subject_digest(scan_src)})
-                else:
-                    # `err`/`reason` were computed in the attempt loop (reason may be "idea_rejected"
-                    # if the crash-triage agent judged the idea fundamentally wrong).
-                    sp.set("error_reason", reason)
-                    # `reason_source`/`engine_reason` ride on the terminal for the same reason
-                    # they ride on `node_repaired`: `reason` is the RECORD of what this node died
-                    # of, and since a judge may re-read three of the twelve classifications the
-                    # record has to say who chose the word. Additive (invariant #5) and
-                    # fold-ignored; an ABSENT pair on an older row means "nobody looked", which is
-                    # deliberately not the same fact as `engine`.
-                    data = {"node_id": node_id, "generation": generation,
-                            "error": err, "reason": reason, "eval_seconds": total_eval,
-                            "reason_source": _reason_source, "engine_reason": _engine_reason}
-                    # …and the record's wider window on the same bytes. The TERMINAL is the row a
-                    # whole run is audited from, and it is also the row for a node that never
-                    # reached a repair — a node abandoned on its first failure has no
-                    # `node_repaired` row at all, so without this its evidence would be the
-                    # 500-character prompt tail and nothing else. Same additive/omitted-when-empty
-                    # rule as on the repair row.
-                    if err_evidence:
-                        data["error_evidence"] = err_evidence
-                    # The diagnostician's citation rides the TERMINAL too, on the same additive,
-                    # omitted-when-absent rule as on `node_repaired` above: the terminal is the row a
-                    # whole run is audited from, and "who said this and what did they read" is
-                    # exactly the question an audit asks of it.
-                    if _evidence:
-                        data["reason_evidence"] = _evidence
-                    if _evidence_resolved is not None:
-                        data["reason_evidence_resolved"] = _evidence_resolved
-                    # THE ACCOUNT AND ITS TRAIL, on the same rule as on `node_repaired` above. This
-                    # is the row a whole run is audited from and the row most likely to be read
-                    # after everything else is gone, which is exactly why the SUMMARY has to carry
-                    # the numbers itself rather than point at a log — the logs do survive, but a
-                    # record whose meaning depends on that is a record that can rot.
-                    if _summary:
-                        data["reason_summary"] = _summary
-                    if _findings:
-                        data["reason_findings"] = _findings
-                    if res.failed_stage:                # Phase 1: pinpoint which pipeline stage broke
-                        data["failed_stage"] = res.failed_stage
-                    if triage_outcome is not None:
-                        # The SEVENTH persisted output channel, found by the C2 sweep and missed by
-                        # it: `triage_rationale` is LLM text about a crash, written to the durable
-                        # `node_failed` row, and the two SIBLING judgements of exactly this kind —
-                        # `train_monitor`'s and `asha_monitor`'s `reason` — have gone through
-                        # `_redact` since B3 with a comment saying why ("LLM text derived from the
-                        # raw log; redact it before it lands in the trace / event log"). This one
-                        # did not. The judge is handed the already-redacted `err`, so the leak is
-                        # narrow rather than open — but it also sees the repair log and the state
-                        # brief, and a model restating what it read is a laundering channel a screen
-                        # downstream of it costs nothing to close. Redact BEFORE the 300-char cut,
-                        # like both siblings, so masking can never be truncated away.
-                        data["triage_action"], data["triage_rationale"] = (
-                            triage_outcome[0], self._redact(str(triage_outcome[1]))[:300])
-                    self.store.append(EV_NODE_FAILED, data)
-                self._maybe_crash()
+                    self._eval_prepare_workdir(a)
+                    self._eval_seed_ledgers(a)
+                    while True:
+                        if await self._eval_run_attempt(a) is PHASE_RETURN:
+                            return
+                        sig = await self._eval_settle_outcome(a)
+                        if sig is PHASE_RETURN:
+                            return
+                        if sig is PHASE_SETTLED:
+                            break
+                        if await self._eval_salvage(a) is PHASE_SETTLED:
+                            break
+                        sig = await self._eval_decide_repair(a)
+                        if sig is PHASE_SETTLED:
+                            break
+                        if sig is PHASE_RETRY:
+                            continue
+                        sig = await self._eval_apply_repair(a)
+                        if sig is PHASE_RETURN:
+                            return
+                        if sig is PHASE_SETTLED:
+                            break
+                        # loop -> re-run the eval with the corrected code (reusing earlier stages when safe)
+                    await self._eval_write_terminal(a)
         except (anyio.get_cancelled_exc_class(), *_EVAL_DELIBERATE_STOPS):
             # A deliberate stop is not a node failure. Cancellation is how a reset, an operator abort
             # and a run stop reach this worker; answering one with a `node_failed` would invent a
@@ -3895,5 +2114,1983 @@ class EvaluateMixin:
             if any(isinstance(leaf, _EVAL_DELIBERATE_STOPS + (anyio.get_cancelled_exc_class(),))
                    for leaf in exception_leaves(exc)):
                 raise
-            await self._contain_eval_crash(node_id, _contained_generation[0], exc)
+            await self._contain_eval_crash(node_id, a.generation, exc)
+
+    async def _eval_record_superseded(self, a: "EvalAttempt") -> None:
+        """The stale-generation terminal a reset owes this lifecycle: fold-budget-only (replay
+        rejects its state fields but charges `eval_seconds` once), then the workdir marker."""
+        async with self._write_lock:
+            self.store.append(EV_NODE_FAILED, {
+                "node_id": a.node_id, "generation": a.generation,
+                "error": "superseded by node reset", "reason": "superseded",
+                "eval_seconds": a.total_eval})
+        a.mark_superseded_workdir()
+
+    async def _eval_admit(self, a: "EvalAttempt") -> str:
+        """ADMIT — the pre-start fence (doc 25 ES-03's `_eval_prestart_fence`, under the name the
+        phase comments use). Folds the log, refuses a lifecycle that reset/abort/tombstone/pause/finish
+        already closed, binds `a.generation`, the resource reservation and the eval env, asks the proxy
+        scorer, and stamps the durable eval-start boundary. `PHASE_RETURN` on every zero-compute exit
+        (each has already written its own terminal, or owes none); `PHASE_NEXT` once the sandbox may
+        be entered."""
+        a.events_at_start = self.store.read_all()
+        a.state = fold(a.events_at_start)
+        a.node = a.state.nodes.get(a.node_id)
+        # The dispatcher checks this before and after resource admission, but _evaluate is also a
+        # defensive public seam used by recovery/tests. An operator Card drop that predates this
+        # worker must close the pending lifecycle at zero cost; the watcher below intentionally
+        # considers only post-start events so it can charge genuinely consumed compute.
+        prestart_stop = getattr(self, "_skip_if_aborted", None)
+        if a.node is not None and callable(prestart_stop) \
+                and prestart_stop({"node_id": a.node_id}, a.state):
+            return PHASE_RETURN
+        # A batch is selected from an earlier fold. Before this worker actually starts, reset
+        # (especially implement/propose), abort, tombstone, pause or finish may have won. Never
+        # evaluate blank/not-yet-rebuilt code or terminalize a superseded lifecycle.
+        if (a.node is None or a.node.status is not NodeStatus.pending or a.node.tombstoned
+                or a.node.id in a.state.aborted_nodes or a.node.rerun_from is not None
+                or a.state.paused or a.state.finished or a.state.stop_requested):
+            return PHASE_RETURN
+        # The one gate that keeps a speculative miss provably free: no unconfirmed prediction may
+        # cross into the sandbox. See `_assert_speculative_selection_confirmed`.
+        self._assert_speculative_selection_confirmed(a.state, a.node)
+        a.generation = a.node.attempt       # immutable identity of THIS worker's node lifecycle
+        # ...and read by the containment handler at the top through `a.generation`, which has no
+        # other way to name the lifecycle it is closing. Re-folding there would read whatever
+        # generation is CURRENT at failure time, which after a concurrent reset is a different
+        # lifecycle than the one that raised — and a terminal on the wrong generation is worse than none.
+        # The trace is opened before the fold above so pre-start exits remain observable. Once
+        # this worker has an exact lifecycle, stamp the root; the span index uses that root receipt
+        # to keep reset attempts disjoint while every nested generation/tool stays in this trace.
+        a.sp.set("generation", a.generation)
+        a.start_seq = a.events_at_start[-1].seq if a.events_at_start else -1
+        a.sp.set("operator", a.node.operator)
+        # The dispatcher owns this reservation for the complete node lifecycle. Keeping the same
+        # devices across every inline repair/retry prevents a repaired process from jumping onto a
+        # sibling's GPU; the dispatcher releases it exactly once in its worker `finally`.
+        a._resource_reservation = self._eval_resource_reservation(a.node_id, a.generation)
+        # The dispatcher registered this reservation under its ADMISSION-time generation, but
+        # `generation` here is node.attempt from a fresher fold. An eval-stage node_reset landing in
+        # that window (attempt+1, still pending, rerun_from None) passes the prestart guard above and
+        # misses the current-generation lookup — and `_resource_eval_env(None)` would yield an
+        # UNPINNED env that sees every sibling's GPU. If the dispatcher still holds this node's
+        # reservation under the superseded key, fail closed (return without a terminal) so the
+        # dispatcher re-admits the reset lifecycle under its current generation and re-pins it,
+        # instead of degrading to whole-box visibility. The presence of a stale-generation reservation
+        # is the authoritative signal that this node was dispatcher-admitted — a never-admitted
+        # recovery/test call holds no stale key and is exempt. Gate on that reservation, NOT on the
+        # live mutable `_eval_parallel`: a Strategist/operator that lowers eval_parallel to 1 mid-batch
+        # (while pinned siblings are still draining) must not flip this into an unpinned launch. A
+        # serial re-admit of a whole-pool-unpinned node is harmless (it just re-runs unpinned).
+        if (
+            a._resource_reservation is None
+            and self._eval_reservation_under_other_generation(a.node_id, a.generation)
+        ):
+            return PHASE_RETURN
+        try:
+            a.eval_env = self._resource_eval_env(
+                a._resource_reservation, inherit_host=True)
+        except GpuPinUnenforceable as exc:
+            # an explicit positive declaration on a zero-device inventory is a
+            # fail-closed, zero-compute terminal — never an unpinned launch and never an endless
+            # resource wait. The dispatcher's finally still releases/clears the marker exactly once.
+            async with self._write_lock:
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": a.node_id, "generation": a.generation,
+                    "error": str(exc)[:400], "reason": "gpu_unavailable",
+                    "eval_seconds": 0.0})
+                self._maybe_crash()
+            return PHASE_RETURN
+        # A6 proxy/predictive scoring: cheaply predict this candidate's metric from the observed
+        # history and skip a full eval for the doomed bottom fraction (cost lever). Deterministic
+        # + replay-safe: the skip is recorded as node_failed reason="proxy_skipped" and a
+        # proxy_scored audit event. OFF by default (kill_fraction=0 -> never skips).
+        if self.proxy_scorer is not None and self.proxy_kill_fraction > 0:
+            # The pair, not the point estimate (doc 52 row 17): the kill abstains on a candidate
+            # whose nearest evaluated neighbour is beyond the explored region's own radius, and
+            # the row records the distance and the abstention beside the score (additive).
+            scored = self.proxy_scorer.score_with_uncertainty(a.state, a.node)
+            if scored is not None:
+                pred, nearest = scored
+                abstained = self.proxy_scorer.abstains(a.state, a.node, nearest)
+                skip = self.proxy_scorer.should_skip(a.state, a.node, pred, nearest)
+                a.sp.set_many(proxy_score=round(pred, 6), proxy_skipped=skip,
+                            proxy_nearest=round(nearest, 6), proxy_abstained=abstained)
+                async with self._write_lock:
+                    self.store.append(EV_PROXY_SCORED,
+                                      {"node_id": a.node_id, "generation": a.generation,
+                                       "score": round(pred, 6), "skipped": skip,
+                                       "nearest": round(nearest, 6), "abstained": abstained})
+                    if skip:
+                        self.store.append(EV_NODE_FAILED, {
+                            "node_id": a.node_id, "generation": a.generation,
+                            "error": "skipped by proxy scorer (predicted in the doomed bottom fraction)",
+                            "reason": "proxy_skipped", "eval_seconds": 0.0})
+                        self._maybe_crash()
+                if skip:
+                    return PHASE_RETURN
+        # DURABLE EVAL-START BOUNDARY (events/types.py::EV_NODE_EVAL_STARTED). This is the LAST
+        # instant at which "this build never ran" is still true: every line below writes a node
+        # workdir and then executes the node's own code. Both zero-compute exits above (an
+        # unenforceable GPU pin, a proxy skip) have already terminalized, so the boundary is never
+        # stamped on a lifecycle that really did cost nothing.
+        #
+        # WHY AN EVENT, weighed against the alternatives. The log records evaluation cost only at
+        # the TERMINAL (`events/replay.py::_charge_terminal_cost`) and appends `stage_finished`
+        # rows inside that terminal's own write-lock block, so a process killed mid-training left
+        # a node byte-identical to one that was never dispatched. The only thing that told them
+        # apart was the IN-MEMORY `eval_inflight` set, which a resumed process starts empty — so
+        # after a crash the refund fired on 40 GPU-minutes of real work. Persisting that set needs
+        # a durable write anyway; a sidecar file is not a function of the log (invariant #4/#5);
+        # and no existing durable fact is written between dispatch and the sandbox. Refusing every
+        # refund whose lifecycle is unprovable is the remaining option and IS what happens for a
+        # node without `eval_start_boundary` — this event is what lets a node that CAN prove it
+        # keep the refund the calibration numbers depend on.
+        #
+        # Every current engine-created lifecycle carries `eval_start_boundary`. A speculative
+        # card session normally wrote the receipt at admission in the MAIN task (keeping it out
+        # of the election's CAS window); ordinary dispatch, recovery, the legacy dispatcher and
+        # direct library callers reach this funnel backstop. The one durable row therefore both
+        # protects speculative budget accounting and moves the public activity projection from
+        # "waiting for a slot" to "evaluating" before sandbox work begins.
+        async with self._write_lock:
+            self._record_eval_start_boundary(a.node)
+        return PHASE_NEXT
+
+    def _eval_prepare_workdir(self, a: "EvalAttempt") -> None:
+        """PREPARE_WORKDIR — the node directory: reuse it on a stage-scoped re-run whose manifest
+        stamp still matches the folded node, else materialize; then the build delta and the
+        metrics-sidecar binding. The stamp/superseded-marker helpers live on `EvalAttempt`."""
+        a.workdir = self.run_dir / "nodes" / f"node_{a.node_id}"
+        # Phase 2 stage-scoped re-run: REUSE the existing workdir (earlier stages' artifacts — the
+        # checkpoint `train` wrote) instead of re-seeding it, which would wipe them.
+        a._superseded_marker = a.workdir / ".looplab-superseded"
+        # Stage reuse is the ONE path that evaluates a workdir it did not just build, so it must
+        # prove the bytes on disk are the manifest the folded node claims. `node_repaired` is
+        # appended BEFORE the repaired files are written (both under the same attempt), so a
+        # process death in that window leaves state claiming the repair while the workdir still
+        # holds the pre-repair source. A later stage-scoped reset then sets `rerun_stage` without
+        # any superseded marker (only the live process writes one, and it died), and reuse would
+        # skip materialization and score the OLD bytes as if they were the repair.
+        # The stamp closes that: it is written only after the files are on disk, so a crash in the
+        # gap leaves it naming the previous manifest and reuse is refused. Fail-closed by
+        # construction — a missing/unreadable/mismatched stamp just forces the full materialize
+        # that every other entry path already does, costing artifacts, never correctness.
+        a._manifest_stamp = a.workdir / ".looplab-manifest"
+        _reuse = bool(a.node.rerun_stage and a.workdir.exists()
+                      and not a._superseded_marker.exists() and a.workdir_matches(a.node))
+        if not _reuse:
+            self._materialize(a.node, a.workdir)    # seed tree -> node edits -> task assets
+            a.stamp_workdir(a.node)                # the workdir now IS this manifest
+        # THE BUILD DELTA, here rather than on the eval-start receipt: the question is about
+        # BYTES ON DISK, and until the line above there are none. Fold-ignored and diagnostic,
+        # so a concurrent eval task may append it (invariant #1); best-effort throughout, so it
+        # can never cost this node its evaluation.
+        self._record_node_build_delta(a.node)
+        if not _reuse:
+            # A stage-scoped re-run whose workdir was GONE has nothing to reuse — the re-seed just
+            # wiped any artifacts. Skipping earlier stages now would run the restarted stage against
+            # MISSING inputs, so drop the start_stage and re-run the FULL pipeline instead.
+            if a.node.rerun_stage:
+                a.node.rerun_stage = None
+        # Bind mutable TensorBoard/metric sidecars to this exact lifecycle before launching any
+        # user code.  A reset can reuse the node directory (stage restart), so the serving layer
+        # also filters points by this start time instead of relabelling an older curve.
+        try:
+            begin_metrics_attempt(a.workdir, a.generation)
+        except Exception:  # noqa: BLE001 - telemetry must never block the evaluation itself
+            pass
+
+    def _eval_seed_ledgers(self, a: "EvalAttempt") -> None:
+        """SEED_LEDGERS — every loop-carried counter, seeded from the DURABLE rows so a resume
+        continues this node's repair chain instead of restarting it (the argument is in the comments
+        below, which used to sit at the head of the attempt loop)."""
+        # Hybrid crash repair: each attempt runs the eval (with the mid-eval abort watcher) and,
+        # if it CRASHES, the agent triages it and may repair the code IN PLACE and re-run — all
+        # within this one node (no new tree node, no max_nodes spent). Exactly ONE terminal event
+        # (node_evaluated/node_failed) is emitted at the end so first_terminal budget accounting
+        # and resume re-entry are intact; only NON-terminal `node_repaired` events are written
+        # mid-loop.
+        #
+        # WHAT STOPS THE LOOP (redesigned 2026-08-05 — see the ledger note further down for what
+        # this replaced and why). Two things, in this order:
+        #   1. THE TRIAGE MODEL, consulted once per attempt with this node's whole repair history
+        #      (`repair_log`). Its `abandon` is the primary stop: the model that reads the failure
+        #      is the only participant that can say "I no longer know how to fix this". This costs
+        #      no additional LLM calls — the loop already made exactly one triage call per attempt
+        #      to decide repair-vs-reject; it now decides repair-vs-STOP on better evidence.
+        #   2. `inline_repair_attempts`, a hard operator backstop (0 = no operator cap, which now
+        #      means `_UNLIMITED_REPAIR_CEILING` rather than nothing — see that constant). It
+        #      exists because the judge can be wrong in the expensive direction, and because a
+        #      judge that cannot ANSWER must not silently mean "keep going" (those verdicts are
+        #      `unanswerable`/`unreadable` and are handled below, not here).
+        #
+        # AND IT IS A LEDGER, NOT A PROCESS COUNTER. Both of those bounds — the budget and the
+        # history the judge reads — are seeded from the DURABLE `node_repaired` rows, so a resume
+        # continues this node's repair chain instead of starting a new one on top of it. See
+        # `_durable_repair_ledger` for the four-resume measurement that made it necessary.
+        a._repair_cap = _effective_repair_cap(self._inline_repair_attempts)
+        a.attempt, _durable_rows, a.unparseable_repairs = _durable_repair_ledger(
+            a.events_at_start, a.node_id, a.generation)
+        # Seeded from the log for the same reason `attempt` is: a bound that a resume refunds is
+        # not a bound. `_MAX_DEP_ROUNDS` exists so an offline or misnamed package cannot loop,
+        # and `inline_repair_retrain_cap` is a guard on GPU hours — both were process-local.
+        a.dep_rounds = _durable_dep_rounds(a.events_at_start, a.node_id, a.generation)
+        # …and the COST floor's own seed, for the same reason and from the same log. See
+        # `_durable_repair_seconds` / `repair_judgment.repair_redone_work_stop`: this is the
+        # bound that reaches the repair chains `inline_repair_retrain_cap` structurally cannot
+        # charge — the ones that re-run a stage without discarding a completed one.
+        a.prior_repair_seconds = _durable_repair_seconds(a.events_at_start, a.node_id, a.generation)
+        # THE LICENSE IS PRICED AT THE LARGEST DECLARATION THE CHAIN HAS SEEN, because the SPEND
+        # it is compared against was earned under all of them. `chain_seconds` accumulates
+        # wall-clock spent under the PRE-repair manifest, while the pipeline cost is re-resolved
+        # from the POST-repair one each attempt — so a repair that legitimately SHRINKS its
+        # declared stage timeouts (right-sizing after an epoch cut) retroactively re-priced
+        # seconds that were inside the license when they were spent, leaving the fix exactly ONE
+        # eval and, if that attempt failed for any reason, a terminal charging old-declaration
+        # work at the new rate. A high-water mark cannot be gamed upward past the operator's own
+        # number: `stage_budget_refusal` already refuses a declaration above
+        # `eval_spec_time_budget`, so the ceiling on this maximum is the budget the operator set.
+        # RESIDUAL, stated rather than hidden: it is per-PROCESS. A resume re-seeds it from the
+        # manifest it resumes with, which is the same declaration the pre-fix code used for the
+        # whole chain — so a resumed chain is never priced looser than before, only a live one
+        # is priced honestly.
+        a.chain_pipeline_s = 0.0
+        a.total_eval = 0.0                 # summed subprocess wall-clock across all attempts (cost)
+        a.triage_outcome = None            # ("abandon"|"reject_idea", rationale) for the terminal event
+        # THE SALVAGED METRIC, when this node's eval failed for something that is not "the
+        # metric is absent" and the operator's own declared reader can still find the value the
+        # eval produced. Loop-local because salvage is decided per ATTEMPT and consumed by the
+        # ONE terminal below — it never becomes a second terminal (invariant #2).
+        a.salvaged = None
+        a.salvage_cause_repaired = False
+        # …and the OTHER outcome of the same block: the node whose repaired declaration then
+        # PASSED its artifact re-check, which is not a salvage at all (F1e). Its provenance
+        # record carries no violation and is consumed by the same single terminal; the two are
+        # mutually exclusive by construction — `salvaged` is cleared the moment this is set.
+        a.declaration_repaired = None
+        a.err = ""
+        a.reason = "crash"
+        # WHO CHOSE `reason`, and what the ENGINE's own answer was — the two columns that keep
+        # the durable rows honest now that a model may re-read three of the twelve
+        # classifications (`triage.py`'s fact/reading split). `_engine_reason` is set beside
+        # every classification and is never overwritten by a judge, so the authenticated column
+        # survives on the row whatever the model said and any audit can still be run against it.
+        # Both default to the engine, which is what every path that never reaches a judge —
+        # no `unified_agent`, a dead transport, an unreadable verdict, a floor stop, a reason the
+        # operator excluded from `inline_repair_reasons` — leaves them at.
+        a._reason_source = REASON_SOURCE_ENGINE
+        a._engine_reason = a.reason
+        # WHERE THE DIAGNOSTICIAN LOOKED, or None on every path that never consulted one. Both
+        # are OMITTED from a durable row when None rather than written empty: an absent key
+        # means "nobody was asked", which is deliberately not the same fact as "asked and cited
+        # nothing" (`failure_diagnosis.EVIDENCE_SOURCE_NONE`).
+        a._evidence = None
+        a._evidence_resolved = None
+        # …and the ACCOUNT plus the trail behind it, on the same rule. `None`/`None` and not
+        # `""`/`[]`, deliberately: an empty summary and an empty list are a diagnostician that
+        # was asked and wrote nothing down, which is a real and different answer from one that
+        # was never asked. The durable rows omit the keys in both cases and an old row omits
+        # them too — the reader-side default (invariant #5) is "nobody looked".
+        a._summary = None
+        a._findings = None
+        # THE EVIDENCE THE JUDGE DECIDES ON: this node's repair history, newest last. One row per
+        # attempt — what failed, what the fix claimed it would do, and which files it actually
+        # touched. Rows made in THIS process are appended from loop locals (every field is already
+        # in hand); rows from earlier processes are rebuilt from the durable `node_repaired`
+        # events above, because `state` is the fold taken at eval START and `RunState` keeps only
+        # the latest code, never the trajectory.
+        #
+        # The judge is handed the trajectory precisely so it can tell "moving" from "circling",
+        # and a resume used to hand it an empty history for a node with eight durable repairs —
+        # the same defect as the process-local budget, seen from the other side: the model was
+        # asked to judge a chain while being shown none of it, and answered `repair` because
+        # nothing it could see said otherwise.
+        #
+        # These three columns are chosen against the two ways the loop failed. A repair going in
+        # CIRCLES is visible as a repeating error next to repeating changed-file sets — which is
+        # what the deleted signature counter tried to measure with a regex, and which a reader of
+        # the actual text does not need a regex for. A repair making real PROGRESS is visible as a
+        # moving failure next to fixes that touch different code. The model gets the trajectory,
+        # not a scalar someone else already reduced it to.
+        a.repair_log: list[dict] = list(_durable_rows)
+        # A repair that returned something that is not Python at all. Counted directly rather than
+        # inferred from the SyntaxError it produces: the error text can vary per attempt (a
+        # provider request id), the FACT cannot. See `_UNPARSEABLE_REPAIR_LIMIT`. Durable for the
+        # same reason as the budget: it bounds a per-NODE condition (a provider answering with
+        # prose), so a process-local count let a resume grant three more truncations.
+        # `unparseable_repairs` is seeded from the ledger above.
+        # Best pipeline depth any attempt has reached (stages passed/reused before the failure) —
+        # surfaced to the judge as the other, non-textual evidence that a repair did real work.
+        a.best_depth = -1
+        # Multi-stage reuse across repair attempts: `next_start` is the stage to run FROM on the next
+        # eval — _UNSET on the first eval (derives node.rerun_stage), then set by the safe-reuse
+        # predicate after each repair (a stage name = reuse the completed earlier stages, e.g. skip
+        # re-train when only the score script was fixed; None = a full re-run). `full_retrains` counts
+        # the EXPENSIVE full re-runs a repair forced, bounded by inline_repair_retrain_cap.
+        a.next_start = _UNSET
+        a.full_retrains = _durable_full_retrains(a.events_at_start, a.node_id, a.generation)
+        # ROLLBACK state, both halves durable for the same reason the budget above is. `rolled_to`
+        # is the set of suspects already spent (at most one re-run per stage per node);
+        # `rollback_refusal` carries the engine's answer to a REFUSED request forward into the next
+        # repair prompt, because a Developer told nothing simply re-asserts the same guess — the
+        # thrash the rungs exist to stop would then just move up one level.
+        a.rolled_to = _durable_rollbacks(a.events_at_start, a.node_id, a.generation)
+        a.rollback_refusal = ""
+
+    async def _eval_run_attempt(self, a: "EvalAttempt") -> str:
+        """RUN_ATTEMPT — one sandboxed evaluation under the intervention watcher and both live-log
+        watchdogs. Binds `a.res`, the watcher's verdict and the per-attempt signals; `PHASE_RETURN`
+        only for the unenforceable-GPU-pin terminal it writes itself."""
+        a._t0 = time.time()
+        # repair/retry attempts reuse the workdir and sandbox stage logs append.
+        # When anything will READ those logs, snapshot every existing one before this attempt
+        # starts, so no reader can rank, classify or diagnose from prior-attempt bytes. Keep
+        # the all-off path free of extra filesystem work (`off == today`).
+        _eval_spec = getattr(self, "_eval_spec", None)
+        # WHO WILL READ THESE LOGS, and therefore whether this attempt owes them a "before".
+        # A named rule (`train_monitor.needs_log_snapshot`) rather than an inline `or`,
+        # because its THIRD reader — the repair triage below — reads only after the attempt
+        # has already died, so the snapshot has to be taken on behalf of something that has
+        # not asked for anything yet. See that function for the whole argument.
+        _watching_logs = needs_log_snapshot(self, _eval_spec)
+        a._log_snapshot = snapshot_training_logs(a.workdir) if _watching_logs else None
+        # Which log each phase of THIS attempt writes. Both watchdogs live across the WHOLE
+        # eval — setup, every stage, and the ALWAYS-appended `score` stage — so without the
+        # resolved pipeline they can only guess whose bytes they are reading, and the freshest
+        # `*.log` is `setup.log` during a pip install and `score.log` after the training has
+        # already SUCCEEDED. `_resolved_stages` re-resolves exactly what `_run_eval` will run
+        # ([] = the single-command path, whose `eval.log` IS the training log).
+        a._log_plan = eval_log_plan(self._resolved_stages(a.node, a.workdir)) if _watching_logs else None
+        # Mid-eval intervention: a watcher polls while the eval runs in a worker thread. An
+        # exact node lifecycle mutation or operator drop of THIS node's Card sets the cancel
+        # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). The pre-eval
+        # skip only catches not-yet-started nodes — this kills a running one.
+        cancel = threading.Event()
+        # The watcher's verdict, handed back through a dict because a sibling task in the
+        # group cannot rebind this frame's locals (see `_watch_for_intervention`). Read
+        # into `aborted`/`superseded`/`operator_card_dropped` once the group has closed;
+        # nothing inside it consults them.
+        a._seen: dict = {}
+        a.kill_signal: dict = {}       # filled by the training monitor if it kills a broken run (Phase 3)
+        # The Card identity this worker can be dropped through, read while `node` is still
+        # the fold this attempt started from — it is not rebound until after the group.
+        _card_id = getattr(getattr(a.node, "idea", None), "card_id", None)
+        async with anyio.create_task_group() as _tg:
+            _tg.start_soon(self._watch_for_intervention, a.node_id, a.generation, a.start_seq,
+                           _card_id, cancel, a._seen)
+            # Training-log monitor (ON by default in the product Settings since 2026-08-04;
+            # still off in a bare `Engine(...)`/`EngineOptions`): a sibling task that tails this eval's live
+            # training log on a timer while it runs in the worker thread, asks the Developer to
+            # judge its health, and records the verdict (advisory unless kill is enabled).
+            # Cancelled with the eval by `_tg.cancel_scope.cancel()` below. Gated on the
+            # command-eval path (`_eval_spec`): only those write the per-stage `<stage>.log` the
+            # monitor tails — the solution.py path (toy/dataset) has no live log to watch.
+            if getattr(self, "_train_monitor", False) and getattr(self, "_eval_spec", None):
+                _idea = getattr(a.node, "idea", None)
+                _rationale = (getattr(_idea, "rationale", "") or "")[:400] if _idea else ""
+                _mkey = ((self._eval_spec.get("metric") or {}).get("key", "metric")
+                         if isinstance(self._eval_spec, dict) else "metric")
+                _mon_ctx = f"Optimizing metric {_mkey!r}." + (
+                    f" Experiment: {_rationale}" if _rationale else "")
+                _tg.start_soon(self._monitor_training, a.node_id, a.generation, a.workdir, cancel,
+                               _mon_ctx, a.kill_signal, a._log_snapshot, a._log_plan)
+            # ASHA live-curve rank watchdog (ON by default in the product Settings since
+            # 2026-08-04; still off in a bare `Engine(...)`): a sibling task that reads the live
+            # log's latest INTERMEDIATE metric and ranks it against finished siblings; advisory
+            # unless asha_live_kill. Same command-eval gate (needs a live log + the metric spec).
+            if getattr(self, "_asha_live", False) and isinstance(getattr(self, "_eval_spec", None), dict):
+                _mspec = self._eval_spec.get("metric") or {}
+                _tg.start_soon(self._monitor_asha, a.node_id, a.generation, a.workdir, cancel,
+                               _mspec, a.state.direction, a.kill_signal, a._log_snapshot, a._log_plan)
+            # The lifecycle reservation selected by the dispatcher stays unchanged through this
+            # retry. CUDA_VISIBLE_DEVICES contains physical ids (logical→physical remap), while
+            # an unspecified serial eval keeps eval_env=None and sees the whole box as before.
+            try:
+                # CODEX AGENT: an evaluator may finish paid/external side effects here, but its
+                # terminal event is appended much later. A process death in that gap makes resume
+                # run the evaluator again. Persist an attempt-scoped outcome/outbox before exposing
+                # success, or require a reconciliable idempotency key at the evaluator boundary.
+                a.res = await anyio.to_thread.run_sync(
+                    self._run_eval, a.node, str(a.workdir), a.eval_env, None, cancel, a.next_start
+                )
+            except GpuPinUnenforceable as exc:
+                # Fail-closed device pin the Docker daemon/runtime cannot enforce. Terminalize
+                # THIS node instead of letting the raise cancel every in-flight sibling eval in
+                # the batch and re-crash deterministically on every resume; the reservation is
+                # still released by the dispatcher's finally.
+                cancel.set()
+                _tg.cancel_scope.cancel()
+                # Cancelling the task-group scope cancels THIS host task at its next checkpoint,
+                # and the write-lock acquisition below IS such a checkpoint. Without a shield the
+                # pending CancelledError preempts the append: the promised node_failed is skipped,
+                # the task group swallows its own scope's cancellation, and execution falls through
+                # to `ok = (res.metric ...)` with `res` still unbound (UnboundLocalError — NO
+                # terminal written, and a deterministic re-crash on every resume, exactly what this
+                # handler exists to prevent). Shield the terminal so scope cancellation cannot
+                # preempt it; the acquire is bounded (the watcher/monitor siblings only briefly
+                # read or append under the same lock and are already being cancelled).
+                with anyio.CancelScope(shield=True):
+                    async with self._write_lock:
+                        self.store.append(EV_NODE_FAILED, {
+                            "node_id": a.node_id, "generation": a.generation,
+                            "error": str(exc)[:400], "reason": "gpu_unpinnable",
+                            # Add THIS attempt's elapsed (`time.time() - _t0`) — the normal path
+                            # accumulates it only after the task group exits (line 330), which this
+                            # early return skips, so recording the bare accumulator would drop the
+                            # Docker/runtime probe + setup cost from the immutable eval budget.
+                            "eval_seconds": round(a.total_eval + (time.time() - a._t0), 3)})
+                        self._maybe_crash()
+                return PHASE_RETURN
+            cancel.set()                  # eval finished on its own …
+            _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
+        return PHASE_NEXT
+
+    async def _eval_settle_outcome(self, a: "EvalAttempt") -> str:
+        """SETTLE_OUTCOME — the watcher's verdict in the order that has always held (superseded ->
+        aborted -> watchdog kill), this attempt's cost, the pipeline record, and `a.ok`.
+        `PHASE_RETURN` after a terminal it wrote, `PHASE_SETTLED` on a success (the loop breaks to the
+        terminal), `PHASE_NEXT` on a failure the loop may still repair."""
+        # Settle the watcher's ONE verdict now the group has closed. Same three questions the
+        # watcher used to answer by assigning three `nonlocal`s; asking them here keeps the
+        # branch order below (`superseded` -> `aborted` -> watchdog kill) unchanged.
+        _intervention = a._seen.get("kind")
+        a.superseded = _intervention == "reset"
+        a.operator_card_dropped = _intervention == "card_drop"
+        a.aborted = _intervention in {"abort", "card_drop"}
+        # THIS attempt's own eval wall-clock, captured beside the cumulative one because the
+        # durable cost ledger needs the per-attempt number: `total_eval` restarts at 0 in a
+        # resumed process, so no single `node_repaired` row could carry a running total that
+        # survives re-entry (`_durable_repair_seconds` sums the rows for exactly that
+        # reason). Read here rather than at the append below, where `time.time() - _t0` has
+        # since accumulated the triage and repair LLM calls, which are not eval seconds.
+        a.attempt_eval_seconds = round(time.time() - a._t0, 3)
+        a.total_eval = round(a.total_eval + (time.time() - a._t0), 3)   # cumulative eval cost (#2)
+        # STALL SALVAGE: a stage the stall-watchdog tree-killed AFTER it had already printed its
+        # metric (a completed train+eval that only hung on teardown — a distributed finalize
+        # deadlock / wedged CUDA op) still counts: the metric is real, the non-zero exit is only
+        # the kill. Self-gating — `res.metric is not None` on a stall means the value WAS emitted
+        # before the silence. NOT for a real deadline timeout (that is still mid-training).
+        a.ok = (a.res.metric is not None and not a.res.timed_out
+              and (a.res.exit_code == 0 or getattr(a.res, "stalled", False)))
+        if a.superseded:
+            # The reset discards this lifecycle's metric/state, not compute already spent. A
+            # stale-generation terminal is fold-budget-only: replay rejects its state fields
+            # but charges eval_seconds once for this immutable generation.
+            await self._eval_record_superseded(a)
+            return PHASE_RETURN                         # the reset owns the next lifecycle generation
+        if a.aborted and not a.ok:                       # killed mid-eval by the operator (and the
+            async with self._write_lock:             # eval didn't already finish cleanly first)
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": a.node_id, "generation": a.generation,
+                    "error": (
+                        "Card dropped by operator (killed mid-eval)"
+                        if a.operator_card_dropped
+                        else "aborted by operator (killed mid-eval)"
+                    ),
+                    "reason": "card_dropped" if a.operator_card_dropped else "aborted",
+                    "eval_seconds": a.total_eval})
+                self._maybe_crash()
+            return PHASE_RETURN
+        # Set only by a REPAIRABLE watchdog stop (see just below); `None` on every other
+        # path, including the terminal kill, which returns before anything reads it.
+        a.watchdog_reason, a.watchdog_err = None, ""
+        if a.kill_signal.get("kill") and not a.ok:       # a live watchdog tree-killed the run early
+            # ONE terminal event; the watchdog names the reason so the fold/failure-reflection
+            # knows WHY: the training monitor leaves it default ('monitor_broken'), the ASHA
+            # watchdog sets terminal_reason='asha_underperforming'. The advisory record
+            # (EV_TRAIN_MONITOR_ALERT / EV_ASHA_RANK) already ran live; replay reconstructs the
+            # node from this terminal and never re-invokes the watchdog.
+            _kreason = str(a.kill_signal.get("terminal_reason") or "monitor_broken")
+            if _kreason in self._inline_repair_reasons:
+                # A stop the watchdog attributed to the IMPLEMENTATION, not to the idea.
+                # It does NOT terminalize here: it falls through into the same failure
+                # handling every other repairable reason takes, so the Developer gets its
+                # own code back with the diagnosis attached and the experiment is retried
+                # once the bug is fixed. Nothing about the repair machinery needed to
+                # change — `cancel` and `kill_signal` are per-ATTEMPT (built inside this
+                # loop), so the retry starts from a clean signal, and the repair critic,
+                # the attempt cap and the redone-work floor all bound it exactly as they
+                # bound a crash. A reason the operator has narrowed OUT of
+                # `inline_repair_reasons` lands in the terminal below instead, which is the
+                # same answer that setting gives every other failure class.
+                a.watchdog_reason = _kreason
+                a.watchdog_err = str(a.kill_signal.get("reason", ""))[:400]
+            else:
+                async with self._write_lock:
+                    self.store.append(EV_NODE_FAILED, {
+                        "node_id": a.node_id, "generation": a.generation,
+                        "error": ("live watchdog stopped the run early: "
+                                  + str(a.kill_signal.get("reason", ""))[:400]),
+                        "reason": _kreason, "eval_seconds": a.total_eval})
+                    self._maybe_crash()
+                return PHASE_RETURN
+        # THE PIPELINE RECORD, ONCE PER ATTEMPT — not once per NODE. Multi-stage eval
+        # (Phase 1): each stage's pass/fail lands BEFORE the terminal so the fold + trace show
+        # mine ✓ / train ✗, and a later stage-scoped re-run knows which stages already passed.
+        # Empty on the classic single-command eval, so that path appends nothing, as before.
+        #
+        # This used to be appended ONLY after the attempt loop, from the LAST attempt's `res`,
+        # and that made the log lie about every REPAIRED multi-stage node. Once the reuse
+        # predicate starts skipping a completed earlier stage, every later attempt reports it
+        # as `{"status": "reused", "exit_code": 0, "seconds": 0.0}` — so the ONE record the log
+        # ever received was the zero-work marker, and the fold's own defence against exactly
+        # that (`events/replay.py::_on_stage_finished`: "a reused marker must NOT clobber that
+        # attempt's REAL completion record ... else the node reads as if it trained in 0s") was
+        # VACUOUS, because the real record it protects was never written by anyone.
+        # `tests/test_events_replay.py::test_fold_reused_stage_marker_does_not_clobber_real_record`
+        # drove that guard from hand-built events, so nothing went red.
+        # Measured on runs/rubert-dr-0807: node 2 trained for ~6,900 s and its folded stage
+        # record read `train reused / exit 0 / 0.0 s`; node 0's Developer-declared `mine` stage
+        # ran four times (two crashes, then two successes) and read `mine reused / 0.0 s`.
+        # The replayable stage-state authority could not tell "this stage succeeded and its
+        # artifacts were reused" from "this stage never ran in this run at all", which is the
+        # difference between a healthy pipeline and a silently skipped one.
+        #
+        # One append per attempt is what the fold was always written to read, and the
+        # de-duplication rule stays THERE (last-wins by name, a real record beats a reused
+        # marker in either arrival order) rather than being re-derived here — a second,
+        # hand-synced copy of that rule in the writer is how the two would drift apart again.
+        # COST, stated because it is a real one: `stage_finished` is FOLDED, so under
+        # `eval_parallel > 1` these rows can move `speculation.py::_proposal_authority_seq` and
+        # discard a concurrently-prepared paid proposal (invariant 1). They could already do
+        # that — the terminal block appended the same rows from the same concurrent evals —
+        # what changes is the RATE, bounded by attempts x stages. Making them diagnostic
+        # instead is not available: the fold reads them.
+        async with self._write_lock:
+            for _st in (a.res.stages or []):
+                self.store.append(EV_STAGE_FINISHED,
+                                  {"node_id": a.node_id, **_st, "generation": a.generation})
+        if a.ok:
+            return PHASE_SETTLED
+        return PHASE_NEXT
+
+    async def _eval_salvage(self, a: "EvalAttempt") -> str:
+        """SALVAGE — classify the failure on the ENGINE's own answer, build the failure text, then
+        ask `metric_salvage`; a salvaged (or re-checked and MEASURED) metric settles the node
+        (`PHASE_SETTLED`), anything else goes on to the repair decision (`PHASE_NEXT`)."""
+        # The WATCHDOG's reason wins over the exit-code classifier when it stopped this
+        # attempt: `res` is a tree-killed process (exit -9, no traceback), which
+        # `_failure_reason` reads as `oom`/`crash` — the exact conflation `FAILURE_REASONS`
+        # documents, and it would send the Developer to halve a batch size that was never
+        # the problem.
+        a.reason = a.watchdog_reason or _failure_reason(a.res)
+        # Re-stamped per ATTEMPT, beside the classification it describes: a chain whose
+        # third attempt is judged and whose fourth is not must not carry the third's
+        # attribution into the fourth's row.
+        a._engine_reason, a._reason_source = a.reason, REASON_SOURCE_ENGINE
+        # …and the diagnostician's citation with them, for the identical reason: a chain
+        # whose third attempt was diagnosed and whose fourth was not must not carry the
+        # third's evidence into the fourth's durable row. The SUMMARY and the findings are
+        # reset here for a sharper version of the same reason: a stale summary is an account
+        # of a DIFFERENT failure written in confident prose on this attempt's row, which is
+        # strictly worse than an absent one — a reader cannot tell it apart from a correct
+        # one, and that is exactly the property the summary is trusted for.
+        a._evidence, a._evidence_resolved = None, None
+        a._summary, a._findings = None, None
+        # The node's whole account of what went wrong — see `_eval_failure_text`, which is
+        # where the no-metric hint and the blank-stderr fallback now live.
+        a.err = self._eval_failure_text(a.res)
+        # …and what the RECORD keeps, which is wider on purpose. Bound here, beside `err`,
+        # so the two windows onto the same bytes are visibly siblings rather than one being
+        # discovered later at a write site. See `_durable_failure_evidence`.
+        a.err_evidence = self._durable_failure_evidence(a.res)
+        if a.watchdog_reason:
+            # The diagnosis FIRST: it is the only part of this text that says what to
+            # change, and the killed process's own tail says only that it was killed.
+            a.err = (f"The live training watchdog stopped this run: {a.watchdog_err}\n"
+                   "It judged the cause to be the IMPLEMENTATION rather than the idea, so "
+                   "this is a repair, not a result. Fix what it named.\n\n" + a.err)
+        # METRIC SALVAGE. Asked HERE — after the eval has failed, before any repair is
+        # considered and long before the terminal — because this is the only point at which
+        # the answer can still change which terminal the node gets. `engine/metric_salvage.py`
+        # owns every rule; this is the call and its consequences.
+        #
+        # `_t0` is THIS attempt's wall-clock start, which is the freshness floor a FILE reader
+        # is held to: an artifact left by an earlier attempt in the deliberately-reused
+        # workdir is older than it, so it cannot be salvaged as this attempt's result.
+        #
+        # On a hit the loop BREAKS with `ok` true. It does not repair-and-re-evaluate, which
+        # is the whole point: the measured case cost 76 GPU-minutes and the number those
+        # minutes bought was already on disk. The CAUSE is still fixed — `_repair_salvaged_cause`
+        # commits the Developer's correction to the declaration through the ordinary
+        # `node_repaired` event, without paying for another evaluation to confirm it — so a
+        # salvaged node does not carry its broken manifest into its next attempt.
+        a.salvaged = self._salvage_eval_metric(a.res, a.reason, a.workdir, a._t0)
+        if a.salvaged is not None:
+            # THE GATES THAT QUALIFY A METRIC, applied to this one before anything downstream
+            # can treat it as measured. `run_command_eval` runs the operator's constraints,
+            # extra readers and drift cross-check in its TAIL, which every early return that
+            # produces a salvageable failure skips — so a salvaged node used to reach the
+            # terminal with `violations == []` and, under `metric_salvage="select"`, could
+            # become champion with the operator's hard bounds never applied.
+            _gates = self._salvage_qualifying_gates(a.salvaged, a.res, a.workdir, a._t0)
+            if _gates["drift"]:
+                # The cross-reader could not corroborate the salvaged value. `drift` is in
+                # NEVER_SALVAGED_REASONS precisely because re-admitting a metric the trust
+                # gate discarded is worse than losing it — the same fact, found one step
+                # later, gets the same answer. The divergence is recorded (the terminal block
+                # appends `spec_drift` from `res.drift`) and the node keeps failing.
+                a.res.drift = _gates["drift"]
+                a.err = (a.err + "\n[metric salvage refused: the drift cross-check could not "
+                             f"corroborate the recovered metric {a.salvaged.metric!r}]")
+                a.salvaged = None
+            else:
+                a.res.metric = a.salvaged.metric
+                a.res.violations = list(a.res.violations or []) + _gates["violations"]
+                a.res.extra_metrics = {**(a.res.extra_metrics or {}),
+                                     **_gates["extra_metrics"]} or None
+                # DECLARED, unambiguously: `salvage_gates` reads only `eval_spec["metrics"]`
+                # — the operator's own reader specs, with `adapter` refused — so these are
+                # the guarded channel even though the eval as a whole failed. Tagged at the
+                # merge because that is where the source is known; the salvage helper
+                # returns values, not authority.
+                a.res.extra_metrics_provenance = {
+                    **(a.res.extra_metrics_provenance or {}),
+                    **{k: EXTRA_METRIC_DECLARED for k in _gates["extra_metrics"]}} or None
+                a.ok = True
+                a.node, a.attempt, a.salvage_cause_repaired, _fix = (
+                    await self._repair_salvaged_cause(
+                        a.node, a.state, a.workdir, a.generation, a.salvaged, a.err, a.reason, a.attempt,
+                        a.stamp_workdir))
+                # THE CONTRACT, RE-ASKED AGAINST THE CORRECTED DECLARATION (backlog F1e).
+                # Measured on `rubertlite-dr-unified-v6` node 3: its stage exited 0, WROTE
+                # its checkpoint, printed the number, and failed its declared artifact
+                # contract because the declaration missed the testbed's composed
+                # `<run_name>_<model>` suffix. The best number the run had (0.728113) then
+                # carried a `metric_salvaged` violation, was excluded from
+                # `feasible_nodes()`, and could neither become champion nor be bred from.
+                # ONE node — see `metric_salvage.py`'s RE-CHECK section for why this is
+                # deliberately not a claim about any operator.
+                #
+                # The metric was never actually unmeasured: the pipeline DID write the
+                # artifact, and the fix above has just corrected the sentence that named it.
+                # So the CHECK is re-asked — never the stage, which is the whole economy of
+                # this design — and if it passes the node is recorded as MEASURED. It is
+                # asked HERE, before the terminal constitutes the salvage, so a node that
+                # passes carries no `metric_salvaged` violation, no salvage provenance and
+                # no `salvaged_error`: it never enters the salvage path at all.
+                # `metric_salvage.py`'s RE-CHECK section owns every admission rule, and what
+                # the promotion does NOT prove is written down there too.
+                a.declaration_repaired = self._recheck_repaired_contract(
+                    a.res, a.node, a.workdir, a.salvaged, _fix, a.err)
+                if a.declaration_repaired is not None:
+                    # NOT a salvage. `res.metric` and the qualifying gates' violations stay
+                    # exactly as computed above — a re-checked contract says nothing about
+                    # the operator's CONSTRAINTS, which still ran and still bind.
+                    a.salvaged = None
+                return PHASE_SETTLED
+        return PHASE_NEXT
+
+    async def _eval_decide_repair(self, a: "EvalAttempt") -> str:
+        """DECIDE_REPAIR — the two dependency rounds (`PHASE_RETRY`: re-run, no repair spent), the
+        eval-budget stop, the floors, the inline-repair gate, the triage judge with its diagnosis
+        record, and the critic. `PHASE_SETTLED` on every stop; `PHASE_NEXT` means "repair"."""
+        # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
+        # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
+        # agent can reject the idea. This is what lets torch/XGBoost/CatBoost (e.g. a GRU
+        # model) run on a fresh box instead of dying as `idea_rejected`. Bounded by
+        # _MAX_DEP_ROUNDS + the `_dep_attempted` cache; does NOT consume a repair attempt (env
+        # prep is not a code fix), and the unchanged node is simply re-evaluated.
+        if (self._auto_install_deps and a.reason == "crash" and a.dep_rounds < _MAX_DEP_ROUNDS):
+            installed = await anyio.to_thread.run_sync(self._prepare_env, a.res.stderr)
+            if installed:
+                a.dep_rounds += 1
+                async with self._write_lock:
+                    self.store.append(EV_DEPS_INSTALLED, {
+                        "node_id": a.node_id, "generation": a.generation,
+                        "packages": installed, "round": a.dep_rounds,
+                        "resolved": self._drain_dep_receipts(installed)})
+                return PHASE_RETRY   # re-run now that the library is present (no repair attempt spent)
+        # Eval-budget stop: the inline-repair loop re-runs FULL evals with no budget check
+        # between attempts — the loop-top / per-eval guards only see `total_eval_seconds` from
+        # TERMINAL events, and no terminal is emitted mid-repair, so a node can overshoot the
+        # eval budget by multiples inside ONE node. Abandon once this node's cumulative eval
+        # time would cross the ceiling.
+        # RE-FOLD before comparing. `state` is the fold taken at eval START, so under
+        # eval_parallel>1 every terminal a sibling appended since this worker began is
+        # invisible to it and the "cumulative ceiling" undercounts run-wide
+        # total_eval_seconds — the repair loop kept re-running full evals well past
+        # max_eval_seconds whenever siblings burned the remaining budget mid-loop. This is
+        # invariant 4 (never carry derived state across loop iterations); one fold is cheap
+        # next to the full eval it is guarding.
+        if a.max_es is not None:
+            spent = fold(self.store.read_all()).total_eval_seconds
+            if spent + a.total_eval >= a.max_es:
+                a.triage_outcome = ("abandon", "eval budget exhausted during inline repair")
+                return PHASE_SETTLED
+        # Pipeline depth reached by THIS attempt (stages passed/reused before the failure).
+        # Non-textual evidence of forward progress, handed to the judge alongside the error
+        # trajectory: a node whose failure keeps moving to a LATER stage is visibly working,
+        # however similar two error strings look.
+        a._depth = len([s for s in (a.res.stages or [])
+                      if isinstance(s, dict) and s.get("status") in ("ok", "reused")])
+        a.best_depth = max(a.best_depth, a._depth)
+        # ONE BUDGET, AND IT IS DURABLE. `inline_repair_attempts` bounds the repairs this node
+        # may make, full stop; `attempt` is the count of durable `node_repaired` rows for this
+        # lifecycle, so a resume continues the chain rather than restarting it. 0 still means
+        # "no OPERATOR cap" (what an existing run resumes with) and is settled to the engine's
+        # own `_UNLIMITED_REPAIR_CEILING` by `_effective_repair_cap` — read that constant for
+        # what an operator with 0 in their snapshot gets and why it is not simply 12.
+        #
+        # It used to be two: an `environment` ledger for repairs that only reconciled the code
+        # with the installed libraries and an `experiment` ledger for everything else, each
+        # bounded by the same number (so 2N worst case). That is removed. A budget is about
+        # TIME AND MONEY — a re-eval costs the same whether the previous fix was a library
+        # migration or a modelling decision — and "whose fault was this repair" is not a
+        # question the operator asked. The real problem it was aimed at (six stale-dependency
+        # migrations eating the whole allowance before the node reached its research question)
+        # is answered by making the ONE budget big enough to cover the longest real chain on
+        # record and letting the judge stop early when there is nothing left to try, rather
+        # than by giving the loop a second allowance to spend.
+        # THE FLOOR, and since F8 that is all this is. It used to be the TRANSITION — an
+        # `attempt < 12` that decided "keep repairing vs give up and open a Debug node" — and
+        # a count cannot tell a chain converging on a fix from one rewriting the same line
+        # for an hour. `repair_judgment.repair_floor_stop` is the same bound with a truth
+        # table and a name, and the shipped default for `inline_repair_attempts` is now 0, so
+        # what normally binds is a judgment (the triage judge, the Developer's own "I do not
+        # know how to fix this", and the critic below) with this ceiling underneath.
+        floor_stop = repair_floor_stop(
+            attempt=a.attempt, operator_cap=int(self._inline_repair_attempts or 0),
+            ceiling=_UNLIMITED_REPAIR_CEILING)
+        # THE COST FLOOR, and it is the one that reaches the chains the retrain cap cannot.
+        # `_repair_forces_full_retrain` charges `inline_repair_retrain_cap` only for a
+        # repair that DISCARDS completed earlier-stage work, which is correct and is why a
+        # first-stage chain — v8 node 3 re-running an 82-minute `mine`, driven to 51 full
+        # evaluations and 0 charges with no judge wired — is charged nothing at all. So the
+        # same operator number is also spent in SECONDS, against what the task DECLARES one
+        # full pipeline costs. Read `repair_judgment.repair_redone_work_stop` for why this
+        # is not simply "charge the cap for a first-stage repair too" (measured: that
+        # abandons v8 node 3 one attempt before its `mine` stage passed).
+        #
+        # Checked SECOND so the message order matches `repair_floor_stop`'s own rule — an
+        # operator who spelled a count cap must read about the bound they set — and computed
+        # only when a cap is actually in force, so the `cap = 0` legacy path pays no stage
+        # resolution. The pipeline is re-resolved per attempt rather than hoisted: a repair
+        # may rewrite `looplab_stages.json`, so a hoisted number would license the chain
+        # against a pipeline the node no longer has.
+        if floor_stop is None and self._inline_repair and self._inline_repair_retrain_cap:
+            # `eval_spec_time_budget` AND NOT the raw `timeout` key, which is the base
+            # profile's number and not the one this eval runs under. A spec spelling
+            # `timeout: 600` beside `profiles: {full: {timeout: 21600}}` gets 21600 from
+            # `build_command` the moment a node selects that profile, so licensing the chain
+            # against 600 charged a 6-hour attempt at a 10-minute pipeline's rate and fired
+            # this floor on the FIRST failure — no repair ever attempted, and a terminal
+            # quoting a pipeline cost 36x below the one the run actually declared.
+            # `declared_pipeline_seconds`' own docstring already named the right number
+            # ("`_eval_pipeline`'s resolved timeout"); this is the derivation the rest of the
+            # engine quotes to both roles (docs/29 F1h), so the floor and the budget the
+            # Developer sized its schedule against are now one number.
+            from looplab.runtime.command_eval import eval_spec_time_budget
+            _pipeline_s = declared_pipeline_seconds(
+                self._resolved_stages(a.node, a.workdir),
+                eval_spec_time_budget(self._eval_spec)
+                if isinstance(self._eval_spec, dict) else None)
+            # See `chain_pipeline_s` above: the spend is cumulative over every manifest
+            # this chain has run, so the license must be too.
+            try:
+                a.chain_pipeline_s = max(a.chain_pipeline_s, float(_pipeline_s or 0.0))
+            except (TypeError, ValueError):
+                pass
+            floor_stop = repair_redone_work_stop(
+                chain_seconds=a.prior_repair_seconds + a.total_eval,
+                pipeline_seconds=a.chain_pipeline_s,
+                retrain_cap=int(self._inline_repair_retrain_cap or 0))
+        # Inline-repair gate: feature on, repairable reason, no floor reached, a Developer that
+        # can repair, and something to repair (whole-file code, multi-file edits, or a repo).
+        if (not self._inline_repair
+                or a.reason not in self._inline_repair_reasons
+                or floor_stop is not None
+                or not callable(getattr(self.developer, "repair", None))
+                or not (a.node.code or a.node.files or self._repo_spec)):
+            if floor_stop is not None and self._inline_repair:
+                # Which bound stopped it, said out loud. An operator whose snapshot says 0
+                # never chose 50 and must not read a terminal that implies they did.
+                a.triage_outcome = ("abandon", floor_stop)
+            return PHASE_SETTLED
+        # THE STOP DECISION. One call per attempt — the same call the loop already made — now
+        # carrying this node's repair history, so the model is answering "given everything
+        # that has been tried here, do you still know what to change?" instead of judging a
+        # single traceback in isolation. `abandon` is its stop.
+        #
+        # `attempts_left` is now always a real number, including for a run with no operator
+        # cap: there IS a bound in that case (the ceiling), and the whole point of telling the
+        # judge is that "a stop and a cap-out are not the same surprise". Telling it `None` on
+        # exactly the runs that carry the loosest bound was the least useful place to be coy.
+        # THE LOG TOOLS THIS TRIAGE MAY LOOK WITH. Built HERE, at the call, because this frame
+        # is the only place that holds all three of the things `monitor_log_sources` needs —
+        # the workdir, THIS attempt's resolved log plan and the byte snapshot taken before it
+        # started — and because `_triage_crash` is instance-monkeypatched by tests, which must
+        # keep replacing the whole decision rather than half of a construction.
+        #
+        # `_log_snapshot` is what makes this safe to hand a role: it was taken before this
+        # attempt ran, so `attempt_byte_floor` puts the floor exactly where this attempt's
+        # bytes begin and a repairer diagnosing attempt N cannot read attempt N-1's curve as
+        # its own. That is the same floor `read_training_tail_raw` respects — one boundary,
+        # now three readers.
+        #
+        # OFF THE EVENT LOOP, and it is not a plain argument evaluation: `monitor_log_sources`
+        # GLOBS the workdir and then `open`s + probes each stage log for this attempt's byte
+        # floor. On the geesefs/S3 mounts a run root usually lives on, a directory lookup that
+        # misses costs 105-950 ms (`core/fence.py::_warm_directory_lookup` measured it), so
+        # building it inline stalled the whole engine loop — every concurrent eval, both
+        # watchdogs and the run loop — for the duration. It is the same defect
+        # `train_monitor._monitor_training` was fixed for on 2026-08-15, at the one call site
+        # where the consumer is NOT itself offloaded, so the hand-off has to be its own.
+        #
+        # `abandon_on_cancel=True` by the rule the orchestrator's own reads state: this is a
+        # PURE READ that spends nothing, appends nothing and rebinds no run-scoped state — it
+        # returns a fresh provider — so a pause/abort may drop it without leaving anything
+        # half-done. The paid call BELOW is the opposite case and is deliberately untouched
+        # here (see `_repair_critic`'s comment for the convention those three share).
+        #
+        # SINCE 2026-08-20 IT IS ALSO THE CODE, not only the logs: `diagnosis_tools`
+        # composes `repair_log_tools` with `RepoScoutTools` rooted at the node WORKDIR, the
+        # same pair `train_monitor.monitor_tools` hands the live watchdog and for the same
+        # reason — a log can show a loss frozen and only the source says whether the
+        # objective can descend as written. Logs go FIRST in the composite so a name
+        # collision cannot shadow `read_log`, which is the only reader that knows this
+        # attempt's byte floor.
+        #
+        # THE MONITOR VERDICTS ARE READ IN THE SAME HOP, and the read is deliberately FRESH
+        # rather than from `events_at_start`. Every alert it wants was appended DURING the
+        # attempt that just died, so a snapshot taken before the node started contains, by
+        # construction, none of them — this is the one place in the node loop where that
+        # distinction is the whole point of the read.
+        #
+        # IT RODE HERE ON THE LOOP THREAD UNTIL 2026-08-30, and the honest number is small:
+        # `read_all()` warm plus the O(whole log) `_durable_monitor_verdicts` walk measured
+        # 1.0 + 0.51 ms on the largest healthy log on this box (e5small-dr-unified-v4, 10.3
+        # MB, 12,579 events) and 0.7 + 0.22 ms on rubertlite-dr-unified-v8 — once per FAILED
+        # attempt, i.e. tens of milliseconds across a whole run. The note that used to sit
+        # here said "every concurrent eval's terminal and the whole serve/read side stall
+        # behind them", which overstates it by three orders of magnitude against the paid
+        # propose call that motivated the comparison. It is folded in anyway because the
+        # hop is ALREADY PAID one line up and the term is O(log) in a run that only grows:
+        # what the loop thread is worth is not decided per call site.
+        #
+        # A worker-thread READ is sanctioned by invariant #1's own note — `EventStore`
+        # serializes `append`/`read_all` through its own locks — and nothing in this hop
+        # writes: `_durable_monitor_verdicts` is a pure filter over rows, which is what makes
+        # it safe to move where `_stage_card_creates`' proposal needed a capture sink first.
+        def _repair_inputs():
+            return (diagnosis_tools(self, a.workdir, a._log_plan, a._log_snapshot),
+                    _durable_monitor_verdicts(self.store.read_all(), a.node_id, a.generation))
+
+        _repair_tools, a._monitor_verdicts = await anyio.to_thread.run_sync(
+            _repair_inputs, abandon_on_cancel=True)
+        # OFF THE LOOP THREAD since 2026-09-06 (doc 52 row 12). The three paid repair-path
+        # calls — this triage, `_repair_result` and `_repair_critic` below — were plain sync
+        # calls on the engine loop: driven with a 5 ms ticker, ZERO loop ticks passed during
+        # one, so watchdog kills, operator aborts and sibling terminals waited out a 116-276 s
+        # median (one recorded case 88.3 min). The propose lanes were offloaded 2026-08-30;
+        # this path could not follow until the Developer's per-call outputs became a RETURN
+        # VALUE (`agents/roles.py::DeveloperResult`), because the freeze was what serialised
+        # concurrent repairs on the shared instance. Through the proposal SINK helper, like
+        # the propose lanes: a worker copies the caller's context (the tracer span, the LLM
+        # lane), and any proposal receipt a judge's tool loop buffers is published from the
+        # main task on the way out. `BudgetExceeded` propagates through it unchanged.
+        a.triage = await self._offload_under_proposal_sink(functools.partial(
+            self._triage_crash, a.state, a.node, a.err, a.attempt + 1, reason=a.reason,
+            repair_log=a.repair_log[-_JUDGE_HISTORY_ROWS:],
+            depth=a._depth,
+            attempts_left=_repair_attempts_left(a.attempt, a._repair_cap),
+            log_tools=_repair_tools,
+            engine_facts=engine_observed_facts(a.res),
+            monitor_verdicts=a._monitor_verdicts))
+        action = a.triage.get("action", DEFAULT_TRIAGE_ACTION)
+        # WHAT THE FAILURE WAS, RE-READ BY THE JUDGE THAT JUST READ IT. Applied HERE, on the
+        # verdict this attempt already paid for, and before every branch below that
+        # consumes `reason`: the directive `_repair_error_context` renders, the
+        # triage-driven install (which a judged `oom` now correctly suppresses — "a too-slow
+        # or too-big run is never fixed by installing something", as that branch's own
+        # comment says), the judge history the F8 critic compares causes across, and the
+        # durable rows. It is deliberately BELOW the `inline_repair_reasons` gate and below
+        # `_salvage_eval_metric`, both of which run on the deterministic answer: the loop
+        # recomputes `reason` from `_failure_reason(res)` at the top of every attempt, so no
+        # judged reason can switch inline repair on or off, and none can reach salvage.
+        #
+        # `diagnosed_failure_reason` is the whole rule and it is deliberately not
+        # restated here: an ENGINE-FINAL classification — the three watchdog verdicts, the
+        # engine's own clock, the drift refusal, the setup flag, the two filesystem stage
+        # contracts — is returned unchanged and the diagnostician's answer is not consulted
+        # at all, so a model cannot contradict a fact the engine holds out of band.
+        #
+        # WHAT SALVAGE DEPENDS ON IS THE ORDERING, NOT THE VOCABULARY, and that is worth
+        # stating because the vocabulary argument got weaker on 2026-08-20 while the
+        # containment did not move. `_salvage_eval_metric` above ran on the DETERMINISTIC
+        # answer, several branches earlier, and the loop recomputes `reason` from
+        # `_failure_reason(res)` at the top of every attempt — so no diagnosed reason has
+        # ever reached the salvage gate or the `inline_repair_reasons` gate, whatever it
+        # says. `failure_diagnosis` keeps the disjointness from
+        # `metric_salvage.NEVER_SALVAGED_REASONS` as a second, independent guarantee.
+        #
+        # BELOW the two engine verdicts' handling by construction rather than by ordering:
+        # `unanswerable` and `unreadable` are not in `AGENT_TRIAGE_ACTIONS`, so a call that
+        # could not produce a stop decision has not produced a classification either — and
+        # since 2026-08-20 that answers `unclassified` rather than silently keeping the
+        # engine's residual, because a diagnostician that FAILED and one that AGREED must
+        # not write the same row. `reject_idea` overwrites `reason` two branches down with
+        # `idea_rejected`, which is the engine's word for "the lineage is wrong" and not a
+        # classification of the eval at all — it stays the last word, and `_reason_source`
+        # below records that the engine chose it.
+        a.reason, a._reason_source = diagnosed_failure_reason(a.reason, a.triage)
+        # WHERE THE DIAGNOSTICIAN SAID IT LOOKED, and whether that citation resolves. The
+        # evidence is not decoration: no out-of-band probe exists for a failure KIND (see
+        # `failure_diagnosis`' EVIDENCE section for why every candidate is either the text
+        # rule just deleted or unavailable), so a re-resolvable citation is the strongest
+        # thing available and is what makes a wrong verdict auditable afterwards.
+        #
+        # It RECORDS and never REFUSES: demoting an uncited-but-correct diagnosis to
+        # `unclassified` would lose it, and the rate at which a live model mis-formats a
+        # citation is not yet known here. The number becomes countable on the durable rows;
+        # promoting it to a gate is a decision for whoever reads that number.
+        #
+        # REDACTED, and its absence here was the EIGHTH persisted output channel — the same
+        # defect the C2 sweep found in `node_failed.triage_rationale` and closed on the very
+        # next screen down, missed one field over. `evidence_quote` is by its own schema
+        # description "the one line that settles it, quoted": bytes a model copied verbatim
+        # out of a stage log, landing on a durable row that travels into `events.jsonl`, the
+        # trace, the UI and every export. Measured over the preserved stage logs, a 500-char
+        # window is where a model can quote from safely by accident (0 masks across 257
+        # logs) and anything wider is not (3 at 8 KB, 36 at 16 KB, 384 at 64 KB) — and this
+        # role now reads with TOOLS, so its quotable window is the whole file. The screen
+        # runs BEFORE the 300-char cap, like both siblings, so masking cannot be truncated
+        # away; `coerce_evidence`/`coerce_findings` own that ordering.
+        a._evidence = coerce_evidence(a.triage, self._redact)
+        a._evidence_resolved = evidence_citation_resolves(a._evidence, a.workdir)
+        # WHAT ACTUALLY HAPPENED, IN PROSE A READER CAN USE WITH NOTHING ELSE IN FRONT OF
+        # THEM. This is the deliverable and the rest of this block is its trail: the
+        # diagnostician has just read the stage logs, the config and the program the eval
+        # ran, and until now every bit of that was discarded when the call returned. The
+        # bytes were never the thing that was lost — 787 MB of stage logs sit in `runs/`
+        # across the eight preserved runs and nothing deletes them — what was lost is the
+        # causal statement and the numbers in it. See `coerce_diagnosis_summary` for the
+        # bar, which is about CONTENT: a summary that points at a log instead of naming the
+        # allocation size, the parameter, the stage and the exception has failed it.
+        a._summary = coerce_diagnosis_summary(a.triage, self._redact)
+        # …and the trail behind it, each citation re-resolved inside the workdir fence by
+        # the same rule the singular one above uses. FREE — the resolution was already being
+        # done for `reason_evidence` — and deliberately nothing more than that: a citation
+        # that does not resolve is MARKED and kept, never retried and never dropped, because
+        # the finding stands on its own text and the summary stands without any of it.
+        #
+        # THE PROMPT IS UNTOUCHED BY ALL OF THIS. `err` is byte-identical to what it always
+        # was, and this whole block runs AFTER the triage call it describes — nothing here
+        # is spliced into anything the engine pays for.
+        a._findings = resolve_findings(coerce_findings(a.triage, self._redact), a.workdir)
+        if action == "abandon":
+            a.triage_outcome = ("abandon", a.triage.get("rationale", ""))
+            return PHASE_SETTLED
+        if action == "reject_idea":   # the idea itself is wrong -> mark the lineage; steer to a new idea
+            a.reason = "idea_rejected"
+            # Not a classification of the eval — it is the ENGINE's word for "this lineage
+            # is wrong", set from the action and not from `failure_kind`. So the attribution
+            # goes back to the engine even though a model's verdict is what triggered it:
+            # `reason_source` answers "who classified the failure", and nobody did here.
+            a._reason_source = REASON_SOURCE_ENGINE
+            a.triage_outcome = ("reject_idea", a.triage.get("rationale", ""))
+            return PHASE_SETTLED
+        # A JUDGE THAT PRODUCED NO USABLE VERDICT, in the two shapes that are not the same
+        # condition (`engine/triage.py`'s verdict contract owns the distinction). Both have
+        # already been re-asked by `_triage_crash`; reaching here means the non-answer
+        # persisted, so neither may read as "keep going".
+        #
+        # THIS BLOCK IS ABOVE THE TRIAGE-DRIVEN INSTALL ON PURPOSE. It used to sit below it,
+        # and the install `continue`s on success — so a judge that answered `unanswerable`
+        # every round bought itself a full eval per successful install: measured, 7 evals and
+        # six packages (faiss-cpu, tensorboardX, fastai, gensim, textblob, umap-learn) pushed
+        # into the SHARED eval interpreter before the breaker ever fired. That install exists
+        # because the agent's RATIONALE proves it read the traceback and named a library the
+        # traceback could not — a premise a non-answer denies outright. A verdict nobody could
+        # read is not evidence about anything, least of all about what to pip install.
+        if action in (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION):
+            _judge_err = str(a.triage.get("rationale", ""))[:400] or "no verdict returned"
+            if action == UNANSWERABLE_TRIAGE_ACTION:
+                # THE TRANSPORT FAILED. Not a verdict about this node: the triage model was
+                # wired and the call did not complete — the same dead-provider condition the
+                # circuit breaker exists for, and exactly how the 2345-repair incident began.
+                # Routed to that breaker (terminal + RUN-level pause) rather than to a quiet
+                # per-node abandon the operator would have to infer a provider outage from.
+                a.triage_outcome = ("abandon", "the repair-stop judge could not be reached — "
+                                             "treating it as a provider failure, not as "
+                                             "permission to keep repairing")
+                a.reason = "developer_crash"
+                a.err = (f"crash-triage failed: {_judge_err}\n[the model that decides whether "
+                       f"to keep repairing this node could not be reached, so the node was "
+                       f"stopped rather than repaired blind. Its last eval error was: "
+                       f"{a.err[-200:]}]")
+                await self._auto_pause_provider_failure(
+                    f"the crash-triage model could not be reached while deciding whether to "
+                    f"keep repairing node {a.node_id} — {_judge_err}")
+            else:
+                # THE MODEL ANSWERED SOMETHING UNREADABLE. The endpoint is demonstrably alive
+                # — it produced bytes — so this is a per-NODE stop and NOTHING MORE. Pausing
+                # the run here was a measured defect: one out-of-enum verdict on a SyntaxError
+                # in the agent's own generated code raised a run-level pause carrying
+                # `node_id=None` (not clearable by a node reset) that told the operator to
+                # check credits, key and base URL — using the MODEL's own rationale as the
+                # evidence — and under `eval_parallel > 1` took every healthy in-flight
+                # sibling down with it. It terminalizes like an `abandon`, keeping the eval's
+                # own `reason`, so a node reset re-opens it and the run continues.
+                a.triage_outcome = ("abandon", f"the repair-stop judge answered something the "
+                                             f"engine could not read as a verdict, so this "
+                                             f"node stopped rather than repairing blind — "
+                                             f"{_judge_err}")
+            return PHASE_SETTLED
+        # A library the traceback never NAMED. `_prepare_env` above installs only what the
+        # crash reports as missing; when a library degrades an absent dependency into a
+        # NameError/AttributeError (an `is_x_available()` guard), the agent's diagnosis is
+        # the only place the name exists. Considered here rather than after the repair,
+        # because an install is not a code repair: it spends no repair attempt at all
+        # (exactly like the traceback-driven round above), so an exhausted budget must not
+        # be what stops the engine from making the node runnable. Bounded by the same
+        # `_MAX_DEP_ROUNDS` + once-per-module `_dep_attempted` cache; the fail-closed
+        # conditions live with the extraction (runtime/deps.py).
+        # GATED ON THE ENGINE'S OWN ANSWER (`_engine_reason`), NOT ON THE DIAGNOSIS, and
+        # the distinction became load-bearing on 2026-08-20. The gate exists because
+        # `inline_repair_reasons` also admits `timeout` and the watchdog kills, whose `err`
+        # is whatever the killed process last wrote — so a training run killed at the
+        # deadline after logging an early import warning could be read as unresolved-name
+        # shaped and drive a pip install into the SHARED eval interpreter. A too-slow or
+        # too-big run is never fixed by installing something.
+        #
+        # That is a statement about what the ENGINE observed, so it must read the engine's
+        # column. Keying it on `reason` — which `diagnosed_failure_reason` has just
+        # rewritten one branch above — put a side effect on the shared interpreter under a
+        # model's control in BOTH directions, and the first one showed up as a red test
+        # immediately: a judge that answered `repair` + `missing_dependency="accelerate"`
+        # with no `failure_kind` mints `unclassified`, and the install it had just asked for
+        # silently did not happen. The mirror is worse and is why this is not fixed by
+        # widening the tuple — a judge could otherwise ENABLE an install by answering
+        # `crash` about a deadline the engine's own clock recorded.
+        #
+        # What is deliberately NOT preserved is the half-measure's claim that a judged `oom`
+        # "correctly suppresses" the install. It never carried weight: `deps.
+        # triage_install_candidates` already fails closed on `unresolved_name_failure`, the
+        # curated allowlist and (at the caller) `is_present`, and an allocator traceback is
+        # not unresolved-name shaped, so it offers nothing to install whatever the kind says.
+        # Text may NOMINATE — the rationale still has to name the distribution — and the
+        # engine's own facts DECIDE.
+        if (self._auto_install_deps and a._engine_reason == "crash"
+                and a.dep_rounds < _MAX_DEP_ROUNDS):
+            installed = await anyio.to_thread.run_sync(
+                self._prepare_env_from_triage, a.triage, a.err)
+            if installed:
+                a.dep_rounds += 1
+                async with self._write_lock:
+                    self.store.append(EV_DEPS_INSTALLED, {
+                        "node_id": a.node_id, "generation": a.generation,
+                        "packages": installed, "round": a.dep_rounds, "source": "triage",
+                        "resolved": self._drain_dep_receipts(installed)})
+                return PHASE_RETRY   # re-run with the library present (no repair attempt spent)
+        # THE CRITIC (F8). The triage judge just said "repair" — the question it answers is
+        # "given this failure, do I know what to change?", and a model answers that
+        # optimistically and one step at a time. The question nothing was asking is about the
+        # SHAPE of the chain: are the attempts addressing different causes, or circling one?
+        # That is what defeated every counter here. `rubert-dr-0804` produced 369 distinct
+        # error signatures on one wall, so the anti-stuck recurrence counter never saw a
+        # repetition; v6 node 5 halved a batch size three times, so no count was near its cap.
+        # Both are obvious to something reading the trajectory and invisible to something
+        # counting it.
+        #
+        # DELIBERATELY BELOW THE INSTALL BRANCHES. A dependency round spends no repair
+        # attempt and changes the environment, so a chain that looks repetitive across two
+        # `ModuleNotFoundError`s is a chain that is actually progressing — asking above the
+        # install would judge a trajectory the engine was in the middle of invalidating.
+        #
+        # It can ONLY stop, and it never touches `reason`: the terminal below carries the
+        # eval's own authenticated failure classification exactly as an `abandon` does, so no
+        # metric, champion, selectability or violation moves on this verdict. Doc 36's line.
+        if critic_due(a.attempt, self._repair_critic_after):
+            # Called DIRECTLY, exactly like `_triage_crash` and `_repair` above rather than
+            # through `to_thread`. Not an oversight: all three are `@in_llm_lane` methods
+            # whose lane admission is selected through a ContextVar, and the two that already
+            # exist establish the convention. A third call shape here would make this the one
+            # place in the loop where the lane's propagation has to be reasoned about.
+            _judged = a.repair_log[-_JUDGE_HISTORY_ROWS:]
+            # The SAME verdicts the triage judge just read, from the same durable
+            # rows — the critic decides whether this chain lives and must not be
+            # reading a thinner record than the judge whose work it is grading.
+            critic = await self._offload_under_proposal_sink(functools.partial(
+                self._repair_critic, a.state, a.node, _judged, a.attempt + 1,
+                monitor_verdicts=a._monitor_verdicts))
+            # THE VERDICT REACHES THE DURABLE RECORD, WHATEVER IT IS. Until 2026-08-15 the
+            # critic left no trace of what it ANSWERED: its span carried
+            # `{attempt, node_id, generation}`, a `continue` appended nothing at all, and a
+            # stop was visible only indirectly as the `abandon` prose below. Measured on
+            # `rubertlite-dr-unified-v8`, whose chains were genuinely progressing: 0
+            # occurrences of the word "critic" in `events.jsonl` against several
+            # consultations — i.e. exactly the case where a missing record goes unnoticed,
+            # because the verdicts happened to be right.
+            #
+            # WHY THE ROW EXISTS AT ALL, given that `continue` moves nothing: F8's premise is
+            # that a JUDGEMENT replaces a counter as the stop rule, and a judgement that
+            # leaves no trace cannot be reviewed, tuned or trusted — `repair_critic_after`
+            # cannot be calibrated by anyone who cannot see what the critic has been saying.
+            # `after` and `durable_repairs` ride on the row for exactly that: the cadence
+            # question is "was this consultation worth paying for?", and answering it needs
+            # the threshold that fired beside the chain it fired on.
+            #
+            # DIAGNOSTIC, and the membership assertion below is the enforcement of that
+            # (invariant #1's shape, the same one `deps_installed` above and
+            # `full_retrain_charged` below are appended under). The fold never reads it, so
+            # no metric, champion, selectability or violation can move on a critic verdict
+            # even by accident — the row is evidence about a decision, never an input to one.
+            # It is written BEFORE the stop is acted on so a chain that ends here still has
+            # its reason durable, and on EVERY consultation so the negative case ("the critic
+            # looked and said keep going") is a fact in the log rather than an absence.
+            assert EV_REPAIR_CRITIC_VERDICT in DIAGNOSTIC_EVENTS
+            async with self._write_lock:
+                self.store.append(EV_REPAIR_CRITIC_VERDICT, {
+                    "node_id": a.node_id, "generation": a.generation,
+                    # The repair this verdict GATED (1-based, matching `node_repaired.attempt`
+                    # and the span), beside the count of durable repairs it judged.
+                    "attempt": a.attempt + 1, "durable_repairs": a.attempt,
+                    "after": self._repair_critic_after,
+                    "verdict": critic.get("action"),
+                    "source": critic.get("source"),
+                    "rationale": str(critic.get("rationale", ""))[:300],
+                    "judged": critic_evidence(_judged)})
+            if critic.get("action") == CRITIC_STOP:
+                a.triage_outcome = ("abandon", (
+                    "the repair critic stopped this chain — "
+                    + (str(critic.get("rationale", "")).strip()
+                       or "successive attempts were addressing the same cause")))
+                return PHASE_SETTLED
+        return PHASE_NEXT
+
+    async def _eval_apply_repair(self, a: "EvalAttempt") -> str:
+        """APPLY_REPAIR — the paid repair call, its envelope, the change set and its verification,
+        the durable `node_repaired` row, the re-materialize under the reset CAS, the inert bound, the
+        reuse/rollback decision and the retrain charge. `PHASE_RETURN` when a reset raced the repair,
+        `PHASE_SETTLED` on a stop, `PHASE_RETRY` to re-run the corrected code."""
+        # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
+        # Snapshot the PRE-repair file set now (node is still the pre-repair fold) so we can
+        # compute the repair's REAL change set below — `developer.last_files` is the node's whole
+        # cumulative solution for the repo developer (repair_from preloads every node file), so a
+        # raw key set would always intersect the train stage and defeat checkpoint reuse.
+        # Deletions get the same NODE-side baseline: post-repair `last_deleted` is cumulative
+        # (repair_from seeds it from node.deleted), so only THIS repair's deletion DELTA may
+        # veto checkpoint reuse — and like `prev_files`, the baseline must be read off the
+        # NODE, not the shared developer: at this instant `developer.last_deleted` belongs to
+        # whatever node it built LAST (see the `_repair` docstring), so a sibling's stale
+        # deletions would mask a real repair deletion from the fail-closed reuse guard (or
+        # veto reuse for a deletion this node never made).
+        prev_files = dict(getattr(a.node, "files", {}) or {})
+        prev_deleted = set(getattr(a.node, "deleted", []) or [])
+        # A REFUSED rollback rides in FRONT of the eval error, not instead of it: the model
+        # still has to fix something, and the refusal only tells it which door is shut and
+        # why. Cleared on read so one refusal is carried exactly one attempt forward.
+        # THE DIAGNOSTICIAN'S ACCOUNT LEADS THE TEXT IT DIAGNOSED, for a reason the
+        # diagnostician itself chose. `check_false_positive`'s directive has said "Read its
+        # rationale above before you touch anything" since it shipped, and nothing put the
+        # rationale above it — that kind exists to say "the declared check is wrong, here is
+        # WHY", and the Developer was handed only the refusal being disputed. The rule is
+        # `failure_diagnosis.diagnosis_repair_lead` rather than an inline `if` so its truth
+        # table is drivable: this call site is three hundred lines inside `_evaluate`.
+        # `_summary` is already redacted and capped (`coerce_diagnosis_summary`).
+        _diag_lead = diagnosis_repair_lead(a._summary, a._reason_source, a.err)
+        # A refused rollback still rides in FRONT of everything: it tells the model which
+        # door is shut, which it needs before it reads why the run was judged at all.
+        _err_in = (f"{a.rollback_refusal}\n\n{_diag_lead}{a.err}" if a.rollback_refusal
+                   else f"{_diag_lead}{a.err}")
+        a.rollback_refusal = ""
+        with self.tracer.span("inline_repair", node_id=a.node_id, attempt=a.attempt + 1):
+            try:
+                # The stuck contract rides on the ERROR CONTEXT rather than inside
+                # `_repair_error_context`, so it reaches every Developer implementation
+                # (whole-file, repo, CLI-backed) through the one argument they all take, and
+                # so the build-time `implement` path — which has nothing to be stuck about —
+                # never sees it. Appended after the per-reason directive on purpose: "here is
+                # what went wrong and what to do about it" then "…and here is how to say you
+                # cannot", never the other way round.
+                # THE ENVELOPE, off the loop (doc 52 row 12): the whole `DeveloperResult`
+                # comes back from the worker, captured under the instance's lock in the
+                # same breath as the call, so nothing below reads the shared instance.
+                repaired = await self._offload_under_proposal_sink(functools.partial(
+                    self._repair_result,
+                    a.node, self._repair_error_context(
+                        a.reason, _err_in, state=a.state, node=a.node,
+                        headline=failure_headline(
+                            getattr(a.res, "stderr", "") or "", self._redact))
+                    + developer_stuck_contract(DEVELOPER_STUCK_PREFIX),
+                    a.state))
+            except BudgetExceeded:
+                raise      # the hard budget stop propagates, exactly as in `_triage_crash`
+            except Exception as _repair_exc:  # noqa: BLE001 - see below; never escapes an eval
+                # A DEVELOPER THAT RAISES INSTEAD OF RETURNING THE SENTINEL. Only
+                # `adapters/repo_developer.py` converts its own session failure into the
+                # in-band "(developer error: …)" string; `agents/roles.py::LLMDeveloper.repair`
+                # calls `complete_text` uncaught, `ValidatingDeveloper._attempt_loop` does not
+                # catch either, and this was the one `_repair` call site with no handler above
+                # it (the other two are inside `_create_node`, which already terminalizes the
+                # build and requests the build_crash pause). So a 401/402/outage on a NON-repo
+                # task escaped `_evaluate` entirely: measured — zero terminals, zero pauses,
+                # zero repairs, and on the serial path it takes the whole run down, so the
+                # circuit breaker below never engaged for exactly the workloads that need it.
+                # Normalizing the raise into the sentinel routes it through the ONE reviewed
+                # exit for "the repair call failed at the provider" rather than adding a
+                # second, differently-behaved one. `except Exception` deliberately does not
+                # catch `BaseException`, so cancellation and KeyboardInterrupt still travel.
+                repaired = DeveloperResult.failed(f"{DEVELOPER_ERROR_PREFIX} {_repair_exc})")
+        new_code = repaired.code
+        # THE DEVELOPER'S PER-CALL OUTPUTS, OFF THE ENVELOPE. Until 2026-09-06 these five
+        # were snapshotted off the SHARED instance "IMMEDIATELY, before any `await`", because
+        # under max_parallel>1 a sibling task's repair() would overwrite `developer.last_files`
+        # in the gap and this row would record (and re-materialize) ANOTHER node's edits as
+        # this node's — and what made even that snapshot safe was the freeze: the paid call
+        # ran on the loop thread, so no sibling could run during it. The envelope is captured
+        # under the instance's own lock in the same breath as the call (`_run_developer`),
+        # so there is no gap left to read across, and the ordering discipline the old
+        # comments carried ("read BEFORE the not-a-repair gate below, which awaits") is now a
+        # property of the record rather than of the line order.
+        repaired_files = dict(repaired.last_files)
+        repaired_deleted = list(repaired.last_deleted)
+        # The rollback REQUEST: the suspect earlier stage this repair blamed, "" for none.
+        _rollback_ask = repaired.last_rollback_stage
+        # WHICH BOUND ENDED THE SESSION. Bounded and coerced because it rides a durable row;
+        # empty for a session that finished on its own terms, which is the common case
+        # (median repair uses 13 % of its clock).
+        _budget_exhausted = repaired.last_budget_exhausted
+        # DID THE SESSION EVER TRY TO WRITE. `changed: []` says the tree did not move; this
+        # says whether the model reached for the write surface at all, and the pair is what
+        # turns `inert` from one word into two distinct failures with different remedies.
+        _edit_calls = int(repaired.last_edit_calls)
+        # THE DEVELOPER SAYING "I DO NOT KNOW HOW TO FIX THIS" (F8). The first of the two
+        # signals the operator asked for, and the one that already existed as a capability
+        # and had no way to be expressed: a Developer that knew it was beaten could only
+        # return another fix it did not believe in, which every counter downstream read as an
+        # ordinary attempt.
+        #
+        # ABOVE `_repair_provider_failure` ON PURPOSE, and this ordering is load-bearing. The
+        # declaration is not Python, so that function would classify it `unparseable`, charge
+        # the provider-failure counter, and — three declarations in — terminalize the node as
+        # `developer_crash` AND pause the whole RUN naming a provider that is answering
+        # perfectly. "The model has no fix left" and "the model's session is dead" are
+        # opposite facts with opposite recoveries; `core/models.py::DEVELOPER_STUCK_PREFIX`
+        # is a separate sentinel for exactly that reason.
+        #
+        # NO REPAIR IS SPENT and no `node_repaired` is written: nothing was repaired. The
+        # node terminalizes below carrying the eval's own authenticated `reason` — this is a
+        # stop, not a re-classification of what failed.
+        if is_developer_stuck(new_code):
+            _stuck_why = developer_stuck_reason(new_code) or "no reason given"
+            a.triage_outcome = ("abandon", "the Developer declared it does not know how to fix "
+                                         f"this — {_stuck_why}"[:400])
+            return PHASE_SETTLED
+        # WAS THIS A REPAIR AT ALL, OR A DEAD PROVIDER? The four answers and the incident
+        # each one was retrofitted for live in `_repair_provider_failure`. The unparseable
+        # counter round-trips through the return value — it is per-NODE, not per-attempt, so
+        # losing it here would silently restore the unbounded loop it bounds.
+        _dev_err, a.unparseable_repairs = _repair_provider_failure(
+            a.node.code, new_code, repaired_files, repaired_deleted, a.unparseable_repairs)
+        if _dev_err is not None:
+            a.triage_outcome = ("abandon", "the repair CALL failed at the provider — no "
+                                         "repaired code was produced")
+            a.reason = "developer_crash"
+            # `REASON_SOURCE_ENGINE`, and it stays that after the 2026-08-20 split: the
+            # engine observed the dead provider itself, and `developer_crash` is its OWN
+            # word for "this node's Developer session died", not a classification of the
+            # eval that anyone was asked about. A diagnostician's non-answer is a different
+            # fact and is recorded as `unclassified`/`undiagnosed` where it happens, above.
+            a._reason_source = REASON_SOURCE_ENGINE
+            a.err = (f"{_dev_err}\n[the Developer's own session failed, so this node was never "
+                   f"repaired. Its last eval error was: {a.err[-200:]}]")
+            await self._auto_pause_provider_failure(
+                "the Developer's LLM provider failed while repairing node "
+                f"{a.node_id}, so the repair returned an error instead of code — {_dev_err}")
+            return PHASE_SETTLED
+        repaired_footprint = self._repaired_footprint(
+            a.node, new_code, repaired_files, a._resource_reservation)
+        a.attempt += 1
+        # THE CHANGE SET, COMPUTED BEFORE THE APPEND. It used to be derived after it (a pure
+        # function of four locals all in hand here either way), and it is the column that
+        # separates a repair chain that is working from one rewriting the same lines — so it
+        # has to be IN the durable row, not only in the process-local one, or a resumed
+        # judge reads a history with the evidence column blank. Both halves are DELTAS
+        # against the pre-repair node, never the cumulative sets the developer hands back —
+        # see `_repair_change_set`. `new_deleted` is consumed by the reuse predicate below.
+        changed, new_deleted = _repair_change_set(
+            prev_files, prev_deleted, repaired_files, repaired_deleted)
+        # The whole-file fallback is gated on the code having actually MOVED, not merely on
+        # it being non-empty. A repair that hands back the artifact it was given rendered
+        # `it changed: <whole-file solution>` to the judge — the column asserting a change
+        # the bytes disprove, on exactly the rows where the truth matters most. `node` is
+        # still the pre-repair fold here, so `node.code` is what `new_code` replaced.
+        _code_changed = (new_code or "") != (a.node.code or "")
+        _changed_col = sorted(changed)[:12] or (["<whole-file solution>"] if _code_changed
+                                                else [])
+        # DID IT DO WHAT IT SAID? The change set above is what the repair DID; the rationale
+        # a line below is what it SAID. Nothing ever compared them, and on the shipped corpus
+        # ~25 % of explained repairs named a change their diff does not contain — 13 of them
+        # changed nothing whatsoever and still bought a full re-evaluation. See
+        # `engine/repair_verify.py` for the measurement, the two-tier design and above all
+        # why only the byte-anchored verdict is allowed to stop anything.
+        #
+        # Computed HERE, beside the change set and before the append, for the same reason
+        # `changed` is: it belongs in the DURABLE row. A resumed judge that reads the history
+        # without this column is back to being told what each fix intended and never what it
+        # accomplished.
+        _verification = verify_repair(
+            a.triage.get("rationale", ""), changed=changed, deleted=new_deleted,
+            code_changed=_code_changed,
+            region=changed_region(prev_files, repaired_files, a.node.code, new_code))
+        # AND DID IT MOVE A DECLARED COORDINATE? A different question from the one above,
+        # asked of different inputs: the Researcher's `idea.params` (in `node_created`, never
+        # written by a repair) against the `.py` bytes this repair just committed. The
+        # rationale is not read at all, so this sits in `REPAIR_INERT`'s trust tier — see
+        # `repair_verify`'s docstring for the v8-node-3 incident, where the run's CHAMPION
+        # ran at `batch_size 4096 / grad_accum 4` while every record of it — `idea.params`
+        # AND the node's own `config.yaml` — said 8192 / 2, and for why the reuse rule that
+        # made a `.py`-only edit the cheap route is deliberately NOT loosened for it.
+        # `baseline_files` narrows this to what THIS repair introduced: a divergence the
+        # Developer authored at build time is a fact about the node, not about the attempt,
+        # and the node-wide question is asked by `champion_caveats` off folded state.
+        _param_overrides = [o.as_row() for o in declared_param_overrides(
+            a.node.idea.params, repaired_files, code=new_code,
+            baseline_files=prev_files, baseline_code=a.node.code or "")]
+        async with self._write_lock:
+            repair_payload = {
+                "node_id": a.node_id, "generation": a.generation,
+                "attempt": a.attempt, "code": new_code,
+                "files": repaired_files,
+                "deleted": repaired_deleted,
+                "error_in": a.err, "triage_action": "repair",
+                # THE RECORD'S OWN WINDOW, beside the prompt's. Omitted when empty so a row
+                # with no column ("this predates the widening") stays distinguishable from a
+                # row with an empty one ("the eval wrote nothing to stderr") — the same
+                # additive, absence-is-a-fact rule `evidence` and `engine_reason` follow two
+                # lines below. Nothing on the prompt path reads it; `_durable_repair_ledger`
+                # keeps building the judge's history from `error_in`, unchanged.
+                **({"error_evidence": a.err_evidence} if a.err_evidence else {}),
+                # Same screen as `node_failed.triage_rationale` below, and for the same
+                # reason — this is the judge's own words about a crash, on a DURABLE row, and
+                # its two sibling log-derived verdicts (`train_monitor` / `asha_monitor`'s
+                # `reason`) have gone through `_redact` since B3. `error_in` beside it is
+                # already covered: `err` derives from the redacted `_stderr_tail`.
+                "rationale": self._redact(str(a.triage.get("rationale", "")))[:300],
+                # The judge's evidence columns, made durable (invariant #5: additive, and the
+                # fold ignores them — `_on_node_repaired` reads code/files/deleted/footprint
+                # only). `_durable_repair_ledger` reads exactly these back after a resume;
+                # `unparseable_repairs` rides along because it bounds the same per-NODE
+                # condition and had the same process-local lifetime.
+                "changed": _changed_col,
+                "stages_passed": a._depth,
+                # The verification rung's answer, in the same durable row as the evidence it
+                # was derived from. `verified` is a member of `repair_verify.REPAIR_VERDICTS`
+                # and emphatically NOT of `triage.py::TRIAGE_ACTIONS` — it is a fact about
+                # bytes, not a verdict about the node, and no model may emit one (the two
+                # vocabularies are cross-referenced in both modules). `unmet` is capped
+                # because it is model-derived text riding in an event payload.
+                "verified": _verification.verdict,
+                "unmet": list(_verification.unmet[:12]),
+                # WHY THE DIFF WAS EMPTY, when the answer is one the ENGINE holds. `verified`
+                # says WHAT the repair did to the tree; this says whether the session that
+                # produced it was CUT SHORT. Measured over `runs/` by pairing each
+                # `inline_repair` session with its own verdict: 12 of the 12 `inert` repairs
+                # in the corpus ran past `session_time_budget_s`, and 0 of the 65 that
+                # finished inside it are inert — so `inert` alone has been an undiagnosed
+                # proxy for "ran out of clock", and "the agent decided no edit was warranted"
+                # and "the agent was still reading when the budget ended" have opposite
+                # remedies. `tool_loop.py` computed and announced this all along
+                # (`_note_budget`) and nothing subscribed.
+                #
+                # OMITTED WHEN EMPTY, exactly like `param_overrides` below and for the stated
+                # reason: an absent key on an old row means "nobody looked", which is not the
+                # same fact as "looked and the session was not cut short". Additive and
+                # fold-ignored (invariant #5); no metric, champion, selectability or
+                # violation moves on it, and `INERT_REPAIR_LIMIT` is untouched.
+                **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
+                "edit_calls": _edit_calls,
+                # A DECLARED COORDINATE THIS REPAIR MOVED, if any. Additive and fold-ignored
+                # (invariant #5), and OMITTED when empty rather than written as `[]`: an
+                # absent key on an old row means "nobody looked", which is not the same fact
+                # as "looked and found none" — the same distinction `_durable_repair_ledger`
+                # already keeps for `verified`. Unlike `unmet` this is NOT model-derived
+                # text: every field is a number or a path out of bytes the engine holds, so
+                # it is capped for event-payload hygiene and not for trust.
+                **({"param_overrides": _param_overrides[:PARAM_OVERRIDE_CAP]}
+                   if _param_overrides else {}),
+                # The cause of the failure this repair answers — F8's critic compares
+                # causes across attempts. Additive (invariant #5); the fold ignores it.
+                #
+                # It used to be described here as "the AUTHENTICATED cause", and since
+                # 2026-08-20 that is true of `engine_reason` and of `reason` only when
+                # `reason_source` says `engine`: a judge may re-read the three kinds
+                # `_failure_reason` inferred from the dead process's TEXT (`triage.py`'s
+                # fact/reading split), and `crash` was the wrong word for every one of the
+                # 25 out-of-memory failures in `runs/`. The three columns are written
+                # together so the row never has to be interpreted: what the engine acted on,
+                # who chose it, and what the deterministic classifier said. The
+                # authenticated column is never overwritten, so a reader that wants the old
+                # guarantee reads `engine_reason` and gets exactly it.
+                "reason": a.reason,
+                "reason_source": a._reason_source,
+                "engine_reason": a._engine_reason,
+                # THE EVIDENCE THE DIAGNOSIS STANDS ON — `{source, locator, quote}` plus the
+                # engine's own re-resolution of the citation. Additive and fold-ignored
+                # (invariant #5); OMITTED when the diagnostician was never consulted, so an
+                # absent key on an old row means "nobody was asked" rather than "asked and
+                # cited nothing". This is what makes a wrong classification auditable after
+                # the fact, which is the only check available here — see
+                # `engine/failure_diagnosis.py` for why no probe of the CONCLUSION exists.
+                **({"reason_evidence": a._evidence} if a._evidence else {}),
+                **({"reason_evidence_resolved": a._evidence_resolved}
+                   if a._evidence_resolved is not None else {}),
+                # WHAT HAPPENED, IN PROSE — same additive, fold-ignored, omitted-when-absent
+                # rule as the pair above, and the absence means the same thing: nobody was
+                # asked. This is the column that makes the row readable a week later
+                # without the run, and it is deliberately NOT `rationale`, which says what
+                # the repair intends to DO and is read back by `repair_verify`.
+                **({"reason_summary": a._summary} if a._summary else {}),
+                # …and the trail behind it, same rule again. Each item carries the model's
+                # account (`source`/`locator`/`quote`/`means`) beside the ENGINE's
+                # re-resolution of it (`resolved`), so a reader never has to guess which
+                # part the model could have written. A citation that did not resolve is
+                # MARKED `resolved: false` and KEPT: the finding stands on its own text, and
+                # a reader owed the summary above is not owed a working link.
+                **({"reason_findings": a._findings} if a._findings else {}),
+                # The wall-clock of the eval this repair answers. Additive (invariant #5);
+                # the fold ignores it. It is what makes the COST floor durable across a
+                # resume — see `_durable_repair_seconds`, which sums these rows, and
+                # `repair_judgment.repair_redone_work_stop`, which spends the operator's
+                # `inline_repair_retrain_cap` in seconds on the chains that cap cannot
+                # charge in counts.
+                "eval_seconds": a.attempt_eval_seconds,
+                "unparseable_repairs": a.unparseable_repairs}
+            if repaired_footprint is not None:
+                repair_payload.update({
+                    "idea_footprint": repaired_footprint,
+                    "footprint_finalized": True,
+                })
+            # This commits the repaired code to folded state BEFORE the files below are
+            # materialized, so state briefly claims a repair the workdir does not hold. The
+            # window is closed on the READ side rather than by reordering (either order skews
+            # one way or the other): the workdir carries a manifest stamp written only after
+            # its files land, and stage reuse — the one path that evaluates a workdir it did
+            # not just build — refuses to proceed unless that stamp matches the folded node.
+            # See `a.stamp_workdir` / `a.workdir_matches` at the top of this method.
+            self.store.append(EV_NODE_REPAIRED, repair_payload)
+        a.node = fold(self.store.read_all()).nodes[a.node_id]   # node.code now == repaired code
+        if a.node.attempt != a.generation:
+            await self._eval_record_superseded(a)
+            return PHASE_RETURN                   # reset raced the repair; never adopt its newer lifecycle
+        self._write_node_files(a.node, a.workdir)               # re-materialize before re-eval
+        a.stamp_workdir(a.node)     # only NOW does the workdir match the repaired manifest
+        if fold(self.store.read_all()).nodes[a.node_id].attempt != a.generation:
+            await self._eval_record_superseded(a)
+            return PHASE_RETURN                   # reset raced the filesystem write; force clean next materialize
+        # Choose the NEXT eval's start stage: REUSE the completed earlier stages (the train
+        # checkpoint is still on disk — _write_node_files overlays, never wipes) when the repair
+        # provably didn't touch them, so a fixed score/eval script doesn't pay to re-train. Else
+        # a full re-run — bounded by inline_repair_retrain_cap so a repair that keeps rewriting
+        # training code can't burn many full trains (the attempt budget bounds the COUNT of
+        # repairs, not their cost). The workdir persists across attempts, so a reused
+        # checkpoint is valid. (`changed`/`new_deleted` were computed above the append.)
+        # THE ROW THE JUDGE WILL READ on the next attempt — the in-process twin of what
+        # `_durable_repair_ledger` rebuilds from the event just written, kept because every
+        # field is already in hand and re-reading the log per attempt would be a full scan for
+        # nothing. "Which files this fix actually touched" is the column that separates a
+        # repair chain that is working from one that is rewriting the same lines: the
+        # developer's own rationale says what it INTENDED to change, this says what it did.
+        a.repair_log.append({
+            "attempt": a.attempt,
+            "error": a.err[-_JUDGE_ERROR_CHARS:],
+            "fix": str(a.triage.get("rationale", ""))[:200],
+            "changed": _changed_col,
+            "verified": _verification.verdict,
+            "unmet": list(_verification.unmet[:12]),
+            # Same fact, same omit-when-empty rule, same reason as the durable row above:
+            # `_format_repair_log` renders this row and the rebuilt one identically, so a
+            # divergence here would show one node two different histories depending on
+            # whether the process had resumed.
+            **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
+            "edit_calls": _edit_calls,
+            # Same omit-when-empty rule as the durable row above, and for the same reason:
+            # `_format_repair_log` renders this row and the rebuilt one identically, so a
+            # `[]` here and an absent key there would render two different histories for
+            # one node depending on whether the process had resumed.
+            **({"param_overrides": _param_overrides[:PARAM_OVERRIDE_CAP]}
+               if _param_overrides else {}),
+            "reason": a.reason,
+            # THE ENGINE'S OWN COLUMN, beside the one a diagnostician may have chosen, so the
+            # F8 critic's `cause` is a fact and not a verdict — see
+            # `repair_judgment.authenticated_cause` for why `c862045c` makes this mandatory
+            # rather than tidy. The in-process row and the durable one must carry the same
+            # pair, or a chain judged before a resume and after it compares different columns.
+            "engine_reason": a._engine_reason,
+            "stages_passed": a._depth})
+        # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`
+        # means the engine compared the bytes and nothing moved: the files this loop is about
+        # to re-materialize are the ones already on disk, `_safe_reuse_start` will reuse
+        # every completed stage because the change set is empty, and the eval it is about to
+        # pay for is the eval that just failed. Repeating that is not a retry, it is a
+        # transcription error with a GPU attached — rubertlite-dr-unified-v4 node 6 spent two
+        # in a row at ~2.7 h each, and rubertlite-dense-retrieval node 57 three.
+        #
+        # ONE is allowed: a developer can legitimately burn a turn budget reading before it
+        # edits, and stopping a node on that would be a regression. The bound is on the
+        # STREAK, so a chain that recovers is never charged for what it already fixed
+        # (`inert_streak`), and it is read off `repair_log` — which is seeded from the
+        # durable rows — so a resume continues the streak instead of refunding it.
+        #
+        # This is the only verdict the loop acts on. `REPAIR_UNMET` is model-derived and
+        # rides into the judge's history as evidence; see `engine/repair_verify.py`.
+        _inert = inert_streak(a.repair_log)
+        if _inert >= INERT_REPAIR_LIMIT:
+            a.triage_outcome = ("abandon", (
+                f"the last {_inert} repair attempts changed nothing at all — the engine "
+                "compared the repaired files against the ones already on disk and they are "
+                "byte-identical, so re-evaluating would re-run inputs this node has already "
+                "run; abandoning in-node repair — the node ends here, and the loop's next "
+                "proposal is fresh work rather than another attempt at this one"))
+            return PHASE_SETTLED
+        _stages = self._resolved_stages(a.node, a.workdir)
+        # `deleted` and the eval spec's `cwd` ride along so the predicate can fail closed on
+        # its blind spots: a deletion is invisible to the reachability closure (the file was
+        # unlinked by _write_node_files above), and a non-default cwd re-bases the stage
+        # scripts so the changed-vs-reachable intersection would prove nothing.
+        _cwd = (self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None
+        # `prev_manifest` is the PRE-repair stage manifest as the engine last COMMITTED it —
+        # `prev_files` off the fold, snapshotted above the repair call, never the copy on
+        # disk. It is what lets the predicate narrow its manifest clause to the entries at
+        # or before the reuse point instead of forfeiting on the whole file; reading it from
+        # the workdir instead would hand that decision to a stage that can rewrite its own
+        # manifest while it runs. `params` expands `%params%` on both sides through the same
+        # rule `_resolve_stages` used, and a repair never writes `idea.params`.
+        a.next_start = self._safe_reuse_start(
+            _stages, a.res.failed_stage, changed, a.workdir,
+            deleted=new_deleted, cwd=_cwd,
+            prev_manifest=prev_files.get(STAGE_MANIFEST_NAME),
+            params=a.node.idea.params)
+        # ROLLBACK, asked only when the Developer named a suspect. It OVERRIDES `next_start`
+        # in the one direction the reuse predicate structurally cannot express: backwards,
+        # onto a stage that already completed. Consulted AFTER `_safe_reuse_start` and never
+        # instead of it — the reuse answer is what the run falls back to when the ladder
+        # refuses, and computing it first also means a refusal costs the node nothing.
+        _rolled_back = False
+        if _rollback_ask:
+            _suspect, _refusal = self._rollback_start(
+                _stages, a.res.failed_stage, _rollback_ask, changed, a.workdir,
+                already_rolled_back=a.rolled_to, cwd=_cwd)
+            if _suspect:
+                a.next_start, _rolled_back = _suspect, True
+                a.rolled_to = a.rolled_to | {_suspect}
+            else:
+                a.rollback_refusal = _refusal or ""
+            async with self._write_lock:
+                # BOTH outcomes are recorded. The refusals are the auditable half: a node
+                # whose every rollback is refused is a Developer stuck on one guess, and that
+                # is invisible if only the accepted ones are written. Diagnostic + fold-
+                # ignored, so this append is splice-neutral by construction (see the event's
+                # own note in events/types.py); on the main task under the write lock like
+                # every other append in this loop.
+                self.store.append(EV_STAGE_ROLLBACK, {
+                    "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
+                    "stage": _rollback_ask, "failed_stage": str(a.res.failed_stage or ""),
+                    "accepted": bool(_suspect),
+                    "refusal": str(_refusal or "")[:300]})
+        # Which repairs count against the retrain cap, and why a renamed stage still does, is
+        # `_repair_forces_full_retrain`. Asked BEFORE incrementing so cap=N runs exactly N.
+        if _repair_forces_full_retrain(a.res, a.next_start, rolled_back=_rolled_back):
+            if (self._inline_repair_retrain_cap
+                    and a.full_retrains >= self._inline_repair_retrain_cap):
+                # The message names WHICH of the two ways this repair discarded completed
+                # work, because they call for different next moves by whoever reads the
+                # terminal: "keeps rewriting training code" is a Developer circling, while
+                # "rolled the pipeline back" says the pipeline itself was suspected and the
+                # allowance for testing that is now spent.
+                #
+                # The NON-rollback branch is byte-identical to what it has always been, on
+                # purpose. It is an operator-facing string two tests pin, and rewording it to
+                # cover both cases at once ("expensive re-run(s)") stranded both of them on a
+                # substring that no longer existed — a contract change dressed as a tidy-up.
+                # A new case gets a new sentence; it does not get to edit the old one.
+                a.triage_outcome = ("abandon",
+                    (f"repair rolled the pipeline back to stage {a.next_start!r} — "
+                     f"{a.full_retrains} expensive re-run(s) already spent"
+                     if _rolled_back else
+                     "repair keeps changing earlier-stage (training) code — "
+                     f"{a.full_retrains} full re-train(s) already spent")
+                    + "; abandoning in-node repair to avoid burning compute — the node ends "
+                    "here, and the loop's next proposal is fresh work rather than another "
+                    "attempt at this one")
+                return PHASE_SETTLED
+            a.full_retrains += 1
+            # Recorded HERE, where the compute is actually committed, so a resume reads the
+            # charge back instead of being handed a fresh allowance (`_durable_full_retrains`).
+            # Diagnostic and fold-ignored, so this append is splice-neutral by construction and
+            # needs no BACKGROUND_APPENDABLE membership; it is on the main task under the write
+            # lock like every other append in this loop.
+            async with self._write_lock:
+                self.store.append(EV_FULL_RETRAIN_CHARGED, {
+                    "node_id": a.node_id, "generation": a.generation,
+                    "spent": a.full_retrains, "attempt": a.attempt})
+        return PHASE_RETRY
+
+    async def _eval_write_terminal(self, a: "EvalAttempt") -> None:
+        """WRITE_TERMINAL — the ONE terminal event per node (invariant #2) with every provenance
+        column, the trust scan and its receipt after it, or the failure row with the diagnosis."""
+        a.sp.set_many(eval_seconds=a.total_eval, exit_code=a.res.exit_code, timed_out=a.res.timed_out,
+                    metric=a.res.metric, ok=a.ok, repair_attempts=a.attempt)
+        if a.res.violations:
+            a.sp.set("violations", len(a.res.violations))
+        if a.res.drift is not None:
+            a.sp.set("drift", True)
+        # ASHA past-experiment curve (#7): a bounded per-RUNG [[rung, metric], ...] (canonical
+        # geometric rungs) mined from the eval's CAPTURED stdout when the task declares a stdout_json
+        # `resource_key`, so a future live node — snapping its sample to the same rung — finds a sibling
+        # checkpoint across the whole run. Additive/only-when-present → old logs fold byte-identically.
+        # Computed OUTSIDE the write-lock: it parses `res.stdout` (run_argv's bounded ~64 KB tail — for a
+        # staged eval, the FINAL stage's output) and depends only on the eval result + `_eval_spec`,
+        # nothing the lock guards, so doing it under the global append lock needlessly serialized every
+        # other writer once per completed node. (Widening the tail to a teed full-curve accumulator is a
+        # follow-up; the fold + reader already degrade safely to the tail.)
+        _curve = None
+        if a.ok:
+            _spec = getattr(self, "_eval_spec", None)
+            _curve = extract_resource_curve(
+                a.res.stdout, _spec.get("metric") if isinstance(_spec, dict) else None)
+        async with self._write_lock:
+            # (The `stage_finished` rows are NOT written here any more — they are appended inside
+            # the attempt loop, once per attempt, which is the only way a repaired node's log can
+            # carry the stage that really ran rather than the last attempt's `reused` marker. See
+            # the block above `if ok: break`. Every path that reaches this terminal has already
+            # appended THIS attempt's rows, so they still land BEFORE the terminal, as required.)
+            if a.res.drift is not None:               # Phase 4: uncorroborated metric (audit)
+                self.store.append(EV_SPEC_DRIFT,
+                                  {"node_id": a.node_id, **a.res.drift, "generation": a.generation})
+            if a.ok:
+                # THE ONE PLACE the extra-metric CHANNEL policy is applied, because it is the one
+                # place the record is written. `Settings.auto_extra_metrics` (default ON =
+                # today's behaviour) decides whether undeclared numbers scraped off the
+                # candidate's stdout may enter the record at all; the tag decides whether a
+                # reader can tell. The gate is expressed over the TAG
+                # (`authenticated_extra_metrics_only`) so the two can never disagree about which
+                # values are which — and since the tag learned to name the engine's OWN spliced
+                # probe source (`EXTRA_METRIC_ENGINE`), turning the flag off no longer deletes
+                # the CUDA proof the calibration receipt gate re-derives from this very payload.
+                #
+                # A GATE HERE AND NOT AT CAPTURE, deliberately: both auto-capture channels
+                # (`command_eval` for repo tasks, the two `sandbox.py` tiers for solution.py)
+                # funnel through this payload, so one choke point covers both instead of two
+                # half-plumbed switches. And this is a WRITE-side policy only — the fold never
+                # consults it, so an already-recorded run replays identically under either value
+                # (`tests/test_auto_extra_metrics.py`), which is what keeps invariant #6 honest
+                # without adding a key to the `run_started` payload whose exact key SET
+                # `search/speculation_quality.py` compares for equality.
+                _extras = normalize_extra_metrics(a.res.extra_metrics)
+                _extra_channels = normalize_extra_metric_channels(a.res.extra_metrics_provenance)
+                _extra_dirs = normalize_extra_metric_directions(a.res.extra_metrics_direction)
+                if not bool(getattr(self, "auto_extra_metrics", True)):
+                    _extras, _extra_channels = authenticated_extra_metrics_only(
+                        _extras, _extra_channels)
+                # The direction map may only describe values that SURVIVED the gate above. A
+                # direction for a dropped key is an orphan: it says which way is better about a
+                # number this record does not carry, and the next reader to join the two would
+                # be reading a fact about nothing. Restricted rather than gated a second time,
+                # so it cannot drift from whichever rule dropped the values.
+                _extra_dirs = {k: v for k, v in _extra_dirs.items() if k in _extras}
+                _eval_payload = {
+                    "node_id": a.node_id, "generation": a.generation,
+                    "metric": a.res.metric,
+                    "stdout_tail": self._redact(a.res.stdout[-500:]), "eval_seconds": a.total_eval,
+                    "extra_metrics": _extras,   # #5 multi-objective
+                    "violations": a.res.violations or [],
+                    # Intra-node sweep: the whole grid's per-trial results, carried on the ONE
+                    # node_evaluated event (the sweep is a single atomic eval — eval_seconds is
+                    # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
+                    "trials": a.res.trials or [],
+                }
+                # THE CANDIDATE'S OWN NUMBER (doc 52 row 10a), only on a host-scored node that
+                # printed one — absent otherwise, on the rule the two keys below state.
+                if getattr(a.res, "self_metric", None) is not None:
+                    _eval_payload["self_metric"] = a.res.self_metric
+                # Written only when there is something to say. `extra_metrics` is unconditional
+                # (it is `{}` on the ordinary node), but a new UNCONDITIONAL key would change the
+                # `node_evaluated` bytes of every node in every run — including the CUDA-probe
+                # calibration nodes whose evidence the speculation gate re-derives — for no
+                # information at all. Absent == "this node reported no extra metrics".
+                if _extra_channels:
+                    _eval_payload["extra_metrics_provenance"] = _extra_channels
+                # Same "only when there is something to say" rule, and for the same reason: an
+                # unconditional key would rewrite the `node_evaluated` bytes of every node in
+                # every run — the calibration nodes included — to say `{}`. Absent == nobody
+                # declared which way is better about anything here, which is the honest reading
+                # of every log written before this shipped.
+                if _extra_dirs:
+                    _eval_payload["extra_metrics_direction"] = _extra_dirs
+                if _curve:                     # computed above, outside the write-lock (see the #7 note)
+                    _eval_payload["resource_curve"] = _curve
+                if a.salvaged is not None:
+                    # A SALVAGED METRIC IS NEVER SILENTLY EQUAL TO A MEASURED ONE. Two records,
+                    # because they answer two different questions and only one of them is read by
+                    # anything today:
+                    #   * `metric_provenance` is the ACCOUNT — which rung recovered the value,
+                    #     out of which declared reader, which stage had failed, and whether the
+                    #     cause was then corrected. Additive, so old logs and old readers are
+                    #     unaffected (invariant #5).
+                    #   * the `metric_salvaged` VIOLATION row is the ENFORCEMENT. The fold's rule
+                    #     is `feasible = not violations`, so under the default `audit` mode this
+                    #     node keeps its metric and its evaluated status — it counts, it is in the
+                    #     budget, the UI and the digest and the lineage all see it — while
+                    #     `RunState.feasible_nodes()` excludes it, which is what champion
+                    #     selection and breeding read. A provenance field alone would satisfy
+                    #     "the selection path CAN tell" and not "does": nothing on that path
+                    #     reads an unknown event key. `metric_salvage="select"` is the operator's
+                    #     opt-in to a salvaged metric competing on equal terms.
+                    _prov = a.salvaged.as_event()
+                    _prov["cause_repaired"] = bool(a.salvage_cause_repaired)
+                    # The failure the salvage overrode, kept verbatim on the SUCCESS terminal.
+                    # A node that reads as evaluated must still be able to tell whoever looks
+                    # what went wrong, or the salvage has merely moved the silence.
+                    #
+                    # INSIDE the provenance record, not beside it as its own event key. It was a
+                    # top-level `salvaged_error` and the fold ignores unknown keys — so the one
+                    # place it was meant to be read (a replayed `RunState`, which is what the UI,
+                    # the report and every read-model see) never had it, and `looplab replay`
+                    # silently dropped the only account of what the node's failure had been.
+                    # `metric_provenance` IS folded, so putting it here is what makes the promise
+                    # true rather than adding a second field for the fold to learn.
+                    _prov["salvaged_error"] = str(a.err)[:600]
+                    _eval_payload["metric_provenance"] = _prov
+                    _eval_payload["violations"] = (
+                        list(_eval_payload["violations"])
+                        + a.salvaged.violation_rows(getattr(self, "metric_salvage",
+                                                          DEFAULT_METRIC_SALVAGE)))
+                elif a.declaration_repaired is not None:
+                    # A MEASURED metric with provenance — the F1e case. The declared contract
+                    # failed, the Developer's fix corrected the declaration, and the artifact
+                    # check then PASSED against it, so the pipeline is known to have produced
+                    # what it declared and nothing about the number was ever in doubt. NO
+                    # violation row and nothing on the selection path: this node competes for
+                    # champion and can be bred from, which is the entire point.
+                    #
+                    # The record is still written (decision (d) in `metric_salvage.py`'s
+                    # `declaration_repair_provenance`): "the manifest was wrong and we fixed it"
+                    # is worth knowing even when the number is sound — it is the only durable
+                    # trace that the node's recorded code is not byte-for-byte what produced its
+                    # recorded metric, and the only way an operator sees that every MERGE node
+                    # in a run needed the same correction.
+                    _eval_payload["metric_provenance"] = a.declaration_repaired
+                # THE SUBJECT — what this number is a claim ABOUT. Folded onto the SAME
+                # `metric_provenance` dict rather than beside it, for the reason `salvaged_error`
+                # records one branch up: the fold ignores unknown top-level keys, so a second
+                # event key would be invisible in every replayed `RunState` — which is what the
+                # UI, the report and every read-model see.
+                #
+                # It MERGES with whatever the salvage/declaration-repair branches already put
+                # there. Those answer "which rung produced this number"; this answers "about
+                # what", and a salvaged number still has a subject. Merging also means a reader
+                # keeps one key to look at, which is the property `metric_provenance` was folded
+                # for in the first place.
+                #
+                # `.get`, not truthiness: `res.metric_subject` is None on the `off` rung and on
+                # every path that never reached a metric read, and an old log has no key at all —
+                # invariant #5's additive-with-reader-side-defaults rule, which is not optional
+                # here because EVERY existing run's log has no provenance.
+                _subject_prov = getattr(a.res, "metric_subject", None)
+                if isinstance(_subject_prov, dict):
+                    _eval_payload["metric_provenance"] = {
+                        **(_eval_payload.get("metric_provenance") or {}), **_subject_prov}
+                # THE HOST SCORER'S RECEIPT (doc 52 row 10a) — WHAT PRODUCED the number, beside
+                # what it is ABOUT: `{argv, program, program_sha256, program_size}`, digested at
+                # the score stage's start, merged onto the same provenance dict for the reason
+                # the subject is. Two nodes whose receipts differ were not scored by the same
+                # program, and that is the fact a "consistent scoring" claim rests on.
+                _host_prov = getattr(a.res, "host_scorer", None)
+                if isinstance(_host_prov, dict):
+                    _eval_payload["metric_provenance"] = {
+                        **(_eval_payload.get("metric_provenance") or {}),
+                        "host_scorer": _host_prov}
+                    # THE ENFORCEMENT, under `require`: an UNBOUND metric gets the EXISTING
+                    # `metric_salvaged` violation row, so the fold's `feasible = not violations`
+                    # keeps it out of `feasible_nodes()` — counted, in the budget, in the UI and
+                    # the lineage, and never champion and never bred from. A provenance field
+                    # alone would satisfy "the selection path CAN tell" and not "does": nothing
+                    # on that path reads an unknown event key. No second exclusion vocabulary is
+                    # minted — see `unbound_subject_violation_rows` for why the row is the same
+                    # name and what a new slug would silently cost.
+                    _eval_payload["violations"] = (
+                        list(_eval_payload["violations"])
+                        + unbound_subject_violation_rows(
+                            _subject_prov, a.res.metric,
+                            str(getattr(self, "metric_subject", "audit") or "audit")))
+                # THE COMPARABILITY KEY — what this number may be RANKED AGAINST. Merged onto the
+                # same `metric_provenance` dict as the subject, for the reason recorded one branch
+                # up: the fold ignores unknown TOP-LEVEL keys, so a second event key would be
+                # invisible in every replayed `RunState`, which is what the UI, the report, the
+                # cross-run panel and `looplab inspect` all read.
+                #
+                # TWO RECORDS, not one, because they answer different questions and only one of
+                # them is an identity: `eval_inputs` is the EVIDENCE (which files, which digests,
+                # and the named reason when one did not bind — what an operator debugging a
+                # `unknown` key has to look at), `comparability` is the KEY (a digest plus the
+                # authority it was decided at — what a ranking surface compares). A surface that
+                # had to re-derive the key from the evidence would be a second copy of
+                # `comparability_record`, and the first thing to drift.
+                #
+                # UNCONDITIONAL, and never a violation. This records what a number may be compared
+                # with; it does not decide whether the number is sound, so it mints no row, gates
+                # nothing and cannot cost a node its terminal. `None` — the answer for every task
+                # that declares neither inputs nor a comparison contract — writes NO key at all
+                # rather than an empty one, because two empty keys would compare EQUAL and
+                # "two runs that recorded nothing are the same evaluation" is the exact statement
+                # this mechanism exists to refuse.
+                _inputs_prov = getattr(a.res, "eval_inputs", None)
+                # …and the SUBSTRATE this number was produced on, read LIVE rather than from
+                # the folded pin: the pin is what `run_started` recorded and is blind to a fix
+                # the operator promoted into the editable repo an hour ago, which is exactly the
+                # move that has to split two nodes. Discriminator only — see
+                # `comparability.py::comparability_record` — so a wrong or missing answer can
+                # never CERTIFY a comparison, and a task with no editable repo records none.
+                #
+                # IN A THREAD, and that is not tidiness. `_substrate_fingerprint` spawns
+                # `git rev-parse` / `git status` / `git diff` with real timeouts, or walks a tree
+                # with `rglob`+`stat` for a non-git source. Until 2026-08-25 it ran on the event
+                # loop at EVERY node terminal — where it had previously only ever run at setup
+                # and resume — and a wedged FUSE mount would have frozen eval finalisation,
+                # terminals and GPU dispatch for the whole of its timeout. This engine has
+                # already paid that bill once, for a propose phase.
+                try:
+                    _substrate = (await anyio.to_thread.run_sync(self._substrate_fingerprint)
+                                  if self._repo_spec else None)
+                except Exception:  # noqa: BLE001 — an unreadable tree is `unknown`, never a failure
+                    _substrate = None
+                _cmp = comparability_record(task=self._task_snapshot_for_comparability(),
+                                            inputs_prov=_inputs_prov, substrate=_substrate)
+                if isinstance(_inputs_prov, dict) or _cmp is not None:
+                    _merged = dict(_eval_payload.get("metric_provenance") or {})
+                    if isinstance(_inputs_prov, dict):
+                        _merged["eval_inputs"] = _inputs_prov
+                    if _cmp is not None:
+                        _merged["comparability"] = _cmp
+                    _eval_payload["metric_provenance"] = _merged
+                # THE APPLIED COORDINATES — what the configuration that ran said this node's
+                # declared `Idea.params` were worth (`runtime/applied_params.py`, bound at the
+                # metric read in `eval_dispatch`).
+                #
+                # MERGED ONTO `metric_provenance` and NOT given a top-level event key, for the
+                # reason the subject record already relies on: the fold ignores unknown TOP-LEVEL
+                # keys, so a second key would be invisible in every replayed `RunState` — which
+                # is what the UI, the report, the exports and `looplab inspect` all read.
+                #
+                # UNCONDITIONAL AND NEVER A VIOLATION. `Idea.params` is a PROPOSAL under
+                # `params_style: "none"`; a node that adjusted for a real constraint (an OOM, a
+                # time budget) did the right thing and must still be allowed to win. This says
+                # what it ran at; it mints no row, excludes nothing, and cannot cost a node its
+                # terminal. Absent when the node declares no comparable coordinate or no carrier
+                # could be read — never an empty record, which would be the claim "the
+                # configuration was checked and said nothing".
+                _applied_prov = getattr(a.res, "applied_params", None)
+                if isinstance(_applied_prov, dict):
+                    _eval_payload["metric_provenance"] = dict(
+                        _eval_payload.get("metric_provenance") or {},
+                        applied_params=_applied_prov)
+                self.store.append(EV_NODE_EVALUATED, _eval_payload)
+                # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
+                # emission does not rewrite the metric, but the folded trust_gate policy
+                # can exclude high-precision signals from champion/breeding under gate/block.
+                # Both the surface and the findings over it are NAMED rules (doc 25 ES-03) — the
+                # `code_digest` below must be the digest of the exact bytes that were scanned, so
+                # the surface is read once, here, and handed to the scan.
+                scan_src = self._trust_scan_surface(a.node)
+                detectors = self._trust_scan_detectors(scan_src)
+                sigs = self._trust_scan_signals(a.node, a.res, a.state, a.workdir, scan_src,
+                                                detectors)
+                # THE CLEAN CASE LEAVES A RECEIPT, and that is the whole point of this row: the
+                # `if sigs:` below writes only on a hit, so until 2026-08-19 a run whose every
+                # node was scanned clean was byte-identical to a run whose scan call had been
+                # deleted — and identical again to a run with every detector switched off, which
+                # is what four of the six preserved logs on this box actually are. Appended
+                # UNCONDITIONALLY (an empty `detectors` list is itself the durable claim "the
+                # engine got here and nothing was configured to look"), and it carries no
+                # candidate text — what was scanned is named by its digest, which is the SAME
+                # value the flagged row below publishes, from one function.
+                #
+                # AFTER the terminal, not folded into it. The BACKLOG's own sketch was a field on
+                # `node_evaluated`; that needs the scan to run BEFORE the terminal append, which
+                # would put five detector calls — three of them over agent-authored source, one
+                # of them a filesystem walk — between an evaluation and the one row the run
+                # cannot afford to lose. A separate row can be lost to a kill in this window
+                # instead, and then it reads `unknown`, which is the correct default and the
+                # exact reading `trust/scan_receipt.py` guarantees for it.
+                self.store.append(EV_TRUST_SCAN, _scan_receipt.trust_scan_receipt(
+                    a.node_id, a.generation, detectors, len(sigs), scan_src))
+                if sigs:
+                    # P1-7 versioned TrustEvidence: bind the evidence to a schema version + a digest
+                    # of the exact scanned surface (provenance — which bytes produced these signals),
+                    # so a stored flag isn't a bare {node_id, signals}. Additive; the fold reads the
+                    # new fields with defaults, so old logs are unaffected.
+                    # (No local `import hashlib` here: it would make `hashlib` a function-local
+                    # name for ALL of _evaluate, so any earlier use in this method would raise
+                    # UnboundLocalError — the exact trap _workdir_manifest_digest's docstring
+                    # records having to move out of this method to dodge. Module-level import.)
+                    self.store.append(EV_REWARD_HACK_SUSPECTED,
+                                      {"node_id": a.node_id, "generation": a.generation,
+                                       "signals": sigs,
+                                       "evidence_version": TRUST_SCAN_EVIDENCE_VERSION,
+                                       # ONE digest rule for both rows (`trust/scan_receipt.py`),
+                                       # so the receipt above and this evidence commit to the
+                                       # same subject by construction rather than by two equal
+                                       # inline `hashlib.sha256(...)` calls that agree until
+                                       # someone edits one of them.
+                                       "code_digest": _scan_receipt.scan_subject_digest(scan_src)})
+            else:
+                # `err`/`reason` were computed in the attempt loop (reason may be "idea_rejected"
+                # if the crash-triage agent judged the idea fundamentally wrong).
+                a.sp.set("error_reason", a.reason)
+                # `reason_source`/`engine_reason` ride on the terminal for the same reason
+                # they ride on `node_repaired`: `reason` is the RECORD of what this node died
+                # of, and since a judge may re-read three of the twelve classifications the
+                # record has to say who chose the word. Additive (invariant #5) and
+                # fold-ignored; an ABSENT pair on an older row means "nobody looked", which is
+                # deliberately not the same fact as `engine`.
+                data = {"node_id": a.node_id, "generation": a.generation,
+                        "error": a.err, "reason": a.reason, "eval_seconds": a.total_eval,
+                        "reason_source": a._reason_source, "engine_reason": a._engine_reason}
+                # …and the record's wider window on the same bytes. The TERMINAL is the row a
+                # whole run is audited from, and it is also the row for a node that never
+                # reached a repair — a node abandoned on its first failure has no
+                # `node_repaired` row at all, so without this its evidence would be the
+                # 500-character prompt tail and nothing else. Same additive/omitted-when-empty
+                # rule as on the repair row.
+                if a.err_evidence:
+                    data["error_evidence"] = a.err_evidence
+                # The diagnostician's citation rides the TERMINAL too, on the same additive,
+                # omitted-when-absent rule as on `node_repaired` above: the terminal is the row a
+                # whole run is audited from, and "who said this and what did they read" is
+                # exactly the question an audit asks of it.
+                if a._evidence:
+                    data["reason_evidence"] = a._evidence
+                if a._evidence_resolved is not None:
+                    data["reason_evidence_resolved"] = a._evidence_resolved
+                # THE ACCOUNT AND ITS TRAIL, on the same rule as on `node_repaired` above. This
+                # is the row a whole run is audited from and the row most likely to be read
+                # after everything else is gone, which is exactly why the SUMMARY has to carry
+                # the numbers itself rather than point at a log — the logs do survive, but a
+                # record whose meaning depends on that is a record that can rot.
+                if a._summary:
+                    data["reason_summary"] = a._summary
+                if a._findings:
+                    data["reason_findings"] = a._findings
+                if a.res.failed_stage:                # Phase 1: pinpoint which pipeline stage broke
+                    data["failed_stage"] = a.res.failed_stage
+                if a.triage_outcome is not None:
+                    # The SEVENTH persisted output channel, found by the C2 sweep and missed by
+                    # it: `triage_rationale` is LLM text about a crash, written to the durable
+                    # `node_failed` row, and the two SIBLING judgements of exactly this kind —
+                    # `train_monitor`'s and `asha_monitor`'s `reason` — have gone through
+                    # `_redact` since B3 with a comment saying why ("LLM text derived from the
+                    # raw log; redact it before it lands in the trace / event log"). This one
+                    # did not. The judge is handed the already-redacted `err`, so the leak is
+                    # narrow rather than open — but it also sees the repair log and the state
+                    # brief, and a model restating what it read is a laundering channel a screen
+                    # downstream of it costs nothing to close. Redact BEFORE the 300-char cut,
+                    # like both siblings, so masking can never be truncated away.
+                    data["triage_action"], data["triage_rationale"] = (
+                        a.triage_outcome[0], self._redact(str(a.triage_outcome[1]))[:300])
+                self.store.append(EV_NODE_FAILED, data)
+            self._maybe_crash()
 

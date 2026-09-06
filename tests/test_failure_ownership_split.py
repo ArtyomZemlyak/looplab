@@ -123,7 +123,9 @@ def _tuple_assign_targets(src: str, func: str) -> list[tuple[str, ...]]:
             continue
         for tgt in node.targets:
             if isinstance(tgt, ast.Tuple):
-                found.append(tuple(el.id for el in tgt.elts if isinstance(el, ast.Name)))
+                # a bare local or an attribute of the attempt record (`a.reason`), rendered as read
+                found.append(tuple(ast.unparse(el) for el in tgt.elts
+                                   if isinstance(el, (ast.Name, ast.Attribute))))
     return found
 
 
@@ -676,10 +678,17 @@ def test_a_diagnosed_reason_can_never_move_a_metric():
     assert UNCLASSIFIED_REASON not in NEVER_SALVAGED_REASONS
 
     from looplab.engine import evaluate as ev
-    src = inspect.getsource(ev.EvaluateMixin._evaluate)
-    assert src.index("self._salvage_eval_metric(res, reason, workdir, _t0)") < src.index(
-        "reason, _reason_source = diagnosed_failure_reason(reason, triage)"), (
+    from tests._source_scan import called_names, eval_attempt_source
+    src = eval_attempt_source()     # the phases in DRIVER order, so index order is run order
+    assert src.index("self._salvage_eval_metric(a.res, a.reason, a.workdir, a._t0)") < src.index(
+        "a.reason, a._reason_source = diagnosed_failure_reason(a.reason, a.triage)"), (
         "salvage must be decided on the engine's own answer, above the diagnostician")
+    # …and since the EvalAttempt split the two live in different phases, so the driver's order IS
+    # the property: SALVAGE runs before DECIDE_REPAIR on every attempt.
+    order = called_names(ev.EvaluateMixin._evaluate)
+    assert order.index("self._eval_salvage") < order.index("self._eval_decide_repair")
+    assert "self._salvage_eval_metric" in called_names(ev.EvaluateMixin._eval_salvage)
+    assert "diagnosed_failure_reason" in called_names(ev.EvaluateMixin._eval_decide_repair)
 
 
 def test_producible_and_selectable_are_still_the_same_set_across_all_four_producers():
@@ -754,23 +763,27 @@ def test_the_engine_loop_stamps_who_chose_the_reason_and_what_it_read():
     `test_a_commented_out_stamp_is_seen_by_the_ast_check_and_missed_by_a_substring` drives it."""
     from looplab.engine import evaluate as ev
 
-    stamps = _payload_stamps(_dedented(ev.EvaluateMixin._evaluate))
+    from tests._source_scan import eval_attempt_dedented_source
+
+    # Every phase of the attempt loop, since the EvalAttempt split boxed the loop's locals on the
+    # attempt record: the columns are the same, spelled `a.<name>`.
+    stamps = _payload_stamps(eval_attempt_dedented_source())
     # WHO chose the reason, and WHAT the engine independently held — the two columns that keep the
     # durable rows honest now that a model may pick `reason`.
-    assert "_reason_source" in stamps.get("reason_source", set())
-    assert "_engine_reason" in stamps.get("engine_reason", set())
+    assert "a._reason_source" in stamps.get("reason_source", set())
+    assert "a._engine_reason" in stamps.get("engine_reason", set())
     # WHERE it looked, and whether the citation resolved. Both are written on BOTH terminals, and
     # the `node_failed` path adds them by subscript assignment rather than in the literal.
-    assert "_evidence" in stamps.get("reason_evidence", set())
-    assert "_evidence_resolved" in stamps.get("reason_evidence_resolved", set())
+    assert "a._evidence" in stamps.get("reason_evidence", set())
+    assert "a._evidence_resolved" in stamps.get("reason_evidence_resolved", set())
     # …and `reason` itself is the loop variable, never a literal, on the rows that carry a source.
-    assert "reason" in stamps.get("reason", set())
+    assert "a.reason" in stamps.get("reason", set())
 
     # THE RULE IS APPLIED, as a call whose two targets are the pair. Asserted as an `ast.Assign`
     # rather than as the rendered line, whose spelling changes under any reformat.
-    targets = _tuple_assign_targets(_dedented(ev.EvaluateMixin._evaluate),
+    targets = _tuple_assign_targets(eval_attempt_dedented_source(),
                                     "diagnosed_failure_reason")
-    assert targets == [("reason", "_reason_source")], (
+    assert targets == [("a.reason", "a._reason_source")], (
         f"the ownership rule must be applied exactly once, to both columns; found {targets}")
 
 
@@ -788,8 +801,10 @@ def test_a_commented_out_stamp_is_seen_by_the_ast_check_and_missed_by_a_substrin
     would have been the seventh."""
     from looplab.engine import evaluate as ev
 
-    src = _dedented(ev.EvaluateMixin._evaluate)
-    assert "_engine_reason" in _payload_stamps(src).get("engine_reason", set()), "precondition"
+    from tests._source_scan import eval_attempt_dedented_source
+
+    src = eval_attempt_dedented_source()
+    assert "a._engine_reason" in _payload_stamps(src).get("engine_reason", set()), "precondition"
 
     # BOTH rows that carry it — `node_repaired` and the `node_failed` terminal — because a stamp is
     # only gone when every writer of it is, and a half-mutation would leave this driver proving
@@ -799,21 +814,21 @@ def test_a_commented_out_stamp_is_seen_by_the_ast_check_and_missed_by_a_substrin
     # partial mutation would leave this driver looking like it passed while proving nothing. The
     # count is pinned for exactly that reason: the first draft of this test used a needle with a
     # trailing comma, silently hit two of the three, and the check stayed correctly green.
-    mutated = _drop_stamp(src, "engine_reason", "_engine_reason", expect=3)
+    mutated = _drop_stamp(src, "engine_reason", "a._engine_reason", expect=3)
     # the AST check REDDENS: the mapping is gone because a comment is not a node…
-    assert "_engine_reason" not in _payload_stamps(mutated).get("engine_reason", set()), (
+    assert "a._engine_reason" not in _payload_stamps(mutated).get("engine_reason", set()), (
         "the AST check cannot see a stamp that stopped being built — it is vacuous")
     # …while the substring pin this replaced stays GREEN over the very same mutation.
-    assert '"engine_reason": _engine_reason' in mutated, (
+    assert '"engine_reason": a._engine_reason' in mutated, (
         "if the old pin also reddened here, the rewrite bought nothing and this test should say so")
 
     # The same, for the rule application itself.
-    assert _tuple_assign_targets(src, "diagnosed_failure_reason") == [("reason", "_reason_source")]
-    gone = _comment_out(src, "reason, _reason_source = diagnosed_failure_reason(reason, triage)",
+    assert _tuple_assign_targets(src, "diagnosed_failure_reason") == [("a.reason", "a._reason_source")]
+    gone = _comment_out(src, "a.reason, a._reason_source = diagnosed_failure_reason(a.reason, a.triage)",
                         expect=1)
     assert _tuple_assign_targets(gone, "diagnosed_failure_reason") == [], (
         "the rule could be deleted without this guard noticing")
-    assert "reason, _reason_source = diagnosed_failure_reason(reason, triage)" in gone
+    assert "a.reason, a._reason_source = diagnosed_failure_reason(a.reason, a.triage)" in gone
 
     # And for the enum: the realistic drift there is a RE-SPELLED literal, not a deletion.
     from looplab.agents import unified_agent

@@ -597,7 +597,7 @@ pinned. Verified to have teeth by making the inject path keep two emits and drop
 
 #### ES-03 · MEDIUM · under-decomposition · effort: large — **PARTIALLY RESOLVED (2026-08-08)**
 
-> **OPEN[evaluate-prestart-and-terminal-blocks-inline]** `_evaluate`'s pre-start fencing and terminal-emission block are still inline, and the method has grown from the 727 lines this resolution left it at to **1,471** (re-measured 2026-08-19 by AST, `evaluate.py:1458-2928`). The named next cut is `_eval_prestart_fence`. proof:absent:_eval_prestart_fence@looplab/engine/evaluate.py
+> *Closed 2026-09-06 (doc 52 row 21): the marker `evaluate-prestart-and-terminal-blocks-inline` stood here. The method had grown to 2,016 lines by the cut. The pre-start fence landed as `_eval_admit` and the terminal block as `_eval_write_terminal` — two of the nine `_eval_*` phases `_evaluate` now drives over `EvalAttempt`, the record of one lifecycle's evaluation (fifty loop-carried locals, declared once). Every append, `_write_lock` block, fold and branch stayed where it was: each moved region was proven AST-equivalent to the stated rewrite at the cut, and four deterministic offline scenarios produced byte-identical normalized event logs before and after. `tests/test_eval_attempt_phases.py` holds the shape. Deleted per the index rule.*
 
 **_evaluate is a single ~700-line method mixing ten concerns in one attempt loop**
 

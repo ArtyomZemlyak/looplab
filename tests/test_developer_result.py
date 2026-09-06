@@ -252,10 +252,9 @@ def test_every_build_site_leaves_the_loop_through_the_offload_helper():
 
 
 def test_the_three_repair_path_calls_leave_through_the_sink_helper():
-    from looplab.engine.evaluate import EvaluateMixin
+    from tests._source_scan import eval_attempt_tree
 
-    src = inspect.getsource(EvaluateMixin._evaluate)
-    tree = ast.parse(textwrap.dedent(src))
+    tree = eval_attempt_tree()     # the driver AND its phases: the three calls live in two of them
     offloaded = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "_offload_under_proposal_sink":

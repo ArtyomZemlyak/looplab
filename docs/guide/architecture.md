@@ -115,7 +115,8 @@ other work items that test the same hypothesis), **cross-run memory**
 ### Thread pools: which work can starve which
 
 Every bare `anyio.to_thread.run_sync` draws on anyio's **shared 40-token default** pool.
-`engine/evaluate.py::_evaluate` offloads `_run_eval` onto it with no limiter and holds one token for
+`engine/evaluate.py::_eval_run_attempt` (the RUN_ATTEMPT phase of `_evaluate`) offloads `_run_eval`
+onto it with no limiter and holds one token for
 that eval's entire multi-hour duration, and `eval_parallel` is admitted to 1024 by
 `core/config.py` (`parallel_build` to 64). So at a raised width the evals pin the default pool and
 anything else that offloads queues behind them **before its call begins** — a wait no span records,

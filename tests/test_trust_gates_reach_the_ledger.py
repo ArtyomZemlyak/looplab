@@ -205,7 +205,7 @@ def test_the_evaluator_binds_what_the_scan_returns():
     detector and drops the lot. Pinned as a real `ast.Assign` to `sigs`, so a comment carrying the
     call expression does not satisfy it."""
     bindings = [
-        node for node in ast.walk(function_tree(EvaluateMixin._evaluate))
+        node for node in ast.walk(function_tree(EvaluateMixin._eval_write_terminal))
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
         and isinstance(node.value.func, ast.Attribute)
         and node.value.func.attr == "_trust_scan_signals"
@@ -217,7 +217,7 @@ def test_the_evaluator_binds_what_the_scan_returns():
     # what `_trust_scan_surface` exists to guarantee: the digest below is of `scan_src`, so a caller
     # that re-derived the surface for one of the two would hash bytes the detectors never saw.
     surfaces = [
-        node for node in ast.walk(function_tree(EvaluateMixin._evaluate))
+        node for node in ast.walk(function_tree(EvaluateMixin._eval_write_terminal))
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
         and isinstance(node.value.func, ast.Attribute)
         and node.value.func.attr == "_trust_scan_surface"
