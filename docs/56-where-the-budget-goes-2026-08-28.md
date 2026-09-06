@@ -12060,3 +12060,41 @@ would fail identically. `sweep_claims` now says which of the two it is, and what
 
 That makes seven claims checked and **seven stale** — the list has no true reading left in it that
 this tool looks at.
+
+## §288 — §278 was wrong about item (в), and the measurement is sharper than the list
+
+§278 concluded, from reading `RESEARCHER_PROMPT_CUES`, that there is no money cue at all and
+therefore "nothing for plan / `foresight_rank` / `hyp_prioritize` to fail to receive". **That is
+wrong.** I inspected the cue machinery instead of measuring what reaches the model, which is the
+same mistake this document keeps recording, committed inside a section written to correct a stale
+claim.
+
+The line exists. `capA13`'s own prompts carry it 94 times:
+
+> `BUDGET: $0.0000 of $1.0000 spent, $1.0000 left (0 % gone). Research that leaves no money for
+> experiments buys nothing — size this memo to what is left.`
+
+Measured across eight capped probes, by phase, counting `generation` spans whose prompt carries it:
+
+| phase | share | | phase | share |
+|---|---|---|---|---|
+| deep_research | 395/475 — **83 %** | | propose | 0/538 — **0 %** |
+| plan_step | 279/897 — 31 % | | repropose | 0/158 — **0 %** |
+| plan | 44/216 — 20 % | | foresight_rank | 0/64 — **0 %** |
+| | | | hyp_prioritize | 0/60 — **0 %** |
+
+So item (в) is **right** about `foresight_rank` and `hyp_prioritize`, nearly right about `plan`
+(20 %, not 0), and **understates the case**: `propose` and `repropose` are also blind, and §245–§247
+measured those two as holding a quarter of a run's spend in 11 % of its calls. The two phases that
+decide what to spend money on are the two told nothing about it.
+
+The cause is visible once you look: the line is not a cue at all. It is **hand-built twice**, in
+`agents/deep_research.py` and `adapters/repo_developer.py`, with identical heads and different
+second sentences. That is why exactly the phases those two adapters drive have it and no others do.
+
+Shipped this sweep: `looplab/core/costs_text.py::budget_line`, one sentence in one place, carrying
+the measurement above in its docstring. Behaviour is unchanged — no phase gains the line yet —
+because a third copy is how the wordings would have started drifting for good, and the wording for
+`propose` deserves its own measurement rather than a paste. A run with no ceiling gets no line at
+all: "0 % gone" is a number a run cannot act on. Five mutations red, including reporting negative
+money on an overspend and inverting the share.
