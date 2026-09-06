@@ -146,3 +146,39 @@ def test_the_deployed_sidecar_names_it_too():
         pytest.skip("no AlgoTune deployment on this box")
     src = DEPLOYED.read_text(encoding="utf-8", errors="replace")
     assert '"interpreter": _ll_sys2.executable' in src
+
+
+def test_the_sidecar_counts_busy_cpus_outside_the_lane():
+    """Whole-box load is a weak proxy when the work is pinned, and it produced a false alarm on its
+    first real use: thirty baselines written at load 350-1817 looked ruined, and `min_dominating_set`
+    re-timed alone came back x0.996.
+
+    What bites is other LANES. Measured on `max_common_subgraph`: 105-113 ms alone against 130 ms
+    with three sibling lanes busy (x1.196). So the number worth keeping is how many CPUs outside our
+    own affinity are held by other pinned processes -- 0 alone, 44 with two 22-cpu lanes busy.
+
+    Counting distinct affinity SETS instead read 46 on an idle box, because an evaluator pins each
+    worker to a single core and every core is its own set."""
+    emitted = pbc.WRITE_PATCH
+    assert '"busy_cpus_outside_lane": _ll_lanes' in emitted
+    assert "_ll_seen |= _ll_o" in emitted, "counting sets again, not cpus"
+    assert "provenance counts busy cpus" in [n for n, _ in pbc._REQUIRED_FRAGMENTS]
+
+
+def test_the_deployed_file_counts_cpus_too():
+    if not DEPLOYED.is_file():
+        import pytest
+        pytest.skip("no AlgoTune deployment on this box")
+    src = DEPLOYED.read_text(encoding="utf-8", errors="replace")
+    assert '"busy_cpus_outside_lane": _ll_lanes' in src and "_ll_seen |= _ll_o" in src
+
+
+def test_an_unpinned_writer_reports_zero_not_the_whole_box():
+    """A process with the run of the machine has no lane to be crowded out of, and reporting 96
+    there would read as maximum contention when it means the opposite."""
+    emitted = pbc.WRITE_PATCH
+    i = emitted.index("_ll_mine = _ll_os2.sched_getaffinity(0)")
+    j = emitted.index("busy_cpus_outside_lane")
+    block = emitted[i:j]
+    assert "len(_ll_mine) < _ll_tot" in block, block[:300]
+    assert "_ll_lanes = 0" in block, block[-300:]

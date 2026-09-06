@@ -204,6 +204,27 @@ WRITE_PATCH = '''                    self._cache[subset] = baseline_times
                             # entries already on disk; it stops the next one being a mystery.
                             try:
                                 import time as _ll_time2, socket as _ll_sock2, sys as _ll_sys2
+                                _ll_lanes = None
+                                try:
+                                    _ll_mine = _ll_os2.sched_getaffinity(0)
+                                    _ll_tot = _ll_os2.cpu_count() or 0
+                                    if _ll_mine and _ll_tot and len(_ll_mine) < _ll_tot:
+                                        _ll_seen = set()      # CPUs, not processes: see below
+                                        for _ll_p in _ll_os2.listdir("/proc"):
+                                            if not _ll_p.isdigit():
+                                                continue
+                                            try:
+                                                _ll_o = _ll_os2.sched_getaffinity(int(_ll_p))
+                                            except Exception:
+                                                continue
+                                            if (_ll_o and len(_ll_o) < _ll_tot
+                                                    and not (_ll_o & _ll_mine)):
+                                                _ll_seen |= _ll_o
+                                        _ll_lanes = len(_ll_seen)
+                                    else:
+                                        _ll_lanes = 0
+                                except Exception:
+                                    _ll_lanes = None
                                 _ll_prov = {
                                     "written_at": _ll_time2.strftime("%Y-%m-%dT%H:%M:%S"),
                                     "host": _ll_sock2.gethostname(),
@@ -218,6 +239,18 @@ WRITE_PATCH = '''                    self._cache[subset] = baseline_times
                                     # difference (§299), which none of workers/threads/affinity/
                                     # load/quota can show.
                                     "interpreter": _ll_sys2.executable,
+                                    # WHOLE-BOX LOAD IS A WEAK PROXY WHEN THE WORK IS PINNED,
+                                    # and it produced a false alarm on its first real use: 30
+                                    # baselines written at load 350-1817 looked ruined, and
+                                    # `min_dominating_set` re-timed alone came back x0.996. What
+                                    # DOES bite is other LANES: measured on `max_common_subgraph`,
+                                    # 105-113 ms alone against 130 ms with three sibling lanes busy
+                                    # (x1.196), and `queens_with_obstacles` x1.219, while
+                                    # `min_dominating_set` is flat. A ruler must be timed under the
+                                    # concurrency it will score under, so the count of busy sibling
+                                    # CPUs busy OUTSIDE our own lane is the number to keep -- counting distinct
+                                    # affinity SETS counted per-core workers instead and read 46.
+                                    "busy_cpus_outside_lane": _ll_lanes,
                                     "cpu_affinity": sorted(_ll_os2.sched_getaffinity(0)),
                                     "loadavg": _ll_os2.getloadavg(),
                                     "cpu_max": (open("/sys/fs/cgroup/cpu.max").read().strip()
@@ -245,6 +278,7 @@ _REQUIRED_FRAGMENTS = [
     ("worker regime key", 'f"__w{_ll_w}x{_ll_c}r3"'),
     ("write provenance", '"cpu_affinity": sorted(_ll_os2.sched_getaffinity(0))'),
     ("provenance names the interpreter", '"interpreter": _ll_sys2.executable'),
+    ("provenance counts busy cpus", '"busy_cpus_outside_lane": _ll_lanes'),
     ("write gate", "LOOPLAB baseline cache NOT WRITTEN"),
 ]
 

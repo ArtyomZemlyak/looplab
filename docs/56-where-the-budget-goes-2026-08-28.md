@@ -12601,3 +12601,42 @@ predate the sidecar and will never have one, so their conditions remain unrecord
 that made §292–§298 possible, closed going forward and not backwards.
 
 The campaign can now run 20 tasks against a ruler measured under the interpreter that will score it.
+
+## §301 — the provenance sidecar's first real reading was a false alarm, and the fix is a better field
+
+`ruler_check` now prints the conditions beside each baseline, and the first thing it showed was
+`spectral_clustering train … [auto workers, load 80.6]`. Reading the rest: the thirty baselines
+built in §300 were written at **load 350 to 1817** on a 96-cpu box — the four-lane parallel build.
+That looked like thirty ruined rulers.
+
+**It is not what whole-box load means when the work is pinned.** `min_dominating_set`, written at
+load 1350, re-timed alone: **×0.996**. Load average counts every core; a lane-pinned job does not
+compete with pinned jobs on other cores, so a box at load 1800 can be perfectly quiet inside a lane.
+
+What does bite is other **lanes**, and only for some tasks:
+
+| task | in the cache (4-way build) | re-timed alone | ratio |
+|---|---|---|---|
+| min_dominating_set | 109.570 | 109.984 | 0.996 |
+| queens_with_obstacles | 105.157 | 86.292 / 86.010 | ≈1.22 |
+| max_common_subgraph | 131.797 | 112.833 / 105.041 | ≈1.21 |
+
+Controlled on `max_common_subgraph`, same lane and interpreter: **105–113 ms alone against 130 ms
+with three sibling lanes busy (×1.196)** — and the cache holds 131.797, matching the loaded
+condition. The measurement's own repeatability alone is ±7 %, so single comparisons at this size
+need the repeats they now have.
+
+So the sidecar records the number that actually predicts it: **CPUs busy outside our own lane** — 0
+alone, 44 with two 22-cpu lanes running. Counting distinct affinity *sets* instead read **46 on an
+idle box**, because the evaluator pins each worker to a single core and every core is its own set;
+that version shipped and was caught by its own output. An unpinned writer reports 0 rather than 96:
+a process with the run of the machine has no lane to be crowded out of, and 96 there would read as
+maximum contention while meaning the opposite.
+
+**The open question, stated rather than resolved.** A campaign runs four probes on four lanes at
+once, so a ruler timed with three siblings busy may be the *right* denominator and an idle one the
+wrong one. The current cache holds the loaded value for the fifteen new tasks and unknown conditions
+for the nine older ones. Which condition a ruler should be timed under is now a decision with a
+measured price tag — up to 22 % on some tasks, nothing on others — and it is not mine to take
+quietly. Two of three spot-checked tasks disagree with an idle re-timing by about a fifth; that is
+the number to weigh before the campaign is read, not after.
