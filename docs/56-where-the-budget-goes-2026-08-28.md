@@ -12953,3 +12953,34 @@ That is the honest inventory a campaign would be run against, and it took eight 
 five of which corrected an earlier one of mine. Every number above is reproducible with
 `ruler_selfcheck --task T --lane L --reps 3` under `ALGOTUNE_EVAL_WORKERS=1`, which is only true
 because §306 removed the override that made that flag a no-op.
+
+## §310 — the sorted inventory, computed instead of remembered
+
+§309's twenty-task sorting lived in a documentation table. A hand-typed table is the thing this
+bench keeps discovering it cannot trust — §291 found six comparison figures quoted from probes that
+no longer exist, §300 found fifteen tasks with no data at all, §303 found nine rulers that do not
+read unity — so `benchmarks/task_inventory.py` derives it from the cache, the recorded self-check
+readings and the task sources, every time it is asked. It reproduces §309 exactly:
+
+```
+  RULES AS IS  (10)                 rbf_interpolation 1.0670 … kcenters 0.9021
+  RULES AT ONE WORKER  (6)          max_clique_cpsat, max_common_subgraph, queens_with_obstacles,
+                                    rectanglepacking, multi_dim_knapsack, set_cover_conflicts
+  UNRULABLE  (3)                    max_independent_set_cpsat (tail 32), max_weighted_independent_set
+                                    (45), min_dominating_set (52)
+  UNREAD  (1)                       spectral_clustering
+  16 of 20 can be scored against a ruler that reads unity
+```
+
+The task list comes from `campaign.sh`'s own default rather than from a list in this file, so the
+inventory cannot drift from what the campaign would actually run.
+
+**The control that keeps the rule honest is in the tests.** `discrete_log` has the heaviest tail on
+the box — p90/p10 = **276**, five times any CP-SAT task — and rules as it is, because it is
+deterministic. A rule that sorted on the tail alone would condemn the most stable task here; a
+mutation doing exactly that is red. So is one that files a *deterministic* task reading 1.85 under
+"CP-SAT", which would have buried §296's `pagerank` finding.
+
+Five mutations red in total. And the end-to-end test asserts the three group sizes on the real
+bench, so a change to the cache or the readings that silently re-sorts the campaign is a failing
+test rather than a different table.
