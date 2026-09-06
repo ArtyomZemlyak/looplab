@@ -1194,7 +1194,8 @@ Additional safety monitors are off by default. Under the default `trust_gate=aud
   either way, so this flag is not the on/off switch for tail redaction.
 - `reward_hack_detect` — flag suspicious wins (grader/answer-key access, frozen-file writes,
   suspiciously perfect metrics).
-- `code_leakage_detect` — static scan for fit-before-split / fit-on-test.
+- `code_leakage_detect` — static scan for fit-before-split / fit-on-test / multi-test selection
+  (repeated evaluation on the test split, then a `max`/`> best` choice over those scores).
 - `critic_check` — an execution-free critic of each solution. Broad critic warnings stay advisory;
   `critic:hardcoded_metric` is the narrow high-precision exception that can gate.
 

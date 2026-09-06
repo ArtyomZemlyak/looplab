@@ -6,6 +6,7 @@ explicit row lists / timestamp lists — adapter-agnostic.
 """
 from __future__ import annotations
 
+import ast
 import re
 from typing import Sequence
 
@@ -213,10 +214,182 @@ _LEAKY_FIT_ARG_RE = re.compile(
     r"(?<![a-z])(?:validation|valset|valid|testset|testing|test|val)(?![a-z])")
 
 
+# ------------------------------------------------------------------ multi-test selection
+# LeakageDetector 2.0's third class (doc 52 row 22): REPEATED evaluation against the same TEST split
+# followed by SELECTION on those scores — a grid loop that scores every configuration on `X_test`
+# and keeps the best, three models scored on the test set and `max()`ed, an epoch loop that
+# `evaluate()`s on the test loader and keeps the best epoch. Every single evaluation in it is
+# legitimate on its own, which is why `fit_on_test` cannot see it: nothing is FITTED on the test
+# split, it is merely asked N times and the answer chosen. On `repo_task` the candidate's own scorer
+# IS that split, so a checkpoint loop that scores each checkpoint and picks the winner is this class
+# exactly. AST-based and dependency-free like the rest of the file, and precision-over-recall for the
+# same reason: `data_leakage:*` is HARD under `trust_gate=gate/block`, so a flag needs BOTH halves —
+# ≥1 test-scored evaluation INSIDE a loop (or ≥2 unrolled at one block) AND a selection tell over
+# those scores (a `max`/`argmax`/`sorted` over the collected scores, or a `> best` comparison that
+# keeps a winner). A loop that scores on a VALIDATION split is the intended protocol and is never
+# flagged (the token set is `test`/`testset`/`testing` only, bounded like `_LEAKY_FIT_ARG_RE`); a loop
+# that evaluates on the test split and only LOGS it is not selection and is not flagged either.
+# ACCEPTED RECALL GAP: a selection made on a NAME the scan cannot tie to the scoring call (scores
+# written to a file and re-read, or chosen by a hand-typed literal index) is invisible here.
+_SURFACE_MARKER_RE = re.compile(r"^# --- .+ ---$", re.M)
+_TEST_TOKEN_RE = re.compile(r"(?<![a-z])(?:test|testset|testing)(?![a-z])")
+_SCORING_NAME_RE = re.compile(
+    r"(?:^|_)(?:score|scores|scoring|evaluate|eval|accuracy|acc|precision|recall|f1|auc|roc_auc|"
+    r"rmse|mse|mae|r2|log_loss|logloss|error|metric|metrics|ndcg|mrr|map|recall_at)(?:_|$)"
+    r"|^predict(?:_proba)?$")
+_SELECTION_NAME_RE = re.compile(r"^(?:max|min|argmax|argmin|sorted|nlargest|nsmallest|idxmax|idxmin)$")
+_BEST_NAME_RE = re.compile(r"best|winner|top|chosen|selected|champion", re.I)
+
+
+def _call_name(call: "ast.Call") -> str:
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
+
+
+def _test_scored(call: "ast.Call") -> bool:
+    """A call that EVALUATES on the test split: a scoring-family name over test-named arguments."""
+    if not _SCORING_NAME_RE.search(_call_name(call).lower()):
+        return False
+    args = " ".join([ast.unparse(a) for a in call.args] + [ast.unparse(k.value) for k in call.keywords])
+    return bool(_TEST_TOKEN_RE.search(args.lower()))
+
+
+def _scored_names(stmts: list, scored: set, collectors: set) -> int:
+    """Walk *stmts* (a loop body or a block): bind the names a test-scored call lands in, the
+    containers those names are appended/assigned into, and return the evaluation count."""
+    n = 0
+    nested: set = set()       # calls INSIDE a counted call's arguments — `acc(y_test, m.predict(X_test))` is ONE
+    for node in ast.walk(ast.Module(body=stmts, type_ignores=[])):
+        if isinstance(node, ast.Call) and _test_scored(node) and id(node) not in nested:
+            n += 1
+            for inner in ast.walk(node):
+                if inner is not node:
+                    nested.add(id(inner))
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            value = node.value
+            if value is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = {ast.unparse(t) for t in targets}
+            if any(isinstance(c, ast.Call) and _test_scored(c) for c in ast.walk(value)):
+                for t in targets:                      # `results[k] = score(...)` collects too
+                    if isinstance(t, ast.Subscript):
+                        collectors.add(ast.unparse(t.value))
+                    else:
+                        scored.add(ast.unparse(t))
+            elif any(isinstance(c, ast.Name) and c.id in scored for c in ast.walk(value)):
+                for t in targets:                      # `results[k] = acc` collects; `x = acc` aliases
+                    if isinstance(t, ast.Subscript):
+                        collectors.add(ast.unparse(t.value))
+                    else:
+                        scored.add(ast.unparse(t))
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("append", "extend", "add", "insert")
+                and any((isinstance(c, ast.Name) and c.id in scored)
+                        or (isinstance(c, ast.Call) and _test_scored(c))
+                        for a in node.args for c in ast.walk(a))):
+            collectors.add(ast.unparse(node.func.value))
+    return n
+
+
+def _selection_tell(tree: "ast.AST", scored: set, collectors: set):
+    """The statement that CHOOSES on the scores, or None: a selection call over a scored name or a
+    collector, or a comparison of a scored name against a `best`-named value."""
+    names = scored | collectors
+    if not names:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _SELECTION_NAME_RE.match(_call_name(node)):
+            text = " ".join(ast.unparse(a) for a in node.args)
+            receiver = ast.unparse(node.func.value) if isinstance(node.func, ast.Attribute) else ""
+            if any(re.search(r"(?<![\w.])" + re.escape(nm) + r"(?![\w])", text) or receiver == nm
+                   for nm in names):
+                return node
+        if isinstance(node, ast.Compare):
+            sides = [node.left] + list(node.comparators)
+            uses_score = any(isinstance(c, ast.Name) and c.id in scored
+                             for sd in sides for c in ast.walk(sd))
+            if uses_score and any(_BEST_NAME_RE.search(ast.unparse(sd)) for sd in sides):
+                return node
+    return None
+
+
+def _surface_parts(code: str) -> list[tuple[int, str]]:
+    """The scan surface as (line offset, text) parts: `engine/evaluate.py::_trust_scan_surface`
+    concatenates every node file under `# --- <name> ---` markers, and two modules concatenated do
+    not parse as one (a second `from __future__` import is a SyntaxError). Each part parses alone."""
+    parts, start = [], 0
+    lines = code.split("\n")
+    for i, line in enumerate(lines):
+        if _SURFACE_MARKER_RE.match(line) and i > start:
+            parts.append((start, "\n".join(lines[start:i])))
+            start = i + 1
+    parts.append((start, "\n".join(lines[start:])))
+    return parts
+
+
+def multi_test_scan(code: str) -> list[dict]:
+    """Flags for `multi_test`: `{"signal", "line", "code", "evaluations", "selection"}` per site."""
+    flags: list[dict] = []
+    for offset, text in _surface_parts(code):
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            continue                       # an unparseable part is unscanned, never a finding
+        lines = text.split("\n")
+        # (1) the loop form: N test-scored evaluations inside one loop, then a selection.
+        for loop in ast.walk(tree):
+            if not isinstance(loop, (ast.For, ast.AsyncFor, ast.While)):
+                continue
+            scored, collectors = set(), set()
+            n = _scored_names(loop.body, scored, collectors)
+            if n == 0:
+                continue
+            tell = _selection_tell(tree, scored, collectors)
+            if tell is None:
+                continue
+            flags.append({"signal": "multi_test", "line": loop.lineno + offset,
+                          "code": lines[loop.lineno - 1].strip()[:90], "evaluations": n,
+                          "selection": ast.unparse(tell)[:90]})
+        # (2) the unrolled form: ≥2 test-scored assignments in one block, then a selection over them.
+        for block in ast.walk(tree):
+            body = getattr(block, "body", None)
+            if not isinstance(body, list) or isinstance(block, (ast.For, ast.AsyncFor, ast.While)):
+                continue
+            scored, collectors = set(), set()
+            sites = [st for st in body if isinstance(st, (ast.Assign, ast.AnnAssign))
+                     and st.value is not None
+                     and any(isinstance(c, ast.Call) and _test_scored(c) for c in ast.walk(st.value))]
+            if len(sites) < 2:
+                continue
+            _scored_names(body, scored, collectors)
+            tell = _selection_tell(tree, scored, collectors)
+            if tell is None:
+                continue
+            first = sites[0]
+            flags.append({"signal": "multi_test", "line": first.lineno + offset,
+                          "code": lines[first.lineno - 1].strip()[:90], "evaluations": len(sites),
+                          "selection": ast.unparse(tell)[:90]})
+    # one flag per site, in source order, even when both forms saw the same block
+    seen, out = set(), []
+    for flag in sorted(flags, key=lambda f: f["line"]):
+        if flag["line"] in seen:
+            continue
+        seen.add(flag["line"])
+        out.append(flag)
+    return out
+
+
 def code_leakage_scan(code: str) -> dict:
     """I3 data-centric: static-dataflow-lite scan of solution CODE for train->test information flow
     (beyond exact-row contamination). Flags the classic anti-patterns: fitting a preprocessor on the
-    FULL data before the split, and calling .fit() on test data. Heuristic + dependency-free.
+    FULL data before the split, calling .fit() on test data, and — since doc 52 row 22 — evaluating on
+    the test split REPEATEDLY and selecting on the result (`multi_test`, the rung above). Heuristic +
+    dependency-free.
 
     NOTE on gating: under `trust_gate='audit'` (the default) these flags are advisory — surfaced to
     the operator and the agent only. But the engine emits them as `data_leakage:<signal>` signals,
@@ -263,6 +436,7 @@ def code_leakage_scan(code: str) -> dict:
         elif split_at is not None and line_i < split_at and "train" not in arg:
             # a fit/fit_transform on (apparently full) data BEFORE the split leaks test statistics
             flags.append({"signal": "fit_before_split", "line": line_i + 1, "code": snippet})
+    flags.extend(multi_test_scan(code))
     return {"detector": "code_leakage", "leak": bool(flags), "flags": flags}
 
 

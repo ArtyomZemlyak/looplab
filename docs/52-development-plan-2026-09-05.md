@@ -374,10 +374,15 @@ detectors cannot see a rule-compliant shortcut by construction); SciIntegrity's 
 and completion pressure are the two extra arms. Precondition of the campaign's Mislead column.
 proof:missing:docs/audit/developer-hack-rate.md
 
-OPEN[leakage-scan-has-no-multi-test-detector] `trust/leakage.py` flags fit-before-split, fit-on-test,
-row overlap and temporal overlap; LeakageDetector 2.0's third class — repeated evaluation against the
-same test split followed by selection — is undetected, and on `repo_task` the candidate's own scorer
-IS that split. proof:absent:multi_test@looplab/trust/leakage.py
+*Closed 2026-09-06 (row 22, first slice shipped): the marker `leakage-scan-has-no-multi-test-detector`
+stood here. `trust/leakage.py::multi_test_scan` is the rung, folded into `code_leakage_scan` so it
+reaches the gate through the existing `data_leakage:` namespace: AST-based, it flags ≥1 test-split
+evaluation inside a loop (or ≥2 unrolled at one block) AND a selection over those scores — a
+`max`/`argmax`/`sorted` over the collected numbers or a `> best` keep — and nothing without both
+halves, so a validation-split loop (the intended protocol), a logged-only test evaluation, bagging
+over test predictions and a cross-validation grid all stay clean; the concatenated scan surface is
+parsed part by part so a second `from __future__` import cannot blind the scan. Eight driven shapes
+in `tests/test_code_leakage.py`. Deleted per the index rule.*
 
 *Closed 2026-09-06 (row 19 shipped): the marker `operator-bandit-has-no-model-arm` stood here.
 `search/policy.py` has the model arm: `parse_model_arms` reads `Settings.model_arms`
