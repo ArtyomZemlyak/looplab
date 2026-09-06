@@ -249,6 +249,102 @@ def _arm_b_regime(final_json: Path) -> str | None:
     return str(key) if key else None
 
 
+# THE RULER'S IDENTITY: which instrument a number was measured on, read off what each arm WROTE.
+#
+# Two numbers may only be averaged together when they were divided by the same denominator, and a
+# denominator has two coordinates: the WIDTH the arena evaluated at (docs/58 s58.3 measures it
+# moving a speedup ~1.6x on this box, and eight arm-B numbers were re-scored with it recorded
+# nowhere) and the BYTES of the per-instance reference entry it divided by (all twenty arm-B files
+# said `baseline_source: in-harness`, i.e. nothing a reader could compare). Since 2026-09-06
+# `looplab_eval.py::_emit` stamps `eval_workers` + `eval_regime.key` + `baseline_cache_sha256` on
+# every arm-B line and `campaign.sh::ruler_fields` stamps `eval_workers=`/`regime=`/
+# `baseline_sha256=` into every `.done` marker, which is the ONLY place arm A's number can carry
+# them: it comes out of AlgoTuner's own loop into `agent_summary.json` as a float and a model name.
+#
+# `?`, `none` and an absent field are three different absences and are kept apart: `?` is "the
+# driver could not derive it", `none` is "derived, and no cached entry existed" (a cold cache --
+# the reference was timed in the pass, `looplab_eval.py`'s `baseline_measured_in_pass` refusal for
+# arm B, and unknowable for arm A), and absent is a row from before the field existed. All three
+# refuse a pair; the sentence says which.
+_MARKER_UNKNOWN = ("", "?", "none")
+
+
+def _arm_b_ruler(final_json: Path) -> dict[str, str | None]:
+    """`{regime, eval_workers, baseline_sha256}` off an arm-B result line; None where it says nothing."""
+    try:
+        row = json.loads(final_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"regime": None, "eval_workers": None, "baseline_sha256": None}
+    if not isinstance(row, dict):
+        return {"regime": None, "eval_workers": None, "baseline_sha256": None}
+    block = row.get("eval_regime") if isinstance(row.get("eval_regime"), dict) else {}
+    workers = row.get("eval_workers")
+    if workers is None and isinstance(block.get("workers"), int):
+        workers = str(block["workers"])
+    sha = row.get("baseline_cache_sha256")
+    return {"regime": str(block.get("key")) if block.get("key") else None,
+            "eval_workers": str(workers) if workers not in (None, "") else None,
+            "baseline_sha256": str(sha) if sha else None}
+
+
+def _marker_ruler(final_dir: Path | None, arm: str, task: str) -> dict[str, str | None]:
+    """The same three coordinates off `campaign.sh`'s marker for this task-arm."""
+    out: dict[str, str | None] = {"regime": None, "eval_workers": None, "baseline_sha256": None}
+    if final_dir is None:
+        return out
+    try:
+        text = (final_dir / f"{arm}-{task}.done").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for key in out:
+        m = re.search(rf"\b{key}=(\S+)", text)
+        if m and m.group(1) not in _MARKER_UNKNOWN:
+            out[key] = m.group(1)
+    return out
+
+
+def ruler_identity(final_dir: Path | None, arm: str, task: str) -> dict[str, str | None]:
+    """What this task-arm says it was measured on. Arm B's result line outranks its marker, field by
+    field (the line is the scoring pass's own statement; the marker was stamped after it under the
+    same lane); arm A has only the marker."""
+    ident = _marker_ruler(final_dir, arm, task)
+    if arm == "B" and final_dir is not None:
+        line = _arm_b_ruler(final_dir / f"B-{task}.final.json")
+        for key, value in line.items():
+            if value is not None:
+                ident[key] = value
+    return ident
+
+
+def pair_refusal(a: dict[str, str | None], b: dict[str, str | None]) -> str | None:
+    """WHY these two numbers may not be averaged together -- or None when they may.
+
+    Refuses on a MISSING coordinate as well as on a differing one: a row that does not say cannot be
+    shown to be comparable, and "no evidence of a mismatch" was exactly how eight re-scored numbers
+    and twenty unidentifiable baselines reached the means. The regime key is compared before the
+    width because the key CONTAINS the width and the lane (`__w22x1r3`), so it is the stronger
+    statement; the width is compared on its own for the row that states only that.
+    """
+    for label, ident in (("A", a), ("B", b)):
+        if ident.get("regime") is None and ident.get("eval_workers") is None:
+            return (f"arm {label} does not record its evaluation width (no `eval_workers`/regime on "
+                    f"its row or marker -- a pre-2026-09-06 record)")
+    if a.get("regime") and b.get("regime") and a["regime"] != b["regime"]:
+        return f"the arms were evaluated on different regimes (A {a['regime']}, B {b['regime']})"
+    if a.get("eval_workers") and b.get("eval_workers") and a["eval_workers"] != b["eval_workers"]:
+        return (f"the arms were evaluated at different widths (A {a['eval_workers']} workers, "
+                f"B {b['eval_workers']})")
+    for label, ident in (("A", a), ("B", b)):
+        if not ident.get("baseline_sha256"):
+            return (f"arm {label} records no baseline identity (no `baseline_cache_sha256` on its row "
+                    f"or `baseline_sha256=` on its marker), so the denominators cannot be shown to "
+                    f"match")
+    if a["baseline_sha256"] != b["baseline_sha256"]:
+        return (f"the arms divided by different reference timings (baseline sha256 A "
+                f"{a['baseline_sha256'][:12]}…, B {b['baseline_sha256'][:12]}…)")
+    return None
+
+
 def _arm_b_train(run_dir: Path) -> float | None:
     """The LoopLab run's own champion metric — a TRAIN number, reported only as context."""
     if not (run_dir / "events.jsonl").exists():
@@ -590,7 +686,7 @@ def main() -> int:
     if not tasks:
         print("no campaign output found"); return 1
 
-    rows, paired = [], []
+    rows, paired, unpaired = [], [], []
     for task in tasks:
         va = a.get(task)
         if args.final_dir:
@@ -650,19 +746,30 @@ def main() -> int:
         # A wall-cut row on EITHER side is PRINTED (above) and not PAIRED: the mean is the one number
         # a reader takes away, and it may only contain task-arms that ran to the ceiling they are
         # compared at. Which arm hit the clock does not change that.
-        # OPEN[skip-with-stale-final-still-pairs] an operator-skipped task-arm with values left by
-        # an EARLIER campaign is still averaged into the paired means while the footer says it
-        # never ran.
-        # proof:`present:and vb is not None and not cut:@benchmarks/algotune/compare_arms.py`
-        # REVIEW 2026-08-30 (correctness): `skipped` renames the row's state and drives the
-        # "SKIPPED ... never ran" footer, and does not exclude the pair — only `cut` does.
+        #
+        # A SKIP IS NOT PAIRED EITHER, and until 2026-09-06 it was: `skipped` renamed the row's state
+        # and drove the "SKIPPED ... never ran" footer, and only `cut` excluded the pair.
         # `agent_summary.json` is a documented MERGE TARGET (rows from earlier campaigns survive a
         # rerun) and `B-<task>.final.json` files persist across campaigns (only `.refused` is
-        # cleared), so a task skipped THIS campaign with a matching stale row is the
-        # mixed-population mean this module's docstring promises against — restored through the
-        # skip branch at the 2026-08-29 merge. Exclude `skipped` from pairing like `cut`.
-        if va is not None and vb is not None and not cut:
-            paired.append((va, vb))
+        # cleared), so a task skipped THIS campaign with a matching stale row was averaged into the
+        # means six lines above a footer saying it never ran -- the mixed-population mean this
+        # module's docstring promises against, restored through the skip branch at the 2026-08-29
+        # merge.
+        #
+        # AND A PAIR WHOSE RULERS CANNOT BE SHOWN TO MATCH IS NOT PAIRED. Two numbers with both arms
+        # present, neither cut nor skipped, are still two numbers off two instruments unless both
+        # say which instrument: see `pair_refusal`. The refusal is printed WHERE THE NUMBER WOULD
+        # HAVE BEEN COUNTED -- on the row and in the footer -- because a silent exclusion is the
+        # other failure this file's docstring names.
+        if va is not None and vb is not None and not cut and not skipped:
+            refusal = pair_refusal(ruler_identity(args.final_dir, "A", task),
+                                   ruler_identity(args.final_dir, "B", task))
+            if refusal is None:
+                paired.append((va, vb))
+            else:
+                unpaired.append((task, refusal))
+                if not why:
+                    rows[-1] = (task, va, vb, f"NOT PAIRED: {refusal}", rows[-1][4], False)
 
     if args.final_dir is None:
         print("WARNING: --final-dir not given, so arm B's column is its TRAIN metric while "
@@ -695,50 +802,7 @@ def main() -> int:
               f"{mean_a:>13.4f}  {mean_b:>11.4f}")
         print(f"{'wins':<{width}}  {wins_a:>13}  {wins_b:>11}   "
               f"({len(paired) - wins_a - wins_b} tied)")
-    # OPEN[compare-arms-prints-its-tail-twice] the closing block — the still-OWED list, the
-    # speedup footer and the whole `--reference` table — is printed TWICE on every invocation.
-    # proof:`present:for task, _, _, _, _, _ in rows:@benchmarks/algotune/compare_arms.py`
-    # REVIEW 2026-08-30 (merge-integrity): this copy (through the reference table below) and the
-    # second one after the money block are both sides of a 2026-08-29 merge conflict kept at once;
-    # this copy lacks the `skipped` footer the second has, so the two have already diverged, which
-    # is how the next merge loses one. The operator's one end-of-campaign deliverable duplicates
-    # its own caveats and rankings. Fold into ONE tail after the money block (this copy's
-    # incomplete/unmeasured/harness-cut lines are the unique half to keep from here).
-    incomplete = sum(1 for _, va, vb, _, _, _ in rows if va is None or vb is None)
-    if incomplete:
-        print(f"\n{incomplete} of {len(rows)} tasks are missing an arm and are EXCLUDED from the "
-              f"means above — a missing run is not a zero.")
-    unmeasured = sorted(t for t, _, _, why, _, _ in rows if why in NOT_SOLVERS_FAULT)
-    if unmeasured:
-        print(f"of those, {len(unmeasured)} arm-B row(s) are the ARENA producing no measurement "
-              f"(not a wrong solver): " + ", ".join(unmeasured))
-    for _st in NOT_AT_BUDGET_STATES:
-        _cut = sorted(t for t, _, _, _, st, _ in rows if st == _st)
-        if _cut:
-            print(f"{len(_cut)} task-arm(s) {_cut_phrase(_st, footer=True)} rather than by the budget, so their "
-                  f"scores are shown but left out of the mean: " + ", ".join(_cut))
-    unfinished = sorted(t for t, _, _, _, st, _ in rows if st in ("unfinished", "refused"))
-    if unfinished:
-        print(f"{len(unfinished)} task-arm(s) have no .done marker from campaign.sh and are still "
-              f"OWED, so any score left behind for them is not reported: " + ", ".join(unfinished))
-    print("\nspeedup = baseline_ms / optimized_ms, both timed here. 100% instance validity is "
-          "required:\na 0.0000 means the solver was WRONG somewhere, not that it was not faster.\n"
-          "That sentence is only true because a zero the ARENA is responsible for is printed as "
-          "`--`\nwith its reason (see NOT_SOLVERS_FAULT); it was false about every such row before "
-          "2026-08-23.")
 
-    if args.reference:
-        print("\nShipped reference models (AlgoTuner's loop driving OTHER models — context, not a "
-              "control:\nthose rows differ from ours in the model AND were produced elsewhere).")
-        for task, _, _, _, _, _ in rows:
-            ref = _reference_models(summary, task)
-            ours = {k: v for k, v in ref.items() if args.model_fragment.lower() in k.lower()}
-            others = {k: v for k, v in ref.items() if k not in ours}
-            if not others:
-                continue
-            best = max(others.items(), key=lambda kv: kv[1])
-            print(f"  {task:<{width}}  best reference {best[0]} = {best[1]:.4f}  "
-                  f"(median {sorted(others.values())[len(others) // 2]:.4f} over {len(others)})")
     # WHAT THE PAIR ACTUALLY COST. Printed for every run, not only when something is wrong: a
     # comparison at "the same $1 budget" is a claim about money, and a claim about money that is
     # never checked against the meter is a claim about a config file.
@@ -772,11 +836,42 @@ def main() -> int:
         else:
             print(f"every task-arm stayed within 5% of its ${ceiling:.2f} ceiling.")
 
+    # ONE TAIL. Until 2026-09-06 everything from here to the reference table was printed TWICE --
+    # both sides of a 2026-08-29 merge conflict kept at once, and already diverged (one copy had the
+    # skip footer, the other the incomplete/unmeasured/harness-cut lines), which is how the next
+    # merge loses one. The operator's one end-of-campaign deliverable duplicated its own caveats and
+    # rankings. This is the union, in one order: what is missing, what was not a measurement, what
+    # was not at the budget, what is still owed, what was skipped, what could not be paired, which
+    # instrument(s) the rows were measured on, and only then the footer and the reference table.
+    incomplete = sum(1 for _, va, vb, _, _, _ in rows if va is None or vb is None)
+    if incomplete:
+        print(f"\n{incomplete} of {len(rows)} tasks are missing an arm and are EXCLUDED from the "
+              f"means above — a missing run is not a zero.")
+    unmeasured = sorted(t for t, _, _, why, _, _ in rows if why in NOT_SOLVERS_FAULT)
+    if unmeasured:
+        print(f"of those, {len(unmeasured)} arm-B row(s) are the ARENA producing no measurement "
+              f"(not a wrong solver): " + ", ".join(unmeasured))
+    for _st in NOT_AT_BUDGET_STATES:
+        _cut = sorted(t for t, _, _, _, st, _ in rows if st == _st)
+        if _cut:
+            print(f"{len(_cut)} task-arm(s) {_cut_phrase(_st, footer=True)} rather than by the budget, so their "
+                  f"scores are shown but left out of the mean: " + ", ".join(_cut))
+    unfinished = sorted(t for t, _, _, _, st, _ in rows if st in ("unfinished", "refused"))
+    if unfinished:
+        print(f"{len(unfinished)} task-arm(s) have no .done marker from campaign.sh and are still "
+              f"OWED, so any score left behind for them is not reported: " + ", ".join(unfinished))
     skipped = sorted(t for t, _, _, _, st, *_ in rows if st == "skipped")
     if skipped:
         print(f"{len(skipped)} task-arm(s) were SKIPPED by the operator and never ran, so this "
               f"table is over {len(rows) - len(skipped)} of {len(rows)} tasks: "
               + ", ".join(skipped))
+    if unpaired:
+        print(f"{len(unpaired)} task(s) have a number on BOTH sides and are NOT in the mean, because "
+              f"their two numbers cannot be shown to be off the same instrument:")
+        for task, refusal in unpaired:
+            print(f"  {task:<{width}}  {refusal}")
+        print("  Width moves a speedup ~1.6x on this box and a re-timed reference cache keeps its\n"
+              "  name; a row that does not record both is not comparable to one that does.")
     # ONE TABLE, ONE INSTRUMENT -- or say so. `looplab_eval.py::_emit` stamps `eval_regime` on
     # every line it prints, so a mean taken across two baseline regimes is now visible instead of
     # being a property of the environment two scripts happened to run under. Rows written before
@@ -809,10 +904,6 @@ def main() -> int:
               f"baseline regime they were measured on;\nthe rest say {next(iter(stated))}. A row "
               f"that does not say cannot be shown to be comparable.")
 
-    unfinished = sorted(t for t, _, _, _, st, *_ in rows if st in ("unfinished", "refused"))
-    if unfinished:
-        print(f"{len(unfinished)} task-arm(s) have no .done marker from campaign.sh and are still "
-              f"OWED, so any score left behind for them is not reported: " + ", ".join(unfinished))
     print("\nspeedup = baseline_ms / optimized_ms, both timed here. 100% instance validity is "
           "required:\na 0.0000 means the solver was WRONG somewhere, not that it was not faster.\n"
           "That sentence is only true because a zero the ARENA is responsible for is printed as "

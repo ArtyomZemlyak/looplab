@@ -79,18 +79,34 @@ _SOLVER_ZERO = {
 }
 _GOOD = {"speedup": 2.0, "eval_seconds": 10.0, "subset": "test"}
 
+# THE RULER, ON BOTH SIDES. Since 2026-09-06 `compare_arms.py::pair_refusal` refuses to average two
+# numbers unless both record the width they were evaluated at and the digest of the reference
+# entry they divided by (docs/58 s58.3: width moves a speedup ~1.6x, and twenty arm-B rows recorded
+# a baseline nothing could compare). These fixtures are about OTHER properties, so they carry the
+# identity a real campaign now writes -- the same on both arms -- exactly as the driver would.
+_SHA = "ab" * 32
+_RULER_MARKER = f" eval_workers=22 regime=__w22x1r3 baseline_sha256={_SHA}"
+_RULER_ROW = {"eval_workers": "22", "eval_regime": {"key": "__w22x1r3", "workers": 22},
+              "baseline_cache_sha256": _SHA}
+
 
 def _campaign_dir(tmp_path: Path, rows: dict, *, markers: set[str] | None = None) -> Path:
-    """A `--final-dir` holding `B-<task>.final.json` and the `.done` markers campaign.sh writes."""
+    """A `--final-dir` holding `B-<task>.final.json` and the `.done` markers campaign.sh writes,
+    for BOTH arms (arm A's identity lives only in its marker)."""
     out = tmp_path / "campaign-out"
     out.mkdir(exist_ok=True)
     marked = rows.keys() if markers is None else markers
     for task, row in rows.items():
-        (out / f"B-{task}.final.json").write_text(json.dumps(row), encoding="utf-8")
+        (out / f"B-{task}.final.json").write_text(json.dumps({**_RULER_ROW, **row}),
+                                                  encoding="utf-8")
         (out / f"B-{task}.log").write_text("", encoding="utf-8")
+        (out / f"A-{task}.done").write_text(
+            f"wall=100 rc=0 state=ran_to_completion cpus=0-1 lanes=1 cores_per_lane=2"
+            f"{_RULER_MARKER}\n", encoding="utf-8")
         if task in marked:
-            (out / f"B-{task}.done").write_text("wall=100 rc=0 cpus=0-1 lanes=1 cores_per_lane=2\n",
-                                                encoding="utf-8")
+            (out / f"B-{task}.done").write_text(
+                f"wall=100 rc=0 cpus=0-1 lanes=1 cores_per_lane=2{_RULER_MARKER}\n",
+                encoding="utf-8")
     return out
 
 
@@ -957,7 +973,7 @@ def _mk(final: Path, task: str, *, a_done: str = None, b_done: str = None,
     if b_done is not None:
         (final / f"B-{task}.done").write_text(b_done, encoding="utf-8")
     if b_speedup is not None or b_reason:
-        body = {"speedup": b_speedup, "subset": "test"}
+        body = {**_RULER_ROW, "speedup": b_speedup, "subset": "test"}
         if b_reason:
             body["no_speedup"] = {"reason": b_reason}
         (final / f"B-{task}.final.json").write_text(json.dumps(body), encoding="utf-8")
@@ -973,7 +989,7 @@ def test_a_wall_cut_is_excluded_whichever_arm_hit_the_clock(tmp_path, capsys):
     at = tmp_path / "AlgoTune"
     (at / "reports").mkdir(parents=True)
 
-    ok = "wall=100 rc=0 state=ran_to_completion\n"
+    ok = f"wall=100 rc=0 state=ran_to_completion{_RULER_MARKER}\n"
     cut = "wall=14400 rc=124 state=wall_cut\n"
     for t, a_marker in (("clean", ok), ("a_was_cut", cut)):
         (runs / t / "run").mkdir(parents=True)
@@ -999,7 +1015,7 @@ def test_a_solver_wrong_on_some_instances_scores_zero_for_EITHER_arm(tmp_path, c
     runs = tmp_path / "runs-B"
     at = tmp_path / "AlgoTune"
     (at / "reports").mkdir(parents=True)
-    ok = "wall=100 rc=0 state=ran_to_completion\n"
+    ok = f"wall=100 rc=0 state=ran_to_completion{_RULER_MARKER}\n"
 
     (runs / "a_wrong" / "run").mkdir(parents=True)
     _mk(final, "a_wrong", a_done=ok, b_done=ok, b_speedup=3.0)
@@ -1033,7 +1049,7 @@ def test_an_arm_a_failure_that_is_NOT_the_solvers_fault_stays_unmeasured(tmp_pat
     runs = tmp_path / "runs-B"
     at = tmp_path / "AlgoTune"
     (at / "reports").mkdir(parents=True)
-    ok = "wall=100 rc=0 state=ran_to_completion\n"
+    ok = f"wall=100 rc=0 state=ran_to_completion{_RULER_MARKER}\n"
     (runs / "a_broke" / "run").mkdir(parents=True)
     _mk(final, "a_broke", a_done=ok, b_done=ok, b_speedup=3.0)
     (at / "reports" / "agent_summary.json").write_text(json.dumps(

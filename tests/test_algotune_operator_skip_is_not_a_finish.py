@@ -19,7 +19,11 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "benchmarks" / "algotune" / "compare_arms.py"
 
-DONE = "wall=100 rc=0 state=ran_to_completion ok_calls=5 attempt=a1\n"
+# Both arms carry the ruler identity `compare_arms.py::pair_refusal` requires since 2026-09-06, so
+# a pair here is refused for being a SKIP and for nothing else.
+_SHA = "cd" * 32
+DONE = (f"wall=100 rc=0 state=ran_to_completion ok_calls=5 eval_workers=22 regime=__w22x1r3 "
+        f"baseline_sha256={_SHA} attempt=a1\n")
 SKIP = "wall=0 rc=0 state=operator_skip attempt=a1\n"
 
 
@@ -33,8 +37,10 @@ def _campaign(tmp: Path, *, a_marker: str, a_score: bool) -> Path:
     (root / "runs-B" / "demo" / "run" / "events.jsonl").write_text("", encoding="utf-8")
     final = root / "campaign-final"
     final.mkdir(parents=True)
-    (final / "B-demo.final.json").write_text(json.dumps({"speedup": 1.5, "subset": "test"}),
-                                             encoding="utf-8")
+    (final / "B-demo.final.json").write_text(
+        json.dumps({"speedup": 1.5, "subset": "test", "eval_workers": "22",
+                    "eval_regime": {"key": "__w22x1r3"}, "baseline_cache_sha256": _SHA}),
+        encoding="utf-8")
     (final / "B-demo.done").write_text(DONE, encoding="utf-8")
     (final / "A-demo.done").write_text(a_marker, encoding="utf-8")
     return root
