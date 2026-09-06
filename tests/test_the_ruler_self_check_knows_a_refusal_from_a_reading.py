@@ -343,3 +343,51 @@ def test_a_missing_bench_interpreter_is_a_refusal_not_a_fallback(monkeypatch, ca
     rc = ruler_selfcheck.main(["--task", "pagerank"])
     assert rc == 2, rc
     assert "REFUSING" in capsys.readouterr().err
+
+
+def test_the_caller_s_worker_count_reaches_the_child():
+    """THE THIRD SILENT OVERRIDE IN ONE FUNCTION. `sys.executable` was §299, the baseline cache was
+    §295, and this one forced `ALGOTUNE_EVAL_WORKERS=auto` over whatever the caller set.
+
+    It blocked §305's own registered experiment: a run with `ALGOTUNE_EVAL_WORKERS=1` wrote
+    `__w22x1r3` and read 1.28, so the "one worker instead of twenty" test measured twenty workers.
+    `looplab_eval.eval_regime` honours the variable correctly -- 1 keys `__lane22r3`, 4 keys
+    `__w4x1r3` -- so the override was here, not downstream."""
+    import ast
+    src = (Path(__file__).resolve().parents[1] / "benchmarks"
+           / "ruler_selfcheck.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "one_eval")
+    body = ast.unparse(fn)
+    assert 'ALGOTUNE_EVAL_WORKERS="auto"' not in body.replace("'", '"'), body[:400]
+    assert "os.environ.get('ALGOTUNE_EVAL_WORKERS', 'auto')" in body \
+        or 'os.environ.get("ALGOTUNE_EVAL_WORKERS", "auto")' in body, body[:400]
+
+
+def test_the_timeout_is_the_caller_s_too():
+    """Same function, same shape: a hard-coded 120 s would silently outrank an operator raising it
+    for a slow task."""
+    import ast
+    src = (Path(__file__).resolve().parents[1] / "benchmarks"
+           / "ruler_selfcheck.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "one_eval")
+    body = ast.unparse(fn).replace("'", '"')
+    assert 'ALGOTUNE_MIN_TIMEOUT_S="120"' not in body, body[:400]
+    assert 'os.environ.get("ALGOTUNE_MIN_TIMEOUT_S", "120")' in body, body[:400]
+
+
+def test_nothing_else_in_one_eval_is_hard_coded_over_the_caller():
+    """The three overrides were found one at a time, each after it had cost something. This asserts
+    the whole environment dict is either a fixed FACT about the bench (the data directory) or a
+    caller-overridable default -- so a fourth cannot be added without the test noticing."""
+    import ast
+    src = (Path(__file__).resolve().parents[1] / "benchmarks"
+           / "ruler_selfcheck.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "one_eval")
+    call = next(n for n in ast.walk(fn)
+                if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "dict")
+    hard = [k.arg for k in call.keywords
+            if isinstance(k.value, ast.Constant) and k.arg != "DATA_DIR"]
+    assert hard == [], f"hard-coded over the caller: {hard}"

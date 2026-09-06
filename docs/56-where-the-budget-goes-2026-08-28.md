@@ -12797,3 +12797,36 @@ next measurement, not a conclusion.
 that was my interpreter. §304 proposed a fix that §305 refuted within the hour. Each time the error
 was not in the bench but in the instrument I reached for, and each time the correction came from
 picking up a *different* instrument rather than repeating the first one more carefully.
+
+## §306 — the registered test ran, after a third silent override in the same function
+
+§305 registered a test: run both passes with **one** worker instead of twenty and see whether the
+CP-SAT reading falls to 1.0. The first attempt appeared to run and read 1.28 — and wrote a baseline
+named `__w22x1r3`. **With `ALGOTUNE_EVAL_WORKERS=1` set, the run used twenty-two workers.**
+
+`ruler_selfcheck.one_eval` forced `ALGOTUNE_EVAL_WORKERS="auto"` into the child's environment over
+whatever the caller set. That is the **third** silent override in that one function: `sys.executable`
+was §299 and cost a retracted week; the baseline cache was §295 and blocked a re-timing; this one
+made a registered experiment measure the opposite of what it asked for and report a number.
+`looplab_eval.eval_regime` honours the variable perfectly — `1` keys `__lane22r3`, `4` keys
+`__w4x1r3`, `auto` keys `__w22x1r3` — so the fault was entirely local.
+
+With the override removed, the test finally ran:
+
+| task | 22 workers | **1 worker** |
+|---|---|---|
+| min_dominating_set (CP-SAT) | 1.3175 / 1.8627, repeats spread ×1.5 | **1.1450** (1.13, 1.15, 1.20), spread ×1.06 |
+| edge_expansion (control) | 0.9797 | **1.0051** (1.00, 1.01, 1.01) |
+
+**Worker contention is the dominant term.** Dropping from twenty-two workers to one takes the CP-SAT
+reading from 1.32–1.86 down to 1.145 and collapses the repeat spread from ×1.5 to ×1.06. The control
+task is unmoved, so this is not a general property of running with one worker.
+
+**A residual of ~14 % survives, and it is systematic** — all three repeats sit between 1.13 and 1.20,
+none near 1.0. So contention explains most of the gap and something else explains the rest; that
+remainder is the next question, not a conclusion.
+
+Three mutations red on the fix, including one that adds a *fourth* hard-coded value: the test now
+asserts every entry in that environment dict is either a fixed fact about the bench (the data
+directory) or a caller-overridable default, so the next override cannot be added quietly. Finding
+the first three one at a time, each after it had cost something, is what that test is for.

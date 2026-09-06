@@ -169,7 +169,15 @@ def one_eval(task: str, solver: str, lane: str, subset: str, timeout: float = 90
     env = dict(os.environ,
                DATA_DIR=f"{BENCH}/AlgoTune/.hf_datasets/oripress__AlgoTune/data",
                ALGOTUNE_BASELINE_CACHE_DIR=cache,
-               ALGOTUNE_MIN_TIMEOUT_S="120", ALGOTUNE_EVAL_WORKERS="auto")
+               # THE THIRD SILENT OVERRIDE IN THIS ONE FUNCTION. `sys.executable` was §299 and the
+               # baseline cache was §295; this one forced `ALGOTUNE_EVAL_WORKERS=auto` over
+               # whatever the caller set. It blocked §305's own registered experiment: a run with
+               # `ALGOTUNE_EVAL_WORKERS=1` wrote `__w22x1r3` and read 1.28, so the "one worker
+               # instead of twenty" test measured twenty workers and said nothing. `eval_regime`
+               # honours the variable correctly -- 1 keys `__lane22r3`, 4 keys `__w4x1r3` -- the
+               # override was here.
+               ALGOTUNE_MIN_TIMEOUT_S=os.environ.get("ALGOTUNE_MIN_TIMEOUT_S", "120"),
+               ALGOTUNE_EVAL_WORKERS=os.environ.get("ALGOTUNE_EVAL_WORKERS", "auto"))
     argv = ["taskset", "-c", lane, bench_python(),
             str(HERE / "algotune" / "looplab_eval.py"),
             "--algotune-root", f"{BENCH}/AlgoTune", "--task", task,
