@@ -479,7 +479,10 @@ def test_the_producer_span_survives_an_engine_built_without_a_tracer(tmp_path):
     engine._discard_node_build_telemetry = lambda **_kw: None
     engine._reset_developer_footprint = lambda _developer: None
     engine._directed_idea = lambda given, _state: given
-    engine._finalize_developer_footprint = lambda given, _dev, _code: (given, True)
+    # The card lane hands the finalizer the envelope's own `footprint=` since doc 52 row 12
+    # (`speculation.py::_build_requested_card` reads it off the `DeveloperResult`), so the
+    # stub accepts the keyword the real method takes.
+    engine._finalize_developer_footprint = lambda given, _dev, _code, **_kw: (given, True)
 
     # No `self.tracer` at all on this engine: the build must still produce its result.
     result = engine._build_requested_card(
