@@ -1,0 +1,40 @@
+{"median": 0.8908, "stamp": "2026-09-04T15:34:55", "subset": "test", "task": "edge_expansion", "values": [0.8908, 0.8912, 0.8833], "interpreter": "conda (WRONG -- see \u00a7299)", "superseded": "measured under /opt/conda/bin/python, not the bench venv; kept for the record"}
+{"median": 1.1013, "stamp": "2026-09-04T15:37:39", "subset": "test", "task": "pde_heat1d", "values": [1.1013, 1.1399, 1.0625], "interpreter": "conda (WRONG -- see \u00a7299)", "superseded": "measured under /opt/conda/bin/python, not the bench venv; kept for the record"}
+{"median": 1.0896, "stamp": "2026-09-04T15:39:43", "subset": "test", "task": "discrete_log", "values": [1.0831, 1.0896, 1.1003], "interpreter": "conda (WRONG -- see \u00a7299)", "superseded": "measured under /opt/conda/bin/python, not the bench venv; kept for the record"}
+{"median": 0.9077, "stamp": "2026-09-05T12:39:01", "subset": "test", "task": "edge_expansion", "values": [0.8986, 0.9168, 0.9188, 0.8904], "interpreter": "conda (WRONG -- see \u00a7299)", "superseded": "measured under /opt/conda/bin/python, not the bench venv; kept for the record"}
+{"lane": "22-32,70-80", "median": 1.0676, "stamp": "2026-09-05T23:41:37", "subset": "test", "task": "pde_heat1d", "values": [1.0127, 1.0676, 1.1324], "interpreter": "conda (WRONG -- see \u00a7299)", "superseded": "measured under /opt/conda/bin/python, not the bench venv; kept for the record"}
+{"lane": "22-32,70-80", "median": 1.083, "stamp": "2026-09-05T23:42:36", "subset": "test", "task": "discrete_log", "values": [1.0985, 1.0763, 1.083], "interpreter": "conda (WRONG -- see \u00a7299)", "superseded": "measured under /opt/conda/bin/python, not the bench venv; kept for the record"}
+{"lane": "22-32,70-80", "median": 0.9007, "stamp": "2026-09-05T23:44:00", "subset": "test", "task": "edge_expansion", "values": [0.9007, 0.9121, 0.8965], "interpreter": "conda (WRONG -- see \u00a7299)", "superseded": "measured under /opt/conda/bin/python, not the bench venv; kept for the record"}
+{"lane": "11-21,59-69", "median": 1.4317, "stamp": "2026-09-06T01:35:36", "subset": "test", "task": "pagerank", "values": [1.4317, 1.432, 1.4271], "interpreter": "conda (WRONG -- see \u00a7299)", "superseded": "measured under /opt/conda/bin/python, not the bench venv; kept for the record"}
+{"lane": "0-10,48-58", "median": 0.9886, "stamp": "2026-09-06T04:34:54", "subset": "test", "task": "pagerank", "values": [0.9886, 0.9826, 0.9905], "interpreter": "conda (WRONG -- see \u00a7299)", "superseded": "measured under /opt/conda/bin/python, not the bench venv; kept for the record"}
+{"lane": "33-43,81-91", "median": 1.0097, "stamp": "2026-09-06T05:08:39", "subset": "test", "task": "discrete_log", "values": [0.998, 1.0097, 1.0151]}
+{"lane": "22-32,70-80", "median": 0.9897, "stamp": "2026-09-06T05:08:45", "subset": "test", "task": "pde_heat1d", "values": [0.9897, 0.9631, 1.0056]}
+{"lane": "11-21,59-69", "median": 0.9997, "stamp": "2026-09-06T05:09:04", "subset": "test", "task": "edge_expansion", "values": [1.0083, 0.9997, 0.9968]}
+{"lane": "0-10,48-58", "median": 0.9663, "stamp": "2026-09-06T05:09:13", "subset": "test", "task": "pagerank", "values": [0.9919, 0.9663, 0.9625]}
+{"lane": "0-10,48-58", "median": 1.71655, "stamp": "2026-09-06T06:27:57", "subset": "test", "task": "max_common_subgraph", "values": [1.6555, 1.7776]}
+{"lane": "0-10,48-58", "median": 1.8627, "stamp": "2026-09-06T06:29:58", "subset": "test", "task": "min_dominating_set", "values": [2.237, 1.4884]}
+{"lane": "0-10,48-58", "median": 1.2922, "stamp": "2026-09-06T06:31:17", "subset": "test", "task": "queens_with_obstacles", "values": [1.2975, 1.2869]}
+{"lane": "0-10,48-58", "median": 0.988, "stamp": "2026-09-06T06:32:25", "subset": "test", "task": "kcenters", "values": [0.9889, 0.9871]}
+{"lane": "0-10,48-58", "median": 1.0568, "stamp": "2026-09-06T06:33:36", "subset": "test", "task": "integer_factorization", "values": [1.0561, 1.0575]}
+{"lane": "33-43,81-91", "median": 1.067, "stamp": "2026-09-06T06:38:53", "subset": "test", "task": "rbf_interpolation", "values": [1.0098, 1.067, 1.0771]}
+{"lane": "0-10,48-58", "median": 0.938, "stamp": "2026-09-06T06:38:57", "subset": "test", "task": "discrete_log", "values": [0.9301, 0.938, 0.967]}
+{"lane": "11-21,59-69", "median": 1.1534, "stamp": "2026-09-06T06:39:42", "subset": "test", "task": "multi_dim_knapsack", "values": [1.0683, 1.2656, 1.1534]}
+{"lane": "22-32,70-80", "median": 1.0583, "stamp": "2026-09-06T06:41:00", "subset": "test", "task": "convex_hull", "values": [1.048, 1.0591, 1.0583]}
+{"lane": "11-21,59-69", "median": 1.2151, "stamp": "2026-09-06T06:43:28", "subset": "test", "task": "rectanglepacking", "values": [1.0257, 1.2151, 1.3473]}
+{"lane": "0-10,48-58", "median": 1.1375, "stamp": "2026-09-06T06:43:51", "subset": "test", "task": "set_cover_conflicts", "values": [1.1375, 1.1115, 1.5047]}
+{"lane": "33-43,81-91", "median": 1.482, "stamp": "2026-09-06T06:43:55", "subset": "test", "task": "max_common_subgraph", "values": [1.4247, 1.482, 1.7002]}
+{"lane": "22-32,70-80", "median": 1.3175, "stamp": "2026-09-06T06:44:19", "subset": "test", "task": "min_dominating_set", "values": [1.3175, 1.4831, 1.1872]}
+{"lane": "22-32,70-80", "median": 1.04, "stamp": "2026-09-06T06:46:12", "subset": "test", "task": "integer_factorization", "values": [0.9723, 1.0455, 1.04]}
+{"lane": "0-10,48-58", "median": 1.2667, "stamp": "2026-09-06T06:46:27", "subset": "test", "task": "queens_with_obstacles", "values": [1.2694, 1.236, 1.2667]}
+{"lane": "33-43,81-91", "median": 0.9797, "stamp": "2026-09-06T06:46:40", "subset": "test", "task": "edge_expansion", "values": [0.9627, 0.9808, 0.9797]}
+{"lane": "11-21,59-69", "median": 1.8545, "stamp": "2026-09-06T06:48:01", "subset": "test", "task": "max_independent_set_cpsat", "values": [1.7245, 2.0881, 1.8545]}
+{"lane": "11-21,59-69", "median": 0.9591, "stamp": "2026-09-06T06:49:47", "subset": "test", "task": "count_riemann_zeta_zeros", "values": [0.9591, 0.9847, 0.9453]}
+{"lane": "0-10,48-58", "median": 0.9507, "stamp": "2026-09-06T06:50:31", "subset": "test", "task": "pagerank", "values": [0.9162, 0.9507, 0.974]}
+{"lane": "33-43,81-91", "median": 1.6028, "stamp": "2026-09-06T06:51:26", "subset": "test", "task": "max_clique_cpsat", "values": [1.8366, 1.6028, 1.4713]}
+{"lane": "11-21,59-69", "median": 0.9021, "stamp": "2026-09-06T06:53:22", "subset": "test", "task": "kcenters", "values": [0.8969, 0.9021, 0.9556]}
+{"lane": "33-43,81-91", "median": 1.0057, "stamp": "2026-09-06T06:53:28", "subset": "test", "task": "pde_heat1d", "values": [0.9153, 1.0281, 1.0057]}
+{"lane": "0-10,48-58", "median": 0.9868, "stamp": "2026-09-06T06:53:30", "subset": "test", "task": "sparse_eigenvectors_complex", "values": [0.9868, 0.9717, 1.0517]}
+{"lane": "22-32,70-80", "median": 1.826, "stamp": "2026-09-06T06:57:02", "subset": "test", "task": "max_weighted_independent_set", "values": [1.826, 1.8172, 2.2749]}
+{"busy_cpus_outside_lane": 0, "lane": "22-32,70-80", "median": 1.0213, "stamp": "2026-09-06T12:47:44", "subset": "test", "task": "discrete_log", "values": [1.0229, 1.0094, 1.0197, 1.0246]}
+{"busy_cpus_outside_lane": 0, "lane": "22-32,70-80", "median": 0.99495, "stamp": "2026-09-06T12:50:36", "subset": "test", "task": "edge_expansion", "values": [0.9973, 0.9926, 0.9978, 0.9915]}
+{"busy_cpus_outside_lane": 0, "lane": "22-32,70-80", "median": 1.01985, "stamp": "2026-09-06T12:53:02", "subset": "test", "task": "pde_heat1d", "values": [1.0129, 1.0268, 1.0094, 1.0451]}

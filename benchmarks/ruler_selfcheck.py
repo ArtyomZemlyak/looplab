@@ -194,9 +194,54 @@ def one_eval(task: str, solver: str, lane: str, subset: str, timeout: float = 90
 
 DEFAULT_LOG = HERE / "algotune" / "ruler_selfcheck_log.jsonl"
 
+def busy_cpus_outside_lane() -> int | None:
+    """CPUs occupied by PINNED work outside this process's own affinity set.
+
+    The same count `baseline_manager` writes into a baseline's `.provenance.json` (§295), computed
+    the same way on purpose: a reading and the ruler it is compared against have to describe the
+    box in the same units, or the comparison is between two different sentences.
+
+    CPUs, not processes. Counting distinct affinity SETS counts per-core workers and reads 46 on a
+    box running two lanes; the union of their CPUs reads 22, which is the number that predicts the
+    slowdown. None means the question is not answerable here (we are not pinned at all).
+
+    AND ONLY WHAT IS ACTUALLY RUNNING. §295's version -- still deployed in `baseline_manager` when
+    this was written -- counted every process whose affinity was a disjoint subset, running or not.
+    Measured 2026-09-06 on an idle box: it read 22, the same number it read while a pinned neighbour
+    was burning eleven cores, because 23 orphaned `multiprocessing` forkservers from a run six hours
+    dead were still sitting pinned to that lane. A field that reads 22 for both answers is not a
+    measurement of load; it is a measurement of how many workers once existed. State R is the
+    difference between the two readings, and it is the whole content of the field.
+    """
+    try:
+        mine = os.sched_getaffinity(0)
+        total = os.cpu_count() or 0
+        if not mine or not total or len(mine) >= total:
+            return None if not mine else 0
+        seen: set[int] = set()
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                other = os.sched_getaffinity(int(pid))
+                if not (other and len(other) < total and not (other & mine)):
+                    continue
+                stat = open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace").read()
+                # After the ") " so a process whose NAME contains a bracket cannot shift the field.
+                if stat.split(") ")[-1].split()[0] != "R":
+                    continue
+            except (OSError, ValueError, IndexError, ProcessLookupError):
+                continue
+            seen |= other
+        return len(seen)
+    except OSError:
+        return None
+
+
+
 
 def append_reading(path, task: str, subset: str, values, median: float, stamp=None,
-                   lane: str | None = None) -> dict:
+                   lane: str | None = None, busy: int | None = None) -> dict:
     """Append one dated reading, so the drift becomes a SERIES rather than a single number.
 
     §214 measured `edge_expansion` at 0.8861 against the sweep's 0.9847 and could say the cached
@@ -214,9 +259,20 @@ def append_reading(path, task: str, subset: str, values, median: float, stamp=No
     lane can drop to 0.87 while its neighbours sit near 0.97. A drift series that does not say which
     lane it was taken on cannot tell a change in the box from a change of lane -- which is exactly
     what §265 walked into, comparing two readings whose lanes the file had never recorded.
+
+    AND THE CPUs BUSY OUTSIDE THAT LANE, because the lane alone is not the condition. Measured
+    2026-09-06: `discrete_log` read 0.9380 at 06:38 while three sibling lanes were self-checking,
+    and 1.0274 on a quiet box two hours later -- a 9.5 % swing with the lane, the interpreter, the
+    baseline and the task all held fixed. Without this field that pair is a series showing drift;
+    with it, it is one reading taken under load and one taken without. §295 put the same count on
+    the BASELINE's sidecar and stopped at the write side; the reading is the other half.
+
+    `busy` is passed IN, sampled while the evaluations were running. Sampling it here would read
+    the box AFTER the work finished, which is exactly when the neighbours have gone quiet.
     """
     row = {"stamp": stamp or datetime.datetime.now().isoformat(timespec="seconds"),
            "task": task, "subset": subset, "lane": lane,
+           "busy_cpus_outside_lane": busy,
            "values": [round(float(v), 6) for v in values],
            "median": round(float(median), 6)}
     path = Path(path)
@@ -346,8 +402,17 @@ def main(argv=None) -> int:
     with tempfile.TemporaryDirectory(prefix="ruler-selfcheck-") as tmp:
         solver = build_solver(args.task, tmp)
         vals, secs, bad = [], [], []
+        # SAMPLED BETWEEN THE REPS, not after the loop. By the time a reading is written the
+        # neighbours have usually stopped, which is how the 06:38 rows came to say nothing about
+        # the three lanes that were running beside them. Taking the MAX over the samples answers
+        # "was this reading taken on a busy box", which is the question; a neighbour that both
+        # starts and ends inside a single rep is missed, and that is not the kind that moves a
+        # median by 9 %.
+        busy_seen = []
         for _ in range(max(1, args.reps)):
+            busy_seen.append(busy_cpus_outside_lane())
             row = one_eval(args.task, solver, args.lane, args.subset)
+            busy_seen.append(busy_cpus_outside_lane())
             why = refused(row)
             if why:
                 bad.append(why)
@@ -384,7 +449,9 @@ def main(argv=None) -> int:
         print(f"  (per-instance work is {100 * share:.0f} % of an evaluation's wall clock, so "
               f"`eval_seconds` cannot see this drift at all)")
     if args.record:
-        append_reading(args.record, args.task, args.subset, vals, median, args.stamp, args.lane)
+        seen = [b for b in busy_seen if b is not None]
+        append_reading(args.record, args.task, args.subset, vals, median, args.stamp,
+                       args.lane, max(seen) if seen else None)
         print(f"  recorded to {args.record}")
     if said is not None and abs(median - said) > 0.02:
         print("  DRIFT: the cached baseline and today's box no longer agree. Within one task this "

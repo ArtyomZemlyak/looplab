@@ -115,11 +115,17 @@ if ! : > "$DEST/.snapshot.lock" 2>/dev/null; then
   exit 1
 fi
 exec 9>"$DEST/.snapshot.lock"
-if ! flock -w 60 9; then
+# The wait is a named variable for two reasons. It was hardcoded 60 in the flock and hardcoded "60s"
+# again in the message, so a change to one would have made the other lie -- and it is the message an
+# operator reads. And a check that DRIVES this refusal (sweep_claims.py) had to hold the lock for
+# longer than the wait to see it, which cost 80 s of sweep for a one-line branch; with the wait
+# overridable it costs three. The default is unchanged, and an unset variable still waits 60 s.
+LOCK_WAIT_S="${SNAPSHOT_LOCK_WAIT_S:-60}"
+if ! flock -w "$LOCK_WAIT_S" 9; then
   # A legitimate skip -- another snapshot IS writing -- but still nothing written by THIS run, so
   # it may not claim success. 3, not 0 and not 1: the timer must retry rather than record a
   # fingerprint, and an operator must be able to tell "busy" from "broken".
-  echo "another snapshot holds the lock (waited 60s); NOTHING WRITTEN by this run" >&2
+  echo "another snapshot holds the lock (waited ${LOCK_WAIT_S}s); NOTHING WRITTEN by this run" >&2
   exit 3
 fi
 

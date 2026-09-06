@@ -130,6 +130,10 @@ _LAYOUT = {
     # package-layout audit sees it and the flat `looplab.control_validation` alias resolves
     "control_validation": "serve",
     "costs": "engine",
+    # ONE money sentence in one place (§288). Named here rather than left on disk because
+    # the layout map is what says a module exists on purpose; §313 found this one missing
+    # from it two sections after it shipped, by running the whole suite.
+    "costs_text": "core",
     "critic": "trust",
     "cross_run": "trust",   # cross-run identity/scope-boundary checks among the trust monitors
     "cv": "trust",

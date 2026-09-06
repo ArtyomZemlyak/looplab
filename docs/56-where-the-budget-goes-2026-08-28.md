@@ -13052,3 +13052,93 @@ because the tool was missing is precisely the false reading this file exists to 
 reading, and a reading requires 100 % valid instances — so every one of those references passes its
 own checker, and §311's `spectral_clustering` is provably the only self-rejecting reference on the
 box. That follows from the readings already taken rather than from twenty more runs.
+
+## §313 — the three unchecked snapshot claims, driven; and a contention field that measured nothing
+
+Three items on the standing list carried the words **НЕ ПРОВЕРЕНО мной**. They are now driven every
+sweep rather than read, by `sweep_claims.check_snapshot_refusals`, against the real `snapshot.sh`:
+
+* a destination that is not a mounted store → **exit 1**, `NOTHING WAS WRITTEN … this is not a skip;
+  it is a failed snapshot`, nothing on disk;
+* another snapshot holding the lock → **exit 3**, nothing on disk, so the timer retries instead of
+  recording a fingerprint;
+* `.env` is not copied — confirmed by looking: no file named `.env` anywhere in a real snapshot, and
+  the only mention of it lives in the timer log.
+
+The lock arm cost 80 s the first time because it had to hold the lock longer than the wait, so the
+wait became `SNAPSHOT_LOCK_WAIT_S` (default unchanged at 60) and the message stopped saying "60s"
+from a hardcoded string beside a hardcoded number. Two earlier attempts at the same drive failed on
+my instrument, not the script: a 60 s hold against a 60 s wait let the second run WIN the lock and
+copy 112 MB of bundles into a temp directory, and an 80 s timeout killed the refusal ten seconds
+before it printed.
+
+Read live at 12:07 on 2026-09-06, the newest snapshot directory had no `ENVIRONMENT.txt`. It had one
+at 12:09:24. That is the hazard the `.complete` marker exists for — written last, after the
+shortfall check — and `restore_from_snapshot.sh` walks newest-first and **skips any directory
+without it**. The marker is honoured by the thing that restores, not merely written.
+
+### The field that read 22 for both answers
+
+Chasing the constants, `check_ruler_constants` reported `discrete_log` at −7.7 % and `pagerank` at
+−5.2 % against the list. Re-run alone on one lane, `discrete_log` came back **1.0274** against the
+06:38 reading of **0.9380** — a 9.5 % swing with lane, interpreter, cached baseline and task all
+held fixed. The 06:38 rows were taken during the ruler rebuild, four lanes self-checking within
+seconds of each other. The prediction that it would come back ≥0.97 was recorded before the run.
+
+The reading rows carried the lane (§266) but not the load, so that pair reads as drift. They now
+carry `busy_cpus_outside_lane`, sampled **between the reps while the work runs** rather than after
+it, and `check_ruler_constants` takes the most recent QUIET reading as its verdict instead of the
+most recent one.
+
+Then the count itself was driven, and it did not survive:
+
+| box | §295's count (any pinned process) | running-only |
+|---|---|---|
+| idle | **22** | 0 |
+| a pinned neighbour burning eleven cores | **22** | 22 |
+
+The field written into every baseline sidecar since §295 could not tell an idle box from a loaded
+one. The cause was on the same box: **23 orphaned `multiprocessing` forkservers and resource
+trackers**, parent gone (ppid 1), four to six hours old, 648 MiB, still wearing the affinity mask of
+the lane they were born on. State **S**, so the hygiene step — which looks for state Z — reported
+zero zombies on a box carrying two thirds of a gigabyte of dead workers, and the contention field
+counted them as occupancy for hours after they stopped doing anything.
+
+Both ends are fixed: the count requires state `R` (in `ruler_selfcheck`, and delivered into the
+deployed `baseline_manager` through a new in-place upgrade anchor, since this box has no pristine
+copy to re-derive from), and `pulse` reports orphaned pinned bench workers with their age, cpu span
+and resident size — printed **before** the "no bench probe running" early return, because an idle
+box is exactly when nothing else would mention them. The 23 were reaped by PID.
+
+Four mutations are red: counting anything pinned regardless of state, dropping the count from the
+row, forgetting the ppid test in the orphan scan, and sampling the box once after the loop instead
+of during it. The fixtures are built to disagree with each bug — an **idle** pinned neighbour beside
+the busy one, and a **parented** worker with the same command line beside the orphan.
+
+The shape is the file's usual one. `busy_cpus_outside_lane` was added in §295 to explain a drift
+that turned out to be an interpreter (§299); it was never itself measured against a box whose load
+was known, and so it spent eleven days reporting a constant that looked like a measurement.
+
+### A gate that had been red for two days, found by running the whole suite
+
+`tests/test_calibration_profile_home.py` was failing before any edit in this section: `e224c5f3`
+(2026-09-04 04:19) added `Settings.developer_probe_max_calls` — the knob §190's registered arm sets
+— and did not re-pin the calibration profile digest. An AST diff of `Settings` between `e224c5f3^`
+and `e224c5f3` reports exactly that one field added and none removed, which is the test's own
+"field set changed too" branch: `_EXPECTED_FIELD_COUNT` 220 → 221 and both pins re-set, with the
+history line the file asks for. The default is `0`, meaning no cap, so no shipped run behaved
+differently; what moved is the envelope a speculation receipt is compared against, and receipts
+issued before it should stop verifying.
+
+Worth naming the method rather than the bug: it was found by running `tests/` whole after an edit
+that touched only `benchmarks/`, not by any reasoning about what the edit could have broken. The
+same sweep had run the suite before and the failure post-dates that run.
+
+### The reading series was one restart from gone
+
+`.gitignore`'s `*.jsonl` — written for run logs and ledgers — also covered
+`benchmarks/algotune/ruler_selfcheck_log.jsonl`. Forty dated readings, 7 KB, living on `/var/tmp`,
+in no snapshot: a bundle carries git, and a gitignored file is not in git. This box lost `/var/tmp`
+once already, on 2026-08-29. The series is the only artefact that can say WHEN a ruler and the box
+parted (§214) and it cannot be recomputed after the fact, so it is now un-ignored with a `!` rule
+and committed. Noticed only because `git status` did not list it after three readings were appended.

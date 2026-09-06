@@ -93,7 +93,22 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
-_EXPECTED_DIGEST = "sha256:0bf504d16e279cea185408d77ebe093fecadfecfab73dfdcbd44357fd3c5e33e"
+#   2026-09-04  + developer_probe_max_calls  (the per-run cap on developer-probe calls, added by
+#               `e224c5f3` so §190's registered arm could set a treatment that actually reaches
+#               `DevProbeTools`). The 'field set changed too' branch, verified that way rather than
+#               from the count: an AST diff of `Settings` between `e224c5f3^` and `e224c5f3` reports
+#               exactly `['developer_probe_max_calls']` added and nothing removed, so a +2/-1 cannot
+#               be hiding behind the +1. `_EXPECTED_FIELD_COUNT` goes 220 -> 221 and both pins are
+#               re-set.
+#               FOUND RED TWO DAYS LATE, on 2026-09-06, by a sweep that ran the whole suite rather
+#               than the tests near its own edit -- the commit that added the field shipped without
+#               re-pinning, so this gate has been failing since 04:19 on 2026-09-04. The default is
+#               `0`, which is "no cap", so nothing about a shipped run changed; what changed is the
+#               envelope a receipt is compared against, and that is precisely what the digest is
+#               for. Whether the knob is INERT for a calibration replicate is not claimed here: it
+#               was not established, and the guard is deliberately not clever enough to need it.
+#               Old receipts stop verifying, which is the correct outcome for a real schema change.
+_EXPECTED_DIGEST = "sha256:74faf6b4a9913b90defc376eef098bb94e0bda6d281cf274a7f0920bacfba5cb"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -420,7 +435,7 @@ _EXPECTED_DIGEST = "sha256:0bf504d16e279cea185408d77ebe093fecadfecfab73dfdcbd443
 #               neither parent's digest describes it. Old receipts SHOULD stop verifying: whether
 #               a single-command eval is health-checked at all is part of the envelope a
 #               speculation receipt was measured in.
-_EXPECTED_FIELD_COUNT = 220
+_EXPECTED_FIELD_COUNT = 221
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

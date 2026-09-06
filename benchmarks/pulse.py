@@ -74,6 +74,54 @@ def wchan(pid) -> str:
         return "gone"
 
 
+def orphans(bench: str) -> dict:
+    """Bench workers still pinned to a lane whose parent is gone (ppid 1).
+
+    THE HYGIENE CHECK LOOKS FOR STATE Z AND THESE ARE STATE S. Measured 2026-09-06 on a box the
+    sweep had just called clean -- zero zombies, no probe running: 23 orphaned `multiprocessing`
+    forkservers and resource trackers from runs four to six hours dead, holding 652 MiB and still
+    carrying the affinity mask of the lane they were born on. Nothing reported them, because
+    "zombie" was the only word the hygiene step knew.
+
+    They cost more than the memory. `busy_cpus_outside_lane` counted them as occupancy, so the
+    ruler's own contention field read 22 on an idle box and 22 under a full lane -- the same number
+    for both answers. That is fixed at the counting end (§313); this is the other end, the one that
+    says out loud that they are there.
+
+    Only what belongs to the bench's own interpreter is counted. An orphan of the host's making is
+    not this tool's business, and claiming it would make the number unactionable.
+    """
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+        boot = float(open("/proc/uptime", encoding="utf-8").read().split()[0])
+    except (OSError, ValueError):
+        return {"count": 0, "rss_mib": 0.0, "oldest_h": 0.0, "cpus": 0}
+    mark = f"{bench}/AlgoTune/.venv/bin/python"
+    seen: set[int] = set()
+    count, rss, oldest = 0, 0.0, 0.0
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            cmd = open(f"/proc/{pid}/cmdline", "rb").read().decode("utf-8", "replace")
+            if mark not in cmd:
+                continue
+            fields = open(f"/proc/{pid}/stat", encoding="utf-8").read().split(") ")[-1].split()
+            if fields[1] != "1":                       # still has a parent: someone owns it
+                continue
+            aff = os.sched_getaffinity(int(pid))
+            if not aff or len(aff) >= (os.cpu_count() or 0):
+                continue                               # unpinned: not a lane worker
+            rss += int(open(f"/proc/{pid}/statm", encoding="utf-8").read().split()[1]) * 4096 / 2 ** 20
+            oldest = max(oldest, boot - int(fields[19]) / hz)
+            seen |= aff
+            count += 1
+        except (OSError, ValueError, IndexError):
+            continue
+    return {"count": count, "rss_mib": round(rss), "oldest_h": round(oldest / 3600, 2),
+            "cpus": len(seen)}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -103,6 +151,13 @@ def main(argv=None) -> int:
     newest = check_money.endpoint_health(ledger)["newest"]
     live = lanes.probes(args.bench)
     running = {r["probe"] for r in live if r["probe"]}
+    orph = orphans(args.bench)
+    if orph["count"]:
+        # PRINTED BEFORE THE EARLY RETURN, because an idle box is exactly when nothing else would
+        # mention them and exactly when they are pure waste.
+        print(f'{orph["count"]} orphaned bench worker(s) pinned across {orph["cpus"]} cpu(s), '
+              f'{orph["rss_mib"]} MiB, oldest {orph["oldest_h"]} h -- parent gone (ppid 1), '
+              f'state S so the zombie check does not see them')
     if not live and not args.expect:
         print("no bench probe running")
         return 0

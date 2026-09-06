@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -179,6 +180,7 @@ def check_ruler_constants(bench: str):
     constant nobody has checked is how it stays quoted.
     """
     latest: dict = {}
+    quiet: dict = {}
     try:
         for line in open(Path(bench) / DRIFT_LOG, encoding="utf-8", errors="replace"):
             line = line.strip()
@@ -191,8 +193,15 @@ def check_ruler_constants(bench: str):
             task, med, stamp = row.get("task"), row.get("median"), str(row.get("stamp") or "")
             if not isinstance(med, (int, float)) or task not in SWEEP_CONSTANTS:
                 continue
+            busy = row.get("busy_cpus_outside_lane")
             if task not in latest or stamp > latest[task][1]:
-                latest[task] = (float(med), stamp)
+                latest[task] = (float(med), stamp, busy)
+            # AND THE MOST RECENT ONE TAKEN ON A QUIET BOX, kept separately. §313: `discrete_log`
+            # read 0.9380 with three sibling lanes self-checking and 1.0274 alone two hours later.
+            # Taking "the latest" without asking makes a busy afternoon look like a drifting ruler,
+            # and this check is the thing that would have said so.
+            if busy == 0 and (task not in quiet or stamp > quiet[task][1]):
+                quiet[task] = (float(med), stamp, busy)
     except OSError as exc:
         return False, f"cannot read the drift log: {type(exc).__name__}"
 
@@ -213,12 +222,18 @@ def check_ruler_constants(bench: str):
             said.append(f"{task}: UNMEASURED here ({why}; list says {quoted:.4f})")
             off += 1
             continue
-        got, stamp = latest[task]
+        # THE QUIET READING IS THE VERDICT WHERE ONE EXISTS. Not the newest: newest-wins is what
+        # turned a 06:38 rebuild -- four lanes self-checking at once -- into a -7.7 % drift on
+        # discrete_log and -5.2 % on pagerank, both of which came back inside 1.1 % alone.
+        got, stamp, busy = quiet.get(task) or latest[task]
+        under = "" if quiet.get(task) else (
+            f", taken with {busy} cpu(s) busy outside its lane" if busy else
+            ", taken before the box's load was recorded with the reading")
         delta = (got - quoted) / quoted
         mark = "" if abs(delta) <= DRIFT_TOLERANCE else "  <-- "
         if abs(delta) > DRIFT_TOLERANCE:
             off += 1
-        said.append(f"{task}: list {quoted:.4f}, measured {got:.4f} on {stamp[:10]} "
+        said.append(f"{task}: list {quoted:.4f}, measured {got:.4f} on {stamp[:10]}{under} "
                     f"({100 * delta:+.1f} %){mark}")
     return off == 0, "; ".join(said)
 
@@ -325,6 +340,76 @@ def check_campaign_evidence_overwrite(bench: str):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def check_snapshot_refusals(bench: str):
+    """"НЕ ПРОВЕРЕНО мной: снимок с исчезнувшим каталогом назначения; два снимка одновременно"
+
+    DRIVEN, NOT READ, and driven against the real `snapshot.sh` rather than a copy of its logic.
+
+    Both refusals are the same failure in different clothes: NOTHING WRITTEN reported as success.
+    The one this box actually suffered on 2026-08-29 was an empty backup under exit 0, so what is
+    checked here is the EXIT CODE and the empty destination, not the wording.
+
+      * destination not a mounted store -> exit 1 ("this is not a skip; it is a failed snapshot")
+      * another snapshot holds the lock  -> exit 3, so the timer retries instead of recording a
+        fingerprint, and an operator can tell "busy" from "broken"
+
+    The lock arm holds the lock itself and sets SNAPSHOT_LOCK_WAIT_S, so it never starts a real
+    snapshot: a drive that let the second run WIN the lock would copy 112 MB of bundles into a
+    temporary directory, which is how this check was first written and why the wait is a variable.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    script = Path(bench) / "looplab" / "benchmarks" / "snapshot.sh"
+    if not script.is_file():
+        return False, "snapshot.sh not on this box, so the claim cannot be driven"
+    work = tempfile.mkdtemp()
+    try:
+        store = Path(work) / "store"
+        (store / "snaps").mkdir(parents=True)
+        # The sentinel is what tells snapshot.sh this is the persistent store and not some path
+        # that happens to exist; without it the FIRST arm's refusal would be indistinguishable
+        # from the SECOND's, and both would pass for the wrong reason.
+        (store / ".persistent-store-id").write_text("drive\n", encoding="utf-8")
+        (store / "snaps" / ".persistent-store-id").write_text("drive\n", encoding="utf-8")
+
+        gone = subprocess.run(
+            ["bash", str(script)],
+            env={**os.environ, "SNAPSHOT_DEST": "/proc/no-such-mount/snaps"},
+            check=False, capture_output=True, text=True, timeout=180)
+
+        lockfile = store / "snaps" / ".snapshot.lock"
+        lockfile.touch()
+        holder = subprocess.Popen(
+            ["bash", "-c", 'exec 9>"$1"; flock 9; sleep 120', "_", str(lockfile)])
+        try:
+            busy = subprocess.run(
+                ["bash", str(script)],
+                env={**os.environ, "SNAPSHOT_DEST": str(store / "snaps"),
+                     "SNAPSHOT_LOCK_WAIT_S": "3"},
+                check=False, capture_output=True, text=True, timeout=180)
+        finally:
+            holder.kill()
+            holder.wait(timeout=30)
+
+        wrote = sorted(d.name for d in (store / "snaps").iterdir() if d.is_dir())
+        bad = []
+        if gone.returncode == 0:
+            bad.append(f"a vanished destination exited {gone.returncode}")
+        if busy.returncode != 3:
+            bad.append(f"a held lock exited {busy.returncode}, not 3")
+        if wrote:
+            bad.append(f"the refused run still wrote {wrote}")
+        if bad:
+            return True, "driven here: " + "; ".join(bad)
+        return False, (f"driven here: vanished destination -> exit {gone.returncode} "
+                       f"({gone.stderr.strip().splitlines()[0][:60] if gone.stderr.strip() else ''}"
+                       "...), held lock -> exit 3 with an empty destination; neither refusal can "
+                       "report success over nothing written")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
@@ -338,6 +423,8 @@ CLAIMS = [
     ("point 9: the comparison figures are the current corpus", check_comparison_figures),
     ("point 8: campaign.sh's rm -rf still overwrites the first attempt's evidence",
      check_campaign_evidence_overwrite),
+    ("point 8: NOT CHECKED -- a snapshot whose destination vanished, and two at once",
+     check_snapshot_refusals),
 ]
 
 

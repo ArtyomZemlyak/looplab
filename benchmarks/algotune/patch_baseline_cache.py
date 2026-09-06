@@ -217,9 +217,21 @@ WRITE_PATCH = '''                    self._cache[subset] = baseline_times
                                                 _ll_o = _ll_os2.sched_getaffinity(int(_ll_p))
                                             except Exception:
                                                 continue
-                                            if (_ll_o and len(_ll_o) < _ll_tot
+                                            if not (_ll_o and len(_ll_o) < _ll_tot
                                                     and not (_ll_o & _ll_mine)):
-                                                _ll_seen |= _ll_o
+                                                continue
+                                            # RUNNING, not merely present. Measured 2026-09-06:
+                                            # without this the field read 22 on an idle box and 22
+                                            # under a full neighbouring lane, because 23 orphaned
+                                            # forkservers from a six-hour-dead run were still
+                                            # pinned there. It counted workers that once existed.
+                                            try:
+                                                _ll_st = open("/proc/%s/stat" % _ll_p).read()
+                                                if _ll_st.split(") ")[-1].split()[0] != "R":
+                                                    continue
+                                            except Exception:
+                                                continue
+                                            _ll_seen |= _ll_o
                                         _ll_lanes = len(_ll_seen)
                                     else:
                                         _ll_lanes = 0
@@ -279,6 +291,9 @@ _REQUIRED_FRAGMENTS = [
     ("write provenance", '"cpu_affinity": sorted(_ll_os2.sched_getaffinity(0))'),
     ("provenance names the interpreter", '"interpreter": _ll_sys2.executable'),
     ("provenance counts busy cpus", '"busy_cpus_outside_lane": _ll_lanes'),
+    # A deployment carrying the field but not this line writes a number that cannot tell an idle
+    # box from a loaded one, which is worse than no field: it is a measurement-shaped constant.
+    ("provenance counts only RUNNING cpus", '.split()[0] != "R"'),
     ("write gate", "LOOPLAB baseline cache NOT WRITTEN"),
 ]
 
@@ -297,6 +312,24 @@ _GATE = """                    if _ll_key and not os.environ.get('ALGOTUNE_BASEL
                             import json as _ll_json2, os as _ll_os2"""
 
 
+# The running-state upgrade. The deployed file carries the ORIGINAL three-line condition verbatim,
+# because both came out of this generator; anchoring on it is what lets a box that already has the
+# field get the fix without a revert-and-re-derive cycle it has no pristine copy for.
+_RUNNING_ANCHOR = """                                            if (_ll_o and len(_ll_o) < _ll_tot
+                                                    and not (_ll_o & _ll_mine)):
+                                                _ll_seen |= _ll_o"""
+_RUNNING = """                                            if not (_ll_o and len(_ll_o) < _ll_tot
+                                                    and not (_ll_o & _ll_mine)):
+                                                continue
+                                            try:
+                                                _ll_st = open("/proc/%s/stat" % _ll_p).read()
+                                                if _ll_st.split(") ")[-1].split()[0] != "R":
+                                                    continue
+                                            except Exception:
+                                                continue
+                                            _ll_seen |= _ll_o"""
+
+
 def _upgrade_in_place(source: str):
     """Deliver missing fragments to an already-patched file. Returns (text, list-of-applied)."""
     applied = []
@@ -304,6 +337,9 @@ def _upgrade_in_place(source: str):
     if "LOOPLAB baseline cache NOT WRITTEN" not in out and _GATE_ANCHOR in out:
         out = out.replace(_GATE_ANCHOR, _GATE, 1)
         applied.append("write gate")
+    if '.split()[0] != "R"' not in out and _RUNNING_ANCHOR in out:
+        out = out.replace(_RUNNING_ANCHOR, _RUNNING, 1)
+        applied.append("provenance counts only RUNNING cpus")
     return out, applied
 
 

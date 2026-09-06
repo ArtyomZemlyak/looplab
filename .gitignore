@@ -85,3 +85,10 @@ ui/.dist.looplab-previous/
 # run is being watched means `vite build --outDir .dist.stage --emptyOutDir` and never touching the
 # live bundle. Nothing consumes it; delete it when you are done.
 ui/.dist.stage/
+
+# THE RULER SERIES IS A MEASUREMENT, NOT AN OUTPUT. `*.jsonl` above is aimed at run logs and
+# ledgers, and it swept up the one file that cannot be recomputed: 40 dated readings of the
+# reference against itself, the only thing that can say WHEN a ruler and the box parted (§214).
+# It lives on /var/tmp, no snapshot carries it (a bundle holds git, and a gitignored file is not
+# in git), and this box has already lost /var/tmp once. 7 KB, append-only.
+!benchmarks/algotune/ruler_selfcheck_log.jsonl
