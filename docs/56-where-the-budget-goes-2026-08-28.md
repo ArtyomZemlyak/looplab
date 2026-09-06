@@ -12723,3 +12723,38 @@ Nine cannot be ruled by this method at all. One does not evaluate. A campaign ov
 produce a mix of numbers with error bars and numbers without, and the two would look identical in
 the results table. **Ten tasks are campaign-ready; the CP-SAT nine need a different scoring rule
 than "divide by a cached reference time", and that is a design decision, not a measurement.**
+
+## §304 — CP-SAT's problem is not noise, it is that its runtime depends on cores
+
+§303 called the nine CP-SAT tasks unrulable and attributed it to nondeterminism. That is half right,
+and the wrong half was doing the work. Timed directly — `min_dominating_set`'s own reference, three
+instances, seven repeats each:
+
+| | instance 0 | instance 1 | instance 2 |
+|---|---|---|---|
+| **22 cores** (a bench lane) | 14.43 ms | 12.01 ms | 16.17 ms |
+| **1 core** | 32.23 ms | 24.88 ms | 36.08 ms |
+| repeat spread, 22 cores | ×1.74 | ×1.19 | ×1.52 |
+| repeat spread, 1 core | ×1.31 | ×1.41 | ×1.28 |
+
+Two things, and the second is the one that matters.
+
+**Restricting to one core does not make it reproducible.** Spreads are ×1.28–1.41 at one core
+against ×1.19–1.74 at twenty-two. CP-SAT's search is randomized whatever it is given, so "pin it and
+the noise goes away" is refuted.
+
+**But the runtime depends on cores by a factor of two.** The same instance takes 14.4 ms with a lane
+and 32.2 ms with one core — **×2.2**. The reference asks for nothing: `cp_model.CpSolver()` with no
+`num_search_workers` and no seed, so CP-SAT takes whatever the process is allowed.
+
+That is enough to produce §303's readings on its own, and it is not noise: per-instance repeat
+spread averages away over a hundred instances, while a systematic core-count difference between the
+baseline pass and the candidate pass does not. A median ratio of 1.85 needs a systematic cause, and
+a 2.2× dependence on allocation is one.
+
+**So the nine are not condemned; they are misconfigured.** The fix is to make both passes give
+CP-SAT the same allocation — which means either fixing `num_search_workers` in the evaluation or
+guaranteeing identical affinity for the reference timing and the candidate timing. Both are changes
+to the scoring harness that alter every CP-SAT number this bench would ever produce, so it is a
+decision to take deliberately, and it is not mine to take quietly. What is now measured is the size
+of the prize: nine of twenty tasks, currently unusable, and one number (×2.2) that says why.
