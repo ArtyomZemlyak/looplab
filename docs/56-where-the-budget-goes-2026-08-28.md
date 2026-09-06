@@ -12830,3 +12830,37 @@ Three mutations red on the fix, including one that adds a *fourth* hard-coded va
 asserts every entry in that environment dict is either a fixed fact about the bench (the data
 directory) or a caller-overridable default, so the next override cannot be added quietly. Finding
 the first three one at a time, each after it had cost something, is what that test is for.
+
+## §307 — the nine CP-SAT tasks are rulable after all: it was the twenty-two workers
+
+§303 concluded the nine could not be ruled. §306 showed contention was the dominant term and left a
+"systematic ~14 % residual". Running the same pair of passes at **one worker** on three more CP-SAT
+tasks and one control settles it:
+
+| task | 22 workers | **1 worker** |
+|---|---|---|
+| max_common_subgraph | 1.4820 | **1.0141** (1.007, 1.028, 1.014) |
+| queens_with_obstacles | 1.2667 | **1.0142** (1.014, 1.023, 0.997) |
+| max_clique_cpsat | 1.6028 | **0.9974** (1.027, 0.980, 0.997) |
+| min_dominating_set | 1.3175 / 1.8627 | 1.1450 (1.13, 1.15, 1.20) |
+| discrete_log (control) | 1.0097 | **0.9965** |
+
+**Three of the four land on unity.** So §306's "residual" is not systematic — it is
+`min_dominating_set` alone, and every other CP-SAT task tested reads within 1.5 % of 1.0 once the
+twenty-two-worker contention is removed. **§303's conclusion is withdrawn: the nine tasks are not
+unrulable. The twenty-two-worker regime is what breaks them.**
+
+The mechanism now hangs together with §304's measurement: CP-SAT's runtime depends on the cores it
+can actually use (×2.2 between one core and a lane), and twenty-two pinned single-core workers
+running CP-SAT simultaneously contend for shared cache and bandwidth in a way that differs between
+the baseline pass and the candidate pass. Take the contention away and the ruler works.
+
+**What that costs to use.** A one-worker ruler is twenty-two times slower to build, and the regime
+key changes from `__w22x1r3` to `__lane22r3`, so it is a *different* cache — the existing forty
+entries are not it. Whether a campaign should score CP-SAT tasks against a one-worker ruler while
+the candidates themselves run twenty-two-wide is exactly the question §301 raised and did not
+answer: a ruler timed under conditions the scored runs will not see is its own kind of wrong. This
+is now a decision with both numbers on the table rather than a mystery.
+
+`min_dominating_set` remains the one task that does not come home at one worker (1.13–1.20 across
+three repeats, none near unity). One outlier out of four, named rather than averaged away.
