@@ -325,6 +325,21 @@ Blackwell'ом, а AlgoTune поднялся — и вся кампания уш
 - Суммарные summary docs 56 §1–140 подготовлены двумя параллельными читателями и сверены с моим
   чтением §141–200 и docs 57/58; расхождений между ними и первоисточником не найдено, но правило
   §58.11 (сверять до цитирования) распространяется и на этот текст.
-- Два факта проверены живьём: компиляция дерева на 3.11 (одна ошибка, исправлена) и тестовый набор
-  (результат прогона на этой машине — в сообщении коммита, а не здесь, чтобы число не устарело в
-  документе).
+- Два факта проверены живьём: компиляция дерева на 3.11 (одна ошибка, исправлена) и тестовый набор.
+  Прогон на этой машине (Python 3.11, без Landlock, без `/var/tmp/looplab-bench`, `-m "not docker"`),
+  на дереве ПОСЛЕ починки `dev_probe.py`: **13,395 passed, 45 failed, 222 skipped, 23 мин 58 с.**
+  Число устареет; классы падений — нет, и они все про машину, кроме одного:
+  - 22 — `import numpy` в `test_algotune_full_context.py` / `test_algotune_profile_command.py`
+    (`suite-requires-an-undeclared-numpy`, doc 57);
+  - 12 — `test_snapshot_refuses_a_store_that_is_not_there.py` требует живой `/var/tmp/looplab-bench`
+    (тот же класс, что `check-leaks-pinned-to-one-box`);
+  - 6 — Landlock: `test_dev_probe.py`, `test_the_probe_cap_is_off_until_an_arm_asks.py`, `test_read_fence.py`;
+  - 3 — пути этой машины: `test_the_patch_generates_the_ruler_that_is_deployed.py` (нет чекаута
+    AlgoTune), `test_the_meter_is_pinned_off_the_lanes.py` (профиль ядер), `test_extract_champion_finds_looplab.py`;
+  - 1 — `test_documentation_contracts.py`, потому что этот документ был добавлен ПОКА шёл прогон
+    (ловушка doc 56 §184); на остановленном дереве — 10 passed;
+  - **1 настоящий**: `test_calibration_profile_home.py` — `Settings` выросли 220 → 221
+    (`developer_probe_max_calls`, 09-04) и дайджест калибровочного профиля сдвинулся на
+    `74faf6b4…`, а константа не перепинована. Doc 56 §191 писал, что «четыре guard'а поймали
+    добавление»; этот — пятый, и он не был запущен. Это ровно «ordinary Settings work revokes
+    the calibration corpus» из `CLAUDE.md`; решение о перепиновке — владельцу, здесь только запись.
