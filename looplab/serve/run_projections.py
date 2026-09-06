@@ -21,6 +21,7 @@ from looplab.core.run_deletion import (RUN_DELETION_FENCE_PREFIX, RunDeletionSto
                                        load_run_deletion_fence, run_deletion_snapshot_token)
 from looplab.engine.champion_caveats import champion_metric_caveats, mislead_gap
 from looplab.engine.comparability import record_of
+from looplab.events.trajectory import running_best
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.digest import concept_rollup as _concept_rollup, theme_rollup as _theme_rollup
 from looplab.events.replay import fold
@@ -140,6 +141,14 @@ def run_summaries(srv, only=None) -> list:
                 # caveats use (`engine/champion_caveats.py::mislead_gap`). `None` without a champion;
                 # a clean run reads `gap: 0` with `excluded: 0`. Additive; a legacy client ignores it.
                 "mislead_gap": mislead_gap(st),
+                # THE RUN'S METRIC TRAJECTORY as change points (doc 52 row 26): the running best per
+                # evaluated experiment, `[index, best, node_id]` at every improvement plus the final
+                # index, bounded by `events/trajectory.py::TRAJECTORY_CAP`. This is the series the
+                # cross-run overlay (`ui/src/crossRunRank.js::trajectoryOverlay`) was waiting for: it
+                # rides on the row rather than costing one state fold per run on the request thread,
+                # and it is cached WITH the fold, so a poll pays nothing for it. `None` when no
+                # feasible measured node exists. Additive; a legacy client ignores it.
+                "trajectory": running_best(st),
                 # WHAT THIS NUMBER MAY BE RANKED AGAINST (`engine/comparability.py`). The row's own
                 # `task_id` + `direction` is what every cross-run surface currently partitions on,
                 # and `ui/src/crossRunRank.js` says in its own words why that is not enough: "a

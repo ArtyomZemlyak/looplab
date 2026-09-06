@@ -361,6 +361,7 @@ _LAYOUT = {
     "trace_files": "core",       # private trace-file identity + bounded physical-row boundary
     "trust_gate": "events",  # the ONE trust_gate_changed write policy, shared by its two surfaces
     "traceview": "events",
+    "trajectory": "events",
     "tracing": "core",
     "train_monitor": "engine",   # per-eval observer + diagnostics + separately opt-in early kill
     "asha_monitor": "engine",    # per-eval ASHA live-curve rank watchdog (advisory + opt-in kill)

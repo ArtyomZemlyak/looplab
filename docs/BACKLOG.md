@@ -471,7 +471,9 @@ site that proves it is open.
     CLAUDE.md's `ui/` row has carried the measurement (36 of 45 runs with a metric, 20 groups, 5 of
     them real) since it shipped. The surviving "Cross-run ranking unavailable" string is the
     group-of-one caveat, not the disclaimer this row quotes. No marker is added: this row is
-    CLOSED. What is genuinely left is named IN CODE as `TRAJECTORY_GAP`, not here.]
+    CLOSED. What was genuinely left — the trajectory overlay — was named IN CODE as `TRAJECTORY_GAP`
+    until 2026-09-06, when doc 52 row 26 shipped it (`events/trajectory.py::running_best` on the run
+    row, `crossRunRank.js::trajectoryOverlay` + `charts.jsx::MultiTrajectory` in the panel).]
 11. ✅ **Fork-to-branch: the gesture EXISTS end to end; only its RunView affordance is missing (P1, S).**
     *(2026-08-14 — the three citations above were re-verified and all three were correct.)* The fused
     gesture landed as `inject_node` + a validated `forked_from` receipt, **not** as a new control event

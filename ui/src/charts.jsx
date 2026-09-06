@@ -523,30 +523,45 @@ export function Spark({ series, width = 120, height = 22, label = null }) {
 function Empty({ children }) { return <div className="muted" style={{ padding: 20 }}>{children}</div> }
 
 // U4 · overlay several runs' running-best trajectories on ONE axis, to compare convergence at a
-// glance. `runs` = [{label, run_id, series:[running-best value per evaluated node]}]. x = experiment
-// index (runs have different lengths — each line just stops at its own end); y = shared metric range.
+// glance. `runs` = [{label, run_id, points:[[experiment, running-best, node_id]], complete}] — the
+// CHANGE POINTS `events/trajectory.py::running_best` puts on every run-summary row — or the legacy
+// dense `series:[running-best value per evaluated node]`. x = experiment index (runs have different
+// lengths — each line just stops at its own end); y = the shared metric range, which is exactly why
+// the one consumer (`panels.jsx::CrossRunPanel` through `crossRunRank.js::trajectoryOverlay`) hands
+// it a single COMPARABLE GROUP at a time: one task, one direction, one evaluation, nothing rescaled.
 const _RUN_COLORS = ['#4aa3ff', '#2ecc71', '#f0b429', '#e0559a', '#8b5cf6', '#22d3d3', '#ff7a45', '#9aa7b5']
 const _RUN_DASHES = ['', '7 3', '2 3', '9 3 2 3', '5 2', '1 3', '10 3', '4 3 1 3']
-export function MultiTrajectory({ runs, width = 760, height = 240 }) {
-  const withData = (runs || []).filter(r => (r.series || []).length > 0)
+const _runPoints = run => (Array.isArray(run.points) && run.points.length
+  ? run.points : (run.series || []).map((value, index) => [index, value]))
+export function MultiTrajectory({ runs, width = 760, height = 240, title = 'Cross-run trajectories' }) {
+  const withData = (runs || []).map(run => ({ run, points: _runPoints(run) }))
+    .filter(entry => entry.points.length > 0)
   if (!withData.length) return <Empty>no comparable run trajectories yet</Empty>
-  const allV = withData.flatMap(r => r.series)
+  const allV = withData.flatMap(entry => entry.points.map(point => point[1]))
   const lo = Math.min(...allV), hi = Math.max(...allV), span = (hi - lo) || 1
-  const maxLen = Math.max(...withData.map(r => r.series.length))
+  const maxX = Math.max(...withData.map(entry => entry.points[entry.points.length - 1][0]))
   const pad = 34, w = width, h = height
-  const X = i => pad + (maxLen <= 1 ? 0 : i / (maxLen - 1) * (w - pad - 10))
+  const X = x => pad + (maxX <= 0 ? 0 : x / maxX * (w - pad - 10))
   const Y = v => h - pad - (v - lo) / span * (h - pad - 12)
-  const rows = withData.flatMap(run => run.series.map((metric, experiment) => ({
-    run: run.label || run.run_id, run_id: run.run_id, experiment, metric,
+  // A running best is a STEP: it holds its value until the experiment that beat it, so the segment
+  // between two change points runs flat and then rises or drops at ONE x. A slope would draw an
+  // improvement as gradual when the record names the single node that made it.
+  const stepPath = points => points.map(([x, v], i) => (i
+    ? `H${X(x).toFixed(1)} V${Y(v).toFixed(1)}`
+    : `M${X(x).toFixed(1)} ${Y(v).toFixed(1)}`)).join(' ')
+  const rows = withData.flatMap(({ run, points }) => points.map(([experiment, metric, node]) => ({
+    run: run.label || run.run_id, run_id: run.run_id, experiment,
+    node: Number.isSafeInteger(node) ? node : '', metric,
   })))
   const columns = [
     { key: 'run', label: 'Run', firstColumnHeader: true },
     { key: 'run_id', label: 'Run id' }, { key: 'experiment', label: 'Experiment', numeric: true },
+    { key: 'node', label: 'Node', numeric: true },
     { key: 'metric', label: 'Running best', numeric: true },
   ]
   return (
-    <ChartFrame title="Cross-run trajectories"
-      description="Each run uses both a hue and a dash pattern; the table contains every exact point."
+    <ChartFrame title={title}
+      description="Each run uses both a hue and a dash pattern; a line holds its value until the experiment that beat it, and the table contains every exact change point."
       columns={columns} rows={rows} csvName="run-trajectories.csv">
     {({ labelledBy }) => <>
       <svg width={w} height={h} role="img" aria-labelledby={labelledBy}>
@@ -555,25 +570,27 @@ export function MultiTrajectory({ runs, width = 760, height = 240 }) {
         <text x={pad - 6} y={16} textAnchor="end" fontSize="10" fill="var(--fg-mut)">{fmt(hi)}</text>
         <text x={pad - 6} y={h - pad} textAnchor="end" fontSize="10" fill="var(--fg-mut)">{fmt(lo)}</text>
         <text x={(w + pad) / 2} y={h - 6} textAnchor="middle" fontSize="10" fill="var(--fg-mut)">experiment #</text>
-        {withData.map((r, k) => {
+        {withData.map(({ run, points }, k) => {
           const c = _RUN_COLORS[k % _RUN_COLORS.length]
           const dash = _RUN_DASHES[k % _RUN_DASHES.length]
-          const pts = r.series.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ')
-          return <g key={r.run_id || k}>
-            <polyline points={pts} fill="none" stroke="var(--fg)" strokeDasharray={dash || undefined}
+          const d = stepPath(points)
+          return <g key={run.run_id || k}>
+            <path d={d} fill="none" stroke="var(--fg)" strokeDasharray={dash || undefined}
               strokeWidth="4" opacity=".78" />
-            <polyline points={pts} fill="none" stroke={c}
+            <path d={d} fill="none" stroke={c}
               strokeDasharray={dash || undefined} strokeWidth="2.1" opacity="0.95" />
           </g>
         })}
       </svg>
       <div className="row" style={{ flexWrap: 'wrap', gap: 10, marginTop: 4 }}>
-        {withData.map((r, k) => <span key={r.run_id || k} className="muted" style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        {withData.map(({ run }, k) => <span key={run.run_id || k} className="muted" style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
           <svg width="18" height="8" aria-hidden="true"><line x1="0" x2="18" y1="4" y2="4" stroke="var(--fg)"
             strokeDasharray={_RUN_DASHES[k % _RUN_DASHES.length] || undefined} strokeWidth="4" opacity=".78" />
             <line x1="0" x2="18" y1="4" y2="4" stroke={_RUN_COLORS[k % _RUN_COLORS.length]}
               strokeDasharray={_RUN_DASHES[k % _RUN_DASHES.length] || undefined} strokeWidth="2" /></svg>
-          {r.label || r.run_id}</span>)}
+          {run.label || run.run_id}{run.complete === false
+            ? <span title="more improvements than the row carries: this line is drawn from an even subsample of its change points, first and last kept"> (coarser)</span>
+            : null}</span>)}
       </div>
     </>}
     </ChartFrame>

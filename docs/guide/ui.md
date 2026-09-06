@@ -722,6 +722,18 @@ nothing on the row says which artifact a number is about — the metric **subjec
 non-blank `task_id`, the panel fails closed with no observations: multiple legacy rows with a missing identity
 are not members of one task.
 
+Under the table, **one running-best overlay per comparable group** (since 2026-09-06, doc 52 row 26):
+each run's running best per evaluated experiment as a **step** line — it holds its value until the
+experiment that beat it — drawn only inside the group, so the axis is that group's own objective and
+nothing is rescaled or normalized. The series rides on the run row (`trajectory`: change points
+`[experiment, best, node_id]`, at most 200 of them, derived from the same fold as the row and cached
+with it), so opening the panel folds nothing. The sentence under each chart counts what is **not**
+drawn and why: rows with no series (no feasible measured node, or a row served before the series
+existed), prefix-folded runs (not drawn for the reason they hold no rank), rows beyond the eight lines
+the chart can tell apart (in rank order), and rows drawn coarser because they held more improvements
+than the row carries. The legend carries each run's **group rank**, and the chart's data view lists
+every exact change point.
+
 ## Which memory panel am I looking at?
 
 Three panels hold durable knowledge, and what separates them is **who writes**, not what the content

@@ -778,10 +778,14 @@ a function-local import). `tests/test_launch_preflight.py` drives the verdict ag
 over the whole refusal ladder; `tests/test_tui.py` drives the TUI's footer and launch through a real
 server and pins the no-copy guard.*
 
-OPEN[cross-run-trajectory-overlay-unbuilt] the run-comparison screen ranks runs of one task and cannot
-overlay their metric TRAJECTORIES, because the run-list payload carries `nodes` as a count;
-`ui/src/crossRunRank.js` names the gap in its own constant (BACKLOG §0.1 #10).
-proof:`present:export const TRAJECTORY_GAP@ui/src/crossRunRank.js`
+*Closed 2026-09-06 (row 26 shipped): the marker `cross-run-trajectory-overlay-unbuilt` stood here.
+The run-summary row now carries `trajectory` — the running best as CHANGE POINTS
+`[experiment, best, node_id]`, `events/trajectory.py::running_best`, derived from the same fold as the
+row and cached with it, bounded by `TRAJECTORY_CAP` — so the overlay costs no fold per run;
+`ui/src/crossRunRank.js::trajectoryOverlay` draws one comparable group per chart through
+`charts.jsx::MultiTrajectory` (a step path now, and the chart's first consumer), counts every row it
+leaves out (no series, prefix-folded, beyond the eight lines the chart can tell apart, capped) and
+`trajectoryClaim` words it; `TRAJECTORY_GAP` is deleted. Deleted per the index rule.*
 
 ### 4.4 Verified open, and NOT tagged — with the reason
 

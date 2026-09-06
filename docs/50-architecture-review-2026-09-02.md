@@ -1169,15 +1169,16 @@ command set against the Typer app (same row). What is deliberately NOT here: a v
 deprecation header on the surface, and per-route HTTP-test coverage — the review's other two
 findings, still open as prose. Deleted per the index rule.*
 
-OPEN[largest-ui-components-are-never-mounted] AssistantBar, RunView and RunList's default export —
-10,595 lines, 55 % of the six largest components — are named by 54 test files and mounted by none
-(`jsdom` is already a devDependency, and `ui/test/cardKanban.test.js` already mounts a real
-component through `vite.ssrLoadModule` + `renderToStaticMarkup`, so the harness is the extraction
-of a pattern that exists);
-their coverage is a compile check plus source-text pins, which cannot see a `disabled` gate flip,
-and the suite's own history records a dropped brace passing 767 tests. Seven hub panels are
-rendered by no test at all. One shared jsdom harness (fetch stub keyed by path, fake timers) and
-one gate-flip test per component. proof:absent:createElement(AssistantBar@ui/test
+*Closed 2026-09-06 (row 26 shipped): the marker `largest-ui-components-are-never-mounted` stood
+here. `ui/test/_mount.js` is the harness — the `cardKanban.test.js` pattern extracted (the Vite SSR
+transform + `renderToStaticMarkup`) plus the jsdom globals, `matchMedia` / `requestAnimationFrame` /
+`ResizeObserver`, and a `fetch` stub keyed by path that records every call — and
+`mountRunList.test.js`, `mountRunView.test.js`, `mountAssistantBar.test.js` mount the three default
+exports through it with one gate flip each: a restored navigation state selecting the Lineage view
+(`aria-pressed`), `reviewMode` marking the workspace root read-only, `hidden` collapsing the
+Assistant to nothing. Each also asserts that the render fetched nothing, which is what makes a
+static mount an honest one; no fake timers, for the reason the harness header gives. Deleted per the
+index rule.*
 
 ### The site markers
 
