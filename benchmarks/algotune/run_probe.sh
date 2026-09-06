@@ -64,6 +64,61 @@
 #
 # И ВТОРОЙ ЗАМОК: каталог с уже записанным терминальным событием не переиспользуется. Даже если тело
 # как-то запустится дважды, второй запуск откажется, а не продолжит тратить чужой бюджет.
+# ARM DISCIPLINE AS CODE (docs/60 s60.9 A4; docs/56 s187, s195). An ARM is any probe whose
+# INSTRUMENT.txt would carry `card_args:` or `cli_settings:` other than the shipped default -- i.e.
+# `PROBE_MAKE_TASK_ARGS` or `PROBE_LOOPLAB_SETTINGS` set -- and an arm may not start unless the
+# probe directory already holds `PREREGISTERED.txt` naming, BEFORE the money:
+#
+#   primary_outcome: <the one number the arm is judged on, e.g. final champion TEST speedup>
+#   batches:         <paired batches of four (2 per arm), the unit `benchmarks/arm_power.py` sizes>
+#   power:           <the share of simulated arms reaching alpha at that size, from arm_power.py>
+#   arm_power:       <the arm_power.py command line that produced that row, verbatim>
+#
+# Measured need: s187's arm was sized at twelve a side from a power table computed on a different
+# outcome and closed at p = 0.1341 having answered nothing; 24 probes bought a power of 0.24. Four
+# separate arms reached p ~ 0.1 on n = 3 and collapsed on the fourth point (docs/58 s58.3). A power
+# table printed AFTER the money is a rationalisation, and an outcome chosen after the numbers are
+# in is the one that happens to be significant -- so both are demanded as a FILE the launcher can
+# check, written by the operator, before the first token is spent.
+#
+# A CONTROL is unaffected: a probe on the shipped card and the shipped settings needs no
+# preregistration, because it IS the baseline every arm is preregistered against. The gate sits
+# above the fence check, the lane check and the instrument record -- above everything, because a
+# refusal that costs four seconds of CPU and leaves a `ws/` behind is still a refusal that spent
+# nothing. Exit 4: distinct from 1 (fence/lane/task refusals) and 2 (a broken bridge).
+#
+# `power:` is checked for SHAPE only (a number in [0, 1]); the launcher cannot re-run the
+# simulation -- `arm_power.py` needs the corpus -- and a gate that could would be spending the
+# operator's clock to second-guess a number the `arm_power:` line already makes re-derivable.
+require_preregistration() {   # $1 = probe dir. 0 = may start; 4 = an arm with no valid PREREGISTERED.txt
+  local pre="$1/PREREGISTERED.txt" missing=""
+  if [ -z "${PROBE_MAKE_TASK_ARGS:-}" ] && [ -z "${PROBE_LOOPLAB_SETTINGS:-}" ]; then
+    return 0                       # a control on the shipped card and settings
+  fi
+  if [ ! -s "$pre" ]; then
+    echo "REFUSED: this is an ARM launch (card_args/cli_settings differ from the shipped default)" >&2
+    echo "  and $pre does not exist. An arm starts only after its outcome, its size and its" >&2
+    echo "  power are on record -- write PREREGISTERED.txt with these four lines first:" >&2
+    echo "    primary_outcome: <the one number this arm is judged on>" >&2
+    echo "    batches: <paired batches of four, the unit benchmarks/arm_power.py sizes>" >&2
+    echo "    power: <arm_power.py's power at that size, 0..1>" >&2
+    echo "    arm_power: <the benchmarks/arm_power.py command line that produced it>" >&2
+    echo "  docs/56 s187: 24 unpreregistered probes bought a power of 0.24 and answered nothing." >&2
+    return 4
+  fi
+  grep -qE '^primary_outcome:[[:space:]]*[^[:space:]]' "$pre" || missing="$missing primary_outcome"
+  grep -qE '^batches:[[:space:]]*[1-9][0-9]*([[:space:]]|$)' "$pre" || missing="$missing batches"
+  grep -qE '^power:[[:space:]]*(0(\.[0-9]+)?|1(\.0+)?)([[:space:]]|$)' "$pre" || missing="$missing power"
+  grep -qE '^arm_power:.*arm_power\.py' "$pre" || missing="$missing arm_power"
+  if [ -n "$missing" ]; then
+    echo "REFUSED: $pre is incomplete -- missing or malformed:$missing" >&2
+    echo "  (primary_outcome: non-empty; batches: a positive integer; power: a number in [0, 1];" >&2
+    echo "   arm_power: the benchmarks/arm_power.py command line that computed the power)" >&2
+    return 4
+  fi
+  return 0
+}
+
 main() {
 set -u
 MODEL="$1"; LABEL="$2"; LANE="$3"; TASK="${4:-edge_expansion}"; METER="${5:-http://127.0.0.1:8802}"; BUDGET="${6:-1.00}"
@@ -75,6 +130,10 @@ ROOT=/var/tmp/looplab-bench
 # ничего не испортило; тест, который однажды оставит там events.jsonl, попадёт в каждую
 # сводку по корпусу молча и без следа в git.
 OUT=${PROBE_OUT_ROOT:-$ROOT/model-probes}/$LABEL
+# THE ARM GATE IS FIRST -- before the output tree exists, before the stand is touched, before a
+# line is logged. An arm with no preregistration has nothing to record yet; see
+# `require_preregistration` for why the file is demanded rather than the table.
+require_preregistration "$OUT" || exit $?
 LOG=$OUT/probe.log
 mkdir -p "$OUT/ws" "$OUT/runs/$TASK/memory" "$OUT/runs/$TASK/knowledge"
 say() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
@@ -269,6 +328,14 @@ mkdir -p "$OUT"
   # `developer_probe_max_calls`) is unreadable afterwards without it -- §113 is the record of what a
   # probe whose inputs are not written down costs.
   echo "cli_settings:   ${PROBE_LOOPLAB_SETTINGS:-(none -- shipped defaults)}"
+  # THE PREREGISTRATION, PINNED. An arm's tree carries the digest of the file it started under, so
+  # an outcome edited after the numbers came in is a different digest from the one on record; a
+  # control says positively that none was required, so the missing line cannot read as "unknown".
+  if [ -n "${PROBE_MAKE_TASK_ARGS:-}" ] || [ -n "${PROBE_LOOPLAB_SETTINGS:-}" ]; then
+    echo "preregistered:  $OUT/PREREGISTERED.txt sha256=$(sha256sum "$OUT/PREREGISTERED.txt" 2>/dev/null | cut -c1-16)"
+  else
+    echo "preregistered:  (not required -- a control on the shipped card and settings)"
+  fi
   # ХЕШ САМОЙ КАРТОЧКИ, а не только флагов. Флаги называют вариант; хеш ловит любое
   # изменение текста -- новый пункт, поправленную формулировку, сдвинувшуюся константу.
   # 01.09 медиана обращений к reference-модулю по 28 пробам вышла 7.6 %, ровно внутри
