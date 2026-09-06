@@ -639,12 +639,19 @@ def _make_calibration_roles(task: TaskAdapter, settings: Settings, run_dir: Path
 def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             crash_after: Optional[int], *, speculation_gate_calibration: bool = False,
             wrap_up_only: bool = False) -> Engine:
-    from looplab.core.llm import validate_bound_profiles
+    from looplab.core.llm import run_cost_accountant, validate_bound_profiles
     from looplab.core.tracing import set_llm_capture
     from looplab.agents.reachability import llm_consumer_plan
     from looplab.agents.preflight import (credential_free_wrap_up_settings,
                                           preflight_role_endpoints, wrap_up_credential_warning,
                                           wrap_up_endpoint_warning)
+    # The run's ONE spend ceiling is minted HERE, before anything forks these settings. Every
+    # `model_copy` below (the credential-free wrap-up copy a few lines down, the role factories'
+    # `unified_agent=False` and `developer_backend` forks) copies the settings `__dict__` shallowly
+    # and therefore INHERITS an accountant attached before it — and mints a second one for a copy
+    # taken first. `core/llm.py::run_cost_accountant` records the 2x ceiling that ordering luck
+    # produced on the wrap-up-only path; attaching at the entry point makes the order irrelevant.
+    run_cost_accountant(settings)
     # Everything this entry point may lose to a missing model, in the order the two gates run. A
     # wrap-up entry collects instead of raising (see below) and the commands close by naming it.
     _degradations: list[str] = []

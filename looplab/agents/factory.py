@@ -21,7 +21,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from looplab.core.llm import make_llm_client, make_llm_client_for, resolve_llm_target
+from looplab.core.llm import (make_llm_client, make_llm_client_for, resolve_llm_target,
+                              run_cost_accountant)
 from looplab.core.prompts import PromptStore
 
 if TYPE_CHECKING:                      # `adapters.tasks` re-exports from HERE, so a runtime import
@@ -95,6 +96,10 @@ def make_developer_factory(task: TaskAdapter, settings):
         # to one and not the other is exactly the three-way disagreement that registry closed.
         from looplab.core.config import DEVELOPER_BACKEND_ALIASES
         b = DEVELOPER_BACKEND_ALIASES.get(backend, backend)
+        # Attach the run's ONE accountant to the PARENT before forking it: `model_copy` is shallow,
+        # so a copy taken after the attach shares the ceiling and one taken before mints a second
+        # (`core/llm.py::run_cost_accountant`). A swapped-in Developer meters on the run's budget.
+        run_cost_accountant(settings)
         s = settings.model_copy(update={"developer_backend": b})
         if b == "default" and settings.developer_backend != "default":
             from looplab.agents.preflight import preflight_in_process_developer_replacement
@@ -218,6 +223,10 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     stage gets its own client + read-only run tools for self-driving action choice."""
     from looplab.agents.strategist import make_strategist
     from looplab.agents.unified_agent import UnifiedAgent
+    # The run's ONE accountant is attached to the parent BEFORE this fork, so the split roles and
+    # the clients built from the parent afterwards (deep researcher, report writer) meter on one
+    # ceiling; the `wrap_up_only` path used to copy first and run two (`run_cost_accountant`).
+    run_cost_accountant(settings)
     split = settings.model_copy(update={"unified_agent": False})
     researcher, developer = make_roles(
         task, split, run_dir, _developer_role="implement")   # H3/stage target applied inside

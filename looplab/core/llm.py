@@ -2101,6 +2101,20 @@ class CostAccountant:
         self.last_sink_error: Optional[str] = None
         self._lock = threading.Lock()
 
+    def __deepcopy__(self, memo):
+        """A deep copy of anything holding this accountant holds THIS accountant.
+
+        The accountant is a run's spend IDENTITY, not data: `run_cost_accountant` attaches it to the
+        run's `Settings` so every client built from them meters on one ceiling, and a copy of those
+        settings that minted a private accountant would be a second ceiling (docs/57
+        `run-accountant-splits-on-settings-copy`). `copy.deepcopy(settings)` used to raise instead
+        -- `_lock` cannot be pickled -- which was the latent half of the same defect: a deep copy
+        can neither share the ledger nor be refused quietly. Sharing is the only answer that keeps
+        `llm_budget_usd` a ceiling on the RUN.
+        """
+        memo[id(self)] = self
+        return self
+
     def set_sink(self, callback: Optional[Callable[[dict], None]]) -> None:
         """Install/replace the post-commit delta sink used by a durable run ledger."""
         if callback is not None and not callable(callback):
@@ -2770,28 +2784,24 @@ def run_cost_accountant(settings) -> "CostAccountant":
 
     Cost accounting for a run whose ceiling is 0.0 (no limit) is unchanged: the accountant is still
     shared, which only makes `find_cost_accountants` dedupe to one entry instead of N.
+
+    THE IDENTITY SURVIVES A COPY ONLY IF IT EXISTS BEFORE THE COPY, and that used to be luck
+    (docs/57 `run-accountant-splits-on-settings-copy`, closed 2026-09-06). The cache rides the
+    settings object's `__dict__`, and pydantic's `model_copy` copies that dict SHALLOWLY -- so a
+    copy taken AFTER the attach shares this accountant while a copy taken BEFORE mints its own
+    (driven: `Settings()`, copy, call this on both -> two objects; attach first, copy after -> one
+    shared object). The default `run` path was saved by ordering alone --
+    `agents/preflight.py::preflight_role_endpoints` happened to build the first client from the
+    PARENT before `agents/factory.py::build_unified_agent` forked it -- and on the `wrap_up_only`
+    path (`cli/run_cmds.py` builds the finalize engine with preflight SKIPPED) the copy came
+    FIRST: the unified roles' clients metered on the copy's accountant while the
+    deep-researcher/report-writer clients built from the parent metered on a second one, the 2x
+    ceiling this docstring says was removed, back on the one entry point that still spends. So
+    the ATTACH is now explicit at every fork: `cli/__init__.py::_engine` calls this right after
+    settings resolve, and both fork sites in `agents/factory.py` call it on the PARENT before
+    their `model_copy`, so a copy can no longer come first. `copy.deepcopy(settings)` shares it
+    too -- see `CostAccountant.__deepcopy__` -- rather than raising on the accountant's lock.
     """
-    # OPEN[run-accountant-splits-on-settings-copy] "one accountant per run" is ORDER-dependent: a
-    # `model_copy` taken before the first client splits the ceiling.
-    # proof:absent:run_cost_accountant@looplab/agents/factory.py
-    # REVIEW 2026-08-25 (correctness): the cache rides the settings object's `__dict__`, and
-    # pydantic's `model_copy` copies that dict SHALLOWLY -- so a copy taken AFTER a client exists
-    # shares this accountant, while a copy taken BEFORE mints its own (driven: `Settings()`, copy,
-    # call this on both -> two objects; attach first, copy after -> one shared object). The default
-    # `run` path is saved by ordering luck alone: `agents/preflight.py::preflight_role_endpoints`
-    # happens to build the first client from the PARENT settings before
-    # `agents/factory.py::build_unified_agent` forks it (the `unified_agent=False` copy). On the
-    # `wrap_up_only` path (`cli/run_cmds.py` builds the finalize engine with preflight SKIPPED,
-    # `_engine(..., wrap_up_only=True)`), the copy comes FIRST: the unified roles' clients meter on
-    # the copy's accountant while the deep-researcher/report-writer clients built from the parent
-    # meter on a second one -- the 2x ceiling this docstring says was removed, back on the one entry
-    # point that still spends (paid curation, memo verification, the report). Fix direction: make
-    # the fork sites inherit explicitly -- call this function on the PARENT before any `model_copy`
-    # in `build_unified_agent` / `make_developer_factory` (one line each), or attach once in
-    # `cli/__init__.py::_engine` right after settings resolve. Worth a sentence beside
-    # `object.__setattr__` too: once attached, `copy.deepcopy(settings)` raises TypeError (the
-    # accountant holds a `threading.Lock`); no production site deepcopies Settings today, so that
-    # half is latent.
     existing = getattr(settings, _RUN_ACCOUNTANT_ATTR, None)
     if isinstance(existing, CostAccountant):
         return existing
