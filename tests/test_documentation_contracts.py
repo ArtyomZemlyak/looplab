@@ -105,7 +105,9 @@ def test_index_mentions_every_numbered_document():
     #   nav, which `f316f392` had not (57 was there, 58 was not; `omitted_files: info` cannot see it).
     #   NOTE for the merge: `origin/master` independently holds a `50-` and a `51-` with different
     #   content from this branch's 50/51 — the SEVENTH collision, two blocks this time.
-    assert len(numbered) == 58, "the derived numbered-document inventory changed"
+    #   58 -> 59 (2026-09-06): doc 60, the SOTA plan derived from the benches. Document, index row,
+    #   nav row and this count in one change.
+    assert len(numbered) == 59, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
