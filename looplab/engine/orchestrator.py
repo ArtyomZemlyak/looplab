@@ -115,6 +115,7 @@ from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefus
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.setup_identity import setup_config_hash, setup_manifest_digest
 from looplab.core.llm_budget import RunBudget
+from looplab.core.phase_events import phase_sink_scope
 from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
                                      in_llm_lane, llm_broker_scope, llm_lane_scope)
 from looplab.search.card_selection import (
@@ -1625,7 +1626,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             broker = self._llm_broker = LLMConcurrencyBroker(
                 budget=getattr(self, "_llm_budget", None))
         try:
-            with llm_broker_scope(broker), llm_lane_scope("engine"):
+            with llm_broker_scope(broker), llm_lane_scope("engine"), \
+                    phase_sink_scope(self._append_phase_event):
                 # THE RUN-SCOPED EVAL TASK GROUP (backlog F1f, doc 33 option 1 — "adopting
                 # sessions").  Evaluation children used to belong to whichever `_run_card_session`
                 # admitted them, and that session could not return until the LAST of them drained.

@@ -25,6 +25,8 @@ from typing import Optional
 
 from looplab.core import tracing
 from looplab.core.containment import contain
+from looplab.core.phase_events import (PHASE_CHECKPOINTED, PHASE_COMPLETED, PHASE_STARTED,
+                                       emit_phase_event)
 from looplab.tools.clock import LoopClock, set_current_clock
 from looplab.core.llm import BudgetExceeded
 from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult,
@@ -546,6 +548,7 @@ def _note_budget(on_budget, kind: str, *, turns, seconds, detail: str = "") -> N
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     max_turns: int = 0, context_budget_chars: int | None = None,
                     time_budget_s: float = 0.0, finalize=None, fallback=None, on_budget=None,
+                    on_plan=None, phase_label: str = "",
                     stuck_detection: bool = True,
                     stuck_repeat: int = 4, stuck_alternate: int = 4,
                     self_plan: bool = False, plan_reinject_every: int = 5,
@@ -653,6 +656,21 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     clock = LoopClock(started=started, time_budget_s=float(time_budget_s or 0.0),
                       max_turns=int(max_turns or 0))
     deadline_warned = False
+    # THE PHASE, EVENT-SOURCED (doc 52 row 16; `core/phase_events.py`): three moments the engine's
+    # sink may append as DIAGNOSTIC rows — started here, a checkpoint on every `update_plan`, and
+    # completed at each of the loop's exits with the exit KIND (emitted / salvaged / fallback). A
+    # raise is not an exit of this loop's, so it leaves `started` unmatched — which is the record.
+    _label = str(phase_label or emit_name or "")[:80]
+    _plan_updates = 0
+    emit_phase_event(PHASE_STARTED, {
+        "label": _label, "emit": str(emit_name or "")[:80],
+        "tools": len(tool_specs), "max_turns": int(max_turns or 0),
+        "time_budget_s": float(time_budget_s or 0.0)})
+
+    def _done(exit_kind: str) -> None:
+        emit_phase_event(PHASE_COMPLETED, {
+            "label": _label, "exit": exit_kind, "turns": clock.turn + 1,
+            "seconds": round(time.monotonic() - started, 3), "plan_updates": _plan_updates})
     # D11: history compression runs on the dedicated cheap compressor when configured, else the
     # loop's own client. A configured compressor that failed validation/construction is different:
     # use the deterministic local truncation fallback instead of spending against the main client.
@@ -769,6 +787,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # extra turn it exists for.
             ok, result, refusal = _salvage_emit(may_retry=True)
             if ok:
+                _done("salvaged")
                 return result
             stalls += 1
             if stalls >= 2:
@@ -834,6 +853,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # a dangling id.) The consequence is a caller obligation: anything that RE-SENDS this
                 # transcript to a provider must first strip unanswered tool_call_ids, or a strict
                 # OpenAI-compatible backend 400s on it — `serve/assistant.py` does exactly that.
+                _done("emitted")
                 return finalize(args)
             from_a_tool = False
             if _cancelled():
@@ -844,6 +864,22 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             elif self_plan and name == _PLAN_TOOL_NAME:
                 current_plan = _render_plan(args) or current_plan
                 result = "plan updated"
+                # THE PLAN IS A RECORD, not only a reminder (doc 52 row 16): hand the structured
+                # args to the caller's `on_plan` and checkpoint the phase with them. Both are
+                # observers — a broken one must not break the loop it observes.
+                _plan_updates += 1
+                if on_plan is not None:
+                    try:
+                        on_plan(args if isinstance(args, dict) else {})
+                    except Exception as _plan_exc:  # noqa: BLE001 — an observer may never break the loop
+                        contain("on_plan observer", _plan_exc)
+                emit_phase_event(PHASE_CHECKPOINTED, {
+                    "label": _label, "turn": turn_idx, "plan_updates": _plan_updates,
+                    "plan": str((args or {}).get("plan") or "")[:1200] if isinstance(args, dict) else "",
+                    "todos": [{"item": str(t.get("item") or "")[:200],
+                               "status": str(t.get("status") or "pending")[:16]}
+                              for t in ((args or {}).get("todos") if isinstance(args, dict) else None) or []
+                              if isinstance(t, dict) and t.get("item")][:40]})
             else:
                 from_a_tool = True
                 # Surface what the agent is about to do BEFORE the (possibly slow) tool runs, so a
@@ -909,6 +945,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     break
                 ok, result, _ = _salvage_emit()
                 if ok:
+                    _done("salvaged")
                     return result
                 break   # force unsupported/rejected: fall to fallback, don't re-attempt every turn
             elif emit_after and tool_turns == emit_after and not emit_nudged:
@@ -934,6 +971,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 break
             ok, result, _ = _salvage_emit()
             if ok:
+                _done("salvaged")
                 return result
             break
     else:
@@ -949,7 +987,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                                     "best answer from everything you have gathered."})
         ok, result, _ = _salvage_emit()
         if ok:
+            _done("salvaged")
             return result
+    _done("fallback")
     return fallback(messages)
 
 

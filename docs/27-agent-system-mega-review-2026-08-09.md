@@ -183,9 +183,15 @@ Research only.
 > - **OPEN[prompt-bundle-unpinned-across-hot-reload]** the PromptStore is still re-read on every use
 >   with no run/phase-pinned revision; the only run-start pins are the `run_started` settings and the
 >   two `core/setup_identity.py` digests. proof:absent:revision@looplab/core/prompts.py
-> - **OPEN[inner-agent-phases-not-event-sourced]** none of `agent_phase_started` /
->   `agent_checkpointed` / `agent_phase_completed` exists; the inner trajectory lives only in
->   `spans.jsonl`, which replay does not read. proof:absent:agent_phase_started@looplab/events/types.py
+> - **[closed 2026-09-06 (doc 52 row 16) — `agent_phase_started` / `agent_checkpointed` /
+>   `agent_phase_completed` are registered `DIAGNOSTIC_EVENTS` (`events/types.py`), reported by
+>   `drive_tool_loop` through `core/phase_events.py::emit_phase_event` and written by the sink
+>   `Engine.run` installs for the run's lifetime (`Engine._append_phase_event`: membership asserted
+>   at the append site, every string redacted); fold-ignored and fence-excluded on purpose, a no-op
+>   outside a run. The Deep Researcher's plan itself is folded (`RunState.research_plan`), which is
+>   doc 52's `deep-research-plan-is-not-durable`. `tests/test_research_record.py` drives the sink,
+>   the fallback exit and the redaction. The marker `inner-agent-phases-not-event-sourced` stood
+>   here; deleted per the index rule.]**
 > - **OPEN[paid-eval-has-no-attempt-scoped-receipt]** the ENGINE half of the receipt item — the
 >   serve/governance half shipped. `EV_NODE_EVAL_STARTED` carries only `node_id`+`generation`: no
 >   attempt-scoped invocation id and no completed receipt.

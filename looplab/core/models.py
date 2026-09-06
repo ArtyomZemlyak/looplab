@@ -1719,6 +1719,18 @@ class ResearchMemo(BaseModel):
     # state/golden projections stay byte-compatible; the research event writer forwards it explicitly.
     claims_receipt: Optional[dict] = Field(default=None, exclude=True)
     sources: list[dict] = Field(default_factory=list)   # {title, url} consulted (web/arXiv)
+    # THE DURABLE RESEARCH RECORD (doc 52 row 16; `core/research_record.py`). `plan` is the stage's
+    # own last `update_plan` — the ResearchPlan and its ProgressLedger, `{plan, todos:[{item,
+    # status}], updates}` — which used to survive only inside one tool-loop context. `evidence` is
+    # the exact-span ledger: one immutable item per tool result the stage read (id over kind +
+    # locator + sha256 of the whole result, the quote as the first 600 chars, the turn it was read
+    # on), which claims are BOUND to deterministically (`claims[*].evidence_ids`) so a verifier
+    # verdict can be re-checked later against the bytes it was drawn from. `literature` is the
+    # papers an `arxiv_search` rendered, each with a stable id and an abstract hash; the engine also
+    # appends them as `literature_retrieved`. All three are additive: an old memo reads as none.
+    plan: Optional[dict] = None
+    evidence: list[dict] = Field(default_factory=list)
+    literature: list[dict] = Field(default_factory=list)
     recommended_directions: list[str] = Field(default_factory=list)  # what to try next (steer hints)
     # THE SPLIT, and it exists because the FIELD NAME contradicted its own description. The prompt
     # asked for `recommended_directions` and defined them as "(specific next experiments to try)",
@@ -2325,6 +2337,18 @@ class RunState(BaseModel):
     research: list[dict] = Field(default_factory=list)
     research_requests: list[dict] = Field(default_factory=list)
     research_served: int = 0
+    # THE DURABLE RESEARCH RECORD, folded (doc 52 row 16). `research_plan` is the LATEST memo's
+    # ResearchPlan / ProgressLedger (its last `update_plan`: `{plan, todos:[{item, status}],
+    # updates}`), `research_evidence` every exact-span evidence item any memo of this run cited,
+    # by id, and `literature` every paper an `arxiv_search` returned (`literature_retrieved`).
+    # Additive: a log written before 2026-09-06 folds to None / {} / [] (invariant #5).
+    # `research_evidence` is an INDEX over the memo rows (each memo's own `evidence` list already
+    # rides `research` and therefore the state payload), so it is `exclude=True` like
+    # `Node.resource_curve`: 64 items x ~1 KB per memo, duplicated on every /state poll, is pure
+    # transfer — the in-process readers (the verifier's by-id lookup) fold and never dump.
+    research_plan: Optional[dict] = None
+    research_evidence: dict[str, dict] = Field(default_factory=dict, exclude=True)
+    literature: list[dict] = Field(default_factory=list)
     # Paid-attempt receipts for the Deep-Research stage (`research_attempted`), each
     # `{attempt_id, trigger, at_node, manual}`. The gates read attempts as well as memos, so a kill
     # between "the provider answered" and "the memo is durable" does NOT re-spend on resume; the

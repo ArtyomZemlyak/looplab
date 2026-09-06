@@ -284,6 +284,7 @@
       "chars": 830
     }
   ],
+  "literature": [],
   "llm_cost": null,
   "node_concept_deltas": {},
   "node_concept_materialization_receipts": {},
@@ -893,6 +894,7 @@
       "trigger": "cadence"
     }
   ],
+  "research_plan": null,
   "research_requests": [],
   "research_served": 0,
   "reward_hacks": [],

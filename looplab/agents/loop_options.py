@@ -175,6 +175,12 @@ EXPLICIT_ONLY_LOOP_ARGS: tuple[str, ...] = (
     # prompt already makes, so it belongs at the site that makes it — `serve/assistant.py`, beside
     # `ASSISTANT_EVIDENCE_GUARD` — and not in a bundle a settings file could reword or switch off.
     "tool_result_label",
+    # THE DURABLE RESEARCH RECORD's two hooks (doc 52 row 16). `on_plan` receives every
+    # `update_plan` call's structured args — the caller that wants a ResearchPlan / ProgressLedger
+    # (the Deep-Research stage) keeps the last one and records it on its memo; per-call, like
+    # every other observer. `phase_label` names the phase in the `agent_phase_*` diagnostic rows
+    # (`core/phase_events.py`); a label is a fact about the CALL SITE, not a setting.
+    "on_plan", "phase_label",
 )
 
 

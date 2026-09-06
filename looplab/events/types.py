@@ -227,6 +227,12 @@ EV_RESEARCH_COMPLETED = "research_completed"   # memo sidecar + gate for `deep_r
 # think twice. This receipt advances those gates on the ATTEMPT; `research_completed` carries the
 # same `attempt_id` back so a completed attempt is not counted as still outstanding.
 EV_RESEARCH_ATTEMPTED = "research_attempted"
+# The papers a Deep-Research pass actually READ (doc 52 row 16; doc 51's
+# `retrieved-literature-is-never-durable`): `{memo_id, at_node, items:[{id, title,
+# abstract_sha256, abstract_chars, query, tool}]}`, appended by `_record_deep_research` right after
+# the memo, from the same gated writer. FOLDED into `RunState.literature` and selection-neutral —
+# nothing but the record reads it — so it sits in `BACKGROUND_APPENDABLE` beside the memo.
+EV_LITERATURE_RETRIEVED = "literature_retrieved"
 EV_LESSONS_DISTILLED = "lessons_distilled"
 EV_LESSONS_REFRESHED = "lessons_refreshed"
 EV_REPORT_GENERATED = "report_generated"
@@ -835,6 +841,16 @@ LOG_ROLES: frozenset[str] = frozenset({
 # parseable loss — `runs/rubert-dr-0807` writes 45 MB containing the string "loss" zero times),
 # NEVER to "the loss was flat".
 EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"
+# INNER AGENT PHASES, event-sourced (doc 52 row 16; doc 27's `inner-agent-phases-not-event-sourced`).
+# `drive_tool_loop` reports the three moments of a phase through `core/phase_events.py`, and the
+# engine's installed sink appends them: `started` {label, emit, tools, max_turns, time_budget_s,
+# node_id?}, `checkpointed` {label, plan, todos:[{item, status}], turn} on every `update_plan`, and
+# `completed` {label, exit: emitted|salvaged|fallback, turns, seconds}. DIAGNOSTIC: fold-ignored,
+# fence-excluded, appended from whichever task or thread the loop runs on (the sink asserts the
+# membership); a run without the sink (the assistant, a script) writes nothing.
+EV_AGENT_PHASE_STARTED = "agent_phase_started"
+EV_AGENT_CHECKPOINTED = "agent_checkpointed"
+EV_AGENT_PHASE_COMPLETED = "agent_phase_completed"
 # ASHA live-curve watchdog (engine/asha_monitor.py): a node whose latest INTERMEDIATE metric ranks below
 # completed endpoints and/or comparable same-resource observations. New rows distinguish those verdicts;
 # only enough underperforming same-resource evidence may trigger the opt-in kill. DIAGNOSTIC / fold-
@@ -913,6 +929,7 @@ def standing_hint_dedup_key(data) -> tuple[object, str]:
 # of thread-dependent position.
 BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
     EV_RESEARCH_COMPLETED, EV_RESEARCH_ATTEMPTED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE,
+    EV_LITERATURE_RETRIEVED,
 })
 
 # Invariant #1's OTHER thread-side seam, registried for the same reason. `_ensure_run_setup`
@@ -1022,4 +1039,5 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_LESSONS_STORE_UNAVAILABLE,
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
+    EV_AGENT_PHASE_STARTED, EV_AGENT_CHECKPOINTED, EV_AGENT_PHASE_COMPLETED,
 })

@@ -166,6 +166,10 @@ def test_tool_then_stall_then_nudge_then_emit_message_parity():
     assert memo.claims == [{"statement": "c", "node_ids": [1],
                             "urls": [claim_ref.display_url],
                             "url_identities": [claim_ref.identity],
+                            # bound by `core/research_record.py::bind_claims_to_evidence` (doc 52
+                            # row 16): the page it cites was never read, so the join is empty —
+                            # and SAID, which is what separates it from a pre-record memo
+                            "evidence_ids": [],
                             "evidence_receipt": {
                                 "v": 1,
                                 "node_refs_total": 1, "node_refs_retained": 1,

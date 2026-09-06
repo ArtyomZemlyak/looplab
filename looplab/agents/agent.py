@@ -101,8 +101,12 @@ def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str
             "the same files and directories — read only what is genuinely new. If a note contradicts "
             "what you observe yourself, believe your own observation.\n\n"
             + "\n\n".join(ledger))})
+    # The phase's own label reaches the `agent_phase_*` diagnostic rows (doc 52 row 16); a caller
+    # that named one itself keeps its spelling.
     result = drive_tool_loop(client, tools, messages, emit_spec,
-                             finalize=finalize, fallback=fallback, **loop_kwargs)
+                             finalize=finalize, fallback=fallback,
+                             **({"phase_label": label} if "phase_label" not in loop_kwargs else {}),
+                             **loop_kwargs)
     if handoff and ledger is not None:      # non-terminal phase in an active scope → contribute a brief
         # Wrap the summary call in its OWN operation span so it's a distinct, clearly-labeled band in
         # the UI trace ("handoff-summary") instead of an anonymous complete_text generation buried in

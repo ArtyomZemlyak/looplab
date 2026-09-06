@@ -34,7 +34,7 @@ from looplab.events.replay import fold
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_BELIEF_ADMISSION,
                                   EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
                                   EV_REPORT_GENERATED, EV_RESEARCH_ATTEMPTED,
-                                  EV_RESEARCH_COMPLETED,
+                                  EV_RESEARCH_COMPLETED, EV_LITERATURE_RETRIEVED,
                                   BACKGROUND_APPENDABLE,
                                   NON_CARD_SELECTION_BACKGROUND_APPENDABLE)
 
@@ -838,6 +838,14 @@ class ResearchCadenceMixin:
         # Steer the next proposals: retain the legacy hint projection for replay compatibility.
         # It is explicitly model-generated advisory data, not operator authority; prompt rendering
         # filters this source while the research memo/open-hypothesis channels carry the signal.
+        # THE PAPERS THIS PASS READ, as their own registered event (doc 52 row 16; doc 51). Written
+        # from this same gated recorder, so the background task's append rule holds unchanged, and
+        # only when the memo carries any — an old-shaped memo appends nothing.
+        if memo_d.get("literature"):
+            assert EV_LITERATURE_RETRIEVED in BACKGROUND_APPENDABLE
+            self.store.append(EV_LITERATURE_RETRIEVED, {
+                **({"memo_id": memo_id} if memo_id is not None else {}),
+                "at_node": memo.at_node, "items": memo_d["literature"]})
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
         # WHERE `next_experiments` IS DELIVERED, and it is deliberately NOT from here. This writer
         # reads only the legacy union and open questions; the concrete half of the memo split

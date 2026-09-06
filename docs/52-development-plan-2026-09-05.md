@@ -644,16 +644,22 @@ unbounded by any utility signal; the field's only "was it used" number is dialog
 Named a CITATION rate to avoid HASTE's keep-fraction sense of "hit rate"; needs the two record
 markers above first. Box-only. proof:missing:docs/audit/prior-injection-hit-rate.md
 
-OPEN[deep-research-plan-is-not-durable] Deep Research planning survives only inside one tool-loop
-context: no `ResearchPlan`, no `ProgressLedger`, no replayable episode state (doc 28 DR-01). Four
-independent 2026 works converge on it (AAR, SCION's Research Execution Plan, auditable records with
-applicability boundaries, claims as individuals). One fix with doc 27's
-`inner-agent-phases-not-event-sourced`. proof:absent:ResearchPlan@looplab/agents/deep_research.py+absent:ProgressLedger@looplab/agents/deep_research.py
+*Closed 2026-09-06 (row 16 shipped): the marker `deep-research-plan-is-not-durable` stood here. The
+stage's plan is a RECORD now: the loop's `update_plan` hands its structured args to the caller's
+`on_plan` observer, `agents/deep_research.py::_plan` keeps the last one (counted) on
+`ResearchMemo.plan`, the memo sanitizer bounds it, and `events/replay.py::_on_research_completed`
+folds it onto `RunState.research_plan` — so it survives a resume and a replay. The episode's own
+trajectory is the three `agent_phase_*` diagnostic events (`core/phase_events.py`, doc 27's
+`inner-agent-phases-not-event-sourced`, closed in the same change). Deleted per the index rule.*
 
-OPEN[research-evidence-has-no-exact-span-identity] a memo's evidence is a URL plus a snippet — no
-immutable `EvidenceItem` with locator, hash and provenance (doc 28 DR-02) — so a verifier verdict
-cannot be re-checked later; one durable record with doc 51's `retrieved-literature-is-never-durable`.
-proof:absent:EvidenceItem@looplab
+*Closed 2026-09-06 (row 16 shipped): the marker `research-evidence-has-no-exact-span-identity` stood
+here. `core/research_record.py::evidence_item` mints one immutable `EvidenceItem` per tool result
+the Deep Researcher reads — an id over the kind, the locator identity and the sha256 of the whole
+result, an exact-span quote, the tool and the loop turn — captured on `ResearchMemo.evidence` from
+the stage's first turn, folded onto `RunState.research_evidence`, and joined to the claims by
+`bind_claims_to_evidence` (by URL identity / node id, never by a model's choice), so a verifier
+verdict can be re-checked against the bytes it was drawn from. The literature half is doc 51's
+`retrieved-literature-is-never-durable`, closed in the same change. Deleted per the index rule.*
 
 OPEN[landlock-refusal-is-not-translated-for-triage] under `landlock="enforce"` a refused read arrives
 as `EACCES` → `PermissionError`, the silent-skip shape the read fence's own exception type avoids, and

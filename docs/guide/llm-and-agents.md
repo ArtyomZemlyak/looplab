@@ -791,6 +791,51 @@ External, repository, memory, prior-run, and free-form current-run text (includi
 rationales/errors/logs) is always covered by an immutable untrusted-data boundary, even when an
 operator hot-overrides the rest of the Deep Research system prompt.
 
+### The durable research record
+
+Until 2026-09-06 a Deep-Research pass left three things behind that nothing could re-check: its
+plan (one `update_plan` reminder inside one tool-loop context), its evidence (a URL plus a
+200-character snippet on `ResearchMemo.sources`) and the papers it had read (rendered into one
+prompt and gone). Doc 52 row 16 makes each a record, and the rule for all three is the same one the
+eval's metric salvage draws: **the record is bytes the engine observed a tool return, never what a
+model said about them.**
+
+- **The plan.** The loop's `update_plan` hands its structured arguments to the stage's `on_plan`
+  observer; the last one wins, counted, on `ResearchMemo.plan` (`{plan, todos:[{item, status}],
+  updates}`), and the fold applies it to `RunState.research_plan`. A junk `emit` keeps it: the
+  record lives on the memo from the first turn, so the summary-only fallback loses the prose and
+  not the plan.
+- **The evidence.** Every tool result the stage reads becomes one immutable `EvidenceItem`
+  (`core/research_record.py::evidence_item`): `id` = a digest over the kind, the locator identity
+  and the sha256 of the *whole* result text — the same bytes from the same place get the same id
+  in any run — plus the tool, a bounded locator, an exact-span `quote` (the first 600 characters,
+  redacted at this boundary because it is persisted verbatim), the `sha256`, the byte count and
+  the loop turn it was read on (`tools/clock.py`'s clock). At most 64 items per memo, on
+  `ResearchMemo.evidence`, folded onto `RunState.research_evidence` keyed by id. Each claim then
+  carries `evidence_ids`, stamped by `bind_claims_to_evidence`: a claim citing a URL is bound to
+  every item read from that URL's identity, a claim citing a node id to every item read from that
+  experiment. The model never names an evidence id — an empty list on a new memo *says* the claim
+  cites something the pass never read, which a pre-record memo (no key) could not say.
+- **The literature.** The papers an `arxiv_search` answer rendered (`parse_literature`: id over
+  the title, sha256 and length of the abstract, the query), at most 32 per memo on
+  `ResearchMemo.literature`; the recorder appends them as their own `literature_retrieved` event
+  beside the memo (`BACKGROUND_APPENDABLE`, so the concurrent research task may write it), and
+  `RunState.literature` is the run's deduplicated reading list with the node each paper was first
+  read at.
+- **The phases.** `drive_tool_loop` reports `agent_phase_started` (label, turn and time budgets),
+  `agent_checkpointed` (each plan update, with the plan) and `agent_phase_completed` (how the
+  phase ended: `emitted` / `salvaged` / `fallback`, turns and tool calls) through
+  `core/phase_events.py`. They are `DIAGNOSTIC_EVENTS` — fold-ignored, excluded from every
+  seq-equality fence, never authority — and the ENGINE decides whether they are written: it
+  installs the sink for the run's lifetime and redacts every string, and outside a run (the
+  assistant, a test, a script) the report is a no-op.
+
+Old logs carry none of it and read as `None` / `{}` / `[]` (invariant #5); the memo sanitizer
+bounds every field on the same pass as the memo's prose. `research_evidence` is a fold-internal
+index (`exclude=True`, like `Node.resource_curve`): each memo's own `evidence` list already rides
+the state payload, and duplicating up to 64 KB per memo on every poll would be pure transfer. The
+dumped state therefore gains exactly two fields, `research_plan` and `literature`.
+
 ### The untrusted-evidence envelope
 
 Every role above reads text it did not write — a candidate's stderr, a sibling run's rationale, an

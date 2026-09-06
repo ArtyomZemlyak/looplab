@@ -449,11 +449,13 @@ A falsifier that cannot go false is the vacuous guard this repo has found nine t
   stays `None`, and `foresight.verified_report` primes predict-before-execute with no view of the
   data at all (§6; OmniScientist).
   proof:`absent:def columns@looplab/adapters/repo_task.py`
-- **OPEN[retrieved-literature-is-never-durable]** — `tools/literature.py` returns arXiv titles and
-  abstracts into one prompt and nothing keeps them: no registered event type, so by invariant #7 no
-  durable record, so no edge to `search/concept_graph.py`, nothing for a later run to find and
-  nothing external for `trust/memo_verify.py` to check a claim against (§2; Mechanist).
-  proof:absent:literature@looplab/events/types.py
+- *Closed 2026-09-06 (doc 52 row 16 shipped): the marker `retrieved-literature-is-never-durable`
+  stood here. `events/types.py::EV_LITERATURE_RETRIEVED` is registered (`BACKGROUND_APPENDABLE`),
+  `engine/research_cadence.py::_record_deep_research` appends it beside the memo with the papers
+  `core/research_record.py::parse_literature` read off each `arxiv_search` answer (id over the
+  title, sha256 + length of the abstract), and `events/replay.py::_on_literature_retrieved` folds
+  them onto `RunState.literature` deduplicated by that id, so a later run and the verifier have a
+  durable record of what was actually read. Deleted per the index rule.*
 
 ---
 

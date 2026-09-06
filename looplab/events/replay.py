@@ -92,7 +92,7 @@ from looplab.events.types import (
     EV_SCORE_METRICS_BACKFILLED,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
-    EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
+    EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_LITERATURE_RETRIEVED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
     EV_RESUME_SERVED,
     EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED,
@@ -4117,7 +4117,16 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     from looplab.core.advisory_payloads import sanitize_research_memo_payload
     # old events predate D8 omission receipts. Preserve their replay shape (and unknown authority)
     # instead of manufacturing a complete receipt from an already-truncated legacy projection.
-    st.research.append(sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False))
+    memo = sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False)
+    st.research.append(memo)
+    # THE DURABLE RESEARCH RECORD (doc 52 row 16): the latest memo's plan is the run's current
+    # ResearchPlan / ProgressLedger, and every memo's exact-span evidence accrues by id. Both are
+    # sanitized above and read by nothing that selects; an old row carries neither.
+    if isinstance(memo.get("plan"), dict):
+        st.research_plan = memo["plan"]
+    for item in memo.get("evidence") or ():
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+            st.research_evidence.setdefault(item["id"], item)
     # `research_served` indexes `research_requests`: the engine only sets `served_manual` while
     # serving `research_requests[research_served]` (engine/research_cadence.py::normalized_belief_key). Counting every
     # such row unconditionally let a duplicate/orphan completion push the cursor PAST the queue, so a
@@ -4133,6 +4142,18 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     attempt_id = d.get("attempt_id")
     if isinstance(attempt_id, str) and attempt_id:
         st.research_attempts_completed.add(attempt_id)
+
+def _on_literature_retrieved(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # The papers a Deep-Research pass read (doc 52 row 16), sanitized on the way in like the memo
+    # they rode beside. Selection-neutral: nothing but the record reads `st.literature`.
+    from looplab.core.advisory_payloads import sanitize_literature_items
+    seen = {row.get("id") for row in st.literature if isinstance(row, dict)}
+    at_node = d.get("at_node") if type(d.get("at_node")) is int else None
+    for item in sanitize_literature_items(d.get("items")):
+        if item["id"] not in seen:
+            seen.add(item["id"])
+            st.literature.append({**item, "at_node": at_node})
+
 
 def _on_lessons_distilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # M6 does not re-rank current nodes/best; at_node + pair ids are behavioral replay gates that
@@ -4309,6 +4330,7 @@ _HANDLERS = {
     EV_DEEP_RESEARCH: _on_deep_research,
     EV_RESEARCH_ATTEMPTED: _on_research_attempted,
     EV_RESEARCH_COMPLETED: _on_research_completed,
+    EV_LITERATURE_RETRIEVED: _on_literature_retrieved,
     EV_LESSONS_DISTILLED: _on_lessons_distilled,
     EV_LESSONS_REFRESHED: _on_lessons_refreshed,
     EV_REPORT_GENERATED: _on_report_generated,

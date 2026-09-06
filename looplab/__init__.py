@@ -45,6 +45,8 @@ _LAYOUT = {
     "appconfig": "core",
     "envsafe": "core",   # the secret screen + the DECLARED ENVIRONMENT rule all three levels share
     "containment": "core",  # `contain(reason, exc)`: the countable contain-and-continue (doc 52 row 14)
+    "research_record": "core",  # exact-span EvidenceItem, retrieved literature, the claim join (doc 52 row 16)
+    "phase_events": "core",     # inner agent phases as DIAGNOSTIC events through an engine-installed sink
     "evidence": "core",  # the ONE untrusted-evidence envelope: label + guard sentence + fence
     "appstate": "serve",
     "node_activity": "serve",  # generation-scoped public building/queue/evaluation projection
