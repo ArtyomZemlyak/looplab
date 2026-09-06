@@ -48,6 +48,7 @@ ATTR_BY_FIELD = {
     "train_monitor_tools": "_train_monitor_tools",
     "train_monitor_contract": "_train_monitor_contract",
     "repair_log_tools": "_repair_log_tools",
+    "stage_check_tools": "_stage_check_tools",
     "asha_live": "_asha_live",
     "asha_live_kill": "_asha_live_kill",
     "asha_live_quantile": "_asha_live_quantile",

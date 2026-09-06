@@ -93,6 +93,11 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
+#   2026-09-06  + stage_check_tools           (doc 52 row 9: may the inter-stage checker query the
+#               checked stage's own log instead of judging from `run.out[-4000:]`). The "field
+#               set changed too" branch again, 216 -> 217: a calibration run never reaches a
+#               checked stage, so no receipt's EVIDENCE moves, but the envelope is the Settings
+#               schema and old receipts stop verifying — the same shape as `agent_timeout` below.
 #   2026-09-03  + agent_timeout               (the wall on ONE external coding-agent invocation).
 #               This is the "field set changed too" branch: 215 -> 216, so the calibration envelope
 #               really is different and old receipts SHOULD stop verifying. It is also the clearest
@@ -101,7 +106,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               never launches a coding agent) legitimately moves THIS pin, which binds the complete
 #               settings map, while it must NOT revoke a preserved snapshot merely for predating it.
 #               See `search/speculation_quality.py`'s directional field check.
-_EXPECTED_DIGEST = "sha256:86efa6effec25bea2a12d2abbd4dbebaf91dcd32ff2d576882ffc2f82d7741aa"
+_EXPECTED_DIGEST = "sha256:df6bb32b057101d52e596f2ed593699d188d272ef7f0c33b4c13d0bfd01a04b0"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -425,7 +430,7 @@ _EXPECTED_DIGEST = "sha256:86efa6effec25bea2a12d2abbd4dbebaf91dcd32ff2d576882ffc
 #               — where a replicate calibrated before it would have run that stage to its wall.
 #               That is a different number of evaluations on the same failing node, which is
 #               precisely what a speculation receipt asserts about.
-_EXPECTED_FIELD_COUNT = 216
+_EXPECTED_FIELD_COUNT = 217
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

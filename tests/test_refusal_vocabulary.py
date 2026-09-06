@@ -18,6 +18,8 @@ and ask for the read.
 from __future__ import annotations
 
 import ast
+
+from _source_scan import iter_sources, iter_trees
 import threading
 from pathlib import Path
 
@@ -55,7 +57,7 @@ def _generation(rd):
 
 
 def _serve_sources():
-    return [p for p in SERVE.rglob("*.py")]
+    return [path for path, _text in iter_sources(SERVE)]
 
 
 # The hand-raised 500s that are FAULTS and not refusals, by enclosing function, each with its reason.
@@ -248,8 +250,7 @@ def test_only_a_reconciling_GET_still_takes_the_sequencer():
     here with its reason."""
     allowed = {"start_status": "reconciles a dead spawn's start claim under the lock"}
     sequenced_gets = set()
-    for path in (SERVE / "routers").glob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for path, tree in iter_trees(SERVE / "routers"):
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue

@@ -230,6 +230,7 @@ _LAYOUT = {
     "metrics_adapters": "serve",
     "mlebench": "adapters",
     "mlebench_grade": "adapters",
+    "mlebench_split": "adapters",
     "mlebench_prep": "adapters",
     "mlebench_real": "adapters",
     "mlflow_export": "events",

@@ -14,6 +14,8 @@ stops asking is stale.
 from __future__ import annotations
 
 import ast
+
+from _source_scan import iter_trees
 from pathlib import Path
 
 import pytest
@@ -55,8 +57,7 @@ def _compares_against_the_literal(node: ast.Compare) -> bool:
 def test_no_site_compares_the_stop_word_as_a_literal():
     """MUTATION: put one `str(x or "").lower() == "error"` back anywhere under looplab/ -> named."""
     offenders = []
-    for path in PKG.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for path, tree in iter_trees(PKG):
         for node in ast.walk(tree):
             if isinstance(node, ast.Compare) and _compares_against_the_literal(node):
                 # Only a comparison whose left side reads a stop/finish REASON: `.lower()` on it,
@@ -72,11 +73,10 @@ def test_no_site_compares_the_stop_word_as_a_literal():
 
 def test_the_readers_are_exactly_the_listed_modules():
     calling = set()
-    for path in PKG.rglob("*.py"):
+    for path, tree in iter_trees(PKG):
         rel = str(path.relative_to(PKG))
         if rel == "core/models.py":
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "is_error_stop":
                 calling.add(rel)
