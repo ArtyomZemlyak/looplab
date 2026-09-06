@@ -12911,3 +12911,45 @@ under either regime — a sum-weighted score over a randomized solver's worst in
 measurement, and no amount of re-timing fixes that. The remaining two CP-SAT tasks are untested at
 one worker; their tails (`max_weighted_independent_set` 45.2, `rectanglepacking` 13.3) predict one
 of each.
+
+## §309 — both remaining predictions held, and the twenty tasks are now sorted
+
+§308's rule — a CP-SAT task rules at one worker if its per-instance tail is light, and does not if it
+is heavy — made two more predictions. Both were recorded before the runs and both held:
+
+| task | p90/p10 | predicted | measured at one worker |
+|---|---|---|---|
+| rectanglepacking | 13.3 | comes home | **0.9871** (1.000, 0.974, 0.987) |
+| max_weighted_independent_set | 45.2 | misses | **1.2468** (1.425, 1.247, 1.122) |
+
+The full CP-SAT picture, seven of nine tested:
+
+| task | p90/p10 | one-worker reading | |
+|---|---|---|---|
+| min_dominating_set | 51.9 | 1.145 | misses |
+| max_weighted_independent_set | 45.2 | 1.247 | misses |
+| max_independent_set_cpsat | 32.2 | 1.236 | misses |
+| max_common_subgraph | 15.0 | 1.014 | rules |
+| rectanglepacking | 13.3 | 0.987 | rules |
+| max_clique_cpsat | 13.1 | 0.997 | rules |
+| queens_with_obstacles | 3.4 | 1.014 | rules |
+
+**Every task above p90/p10 = 30 misses; every task below 15 rules.** Nothing lands in between, and
+the two untested tasks — `set_cover_conflicts` (12.3) and `multi_dim_knapsack` (4.2) — are both well
+below the line. The threshold `TAIL_RATIO_LIMIT = 30` now has seven points under it rather than the
+one it was guessed from.
+
+**The twenty tasks, sorted:**
+
+- **Ten** non-CP-SAT tasks rule as they are, at twenty-two workers, within 7 % of unity.
+- **Six** CP-SAT tasks (four measured, two predicted) rule at **one worker** — a ruler that is 22×
+  slower to build and lives in a different cache (`__lane22r3`).
+- **Three** CP-SAT tasks rule under neither regime, because a sum-weighted score over a randomized
+  solver's heaviest instances is not a measurement and no re-timing repairs it.
+- **One**, `spectral_clustering`, produces no reading at all: its own reference fails 7 of its 100
+  instances (§303).
+
+That is the honest inventory a campaign would be run against, and it took eight sections to get —
+five of which corrected an earlier one of mine. Every number above is reproducible with
+`ruler_selfcheck --task T --lane L --reps 3` under `ALGOTUNE_EVAL_WORKERS=1`, which is only true
+because §306 removed the override that made that flag a no-op.
