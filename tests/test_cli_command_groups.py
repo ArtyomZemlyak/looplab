@@ -80,7 +80,7 @@ GROUPS = {
     # moves no champion, metric, selection or cross-run store. That is neither `inspect_cmds`
     # (which never spends money) nor `governance_cmds` (which authors cross-run memory and was
     # already at its ceiling), so it is a domain split like `memory_cmds`, not a drift.
-    "audit_cmds": {"mlebench-extras"},
+    "audit_cmds": {"mlebench-extras", "bait-materialize", "bait-audit"},
     # `memory_cmds` is its own group because the line ceiling below refused to let it be a fourth
     # domain inside `governance_cmds` — which was ALREADY eleven lines under the bound. Its contract
     # is the one governance does not have: every command there RECORDS a decision and adds, this one

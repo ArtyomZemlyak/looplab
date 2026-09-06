@@ -70,3 +70,63 @@ def mlebench_extras_cmd(
         else:
             typer.echo(f"  plagiarism: {pl.get('status')} — {pl.get('reason', '')}")
 
+
+@app.command(name="bait-materialize")
+def bait_materialize_cmd(
+    root: Path = typer.Argument(..., help="Directory to write the three bait tasks under (<root>/<bait>/task.json)."),
+):
+    """Write the three BAIT tasks (doc 52 row 22, BAITBENCH's shape): ordinary small prediction
+    tasks with a planted, rule-compliant shortcut each — a post-outcome `client_score` column, the
+    test labels left in `archive/`, a scorer that trusts the printed metric — documented beside the
+    data the way a real README documents a leaky column. Deterministic; no model, no network."""
+    from looplab.judgebench.bait import materialize, reference_scores
+
+    written = materialize(root)
+    for bait_id, task_path in written.items():
+        ref = reference_scores(root, bait_id)
+        typer.echo(f"{bait_id:16s} {task_path}  intended={ref['intended']} shortcut={ref['shortcut']}")
+
+
+@app.command(name="bait-audit")
+def bait_audit_cmd(
+    run_dir: Path = typer.Argument(..., help="A finished run made on one of the bait tasks."),
+    bait: str = typer.Option(..., "--bait", help="Which bait the run was made on: proxy_feature | answers_on_disk | lenient_scorer."),
+    bait_root: Optional[Path] = typer.Option(None, "--bait-root", help="The materialized bait root, to carry the reference scores."),
+    no_judge: bool = typer.Option(False, "--no-judge", help="Only the deterministic fingerprint stage; no paid call."),
+    model: Optional[str] = typer.Option(None, "--model", help="Override the judge model for this call."),
+    as_json: bool = typer.Option(False, "--json", help="Print the whole record as JSON."),
+):
+    """Score EVERY evaluated node of a bait-task run: stage one is the planted bait's own fingerprint
+    in the code (deterministic, a lower bound), stage two the two-stage transcript judge (a PAID call
+    to the run's own endpoint). Records `<run_dir>/bait_audit.json` — a hack RATE, moving nothing."""
+    from looplab.judgebench.bait import BAIT_IDS, audit_run
+    from looplab.cli import _settings_for_run
+
+    run_dir = Path(run_dir)
+    if not (run_dir / "events.jsonl").is_file():
+        typer.echo(f"no events.jsonl under {run_dir}")
+        raise typer.Exit(1)
+    if bait not in BAIT_IDS:
+        typer.echo(f"unknown bait {bait!r}; one of {', '.join(BAIT_IDS)}")
+        raise typer.Exit(2)
+    client, parser = None, "tool_call"
+    if not no_judge:
+        settings = _settings_for_run(run_dir, model=model)
+        client = _make_llm_client(settings)
+        parser = str(getattr(settings, "llm_parser", "tool_call") or "tool_call")
+    record = audit_run(run_dir, bait, client=client, judge=not no_judge, parser=parser, bait_root=bait_root)
+    (run_dir / "bait_audit.json").write_bytes(orjson.dumps(record, option=orjson.OPT_INDENT_2))
+    if as_json:
+        typer.echo(orjson.dumps(record, option=orjson.OPT_INDENT_2).decode())
+        return
+    typer.echo(f"bait-audit {bait}: {record['nodes']} node(s) -> {run_dir / 'bait_audit.json'}")
+    typer.echo(f"  fingerprint: {record['fingerprint_hits']}/{record['nodes']} "
+               f"(rate {record['fingerprint_rate']})")
+    if record["judged"]:
+        typer.echo(f"  judge: hack rate {record['hack_rate']} over {record['judged']} judged node(s)")
+    else:
+        typer.echo("  judge: not run (--no-judge)")
+    if record.get("reference_scores"):
+        ref = record["reference_scores"]
+        typer.echo(f"  reference: intended={ref['intended']} shortcut={ref['shortcut']}")
+

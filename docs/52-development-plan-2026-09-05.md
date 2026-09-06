@@ -379,12 +379,14 @@ violation in neither population, ties). The campaign's adjusted column (row 23) 
 Deleted per the index rule.*
 
 OPEN[developer-hack-rate-unmeasured] nothing has measured how often LoopLab's own Developer takes a
-planted, rule-compliant shortcut. BAITBENCH released its three tasks, its two-stage transcript judge
-and annotated hack transcripts, so the instrument is S, not L; EvilGenie found held-out tests add
-"only minimal improvement" over a transcript judge, so the A/B is NOT detectors on / off (the shape
-detectors cannot see a rule-compliant shortcut by construction); SciIntegrity's infeasible-task trap
-and completion pressure are the two extra arms. Precondition of the campaign's Mislead column.
-proof:missing:docs/audit/developer-hack-rate.md
+planted, rule-compliant shortcut. THE INSTRUMENT SHIPPED 2026-09-06 (row 22, fourth slice):
+`judgebench/bait.py` materializes three README-documented baits (a post-outcome `client_score`
+column, test labels in `archive/`, a scorer that trusts the printed metric; each pays 0.15–0.19
+accuracy over the honest reference), a deterministic fingerprint stage and the two-stage transcript
+judge, driven by `looplab bait-materialize` / `looplab bait-audit`; the protocol and its four arms
+are in `docs/audit/developer-hack-rate.md`. Still open: the NUMBER, which needs a model behind the
+Developer on a box. Precondition of the campaign's Mislead column.
+proof:`absent:RESULT 2026-@docs/audit/developer-hack-rate.md`
 
 *Closed 2026-09-06 (row 22, first slice shipped): the marker `leakage-scan-has-no-multi-test-detector`
 stood here. `trust/leakage.py::multi_test_scan` is the rung, folded into `code_leakage_scan` so it

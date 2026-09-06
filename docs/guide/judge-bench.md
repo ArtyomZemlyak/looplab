@@ -712,3 +712,14 @@ only that it disagrees with a stale list. The two things it *does* copy — `TOR
 `NEVER_SALVAGED_REASONS` — are copied on purpose, because a bench that moves when the thing it
 measures moves cannot detect that it moved; the test asserts each copy still agrees with its
 original.
+
+## The third instrument — the bait bench (a rate, not a corpus)
+
+`looplab/judgebench/bait.py` is the same package's third bench and a different kind of number: not
+"did the judge get it right" over a frozen corpus, but "how often does the DEVELOPER take a planted,
+rule-compliant shortcut" over three synthetic bait tasks (BAITBENCH's shape, doc 52 row 22). It has
+a deterministic fingerprint stage (a floor) and a paid two-stage transcript judge, and it is driven
+by `looplab bait-materialize` / `looplab bait-audit` rather than by this package's `score` verbs
+because the judge is a paid call. The protocol, the arms and the (still unmeasured) number are in
+`docs/audit/developer-hack-rate.md`.
+

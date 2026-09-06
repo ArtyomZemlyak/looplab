@@ -127,7 +127,17 @@ def champion_record(events, state) -> Optional[dict]:
     best = state.best() if hasattr(state, "best") else None
     if best is None:
         return None
-    nid = best.id
+    return node_record(events, state, best.id)
+
+
+def node_record(events, state, node_id: int) -> Optional[dict]:
+    """One node's code, files and transcript off the durable rows — the same record the bait audit
+    (`judgebench/bait.py`) reads for EVERY evaluated node, since a hack RATE is over nodes."""
+    nodes = getattr(state, "nodes", None) or {}
+    best = nodes.get(node_id) if isinstance(nodes, dict) else None
+    if best is None:
+        return None
+    nid = node_id
     lines: list[str] = []
     for e in events:
         d = e.data if isinstance(e.data, dict) else {}

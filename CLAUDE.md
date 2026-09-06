@@ -52,7 +52,7 @@ auto-builds when the dist is missing. `looplab/cli/` is a PACKAGE (command group
 `run_cmds`/`export_cmds`/`inspect_cmds`/`concept_cmds`/`governance_cmds`/`memory_cmds`/`audit_cmds`/`ui_cmds` —
 `inspect_cmds` is run diagnostics ONLY, the Part IV concept/novelty diagnostics are `concept_cmds`,
 and everything that spends money on a steward or authors cross-run memory CONTENT is
-`governance_cmds`; `audit_cmds` (2026-09-06, doc 52 row 22) is the post-run INSTRUMENT group — a paid judge over ONE finished run that writes that run's sidecar and moves nothing (`mlebench-extras`). `memory_cmds` is the other deliberate exception and it is a DOMAIN split, not a
+`governance_cmds`; `audit_cmds` (2026-09-06, doc 52 row 22) is the post-run INSTRUMENT group — a paid judge over ONE finished run that writes that run's sidecar and moves nothing (`mlebench-extras`; `bait-materialize` / `bait-audit`, the BAITBENCH-shaped hack-rate instrument over `judgebench/bait.py`, whose box measurement is still owed). `memory_cmds` is the other deliberate exception and it is a DOMAIN split, not a
 drift: `memory-orphans` writes the shared stores too, but only ever by REMOVING rows whose run no
 longer exists — a maintenance sweep with no model call and no new claim — and it lives apart
 because `governance_cmds` was 11 lines under its file ceiling when the command arrived — and `prior-citations` (2026-09-06, doc 52 row 17) joined it as the READ side of the same stores, the citation instrument over `prior_injected` + `memory_read` (`events/prior_citations.py`), writing nothing and calling no model; the Typer app +
