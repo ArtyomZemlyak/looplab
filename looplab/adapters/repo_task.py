@@ -733,6 +733,17 @@ class EvalSpec(BaseModel):
     # `AlgoTuner.utils.isolated_benchmark`. Empty (the default) fences nothing, which is the
     # historical behaviour byte for byte.
     protect_packages: list[str] = Field(default_factory=list)
+    # URL prefixes the Researcher's `web_fetch` may not reach -- the WEB twin of the grader fence.
+    # The open web holds PUBLISHED SOLUTIONS to benchmark tasks, and measured over the AlgoTune
+    # probe corpus (docs/56 §150 finding 13) 52 of 76 runs fetched the published solver source for
+    # the very task they were graded on, through `tools/web.py`, while the card's fence was prose.
+    # DECLARED and never derived, on `protect_packages`' grounds: only the operator who built the
+    # task knows where its solutions, leaderboard and grader are published, and a heuristic over
+    # URLs would refuse a legitimate write-up and still miss the mirror it did not know. Each entry
+    # is an absolute http(s) URL prefix (validated at submit, see `tools/web.py::normalize_web_deny`
+    # for the match rule); a fetch under one is refused with a message naming this declaration and
+    # the refusal is stamped on the tool span. Empty (the default) fences nothing.
+    web_deny: list[str] = Field(default_factory=list)
     cwd: str = "."                           # relative to the node eval workdir
     # Freeze the FILE the `command` executes, when the argv names one that the editable source
     # actually ships (`python -m pkg.mod`, `python score.py` — see `entrypoint_candidates`). ON by
@@ -904,6 +915,16 @@ class EvalSpec(BaseModel):
         if float(v) < 0:
             raise ValueError("drift_tolerance must be >= 0")
         return float(v)
+
+    @field_validator("web_deny")
+    @classmethod
+    def _web_deny_is_absolute_prefixes(cls, v):
+        # At SUBMIT, like every other field here: a prefix that can never match (no scheme, no
+        # host, a bare path) is a fence that fences nothing while the task file says it does, and
+        # the operator only ever finds out from a span that should not exist. ONE rule, owned by the
+        # tool that applies it, so the validator and the fence cannot disagree about what a prefix is.
+        from looplab.tools.web import normalize_web_deny
+        return list(normalize_web_deny(v or []))
 
     @field_validator("constraints")
     @classmethod

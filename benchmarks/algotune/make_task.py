@@ -1214,6 +1214,43 @@ def solution_space_clause(ref: Path, task: str) -> str:
             "reference.)")
 
 
+# WHERE ALGOTUNE PUBLISHES THE ANSWERS. The repository ships 17 models x 154 tasks of reference
+# solvers under `results/<model>/<task>/` (README, "What is in here"), the project site carries the
+# leaderboard, and the HuggingFace dataset carries the graded instances, TEST split included.
+ALGOTUNE_REPO_URL = "https://github.com/oripress/AlgoTune/"
+ALGOTUNE_RAW_URL = "https://raw.githubusercontent.com/oripress/AlgoTune/"
+ALGOTUNE_SITE_URL = "https://algotune.io/"
+ALGOTUNE_DATASET_URL = "https://huggingface.co/datasets/oripress/AlgoTune"
+
+
+def web_deny_prefixes(task: str) -> list[str]:
+    """`EvalSpec.web_deny` for one AlgoTune task: every URL prefix that publishes its solutions.
+
+    Measured over the probe corpus (docs/56 §150 finding 13, re-derived by hand): 52 of 76 runs
+    (68 %) fetched AlgoTune's published solver source for the task they were being graded on,
+    through `web_fetch`, with the solver's source landing in the tool result every time. The card's
+    fence was prose; this is the declaration `tools/web.py` refuses on.
+
+    The prefixes are the REPOSITORY, not the task's own `results/<model>/<task>/` subtree, and that
+    is forced by the URL's shape, not by laziness: a GitHub file URL is
+    `<repo>/blob/<ref>/results/<model>/<task>/solver.py`, so both the REF (`main`, a tag, any commit
+    sha) and the MODEL (17 of them) sit IN FRONT of the task segment, and a prefix that named this
+    task's subtree would have to enumerate refs x models — with any commit sha evading the whole
+    list. The repo-level prefix is the smallest one that covers every spelling, and nothing else in
+    that repository is legitimately the candidate's: `AlgoTuner/` and `AlgoTuneTasks/` are the
+    grader and the task classes (`protect_packages`, the same fence one field up), the task's
+    `description.txt` and reference module are already in the workspace, and the README is the
+    leaderboard. `task` is taken so the declaration is per-task by construction (the dataset URL
+    below carries the graded instances of every task, this task's test split among them) and so a
+    finer prefix can be added here without changing the call site."""
+    return [
+        ALGOTUNE_REPO_URL,                       # results/<model>/<task>/ under any ref, and the README table
+        ALGOTUNE_RAW_URL,                        # the same files served raw
+        ALGOTUNE_SITE_URL,                       # the leaderboard
+        ALGOTUNE_DATASET_URL,                    # the graded instances, test split included
+    ]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--algotune-root", required=True, type=Path)
@@ -1609,6 +1646,10 @@ def main() -> int:
             # task classes and their instance-size parameters live, which is the specific thing the
             # Developer was hunting for.
             "protect_packages": ["AlgoTuner", "AlgoTuneTasks"],
+            # THE WEB TWIN of that fence. 52 of 76 probe runs fetched this task's published solver
+            # through `web_fetch` (docs/56 §150 #13); see `web_deny_prefixes` for why the prefixes
+            # are the repository and the site rather than one `results/<model>/<task>/` subtree.
+            "web_deny": web_deny_prefixes(args.task),
             "timeout": args.timeout,
         },
     }

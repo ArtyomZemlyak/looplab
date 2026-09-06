@@ -1002,8 +1002,11 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     if _repo_reader is not None:
         providers.append(_repo_reader)
     if getattr(settings, "web_search", False):
-        from looplab.tools.web import WebTools
-        providers.append(WebTools(enabled=True))
+        # Through the tool module's one constructor, so the task's `EvalSpec.web_deny` reaches the
+        # stage that makes essentially every `web_fetch` of a run (docs/56 §150 #13: 52 of 76 runs
+        # fetched their own task's published solver here).
+        from looplab.tools.web import build_web_tools
+        providers.append(build_web_tools(task))
     # Through `compose_tools`, not a hand-rolled `CompositeTools(providers)`. The comment above says
     # this stage uses the same capability assembly as the Researcher — and then the composition step
     # was spelled out separately, which is how it silently missed `Settings.hide_empty_tools`:

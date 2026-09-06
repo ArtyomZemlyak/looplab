@@ -199,8 +199,8 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
     lone provider), or None when nothing is available."""
     providers = _shared_providers(task, settings, run_dir, role="strategist")
     if getattr(settings, "web_search", False):              # web search/fetch (network-optional)
-        from looplab.tools.web import WebTools
-        providers.append(WebTools(enabled=True))
+        from looplab.tools.web import build_web_tools        # carries the task's `web_deny`
+        providers.append(build_web_tools(task))
     if not providers:
         return None
     from looplab.agents.tool_loop import compose_tools

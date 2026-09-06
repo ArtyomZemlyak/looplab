@@ -1359,6 +1359,11 @@ class LLMRepoDeveloper:
                                        confine_reads=getattr(self, "_probe_confine", True),
                                        max_calls=getattr(self, "_probe_max_calls", 0),
                                        counter=self._probe_call_counter(),
+                                       # THE SAME declaration `EnvInspectTools` is built with, as
+                                       # directories: a grader fenced in one provider of this
+                                       # toolset and readable in the next was the route that
+                                       # opened under pressure (2026-08-30 review).
+                                       protect_roots=self._grader_roots(),
                                        staged=write))
         # PART V §22 — the Developer's read-only cross-run knowledge (dev-routed lessons: what code
         # change fixed a crash across runs). Advisory only; role-scoped so it doesn't see the R&D claims.
@@ -1509,6 +1514,15 @@ class LLMRepoDeveloper:
             return ()
         names = ev.get("protect_packages") or ()
         return tuple(str(n) for n in names if str(n).strip())
+
+    def _grader_roots(self) -> dict:
+        """`_grader_packages` as DIRECTORIES, for the probe -- `dev_probe.grader_package_roots`.
+
+        Resolved here, at composition, and not inside the probe: the probe is handed a spec and
+        must not go looking for a task, while this class already reads the task's `eval_spec` for
+        the inspector one line over. Same total-and-quiet contract -- no spec, no fence."""
+        from looplab.tools.dev_probe import grader_package_roots
+        return grader_package_roots(self._grader_packages())
 
     def _cmd_context(self) -> tuple[dict, bool]:
         """The operator's scoring contract (eval_spec) + whether one exists. The stages phase shows it to

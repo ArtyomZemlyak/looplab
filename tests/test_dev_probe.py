@@ -885,7 +885,10 @@ def _fence_predicate(tools, grants):
     Exec'd under `read_fence._PROBE_NAME`, the seam that yields the pure predicate without
     installing an irreversible audit hook — and rendered through the same projection
     `_install_fence` uses, so what is driven is the file the probe would really carry."""
-    roots, hook_allow, _dropped, swallowed = read_fence.fence_inputs(tools.repo_spec, allow=grants)
+    # `_fence_spec()`, not `repo_spec`: the grader roots (`protect_roots`) are folded into the
+    # editable list the fence is derived from, and a predicate over the bare spec would render a
+    # fence the probe never installs.
+    roots, hook_allow, _dropped, swallowed = read_fence.fence_inputs(tools._fence_spec(), allow=grants)
     assert not swallowed, f"a grant contains a root: {swallowed}"
     confine = not tools.confine_reads
     src = read_fence.render(roots, grants if confine else hook_allow, policy="deny",
@@ -1201,3 +1204,216 @@ def test_a_spliced_event_is_live_in_a_real_probe_child(outside, event):
     assert "THROUGH" not in out and event in read_fence.MUTATION_EVENTS
     assert victim.exists() and victim.read_text(encoding="utf-8") == "original"
     assert victim.stat().st_mode == before.st_mode and victim.stat().st_mtime == before.st_mtime
+
+
+# ------------------------------------ rule 1, the GRADER: what `protect_packages` fences, the probe
+#                                      refuses too (docs/60 §60.9 A3, ex-OPEN[probe-reads-what-the-
+#                                      grader-fence-refuses])
+#
+# `EvalSpec.protect_packages` fenced `env_inspect` and the probe was composed BESIDE it, with a read
+# confinement that granted site-packages whole — so `run_probe(inspect.getsource(<grader>))`
+# returned what `read_installed` refused, in one toolset. The declaration now reaches the probe as
+# DIRECTORIES (`grader_package_roots`, `find_spec(...).submodule_search_locations`), folded into the
+# fence's own root list so both rungs refuse them by the machinery they already have.
+#
+# The fixture lives under `~/.cache`, not `tmp_path`, for `under_cache_tier`'s reason: the grader
+# has to sit INSIDE a tier the grant derivation really produces, because the whole defect is a
+# granted tier containing the thing the fence should hide. The confined-by-default variants skip
+# where the kernel cannot confine (the autouse gate); the `confine_reads=False` variant drives the
+# HOOK rung everywhere.
+
+@pytest.fixture()
+def fake_grader():
+    """A `site/` holding an installed GRADER package (secret inside) beside an unrelated one."""
+    root = Path.home() / ".cache" / f"looplab-grader-test-{os.getpid()}-{id(object())}"
+    site = root / "site"
+    name = f"fakegrader_{os.getpid()}"
+    try:
+        (site / name).mkdir(parents=True)
+    except OSError as exc:                              # noqa: PERF203 - a read-only HOME is a skip
+        pytest.skip(f"cannot create a fixture under ~/.cache: {exc}")
+    (site / name / "__init__.py").write_text("SECRET = 'HOW SOLUTIONS ARE CHECKED'\n",
+                                             encoding="utf-8")
+    (site / name / "checker.py").write_text("def is_solution(x):\n    return True\n",
+                                            encoding="utf-8")
+    (site / "otherpkg").mkdir()
+    (site / "otherpkg" / "__init__.py").write_text("HELLO = 'AN ORDINARY DEPENDENCY'\n",
+                                                   encoding="utf-8")
+    try:
+        yield site, name
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_grader_package_roots_resolves_a_declared_name_to_its_directory(fake_grader, monkeypatch):
+    """The name the operator declared becomes the directory the interpreter imports it from — in
+    THIS interpreter, which is the one the probe runs on. A dotted spelling is one declaration, an
+    absent package fences nothing (the inspector already answers "(not installed)" for it)."""
+    site, name = fake_grader
+    monkeypatch.syspath_prepend(str(site))
+    roots = dev_probe.grader_package_roots([name, f"{name}.checker", "definitely_not_installed_xyz"])
+    assert roots == {name: (str(site / name),)}
+    assert dev_probe.grader_package_roots([]) == {}
+    # A single-FILE module has no search locations and is a STATED residual, not a silent fence.
+    (site / "onefile_grader.py").write_text("X = 1\n", encoding="utf-8")
+    assert dev_probe.grader_package_roots(["onefile_grader"]) == {}
+
+
+def _grader_probe(site, name, **kw):
+    return DevProbeTools({}, timeout_s=60,
+                         protect_roots=dev_probe.grader_package_roots([name]) or
+                         {name: (str(site / name),)}, **kw)
+
+
+def test_the_probe_refuses_the_grader_in_the_hook_rung_and_names_the_package(fake_grader,
+                                                                              monkeypatch):
+    """`confine_reads=False`: the HOOK is the confinement, so this drives everywhere. The read is
+    refused, the secret never reaches the tool result, and the refusal is `env_inspect`'s — it
+    names the PACKAGE and says it is installed, never "under the operator's SOURCE tree" (false,
+    and unactionable: there is no workdir-relative spelling of the checker)."""
+    site, name = fake_grader
+    monkeypatch.syspath_prepend(str(site))
+    tools = _grader_probe(site, name, confine_reads=False)
+    out = tools.execute("run_probe", {"code": f"print(open({str(site / name / '__init__.py')!r}).read())"})
+    assert "HOW SOLUTIONS ARE CHECKED" not in out and "exit=0" not in out
+    assert f"`{name}`" in out and "fenced" in out and "IS installed" in out, out
+    assert "operator's SOURCE tree" not in out
+    # `import` is the route the review measured: the module's own bytes through the loader. The
+    # fixture goes on the CHILD's path from inside the program (a real grader is on it from
+    # site-packages; `monkeypatch.syspath_prepend` reaches only this interpreter).
+    out = tools.execute("run_probe", {"code": (
+        f"import sys; sys.path.insert(0, {str(site)!r})\n"
+        f"import inspect, {name}.checker as m; print(inspect.getsource(m))")})
+    assert "def is_solution" not in out and "exit=0" not in out
+    assert f"`{name}`" in out and "fenced" in out, out
+    # An unrelated package in the same tier is readable: the tier was PUNCHED, not dropped.
+    out = tools.execute("run_probe", {"code": f"print(open({str(site / 'otherpkg' / '__init__.py')!r}).read())"})
+    assert "exit=0" in out and "AN ORDINARY DEPENDENCY" in out, out
+
+
+def test_the_probe_refuses_the_grader_under_full_default_confinement(fake_grader, monkeypatch):
+    """BOTH rungs, on a kernel that has the second one (skipped by the autouse gate otherwise).
+    This is the review's own reproduction — "under full default confinement" — driven verbatim."""
+    site, name = fake_grader
+    monkeypatch.syspath_prepend(str(site))
+    tools = _grader_probe(site, name)
+    out = tools.execute("run_probe", {"code": (
+        f"import sys; sys.path.insert(0, {str(site)!r})\n"
+        f"import inspect, {name}.checker as m; print(inspect.getsource(m))")})
+    assert "def is_solution" not in out and "exit=0" not in out
+    assert f"`{name}`" in out and "fenced" in out, out
+    # …the kernel half too, where the audit hook cannot look.
+    secret = site / name / "__init__.py"
+    out = tools.execute("run_probe", {"code": (
+        "import ctypes, os\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        f"fd = libc.open({str(secret)!r}.encode(), os.O_RDONLY)\n"
+        "print('DENIED' if fd < 0 else os.read(fd, 64))\n")})
+    assert "DENIED" in out and "HOW SOLUTIONS ARE CHECKED" not in out
+    out = tools.execute("run_probe", {"code": f"print(open({str(site / 'otherpkg' / '__init__.py')!r}).read())"})
+    assert "exit=0" in out and "AN ORDINARY DEPENDENCY" in out, out
+
+
+@pytest.mark.parametrize("confine", [True, False])
+def test_the_grader_root_is_in_both_projections_of_rule_one(fake_grader, confine):
+    """Derivation only, no child: the kernel's grant list holds no grant covering the grader and
+    one covering its sibling; the roots that travel to the child name it; and the hook the probe
+    would install refuses the grader's file and admits the sibling's. Runs on any kernel."""
+    site, name = fake_grader
+    tools = _grader_probe(site, name, confine_reads=confine)
+    grader = read_fence._norm_root(site / name)
+    grants = tools._confined_allow(Path(tempfile.gettempdir()) / "looplab-probe-x" / "work")
+    assert not any(grader.startswith(g) for g in grants), "a grant contains the grader"
+    assert any(read_fence._norm_root(site / "otherpkg").startswith(g) for g in grants), \
+        "the sibling package lost its grant: the tier was dropped rather than punched"
+    assert grader in tools._read_deny()
+    fenced = _fence_predicate(tools, grants)
+    assert fenced(str(site / name / "checker.py")) is not None
+    assert fenced(str(site / "otherpkg" / "__init__.py")) is None
+
+
+def test_the_refusal_is_rewritten_from_the_fences_own_sentence(fake_grader):
+    """The message rung, driven on the exact text the fence emits (`read_fence.REFUSAL_MESSAGE`,
+    spliced — a reworded fence goes red here rather than silently un-annotated), and on the
+    kernel's `PermissionError` for a native reader. A path outside every grader root, a successful
+    exit and a probe with no grader declared all leave the stderr byte for byte."""
+    site, name = fake_grader
+    tools = _grader_probe(site, name)
+    inside = str(site / name / "checker.py")
+    fence_line = "LoopLabReadFenceRefused: " + read_fence.REFUSAL_MESSAGE.format(path=inside)
+    got = tools._name_the_grader(1, "Traceback...\n" + fence_line + "\n")
+    assert dev_probe.GRADER_REFUSAL.format(path=inside, package=name) in got
+    assert "operator's SOURCE tree" not in got
+    kernel_line = f"PermissionError: [Errno 13] Permission denied: '{inside}'"
+    got = tools._name_the_grader(1, kernel_line + "\n")
+    assert kernel_line in got and f"LOOPLAB probe: refused: {inside} is inside `{name}`" in got
+    elsewhere = "LoopLabReadFenceRefused: " + read_fence.REFUSAL_MESSAGE.format(path="/src/repo/x.py")
+    assert tools._name_the_grader(1, elsewhere) == elsewhere
+    assert tools._name_the_grader(0, fence_line) == fence_line
+    assert tools._name_the_grader(1, f"printed {inside} and exited\n") == f"printed {inside} and exited\n"
+    assert DevProbeTools({}, timeout_s=5)._name_the_grader(1, fence_line) == fence_line
+
+
+def test_an_empty_protect_declaration_renders_the_unfenced_probe_byte_for_byte(tmp_path):
+    """`protect_packages: []` — the default — must change NOTHING: the grants, the roots that
+    travel to the child, the rendered fence, the launcher and the tool spec."""
+    spec = {"editables": [{"name": ".", "path": str(tmp_path / "repo")}]}
+    (tmp_path / "repo").mkdir()
+    plain, empty = DevProbeTools(spec, timeout_s=5), DevProbeTools(spec, timeout_s=5, protect_roots={})
+    assert empty.protect_roots == {} and DevProbeTools(spec, protect_roots=()).protect_roots == {}
+    assert empty._fence_spec() == spec
+    work = tmp_path / "w"
+    assert plain._confined_allow(work) == empty._confined_allow(work)
+    assert plain._read_deny() == empty._read_deny()
+    assert plain.specs() == empty.specs()
+    assert dev_probe.render_launcher("p.py", read_allow=plain._read_allow(work),
+                                     read_deny=plain._read_deny()) == dev_probe.render_launcher(
+        "p.py", read_allow=empty._read_allow(work), read_deny=empty._read_deny())
+    for d in (tmp_path / "f1", tmp_path / "f2"):
+        d.mkdir()
+    plain._install_fence(tmp_path / "f1")
+    empty._install_fence(tmp_path / "f2")
+    assert ((tmp_path / "f1" / "sitecustomize.py").read_text(encoding="utf-8")
+            == (tmp_path / "f2" / "sitecustomize.py").read_text(encoding="utf-8"))
+    # …and a declared grader is what makes the spec say so.
+    assert "fenced as the evaluation harness" not in json.dumps(plain.specs())
+    assert "fenced as the evaluation harness" in json.dumps(
+        DevProbeTools(spec, protect_roots={"g": (str(tmp_path / "g"),)}).specs())
+
+
+def test_a_grader_inside_the_stdlib_tier_is_refused_loudly_not_punched(tmp_path):
+    """Punching a tier loses its loose FILES (`_grant_expansion`'s residual). Under a venv that is
+    `six.py`; under a conda/system interpreter `site-packages` sits INSIDE the stdlib directory and
+    the loose files are `os.py` — a broken interpreter, not a fence. Refuse and name the shape."""
+    stdlib = Path(sysconfig.get_paths()["stdlib"])
+    tools = DevProbeTools({}, timeout_s=5, protect_roots={"jsongrader": (str(stdlib / "json"),)})
+    with pytest.raises(dev_probe.ProbeRefusal) as refused:
+        tools._confined_allow(tmp_path / "work")
+    assert "jsongrader" in str(refused.value) and "stdlib" in str(refused.value)
+    assert "Running without the fence is not the alternative" in str(refused.value)
+
+
+def test_the_developer_hands_the_probe_the_same_declaration_as_the_inspector(fake_grader,
+                                                                              monkeypatch):
+    """The composition point, driven: the probe `_scout_tools` builds carries the grader roots
+    resolved from the task's OWN `protect_packages` — the same accessor `EnvInspectTools` is built
+    from one line over — and a task that declares none hands it nothing."""
+    site, name = fake_grader
+    monkeypatch.syspath_prepend(str(site))
+
+    class _Task:
+        def __init__(self, spec):
+            self._spec = spec
+
+        def eval_spec(self):
+            return self._spec
+
+    dev = _developer(True)
+    dev.task = _Task({"command": ["python", "x.py"], "protect_packages": [name, "not_installed_zz"]})
+    probe = next(t for t in dev._scout_tools(None) if isinstance(t, DevProbeTools))
+    assert probe.protect_roots == {name: (read_fence._norm_root(site / name),)}
+    assert dev._grader_roots() == {name: (str(site / name),)}
+    dev.task = _Task({"command": ["python", "x.py"]})
+    assert next(t for t in dev._scout_tools(None) if isinstance(t, DevProbeTools)).protect_roots == {}
+    # …and a developer with no task at all (the `__new__`-built shape ~170 tests use) fences nothing.
+    assert _developer(True)._grader_roots() == {}

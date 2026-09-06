@@ -136,7 +136,9 @@ and a second, unrecorded authoring channel would route around it.
 
 WHAT IT CAN SEE
 ---------------
-The real interpreter and its real site-packages (that is the entire point), the declared `data:` /
+The real interpreter and its real site-packages (that is the entire point) — MINUS the packages the
+task fences as its GRADER (`EvalSpec.protect_packages`, arriving as `protect_roots`; a read inside
+one is refused naming the package, as `env_inspect` refuses it) — the declared `data:` /
 `references:` mount sources (the fence allow-lists them), and a DISPOSABLE REPLICA of the files this
 node has staged so far — `write.files`, materialized read-only into the probe's cwd. The replica
 flows one way only: authoring -> probe, never back. It is the node's own staged content and not the
@@ -567,9 +569,67 @@ def render_launcher(program_path: str, read_allow: Optional[tuple] = None,
                             "read_deny": tuple(read_deny)})}
 
 
+# The refusal the probe answers for a read inside a fenced GRADER package. Mirrors
+# `env_inspect.EnvInspectTools.DENIED` on purpose — the two are one rule in two channels, and a
+# Developer refused by one and then by the other must read the same sentence, with the same fix
+# (none: it IS installed, and the fence is the point). A CONSTANT so a test can pin the property.
+GRADER_REFUSAL = (
+    "refused: {path} is inside `{package}`, the evaluation harness that grades this experiment, so "
+    "the probe is fenced from reading it. Reading the checker, the timer or the scorer would make "
+    "any result meaningless. It IS installed -- this is a fence, not a missing package."
+)
+
+
+def grader_package_roots(names) -> dict:
+    """`{top-level name: (package directory, ...)}` for the packages a task fences as the GRADER.
+
+    `EvalSpec.protect_packages` names DISTRIBUTIONS the Developer may not read, and the env
+    inspector applies that by NAME (it answers by importing). A probe reads FILES, so the name has
+    to become the directories the interpreter would import it from — which is exactly
+    `find_spec(name).submodule_search_locations`, in THIS interpreter, because `_probe` runs the
+    child on `sys.executable` for precisely the reason that lets this resolution be trusted: the
+    probe's interpreter and the inspector's are one, so what `read_installed` refuses and what this
+    denies are the same bytes. An editable install (`pip install -e`, the AlgoTune bench's shape)
+    resolves to the CHECKOUT, not to site-packages, and is fenced there.
+
+    Total and quiet in exactly one direction: a name that does not resolve fences nothing and is
+    left out, because a fence over a package that is not installed is a fence over nothing and the
+    inspector already answers "(not installed)" for it. A name that resolves to a single FILE
+    (`spec.origin` with no search locations) is left out too, and that is a STATED residual rather
+    than a shortcut: both rungs of the read boundary are DIRECTORY prefixes (`_norm_root` appends
+    the separator so `/src` cannot admit `/srcfoo`, and a Landlock rule covers a subtree), so a
+    one-file grader would need a file rule neither rung has a spelling for. The graders this was
+    measured on are packages. Dotted names are cut to their top level, as `env_inspect._top` does,
+    so `AlgoTuner.utils` and `AlgoTuner` are one declaration."""
+    import importlib.util
+
+    out: dict = {}
+    for raw in (names or ()):
+        top = str(raw or "").strip().split(".", 1)[0]
+        if not top or top in out:
+            continue
+        try:
+            spec = importlib.util.find_spec(top)
+        except Exception:  # noqa: BLE001 - a finder that raises is "not installed" for this purpose
+            spec = None
+        locations = tuple(str(p) for p in (getattr(spec, "submodule_search_locations", None) or ())
+                          if str(p or "").strip())
+        if locations:
+            out[top] = locations
+    return out
+
+
 class DevProbeTools:
     """ToolProvider (`specs()`/`execute()`) giving the repo Developer ONE tool: run a short Python
     program against the real environment, inside the boundary this module's docstring states.
+
+    `protect_roots` is the GRADER FENCE arriving at the probe: `{package: (directory, ...)}` as
+    `grader_package_roots` resolves it from `EvalSpec.protect_packages` (a bare iterable of
+    directories is accepted and named by its last path component). They are folded into the fence's
+    ROOT list (`_fence_spec`) beside the editable trees, so both rungs of rule 1 refuse them by the
+    machinery they already have — and the refusal names the PACKAGE (`GRADER_REFUSAL`, stamped by
+    `_project` over the fence's own path message), exactly as `env_inspect`'s does. Empty fences
+    nothing and renders every byte the unfenced probe rendered.
 
     `repo_spec` is the task's own spec (`adapters/tasks.py::repo_spec`) — the SAME input
     `engine/resources.py::_read_fence_dir` hands the engine's fence, so the probe's fence and the
@@ -577,7 +637,8 @@ class DevProbeTools:
     `RepoWriteTools` whose `files` dict is replicated, read-only, into the probe's cwd."""
 
     def __init__(self, repo_spec: Optional[dict] = None, *, timeout_s: float = _DEFAULT_TIMEOUT,
-                 staged=None, confine_reads: bool = True, max_calls: int = 0, counter=None):
+                 staged=None, confine_reads: bool = True, max_calls: int = 0, counter=None,
+                 protect_roots=()):
         # A COUNT CAP, OFF BY DEFAULT (`max_calls=0`). §189 measured the only process variable that
         # separates the best `edge_expansion` runs from the worst: the bottom decile makes 29
         # `run_probe` calls to the top decile's 20, while evaluating the SAME number of nodes,
@@ -612,6 +673,44 @@ class DevProbeTools:
         # have, and the refusal names `developer_probe_confine`, which is how an operator who wants
         # the old trade takes it.
         self.confine_reads = bool(confine_reads)
+        # `{package: (dir, ...)}`, normalized through the fence's own root rule so the hook, the
+        # kernel rung and `_project`'s annotation all compare the same spelling of one directory.
+        self.protect_roots: dict = {}
+        items = (protect_roots.items() if isinstance(protect_roots, dict)
+                 else ((os.path.basename(os.path.normpath(str(p))), (p,)) for p in (protect_roots or ())))
+        for package, dirs in items:
+            dirs = (dirs,) if isinstance(dirs, (str, os.PathLike)) else tuple(dirs or ())
+            norm = tuple(n for n in (read_fence._norm_root(d) for d in dirs) if n)
+            if str(package or "").strip() and norm:
+                self.protect_roots[str(package)] = norm
+
+    def _fence_spec(self) -> dict:
+        """The repo spec the FENCE is derived from: the task's own, plus a `protect:<package>`
+        editable per grader directory.
+
+        One list, not a second one: `read_fence.fence_inputs` and `confine_grants` already know how
+        to deny a root in the hook, punch a containing tier around it in the kernel allow-list,
+        drop one that is too broad and refuse one that a grant swallows — and a grader directory
+        needs every one of those treatments for the same reasons an editable tree does. A parallel
+        `deny_roots` argument would have been a second policy that could drift from the first,
+        which is the drift this module's own history is about."""
+        spec = dict(self.repo_spec or {})
+        extra = [{"name": f"protect:{package}", "path": d}
+                 for package, dirs in sorted(self.protect_roots.items()) for d in dirs]
+        if extra:
+            spec["editables"] = list(spec.get("editables") or []) + extra
+        return spec
+
+    def _grader_of(self, path: str) -> Optional[str]:
+        """The fenced package a path is inside, or None. Realpath'd like the roots it is compared to."""
+        try:
+            resolved = os.path.realpath(str(path))
+        except (OSError, ValueError, TypeError):
+            return None
+        for package, dirs in self.protect_roots.items():
+            if any(resolved == d.rstrip(os.sep) or resolved.startswith(d) for d in dirs):
+                return package
+        return None
 
     def bind_state(self, state=None, parent=None) -> None:
         return None
@@ -633,7 +732,12 @@ class DevProbeTools:
                     "The probe OBSERVES and changes nothing: it CANNOT write files, install "
                     "packages, run other programs or use a GPU, and it cannot read the operator's "
                     "source tree (you run in a copy of the files you have staged so far — the same "
-                    "paths write_file uses). Anything that must produce a file belongs in your "
+                    "paths write_file uses)"
+                    # Spliced only when a grader is declared, so an unfenced task's spec is
+                    # byte-identical (prompt strings are contracts).
+                    + (" nor the packages the operator fenced as the evaluation harness — those "
+                       "reads are refused and say so" if self.protect_roots else "")
+                    + ". Anything that must produce a file belongs in your "
                     "node's files and its declared eval stages. PRINT what you want to see; only "
                     "stdout/stderr come back, each as a tail if long.",
                     {"code": {"type": "string", "description": "the Python program to run; print() "
@@ -814,7 +918,7 @@ class DevProbeTools:
         grants = self._confined_allow(fence_dir.parent / "work")
         confine = not self.confine_reads
         roots, hook_allow, _dropped, swallowed = read_fence.fence_inputs(
-            self.repo_spec, allow=grants)
+            self._fence_spec(), allow=grants)
         if swallowed:
             raise ProbeRefusal(
                 "refused to run: a read grant contains the operator's source root "
@@ -898,7 +1002,28 @@ class DevProbeTools:
         # where the prefix is single-component: its premise (the prefix survives as a root)
         # evaporates and the probe launches instead of refusing. A non-empty drop here should
         # refuse the run with the dropped paths named, like `refused` below.
-        roots, allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
+        roots, allow, _dropped, _swallowed = read_fence.fence_inputs(self._fence_spec(), allow=())
+        # A GRADER INSIDE THE STDLIB TIER IS A REFUSAL, NOT A PUNCH. `confine_grants` replaces a
+        # tier that contains a root by its subdirectories, and a punched tier loses the loose
+        # FILES sitting directly in it (`_grant_expansion`'s stated residual). Under a venv the
+        # grader lives in `<venv>/lib/pythonX.Y/site-packages/` and the loose files that go are
+        # single-file third-party modules — a bounded, visible cost (a `PermissionError` naming
+        # `six.py`). Under a conda or system interpreter `site-packages` sits INSIDE the stdlib
+        # directory, and punching that loses `os.py`, `functools.py` and every other loose stdlib
+        # module: not a fence, a broken interpreter — `_too_broad`'s failure arriving through the
+        # grant list. Say so, and name the shape that works, rather than run a probe that dies on
+        # its first import with nothing to say why.
+        stdlib = read_fence._norm_root(__import__("sysconfig").get_paths().get("stdlib") or "")
+        if stdlib:
+            inside = sorted(f"{package} ({d})" for package, dirs in self.protect_roots.items()
+                            for d in dirs if d.startswith(stdlib))
+            if inside:
+                raise ProbeRefusal(
+                    "refused to run: a package fenced by `protect_packages` is installed INSIDE the "
+                    f"interpreter's own stdlib tier ({', '.join(inside)} under {stdlib}), and a "
+                    "read allow-list cannot exclude it without losing the stdlib's own modules. "
+                    "Install the grader as an editable checkout or into a virtualenv, or drop it "
+                    "from `protect_packages`. Running without the fence is not the alternative.")
         tiers = tuple(path for path in self._interpreter_allow() if not _shared_temp_root(path))
         # The probe's own disposable replica, added AFTER the temp filter and never through it: it
         # lives under `mkdtemp`, i.e. under exactly the tier that filter exists to drop.
@@ -938,21 +1063,17 @@ class DevProbeTools:
     def _interpreter_allow() -> tuple:
         """The paths a confined probe must still reach: the interpreter, and the machine tiers.
 
-        OPEN[probe-reads-what-the-grader-fence-refuses] granting site-packages wholesale hands the
-        probe exactly the grader sources the EvalSpec package fence keeps out of `env_inspect`, in
-        the same composed toolset — and nothing hands this provider that declaration.
-        proof:absent:protect_packages@looplab/tools/dev_probe.py
-        REVIEW 2026-08-30 (trust-boundary): every Developer phase composes `EnvInspectTools`
-        (fenced) beside `DevProbeTools`, whose read confinement includes purelib and
-        `site.getsitepackages()` while the hook half denies editable roots only — so one
-        `run_probe(code="import inspect, <grader mod> as m; print(inspect.getsource(m))")` returns
-        what `read_installed` refuses, under full default confinement. The grader-fence test's own
-        docstring claims the probe route was already covered; that is true for a temp-root grader
-        and false for the pip-installed one the fence was measured on (213/216 calls hunting the
-        checker), and a route that opens under pressure is why that fence exists. The in-tree fix
-        shape: hand the grader packages' `find_spec(...).submodule_search_locations` to this
-        provider as extra deny roots (`read_fence.confine_grants` already knows how to punch the
-        other way).
+        Granting site-packages WHOLE used to hand the probe exactly the grader sources
+        `EvalSpec.protect_packages` keeps out of `env_inspect`, in the same composed toolset: one
+        `run_probe(code="import inspect, <grader mod> as m; print(inspect.getsource(m))")` returned
+        what `read_installed` refuses, under full default confinement (2026-08-30 review). Since
+        2026-09-06 that declaration reaches this provider as `protect_roots` — the grader packages'
+        `find_spec(...).submodule_search_locations`, resolved by `grader_package_roots` — and
+        `_fence_spec` folds them into the SAME root list the editable trees are in, so
+        `read_fence.confine_grants` punches every one of these tiers around them (the kernel rung)
+        and the hook denies them by prefix (the message rung). Nothing here changed for it: this
+        list is still the interpreter's own paths, and the punch is applied where the grants are
+        derived (`_confined_allow`).
 
         Denying the interpreter does not fence a probe, it stops python from starting -- which is the
         failure `read_fence._too_broad` exists to prevent one layer down. Everything here is derived
@@ -1010,8 +1131,10 @@ class DevProbeTools:
         The grants are computed here and the child derives some of its own (`sys.prefix` and the
         system tiers, in the probe's real interpreter — see `_READ_RUNG`). A derivation the parent
         cannot see is a derivation the parent cannot fence, so the roots travel with the grants and
-        the containment rule is applied again where the grant is actually made."""
-        roots, _allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
+        the containment rule is applied again where the grant is actually made. The grader roots
+        travel too (`_fence_spec`): the child's own `purelib` grant is exactly the one that contains
+        a pip-installed grader, and the parent's punched expansion of it is in the grant list."""
+        roots, _allow, _dropped, _swallowed = read_fence.fence_inputs(self._fence_spec(), allow=())
         return tuple(roots)
 
     def _replicate(self, work: Path) -> str:
@@ -1103,6 +1226,44 @@ class DevProbeTools:
             used += len(body)
         return copied, skipped
 
+    # The two refusal shapes a fenced read produces, each carrying the path: the hook's own
+    # sentence — `read_fence.REFUSAL_MESSAGE` itself, spliced around its `{path}` slot so a reworded
+    # fence message goes red in `tests/test_dev_probe.py` rather than silently un-annotated — and
+    # the kernel's `PermissionError` for a reader the hook cannot see (`ctypes`, a native loader).
+    # Anchored on the sentence/exception, never on the bare path, so a program that merely PRINTS a
+    # grader path is not annotated.
+    _FENCE_REFUSAL_RE = re.compile(
+        "(" + r"(?P<hook>\S+)".join(re.escape(part)
+                                    for part in read_fence.REFUSAL_MESSAGE.split("{path}")) + ")"
+        + r"|(PermissionError: \[Errno 13\] Permission denied: '(?P<kernel>[^']+)')")
+
+    def _name_the_grader(self, rc, err: str) -> str:
+        """Rewrite a fenced-read refusal that landed inside a grader package so it NAMES THE PACKAGE.
+
+        The fence is one mechanism with two kinds of root, and its own message knows only the
+        first: a read under a grader directory is refused with "is under the operator's SOURCE
+        tree", which is false (it is site-packages) and unactionable (there is no workdir-relative
+        spelling of the checker). The refusal a Developer must read is `env_inspect`'s, so the
+        hook's sentence is REPLACED by `GRADER_REFUSAL` for the path it names, and a kernel-rung
+        `PermissionError` on such a path gets the same sentence appended — a `PermissionError` is an
+        `OSError`, the silent-skip shape, and the one thing this surface can add after the fact is
+        the reason. Host-side and deterministic: the map from directory to package is this
+        provider's own, so no text the child wrote decides anything. A probe with no grader
+        declared returns `err` byte for byte."""
+        if not self.protect_roots or rc == 0 or not err:
+            return err
+
+        def _sub(m):
+            path = m.group("hook") or m.group("kernel") or ""
+            package = self._grader_of(path)
+            if package is None:
+                return m.group(0)
+            sentence = GRADER_REFUSAL.format(path=path, package=package)
+            if m.group("hook"):
+                return sentence
+            return m.group(0) + "\nLOOPLAB probe: " + sentence
+        return self._FENCE_REFUSAL_RE.sub(_sub, err)
+
     def _project(self, rc, out, err, timed_out, to: float, note: str, *, cancelled=False) -> str:
         """The bounded output projection: exit status, then each stream as a TAIL.
 
@@ -1121,6 +1282,7 @@ class DevProbeTools:
             # crash in the thing being probed, which is exactly the misdiagnosis this note prevents.
             head += " — " + PROBE_REFUSAL.replace("{what}", "write files")
         parts = [head + note]
+        err = self._name_the_grader(rc, err or "")
         out_take, err_take = stream_tails(out or "", err or "")
         if out and out.strip():
             parts.append("stdout:\n" + clip(out, out_take, keep="tail", note="…(truncated)…\n"))
