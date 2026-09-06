@@ -208,7 +208,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 220 -> 221 Settings on 2026-09-06: `evidence_envelope`. See the catalogue note above.
     # 221 -> 223 Settings on 2026-09-06: `llm_cost_limit` + `llm_token_limit`. See the catalogue note.
     # 223 -> 224 Settings on 2026-09-06: `endgame_reserve_frac`, the plan's endgame reserve (doc 52 row 18).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 224
+    # 224 -> 225 Settings on 2026-09-06: `model_arms`, the operator x model router's arms (doc 52 row 19; uncurated, open-keyed).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 225
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

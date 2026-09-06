@@ -57,6 +57,92 @@ META_CHOSEN = "_chosen"
 META_REASON = "_reason"
 META_RUNG = "_rung"
 META_PROMOTED = "_promoted"
+# THE MODEL ARM (doc 52 row 19): which model the bandit routed a build to. `_model` rides only on
+# an action the bandit branch produced with arms declared; the engine builds under that arm's model
+# (`core/llm.py::model_override`) and records the arm on `node_created`, which `model_arm_yields`
+# folds so the pick learns per arm. The configured Developer model is the implicit `default` arm.
+META_MODEL = "_model"
+DEFAULT_MODEL_ARM = "default"
+
+
+def parse_model_arms(raw) -> dict[str, tuple[str, float]]:
+    """`Settings.model_arms` — `{arm: "model-id[@relative-cost]"}` — as `{arm: (model, cost)}`.
+
+    The cost is the arm's price RELATIVE to the configured model (1.0), declared by the operator
+    because it is a fact about the box's endpoints the run cannot measure; the pick divides an
+    arm's gain by it, which is the iso-budget lever the four 2026 results measured (LEVI, DEI,
+    cross-tier routing, ShinkaEvolve's bandit). Junk rows, a non-positive cost and the reserved
+    `default` name are skipped rather than guessed."""
+    out: dict[str, tuple[str, float]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for name, spec in raw.items():
+        if not isinstance(name, str) or not name.strip() or name == DEFAULT_MODEL_ARM:
+            continue
+        if not isinstance(spec, str) or not spec.strip():
+            continue
+        model, _, cost_text = spec.partition("@")
+        model = model.strip()
+        if not model:
+            continue
+        cost = 1.0
+        if cost_text.strip():
+            try:
+                cost = float(cost_text)
+            except ValueError:
+                continue
+            if not (cost > 0.0) or cost != cost:
+                continue
+        out[name.strip()[:64]] = (model[:200], cost)
+    return out
+
+
+def model_arm_costs(arms: dict[str, tuple[str, float]]) -> dict[str, float]:
+    """The per-arm relative cost the policy is handed, the default arm at 1.0 first."""
+    return {DEFAULT_MODEL_ARM: 1.0, **{name: cost for name, (_model, cost) in (arms or {}).items()}}
+
+
+def model_arm_yields(state: RunState) -> dict[str, dict]:
+    """`operator_yields`' rule keyed by the model ARM a node was built with (`Node.model_arm`; an
+    unrouted node counts for the default arm), so the pick can learn which MODEL's builds pay."""
+    out: dict[str, dict] = {}
+    for n in state.nodes.values():
+        if not n.parent_ids or n.status is not NodeStatus.evaluated or n.metric is None:
+            continue
+        if (n.tombstoned or not n.feasible
+                or n.id in state.aborted_nodes or n.id in state.breed_excluded):
+            continue
+        pm = [state.nodes[p].metric for p in n.parent_ids
+              if p in state.nodes and state.nodes[p].metric is not None]
+        if not pm:
+            continue
+        base = max(pm) if state.direction == "max" else min(pm)
+        delta = (n.metric - base) if state.direction == "max" else (base - n.metric)
+        gain = max(0.0, delta) / max(0.1, (n.eval_seconds or 0.1))
+        arm = getattr(n, "model_arm", "") or DEFAULT_MODEL_ARM
+        d = out.setdefault(arm, {"n": 0, "gain": 0.0})
+        d["gain"] = (d["gain"] * d["n"] + gain) / (d["n"] + 1)
+        d["n"] += 1
+    return out
+
+
+def _model_arm_pick(yields: dict[str, dict], arms: list[str], costs: dict[str, float],
+                    c: float = 0.8) -> str:
+    """`_bandit_pick` over model arms with the gain COST-NORMALIZED: an untried arm is tried first
+    (in arm order — the caller lists the default first), then mean gain / relative cost plus the
+    same exploration bonus. Deterministic; ties break by arm order."""
+    for k in arms:
+        if yields.get(k, {"n": 0})["n"] == 0:
+            return k
+    total = sum(yields[k]["n"] for k in arms) or 1
+    scored = {k: yields[k]["gain"] / max(1e-9, float(costs.get(k, 1.0))) for k in arms}
+    gmax = max(scored.values(), default=0.0) or 1.0
+    best_k, best_s = arms[0], None
+    for k in arms:
+        score = (scored[k] / gmax) + c * math.sqrt(math.log(total + 1) / (yields[k]["n"] + 1))
+        if best_s is None or score > best_s + 1e-12:
+            best_k, best_s = k, score
+    return best_k
 
 # ASHA: how many FAILED promotion children a survivor may accrue before it is retired (no longer
 # re-promoted). One transient crash shouldn't abandon a good lineage, but a lineage that crashes
@@ -220,6 +306,7 @@ class GreedyTree:
         max_merges: int = 2,
         ablate_every: int = 0,
         operator_bandit: bool = False,
+        model_arms: Optional[dict] = None,
     ):
         self.n_seeds = n_seeds
         self.max_nodes = max_nodes
@@ -233,6 +320,10 @@ class GreedyTree:
         # cadence defaults are well-tested and the bandit has no direct published ablation —
         # `thorough` turns it on.
         self.operator_bandit = operator_bandit
+        # doc 52 row 19: `{arm: relative cost}` — the model arms the bandit branch may route a build
+        # to beside the implicit default. Inert without `operator_bandit`.
+        self.model_arms = {str(k): float(v) for k, v in (model_arms or {}).items()
+                           if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0}
 
     def next_actions(self, state: RunState) -> list[dict]:
         # 1. Evaluate anything created-but-not-evaluated (crash-resume re-entry point).
@@ -277,16 +368,25 @@ class GreedyTree:
             pick = _bandit_pick(operator_yields(state), cands)
             if pick == "merge":
                 top2 = rank_by_metric(state, evaluated)[:2]
-                return [{"kind": KIND_MERGE, "parent_ids": [top2[0].id, top2[1].id],
-                         META_SCORES: _metric_scores(top2), META_CHOSEN: top2[0].id,
-                         META_REASON: "bandit: merge top-2"}]
-            if pick == "refine_block":
-                return [{"kind": KIND_ABLATE, "parent_id": best.id,
-                         META_SCORES: _metric_scores(evaluated), META_CHOSEN: best.id,
-                         META_REASON: "bandit: ablate highest-impact param"}]
-            return [{"kind": KIND_IMPROVE, "parent_id": best.id,
-                     META_SCORES: _metric_scores(evaluated), META_CHOSEN: best.id,
-                     META_REASON: "bandit: exploit best"}]
+                action = {"kind": KIND_MERGE, "parent_ids": [top2[0].id, top2[1].id],
+                          META_SCORES: _metric_scores(top2), META_CHOSEN: top2[0].id,
+                          META_REASON: "bandit: merge top-2"}
+            elif pick == "refine_block":
+                action = {"kind": KIND_ABLATE, "parent_id": best.id,
+                          META_SCORES: _metric_scores(evaluated), META_CHOSEN: best.id,
+                          META_REASON: "bandit: ablate highest-impact param"}
+            else:
+                action = {"kind": KIND_IMPROVE, "parent_id": best.id,
+                          META_SCORES: _metric_scores(evaluated), META_CHOSEN: best.id,
+                          META_REASON: "bandit: exploit best"}
+            if self.model_arms:
+                # The model ARM (doc 52 row 19), chosen by the same UCB over per-arm yield with the
+                # gain divided by the arm's relative cost — the default first, then each declared
+                # arm once, then whichever pays most per unit of spend.
+                arms = [DEFAULT_MODEL_ARM] + [a for a in self.model_arms if a != DEFAULT_MODEL_ARM]
+                action[META_MODEL] = _model_arm_pick(
+                    model_arm_yields(state), arms, {DEFAULT_MODEL_ARM: 1.0, **self.model_arms})
+            return [action]
 
         # 4. Periodic merge of the top-2 evaluated nodes (multi-parent DAG step).
         # One merge per `merge_every` improves (not back-to-back): gate on the merge DEFICIT
@@ -657,7 +757,8 @@ def _make_greedy(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,
                  params: dict) -> SearchPolicy:
     return GreedyTree(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every,
                       debug_depth=depth,
-                      operator_bandit=bool(params.get("operator_bandit", False)))
+                      operator_bandit=bool(params.get("operator_bandit", False)),
+                      model_arms=params.get("model_arms") or None)
 
 
 def _make_evolutionary(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,

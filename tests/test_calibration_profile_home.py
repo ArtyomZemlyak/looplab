@@ -124,7 +124,10 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
 #               0.0, so no replicate's dispatch moves; the envelope moves regardless, because the
 #               digest binds the complete non-variant map.
-_EXPECTED_DIGEST = "sha256:16926f758dabd370e8d9460a386f199427dbe81ba1c33b6f3a97e5b71c47c284"
+#   2026-09-06  + model_arms (doc 52 row 19: the operator x model router's arms, uncurated and
+#               open-keyed). 221 -> 222, both pins re-set. Inert for a calibration replicate —
+#               the profile's `EngineOptions` declares no arm and the toy policy runs no bandit.
+_EXPECTED_DIGEST = "sha256:80ccca377ef2f10b94f676d4583b88a38d6feaac4879f39816fd100012ce05fb"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -448,7 +451,7 @@ _EXPECTED_DIGEST = "sha256:16926f758dabd370e8d9460a386f199427dbe81ba1c33b6f3a97e
 #               — where a replicate calibrated before it would have run that stage to its wall.
 #               That is a different number of evaluations on the same failing node, which is
 #               precisely what a speculation receipt asserts about.
-_EXPECTED_FIELD_COUNT = 221
+_EXPECTED_FIELD_COUNT = 222
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

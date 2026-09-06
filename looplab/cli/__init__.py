@@ -43,7 +43,7 @@ from looplab.engine.orchestrator import (
     Engine,
     SPECULATION_CALIBRATION_PROFILE_SETTINGS,
 )
-from looplab.search.policy import make_policy
+from looplab.search.policy import make_policy, parse_model_arms
 from looplab.search.speculation_calibration import speculation_runtime_scope_digest
 from looplab.runtime.sandbox import docker_tier_kwargs, make_sandbox
 from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles
@@ -956,7 +956,10 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                            eta=settings.asha_eta,     # forwarded to ASHA (greedy/mcts/evo ignore it)
                            rung_nodes=settings.asha_rung_nodes,
                            debug_depth=settings.debug_depth,
-                           operator_bandit=settings.operator_bandit),
+                           operator_bandit=settings.operator_bandit,
+                           # doc 52 row 19: the arms' relative costs; the engine holds the models
+                           model_arms={arm: cost for arm, (_m, cost)
+                                       in parse_model_arms(settings.model_arms).items()}),
         options=EngineOptions.from_settings(settings),
         crash_after=crash_after,
         # Maintainer-only bootstrap path for producing the paired evidence that the public positive

@@ -192,6 +192,9 @@ _HOME_RELATIVE_DEFAULT_FIELDS = frozenset({"memory_dir", "knowledge_dir"})
 _UNCURATED_OPEN_KEYED = frozenset({
     "agent_control", "agent_stage_base_urls", "agent_stage_models", "llm_profile", "llm_profiles",
     "llm_reasoning_extra", "role_profiles",
+    # doc 52 row 19: `{arm: "model-id[@cost]"}` — open arm names cross-referenced against the
+    # endpoints the operator runs, the same JSON-blob shape as `agent_stage_models` beside it.
+    "model_arms",
 })
 _UNCURATED_LEGACY_ALIAS = frozenset({"max_parallel", "parallel_build"})
 # The RUN-LEVEL DECLARED ENVIRONMENT (F1d). Open-keyed like the group above — the keys are arbitrary

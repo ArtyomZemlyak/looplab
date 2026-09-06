@@ -24,7 +24,7 @@ from typing import NamedTuple, Optional
 
 import anyio
 
-from looplab.core.llm import BudgetExceeded
+from looplab.core.llm import BudgetExceeded, model_override
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.types import (EV_RUN_LOOP_EXITED, EV_TRACE_EXPORT_HEALTH,
@@ -93,6 +93,7 @@ from looplab.events.finalize_protocol import FINALIZE_STEP_BEGUN
 from looplab.engine.holdout import HoldoutGrader
 from looplab.engine.lessons import LessonMemory
 from looplab.engine.plan import META_SWEEP
+from looplab.engine.node_build import _OMIT as _OMIT_ARM
 from looplab.engine.options import EngineOptions
 from looplab.engine.workspace import WorkspaceSeeder
 # Pure triage/fingerprint helpers extracted to looplab/engine/triage.py, imported back under
@@ -133,7 +134,8 @@ from looplab.search.speculation_calibration import (
     SPECULATION_POLICY_SCOPE,
 )
 from looplab.search.operators import merge_idea
-from looplab.search.policy import KIND_EXPAND, SearchPolicy
+from looplab.search.policy import (DEFAULT_MODEL_ARM, KIND_EXPAND, META_MODEL, SearchPolicy,
+                                   parse_model_arms)
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
 # / run_phase / operator_yields / NOVELTY_STANCES …) moved to engine/strategy.py (StrategyCadenceMixin),
 # which imports those symbols from their canonical sources — so they are no longer imported here.
@@ -654,6 +656,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         report_every = _opt("report_every")
         merge_mode = _opt("merge_mode")
         endgame_reserve_frac = _opt("endgame_reserve_frac")
+        model_arms = _opt("model_arms")
         complexity_cue = _opt("complexity_cue")
         budget_aware = _opt("budget_aware")
         failure_reflection = _opt("failure_reflection")
@@ -797,6 +800,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._endgame_reserve_frac = float(endgame_reserve_frac or 0.0)
         self._endgame_sweep = True
         self._endgame_surrogate = None
+        # doc 52 row 19: the model ARMS the bandit may route a build to — `{arm: (model, cost)}`;
+        # the configured Developer model is the implicit `default` arm. Inert without
+        # `operator_bandit`, which is the policy's knob, and without a declared arm.
+        self._model_arms = parse_model_arms(model_arms)
         self._complexity_cue = complexity_cue
         self._prefer_sweep = False   # A7: Strategist-set bias toward intra-node sweeps (audit-driven)
         self._budget_aware = budget_aware
@@ -1990,7 +1997,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # then read back off the fold so the reserve below is the durable row's, never a local's.
             if self._ensure_plan(state):
                 state = fold(self.store.read_all())
-            actions = self._plan_gate(state, self._select_actions(state))
+            actions = self._select_actions(state)
+            actions = self._plan_gate(state, actions)
             if not actions:
                 if await self._handle_no_actions(state, decision_seq=decision_seq) == "break":
                     break
@@ -5858,9 +5866,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     precoded,
                     max_eval_seconds=precoded_max_eval_seconds,
                 )
-            return self._create_node_scoped(
-                action, roles, reserved, preproposed=preproposed,
-                pretelemetry=pretelemetry)
+            # doc 52 row 19: a routed action builds under its arm's model — a ContextVar the
+            # client reads per call, scoped to this build (a worker thread's copied context).
+            with model_override(self._model_for_arm(action)):
+                return self._create_node_scoped(
+                    action, roles, reserved, preproposed=preproposed,
+                    pretelemetry=pretelemetry)
+
+    def _model_for_arm(self, action: dict) -> Optional[str]:
+        """The model id an action's `_model` arm names, or None for the default arm / no arm /
+        an arm this engine was not configured with (the build then runs on the configured model)."""
+        arm = action.get(META_MODEL) if isinstance(action, dict) else None
+        if not isinstance(arm, str) or arm == DEFAULT_MODEL_ARM:
+            return None
+        entry = self._model_arms.get(arm)
+        return entry[0] if entry else None
 
     def _create_node_scoped(self, action: dict, roles=None, reserved=None, preproposed=None,
                             pretelemetry=None) -> None:
@@ -6044,6 +6064,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 files=dict(built.last_files),                # the envelope's, never the instance's
                 deleted=list(built.last_deleted),
                 research_origin=research_origin,
+                # doc 52 row 19: the arm this build was routed to (omitted when none was)
+                model_arm=(action.get(META_MODEL) if isinstance(action.get(META_MODEL), str)
+                           else _OMIT_ARM),
                 # Variant-1: read the receipt THIS build stamped on its own researcher (set under
                 # `_advisory_lock` in `_set_complexity_hint`), so a concurrent sibling draft's advisory
                 # write to `self._cross_run_advisory_receipt` can't mis-stamp this node. Falls back to

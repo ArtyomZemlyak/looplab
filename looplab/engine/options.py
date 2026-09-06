@@ -30,7 +30,7 @@ from __future__ import annotations
 _UNSET = object()
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 from looplab.core.models import FAILURE_REASONS
@@ -182,6 +182,7 @@ class EngineOptions:
     report_every: int = 0                # regenerate the run report every N created nodes (0 = manual only)
     merge_mode: str = "mean"             # A0b: "mean" | "ensemble" ("auto" resolves in Engine.__init__)
     endgame_reserve_frac: float = 0.0    # doc 52 row 18: the plan's endgame reserve (0 = historical dispatch)
+    model_arms: dict = field(default_factory=dict)   # doc 52 row 19: {arm: "model[@cost]"} the bandit may route a build to
     complexity_cue: bool = False         # A0d: breadth-keyed prompt hint
     budget_aware: bool = False           # A5: surface remaining eval budget into the prompt
     failure_reflection: bool = False     # A4: reflect on recent failed branches in the prompt

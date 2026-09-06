@@ -1580,6 +1580,9 @@ class Node(BaseModel):
     # directions were the active steering). {"at_node","trigger"} of the memo. None otherwise. Audit/UI
     # only (a 💡 chip) — shows where research landed in the tree; never affects search/selection.
     research_origin: Optional[dict] = None
+    # doc 52 row 19: the model ARM the bandit routed this build to (`search/policy.py::META_MODEL`);
+    # "" for a build that was not routed, which the yield fold reads as the default arm.
+    model_arm: str = ""
     # Fold-internal receipt that the Developer finalized this lifecycle's quantitative footprint.
     # Excluded from model dumps so Layer 4 does not perturb snapshots/public DTOs; the append-only
     # node_created/node_repaired event remains the durable authority.

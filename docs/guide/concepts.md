@@ -807,6 +807,18 @@ error) and the files that DIFFER from the working set, under fixed caps
 (`adapters/repo_developer.py::co_parent_block`). A Developer without the keyword is called exactly
 as before.
 
+**The operator × model router (2026-09-06).** `operator_bandit` learned WHICH OPERATOR fires from
+folded yields and nothing learned WHICH MODEL generates it, while four independent 2026 results
+say the model lever is real at iso-budget (LEVI, DEI, cross-tier routing, ShinkaEvolve's bandit).
+`model_arms` declares the candidate models with a relative cost — `{"cheap": "qwen3:8b@0.25"}` —
+beside the configured Developer model (the implicit `default` arm); the bandit branch then picks
+the arm by the same deterministic UCB over per-arm yield (`Node.model_arm`, recorded on
+`node_created`) with the gain divided by the arm's cost, the default first and every declared arm
+once. A routed build runs under `core/llm.py::model_override`, a ContextVar every client request
+reads, so the arm changes only the MODEL the same endpoint is asked for. Inert without
+`operator_bandit` or without a declared arm; the card lane's builds are not routed (a Card carries
+no arm).
+
 ## Operators
 
 The win comes from rich operators, not exotic search. The Researcher/Developer apply:

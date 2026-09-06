@@ -70,6 +70,8 @@ ATTR_BY_FIELD = {
     "llm_token_limit": "_llm_token_limit",
     # The plan's endgame reserve (`engine/plan.py`, doc 52 row 18).
     "endgame_reserve_frac": "_endgame_reserve_frac",
+    # The operator x model router's arms, parsed once at construction (`search/policy.py::parse_model_arms`).
+    "model_arms": "_model_arms",
     "memory_dir": "memory_dir",
     "require_approval": "require_approval",
     "archive_resolution": "archive_resolution",

@@ -338,6 +338,7 @@
       },
       "metric": 53.054167369999995,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
@@ -401,6 +402,7 @@
       },
       "metric": 35.66064084999999,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
@@ -464,6 +466,7 @@
       },
       "metric": 8.51019194,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
@@ -530,6 +533,7 @@
       },
       "metric": 9.73679185,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -598,6 +602,7 @@
       },
       "metric": 17.17538701,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -663,6 +668,7 @@
       },
       "metric": 5.57026258,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -731,6 +737,7 @@
       },
       "metric": 6.688963449999999,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "merge",
       "origin": null,
       "parent_ids": [
@@ -800,6 +807,7 @@
       },
       "metric": 4.482711760000001,
       "metric_provenance": null,
+      "model_arm": "",
       "operator": "improve",
       "origin": null,
       "parent_ids": [

@@ -638,6 +638,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # logs fold byte-identically (invariant 5).
             forked_from=d.get("forked_from"),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
+            model_arm=str(d.get("model_arm") or "")[:64],  # doc 52 row 19: the routed model arm
             footprint_finalized=d.get("footprint_finalized") is True,
             speculative=speculative,
             card_build_generation=card_build_generation,

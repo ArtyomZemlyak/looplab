@@ -82,7 +82,7 @@ older binary can still load a snapshot a newer one wrote.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **191 of the 224 direct `Settings` fields in 10 groups**. The default
+server-owned curated catalogue with **191 of the 225 direct `Settings` fields in 10 groups**. The default
 **Essential** disclosure mode contains 18 high-frequency keys; search spans all 191 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
@@ -815,6 +815,7 @@ never touches.
 | `best_of_n` | `LOOPLAB_BEST_OF_N` | `1` | Generate N implementations per node, keep the best by execution-free reward (1 = off). REFUSED at launch (`search/best_of_n.py::refuse_unrankable_best_of_n`) when the active Developer answers on `last_files` rather than on the code `implement()` returns (every repo task) — the selector would rank N identical sentinels and always pick candidate 0 after paying for N builds; see `docs/BACKLOG.md` §0.18 |
 | `best_of_n_listwise` | `LOOPLAB_BEST_OF_N_LISTWISE` | `true` | Break a best-of-N static-score tie with a comparative LLM selection (D10) |
 | `operator_bandit` | `LOOPLAB_OPERATOR_BANDIT` | `False` | P4: replace the fixed merge/ablate cadences with a UCB bandit over per-operator yield (Δmetric per eval-second). Off by default; `thorough` turns it on |
+| `model_arms` | `LOOPLAB_MODEL_ARMS` | `{}` | The operator × model router's arms: `{arm: "model-id[@relative-cost]"}` — the models the bandit branch may route a BUILD to beside the configured Developer model (the implicit `default` arm), `cost` the arm's price relative to it (1.0), declared because the run cannot measure it. The pick is the same UCB over per-arm yield with the gain divided by the cost (the iso-budget lever); a routed build runs under `core/llm.py::model_override` and records its arm on `node_created`. Inert without `operator_bandit` or without a declared arm |
 
 ## Repair & resilience
 

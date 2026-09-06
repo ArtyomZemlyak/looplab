@@ -22,6 +22,7 @@ import math
 import os
 import sys
 from collections import OrderedDict
+import contextvars
 from contextlib import contextmanager
 import threading
 import time
@@ -645,6 +646,34 @@ class _ResponseCache:
             return self._entries.get(key)
 
 
+# THE MODEL OVERRIDE (doc 52 row 19): the operator x model router builds a node under the model its
+# bandit arm names. A ContextVar rather than a second client per arm, because the Developer holds
+# ONE client through every wrapper and the build runs on whichever thread the engine offloads it to
+# with a copied context — so the override is scoped to that build and invisible to a sibling's.
+# Every request site reads `_model_for_call()`; nothing else about the client (endpoint, key,
+# temperature, accountant) changes, which is the point: an arm is a MODEL on the same endpoint.
+_MODEL_OVERRIDE: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "looplab_llm_model_override", default=None)
+
+
+@contextmanager
+def model_override(model: Optional[str]):
+    """Run the block with every client request sent to `model`; None / "" keeps the enclosing
+    override (or the client's own model) — so a routed build's inner phases need no re-entry."""
+    if not model:
+        yield
+        return
+    token = _MODEL_OVERRIDE.set(str(model))
+    try:
+        yield
+    finally:
+        _MODEL_OVERRIDE.reset(token)
+
+
+def current_model_override() -> Optional[str]:
+    return _MODEL_OVERRIDE.get()
+
+
 class OpenAICompatibleClient:
     """OpenAI-compatible chat client on the openai SDK (httpx transport). Implements the
     `parse.LLMClient` Protocol, so it drops into the LLM roles like any other backend.
@@ -654,6 +683,10 @@ class OpenAICompatibleClient:
     SDK's per-read httpx timeout is what reliably bounds a stalled mid-stream read (the
     stdlib-urllib transport this replaced could not interrupt one). This is the backend
     selected by the shipped Settings factory; `LiteLLMClient` remains an optional adapter."""
+
+    def _model_for_call(self) -> str:
+        """The model this request goes to: the routed arm's when one is in scope, else the client's."""
+        return _MODEL_OVERRIDE.get() or self.model
 
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  api_key: str = "ollama", temperature: float = 0.7,
@@ -1073,7 +1106,7 @@ class OpenAICompatibleClient:
         if self._cache is None or payload.get("temperature", self.temperature) not in (0, 0.0):
             return None
         import hashlib
-        blob = json.dumps({"model": self.model, "messages": payload.get("messages"),
+        blob = json.dumps({"model": self._model_for_call(), "messages": payload.get("messages"),
                            "tools": payload.get("tools"), "tool_choice": payload.get("tool_choice"),
                            "response_format": payload.get("response_format"),
                            "max_tokens": payload.get("max_tokens")},
@@ -1395,7 +1428,7 @@ class OpenAICompatibleClient:
                 and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int)
                      or not 1 <= max_tokens <= 1_000_000)):
             raise ValueError("max_tokens must be an integer between 1 and 1000000")
-        payload = {"model": self.model, "messages": messages,
+        payload = {"model": self._model_for_call(), "messages": messages,
                    "temperature": self.temperature}
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
@@ -1413,7 +1446,7 @@ class OpenAICompatibleClient:
         model_parameters = self._model_params()
         if max_tokens is not None:
             model_parameters = {**model_parameters, "max_tokens": max_tokens}
-        with tracing.generation(op="complete_text", model=self.model, messages=messages,
+        with tracing.generation(op="complete_text", model=self._model_for_call(), messages=messages,
                                 model_parameters=model_parameters) as gen:
             body = self._post(self._text_payload(messages, max_tokens))
             msg = body["choices"][0]["message"]
@@ -1455,13 +1488,13 @@ class OpenAICompatibleClient:
             if text:
                 yield text
         # The generation span stays open for the whole stream (its duration = time-to-full-answer).
-        with tracing.generation(op="complete_text_stream", model=self.model, messages=messages,
+        with tracing.generation(op="complete_text_stream", model=self._model_for_call(), messages=messages,
                                 model_parameters=self._model_params()) as gen:
             try:
                 # Reasoning-param retry: like `_post`, a model that 400s on our reasoning toggle
                 # retries once without it instead of silently losing streaming forever.
                 for _attempt in range(2):
-                    kwargs: dict = {"model": self.model, "messages": messages,
+                    kwargs: dict = {"model": self._model_for_call(), "messages": messages,
                                     "temperature": self.temperature, "stream": True}
                     if self._stream_options_ok:      # optional capability — see `_sdk_chat`
                         kwargs["stream_options"] = {"include_usage": True}
@@ -1561,10 +1594,10 @@ class OpenAICompatibleClient:
              tool_choice: str = "auto") -> dict:
         """General multi-turn tool-calling step. Returns the raw assistant message
         (content + optional tool_calls) so the caller can run an agent loop."""
-        with tracing.generation(op="chat", model=self.model, messages=messages,
+        with tracing.generation(op="chat", model=self._model_for_call(), messages=messages,
                                 model_parameters=self._model_params()) as gen:
             body = self._post({
-                "model": self.model, "messages": messages, "tools": tools,
+                "model": self._model_for_call(), "messages": messages, "tools": tools,
                 "tool_choice": tool_choice, "temperature": self.temperature,
             })
             msg = body["choices"][0]["message"]
@@ -1586,7 +1619,7 @@ class OpenAICompatibleClient:
                 "function": {"name": "emit", "description": "Emit the structured result.",
                              "parameters": json_schema}}
         payload = {
-            "model": self.model, "messages": messages, "tools": [tool],
+            "model": self._model_for_call(), "messages": messages, "tools": [tool],
             "tool_choice": {"type": "function", "function": {"name": "emit"}},
             "temperature": self.temperature,
         }
@@ -1594,7 +1627,7 @@ class OpenAICompatibleClient:
             payload["response_format"] = {"type": "json_schema",
                                           "json_schema": {"name": "emit", "schema": json_schema}}
             payload["guided_json"] = json_schema
-        with tracing.generation(op="complete_tool", model=self.model, messages=messages,
+        with tracing.generation(op="complete_tool", model=self._model_for_call(), messages=messages,
                                 model_parameters=self._model_params()) as gen:
             body = self._post(payload)
             msg = body["choices"][0]["message"]
@@ -1780,6 +1813,9 @@ class LiteLLMClient:
         self.accountant = accountant or CostAccountant()
         self.kwargs = kwargs
 
+    def _model_for_call(self) -> str:
+        return _MODEL_OVERRIDE.get() or self.model
+
     def _litellm(self):
         import litellm  # lazy
         return litellm
@@ -1797,7 +1833,7 @@ class LiteLLMClient:
                 # match the OpenAI-compatible transport seam. One attempt borrows one
                 # atomic total+lane slot; backoff/retry waiting itself consumes no shared capacity.
                 with llm_request_permit():
-                    return litellm.completion(model=self.model, **kwargs)
+                    return litellm.completion(model=self._model_for_call(), **kwargs)
             except Exception as e:  # noqa: BLE001 - normalize EVERY provider error to LLMError
                 last = e
                 name = type(e).__name__.lower()
@@ -1838,7 +1874,7 @@ class LiteLLMClient:
             return None
 
     def complete_text(self, messages: list[dict]) -> str:
-        with tracing.generation(op="complete_text", model=self.model, messages=messages) as gen:
+        with tracing.generation(op="complete_text", model=self._model_for_call(), messages=messages) as gen:
             resp = self._completion(messages=messages, **self.kwargs)
             self._account(resp)
             if not getattr(resp, "choices", None):
@@ -1865,7 +1901,7 @@ class LiteLLMClient:
             "function": {"name": "emit", "description": "Emit the structured result.",
                          "parameters": json_schema},
         }
-        with tracing.generation(op="complete_tool", model=self.model, messages=messages) as gen:
+        with tracing.generation(op="complete_tool", model=self._model_for_call(), messages=messages) as gen:
             resp = self._completion(
                 messages=messages, tools=[tool],
                 tool_choice={"type": "function", "function": {"name": "emit"}}, **self.kwargs,

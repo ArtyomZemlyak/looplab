@@ -1089,6 +1089,15 @@ class Settings(BaseSettings):
     # Off by default (the cadences are well-tested and the bandit has no direct published
     # ablation); `thorough` turns it on.
     operator_bandit: bool = False
+    # THE MODEL ARMS of the operator x model router (doc 52 row 19): `{arm: "model-id[@cost]"}` —
+    # the models the bandit branch may route a BUILD to beside the configured Developer model (the
+    # implicit `default` arm), `cost` the arm's price relative to it (1.0), declared because it is a
+    # fact about the box's endpoints the run cannot measure. The pick is `_bandit_pick`'s UCB over
+    # per-arm yield with the gain divided by the cost — the iso-budget lever LEVI / DEI / cross-tier
+    # routing / ShinkaEvolve's bandit all measured. INERT without `operator_bandit` (the pick lives
+    # in its branch) and without a declared arm; a routed build runs under
+    # `core/llm.py::model_override` and records its arm on `node_created`.
+    model_arms: dict = {}
     # P1 hypothesis ledger: ask the Researcher to state the one-line hypothesis each experiment tests,
     # register deep-research directions as hypotheses, and track them to a verdict on the board. ON by
     # default. The board is shown to the Researcher and can be foresight-ordered, so it can

@@ -379,12 +379,15 @@ row overlap and temporal overlap; LeakageDetector 2.0's third class — repeated
 same test split followed by selection — is undetected, and on `repo_task` the candidate's own scorer
 IS that split. proof:absent:multi_test@looplab/trust/leakage.py
 
-OPEN[operator-bandit-has-no-model-arm] `search/policy.py::_bandit_pick` learns WHICH OPERATOR fires
-from folded yields and nothing learns WHICH MODEL generates it; four independent 2026 results say the
-lever is real at iso-budget (LEVI 3.3–6.7×, DEI +124 % QD-score, cross-tier 5.6–14×, ShinkaEvolve's
-bandit > single > fixed). The shape is an operator × model ROUTER with the cheap tier on the
-high-volume implement loop (`agent_stage_models[role]` is the static precedent) — INERT until
-`operator_bandit` is on, which the profile A/B decides. proof:absent:model_arm@looplab/search/policy.py
+*Closed 2026-09-06 (row 19 shipped): the marker `operator-bandit-has-no-model-arm` stood here.
+`search/policy.py` has the model arm: `parse_model_arms` reads `Settings.model_arms`
+(`{arm: "model-id[@relative-cost]"}`), `model_arm_yields` folds per-arm yield off `Node.model_arm`,
+`_model_arm_pick` is `_bandit_pick`'s UCB with the gain divided by the arm's cost (the iso-budget
+lever), the bandit branch stamps `_model` on its action, the engine builds under
+`core/llm.py::model_override` (a ContextVar every request site reads) and records the arm on
+`node_created`. Inert without `operator_bandit` or a declared arm, exactly as ranked; the profile
+A/B that turns the bandit on is still the box's. `tests/test_model_arms.py` drives it. Deleted
+per the index rule.*
 
 OPEN[mcts-selection-has-no-cost-term] MARS's cost-constrained MCTS balances expected gain against
 execution expense; every policy in `search/policy.py` ranks by metric alone and `budget_aware` is a
