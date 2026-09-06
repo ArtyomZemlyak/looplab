@@ -21,9 +21,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# BOTH PATHS, AND NOT BY ACCIDENT. The sidecar tests below import `ruler_check`, which lives one
+# directory up. Run beside another file that had already inserted that path they passed; run alone
+# they raised `ModuleNotFoundError`, and three mutations "failed" on the import rather than on the
+# behaviour -- a green-looking mutation run that measured nothing.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks" / "algotune"))
 
 import patch_baseline_cache as pbc  # noqa: E402
+import ruler_check  # noqa: E402
 
 DEPLOYED = Path("/var/tmp/looplab-bench/AlgoTune/AlgoTuner/utils/evaluator/baseline_manager.py")
 
@@ -71,3 +77,52 @@ def test_the_deployed_file_actually_carries_it():
     src = DEPLOYED.read_text(encoding="utf-8", errors="replace")
     missing = [name for name, frag in pbc._REQUIRED_FRAGMENTS if frag not in src]
     assert not missing, missing
+
+
+def _cache(tmp_path, name, times, prov=None):
+    import json as _json
+    (tmp_path / name).write_text(_json.dumps({str(i): t for i, t in enumerate(times)}),
+                                 encoding="utf-8")
+    if prov is not None:
+        (tmp_path / (name + ".provenance.json")).write_text(_json.dumps(prov), encoding="utf-8")
+
+
+def test_a_sidecar_is_not_reported_as_a_malformed_entry(tmp_path):
+    """The moment §297's sidecars landed, `ruler_check` called both of them malformed cache files --
+    a false alarm I created myself, in the tool whose job is telling a real problem from a
+    memorised number."""
+    _cache(tmp_path, "pagerank__test__w22x1r3.json", [1.0] * 100,
+           prov={"eval_workers": "auto", "loadavg": [8.4, 5.9, 7.5]})
+    rows = ruler_check.entries(tmp_path)
+    assert [r["file"] for r in rows] == ["pagerank__test__w22x1r3.json"], [r["file"] for r in rows]
+    assert ruler_check.problems(rows, "w22x1r3", 100) == []
+
+
+def test_the_conditions_are_read_and_shown(tmp_path, capsys):
+    """Skipping the sidecar would have been enough to silence the alarm. Reading it is the point:
+    pagerank's 46 % error was undiagnosable for three sweeps because no entry carried this."""
+    _cache(tmp_path, "pagerank__test__w22x1r3.json", [1.0] * 100,
+           prov={"eval_workers": "auto", "loadavg": [8.4, 5.9, 7.5]})
+    rows = ruler_check.entries(tmp_path)
+    assert rows[0]["provenance"]["eval_workers"] == "auto"
+    ruler_check.main([str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "auto workers" in out and "load 8.4" in out, out
+
+
+def test_an_entry_without_a_sidecar_still_prints(tmp_path, capsys):
+    """Nine of the eleven entries here predate the sidecar and will never have one; a tool that
+    needed it would report the whole cache broken."""
+    _cache(tmp_path, "pde_heat1d__test__w22x1r3.json", [1.0] * 100)
+    rows = ruler_check.entries(tmp_path)
+    assert rows[0]["provenance"] == {}
+    assert ruler_check.main([str(tmp_path)]) == 0
+    assert "pde_heat1d" in capsys.readouterr().out
+
+
+def test_a_torn_sidecar_does_not_take_the_entry_down(tmp_path):
+    _cache(tmp_path, "pagerank__test__w22x1r3.json", [1.0] * 100)
+    (tmp_path / "pagerank__test__w22x1r3.json.provenance.json").write_text("{not json",
+                                                                          encoding="utf-8")
+    rows = ruler_check.entries(tmp_path)
+    assert len(rows) == 1 and rows[0]["provenance"] == {}

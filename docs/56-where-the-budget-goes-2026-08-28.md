@@ -12461,3 +12461,52 @@ the 1.0830 measured before the change).
 in `patch_baseline_cache.py` — but every required fragment also appears inside `_REQUIRED_FRAGMENTS`
 itself, so the search could never fail, and a mutation deleting `cpu_affinity` from the emitted
 patch passed. It now checks `WRITE_PATCH`, the string actually emitted. Five mutations red.
+
+## §298 — the pagerank ruler is replaced, and one score changed under it
+
+Decision taken by the operator: **re-time and accept.** Both `pagerank` baselines were archived to
+persistent storage, removed from the live cache, and re-measured:
+
+```
+pagerank test :  109.133 ms -> 74.891 ms   (x1.457)
+pagerank train:  110.466 ms -> 75.409 ms   (x1.465)
+```
+
+Both subsets moved by the same factor, which is what §297's uniform per-instance ratio predicted.
+The reference-against-itself reading is now **0.9886** against the standing list's 1.0024 — the
+constant that had been wrong by 43 % is back within 1.4 %, and `ruler_check`'s alarm has cleared.
+The new entries carry §297's provenance sidecar: `auto` workers, load 8.4, `cpu.max 9000000 100000`,
+written 2026-09-06T04:31.
+
+**One score changed, and it was re-measured rather than rescaled.** `pgr1` is the only probe ever
+run on this task. Its champion was re-evaluated against the corrected ruler:
+
+| | TEST |
+|---|---|
+| against the retired 109.1 ms ruler | 34.2751 |
+| against the corrected 74.9 ms ruler | **23.0394** |
+
+The ratio 1.488 is close to the baseline's 1.457 but not equal to it, which is exactly why this was
+re-run instead of divided: arithmetic on a stale number would have produced 23.5 and looked just as
+convincing. The old `final.json` is archived beside the old baselines.
+
+**And the fix broke the tool that checks it, immediately.** `ruler_check` reported both new
+`.provenance.json` sidecars as malformed cache entries — a false alarm I created myself, in the tool
+whose whole job is telling a real problem from a memorised number. A sidecar is now skipped as an
+entry and READ as what it is; the listing shows the conditions beside each baseline:
+
+```
+pagerank    test   w22x1r3  100    74.89  09-06 04:31   [auto workers, load 8.4]
+pagerank   train   w22x1r3  100    75.41  09-06 04:32   [auto workers, load 12.7]
+pde_heat1d  test   w22x1r3  100   146.36  08-31 02:12
+```
+
+Nine older entries have no sidecar and never will; the tool prints them unchanged rather than
+calling the cache broken.
+
+**A mutation run of mine measured nothing and looked like it had.** Three mutations all "failed" on
+`ModuleNotFoundError`: the new tests imported `ruler_check` from a path only a *neighbouring* test
+file had inserted, so they passed when run together and raised when run alone — and a red that comes
+from an import is not a red that comes from the behaviour. Both paths are now set in the file that
+needs them. A second mutation, `row["provenance"] = {} or json.loads(...)`, was a no-op — `{} or X`
+is `X` — so its survival meant nothing either; the real one is red.

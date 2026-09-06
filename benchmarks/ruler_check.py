@@ -35,6 +35,13 @@ def entries(directory) -> list[dict]:
     """One record per cache file: task, subset, regime, instance count, spread, mtime."""
     out = []
     for path in sorted(Path(directory).glob("*.json")):
+        # A SIDECAR IS NOT AN ENTRY. §297 gave every baseline write a `.provenance.json` recording
+        # the conditions it was taken under, and this loop immediately reported both of them as
+        # malformed cache files -- a false alarm I created myself, in the tool whose whole job is
+        # telling a real problem from a memorised number. Skipped here and READ below, which is
+        # what it was written for.
+        if path.name.endswith(".provenance.json"):
+            continue
         got = NAME.match(path.name)
         row = {"file": path.name, "path": path, "ok_name": bool(got),
                "task": got.group("task") if got else "", "subset": got.group("subset") if got else "",
@@ -49,6 +56,14 @@ def entries(directory) -> list[dict]:
         try:
             row["mtime"] = os.path.getmtime(path)
         except OSError:
+            pass
+        # AND THE CONDITIONS IT WAS TAKEN UNDER, when the write left them. `pagerank`'s 46 % error
+        # was undiagnosable for three sweeps precisely because no entry carried this.
+        row["provenance"] = {}
+        try:
+            row["provenance"] = json.loads(
+                Path(str(path) + ".provenance.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             pass
         out.append(row)
     return out
@@ -158,8 +173,14 @@ def main(argv=None) -> int:
     for row in rows:
         when = (datetime.datetime.fromtimestamp(row["mtime"]).strftime("%m-%d %H:%M")
                 if row["mtime"] else "?")
+        prov = row.get("provenance") or {}
+        note = ("" if not prov else
+                f'   [{prov.get("eval_workers", "?")} workers, load '
+                f'{(prov.get("loadavg") or ["?"])[0]:.1f}]'
+                if isinstance((prov.get("loadavg") or [None])[0], (int, float))
+                else f'   [{prov.get("eval_workers", "?")} workers]')
         print(f'{row["task"]:22s} {row["subset"]:>6s} {row["regime"]:>10s} {row["n"]:4d} '
-              f'{row["median"]:10.2f}  {when}')
+              f'{row["median"]:10.2f}  {when}{note}')
     bad = problems(rows, args.expect_regime, args.min_instances)
     bad += stale_entries(rows, latest_readings())
     for line in bad:
