@@ -147,9 +147,9 @@ A config file may be **unified** (top-level `task:` / `settings:` / `out:` keys)
 **Genesis (author the task from a plain goal).** Pass `--goal` and the LLM authors the task. This is
 the CLI planning surface; the Web **New run** flow uses the owner Assistant's `propose_run` tool and
 the TUI uses `/api/genesis`. They share task-adapter validation and backend-default authority, but
-not one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token; TUI posts
-to `/api/start`, whose server validates before spawn but issues no reviewed receipt; CLI validates
-directly. The CLI announces its choice
+not one planner/schema. Web additionally submits a reviewed `/api/start/preflight` token; the TUI
+asks `/api/validate` (the same funnel, answered as a verdict) on every draft and binds its
+`/api/start` to the token it returns; CLI validates directly. The CLI announces its choice
 (`Genesis -> kind=…`) before launching, and:
 
 - picks the `kind` from your words — *or* stays within the kind you **pin** with `--kind` (it doesn't

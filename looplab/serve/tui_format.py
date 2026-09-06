@@ -137,38 +137,39 @@ def spec_lines(spec: Optional[dict]) -> list[str]:
     return out
 
 
-def spec_ready(spec: Optional[dict]) -> Optional[str]:
-    """None when the spec is launchable, else a short reason it isn't (mirrors the backend truth,
-    `EvalSpec._command_or_stages`, so the TUI never fires a doomed /api/start — see the BACKLOG
-    "unify the launch-readiness gate" item). Keeps the launch button honest."""
-    if not spec:
-        return "no plan yet — describe a goal first"
-    if not (spec.get("run_id") or "").strip():
-        return "the run needs a name"
-    task = spec.get("task") or {}
+def launch_body(spec: dict, msgs: Optional[list] = None) -> dict:
+    """The ONE `/api/start` body the TUI builds from a genesis spec.
+
+    Asked of `/api/validate` on every draft render and posted to `/api/start` on launch, so the
+    readiness footer and the launch are answered about the SAME proposal by the SAME server funnel.
+    The TUI used to keep its own `spec_ready` copy of "is this launchable" here — a hand-mirrored
+    superset of the adapters' validators whose docstring pointed at the backlog row asking for
+    `/api/validate` — and every move of the task schema had to be repaired in both (doc 52 row 8).
+    This module may not import `looplab.adapters` (pinned in `tests/test_tui.py`), which is what
+    keeps the copy from coming back.
+    """
+    body: dict = {"run_id": slug(spec.get("run_id") or ""), "settings": spec.get("settings") or {}}
     if spec.get("task_file"):
+        body["task_file"] = spec["task_file"]
+    else:
+        body["task"] = spec.get("task") or {}
+    if msgs:                                            # carry the planning chat into the run's history
+        body["chat"] = [{"role": m["role"], "content": m["content"]} for m in msgs]
+    return body
+
+
+def readiness_reason(verdict: Any) -> Optional[str]:
+    """None when `/api/validate` said the proposal is launchable, else the one line the footer
+    prints: the server's message, plus each field it named (with a reason of its own)."""
+    if not isinstance(verdict, dict):
+        return "the server gave no launch verdict"
+    if verdict.get("ready") is True:
         return None
-    if not task:
-        return "the boss hasn't picked a task yet"
-    from looplab.adapters.tasks import normalize_task
-    try:
-        task = normalize_task(task)           # composable (repo/dataset/cmd/kaggle) -> canonical + kind
-    except ValueError as e:
-        # A half-assembled / malformed spec (a string `cmd`, no recognizable capability field) must
-        # read as "not launchable yet + why", never crash the genesis screen (mega-review fix).
-        return str(e)
-    if task.get("kind") == "mlebench_real" and not (task.get("competition") or "").strip():
-        return "set a Kaggle competition id"
-    if task.get("kind") == "repo":
-        if not (task.get("editable_path") or task.get("editables")):
-            return "a repo task needs a `repo` path"
-        # EvalSpec accepts a `command` OR a `stages` pipeline (see EvalSpec._command_or_stages), so an
-        # operator stages-only `cmd:{stages:[…]}` is launchable — the gate must not demand `command`.
-        _eval = task.get("eval")
-        has_cmd = isinstance(_eval, dict) and (_eval.get("command") or _eval.get("stages"))
-        if not (has_cmd or task.get("onboard")):
-            return "a repo task needs a `cmd` (a command or a stages pipeline, or metric reader \"auto\")"
-    return None
+    message = str(verdict.get("message") or verdict.get("code") or "not launchable yet")
+    errors = verdict.get("field_errors") or {}
+    named = [f"{field}: {why}" for field, why in errors.items()
+             if isinstance(errors, dict) and why and str(why) != message]
+    return message + (f" ({'; '.join(named)})" if named else "")
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")

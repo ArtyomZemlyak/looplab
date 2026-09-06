@@ -5962,7 +5962,12 @@ reused-stage fold record). What remains open or was dismissed:
   caller is `evaluate.py::_recheck_repaired_contract`), and the divergence was LATENT — the only
   profile-passing caller is the confirm phase, which never plans, and no run in `runs/` contains a
   single `confirm_eval` row.]
-- ⬜ **P2 · unify the launch-readiness gate (S–M).** "Is this task launchable" now
+- ✅ **P2 · unify the launch-readiness gate (S–M).** **[2026-09-06 — SHIPPED (doc 52 row 8):
+  `serve/launch.py::validate_launch` answers `POST /api/validate` as a verdict over the same
+  `preflight_start` funnel `/api/start` refuses through; `serve/tui_format.py::spec_ready` is
+  deleted and the TUI asks the server on every draft render (`Tui._validate`), binding its launch
+  to the returned token. `tests/test_launch_preflight.py` + `tests/test_tui.py` drive it.]**
+  "Is this task launchable" now
   lives in 2 parallel copies — `EvalSpec._command_or_stages` (backend truth) and
   `serve/tui.py::spec_ready` (the third, `ui/src/GenesisChat.jsx`, was deleted as dead
   UI 2026-07) — and this range was itself

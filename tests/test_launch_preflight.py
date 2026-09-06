@@ -640,3 +640,113 @@ def test_declared_tasks_dir_takes_a_list(tmp_path, monkeypatch):
     })
     assert refusal.status_code == 400
     assert refusal.json()["detail"]["code"] == "task_file_not_allowed"
+
+
+# ------------------------------------------------------------- /api/validate: the readiness QUESTION
+# (doc 52 row 8). One rule of "is this launchable": the same `preflight_start` funnel `/api/start`
+# refuses through, answered as a 200 verdict so a client can gate its launch button on the answer
+# without carrying a copy of the rules — the TUI's `spec_ready` copy was deleted for it.
+
+def test_validate_answers_ready_with_the_preflight_receipt_and_no_side_effects(tmp_path, monkeypatch):
+    client = TestClient(make_app(tmp_path))
+    spawned = []
+    monkeypatch.setattr("looplab.serve.routers.control._spawn_engine",
+                        lambda *args, **kwargs: spawned.append((args, kwargs)))
+    before = sorted(path.name for path in tmp_path.iterdir())
+
+    response = client.post("/api/validate", json={"run_id": "asked", "task": _toy(),
+                                                  "settings": {"max_nodes": 4}})
+
+    assert response.status_code == 200
+    verdict = response.json()
+    assert verdict["ready"] is True and verdict["ok"] is True
+    assert len(verdict["validation_token"]) == 64
+    assert verdict["preview"]["task"]["kind"] == "quadratic"
+    assert sorted(path.name for path in tmp_path.iterdir()) == before
+    assert not (tmp_path / "asked").exists() and not spawned
+    # The receipt is the SAME one preflight issues for the same proposal, so a launch bound to it
+    # is bound to what was validated.
+    preflight = client.post("/api/start/preflight", json={"run_id": "asked", "task": _toy(),
+                                                          "settings": {"max_nodes": 4}})
+    assert preflight.json()["validation_token"] == verdict["validation_token"]
+
+
+@pytest.mark.parametrize("payload, status, code, field", [
+    ({"run_id": "x", "task": {}}, 400, "invalid_task_source", "task"),
+    ({"run_id": "", "task": {"benchmark": "quadratic"}}, 400, "invalid_run_id", "run_id"),
+    ({"run_id": "x", "task": {"goal": "g"}}, 422, "invalid_task", "task"),
+    ({"run_id": "x", "task": {"benchmark": "quadratic"}, "settings": {"max_nodes": "many"}},
+     422, "invalid_launch_settings", "settings.max_nodes"),
+])
+def test_validate_answers_not_ready_with_the_refusal_instead_of_raising(tmp_path, payload, status,
+                                                                        code, field):
+    response = TestClient(make_app(tmp_path)).post("/api/validate", json=payload)
+    assert response.status_code == 200
+    verdict = response.json()
+    assert verdict["ready"] is False
+    assert verdict["status"] == status and verdict["code"] == code
+    assert verdict["message"] and field in verdict["field_errors"]
+    assert "validation_token" not in verdict
+
+
+def test_validate_and_start_refuse_the_same_proposal_for_the_same_reason(tmp_path, monkeypatch):
+    """THE PROPERTY: a client gating on the verdict can never be told "ready" about a proposal the
+    launch refuses, nor "not ready" for a reason the launch would not give — the two are one call.
+    Driven over the refusal ladder: a malformed source, an unsafe name, an adapter refusal (the
+    repo rule `EvalSpec._command_or_stages` mirrors), unavailable paths, and a taken name."""
+    client = TestClient(make_app(tmp_path))
+    spawned = []
+    monkeypatch.setattr("looplab.serve.routers.control._spawn_engine",
+                        lambda *args, **kwargs: spawned.append((args, kwargs)))
+    (tmp_path / "taken").mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    no_cmd = {"goal": "g", "direction": "max", "repo": str(repo)}
+    empty_cmd = {"goal": "g", "direction": "max", "repo": str(repo), "cmd": {"metric": {"reader": "stdout_json", "key": "s"}}}
+    proposals = [
+        {"run_id": "x", "task": {}},
+        {"run_id": "x", "task": _toy(), "task_file": "examples/toy_task.json"},
+        {"run_id": "../x", "task": _toy()},
+        {"run_id": "x", "task": {"kind": "no-such-kind"}},
+        {"run_id": "x", "task": no_cmd},
+        {"run_id": "x", "task": empty_cmd},
+        {"run_id": "x", "task": _repo(tmp_path / "missing")},
+        {"run_id": "taken", "task": _toy()},
+    ]
+    for proposal in proposals:
+        verdict = client.post("/api/validate", json=proposal).json()
+        start = client.post("/api/start", json=proposal)
+        assert verdict["ready"] is False, proposal
+        assert (verdict["status"], verdict["code"]) == (start.status_code, start.json()["detail"]["code"]), proposal
+        assert verdict["message"] == start.json()["detail"]["message"], proposal
+    assert not spawned
+    # The rule the marker named — a repo task must carry a command or a stages pipeline, or onboard —
+    # is stated by the adapters in the verdict: `validate_task`'s repo rule in the message, and
+    # `EvalSpec._command_or_stages` (a pydantic refusal) in the field it names.
+    stated = [client.post("/api/validate", json=p).json() for p in
+              ({"run_id": "x", "task": no_cmd}, {"run_id": "x", "task": empty_cmd})]
+    texts = [" ".join([v["message"], *v["field_errors"].values()]) for v in stated]
+    assert all("cmd" in text or "command" in text for text in texts), stated
+    assert any("stages" in text for text in texts), stated
+
+
+def test_validate_rejects_a_non_json_body_like_its_siblings(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.post("/api/validate", content=b"not json",
+                           headers={"content-type": "application/json"})
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "invalid_launch_request"
+
+
+def test_validate_does_not_answer_for_the_servers_own_condition(tmp_path, monkeypatch):
+    """A 503 from the deletion-fence storage is not a fact about the proposal: it stays an error."""
+    from looplab.serve import launch as launch_module
+    from looplab.serve.launch import READINESS_REFUSALS
+
+    def _broken(*args, **kwargs):
+        from looplab.core.run_deletion import RunDeletionStorageError
+        raise RunDeletionStorageError("fence store unreadable")
+
+    monkeypatch.setattr(launch_module, "load_run_deletion_fence", _broken)
+    response = TestClient(make_app(tmp_path)).post("/api/validate", json={"run_id": "x", "task": _toy()})
+    assert response.status_code == 503 and 503 not in READINESS_REFUSALS

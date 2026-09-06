@@ -694,6 +694,49 @@ def preflight_response(plan: LaunchPreflight) -> dict:
         "warnings": list(plan.warnings),
     }
 
+
+# The statuses a launch proposal can earn on its OWN account through `preflight_start`: a malformed
+# body or field (400), a name that is taken or fenced (409), a task, its paths or its settings the
+# adapters refuse (422). `validate_launch` turns exactly these into a `ready: false` verdict; any
+# other status is the SERVER's condition (the 503 deletion-storage refusal in `safe_run_dir`), which
+# is not an answer about the proposal and stays an error.
+READINESS_REFUSALS = frozenset({400, 409, 422})
+
+
+def validate_launch(srv, body: Any) -> dict:
+    """The launch-readiness QUESTION (doc 52 row 8): the same `preflight_start` funnel `/api/start`
+    and `/api/start/preflight` run, answered as a verdict instead of a refusal.
+
+    ONE rule of "is this launchable". "Is this task launchable" was spelled twice — the adapters'
+    own validators (`adapters/repo_task.py::EvalSpec._command_or_stages`, `adapters/tasks.py::
+    validate_task`'s repo rule) and `serve/tui_format.py::spec_ready`, a hand-mirrored superset whose
+    docstring pointed at the backlog row asking for this endpoint — and every move of the task schema
+    had to be repaired in both (stages-only `cmd`, dataset mounts). A client that gates its launch
+    button on THIS answer cannot drift from the funnel that will refuse the launch, because it is
+    the funnel. The verdict carries the refusal's `status`/`code`/`message`/`field_errors` verbatim,
+    so a caller that later meets the same refusal on `/api/start` can recognise it; `ready: true`
+    carries the preflight receipt (`validation_token`, `preview`, `warnings`) so the launch can be
+    bound to exactly the proposal that was validated. No mutation, no name reserved, no engine.
+    """
+    try:
+        plan = preflight_start(srv, body)
+    except HTTPException as exc:
+        if exc.status_code not in READINESS_REFUSALS:
+            raise
+        detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+        verdict: dict[str, Any] = {
+            "ready": False,
+            "status": exc.status_code,
+            "code": str(detail.get("code") or ""),
+            "message": str(detail.get("message") or detail.get("code") or "not launchable"),
+            "field_errors": {str(k): str(v) for k, v in (detail.get("field_errors") or {}).items()},
+        }
+        for key in ("remediation", "operation_id"):
+            if detail.get(key) is not None:
+                verdict[key] = detail[key]
+        return verdict
+    return {"ready": True, **preflight_response(plan)}
+
 # Moved here from `routers/control.py` (doc 25 SR-12): launch policy with no HTTP dependency, which
 # `routers/genesis.py` was importing out of a SIBLING ROUTER's privates — route modules stopped being
 # independent leaves. Its home is now the module that owns the launch boundary, next to the funnel it

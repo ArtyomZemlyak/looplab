@@ -45,7 +45,8 @@ from looplab.serve.tui_api import (  # noqa: F401
 )
 from looplab.serve.tui_format import (  # noqa: F401 — re-exported for the import-compat note above
     _free_port, _stop_child, dashboard_sig, ensure_server, fmt_ago, fmt_metric, history_for_boss,
-    is_critical, parse_pick, phase_meta, run_sig, slug, sort_runs, spec_lines, spec_ready)
+    is_critical, launch_body, parse_pick, phase_meta, readiness_reason, run_sig, slug, sort_runs,
+    spec_lines)
 
 
 _COMMAND_DONE = {"succeeded", "noop"}
@@ -419,26 +420,46 @@ class Tui:
                 self.console.print(f"[yellow]{_esc(r['error'])}[/yellow]")
             self._render_spec(spec)
 
+    def _validate(self, spec: Optional[dict],
+                  msgs: Optional[list] = None) -> tuple[Optional[str], Optional[str]]:
+        """`(reason, validation_token)`: why this proposal is not launchable — `None` when it is —
+        and the receipt `/api/start` binds the launch to.
+
+        ONE question, asked of the server: `/api/validate` is the same `preflight_start` funnel
+        `/api/start` refuses through, answered as a verdict. The TUI used to carry its own
+        `spec_ready` copy of the rules (doc 52 row 8 / BACKLOG §5), which had to be repaired in step
+        with the adapters every time the task schema moved, and a footer that said "ready" about a
+        proposal the server would refuse was the whole cost. A spec that is not a proposal at all is
+        the one answer that needs no server; an unreachable server is reported as exactly that,
+        because the launch would fail the same way."""
+        if not spec:
+            return "no plan yet — describe a goal first", None
+        try:
+            verdict = self.api.post("/api/validate", launch_body(spec, msgs))
+        except ApiError as e:
+            return f"can’t validate with the server: {_esc(e)}", None
+        reason = readiness_reason(verdict)
+        token = verdict.get("validation_token") if reason is None else None
+        return reason, (str(token) if token else None)
+
     def _render_spec(self, spec: Optional[dict]) -> None:
         from rich.panel import Panel
         body = "\n".join(spec_lines(spec))
-        reason = spec_ready(spec)
+        reason, _token = self._validate(spec)
         foot = "[green]ready — type [bold]launch[/bold] to start[/green]" if reason is None else f"[yellow]{_esc(reason)}[/yellow]"
         self.console.print(Panel(_esc(body) + "\n\n" + foot, title="proposed run", border_style="green", expand=True))
 
     def _launch(self, spec: Optional[dict], msgs: list) -> bool:
-        reason = spec_ready(spec)
+        reason, token = self._validate(spec, msgs)
         if reason:
             self.console.print(f"[yellow]can’t launch yet: {_esc(reason)}[/yellow]")
             return False
-        rid = slug(spec["run_id"])
-        body: dict = {"run_id": rid, "settings": spec.get("settings") or {}}
-        if spec.get("task_file"):
-            body["task_file"] = spec["task_file"]
-        else:
-            body["task"] = spec["task"]
-        if msgs:                                            # carry the planning chat into the run's history
-            body["chat"] = [{"role": m["role"], "content": m["content"]} for m in msgs]
+        body = launch_body(spec, msgs)
+        rid = body["run_id"]
+        if token:
+            # Bind the launch to the exact proposal the server just validated (`launch_validation_stale`
+            # refuses a draft that moved in between) — the receipt the web launch card already submits.
+            body["validation_token"] = token
         try:
             with self.console.status(f"starting {rid}…", spinner="dots"):
                 self.api.post("/api/start", body)

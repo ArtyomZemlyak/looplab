@@ -87,20 +87,59 @@ def test_spec_lines_catalogue_and_inline():
     assert "beat the baseline" in blob and "/repo/x" in blob and "max" in blob
 
 
-def test_spec_ready_gates():
-    assert tui.spec_ready(None) is not None                 # no plan
-    assert tui.spec_ready({"task": {"kind": "quadratic"}}) is not None    # missing name
-    assert tui.spec_ready({"run_id": "x", "task": {}}) is not None        # no task kind
-    # mlebench_real needs a competition
-    assert tui.spec_ready({"run_id": "x", "task": {"kind": "mlebench_real"}}) is not None
-    assert tui.spec_ready({"run_id": "x", "task": {"kind": "mlebench_real", "competition": "titanic"}}) is None
-    # repo task needs a path AND (eval command or onboard)
-    assert tui.spec_ready({"run_id": "x", "task": {"kind": "repo", "editable_path": "/r"}}) is not None
-    assert tui.spec_ready({"run_id": "x", "task": {"kind": "repo", "editable_path": "/r", "onboard": True}}) is None
-    assert tui.spec_ready({"run_id": "x", "task": {"kind": "repo", "editable_path": "/r",
-                                                   "eval": {"command": ["python", "t.py"]}}}) is None
-    # a catalogue task_file is always launchable once named
-    assert tui.spec_ready({"run_id": "x", "task_file": "examples/toy_task.json"}) is None
+def test_launch_body_is_the_one_proposal_the_tui_asks_and_posts():
+    """doc 52 row 8: the readiness footer and the launch are answered about the SAME body."""
+    spec = {"run_id": "My Run!", "task": {"kind": "quadratic"}, "settings": {"max_nodes": 3}}
+    assert tui.launch_body(spec) == {"run_id": "my-run", "settings": {"max_nodes": 3},
+                                     "task": {"kind": "quadratic"}}
+    msgs = [{"role": "user", "content": "go", "extra": "dropped"}, {"role": "assistant", "content": "ok"}]
+    assert tui.launch_body(spec, msgs)["chat"] == [{"role": "user", "content": "go"},
+                                                   {"role": "assistant", "content": "ok"}]
+    # a catalogue file wins over an inline task; a nameless / taskless draft is still a body the
+    # server can answer about (it is the server that says "run_id is required")
+    assert tui.launch_body({"run_id": "k", "task_file": "examples/toy_task.json", "task": {"kind": "x"}}) \
+        == {"run_id": "k", "settings": {}, "task_file": "examples/toy_task.json"}
+    assert tui.launch_body({}) == {"run_id": "", "settings": {}, "task": {}}
+
+
+def test_readiness_reason_renders_the_servers_verdict():
+    assert tui.readiness_reason({"ready": True, "validation_token": "t"}) is None
+    assert tui.readiness_reason({"ready": False, "status": 400, "code": "invalid_task_source",
+                                 "message": "give exactly one nonempty task or task_file",
+                                 "field_errors": {"task": "give exactly one nonempty task or task_file"}}) \
+        == "give exactly one nonempty task or task_file"          # a field echoing the message is not repeated
+    assert tui.readiness_reason({"ready": False, "code": "invalid_task", "message": "task is invalid",
+                                 "field_errors": {"task.eval": "needs a command"}}) \
+        == "task is invalid (task.eval: needs a command)"
+    assert tui.readiness_reason({"ready": False, "code": "reserved_run_id", "field_errors": {}}) == "reserved_run_id"
+    assert tui.readiness_reason(None) is not None and tui.readiness_reason([]) is not None
+
+
+def test_the_tui_carries_no_launch_readiness_rule_of_its_own():
+    """The guard behind doc 52 row 8: `spec_ready` — the TUI's hand-mirrored copy of the adapters'
+    "is this launchable" — is gone, and `tui_format` may not import `looplab.adapters` at all (the
+    deleted copy reached `normalize_task` through a function-local import, so a module-level scan
+    would not have seen it come back). The property itself is driven below against a real server."""
+    import ast
+    import inspect
+    import textwrap
+
+    from looplab.serve import tui_format
+    assert not hasattr(tui_format, "spec_ready") and not hasattr(tui, "spec_ready")
+    tree = ast.parse(inspect.getsource(tui_format))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+    assert not any(name == "looplab.adapters" or name.startswith("looplab.adapters.") for name in imported), \
+        sorted(imported)
+    # and the TUI's one question is the server's verdict route
+    posted = {node.value
+              for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(tui.Tui._validate))))
+              if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("/api/")}
+    assert posted == {"/api/validate"}
 
 
 def test_web_and_tui_controls_use_the_authoritative_command_service():
@@ -1598,6 +1637,87 @@ def test_api_error_detail_unwrapped(tmp_path):
     with pytest.raises(tui.ApiError) as ei:
         api.post("/api/start", {"run_id": "demo", "task_file": str(TASK)})
     assert ei.value.status == 409 and "exists" in ei.value.detail
+
+
+def _tui_over(client: "TestClient") -> "tui.Tui":
+    """A Tui whose Api is routed through the in-process server, drawing into /dev/null."""
+    import os
+
+    from rich.console import Console
+
+    api = tui.Api("http://test")
+    _bind(api, client)
+    app = tui.Tui.__new__(tui.Tui)                          # bypass __init__ (no server process)
+    app.api = api
+    app.console = Console(file=open(os.devnull, "w"))
+    return app
+
+
+def test_tui_readiness_is_the_servers_own_verdict(tmp_path, monkeypatch):
+    """THE PROPERTY behind doc 52 row 8: the TUI's footer and its launch gate are `/api/validate`,
+    the same funnel `/api/start` refuses through — so "ready" is never said about a proposal the
+    launch would refuse, and a refusal reads the server's reason, not a local guess."""
+    spawned = []
+    monkeypatch.setattr("looplab.serve.routers.control._spawn_engine",
+                        lambda *args, **kwargs: spawned.append((args, kwargs)))
+    client = TestClient(make_app(tmp_path))
+    app = _tui_over(client)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    assert app._validate(None) == ("no plan yet — describe a goal first", None)
+    reason, token = app._validate({"run_id": "x", "task": {}})
+    assert reason == "give exactly one nonempty task or task_file" and token is None
+    reason, _ = app._validate({"task": {"benchmark": "quadratic"}})
+    assert reason == "run_id is required"
+    # the rule the marker named — a repo task needs a command or a stages pipeline, or onboarding —
+    # is answered by the adapters through the server, in their words
+    no_cmd = {"run_id": "x", "task": {"goal": "g", "direction": "max", "repo": str(repo)}}
+    reason, _ = app._validate(no_cmd)
+    assert reason and "cmd" in reason
+    start = client.post("/api/start", json=tui.launch_body(no_cmd))
+    assert start.status_code == 422 and start.json()["detail"]["message"] in reason
+    onboard = {"run_id": "x", "task": {"goal": "g", "direction": "max", "repo": str(repo),
+                                       "cmd": {"metric": {"reader": "auto"}}}}
+    assert app._validate(onboard)[0] is None
+    # a launchable proposal is ready and carries the receipt the launch is bound to
+    ready = {"run_id": "Demo Run", "task_file": str(TASK), "settings": {"max_nodes": 3}}
+    reason, token = app._validate(ready, [{"role": "user", "content": "go"}])
+    assert reason is None and token and len(token) == 64
+    assert not (tmp_path / "demo-run").exists() and not spawned
+    # a taken name is refused by the same funnel before any launch is attempted
+    (tmp_path / "demo-run").mkdir()
+    reason, _ = app._validate(ready)
+    assert reason and "already exists" in reason
+
+
+def test_tui_launch_posts_the_validated_body_with_its_token(tmp_path, monkeypatch):
+    client = TestClient(make_app(tmp_path))
+    app = _tui_over(client)
+    posted = []
+    real_post = app.api.post
+
+    def _post(path, body=None, timeout=None):
+        posted.append((path, body))
+        if path == "/api/start":
+            return {"ok": True}
+        return real_post(path, body, timeout)
+
+    monkeypatch.setattr(app.api, "post", _post)
+    monkeypatch.setattr(app, "run_view", lambda rid: None)
+    monkeypatch.setattr(app.api, "get", lambda *a, **k: {"state": {}})
+    spec = {"run_id": "Demo Run", "task_file": str(TASK), "settings": {"max_nodes": 3}}
+    assert app._launch(spec, [{"role": "user", "content": "go"}]) is True
+    paths = [path for path, _ in posted]
+    assert paths == ["/api/validate", "/api/start"]
+    validated, started = posted[0][1], posted[1][1]
+    assert started["validation_token"] and len(started["validation_token"]) == 64
+    assert {k: v for k, v in started.items() if k != "validation_token"} == validated
+    assert started["run_id"] == "demo-run" and started["chat"] == [{"role": "user", "content": "go"}]
+    # an unlaunchable proposal never reaches /api/start
+    posted.clear()
+    assert app._launch({"run_id": "x", "task": {}}, []) is False
+    assert [path for path, _ in posted] == ["/api/validate"]
 
 
 def test_api_error_structured_command_detail_is_actionable():

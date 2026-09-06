@@ -133,9 +133,10 @@ def test_no_router_reads_the_request_body_itself_to_re_derive_the_object_check()
     from pathlib import Path
 
     allowed = {
-        # `/api/start` and `/api/start/preflight`: a STRUCTURED 400 body the launch client parses by
-        # shape ({"code": "invalid_launch_request", "field_errors": {}}), not the string contract.
-        "control.py": 2,
+        # `/api/start`, `/api/start/preflight` and `/api/validate` (the same funnel asked as a
+        # question, doc 52 row 8): a STRUCTURED 400 body the launch client parses by shape
+        # ({"code": "invalid_launch_request", "field_errors": {}}), not the string contract.
+        "control.py": 3,
         # `PUT /api/authors/{name}`: a raw UTF-8 text body bounded by the author read cap. Never JSON.
         "misc.py": 1,
     }

@@ -38,6 +38,7 @@ from looplab.serve.launch import (
     launch_request_digest,
     preflight_response,
     preflight_start,
+    validate_launch,
     safe_run_dir,
     validate_idempotency_key,
 )
@@ -765,6 +766,23 @@ def build_router(srv) -> APIRouter:
                 "field_errors": {},
             }) from exc
         return preflight_response(await anyio.to_thread.run_sync(lambda: preflight_start(srv, body)))
+
+    @router.post("/api/validate")
+    async def validate_run_launch(request: Request):
+        """Is this launch proposal launchable, and if not, why — the same `preflight_start` funnel
+        as `/api/start` and `/api/start/preflight`, answered as a 200 verdict (`launch.py::
+        validate_launch`). The TUI asks it on every draft render and before every launch, which is
+        what let its own `spec_ready` copy of the rules be deleted (doc 52 row 8). A body that is not
+        JSON is not a proposal at all and gets the siblings' 400."""
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, {
+                "code": "invalid_launch_request",
+                "message": "validate body must be valid JSON",
+                "field_errors": {},
+            }) from exc
+        return await anyio.to_thread.run_sync(lambda: validate_launch(srv, body))
 
     @router.post("/api/start")
     async def start_run(request: Request):

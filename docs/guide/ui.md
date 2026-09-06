@@ -105,7 +105,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   UI-launched run never silently falls back to the offline toy developer; after **Validate**, the
   authoritative preview shows the effective backend before Start. The launch card is an inline editor for its surfaced run,
   task, budget, seed, policy, and backend fields. Editing invalidates the prior validation receipt;
-  validate the revised card before Start is enabled. Ask the Assistant for a new proposal when the
+  validate the revised card before Start is enabled. **`POST /api/validate` is that same funnel
+  asked as a question** (since 2026-09-06, doc 52 row 8): the body `/api/start` takes, answered with
+  a 200 verdict — `{ready: true, validation_token, preview, warnings}` or `{ready: false, status,
+  code, message, field_errors}` carrying the exact refusal `/api/start` would give — with nothing
+  written, no name reserved and no engine spawned. It exists so a client can gate its launch button
+  on the server's answer instead of on a copy of the rules: the TUI's `spec_ready` copy (a
+  hand-mirrored superset of the adapters' validators) was deleted for it, and the TUI now asks
+  `/api/validate` on every draft render and binds its launch to the returned token. Ask the Assistant for a new proposal when the
   needed field is not surfaced by the card. A backend set explicitly in Settings or `LOOPLAB_BACKEND`
   still wins. See **[Generating train & test code](generating-code.md)** for the full
   Genesis flow

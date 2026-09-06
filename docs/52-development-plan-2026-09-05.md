@@ -653,10 +653,19 @@ OPEN[readmodel-watermark-ignores-event-data] `readmodel.py::coverage_watermark` 
 place still certifies `current` (BACKLOG §0.2, driven).
 proof:`present:rows = [[int(getattr(e, "seq", -1)), str(getattr(e, "type", ""))] for e in events]@looplab/events/readmodel.py`
 
-OPEN[launch-readiness-gate-is-two-copies] one rule of "is this task launchable" is spelled twice —
-`adapters/repo_task.py::EvalSpec._command_or_stages` and `serve/tui_format.py::spec_ready`, whose
-docstring says it mirrors the backend and whose other checks are a superset — and there is no
-`/api/validate` (BACKLOG §5). proof:`present:def spec_ready@looplab/serve/tui_format.py`
+*Closed 2026-09-06 (row 8 shipped): the marker `launch-readiness-gate-is-two-copies` stood here.
+The one rule was already the server's — `serve/launch.py::preflight_start`, which `/api/start` and
+`/api/start/preflight` both run and which reaches `adapters/tasks.py::validate_task` and so
+`EvalSpec._command_or_stages` — and what was missing was a way to ASK it: `launch.py::validate_launch`
+answers `POST /api/validate` as a 200 verdict (`ready: true` + the preflight receipt, or `ready: false`
++ the exact `status`/`code`/`message`/`field_errors` `/api/start` would refuse with; a status outside
+`READINESS_REFUSALS` is the server's own condition and stays an error). `serve/tui_format.py::spec_ready`
+is DELETED; `launch_body` builds the one proposal the TUI asks about and posts, `Tui._validate` asks
+`/api/validate` on every draft render and before every launch and binds `/api/start` to the token,
+and `tui_format` may not import `looplab.adapters` (the deleted copy reached `normalize_task` through
+a function-local import). `tests/test_launch_preflight.py` drives the verdict against `/api/start`
+over the whole refusal ladder; `tests/test_tui.py` drives the TUI's footer and launch through a real
+server and pins the no-copy guard.*
 
 OPEN[cross-run-trajectory-overlay-unbuilt] the run-comparison screen ranks runs of one task and cannot
 overlay their metric TRAJECTORIES, because the run-list payload carries `nodes` as a count;
