@@ -385,6 +385,21 @@ class LessonDistillMixin:
                 receipt["accepted"] = False
                 receipt["reason"] = "write_failed"
 
+        # THE CONTRADICTION EDGE of the skill lifecycle (doc 52 row 17): a card whose claim the shared
+        # lessons store now records as reversed is demoted here, by code, from the same recorded
+        # outcomes the priors are read from — the store's bounded recent window, the same reader
+        # the prompt-side prior uses (`core/memory_window.py`). Receipted below, never silent.
+        skills_demoted: list[dict] = []
+        try:
+            from looplab.core.memory_window import read_memory_jsonl_window
+            _rows, _receipt = read_memory_jsonl_window(base / "lessons.jsonl", loads=orjson.loads)
+            skills_demoted = _memory.reconcile_auto_skill_statuses(
+                sk_dir, [row for _, row in _rows if isinstance(row, dict)])
+        except Exception as exc:  # noqa: BLE001 — skill hygiene is best-effort, never fails finalize
+            from looplab.core.containment import contain
+            contain("auto-skill status reconcile at finalize", exc)
+            skills_demoted = []
+
         # Audit the run-end distillation in the event log (diagnostic sidecar — fold ignores it). These
         # LLM artifacts (the causal note, the generalizable lessons, the auto-promoted skills) shape
         # FUTURE runs' priors/skills yet otherwise leave no trace in THIS run's events.jsonl — only in
@@ -396,6 +411,7 @@ class LessonDistillMixin:
             "coverage_digest": coverage_digest,
             "n_lessons": len(lessons), "n_skills": len(skills),
             "n_skill_candidates": len(skill_candidates),
+            "n_skills_demoted": len(skills_demoted), "skills_demoted": skills_demoted[:12],
             "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", ""),
                          "claim_stance": lz.get("claim_stance")}
                         if isinstance(lz, dict) else {"statement": str(lz), "outcome": ""}

@@ -425,16 +425,22 @@ monotone expression; `res[1]` read in both `panel.py` and `proxy.py`; a `def col
 an `EV_LITERATURE_RETRIEVED` constant in `events/types.py` — and every predicate flipped True → False.
 A falsifier that cannot go false is the vacuous guard this repo has found nine times in one day.
 
-- **OPEN[skill-body-served-whole-and-unbounded]** — `use_skill` returns the entire skill body with
-  no cap; `looplab/tools/skills.py` is the one agent-facing provider that neither imports
-  `tools/_base` nor calls the shared bounded-output helpers, so a skill library cannot grow without
-  eating the context window a section at a time (§3a; SkillZip).
-  proof:absent:clip@looplab/tools/skills.py
-- **OPEN[skill-status-never-demoted-on-later-evidence]** — one expression decides a skill's whole
-  lifecycle and it is monotone upward: `candidate` → `promoted` on a differently-fingerprinted
-  confirmation, and `prior_status == "promoted"` pins it there forever. No execution feedback, usage
-  count or utility signal can ever move a skill back (§3b; SkillZip/ReZip, Skill-SP, doc 41 §2).
-  proof:line:prior_status&&"candidate"@looplab/engine/memory.py
+- *Closed 2026-09-06 (doc 52 row 17 shipped): the marker `skill-body-served-whole-and-unbounded`
+  stood here. `tools/skills.py` now imports `_base`'s `clip`/`fit_rows`: `render_skill_body`
+  answers `use_skill` in WHOLE sections under `SKILL_RESULT_CAP` (bytes are cut only when one
+  section alone is over the cap, and then it says so), names every section it left out beside the
+  exact `use_skill(name=…, section=…)` call that returns it, and `section=` makes a skill
+  addressable exactly as `run_tools._research_memo` made a memo. A body that fits is byte-identical
+  to the file. `tests/test_skill_sections_and_lifecycle.py` drives it. Deleted per the index rule.*
+- *Closed 2026-09-06 (doc 52 row 17 shipped): the marker `skill-status-never-demoted-on-later-evidence`
+  stood here. The lifecycle is a lattice: `engine/memory.py::next_auto_skill_status` is the SUPPORT
+  edge (candidate → promoted on a different task family; a demoted card re-earns promotion the same
+  way; `retired` never moves automatically) and `reconcile_auto_skill_statuses` the CONTRADICTION
+  edge, run at finalize beside the writer: the newest lessons-store row about the card's claim
+  (`source_statement_sha256` / `claim_sha256`) with a negative verdict demotes it — a promoted card
+  only from a task family it was confirmed on — and the second demotion retires it; every move is
+  receipted on the `reflection_note` (`skills_demoted`). Only code moves `status`, only from
+  recorded outcomes. Deleted per the index rule.*
 - **OPEN[knn-uncertainty-dropped-by-two-of-three-callers]** — `core/numeric.py::knn_idw` returns
   `(prediction, nearest_distance)`; `search/surrogate.py` spends the second value as a UCB
   exploration term while `search/panel.py` and `search/proxy.py` keep only `res[0]`, so the K-idea

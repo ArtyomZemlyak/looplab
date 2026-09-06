@@ -427,24 +427,161 @@ def _legacy_auto_skill_claim_matches(text: str, canonical: str) -> bool:
 def _stored_skill_fingerprints(raw: str) -> list[list[str]]:
     """Parse the bounded shape written in auto-skill frontmatter, failing closed on drift.
 
-    This is trust-bearing lifecycle evidence, not generic JSON.  Accepting a dict/string here makes
-    iteration look superficially valid and can falsely satisfy the cross-task promotion test.
-    Six histories is the writer's existing retention cap; the generous inner bounds prevent a
-    hand-edited file from turning this best-effort path into unbounded work without rejecting normal
-    task fingerprints.
+    ONE parser, two sides (2026-09-06): the reader (`tools/skills.py::parse_skill_fingerprints`,
+    which orders the `domain` tier by fit to the bound run) and this writer must agree on what
+    counts as lifecycle evidence, so the rule lives beside the frontmatter parser it reads through.
     """
+    from looplab.tools.skills import parse_skill_fingerprints
+    return parse_skill_fingerprints(raw)
+
+
+# THE LIFECYCLE IS A LATTICE, NOT A RATCHET (doc 52 row 17; doc 51 §3b). Until 2026-09-06 one
+# expression decided it — ``"promoted" if different or prior_status == "promoted" else
+# "candidate"`` — monotone upward: nothing recorded after a promotion could ever move a skill back,
+# and the word `retired` did not occur in this file. `next_auto_skill_status` is the SUPPORT edge
+# (a run that confirmed the technique refreshes the card) and `reconcile_auto_skill_statuses` the
+# CONTRADICTION edge (a later recorded outcome reversed it); both are code, both read folded
+# outcomes, and neither reads a model's opinion of the skill (doc 36: a model may draft a body,
+# only code may move `status`).
+AUTO_SKILL_STATUSES = ("candidate", "promoted", "demoted", "retired")
+AUTO_SKILL_RETIRE_AFTER = 2      # demotions before a skill needs a human rather than a third chance
+# The same-family bar `write_auto_skill` uses for "a DIFFERENT task confirmed it" (Jaccard < 0.6):
+# a contradiction counts against a PROMOTED skill only from a task family it was confirmed on.
+_SKILL_SAME_FAMILY = 0.6
+
+
+def next_auto_skill_status(prior_status: str, different: bool) -> str:
+    """The SUPPORT edge: a run that supported the claim refreshes its card.
+
+    `different` = the supporting task's fingerprint differs from every stored one (Jaccard < 0.6).
+    candidate + different -> promoted; candidate + same task -> candidate; promoted stays
+    promoted; demoted + different -> promoted (independently re-confirmed), demoted + same ->
+    demoted; retired stays retired (a human decision, never an automatic third chance)."""
+    prior = str(prior_status or "").strip().lower()
+    if prior == "retired":
+        return "retired"
+    if prior == "promoted":
+        return "promoted"
+    if prior == "demoted":
+        return "promoted" if different else "demoted"
+    return "promoted" if different else "candidate"
+
+
+def _skill_contradiction(metadata: dict, lesson_rows: list[dict]) -> Optional[dict]:
+    """The newest lesson row that REVERSES this card's claim, or None.
+
+    A row is about this card when its statement digests to the card's `source_statement_sha256`
+    (`skill_source_digest`, the receipt join) or its canonical claim to `claim_sha256`. The newest
+    such row decides — `filter_contradicted`'s rule one module over — and a NEGATIVE verdict
+    contradicts a `candidate` from any task, but a `promoted` card only from a task family it was
+    confirmed on (a technique that worked on A and was abandoned on an unrelated B is not a
+    reversal; `filter_contradicted` keys on the same distinction by task id)."""
+    status = str(metadata.get("status", "")).strip().lower()
+    if status not in ("candidate", "promoted"):
+        return None
+    source = str(metadata.get("source_statement_sha256", "")).strip().lower()
+    claim = str(metadata.get("claim_sha256", "")).strip().lower()
+    if not source and not claim:
+        return None
+    newest: Optional[dict] = None
+    for row in lesson_rows:
+        if not isinstance(row, dict):
+            continue
+        statement = row.get("statement")
+        if not isinstance(statement, str) or not statement:
+            continue
+        if not ((source and skill_source_digest(statement) == source)
+                or (claim and _auto_skill_identity(statement)[1] == claim)):
+            continue
+        newest = row                      # rows are file order, newest last
+    if newest is None or str(newest.get("outcome", "")) not in _NEGATIVE:
+        return None
+    if status == "promoted":
+        stored = _stored_skill_fingerprints(metadata.get("fingerprints", ""))
+        row_fp = newest.get("fingerprint")
+        row_fp = [t for t in row_fp if isinstance(t, str)] if isinstance(row_fp, list) else []
+        if not any(fingerprint_similarity(row_fp, old) >= _SKILL_SAME_FAMILY for old in stored if old):
+            return None
+    return newest
+
+
+def reconcile_auto_skill_statuses(skills_dir: str | Path, lesson_rows: list[dict]) -> list[dict]:
+    """The CONTRADICTION edge, run at finalize beside `write_auto_skill`: demote every auto card
+    whose claim the lessons store now records as reversed, and retire one demoted for the
+    `AUTO_SKILL_RETIRE_AFTER`-th time. Rewrites ONLY the frontmatter (`status`, `demotions`,
+    `demoted_by`, `demoted_outcome`) under the same locks the writer takes; the body is untouched.
+    Returns one receipt per moved card and never raises (best-effort memory, like the writer)."""
+    receipts: list[dict] = []
     try:
-        value = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return []
-    if not isinstance(value, list) or len(value) > 6:
-        return []
-    for fingerprint in value:
-        if (not isinstance(fingerprint, list) or len(fingerprint) > 512
-                or any(not isinstance(token, str) or len(token) > 1024
-                       for token in fingerprint)):
-            return []
-    return value
+        d = Path(skills_dir)
+        if not d.is_dir():
+            return receipts
+        from looplab.events.eventstore import _interprocess_lock
+        from looplab.tools.skills import parse_skill_frontmatter
+        for path in sorted(d.glob("auto-*.md")):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            metadata = parse_skill_frontmatter(text)
+            if metadata.get("provenance", "").strip().lower() != "auto":
+                continue
+            row = _skill_contradiction(metadata, lesson_rows)
+            if row is None:
+                continue
+            prior = metadata.get("status", "").strip().lower()
+            try:
+                demotions = int(str(metadata.get("demotions", "0")).strip() or 0)
+            except ValueError:
+                demotions = 0
+            demotions = max(0, min(999, demotions)) + 1
+            new_status = "retired" if demotions >= AUTO_SKILL_RETIRE_AFTER else "demoted"
+            run_id = str(row.get("run_id") or "")[:200]
+            outcome = str(row.get("outcome") or "")[:40]
+            fields = {"status": new_status, "demotions": str(demotions),
+                      "demoted_by": json.dumps(run_id, ensure_ascii=False),
+                      "demoted_outcome": json.dumps(outcome, ensure_ascii=False)}
+            rewritten = _rewrite_frontmatter(text, fields)
+            if rewritten is None:
+                continue
+            with _interprocess_lock(d / ".auto-skills.lock", required=True):
+                with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+                    atomic_write_text(path, rewritten)
+            receipts.append({"name": metadata.get("name", path.stem), "from": prior,
+                             "to": new_status, "outcome": outcome, "run_id": run_id,
+                             "claim_sha256": metadata.get("claim_sha256", ""),
+                             "demotions": demotions})
+    except Exception as exc:  # noqa: BLE001 — skill hygiene is best-effort, never fails a run
+        from looplab.core.containment import contain
+        contain("auto-skill status reconcile", exc)
+        return receipts
+    return receipts
+
+
+def _rewrite_frontmatter(text: str, fields: dict[str, str]) -> Optional[str]:
+    """Replace / insert scalar fields in the real leading frontmatter block; None when there is
+    none. A field is written on ONE physical line (the values above are JSON-escaped), so a
+    contradicting lesson's run id can never inject a second lifecycle line."""
+    match = re.match(r"\A(---\r?\n)(.*?)(\r?\n---\r?\n?)(.*)\Z", text, re.DOTALL)
+    if not match:
+        return None
+    head, block, close, body = match.groups()
+    lines = block.split("\n")
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        key = line.partition(":")[0].strip().lower()
+        if key in fields:
+            if key in seen:
+                continue                  # last-one-wins is the reader's rule; write it once
+            seen.add(key)
+            out.append(f"{key}: {fields[key]}")
+        else:
+            out.append(line)
+    for key, value in fields.items():
+        if key not in seen:
+            out.append(f"{key}: {value}")
+    return head + "\n".join(out) + close + body
 
 
 # A SKILL IS A NON-OBVIOUS PROCEDURE, NOT A FACT ABOUT ONE NODE. The first guard added in 2026-08
@@ -905,6 +1042,7 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
             # existing cooperating writers, nested after the directory identity-selection lock.
             locks.enter_context(_interprocess_lock(Path(str(p) + ".lock"), required=True))
             status, fps = "candidate", [fingerprint]
+            carried: dict[str, str] = {}
             if p.exists():
                 head = p.read_text(encoding="utf-8")
                 # Read lifecycle state only from the real leading frontmatter.  The skill body is
@@ -927,8 +1065,12 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                     prior_status = metadata.get("status", "").strip().lower()
                     different = any(
                         fingerprint_similarity(fingerprint, old) < 0.6 for old in fps if old)
-                    status = (
-                        "promoted" if different or prior_status == "promoted" else "candidate")
+                    # The SUPPORT edge of the lattice (`next_auto_skill_status` holds the table);
+                    # a card's demotion receipts travel with it so `reconcile_auto_skill_statuses`
+                    # can still count toward retirement after a re-promotion.
+                    status = next_auto_skill_status(prior_status, different)
+                    carried = {key: metadata[key] for key in
+                               ("demotions", "demoted_by", "demoted_outcome") if metadata.get(key)}
                     if fingerprint not in fps:
                         fps = (fps + [fingerprint])[-6:]
             source_task = json.dumps(str(task_id), ensure_ascii=False)
@@ -961,7 +1103,9 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                     # physical line while retaining the full Unicode identifier for audit.
                     f"source_task: {source_task}\n"
                     f"fingerprints: {json.dumps(fps)}\n"
-                    "---\n\n"
+                    + "".join(f"{key}: {value}\n" for key, value in carried.items()
+                              if re.fullmatch(r"[a-z_]+", key) and "\n" not in str(value))
+                    + "---\n\n"
                     f"# {statement.strip()}\n\n{redacted_skill_body(body).strip()}\n")
             atomic_write_text(p, text)
         return p

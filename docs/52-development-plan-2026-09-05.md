@@ -411,12 +411,15 @@ cascade rung — AlphaEvolve's cascade, OpenEvolve's `cascade_evaluation`, LEVI'
 benchmark — and nothing measures whether smoke rank order survives at full, which is what decides
 whether promotion may read it. Box-only. proof:missing:docs/audit/smoke-full-rank-fidelity.md
 
-OPEN[skills-load-flat-not-by-tier] `tools/skills.py` serves one flat dict with no global / domain /
-task tier; HASTE measured flat loading at 62.5 % on 8 competitions — the same as NO skills, at 2× the
-output tokens — against 100 % tiered. SkillZip Pro's warning applies to doc 51's `clip`: cut whole
-sections, never bytes (an unprotected 71 % compression lost 26 accuracy points). Ranked behind the
-skill-body and demotion markers: a tier of unbounded bodies is still unbounded.
-proof:absent:tier@looplab/tools/skills.py
+*Closed 2026-09-06 (row 17 shipped): the marker `skills-load-flat-not-by-tier` stood here.
+`tools/skills.py::skill_tier` settles every skill into HASTE's three tiers — a declared `tier:`
+wins, else hand-written is `global`, a promoted auto skill `domain` and any other auto skill `task` —
+and `list_skills` is grouped by tier with the `domain` tier ordered by fit to the bound run
+(`SkillTools.bind_state` → the run's task fingerprint against the fingerprints the card was
+confirmed on, `DOMAIN_FIT_MIN` = the prior's own 0.34 bar), `task` drafts kept out of the
+production listing, a `tier=` filter, and the listing itself bounded by `fit_rows`. It landed with
+the body bound and the demotion edge in the same change, as the ranking required. Deleted per the
+index rule.*
 
 OPEN[injected-priors-leave-no-structured-record] the cross-run prior is prose spliced into both role
 prompts (`engine/lessons_priors.py::_render_role_prior`), lesson rows carry no id, and no event names
