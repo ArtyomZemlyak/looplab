@@ -360,6 +360,10 @@ NO_SPEEDUP_REASONS = (
                                   # absent while another regime for the same task+subset is on
                                   # disk, so it would re-time the reference and divide by a
                                   # different denominator than whoever wrote those entries
+    "regime_not_scorable_for_task",  # refused BEFORE measuring: this task's reference solves with
+                                     # CP-SAT and the run keys a twenty-two-wide regime, where §314
+                                     # measured the reference itself at 1.14-1.60 against a
+                                     # baseline built on the same idle box
     "solver_unloadable",   # their import of our solver.py failed
     "compilation_failed",  # a Cython/pythran/DaCe build step failed
     "no_problems",         # the requested dataset half was empty
@@ -925,6 +929,37 @@ def _build_error_digest(stderr: str, limit: int = 400) -> str:
     return f"{text[:limit // 2]} ... {text[-limit // 2:]}"
 
 
+def regime_scores_this_task(task_source: str, regime_key: str) -> bool:
+    """May a run keying `regime_key` be trusted to SCORE a task whose reference is `task_source`?
+
+    §314 measured the reference submitted as its own candidate, on an idle box, against baselines
+    built on that same idle box:
+
+        regime            max_clique_cpsat   six CP-SAT tasks
+        22 evaluation workers   1.5291           1.1375 - 1.6028
+        one worker              0.9922           1.0113 - 1.0967
+
+    Re-timing the baseline quiet moved it 2 %, and reading it quiet still gave 1.5291, so this is
+    neither a stale ruler nor a busy box: at twenty-two workers the baseline pass and the candidate
+    pass do not measure the same code the same way, and the gap grows with the task's own timing
+    variance -- which is why it is invisible on the ten deterministic tasks and 50 % on CP-SAT.
+
+    A candidate that does NOTHING scores 1.53 here. That is the number this refuses to print.
+
+    The rule is a property of the TASK's reference, not of a list of names: a task list goes stale
+    the first time upstream adds a solver, and this box has already been bitten by a name-keyed
+    check (`snapshot.sh`'s hardcoded campaign directory).
+    """
+    if not ("cp_model" in task_source or "ortools" in task_source):
+        return True
+    # THE KEY CARRIES ITS OWN UNDERSCORES: `eval_regime()` returns `__lane22r3` and `__w22x1r3`,
+    # not `lane22r3`. The first cut matched `startswith("lane")` and a unit test invented the
+    # stripped form to agree with it, so the guard refused the serial run as well -- and told the
+    # operator, in its own message, to do the thing it had just refused. Driving it end to end is
+    # what caught that; the test below now takes both keys from `eval_regime` itself.
+    return regime_key.lstrip("_").startswith("lane")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--algotune-root", required=True, type=Path,
@@ -1267,6 +1302,41 @@ def main() -> int:
                   "because ALGOTUNE_ALLOW_NEW_REGIME=1", file=sys.stderr)
             return None
         return mine, ", ".join(present)
+
+    def _regime_not_for_this_task() -> str | None:
+        """The regime this run keys, when it may not score THIS task — else None."""
+        if not (os.environ.get("ALGOTUNE_BASELINE_CACHE_DIR")
+                or "--baseline-times-dir" in sys.argv):
+            return None
+        mine = eval_regime()["key"]
+        if mine is None:
+            return None
+        try:
+            src = (args.algotune_root / "AlgoTuneTasks" / args.task
+                   / f"{args.task}.py").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None                      # cannot read the reference: not this guard's call
+        if regime_scores_this_task(src, mine):
+            return None
+        if os.environ.get("ALGOTUNE_SCORE_ANYWAY") == "1":
+            print(f"LOOPLAB: scoring {args.task} in regime {mine!r} anyway "
+                  "(ALGOTUNE_SCORE_ANYWAY=1); §314 measured the reference itself at 1.14-1.60 "
+                  "here, so this number carries that bias", file=sys.stderr)
+            return None
+        return mine
+
+    if (_bad_regime := _regime_not_for_this_task()) is not None:
+        _block = _no_speedup("regime_not_scorable_for_task", task=args.task)
+        _inner = _block.get("no_speedup") if isinstance(_block.get("no_speedup"), dict) else _block
+        _inner["detail"] = (
+            f"this task's reference solves with CP-SAT, and this invocation keys {_bad_regime!r}. "
+            "§314: the reference submitted as its own candidate reads 1.1375-1.6028 in that regime "
+            "on an idle box against a baseline built on that idle box, and 1.0113-1.0967 at one "
+            "evaluation worker -- so a candidate that changes nothing would score about 1.5. Score "
+            "it with ALGOTUNE_EVAL_WORKERS=1, or set ALGOTUNE_SCORE_ANYWAY=1 to accept the bias.")
+        _emit({"speedup": None, "eval_seconds": 0.0, "subset": args.subset,
+               "no_speedup": _inner if _inner is not _block else _block})
+        return 0
 
     if (_mismatch := _regime_mismatch()) is not None:
         _mine, _present = _mismatch

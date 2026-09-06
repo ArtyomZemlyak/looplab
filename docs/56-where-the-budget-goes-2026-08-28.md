@@ -13253,3 +13253,50 @@ Running the whole suite after the change turned up three reds, all mine and all 
   them "rules as is" — 16 where the shipped tool said 10. The wiring moved into
   `task_inventory.inventory()` and the test calls that. Duplicated wiring is how a test comes to
   check a different program than the one that ships.
+
+## §315 — the concurrency hypothesis dies, and the bench refuses to print the biased number
+
+§314 left the mechanism open. The obvious hypothesis was that the two passes run at different
+concurrency, so a sampler counted the bench interpreter's processes and threads every half second
+through a baseline pass and a candidate pass of `max_clique_cpsat`:
+
+| pass | procs (median over busy samples) | threads |
+|---|---|---|
+| baseline | 80 | 2268 |
+| candidate | 51 | 1077 |
+
+Which looked like a confirmation and was an artefact of my own summary statistic: the windows
+contain different amounts of idle time. The time series says the opposite —
+
+```
+BASELINE   ..  91 procs / 2580 thr  ..  92/2770  ..  81/2196  ..  [5/8 serial gap]  ..  87/2666  ..
+CANDIDATE  ..  [5/50 startup]       ..  93/2484  ..  89/2857  ..  88/2860          ..  85/2661  ..
+```
+
+— both passes work at the same concurrency, ~22 workers and ~2 600 threads. **Prediction 4 refuted.**
+A median taken over a window that contains a serial phase is not the concurrency of the pass.
+
+So the mechanism is still open, and it is now bounded on four sides: it is not baseline staleness
+(re-timing quiet moves 2 %), not box contention (idle box, 1.5291), not worker count (identical
+profiles), and it scales with the task's own timing variance. What remains is inside how each pass
+turns ten timed runs into one number under oversubscription. Both use `min_time_ms`; both warm on a
+neighbouring problem; the run counts come from the same `EVAL_RUNS`. Named here so the next sitting
+starts from the four things it is not.
+
+### The number is refused rather than remembered
+
+The inventory knew CP-SAT tasks are only rulable serially, and nothing stopped a campaign from
+scoring one twenty-two wide and printing it. `looplab_eval` now refuses with its own reason,
+`regime_not_scorable_for_task`, registered in the vocabulary `compare_arms` reads: a task whose
+reference imports `cp_model` or `ortools` is not scored in a `__w<N>x<C>` regime.
+`ALGOTUNE_SCORE_ANYWAY=1` overrides it and says on stderr that the number carries the bias. The rule
+reads the reference rather than a list of task names, because a name list goes stale the first time
+upstream adds a solver — this box has been bitten by a name-keyed check before.
+
+Driving it end to end immediately caught what the unit test could not: `eval_regime()` returns
+`__lane22r3`, not `lane22r3`, so `startswith("lane")` was False and the guard refused the serial run
+too — telling the operator, in its own message, to make the run it had just refused. The test had
+typed the stripped key by hand, so fixture and bug came from the same wrong idea about the key's
+shape. Both keys now come from `eval_regime()` itself. Measured after the fix: serial scores
+(1.0733), wide refuses, override scores (1.8529 — a fourth sample of the biased number, beside
+1.6028, 1.5291 and 1.7702).
