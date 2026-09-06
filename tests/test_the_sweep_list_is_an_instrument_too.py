@@ -314,3 +314,59 @@ def test_an_unreadable_final_does_not_take_the_check_down(tmp_path, monkeypatch)
                                                                   encoding="utf-8")
     ok, detail = sweep_claims.check_comparison_figures(str(tmp_path))
     assert ok, detail
+
+
+def test_the_campaign_evidence_claim_is_driven_not_grepped(tmp_path):
+    """§267 closed this by DRIVING the real `archive_tree`, and the check re-drives it every sweep:
+    a source-grep would pass on a function whose behaviour had changed underneath its comment.
+
+    Given the real snapshot.sh, attempt 1 survives 400 rows as `.superseded-1` after `campaign.sh`'s
+    rm -rf and an EQUAL-LENGTH attempt 2 -- equal length being the case a size test would miss and a
+    prefix check catches."""
+    bench = Path("/var/tmp/looplab-bench")
+    if not (bench / "looplab" / "benchmarks" / "snapshot.sh").is_file():
+        import pytest
+        pytest.skip("no bench on this box")
+    ok, detail = sweep_claims.check_campaign_evidence_overwrite(str(bench))
+    assert not ok, detail
+    assert "400 rows" in detail and "attempt1 row 0" in detail, detail
+    assert "PREFIX check" in detail, detail
+
+
+def test_a_bench_without_the_script_does_not_silently_pass(tmp_path):
+    """"Cannot be driven" is not "the note is stale". Reporting a claim as refuted because the tool
+    was missing is exactly the false reading this file exists to stop."""
+    ok, detail = sweep_claims.check_campaign_evidence_overwrite(str(tmp_path))
+    assert ok is False and "cannot be driven" in detail, detail
+
+
+def test_a_bench_that_really_loses_the_evidence_reports_the_note_standing(tmp_path):
+    """The check has to be able to say the note HOLDS, or it is a rubber stamp. A snapshot.sh whose
+    archive_tree just copies -- no supersede -- must come back as the note standing."""
+    d = tmp_path / "looplab" / "benchmarks"
+    d.mkdir(parents=True)
+    (d / "snapshot.sh").write_text(
+        "archive_tree() {\n"
+        '  mkdir -p "$2"\n'
+        '  cp -ru "$1" "$2/"\n'
+        "}\n", encoding="utf-8")
+    ok, detail = sweep_claims.check_campaign_evidence_overwrite(str(tmp_path))
+    assert ok is True and "NOT preserved" in detail, detail
+
+
+def test_a_superseded_file_holding_the_wrong_attempt_is_not_intact(tmp_path):
+    """The check has to look INSIDE. A version that accepted any `.superseded-1` passed every
+    fixture here, because the one that loses evidence writes no such file at all -- so "exists" and
+    "holds attempt 1" were never told apart. This archive_tree writes a superseded file containing
+    attempt TWO, which is the failure that matters: evidence-shaped, evidence-free."""
+    d = tmp_path / "looplab" / "benchmarks"
+    d.mkdir(parents=True)
+    (d / "snapshot.sh").write_text(
+        "archive_tree() {\n"
+        '  mkdir -p "$2/demo/run"\n'
+        '  cp -r "$1"/. "$2/demo/" 2>/dev/null || true\n'
+        '  cp "$1/run/events.jsonl" "$2/demo/run/events.jsonl.superseded-1"\n'
+        "}\n", encoding="utf-8")
+    ok, detail = sweep_claims.check_campaign_evidence_overwrite(str(tmp_path))
+    assert ok is True, detail
+    assert "does not hold attempt 1 intact" in detail, detail

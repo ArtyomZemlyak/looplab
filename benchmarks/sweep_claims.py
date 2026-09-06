@@ -273,6 +273,58 @@ def check_comparison_figures(bench: str):
     return missing == 0, "; ".join(said)
 
 
+def check_campaign_evidence_overwrite(bench: str):
+    """"campaign.sh делает rm -rf каталога задачи ... cp -ru перезаписывает доказательства первой
+    попытки ... закрывается только версионированием архива по попыткам"
+
+    DRIVEN, NOT READ. §267 closed this by driving the real `archive_tree`: archive 400 rows, do what
+    `campaign.sh` does -- `rm -rf` the task root and write an EQUAL-LENGTH second attempt at the same
+    path -- and attempt 1 came back intact as `.superseded-1`. The rule is a PREFIX check, "is the
+    source a continuation of the archive", which is why an equal-length attempt 2 is caught where a
+    size test would pass it.
+
+    Re-driven every sweep rather than trusted: a source-grep would pass on a function whose
+    behaviour had changed underneath its comment.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    script = Path(bench) / "looplab" / "benchmarks" / "snapshot.sh"
+    if not script.is_file():
+        return False, "snapshot.sh not on this box, so the claim cannot be driven"
+    work = tempfile.mkdtemp()
+    try:
+        src = Path(work) / "src" / "runs" / "demo"
+        (src / "run").mkdir(parents=True)
+        (src / "run" / "events.jsonl").write_text(
+            "".join("attempt1 row %d\n" % i for i in range(400)), encoding="utf-8")
+        arch = Path(work) / "arch"
+        arch.mkdir()
+        drive = Path(work) / "drive.sh"
+        drive.write_text(
+            "set -e\n"
+            "sed -n '/^archive_tree() {/,/^}/p' \"$1\" > \"$2/at.sh\"\n"
+            ". \"$2/at.sh\"\n"
+            "archive_tree \"$3\" \"$4\" >/dev/null 2>&1 || true\n"
+            "rm -rf \"$3\"; mkdir -p \"$3/run\"\n"
+            "for i in $(seq 0 399); do echo \"attempt2 row $i\"; done > \"$3/run/events.jsonl\"\n"
+            "archive_tree \"$3\" \"$4\" >/dev/null 2>&1 || true\n", encoding="utf-8")
+        subprocess.run(["bash", str(drive), str(script), work, str(src), str(arch)],
+                       check=False, capture_output=True, timeout=180)
+        kept = arch / "demo" / "run" / "events.jsonl.superseded-1"
+        if not kept.is_file():
+            return True, "driven here: attempt 1's evidence was NOT preserved, so the note stands"
+        first = kept.read_text(encoding="utf-8", errors="replace").splitlines()
+        if len(first) == 400 and first[0].startswith("attempt1"):
+            return False, (f"driven here: attempt 1 survives as .superseded-1 with {len(first)} "
+                           f"rows, first {first[0]!r} -- the per-attempt versioning the note asks "
+                           "for is in place (§267), keyed on a PREFIX check so an equal-length "
+                           "second attempt is caught too")
+        return True, "driven here: .superseded-1 exists but does not hold attempt 1 intact"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
@@ -284,6 +336,8 @@ CLAIMS = [
      check_card_silent_on_the_champion_rule),
     ("point 5: the reference-against-itself constants", check_ruler_constants),
     ("point 9: the comparison figures are the current corpus", check_comparison_figures),
+    ("point 8: campaign.sh's rm -rf still overwrites the first attempt's evidence",
+     check_campaign_evidence_overwrite),
 ]
 
 

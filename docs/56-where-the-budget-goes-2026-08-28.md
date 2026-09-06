@@ -13019,3 +13019,36 @@ guard that saved §287 and §289, and it is the last line of defence rather than
 **While there: the downloaded datasets are complete.** Tasks needing external arrays have them —
 `spectral_clustering` 200 `.npy` files, `convex_hull` 200, `rbf_interpolation` 2 — and tasks that
 need none have no `_npy_data` directory. The §300 fetch pulled the payloads, not just the manifests.
+
+## §312 — the loudest open item on the list is checked now, by driving it
+
+The sweep list marks `campaign.sh`'s evidence overwrite **ОСТАЁТСЯ ОТКРЫТЫМ** — the only item it
+capitalises that way. §267 closed it by driving the real `archive_tree`, and since then I have been
+re-reporting that from memory each sweep. `sweep_claims` now re-drives it instead:
+
+```
+  STALE  point 8: campaign.sh's rm -rf still overwrites the first attempt's evidence
+         driven here: attempt 1 survives as .superseded-1 with 400 rows, first 'attempt1 row 0'
+         -- the per-attempt versioning the note asks for is in place (§267), keyed on a PREFIX
+         check so an equal-length second attempt is caught too
+```
+
+**Driven, not grepped**, and the difference is the point: a source-grep passes on a function whose
+behaviour has changed underneath its comment. The check archives 400 rows, does what `campaign.sh`
+does — `rm -rf` the task root, write an equal-length attempt 2 at the same path — and looks inside
+what survived.
+
+**A mutation survived and the fixture was the reason, for the fourth time in this series.** Accepting
+any `.superseded-1` regardless of contents passed every test, because the fixture that loses evidence
+writes *no* such file — so "exists" and "holds attempt 1" were never distinguished. The new fixture
+is an `archive_tree` that writes a superseded file containing attempt **two**: evidence-shaped and
+evidence-free. That is the failure that would actually fool a reader, and it is now red.
+
+Also pinned: "cannot be driven" must not read as "the note is stale". A bench without `snapshot.sh`
+reports the claim as unrefuted, and a mutation flipping that is red — reporting a claim as refuted
+because the tool was missing is precisely the false reading this file exists to stop.
+
+**And one thing that needed no new work.** Nineteen of the twenty tasks produced a self-check
+reading, and a reading requires 100 % valid instances — so every one of those references passes its
+own checker, and §311's `spectral_clustering` is provably the only self-rejecting reference on the
+box. That follows from the readings already taken rather than from twenty more runs.
