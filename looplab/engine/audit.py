@@ -282,13 +282,22 @@ class AuditMixin:
         if store is None:
             return
         try:
-            clean = {k: (self._redact(v) if isinstance(v, str) else v) for k, v in data.items()}
-            if isinstance(clean.get("todos"), list):
-                clean["todos"] = [{**t, "item": self._redact(str(t.get("item", "")))}
-                                  for t in clean["todos"] if isinstance(t, dict)]
-            store.append(etype, clean)
+            store.append(etype, self._redact_tree(data))
         except Exception as exc:  # noqa: BLE001 — a diagnostic row must never break the loop reporting it
             contain("phase event append", exc)
+
+    def _redact_tree(self, value, _depth: int = 0):
+        """`_redact` over every string in a bounded JSON tree — a phase row's todos, a memory-read
+        row's statements — so no nesting is a way past the redactor."""
+        if isinstance(value, str):
+            return self._redact(value)
+        if _depth >= 4:
+            return value
+        if isinstance(value, dict):
+            return {k: self._redact_tree(v, _depth + 1) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._redact_tree(v, _depth + 1) for v in value]
+        return value
 
     def _redact(self, text: str) -> str:
         """B3/C2: mask secrets in an output tail before it is persisted.

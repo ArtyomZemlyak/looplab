@@ -289,6 +289,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                 "at_node": n, "skipped": "unreadable", "error": str(e)[:300]})
             return fold(self._e.store.read_all())
         self.seen_stamp = stamp        # committed only once the load actually succeeded
+        if self.prior_note_text or self.dev_prior_note_text:
+            self.record_prior_injection(at_node=n, phase="refresh")   # doc 52 row 17: the record
         self._e.store.append(EV_LESSONS_REFRESHED, {
             "at_node": n, "chars": len(self.prior_note_text) + len(self.dev_prior_note_text),
             "changed": (self.prior_note_text, self.dev_prior_note_text) != before})

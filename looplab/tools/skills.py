@@ -397,9 +397,16 @@ class SkillTools:
                     # label the tool payload at its source instead of relying on directory identity.
                     label = ("UNTRUSTED_MEMORY_AUTO_SKILL "
                              f"provenance={s.provenance!r} status={s.status!r}\n")
-                    return label + render_skill_body(
+                    answer = label + render_skill_body(
                         s, cap=max(200, SKILL_RESULT_CAP - len(label)), section=section)
-                return render_skill_body(s, section=section)
+                else:
+                    answer = render_skill_body(s, section=section)
+                # The read RECORD (doc 52 row 17): which skill, which section, what bytes.
+                from looplab.core.phase_events import emit_memory_read
+                emit_memory_read("use_skill", args, answer,
+                                 rows=[{"id": f"skill:{s.name}", "statement": s.description}],
+                                 source={"tier": skill_tier(s), "status": s.status or ""})
+                return answer
             return f"(unknown tool: {name})"
         except Exception as e:  # noqa: BLE001
             return f"(tool error: {e})"

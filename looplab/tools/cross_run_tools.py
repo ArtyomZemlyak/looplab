@@ -531,15 +531,18 @@ class CrossRunTools:
                     "this is a wiring error, not an empty portfolio)")
         try:
             result = self._execute(name, args or {})
-            # CODEX AGENT: Auditability gap: the exact rendered tool result, its scope snapshot, and the
-            # consuming model turn share no durable invocation id. Generic traces cannot prove which
-            # mutable portfolio bytes influenced a later proposal after restart/replay. Persist a bounded
-            # result digest + source watermark and reference that receipt from the resulting decision event.
             # this final boundary covers every current/future tool branch, including a
             # malformed legacy value that bypasses a field-level formatter. Tool results are persisted
             # in traces and fed back to the model, so they are never allowed to carry raw credentials.
-            return cross_run_text(
+            rendered = cross_run_text(
                 result, max_chars=_MAX_TOOL_RESULT_CHARS, single_line=False, entropy=True)
+            # THE INVOCATION RECORD (doc 52 row 17; the auditability gap this method used to name
+            # in a comment): the exact rendered result's digest + length under an invocation id,
+            # as a `memory_read` diagnostic through the engine-installed sink, so a later proposal
+            # can be joined to the portfolio bytes that preceded it. No-op outside a run.
+            from looplab.core.phase_events import emit_memory_read
+            emit_memory_read(name, args, rendered, source={"audience": self.audience})
+            return rendered
         except Exception as exc:  # noqa: BLE001
             # Storage/parser exceptions can contain credentialed URLs, provider hosts and
             # absolute paths. Tool results become prompt/event material, so they are allow-listed;

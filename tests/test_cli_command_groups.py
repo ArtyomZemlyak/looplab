@@ -79,7 +79,13 @@ GROUPS = {
     # domain inside `governance_cmds` — which was ALREADY eleven lines under the bound. Its contract
     # is the one governance does not have: every command there RECORDS a decision and adds, this one
     # REMOVES rows whose writing run is gone and decides nothing about their content.
-    "memory_cmds": {"memory-orphans"},
+    # `prior-citations` (doc 52 row 17) is the READ side of the same stores: a pure projection over
+    # one run's `prior_injected` + `memory_read` rows that reports which pushed lessons its
+    # proposals cited — the number the utility rank term and the forgetting rung are keyed on. It
+    # writes nothing and calls no model; it is here and not in `inspect_cmds` because that group
+    # sits at its own ceiling and the subject is the cross-run store's usefulness, not one run's
+    # account of itself.
+    "memory_cmds": {"memory-orphans", "prior-citations"},
     # OFFLINE RECORD REPAIRS. Its own group rather than `governance_cmds` because the subject is a
     # SINGLE run's account of itself — a node whose durable record kept the proposal and lost what
     # actually ran — not the cross-run store. It appends events, so it is not `inspect_cmds` either;

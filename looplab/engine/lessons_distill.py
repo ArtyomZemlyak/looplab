@@ -400,6 +400,30 @@ class LessonDistillMixin:
             contain("auto-skill status reconcile at finalize", exc)
             skills_demoted = []
 
+        # THE READ-SIDE UTILITY LEDGER (doc 52 row 17): this run's own citation report — which
+        # lessons its prompt prior showed and which its proposals cited (`events/prior_citations.py`)
+        # — appended as one row per lesson to the shared `lesson_utility.jsonl`, which the next
+        # run's prior scan folds onto each lesson as its `utility`. Append-only, under the ledger's
+        # own lock, inside this pass's own finish-seq idempotency; the rows are receipted below.
+        prior_citations: dict = {}
+        try:
+            from looplab.events.prior_citations import prior_citation_report, utility_rows
+            _report = prior_citation_report(self._e.store.read_all())
+            _rows_out = utility_rows(_report, run_id=final.run_id, run_uid=final.run_uid)
+            if _rows_out:
+                _upath = base / "lesson_utility.jsonl"
+                with _interprocess_lock(Path(str(_upath) + ".lock"), required=True):
+                    append_jsonl_bytes_locked(
+                        _upath, b"".join(orjson.dumps(row) + b"\n" for row in _rows_out))
+            prior_citations = {
+                "proposals": _report["proposals"], "shown": _report["shown_pairs"],
+                "cited": _report["cited_pairs"], "lessons": len(_rows_out),
+                "rate": _report["citation_rate"]}
+        except Exception as exc:  # noqa: BLE001 — the ledger is best-effort, never fails finalize
+            from looplab.core.containment import contain
+            contain("lesson utility ledger at finalize", exc)
+            prior_citations = {}
+
         # Audit the run-end distillation in the event log (diagnostic sidecar — fold ignores it). These
         # LLM artifacts (the causal note, the generalizable lessons, the auto-promoted skills) shape
         # FUTURE runs' priors/skills yet otherwise leave no trace in THIS run's events.jsonl — only in
@@ -412,6 +436,7 @@ class LessonDistillMixin:
             "n_lessons": len(lessons), "n_skills": len(skills),
             "n_skill_candidates": len(skill_candidates),
             "n_skills_demoted": len(skills_demoted), "skills_demoted": skills_demoted[:12],
+            "prior_citations": prior_citations,
             "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", ""),
                          "claim_stance": lz.get("claim_stance")}
                         if isinstance(lz, dict) else {"statement": str(lz), "outcome": ""}

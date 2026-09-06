@@ -3952,6 +3952,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._prior_note_text, self._dev_prior_note_text = \
                 self._load_reflection_priors_both(
                     exclude_run_id=_rid, exclude_run_uid=_ruid)
+            # THE RECORD of what was just spliced into both role prompts (doc 52 row 17): main
+            # task, diagnostic, one row per role — the citation instrument's first half.
+            if self._prior_note_text or self._dev_prior_note_text:
+                self.lessons.record_prior_injection(
+                    at_node=len(getattr(_entry, "nodes", None) or {}), phase="run_start")
         except (OSError, ValueError) as e:  # noqa: BLE001 - an advisory prior cannot fail the run
             self._lessons_seen_stamp = None
             self.store.append(EV_LESSONS_STORE_UNAVAILABLE, {

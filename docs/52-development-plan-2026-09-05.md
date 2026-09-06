@@ -421,17 +421,22 @@ production listing, a `tier=` filter, and the listing itself bounded by `fit_row
 the body bound and the demotion edge in the same change, as the ranking required. Deleted per the
 index rule.*
 
-OPEN[injected-priors-leave-no-structured-record] the cross-run prior is prose spliced into both role
-prompts (`engine/lessons_priors.py::_render_role_prior`), lesson rows carry no id, and no event names
-which rows a proposal was shown — so no utility signal can be computed and the prior citation-rate
-audit has no instrument (the `CODEX AGENT` note in `tools/cross_run_tools.py` says the same of tool
-results). The fix is a fold-ignored diagnostic `EV_PRIOR_INJECTED` (role, per-row statement digests)
-appended by the main task at load. proof:absent:prior_injected@looplab/events/types.py
+*Closed 2026-09-06 (row 17 shipped): the marker `injected-priors-leave-no-structured-record` stood
+here. `events/types.py::EV_PRIOR_INJECTED` (DIAGNOSTIC) is written by the main task at both prior
+loads from `lessons_priors.record_prior_injection`, one row per role, carrying the receipt
+`_pick_role_prior` now returns beside the text: each lesson row by `lesson_hygiene.lesson_id` (the
+statement digest, derived), its outcome / task / run / similarity, the notes and case counts, the
+rows the forgetting rung withheld and the store window's digests. `tests/test_prior_records.py`
+drives it through a real run. Deleted per the index rule.*
 
-OPEN[lesson-rank-has-no-utility-term] `engine/lesson_hygiene.py::lesson_rank_key` ranks by similarity,
-confidence × evidence count and recency — all write-side — and forgetting happens only by CONTRADICTION,
-never by uselessness, while SkillAudit, Co-Evolving and ReMe each key retention on a read-side
-outcome. Depends on the record above. proof:absent:utility@looplab/engine/lesson_hygiene.py
+*Closed 2026-09-06 (row 17 shipped): the marker `lesson-rank-has-no-utility-term` stood here.
+`lesson_hygiene.lesson_utility` is the read-side term — the Laplace-smoothed citation rate
+`(cited + 1) / (shown + 2)` off the `utility` the prior scan folds from `lesson_utility.jsonl`,
+neutral when unrecorded — ranked by `lesson_rank_key` after similarity and corroboration, and
+`filter_useless` is forgetting by uselessness beside `filter_contradicted`: a lesson shown to
+`USELESS_MIN_SHOWN` proposals that none cited stops being served, the store row untouched. The
+ledger is written by the finalize pass from `events/prior_citations.py`'s report. Deleted per the
+index rule.*
 
 *Closed 2026-09-06 (row 15 shipped): the marker `eval-process-is-not-told-its-deadline` stood here.
 `sandbox.eval_deadline_env` derives `LOOPLAB_EVAL_DEADLINE` + `LOOPLAB_EVAL_TIMEOUT_S` from the
@@ -600,11 +605,13 @@ into as soon as any worker is free (its own `CODEX AGENT` note; doc 22's shape c
 in-box half of the throughput gap, before any cross-machine pool.
 proof:`present:self.tracer.span("parallel_build_batch"@looplab/engine/orchestrator.py`
 
-OPEN[cross-run-tool-results-leave-no-invocation-record] `tools/cross_run_tools.py` renders a memory
-read into the prompt and records neither the exact rendered result nor an invocation id a later
-decision could be joined to (its own `CODEX AGENT` note) — the tool-result twin of the prior-record
-gap, and the second precondition of the citation-rate audit.
-proof:absent:invocation_id@looplab/tools/cross_run_tools.py
+*Closed 2026-09-06 (row 17 shipped): the marker `cross-run-tool-results-leave-no-invocation-record`
+stood here. `core/phase_events.py::emit_memory_read` reports every `cross_run_*`, `search_lessons`
+/ `recall_notes` and `use_skill` call as a `memory_read` DIAGNOSTIC row — an invocation id, the
+exact rendered result's sha256 + length, bounded args and the rows it showed by `lesson_id` —
+through the engine-installed sink from wherever the loop runs; the answer's bytes are unchanged
+and outside a run it is a no-op. The `CODEX AGENT` note is gone with the gap. Deleted per the
+index rule.*
 
 OPEN[write-tool-reopens-the-approved-path-by-name] `tools/write_tools.py` proves containment on a
 resolved pathname before approval and then reopens the path BY NAME for the atomic replacement, so a
@@ -641,11 +648,16 @@ The coverage snapshot shares the gate and takes one extra sample per rung.
 halves of the idempotence across a resume, the window's source and the other consumer. Rehearse's
 judge-decay trigger stays unbuilt — it needs the judge-quality record row 16 owns.*
 
-OPEN[prior-injection-hit-rate-unmeasured] nothing measures whether an injected prior (lesson, skill,
-capsule, claim) was CITED by the proposal that followed or changed its outcome, so memory growth is
-unbounded by any utility signal; the field's only "was it used" number is dialogue QA (2603.02473).
-Named a CITATION rate to avoid HASTE's keep-fraction sense of "hit rate"; needs the two record
-markers above first. Box-only. proof:missing:docs/audit/prior-injection-hit-rate.md
+OPEN[prior-injection-hit-rate-unmeasured] the INSTRUMENT shipped on 2026-09-06 (row 17:
+`events/prior_citations.py`, `looplab prior-citations <run_dir>`, the two records it reads and the
+`lesson_utility.jsonl` ledger it feeds), but the NUMBER has not: nobody has run it over real runs on
+the box, so whether an injected prior (lesson, skill, capsule, claim) is CITED by the proposal that
+followed — or changes its outcome — is still unmeasured, and the read-side rank term and the
+forgetting rung ship on an unmeasured signal. The audit is `looplab prior-citations` over every run
+with `prior_injected` rows, the citation rate per role and per lesson, and one paired comparison of
+proposals with and without a cited prior; it also decides `lessons-are-not-operator-scoped` below.
+Named a CITATION rate to avoid HASTE's keep-fraction sense of "hit rate". Box-only.
+proof:missing:docs/audit/prior-injection-hit-rate.md
 
 *Closed 2026-09-06 (row 16 shipped): the marker `deep-research-plan-is-not-durable` stood here. The
 stage's plan is a RECORD now: the loop's `update_plan` hands its structured args to the caller's

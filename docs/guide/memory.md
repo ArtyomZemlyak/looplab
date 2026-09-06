@@ -606,6 +606,38 @@ necessarily exposed as an on-demand tool.
 | Part IV/V portfolio claims + concepts | `cross_run_prior_attempts`, `cross_run_claims`, `cross_run_atlas`, `cross_run_search`, `cross_run_concept_map`, `similar_runs`, `find_concept_slugs`, `concept_card` |
 | Cards (open beliefs) | injected each proposal (open ones, with instruction to reuse exact wording for evidence linking) |
 
+## The records, the utility ledger and the citation instrument
+
+Until 2026-09-06 nothing said which rows a proposal had been shown: the cross-run prior was prose
+spliced into the two role prompts, the memory tools rendered a read into the prompt and kept no
+receipt, and so no utility signal could be computed and memory grew unbounded by any read-side
+number. Doc 52 row 17 adds two diagnostic records, one ledger and one instrument.
+
+- **`prior_injected`** — at every prior load (run start, each `lessons_refresh_every` refresh) the
+  engine writes one row per role: the lesson rows the prompt prior was built from (each by
+  `lesson_id`, the sha256 of its normalized statement — derived, never stored — with its outcome,
+  task, run and similarity), how many meta-notes and whether the case were spliced in, how many
+  rows the forgetting rung withheld, and the store window's digests. Main task only, fold-ignored.
+- **`memory_read`** — every `search_lessons` / `recall_notes` / `cross_run_*` / `use_skill` call
+  reports an invocation id, the exact rendered result's sha256 and length, and the rows it showed,
+  through the same engine-installed sink the agent phases use. The answer's bytes do not change;
+  outside a run nothing is written.
+- **The instrument** — `looplab prior-citations <run_dir>` (`events/prior_citations.py`) joins
+  the two to the `node_created` rows that followed, by log order: a proposal was shown the latest
+  prior of each role before it and the tool reads since the previous proposal, and it *cites* a
+  lesson when at least 60 % of the lesson's content tokens appear in its rationale, hypothesis or
+  params (or its id does). Both the join and the rule are stated in the report; a citation rate
+  is a proxy, not a causal effect, and the audit that decides whether priors change outcomes is
+  still a number over real runs on the box (`prior-injection-hit-rate-unmeasured`).
+- **The ledger** — at finalize the run appends its own report to `<memory_dir>/lesson_utility.jsonl`,
+  one row per lesson its prior showed (`{lesson_id, run_id, run_uid, shown, cited, ts}`), receipted
+  as `prior_citations` on the `reflection_note`. The next run's prior scan sums the ledger onto
+  each lesson as `utility` = `{shown, cited}`; `lesson_rank_key` ranks by the Laplace-smoothed
+  citation rate `(cited + 1) / (shown + 2)` after similarity and corroboration (neutral 0.5 when a
+  lesson has never been shown, so an old store is unmoved), and **forgetting by uselessness** —
+  `filter_useless` — stops serving a lesson shown to 8 proposals that none of them cited. The
+  store rows are never rewritten; like the contradiction quarantine, this rations prompt space.
+
 ## The concept shelf — memory indexed by the concept tree
 
 The Memory panel can be filtered and grouped by the same concept tree the run workspace shows, so

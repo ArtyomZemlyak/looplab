@@ -851,6 +851,17 @@ EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"
 EV_AGENT_PHASE_STARTED = "agent_phase_started"
 EV_AGENT_CHECKPOINTED = "agent_checkpointed"
 EV_AGENT_PHASE_COMPLETED = "agent_phase_completed"
+# THE MEMORY RECORDS (doc 52 row 17; doc 27's `cross-run-tool-results-leave-no-invocation-record`,
+# doc 52's `injected-priors-leave-no-structured-record`). `prior_injected`: which lesson rows (by
+# `lesson_hygiene.lesson_id`), notes and case a role's cross-run prior was built from, appended by
+# the MAIN task at every prior load (run start, each refresh), one row per role. `memory_read`: one
+# row per cross-run / memory / skill TOOL call — an invocation id, the tool, bounded args, the
+# sha256 + length of the exact rendered result and the row ids it showed — reported through the
+# `core/phase_events.py` sink from wherever the loop runs. Both are DIAGNOSTIC: fold-ignored,
+# fence-excluded, and the ONLY instrument the prior citation-rate audit
+# (`events/prior_citations.py`) has.
+EV_PRIOR_INJECTED = "prior_injected"
+EV_MEMORY_READ = "memory_read"
 # ASHA live-curve watchdog (engine/asha_monitor.py): a node whose latest INTERMEDIATE metric ranks below
 # completed endpoints and/or comparable same-resource observations. New rows distinguish those verdicts;
 # only enough underperforming same-resource evidence may trigger the opt-in kill. DIAGNOSTIC / fold-
@@ -1040,4 +1051,5 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
     EV_AGENT_PHASE_STARTED, EV_AGENT_CHECKPOINTED, EV_AGENT_PHASE_COMPLETED,
+    EV_PRIOR_INJECTED, EV_MEMORY_READ,
 })

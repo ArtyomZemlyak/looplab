@@ -14,7 +14,9 @@ and monkeypatch seams (notably `claims_health`'s `_NEGATIVE` / `normalize_statem
 """
 from __future__ import annotations
 
+import hashlib
 import re
+from typing import Optional
 
 from looplab.tools.vectorstore import Hit
 
@@ -378,9 +380,62 @@ def retrieve_lessons_harmonic(candidates, query_text, abstract, embed, *, k: int
         out.append((min(0.9, float(h.score)), i))   # cap < exact-task 1.0
     return out
 
+def lesson_id(value) -> str:
+    """THE ONE identity of a lesson across every reader (doc 52 row 17): `les-` + 24 hex of the
+    sha256 of the normalized statement. Derived, never stored — rows carry no id and consolidation
+    rewrites statements, so a stored id would be the drift; the same statement yields the same id in
+    the prior receipt, the memory-read record, the utility ledger and the citation instrument."""
+    statement = value.get("statement", "") if isinstance(value, dict) else value
+    digest = hashlib.sha256(normalize_statement(str(statement or "")).encode("utf-8")).hexdigest()
+    return "les-" + digest[:24]
+
+
+USELESS_MIN_SHOWN = 8           # a lesson shown this often and never cited is quarantined at read
+
+
+def lesson_utility(o: dict) -> Optional[float]:
+    """The READ-side term (doc 52 row 17): Laplace-smoothed citation rate `(cited + 1) / (shown + 2)`
+    from the `utility` the prior scan attaches off `lesson_utility.jsonl`, None when the lesson has
+    never been shown — a lesson with no record ranks as if half-cited, so an old store is unmoved."""
+    u = o.get("utility") if isinstance(o, dict) else None
+    if not isinstance(u, dict):
+        return None
+    try:
+        shown, cited = int(u.get("shown") or 0), int(u.get("cited") or 0)
+    except (TypeError, ValueError):
+        return None
+    if shown <= 0:
+        return None
+    return (min(cited, shown) + 1) / (shown + 2)
+
+
+def filter_useless(scored: list[tuple[float, int, dict]], *,
+                   min_shown: int = USELESS_MIN_SHOWN) -> list[tuple[float, int, dict]]:
+    """Read-path FORGETTING by uselessness (SkillAudit / Co-Evolving / ReMe key retention on a
+    read-side outcome; this store forgot only by CONTRADICTION): a lesson shown at least
+    `min_shown` times whose proposals never cited it stops being served. Nothing is dropped from
+    the store — the ledger is the record, this only rations prompt space, exactly like
+    `filter_contradicted` beside it."""
+    keep: list[tuple[float, int, dict]] = []
+    for sim, idx, o in scored:
+        u = o.get("utility") if isinstance(o, dict) else None
+        if isinstance(u, dict):
+            try:
+                shown, cited = int(u.get("shown") or 0), int(u.get("cited") or 0)
+            except (TypeError, ValueError):
+                shown, cited = 0, 0
+            if shown >= min_shown and cited <= 0:
+                continue
+        keep.append((sim, idx, o))
+    return keep
+
+
 def lesson_rank_key(sim: float, idx: int, o: dict):
-    """Retrieval ranking: similarity first, then confidence × corroboration, then recency —
-    so a twice-confirmed lesson from a related task beats a one-off with equal similarity."""
+    """Retrieval ranking: similarity first, then confidence × corroboration, then the READ-side
+    utility (citation rate, neutral 0.5 when unrecorded), then recency — so a twice-confirmed
+    lesson from a related task beats a one-off with equal similarity, and among equals the one
+    proposals actually cite beats the one they ignore."""
     conf = float(o.get("confidence", 0.5) or 0.5)
     ev = min(3, int(o.get("evidence_count", 1) or 1))
-    return (-sim, -(conf * ev), -idx)
+    utility = lesson_utility(o)
+    return (-sim, -(conf * ev), -(0.5 if utility is None else utility), -idx)
