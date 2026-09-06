@@ -180,6 +180,15 @@ RUN_START_PINNED_FIELDS = frozenset({
     "select_verifier",
     "select_verifier_samples",
     "verifier_ci_tie",
+    # The HITL gate (I21). Pinned since 2026-09-06: it was read LIVE off `Settings`, so a snapshot
+    # EDIT — as opposed to the deletion `cli/__init__.py::load_run_settings(require_snapshot=True)`
+    # refuses — could still finish a paused approval-pending run with no approval; the one setting
+    # that gates a paid finish was the one invariant #6 did not cover. Recorded on every
+    # `run_started` since then; a log written before carries no record and its snapshot stays the
+    # authority (`RunState.require_approval is None`), the same legacy rule `holdout_fraction`
+    # follows, because folding "absent" to False would turn the gate OFF on the resume of every
+    # older run that had it on — the exact defect the pin exists to stop.
+    "require_approval",
 })
 
 
@@ -211,8 +220,8 @@ def run_start_pinned_disagreement(field: str, value, pinned) -> bool:
 def run_start_pinned_settings(state) -> dict:
     """Return the effective Settings names committed by a folded run-start record.
 
-    Pre-pin legacy logs have no recorded holdout fraction, so their snapshot remains authoritative
-    for both holdout knobs. Verifier fields, however, have always been re-pinned from the legacy-safe
+    Pre-pin legacy logs have no recorded holdout fraction (nor, before 2026-09-06, an approval
+    gate), so their snapshot remains authoritative for those knobs. Verifier fields, however, have always been re-pinned from the legacy-safe
     fold defaults whenever a valid ``run_started`` identity exists.
 
     Every value here must be one ``run_started`` ACTUALLY CARRIED. That is not a tautology for
@@ -241,6 +250,10 @@ def run_start_pinned_settings(state) -> dict:
             "holdout_fraction": holdout_fraction,
             "holdout_select": bool(getattr(state, "holdout_select", False)),
         })
+    # Tri-state on purpose: only a RECORDED gate is a pin. See the registry comment above.
+    require_approval = getattr(state, "require_approval", None)
+    if require_approval is not None:
+        values["require_approval"] = bool(require_approval)
     if not values.keys() <= RUN_START_PINNED_FIELDS:
         raise RuntimeError("folded run-start pinned settings contract drifted")
     return values

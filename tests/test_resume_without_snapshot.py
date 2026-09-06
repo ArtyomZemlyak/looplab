@@ -2,9 +2,10 @@
 
 `load_run_settings(..., strict=True)` is what `resume`, `finalize` and the finalization recovery use
 to answer "which settings does this run actually run with". With the snapshot ABSENT it returned a
-fresh `Settings()`, whose `require_approval` is False — and `require_approval` is read LIVE off
-Settings, not pinned in `run_started` — so deleting one file finished a paused approval-pending run
-with no approval. `trust_mode`, `eval_trust_mode`, `confirm_*` and `backend` degraded the same way,
+fresh `Settings()`, whose `require_approval` is False — and until 2026-09-06 `require_approval` was
+read LIVE off Settings, not pinned in `run_started` (it is pinned now, `tests/test_require_approval_
+pin.py`; the other settings named below still are not) — so deleting one file finished a paused
+approval-pending run with no approval. `trust_mode`, `eval_trust_mode`, `confirm_*` and `backend` degraded the same way,
 silently, which is the case the loader's own docstring already warned about for the CORRUPT snapshot
 and then did anyway for the absent one.
 

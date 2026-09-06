@@ -417,9 +417,12 @@ def load_run_settings(run_dir, *, strict: bool, require_snapshot: bool = False) 
     paragraph it replaces ("an absent snapshot is ambient Settings under BOTH modes: `strict` is
     about corruption, not about requiring the file") was the defect its own bullet above describes.
     With the file absent, `resume` took a fresh `Settings()`, whose `require_approval` is `False`
-    and is read LIVE (`engine/orchestrator.py::Engine.__init__`, gated in the search spine), so a
+    and was read LIVE (`engine/orchestrator.py::Engine.__init__`, gated in the search spine), so a
     paused approval-pending run could be continued to completion with no approval — by deleting one
     file. `trust_mode`, `eval_trust_mode`, `confirm_*` and `backend` degrade the same way, silently.
+    Since 2026-09-06 `require_approval` is also PINNED in `run_started` (invariant #6), which closes
+    the snapshot-EDIT half of the same defect for every run started since; this refusal still
+    covers the other settings, and every log written before the pin.
 
     WHY ONLY `resume`, and this is the narrowing that matters: the bypass lives in the SEARCH SPINE,
     and `finalize` and the finalization recovery do not run it — they wrap up a run that has already

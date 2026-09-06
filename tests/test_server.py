@@ -2686,6 +2686,7 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
         "select_verifier_samples": 7,
         "card_driven_selection": True,
         "speculation_depth": 4,
+        "require_approval": True,
     })
     # Every pinned field must actually DRIFT from the run_started pin above, or the mismatch/heal
     # assertions below silently stop covering it. `card_driven_selection` is spelled False here for
@@ -2694,7 +2695,7 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
     snapshot = Settings(
         timeout=30.0, holdout_fraction=0.1, holdout_select=False,
         select_verifier=False, verifier_ci_tie=False, select_verifier_samples=1,
-        card_driven_selection=False, speculation_depth=0,
+        card_driven_selection=False, speculation_depth=0, require_approval=False,
     ).masked_snapshot()
     (rd / "config.snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
     client = TestClient(make_app(tmp_path))
@@ -2705,6 +2706,7 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
     assert shown["select_verifier_samples"] == 7
     assert shown["card_driven_selection"] is True
     assert shown["speculation_depth"] == 4
+    assert shown["require_approval"] is True
     meta = shown["_looplab_config_meta"]
     assert set(meta["run_start_pinned_fields"]) == RUN_START_PINNED_FIELDS
     assert set(meta["snapshot_mismatch_fields"]) == RUN_START_PINNED_FIELDS
@@ -2790,6 +2792,7 @@ def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
         "select_verifier_samples": 7,
         "card_driven_selection": True,
         "speculation_depth": 4,
+        "require_approval": True,
     })
     (rd / "config.snapshot.json").write_text(
         json.dumps(Settings().masked_snapshot()), encoding="utf-8")
@@ -2802,6 +2805,7 @@ def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
         "select_verifier_samples": 2,
         "card_driven_selection": False,
         "speculation_depth": 0,
+        "require_approval": False,
     }
 
     assert set(attempted) == RUN_START_PINNED_FIELDS

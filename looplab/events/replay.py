@@ -393,6 +393,11 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.dirty_inputs = _di if isinstance(_di, list) else []   # P0-5 uncommitted-input enumeration
     _tg = str(d.get("trust_gate", "audit")).strip().lower()
     st.trust_gate = _tg if _tg in ("audit", "gate", "block") else "audit"
+    # The HITL gate the run launched with (pinned since 2026-09-06, invariant #6). Only a JSON
+    # boolean is a record; anything else — and every log written before the pin — folds to None,
+    # which every reader treats as "not recorded, the snapshot decides" and never as False.
+    _ra = d.get("require_approval")
+    st.require_approval = _ra if isinstance(_ra, bool) else None
     # F1d: the run-level DECLARED ENVIRONMENT the evals ran under. Absent on old logs and on every
     # run that declared none -> `{}` -> the engine keeps its own launch value, i.e. byte-identical
     # legacy behaviour. Coerced to `{str: str}` here rather than trusted: this is read back by

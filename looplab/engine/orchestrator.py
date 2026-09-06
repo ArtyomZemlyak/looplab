@@ -2892,6 +2892,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             "select_verifier": self._select_verifier,
             "select_verifier_samples": self._select_verifier_samples,
             "verifier_ci_tie": self._verifier_ci_tie,
+            # The HITL gate, ALWAYS written (both values are a record: a recorded False must win
+            # over a snapshot edited to True as much as the reverse). This is the one key the
+            # default payload gained after calibration receipts were issued, and
+            # `search/speculation_quality.py::_CALIBRATION_PINS_ADDED_AFTER_RECEIPTS` is what keeps
+            # those receipts valid — see there before adding another.
+            "require_approval": bool(self.require_approval),
         }
         legacy_fields = RUN_START_PINNED_FIELDS - {"card_driven_selection", "speculation_depth"}
         if values.keys() != legacy_fields:
@@ -3858,6 +3864,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._select_verifier = _entry.select_verifier_tiebreak
             self._verifier_ci_tie = _entry.verifier_ci_tie   # R1-d: re-pin the recorded CI-tie rule
             self._select_verifier_samples = _entry.select_verifier_samples
+            # The HITL gate (invariant #6, pinned 2026-09-06). Adopt only a RECORDED value: a log
+            # written before the pin folds None and keeps the live (snapshot) value, so the fix
+            # that exists to stop an unapproved finish cannot itself finish an older
+            # approval-pending run unapproved. Say so when the record overrides the snapshot —
+            # the operator edited a value the run will not honour.
+            if _entry.require_approval is not None:
+                if bool(self.require_approval) != _entry.require_approval:
+                    _LOG.warning(
+                        "ignoring require_approval=%s on re-entry: this run's log records %s "
+                        "(engine invariant #6 — the approval gate is chosen at launch; start a "
+                        "new run to use a different one)",
+                        bool(self.require_approval), _entry.require_approval)
+                self.require_approval = _entry.require_approval
         # Pinned by tests/test_holdout.py::test_a_resume_honours_the_recorded_split_not_a_changed_live
         # _setting, which resumes with every one of these settings CHANGED and asserts the recorded
         # values win (both this block and the verifier re-pin above).

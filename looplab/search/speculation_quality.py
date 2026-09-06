@@ -249,6 +249,22 @@ _CALIBRATION_RUN_STARTED_FIELDS = frozenset({
     "eval_parallel",
     "llm_parallel",
 }) | RUN_START_PINNED_FIELDS
+# A pin admitted to `RUN_START_PINNED_FIELDS` AFTER receipts had been issued, with the value every
+# earlier writer would have recorded had the key existed (the calibration profile spells it so).
+# The schema check admits the writer's key set with AND without these, and the per-field loop reads
+# the default for an absent one, so the change to the pin SET did not revoke every issued receipt
+# (six GPU runs each); the receipt BODY derivation is untouched. Nothing else is tolerated: any
+# other absent pinned field is still the non-writer refusal it always was, and a log that CARRIES
+# the key is compared against the config exactly like every other pin.
+_CALIBRATION_PINS_ADDED_AFTER_RECEIPTS: dict[str, object] = {"require_approval": False}
+
+
+def _calibration_run_started_schemas() -> tuple[frozenset, ...]:
+    """The key sets the shipped writer has emitted: the current one and each pre-pin generation."""
+    full = frozenset(_CALIBRATION_RUN_STARTED_FIELDS)
+    return (full, full - frozenset(_CALIBRATION_PINS_ADDED_AFTER_RECEIPTS))
+
+
 _CALIBRATION_CARD_ADDED_FIELDS = frozenset({
     "id",
     "statement",
@@ -626,8 +642,8 @@ def _validate_calibration_setup(
         raise ValueError("calibration evidence setup lifecycle differs from the Toy writer")
 
     started_data = started.data or {}
-    if not isinstance(started.data, dict) or set(started_data) != set(
-        _CALIBRATION_RUN_STARTED_FIELDS
+    if not isinstance(started.data, dict) or frozenset(started_data) not in (
+        _calibration_run_started_schemas()
     ):
         raise ValueError("calibration run_started has a non-writer payload schema")
     if (
@@ -637,9 +653,8 @@ def _validate_calibration_setup(
     ):
         raise ValueError("calibration run_started task authority differs from the task snapshot")
     for field in RUN_START_PINNED_FIELDS:
-        if field not in config or canonical_json(started_data.get(field)) != canonical_json(
-            config[field]
-        ):
+        recorded = started_data.get(field, _CALIBRATION_PINS_ADDED_AFTER_RECEIPTS.get(field))
+        if field not in config or canonical_json(recorded) != canonical_json(config[field]):
             raise ValueError(
                 f"calibration run_started {field} authority differs from config.snapshot.json"
             )

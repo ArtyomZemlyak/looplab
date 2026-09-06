@@ -1954,6 +1954,13 @@ class RunState(BaseModel):
     # Complete verifier treatment pinned by run_started so resume cannot mix sampling/criteria policies.
     select_verifier_samples: int = 3
     select_verifier_contract: str = "selection-criteria:v1"
+    # The HITL approval gate (I21) as `run_started` recorded it — pinned since 2026-09-06 (engine
+    # invariant #6; `core/config.py::RUN_START_PINNED_FIELDS`). Tri-state ON PURPOSE: None is a log
+    # written before the pin existed, and for it the snapshot stays the authority
+    # (`Engine._reentry_repin` adopts only a recorded value), because folding "absent" to False
+    # would turn the gate OFF on the resume of every older approval-pending run — the exact
+    # finish-without-approval the pin exists to stop.
+    require_approval: Optional[bool] = None
     nodes: dict[int, Node] = Field(default_factory=dict)
     # Fold-internal current-failure threshold state. Keeping the causal crossing seq prevents a
     # reset/abort from regrouping old failures into a brand-new browser notification identity.
