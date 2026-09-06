@@ -12640,3 +12640,39 @@ for the nine older ones. Which condition a ruler should be timed under is now a 
 measured price tag — up to 22 % on some tasks, nothing on others — and it is not mine to take
 quietly. Two of three spot-checked tasks disagree with an idle re-timing by about a fifth; that is
 the number to weigh before the campaign is read, not after.
+
+## §302 — the fifteen new rulers are a mixed bag, and three of them are unusable
+
+§301 left the question open: is the loaded ruler or the idle one right? Before answering that, the
+prior question turns out to matter more — **are the new rulers self-consistent at all?** The
+reference-as-candidate reading should be ~1.0 by construction. Measured, five of the fifteen:
+
+| task | self-check reading | verdict |
+|---|---|---|
+| kcenters | 0.9880 | sound |
+| integer_factorization | 1.0568 | sound |
+| queens_with_obstacles | 1.2922 | **29 % high** |
+| max_common_subgraph | 1.7166 (repeats 1.66, 1.78, and 2.04 under load) | **72 % high** |
+| min_dominating_set | 1.8627 (repeats 2.24, 1.49, 1.71, 1.23) | **86 % high, and unstable** |
+
+`ruler_check` now says so on its own, because the readings are recorded and its §296 drift check
+compares any recorded task against 1.0 — it was written for `pagerank` and finds these without a
+line of new code.
+
+**Two of these numbers contradict something I measured last sweep.** `min_dominating_set`'s cached
+baseline matched an idle re-timing at **×0.996** (§301) — yet its self-check reads 1.86, and the
+repeats swing from 1.23 to 2.24. A cache that agrees with a direct re-timing but disagrees with the
+candidate path by 86 % means the two paths are not measuring the same thing on this task, and the
+instability says at least one of them is not measuring anything stable. I do not know which, and I
+am not going to pick.
+
+**What follows for the campaign, plainly.** Of the twenty tasks, five have long-standing rulers that
+read within 3.6 % (§299), and the fifteen new ones are unverified except for the five spot-checked
+here — of which two are sound and three are not. **Scoring a campaign against the unchecked ten
+would produce numbers with no error bar I can state.** The cheap fix is not a fix: raising a
+tolerance would hide it. What the bench needs before a twenty-task campaign is a self-check reading
+recorded for every task, and the ones that do not read ~1.0 either understood or dropped from the
+task list.
+
+That is a measurement of maybe an hour on idle lanes, and it is the honest next step rather than a
+launch. The five original tasks remain campaign-ready today.
