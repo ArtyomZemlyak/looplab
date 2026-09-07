@@ -417,9 +417,19 @@ lever), the bandit branch stamps `_model` on its action, the engine builds under
 A/B that turns the bandit on is still the box's. `tests/test_model_arms.py` drives it. Deleted
 per the index rule.*
 
-OPEN[mcts-selection-has-no-cost-term] MARS's cost-constrained MCTS balances expected gain against
-execution expense; every policy in `search/policy.py` ranks by metric alone and `budget_aware` is a
-prompt cue. proof:absent:eval_cost@looplab/search/policy.py
+*Closed 2026-09-07 (row 31 shipped): the marker `mcts-selection-has-no-cost-term` stood here.
+`search/policy.py::eval_cost_penalty` is the cost term as a statable function — `weight × (subtree
+mean eval second / the run's mean eval second)`, SUBTRACTED from UCB1 rather than divided into it,
+because `_mcts_reward` is bounded in (0, 2) and `c ≈ 1.4` is calibrated against that scale while the
+exploration term knows nothing about seconds. `subtree_eval_cost` reads the expense with the same
+lifecycle filter the value and the visit count use, so deleting a node still cannot move where the
+search goes, and an UNMEASURED subtree counts as average rather than free — otherwise the cheapest
+thing in every run is the thing nobody measured. Behind `Settings.mcts_cost_weight`, default `0.0`,
+where the score expression is byte-identical to the historical one; a Strategist policy switch
+carries the weight forward off the policy it replaces. `tests/test_mcts_cost_term.py` drives the
+trade in both directions, including the pair that flips between weight 0.2 and 0.5. The operator
+bandit was already cost-aware (`operator_yields` amortizes per eval-second); this is the tree half.
+Deleted per the index rule.*
 
 *Closed 2026-09-07 (row 31 shipped): the marker `edit-cycling-and-edit-type-unannotated` stood
 here. `tools/node_diff.py::EDIT_TYPES` is a closed, deterministic vocabulary — comment, import,

@@ -957,6 +957,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                            rung_nodes=settings.asha_rung_nodes,
                            debug_depth=settings.debug_depth,
                            operator_bandit=settings.operator_bandit,
+                           cost_weight=settings.mcts_cost_weight,   # doc 52 row 31: MCTS only
                            # doc 52 row 19: the arms' relative costs; the engine holds the models
                            model_arms={arm: cost for arm, (_m, cost)
                                        in parse_model_arms(settings.model_arms).items()}),

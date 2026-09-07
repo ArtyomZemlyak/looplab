@@ -126,7 +126,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   honours — the top-2 ensemble once, then champion sweeps (doc 52 row 18).
   //   191 -> 192 (2026-09-06): `syscall_fence`, the kernel syscall policy beside `landlock` (doc 52
   //   row 28). The Python half moved in the same change, as this tripwire's history demands.
-  assert.equal(Object.keys(schema.fieldByKey).length, 192)
+  //   192 -> 193 (2026-09-07): `mcts_cost_weight`, the cost term of the cost-constrained MCTS
+  //   (doc 52 row 31) — a form row because it is a number an operator types to trade speed
+  //   against score, and its unit (relative to the run's mean eval second) has to be shown.
+  assert.equal(Object.keys(schema.fieldByKey).length, 193)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')

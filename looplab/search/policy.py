@@ -490,6 +490,48 @@ def _mcts_reward(value: float, direction: str) -> float:
     return (2.0 - 1.0 / (1.0 + value)) if value >= 0 else (1.0 / (1.0 - value))
 
 
+def subtree_eval_cost(state: RunState, node_ids) -> float:
+    """Mean measured eval seconds over the subtree's own countable nodes, or 0.0 when none is.
+
+    The same lifecycle filter the value and the visit count use, for the same reason: a tombstoned,
+    aborted or gate-flagged descendant contributes nothing to the reward, so letting it decide the
+    EXPENSE would make deleting a node change where the search goes — the exact coupling every
+    other filter in this policy closes.
+    """
+    seconds = [state.nodes[i].eval_seconds for i in node_ids
+               if i in state.nodes and state.nodes[i].status is NodeStatus.evaluated
+               and state.nodes[i].feasible and not state.nodes[i].tombstoned
+               and i not in state.aborted_nodes and i not in state.breed_excluded
+               and isinstance(state.nodes[i].eval_seconds, (int, float))
+               and state.nodes[i].eval_seconds > 0]
+    return (sum(seconds) / len(seconds)) if seconds else 0.0
+
+
+def eval_cost_penalty(subtree_cost: float, run_cost: float, weight: float) -> float:
+    """The cost term of a cost-constrained selection: `weight × (subtree cost / run mean cost)`.
+
+    MARS's cost-constrained MCTS balances expected gain against execution expense; this is that
+    balance in the units this policy already has. Three decisions, each of which the other spelling
+    got wrong when tried:
+
+    * SUBTRACTED from UCB1, not divided into it. `_mcts_reward` is bounded in (0, 2) and `c ≈ 1.4`
+      is calibrated against that scale; dividing the whole score by cost would scale the
+      EXPLORATION term too, which is about visit counts and knows nothing about seconds.
+    * RELATIVE to the run's own mean, so the knob is dimensionless and portable: `weight = 0.5`
+      means "a subtree that costs twice this run's average pays half a reward unit", on a 20-second
+      toy and a six-hour repo run alike. An absolute-seconds penalty is a different number on every
+      task and would have to be re-tuned per task to mean anything.
+    * UNKNOWN IS AVERAGE, never free. A subtree with no measured seconds returns the neutral 1.0
+      relative cost rather than 0 — otherwise the cheapest thing in the run is always the thing
+      nobody has measured, and a cost-aware policy would systematically prefer the unmeasured.
+      When the RUN has measured nothing at all the term is inert, which is the only honest answer.
+    """
+    if weight <= 0 or run_cost <= 0:
+        return 0.0
+    relative = (subtree_cost / run_cost) if subtree_cost > 0 else 1.0
+    return weight * relative
+
+
 class MCTSPolicy:
     """Opt-in UCB1 tree search (I22, ADR-2). Selects which node to expand by
     UCB1 = reward + c·sqrt(ln N / visits), balancing exploiting good subtrees against
@@ -498,11 +540,16 @@ class MCTSPolicy:
     """
 
     def __init__(self, n_seeds: int = 3, max_nodes: int = 12, c: float = 1.4,
-                 debug_depth: int = 1):
+                 debug_depth: int = 1, cost_weight: float = 0.0):
         self.n_seeds = n_seeds
         self.max_nodes = max_nodes
         self.c = max(0.0, float(c))   # >= 0: a negative c flips UCB exploration into a penalty
         self.debug_depth = debug_depth
+        # The cost term (doc 52 row 31), OFF at 0.0 — which reproduces the pre-2026-09-07 score
+        # exactly, not approximately: `eval_cost_penalty` returns 0.0 and the UCB expression is
+        # unchanged. Clamped >= 0 for the same reason `c` is: a negative weight would turn the
+        # expense into a BONUS and quietly make the policy prefer the slowest subtree.
+        self.cost_weight = max(0.0, float(cost_weight or 0.0))
 
     def next_actions(self, state: RunState) -> list[dict]:
         pending = state.pending_nodes()
@@ -535,6 +582,11 @@ class MCTSPolicy:
             return seen
 
         n_total = len(evaluated)
+        # The run's own mean eval second, the denominator every subtree's expense is relative to.
+        # Computed once over the whole countable pool rather than per candidate: the denominator is
+        # a property of the RUN, and recomputing it per subtree would make the penalty depend on
+        # which candidate is being scored.
+        run_cost = subtree_eval_cost(state, list(state.nodes))
         best_of = min if state.direction == "min" else max
         chosen, best_ucb = None, None
         scores: dict[int, float] = {}   # per-candidate UCB1 (surfaced as a `policy_decision` event)
@@ -573,6 +625,10 @@ class MCTSPolicy:
                          and i not in state.aborted_nodes
                          and i not in state.breed_excluded) or 1
             ucb = reward + self.c * math.sqrt(math.log(n_total + 1) / visits)
+            # COST-CONSTRAINED SELECTION (doc 52 row 31): the same UCB1, minus what this subtree
+            # costs to expand, relative to what this run's experiments cost on average. Inert at
+            # `cost_weight = 0`, which is the default and the historical behaviour.
+            ucb -= eval_cost_penalty(subtree_eval_cost(state, tree), run_cost, self.cost_weight)
             scores[node.id] = round(ucb, 4)
             if best_ucb is None or ucb > best_ucb:
                 best_ucb, chosen = ucb, node.id
@@ -772,7 +828,8 @@ def _make_mcts(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,
     # accepts any scalar) would flip the UCB exploration term into a PENALTY on under-visited
     # subtrees — a silently degenerate hyper-greedy policy recorded as a legitimate strategy.
     c = max(0.0, float(params.get("c", 1.4)))
-    return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes, c=c, debug_depth=depth)
+    return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes, c=c, debug_depth=depth,
+                      cost_weight=float(params.get("cost_weight", 0.0) or 0.0))
 
 
 def _make_asha(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,

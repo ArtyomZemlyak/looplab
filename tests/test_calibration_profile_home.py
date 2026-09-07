@@ -127,7 +127,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-09-06  + model_arms (doc 52 row 19: the operator x model router's arms, uncurated and
 #               open-keyed). 221 -> 222, both pins re-set. Inert for a calibration replicate —
 #               the profile's `EngineOptions` declares no arm and the toy policy runs no bandit.
-_EXPECTED_DIGEST = "sha256:32c9eca685430b3476542825122a00d996aefbb2a7c383bb5394365aae9dd47c"
+_EXPECTED_DIGEST = "sha256:83113f0a8efcc8197bc578e597edbd0512c6a6bdb14c26be6c1933f9d0e38c19"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -457,7 +457,15 @@ _EXPECTED_DIGEST = "sha256:32c9eca685430b3476542825122a00d996aefbb2a7c383bb53943
 #               is deliberately not clever enough to exempt an inert knob: the digest binds the
 #               COMPLETE non-variant envelope. `_EXPECTED_FIELD_COUNT` goes 222 -> 223 and both pins
 #               are re-set.
-_EXPECTED_FIELD_COUNT = 223
+#   2026-09-07  + mcts_cost_weight  (doc 52 row 31: the cost term of a cost-constrained MCTS). The
+#               'field set changed too' branch again, and inert for a calibration replicate twice
+#               over: it ships 0.0, where `search/policy.py::eval_cost_penalty` returns 0.0 and the
+#               UCB expression is byte-identical to the one every issued receipt was calibrated
+#               under, and the calibration profile runs `greedy`, which never reads it. The guard is
+#               deliberately not clever enough to exempt either fact — the digest binds the COMPLETE
+#               non-variant envelope, which is what makes it a receipt rather than a summary.
+#               `_EXPECTED_FIELD_COUNT` goes 223 -> 224 and both pins are re-set.
+_EXPECTED_FIELD_COUNT = 224
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

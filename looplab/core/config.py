@@ -1089,6 +1089,14 @@ class Settings(BaseSettings):
     # Off by default (the cadences are well-tested and the bandit has no direct published
     # ablation); `thorough` turns it on.
     operator_bandit: bool = False
+    # COST-CONSTRAINED SELECTION (doc 52 row 31): how much a subtree's measured expense counts
+    # against its UCB1 score in the `mcts` policy. `0.0` = off and is the historical behaviour
+    # exactly — `search/policy.py::eval_cost_penalty` returns 0.0 and the score expression is
+    # unchanged. The unit is RELATIVE to this run's own mean eval second, so `0.5` means "a subtree
+    # that costs twice this run's average pays half a reward unit" on a toy and a repo run alike;
+    # a subtree nobody has measured counts as average, never as free. Only the `mcts` policy reads
+    # it (greedy/evolutionary/asha ignore it, as they ignore `c`).
+    mcts_cost_weight: float = 0.0
     # THE MODEL ARMS of the operator x model router (doc 52 row 19): `{arm: "model-id[@cost]"}` —
     # the models the bandit branch may route a BUILD to beside the configured Developer model (the
     # implicit `default` arm), `cost` the arm's price relative to it (1.0), declared because it is a

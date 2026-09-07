@@ -693,6 +693,12 @@ class StrategyCadenceMixin:
                 pp = {k: v for k, v in raw_pp.items()
                       if k not in ("n_seeds", "max_nodes", "ablate_every",
                                    "debug_depth", "operator_bandit")}
+                # The cost weight travels with the SWITCH, read off the policy being replaced.
+                # It is a run-level knob (`Settings.mcts_cost_weight`), not a per-strategy one, and
+                # the engine does not hold it — so a switch to `mcts` that did not carry it forward
+                # would silently drop a cost constraint the operator set at launch, the same shape
+                # as the `ablation_capable` re-stamp below. An explicit `policy_params` entry wins.
+                pp.setdefault("cost_weight", getattr(self.policy, "cost_weight", 0.0))
                 self.policy = make_policy(base, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
                                           ablate_every=self._ablate_every,
                                           debug_depth=self._debug_depth,
