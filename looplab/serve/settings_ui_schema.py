@@ -25,15 +25,21 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
+# HAND-PINNED, and the comment below describes the NEXT constant rather than this one — it sat
+# here reading as if 207 were derived while it is typed, which is the drift it warns about. The
+# unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
+# human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
 SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 207
-# DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
+# On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
+# bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
 # 193 -> 194 and added zero rows to the catalogue). The real gate is the two-way reconciliation in
 # `_reconcile_settings_fields` plus the per-row `default` pin in `_check_pinned_default`, both
-# checked against the live model at load. This value only feeds the docs-count assertion in
-# tests/test_config_docs_sync.py, which keeps configuration.md's "N of the M direct Settings
-# fields" sentence honest.
+# checked against the live model at load, plus the digest itself. The COUNT above feeds
+# `tests/test_config_docs_sync.py` (keeping configuration.md's "N of the M direct Settings fields"
+# sentence honest) and is re-asserted in `tests/test_settings_ui_schema.py` and the browser pin —
+# four copies of one integer, which is why the digest and not the count is the review gate.
 SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # 169 rows since the ASSISTANT's own wall clock joined the agentic tool-loop group, beside
 # `agent_time_budget_s`. It is a row rather than an uncurated omission for the same reason the

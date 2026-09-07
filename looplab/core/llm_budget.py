@@ -1,8 +1,24 @@
 """The run's LLM spend as a RESERVE-COMMIT budget every concurrent caller draws on.
 
 `CostAccountant` (core/llm.py) is per CLIENT and commits POST HOC: it learns what a call cost when
-the response lands, and its `limit` — when anyone set one, which `make_llm_client` never did —
-bounded one client's own spend, not the run's. `llm_broker.py` is concurrency ADMISSION with no
+the response lands, and its `limit` bounds one client's own spend, not the run's.
+
+THAT LIMIT IS NO LONGER UNSET, and this paragraph said "when anyone set one, which
+`make_llm_client` never did" until the 2026-09-07 merge made it false: `core/llm.py::
+run_cost_accountant` now sets it from `Settings.llm_budget_usd` and shares one accountant across a
+run's clients. So the tree carries TWO run-level USD ceilings — this one on `llm_cost_limit`,
+reserving before the call, and the accountant's on `llm_budget_usd`, committing after it — both
+defaulting to 0.0 (off), both raising `BudgetExceeded`, and each with a refusal sentence naming
+its own knob. Setting only `llm_budget_usd` gets the post-hoc commit with exactly the fan-out
+overshoot this module was written to remove; setting only `llm_cost_limit` gets no
+`node_open_budget_floor_usd` stop; setting both means the run stops at whichever is lower under a
+message naming the other. Which one an operator should be given is a decision, not a merge tidy-up
+— see the marker below.
+
+OPEN[two-run-level-usd-ceilings] `llm_cost_limit` (reserve-commit, here) and `llm_budget_usd`
+(post-hoc, `core/llm.py::run_cost_accountant`) are two run-level USD caps with two Settings rows and
+two refusal sentences; one should feed the other rather than race it.
+proof:present:llm_cost_limit@looplab/core/config.py `llm_broker.py` is concurrency ADMISSION with no
 notion of money. So concurrent roles could not reserve against one cap: with N callers in flight
 under a cap the ledger reads as under budget until all N land, and the run overshoots by up to
 N calls — the asyncio fan-out overshoot the Token Budgets measurement names (doc 52 row 15; the

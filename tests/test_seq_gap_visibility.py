@@ -269,12 +269,22 @@ def test_cost_distinguishes_unreadable_from_absent_from_zero(client):
 
 # --- the regression net over the real corpus ------------------------------------------------------
 
-# `is_dir()` alone was not the condition: an EMPTY `runs/` — what a smoke run followed by a
-# cleanup of its own output leaves behind — passes it and then fails the `seen >= 1` floor
-# below, so tidying up after a manual run turned this net red. The corpus is absent in both
-# shapes and that is the same fact.
-@pytest.mark.skipif(not REPO_RUNS.is_dir() or not any(REPO_RUNS.iterdir()),
-                    reason="no runs/ corpus in this checkout")
+# THE SKIP AND THE FLOOR ARE ONE PREDICATE. `is_dir()` alone was not the condition — an EMPTY
+# `runs/`, what a smoke run followed by a cleanup of its own output leaves behind, passed it and
+# then failed the `seen >= 1` floor below — but "non-empty" is not the condition either, and it
+# does not fix the case it names: `runs/demo` stripped of its `events.jsonl`, or a stray
+# `.DS_Store`, leaves the directory non-empty, passes the skip, and reds the floor again. The floor
+# counts directories holding a READABLE `events.jsonl`, so that is what the skip must count. Both
+# now read `_loadable_runs()`, which is the only way the two cannot disagree.
+def _loadable_runs() -> list:
+    """The corpus this net runs over: run dirs holding an `events.jsonl`. The skip's population and
+    the floor's are the same list, derived once."""
+    if not REPO_RUNS.is_dir():
+        return []
+    return [rd for rd in sorted(REPO_RUNS.iterdir()) if (rd / "events.jsonl").is_file()]
+
+
+@pytest.mark.skipif(not _loadable_runs(), reason="no readable runs/ corpus in this checkout")
 def test_every_real_run_still_loads_exactly_as_it_does_today():
     """The receipt must be a STATEMENT and never a fence: no real log may start reading differently.
 
@@ -283,10 +293,8 @@ def test_every_real_run_still_loads_exactly_as_it_does_today():
     "fix". Exactly one run in the corpus loses anything, and this pins WHICH.
     """
     losses, seen = {}, 0
-    for rd in sorted(REPO_RUNS.iterdir()):
+    for rd in _loadable_runs():
         log = rd / "events.jsonl"
-        if not log.is_file():
-            continue
         seen += 1
         physical = sum(1 for line in log.read_bytes().split(b"\n")[:-1] if line.strip())
         records = len(EventStore(log).read_all())

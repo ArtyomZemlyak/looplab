@@ -18,7 +18,6 @@ import here would close the cycle into an ImportError at startup — guarded by
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from looplab.core.evidence import envelope_enabled

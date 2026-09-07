@@ -1359,3 +1359,40 @@ def test_a_grant_under_a_root_is_kept_because_that_is_the_sanctioned_carve_out(t
     _tier, root = _tier_with_a_root_inside(tmp_path)
     grants, refused = read_fence.confine_grants([str(root / "corpus")], [str(root)])
     assert refused == () and grants == (str(root / "corpus") + os.sep,)
+
+
+def test_the_open_branch_uses_the_same_rule_as_every_other_event():
+    """THE MERGE LOST CONFINEMENT ON THE READ PATH, and only on the read path.
+
+    One parent's `open` branch called `_fenced(args[0])` — the whole policy; the other inlined
+    `p.startswith(_ROOTS) and not _ALLOW…` so it could keep the resolved path for its own record
+    check, and the merge kept the inline. That copy has no `_CONFINE` clause, so a confined probe
+    (`developer_probe_confine`) refused only reads under the editable roots and let every other
+    read through — the opposite of what confinement means, on the one event a probe actually makes.
+
+    Driven over the RENDERED launcher, in both directions and both modes, because the rule that
+    matters is the one the generated hook carries, not the one this module can state.
+
+    MUTATION: inline the root test in the open branch again -> the first assertion flips and a
+    confined probe reads the whole filesystem.
+    """
+    def rule(confine):
+        src = read_fence.render(("/src/repo",), ("/tmp/work",), policy="deny", confine=confine)
+        # UNDER `_PROBE_NAME`, which is the seam that yields the predicate and installs NOTHING.
+        # The first cut of this exec'd the launcher bare: that installs the audit hook in THIS
+        # interpreter, irreversibly, and pytest's own tmp cleanup was then refused by it.
+        ns: dict = {"__name__": read_fence._PROBE_NAME}
+        exec(compile(src, "<fence>", "exec"), ns)
+        assert "bad = _fenced_resolved(p)" in src, (
+            "the open branch stopped using the shared rule; a second copy is how confinement was "
+            "lost the first time")
+        return ns["_fenced_resolved"]
+
+    confined = rule(True)
+    assert confined("/usr/lib/python3.11/json/__init__.py") is not None, (
+        "a confined fence must refuse a read outside its allow-list")
+    assert confined("/tmp/work/solver.py") is None, "…and admit one inside it"
+
+    plain = rule(False)
+    assert plain("/src/repo/train.py") is not None, "an unconfined fence still refuses the source"
+    assert plain("/usr/lib/python3.11/json/__init__.py") is None, "…and nothing else"

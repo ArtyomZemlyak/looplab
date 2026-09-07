@@ -325,6 +325,17 @@ class NodeBuildMixin:
             last_rollback_stage=str(getattr(developer, "last_rollback_stage", "") or "").strip(),
             last_budget_exhausted=str(
                 getattr(developer, "last_budget_exhausted", "") or "").strip()[:32],
+            # REGISTERED AND NOT CAPTURED until 2026-09-07: the field was added to
+            # `DEVELOPER_OUTPUT_ATTRS` and to the envelope, and this reader was not extended, so a
+            # session cut off by its money ceiling wrote `{"kind": …, "seconds": …, "detail": …}`
+            # onto the instance and the envelope reported None. `tests/test_developer_result.py`
+            # stayed green because it pins the FIELD SET, not that each field is read — and every
+            # engine site is being migrated off instance reads ONTO this envelope, so the first
+            # consumer to move records "the session was not cut off". Coerced like its siblings: a
+            # stub setting a string where a dict belongs must read as nothing, never raise.
+            last_budget_facts=(dict(getattr(developer, "last_budget_facts", None))
+                               if isinstance(getattr(developer, "last_budget_facts", None), dict)
+                               else None),
             last_edit_calls=edit_calls,
         )
 

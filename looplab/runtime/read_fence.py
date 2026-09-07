@@ -743,9 +743,16 @@ def _cwd_reaches_root():
     return not (_ALLOW and d.startswith(_ALLOW))
 
 
-def _fenced(p):
-    """The path this fence refuses, or None. The whole policy, in three string operations."""
-    p = _resolve(p)
+def _fenced_resolved(p):
+    """The policy over an ALREADY-RESOLVED path: the refused path, or None.
+
+    ONE rule, two callers. The `open` branch needs the resolved path for its own record check and
+    therefore cannot use `_fenced`'s return alone, and the 2026-09-07 merge answered that by
+    INLINING the rule there — which silently dropped the `_CONFINE` clause, so a confined probe
+    (`developer_probe_confine`) refused only reads under the editable roots and let everything else
+    through, the opposite of what confinement means. Split rather than duplicated, so the open path
+    keeps `p` and the rule stays in one place.
+    """
     if p is None:
         return None
     if _CONFINE:
@@ -755,6 +762,11 @@ def _fenced(p):
     if _ALLOW and p.startswith(_ALLOW):
         return None
     return p
+
+
+def _fenced(p):
+    """The path this fence refuses, or None. The whole policy, in three string operations."""
+    return _fenced_resolved(_resolve(p))
 
 
 def _record_write(p):
@@ -998,9 +1010,7 @@ def _hook(event, args):
     if event == "open":
         try:
             p = _resolve(args[0])
-            bad = None
-            if p is not None and p.startswith(_ROOTS) and not (_ALLOW and p.startswith(_ALLOW)):
-                bad = p
+            bad = _fenced_resolved(p)
         except Exception:
             return                   # a bug in the fence must never break an unrelated open
         if bad is not None:

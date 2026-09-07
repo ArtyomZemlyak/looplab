@@ -43,7 +43,16 @@ from looplab.events import types as event_types
 # would have locked onto the research lane and reported green about a region nobody asked it to
 # check.
 _LANES = (("per-action", card_reservation, "_stage_card_creates"),
-          ("batch", orchestrator, "_await_batch_proposal"))
+          ("batch", orchestrator, "_await_batch_proposal"),
+          # THE THIRD LANE, added 2026-09-07 after it breached the invariant the other two were
+          # fixed for. `_offload_build` carries the SERIAL build, the fork's build and the
+          # node-reset rebuild onto a worker, and it used a bare `to_thread` on the reasoning that
+          # a build's appends are its own node's. `_create_node` reaches
+          # `_prepare_node_idea` -> `_apply_novelty_gate` -> `_append_proposal_event`, so
+          # `novelty_rejected` / `novelty_graded` / `cross_run_prior` landed from the thread —
+          # FOLDED and authority-bearing. This list is why it went unseen: two lanes were
+          # enumerated and the third simply was not in it.
+          ("serial build", orchestrator, "_offload_build"))
 
 # OPEN[offload-sink-guards-scan-one-file] the REAL `_propose_batch` closure is still never driven
 # under a watched store — the behavioural twins stub the paid callee.

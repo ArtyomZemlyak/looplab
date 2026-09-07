@@ -241,10 +241,19 @@ def test_every_build_site_leaves_the_loop_through_the_offload_helper():
     assert not creates, "the serial lane must not build on the loop thread"
     offloads = _attr_calls(Engine._handle_create_actions, "_offload_node_build")
     assert len(offloads) == 2, "both serial sites (card-reserved and plain) go through the helper"
-    # the helper itself wraps the real build and rides the proposal pool
+    # …the helper leaves the loop and rides the proposal pool, and does so THROUGH THE SINK. It
+    # called `run_sync` directly until 2026-09-07, which is how `_create_node`'s novelty appends
+    # (`_prepare_node_idea` -> `_apply_novelty_gate` -> `_append_proposal_event`) came to land from
+    # a worker thread — FOLDED, authority-bearing rows, the breach the other two offloaded lanes
+    # were each fixed for. `run_sync` is now one hop down inside
+    # `novelty.py::_offload_under_proposal_sink`; asserting it HERE again would re-admit the bare
+    # form, so what is pinned is the seam that buffers those intents and publishes them on the main
+    # task. `tests/test_offload_lane_writes_no_folded_events.py` drives the property itself.
     tree = function_tree(Engine._offload_build)
-    assert any(getattr(c.func, "attr", None) == "run_sync" for c in ast.walk(tree)
-               if isinstance(c, ast.Call))
+    assert any(getattr(c.func, "attr", None) == "_offload_under_proposal_sink"
+               for c in ast.walk(tree) if isinstance(c, ast.Call)), (
+        "the serial build lane must leave the loop under the proposal sink, not through a bare "
+        "to_thread — its build reaches `_append_proposal_event`")
     assert any(isinstance(n, ast.Name) and n.id == "proposal_limiter" for n in ast.walk(tree))
     assert any(isinstance(n, ast.Attribute) and n.attr == "_create_node"
                for n in ast.walk(function_tree(Engine._offload_node_build)))
@@ -289,3 +298,46 @@ def test_no_engine_site_reads_a_side_channel_off_the_shared_instance():
             if isinstance(target, ast.Attribute) and target.attr == "developer":
                 offenders.append(f"{path.name}:{node.lineno}: {ast.unparse(node)[:80]}")
     assert offenders == [], "\n".join(offenders)
+
+
+def test_every_registered_side_channel_is_actually_READ_into_the_envelope():
+    """The field-set pin cannot see a field nobody reads, and `last_budget_facts` proved it.
+
+    That field was added to `DEVELOPER_OUTPUT_ATTRS` and to `DeveloperResult`, and
+    `_capture_developer_result` was not extended — so a session cut off by its money ceiling wrote
+    the dict onto the instance and the envelope reported `None`, with every existing guard green.
+    Every engine site is being migrated off instance reads onto this envelope, so the first consumer
+    to move would have recorded "the session was not cut off".
+
+    DRIVEN, not pinned: a Developer carrying a DISTINCT sentinel per registered attribute must come
+    back with every one of them, which no amount of listing the names can fake.
+
+    MUTATION: drop any `getattr(developer, "<attr>", …)` line -> that channel reads as its falsy
+    default and this test names it.
+    """
+    from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS
+    from looplab.engine.node_build import NodeBuildMixin
+
+    # A value per attribute that survives its own coercion, so "captured" and "defaulted" differ.
+    sentinels = {
+        "last_files": {"solver.py": "x = 1\n"},
+        "last_deleted": ["gone.py"],
+        "last_footprint": {"gpus": 2},
+        "last_report": "a report",
+        "last_seed": "a seed",
+        "last_run": "a run",
+        "last_patch": {"ok": True},
+        "last_rollback_stage": "train",
+        "last_budget_exhausted": "cost",
+        "last_budget_facts": {"kind": "cost", "seconds": 42.0, "detail": "ceiling"},
+        "last_edit_calls": 7,
+    }
+    assert set(sentinels) == set(DEVELOPER_OUTPUT_ATTRS), (
+        "a side channel was registered or removed; give it a distinct sentinel here so this test "
+        "can tell a captured value from a defaulted one")
+
+    dev = type("_Dev", (), dict(sentinels))()
+    envelope = NodeBuildMixin._capture_developer_result(dev, "code")
+    unread = [name for name in DEVELOPER_OUTPUT_ATTRS
+              if not getattr(envelope, name) and sentinels[name]]
+    assert not unread, f"registered but never read into the envelope: {unread}"

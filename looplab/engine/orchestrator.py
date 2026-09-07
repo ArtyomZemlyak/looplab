@@ -6677,7 +6677,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         serial path keeps its historical crash-on-raise so bugs surface in tests.
         """
         from looplab.engine.novelty import proposal_limiter
-        await anyio.to_thread.run_sync(fn, limiter=proposal_limiter())
+        # UNDER THE PROPOSAL SINK, not a bare `to_thread`. The paragraph above argued the bare form
+        # on the ground that "the build's appends are its OWN node's — `node_building`,
+        # `node_created`, `node_failed`, the per-node audit — which is exactly the worker seam
+        # invariant #1 licenses". True of those four and false of the path: `_create_node` reaches
+        # `_prepare_node_idea` -> `_apply_novelty_gate` -> `_append_proposal_event`, whose sink is
+        # unset in this worker, so `novelty_rejected` / `novelty_graded` / `cross_run_prior` fell
+        # through to `store.append` from a thread. None is in `BACKGROUND_APPENDABLE`,
+        # `SETUP_THREAD_APPENDABLE` or `ASSISTANT_APPENDABLE`, and they are exactly the
+        # authority-bearing rows `speculation._proposal_authority_seq` keys on — a row landing
+        # inside a concurrent reservation's window discards a proposal the run already paid for.
+        # This is the SAME breach the 2026-08-29 card-lane and 2026-08-30 batch-lane fixes each
+        # closed, arriving a third time through the lane that offloaded last.
+        #
+        # The helper buffers those intents and publishes them from the MAIN task on the way out; the
+        # node's own four appends are untouched and stay exactly as licensed.
+        await self._offload_under_proposal_sink(fn, limiter=proposal_limiter())
 
     async def _offload_node_build(self, action: dict, **kwargs) -> None:
         """`_create_node`, off the loop — see `_offload_build`."""

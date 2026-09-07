@@ -393,9 +393,19 @@ def _note_heads() -> tuple[tuple[str, bool], ...]:
     retyped `"\n(note: "` instead and thereby missed `_TRUNC_NOTE` entirely, storing a page the cap
     had cut as "the first page verbatim". Every note is ONE LINE beginning with a newline, which is
     what lets a stripper tell an appended note from a `(note: …)` line inside a file's own bytes.
+
+    THE POPULATION IS DERIVED TOO, and a hand-written tuple is what let this fall behind once
+    already: the 2026-09-07 merge brought `_DEADLINE_NOTE` from one parent and this registry from
+    the other, so a page ending `…wall-clock budget remain — finish and call `done` now)` was
+    stored, hashed and rendered as a file's first page verbatim — the exact defect the registry
+    exists to prevent, reintroduced by the merge that added it. It is now every module-level
+    `_*_NOTE` string that opens with a newline, i.e. the shape that MAKES a note appendable, so a
+    fifth one is covered by existing.
     """
     return tuple((template.split("{", 1)[0], template is _TRUNC_NOTE)
-                 for template in (_TRUNC_NOTE, _REPEAT_NOTE, _READ_LOOP_NOTE, _READ_LOOP_NOTE_UNPAGED))
+                 for name, template in sorted(globals().items())
+                 if name.startswith("_") and name.endswith(("_NOTE", "_NOTE_UNPAGED"))
+                 and isinstance(template, str) and template.startswith("\n"))
 
 
 def _canonical_read_path(name: str, args: dict) -> str | None:
