@@ -6387,8 +6387,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         except Exception:  # noqa: BLE001
                             pass
             # Per-call output: never let a reused wrapper/backend leak another node's resource
-            # finalization into this build.  The exact pooled Developer is cleared and read below.
-            self._reset_developer_footprint(developer)
+            # finalization into this build. The clear is `_run_developer`'s, under the instance's
+            # own lock, because at THIS site it would be an unlocked write to a shared Developer.
             if kind == "draft":
                 parents: list[int] = []        # not whatever label the LLM returns
                 # The progress beacon rides ON the existing tracer span rather than nesting inside
@@ -6821,7 +6821,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 if active_card_id:
                     building_payload["card_id"] = active_card_id
                 self.store.append(EV_NODE_BUILDING, building_payload)
-            self._reset_developer_footprint(self.developer)
             with self.tracer.span("implement"):
                 # §1: a reset RE-BUILDS the node from scratch, so standing operator directives must
                 # steer its code too — same as the four _create_node build sites.
@@ -7036,7 +7035,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             _inj = None                     # the envelope, when the Developer was called (doc 52 row 12)
             if developer_called:
                 try:
-                    self._reset_developer_footprint(self.developer)
                     with self.tracer.span("implement"):
                         # An injected experiment usually BUILDS ON its parent (a human picked it as the
                         # base) — hand the parent's solution to a parent-aware developer. Preserve the

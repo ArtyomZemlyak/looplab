@@ -158,7 +158,7 @@ def echo_reconciliation(*, wall, intervals: list, attributed: float, durable_eve
         # showing more concurrent evals than it declared is itself worth seeing.
         occ = eval_occupancy(durable_events)
         if occ["span_seconds"] > 0:
-            typer.echo(f"\neval occupancy (from events.jsonl, not spans):")
+            typer.echo("\neval occupancy (from events.jsonl, not spans):")
             typer.echo(f"  bootstrap  {minutes(occ['bootstrap_seconds']):>6} min  "
                        f"before the first evaluation could start — not starvation")
             typer.echo(f"  dead       {minutes(occ['dead_seconds']):>6} min  "

@@ -210,7 +210,6 @@ class AblationMixin:
         # this is a real tree-entering node built from an idea, exactly like the improve/merge sites
         # that already thread _directed_idea (the signal_delivery registry lists the Developer as a
         # consumer, so skipping it here would silently drop the directive for every ablation child).
-        self._reset_developer_footprint(self.developer)
         built = self._implement_result(
             self._directed_idea(idea.model_copy(deep=True), state), parent, state=state)
         code = built.code                     # the envelope's, never the instance's (doc 52 row 12)

@@ -959,6 +959,77 @@ def test_a_node_cannot_rewrite_the_fence_that_fences_it(tmp_path):
                for line in read_fence.violations(run_dir))
 
 
+_SELF_ESCAPE = """
+    import os
+    fence = os.environ[{marker!r}] + "/sitecustomize.py"
+    try:
+        open({target!r}).read()
+        print("STAGE1 read ALLOWED")
+    except Exception as exc:
+        print("STAGE1 refused", type(exc).__name__)
+    for label, attempt in (
+        ("chmod", lambda: os.chmod(fence, 0o644)),
+        ("unlink", lambda: os.remove(fence)),
+        ("unlink-dir-fd", lambda: os.remove("sitecustomize.py",
+                                            dir_fd=os.open(os.path.dirname(fence), os.O_RDONLY))),
+        ("rename-away", lambda: os.rename(fence, fence + ".bak")),
+        ("truncate", lambda: os.truncate(fence, 0)),
+        ("symlink-over", lambda: os.symlink("/etc/hosts", fence)),
+    ):
+        try:
+            attempt()
+            print("STAGE2 ESCAPED", label)
+        except Exception as exc:
+            print("STAGE2 blocked", label, type(exc).__name__)
+"""
+
+
+def test_the_hook_rung_refuses_a_mutation_of_the_fences_own_file_at_any_uid(tmp_path):
+    """`_SELF`, on its own, with no kernel write bit in the claim — so this runs as root too.
+
+    The sibling test above asserts BOTH rungs and skips under root, correctly, because its kernel
+    half (`_harden`'s 0444) is ignored by DAC-override. But the six attempts below are refused by
+    the AUDIT HOOK, which does not know what uid it is running as — so a uid-scoped skip was
+    retiring a uid-independent property, and this box runs as root: measured, `pytest -rs` reported
+    `SKIPPED [1] running as root` and zero failures while `_SELF` had ZERO CALLERS in the module (a
+    merge resolved the hook's mutation branch to a path that skipped it) and the escape reproduced
+    end to end. Four green shards could not see it.
+
+    Deliberately NOT the seven-attempt template: `open-w` is the kernel rung's attempt, it succeeds
+    under DAC-override, and it would clobber the fence file before the six below ever ran. This test
+    makes no claim about it — that is the sibling's, under its own precondition.
+
+    NOT a duplicate of `test_the_hook_refuses_a_mutation_of_the_fences_own_file_whatever_the_uid`,
+    and the difference is measured rather than asserted. That one drives the RENDERED template's
+    `_hook` in-process and binds `_SELF` by hand, which is what lets it be a per-event truth table;
+    this one goes through the real `install()`, a real child and real syscalls. Two mutations
+    separate them: calling `_prefixed(r)` in the mutation branch (the 2026-09-07 merge regression)
+    is caught by BOTH, while `_SELF = ()` in the template — the fence no longer knowing where it
+    lives — is caught by THIS ONE ONLY, because the sibling supplies the value the mutation
+    removes. Keep both; deleting either leaves a live escape green.
+    """
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    generated = Path(fence) / "sitecustomize.py"
+
+    rc, out, _err, timed_out = _run(
+        _SELF_ESCAPE.format(target=str(target), marker=read_fence.FENCE_DIR_ENV), wd, fence)
+    assert not timed_out and rc == 0, out
+
+    # Non-vacuity, the same ladder the sibling spells out: the child must have REACHED the fence.
+    # A crash, a swallowed argv or an unfenced world fails here rather than passing quietly.
+    assert "STAGE1 refused LoopLabSourceReadRefused" in out, out
+    assert "STAGE2 ESCAPED" not in out, out
+    for label in ("chmod", "unlink", "unlink-dir-fd", "rename-away", "truncate", "symlink-over"):
+        assert f"STAGE2 blocked {label} LoopLabSourceReadRefused" in out, out
+
+    # …and the file the hook was protecting is still the fence, byte-wise and mode-wise.
+    assert "LoopLab source-tree READ FENCE" in generated.read_text(encoding="utf-8")
+    assert any(str(generated) in line and "os.chmod" in line
+               for line in read_fence.violations(run_dir))
+
+
 def test_the_fence_overwrite_escape_is_real_once_the_kernel_rung_is_taken_away(tmp_path):
     """The control for the test above: the capability it denies has to exist to be worth denying.
 

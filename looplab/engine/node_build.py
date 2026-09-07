@@ -289,10 +289,32 @@ class NodeBuildMixin:
         return self._run_developer(developer, developer.implement, idea)
 
     def _run_developer(self, developer, fn, *args, **kwargs) -> DeveloperResult:
-        """ONE Developer call and the capture of its outputs, as one atomic step under the
-        instance's lock (`developer_call_lock`). The lock is what makes two offloaded calls on a
-        SHARED instance safe: they queue here, in a worker, instead of on the event loop."""
+        """ONE Developer call — CLEAR, call, capture — as one atomic step under the instance's lock
+        (`developer_call_lock`). The lock is what makes two offloaded calls on a SHARED instance
+        safe: they queue here, in a worker, instead of on the event loop.
+
+        THE CLEAR IS THE THIRD MEMBER OF THAT STEP and used to sit outside it. Five build sites each
+        called `_reset_developer_footprint(developer)` themselves, before the call — an UNLOCKED
+        write to the shared instance — and once the serial build, the fork's build and the node-reset
+        rebuild moved off the loop thread (2026-09-06, `_offload_build`), two of those writes could
+        land inside another caller's locked window. Driven, both directions on one shared instance:
+        a reset landing between a call's `fn` and its capture makes the envelope report
+        `last_footprint=None`, so `_finalize_developer_footprint` falls back to the Researcher's
+        proposal and a build that RAISED its own estimate is scheduled at the old one; and a site
+        that clears before it blocks on the lock inherits whatever the intervening call left behind
+        — the cross-node leak the clear exists to prevent, delivered by the clear itself. That is
+        the exact guarantee `orchestrator.py::_offload_build`'s docstring claims the envelope gives,
+        so the clear had to move rather than the docstring.
+
+        Reach: this also clears before a REPAIR, which no site did. Nothing reads a repair's
+        footprint — all five `_finalize_developer_footprint` sites are build sites and each was one
+        of the five that cleared — and per-call is what the clear means, so a Developer that omits
+        the optional output on a repair now reads as "no estimate" instead of inheriting the last
+        build's. A call site may no longer clear on its own: an unlocked write is the defect, and a
+        LOCKED one at the site would not fix it either, since the gap between that lock and this one
+        is all an intervening call needs (`tests/test_developer_result.py`)."""
         with developer_call_lock(developer):
+            self._reset_developer_footprint(developer)
             code = fn(*args, **kwargs)
             return self._capture_developer_result(developer, code)
 
@@ -346,6 +368,10 @@ class NodeBuildMixin:
         Parallel builds use isolated role pairs, but serial reruns/repairs reuse one object.  Clearing
         every reachable wrapper/inner/fallback prevents a backend that omits the optional output from
         inheriting another node's finalization.
+
+        ONE CALLER, `_run_developer`, which holds the instance's lock around this walk, the call and
+        the capture together — see its docstring for what an unlocked clear cost. Call it from a
+        build site and the walk is an unlocked write to a possibly-shared instance again.
         """
         pending = [developer]
         seen: set[int] = set()

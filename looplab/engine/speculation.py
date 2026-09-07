@@ -1071,7 +1071,6 @@ class SpeculationMixin:
         idea = reservation.idea.model_copy(deep=True)
         kind = reservation.kind
         try:
-            self._reset_developer_footprint(developer)
             # THE ENVELOPE (doc 52 row 12): the build's outputs are read off the `DeveloperResult`
             # the call returned, never off the instance afterwards — see `agents/roles.py`.
             if kind == "draft":

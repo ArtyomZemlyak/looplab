@@ -307,7 +307,6 @@ def timings(run_dir: Path = typer.Argument(...),
     # `spans.jsonl` is a high-volume sidecar (the reason `events/span_index.py` exists). It is read
     # WHOLE, so peak memory tracks the file: the accelerated index is deliberately not used here
     # because building it WRITES `spans.index.jsonl`, and this command is read-only.
-    from looplab.events.eval_occupancy import eval_occupancy
     import json as _json
     from collections import defaultdict
 
