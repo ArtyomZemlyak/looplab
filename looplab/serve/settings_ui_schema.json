@@ -1069,6 +1069,13 @@
           "help": "The most re-fetched items are carried verbatim until this budget is spent; the rest become one-line index rows. 12288 is about three pages of a 3,600-character read_file page."
         },
         {
+          "key": "agent_read_loop_nudge_after",
+          "label": "Read-loop nudge after N reads of one file",
+          "type": "int",
+          "default": 25,
+          "help": "Reads of ONE file inside a single tool loop after which every further read of it carries a note naming the paged call that ends the walk. 25 is the corpus's normal ceiling — the runaway this targets read one file 189 times. 0 = off. The note is advice only: the read still executes and returns fresh, complete content."
+        },
+        {
           "key": "developer_step_feedback_command",
           "label": "↳ between-steps measurement command",
           "type": "text",

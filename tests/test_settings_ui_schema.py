@@ -100,7 +100,22 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 196
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 197
+    # 196 + 1 -> 197 on 2026-09-07: `agent_read_loop_nudge_after`, found by review. The A9 read-loop
+    # nudge shipped ON with a threshold of 25 and NO Settings field, so `loop_opts_from_settings`
+    # never populated the bundle and `drive_tool_loop`'s literal was the only value that could ever
+    # apply — the "0 = off" its own docstring offers was unreachable from an env var, a snapshot,
+    # this form or the guide. A ROW rather than an uncurated entry because it is a plain threshold
+    # on the agent loop, exactly like its eight `agent_*` siblings, and it changes the bytes of
+    # every tool result the model sees. Verified as 196 keys common to the previous keyset plus
+    # exactly that one, no duplicate.
+    # 193 + 2 -> 195 on 2026-09-06: A5's pair, `established_context` and `established_context_bytes`
+    # — the "already established" block and its byte budget. CURATED because the first is a
+    # default-ON prompt splice at every chain root and the second is the only bound on how much of
+    # a run's read history that splice can carry; both are things an operator turns down when a
+    # prompt is too long, which is the form's own job. (This entry was missing until 2026-09-07;
+    # the two rows really did land in `d2f9a54c`, and the ledger's own rule is that every move is
+    # argued, not merely balanced.)
     # 195 + 1 -> 196 on 2026-09-06, at the MERGE with master: this branch's ten rows
     # meeting master's `agent_timeout`. Verified as every entry below prescribes rather
     # than by adding the integers: 185 rows are common to the two files, ours adds ten and
@@ -246,7 +261,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # meeting this branch's ten. Re-derived from the merged model, not added: an AST scan
     # of `Settings` against both parents reports exactly those eleven added and none
     # removed.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 230
+    # 230 + 1 -> 231 on 2026-09-07: `agent_read_loop_nudge_after` — see the catalogue note above;
+    # the two counts move together because it is a curated row.
+    # 227 -> 229 Settings on 2026-09-06: A5's `established_context` / `established_context_bytes`,
+    # the pair whose catalogue entry was also missing until 2026-09-07.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 231
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

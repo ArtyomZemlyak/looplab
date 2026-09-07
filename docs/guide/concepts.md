@@ -780,6 +780,14 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   absent from `NEVER_SALVAGED_REASONS`, so they can neither suppress one nor grant one. The engine's own structural answer stays on the row beside it
   (`engine_reason`) and `reason_source` says who chose the word.
 
+  `diverged` is the one word BOTH may say, and only in one direction: the engine names it when its
+  own watchdog killed the stage, and the diagnostician may name it ONLY where the engine's own
+  answer was `check_failed` (`DIAGNOSED_CONTEXT_BOUND`) — a stage that exited 0 and was then failed
+  by its own declaration is exactly the case the watchdog never saw. Unlike the two answers above,
+  it IS in `NEVER_SALVAGED_REASONS`, which is why the neighbouring override is fenced rather than
+  free: `OVERRIDE_EVIDENCE_REQUIRED` refuses a `check_failed` → `not_learning` override that cites
+  no LOG source, and stamps `reason_override_refused` on the row. Text nominates; it never decides.
+
   **A diagnosed reason now LEADS the text the Developer repairs from** (2026-08-28). It did not
   until then, and `check_false_positive` is where that cost the most: its directive says *"Read its
   rationale above before you touch anything"* and nothing spliced the diagnostician's verdict into

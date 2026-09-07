@@ -77,6 +77,21 @@ _IDEA_SPACE_TOOL = ("Your idea space is the WHOLE experiment, not just hyperpara
 # internal `drive_tool_loop(...)` call resolving through THIS module's (patched) global at call
 # time. Defined in tool_loop, that call would resolve tool_loop's UNPATCHED binding and the seam
 # would silently break — behavior seams beat file size.
+def _researcher_workspace(store):
+    """Declare the Researcher's own working set before its block is rendered, and return the store.
+
+    The Developer's scouts answer through `write.files`, its per-NODE staged overlay, and the store
+    is shared. The loop order is propose(N) -> build(N) -> … -> propose(N+1), and the workspace
+    boundary lives in the BUILD — so propose(N+1) rendered under node N's token and was served node
+    N's staged `solver.py` as "carried verbatim … do not re-fetch". The Researcher reads the source,
+    not any node's overlay, so it belongs to a workspace of its own: one stable token, which keeps
+    its pages carried across its own phases and out of every node's.
+    """
+    if store is not None:
+        store.enter_workspace("researcher")
+    return store
+
+
 def _established_block(store) -> str:
     """The "already established" block appended to a chain root's user turn, or "" — see
     `agents/established.py`. "" when there is no store OR nothing was recorded, so the prompt is
@@ -327,7 +342,7 @@ class ToolUsingResearcher:
                                                      memo_verdicts=bool(getattr(
                                                          self, "_memo_verdict_cue", False)))
                 + answered_by_context(self.tools)
-                + _established_block(getattr(self, "_established", None))
+                + _established_block(_researcher_workspace(getattr(self, "_established", None)))
                 + hint_block + cue +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},

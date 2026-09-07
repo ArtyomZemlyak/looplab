@@ -457,8 +457,10 @@ error frame as terminal and closes the response, so a gateway that reports the f
 reports what it billed for the tokens it already forwarded would have its price thrown away
 permanently. The client holds that frame back, reads the rest, and lets the SDK raise it last, so
 such a call is priced normally; only a cut with genuinely nothing behind it is recorded as
-**unpriced**, which is not the same as free. Only a cut that produced *nothing at all* is retried —
-and that retry drops SSE for the next attempt, exactly as a stalled stream does. The split is what
+**unpriced**, which is not the same as free. Only a cut that produced *nothing at all* is retried,
+and whether that retry drops SSE is `llm_stream_stall_fallback` (default on): with it, the next
+attempt goes non-streaming exactly as a stalled stream's does; with it off, streaming is kept and
+only the retry itself is spent. The split is what
 keeps the retries affordable: re-asking happens only where re-asking is free. Measured on a 20-run
 AlgoTune campaign, 26 cut streams burned **13.15 hours** — 18.7–94.6 % of each affected run's
 lifetime — and $1.66 that reached no ledger; one task spent 94.6 % of its run inside six of them

@@ -2122,6 +2122,13 @@ class Settings(BaseSettings):
     # DIFFERENT phase. It changes no tool and reaches no metric, champion or selection: an empty
     # store renders nothing, and OFF restores every prompt byte for byte. LEGACY row False, so a
     # resumed run gains no prompt bytes it never consented to (`agents/established.py`).
+    # A9 (docs/60 §60.9; evidence docs/56 §164). After this many reads of ONE file inside a single
+    # tool loop, every further read of it carries the note naming the paged call that ends the walk.
+    # 25 is the corpus's NORMAL ceiling, not a guess: the runaway it targets read one file 189 times.
+    # 0 = off. It had NO field at all until 2026-09-07 — the loop's literal was the only value that
+    # could ever apply, so the "0 = off" its own docstring offered was unreachable for an operator,
+    # which is the half of a threshold CLAUDE.md requires in the same change as the threshold.
+    agent_read_loop_nudge_after: int = Field(default=25, ge=0)
     established_context: bool = True
     # The byte budget of that block: the most re-fetched items are carried verbatim until it is
     # spent, the rest as one-line index rows. ~3 pages of a 3,600-char `read_file` page.

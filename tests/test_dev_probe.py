@@ -1230,8 +1230,7 @@ def test_a_spliced_event_is_live_in_a_real_probe_child(outside, event):
 
 
 # ------------------------------------ rule 1, the GRADER: what `protect_packages` fences, the probe
-#                                      refuses too (docs/60 §60.9 A3, ex-OPEN[probe-reads-what-the-
-#                                      grader-fence-refuses])
+#                                      refuses too (docs/60 §60.9 A3)
 #
 # `EvalSpec.protect_packages` fenced `env_inspect` and the probe was composed BESIDE it, with a read
 # confinement that granted site-packages whole — so `run_probe(inspect.getsource(<grader>))`

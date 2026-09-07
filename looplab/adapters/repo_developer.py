@@ -2130,6 +2130,22 @@ class LLMRepoDeveloper:
         # attribute a sibling's edits here. See `repo_write_tools.py::edit_calls` for why the ATTEMPT
         # is counted rather than the result.
         self.last_edit_calls = 0
+        # A5 — the same boundary, for the same reason as the line above it: the A5 store is per RUN
+        # while `read_file` answers through `write.files`, this node's staged overlay, so a page
+        # carried past here would be a sibling node's bytes under "do not re-fetch". Counts survive;
+        # only the carried CONTENT is scoped (`agents/established.py::enter_workspace`).
+        # ONE TOKEN PER `_run`, and the errors are deliberately asymmetric. A token that WRONGLY
+        # DIFFERS costs a re-read; a token that wrongly MATCHES asserts a sibling experiment's bytes
+        # are this node's working set, which is the whole defect. An inline repair therefore enters
+        # a fresh workspace and does not inherit the implement session's pages — a real loss, and
+        # the safe one, because `repair_from` may repair a node a DIFFERENT `_run` built (the create
+        # batch builds every node before any eval), so continuing "the current" workspace would be
+        # a coin flip between the two. A per-NODE token is what would recover it; nothing in this
+        # method's arguments names the node.
+        self._build_serial = getattr(self, "_build_serial", 0) + 1
+        _est = getattr(self, "_established", None)
+        if _est is not None:
+            _est.enter_workspace((id(self), self._build_serial))
         # Resolved ONCE for the whole node: operator `cmd.stages` make declare_stages refuse (P12)
         # and drive the stage notes below; data-mount names make mount refusals honest.
         op_stages = self._operator_stage_list()
@@ -2204,7 +2220,6 @@ class LLMRepoDeveloper:
         #   3. IMPLEMENT: write the code, one bounded session per plan step (each step its own trace block).
         # A REPAIR (error set) OR a bare / __new__-constructed dev (unit tests, no `_editables`) skips
         # straight to a single bounded session — repair is already narrow; the toy dev has no repo to stage.
-        user += self._established_block()
         is_fresh_repo = error is None and getattr(self, "_editables", None)
         from looplab.agents.agent import CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
@@ -2263,6 +2278,13 @@ class LLMRepoDeveloper:
                 stage_note = self._stage_note(operator_stages, declared, carried_over,
                                               manifest_protected)
                 user += stage_note
+            # LAST, because the block is a snapshot of what THIS workspace has established and the
+            # `stages` phase above has just read the manifest and the config into it. Rendered where
+            # it used to be — sixty lines up, immediately after `enter_workspace` — it could only
+            # ever be index rows: nothing had been recorded in the new workspace yet, so the single
+            # `implement`/`repair` session (two of the five chain roots) never received a carried
+            # page at all, while `plan` and `plan_step` render late and were unaffected.
+            user += self._established_block()
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             # Compose the write/edit tools with read-only ENVIRONMENT INTROSPECTION (pkg_info / py_api /
             # read_installed / grep_installed) so the Developer grounds generated code in the ACTUAL

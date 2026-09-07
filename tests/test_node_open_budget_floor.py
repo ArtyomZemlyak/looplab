@@ -49,7 +49,13 @@ TOY = Path(__file__).resolve().parents[1] / "examples" / "toy_task.json"
     (1.00, 0.95, -1.0, False),     # a negative floor is off, not "always refuse"
     (None, 0.95, 0.10, False),     # no ceiling: no remainder to test, inert
     (0.50, 0.00, 0.10, False),     # a fresh budget above the floor
-    (0.05, 0.00, 0.10, True),      # a budget smaller than one node is refused before the first
+    # A DECISION, re-affirmed 2026-09-07 against a review that read it as a defect ("a
+        # --llm-budget-usd 0.05 smoke run becomes a no-op"). It is what the guard is FOR: on a
+        # $0.05 ceiling the node is discarded unfinished exactly as it is on the last $0.05 of a
+        # $1.00 one, and the refusal names both remedies (raise the budget, or set the floor to
+        # 0). Clamping the floor to the ceiling would make the guard inert precisely where the
+        # operator's whole budget cannot buy one node.
+        (0.05, 0.00, 0.10, True),      # a budget smaller than one node is refused before the first
 ])
 def test_require_headroom_truth_table(limit, spent, floor, refused):
     accountant = CostAccountant(limit=limit)

@@ -124,6 +124,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   195 + 1 -> 196 (2026-09-06), at the MERGE with master: this branch's ten rows
   //   meeting master's `agent_timeout`. The total is stated ONCE, here, because the
   //   Python guard asserts this file pins it exactly once.
+  //   196 + 1 -> 197 (2026-09-07): `agent_read_loop_nudge_after`, found by review. The A9
+  //   read-loop nudge shipped ON with a threshold of 25 and no Settings field at all, so the
+  //   loop's literal was the only value that could ever apply and the `0 = off` its own
+  //   docstring offers was unreachable from an env var, a snapshot, this form or the guide.
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   //   183 -> 186 (2026-08-21, REBASE): this branch's three rows meeting master's additions —
@@ -138,7 +142,7 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   rather than by bumping the number: the catalogue was 187 keys and removing exactly
   //   `developer_step_feedback_command` gave back 186, so this is one real addition with nothing
   //   renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 196)
+  assert.equal(Object.keys(schema.fieldByKey).length, 197)
   //   190 -> 193 (2026-09-06): the three bench-driven knobs of docs/60 §60.9 — `llm_stream_stall_
   //   fallback` (beside `llm_stream`), `node_open_budget_floor_usd` (beside `llm_budget_usd`) and
   //   `developer_crash_pause_after` (beside `systemic_failure_stop`). Verified by intersection:

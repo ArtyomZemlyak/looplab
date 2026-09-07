@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 196
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 197
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -177,7 +177,11 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # files, +10 this branch authored, +1 master's, 196 with no duplicate key. The file also
 # returns to master's (and the merge base's) 2-space indentation; the branch's 1-space
 # rewrite was the deviation.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "d5e89ed0594aa403a97131c2868eba1435165b994e567598808c06de154c823d"
+# 196 + 1 -> 197 on 2026-09-07: `agent_read_loop_nudge_after`, the A9 read-loop nudge's threshold,
+# which shipped with NO Settings field at all — the loop's literal 25 was the only value that could
+# ever apply, so the "0 = off" its own docstring offered was unreachable for an operator. Exactly
+# one row, no key removed; re-derived, not edited.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "292ebf8a27ce2fc321d3f286f1da2210fe4262d1f6ea2aa68cd92a3482ddd656"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

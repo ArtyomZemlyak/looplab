@@ -1232,9 +1232,19 @@ class DevProbeTools:
     # the kernel's `PermissionError` for a reader the hook cannot see (`ctypes`, a native loader).
     # Anchored on the sentence/exception, never on the bare path, so a program that merely PRINTS a
     # grader path is not annotated.
+    # ONE slot, asserted rather than assumed. The join emits a NAMED group per `{path}`, so the day
+    # `read_fence.REFUSAL_MESSAGE` — a prompt string this repo edits freely — grows a second slot,
+    # `re.compile` raises `re.error: redefinition of group name 'hook'` AT CLASS-BODY EVALUATION:
+    # `import looplab.tools.dev_probe` fails and takes the Developer down, at run time, not in a
+    # test. `partition` makes the single slot a precondition with a sentence instead, and the
+    # annotation degrades to "not named" rather than the process degrading to an ImportError.
+    _FENCE_HEAD, _FENCE_SLOT, _FENCE_TAIL = read_fence.REFUSAL_MESSAGE.partition("{path}")
+    # `[^\r\n]+?` and not `\S+`: a grader directory containing a space silently lost the annotation
+    # and the Developer read the false, unactionable "is under the operator's SOURCE tree" about a
+    # site-packages path.
     _FENCE_REFUSAL_RE = re.compile(
-        "(" + r"(?P<hook>\S+)".join(re.escape(part)
-                                    for part in read_fence.REFUSAL_MESSAGE.split("{path}")) + ")"
+        ("(" + re.escape(_FENCE_HEAD) + r"(?P<hook>[^\r\n]+?)" + re.escape(_FENCE_TAIL) + ")"
+         if _FENCE_SLOT and "{path}" not in _FENCE_TAIL else "(?!x)x")
         + r"|(PermissionError: \[Errno 13\] Permission denied: '(?P<kernel>[^']+)')")
 
     def _name_the_grader(self, rc, err: str) -> str:

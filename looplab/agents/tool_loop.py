@@ -370,6 +370,19 @@ _READ_LOOP_NOTE_UNPAGED = (
 _LINES_OF_RE = re.compile(r"^\(lines (\d+)-(\d+) of (\d+)\)$", re.M)
 
 
+def _note_heads() -> tuple[tuple[str, bool], ...]:
+    """Every trailing note this loop may append to a tool result, as `(fixed head, is truncation)`.
+
+    DERIVED from the note constants themselves — each one's text up to its first placeholder — so a
+    reader that has to strip them cannot fall behind a note being added or reworded. `established.py`
+    retyped `"\n(note: "` instead and thereby missed `_TRUNC_NOTE` entirely, storing a page the cap
+    had cut as "the first page verbatim". Every note is ONE LINE beginning with a newline, which is
+    what lets a stripper tell an appended note from a `(note: …)` line inside a file's own bytes.
+    """
+    return tuple((template.split("{", 1)[0], template is _TRUNC_NOTE)
+                 for template in (_TRUNC_NOTE, _REPEAT_NOTE, _READ_LOOP_NOTE, _READ_LOOP_NOTE_UNPAGED))
+
+
 def _canonical_read_path(name: str, args: dict) -> str | None:
     """The ledger key for a read-type tool call, or None when `name` is not a registered reader or
     names no file. Separators are normalized and a leading `./` stripped (the scout's own overlay
@@ -1518,6 +1531,10 @@ def loop_opts_from_settings(settings) -> LoopOptions:
         auto_summary=bool(g(settings, "agent_auto_summary", True)),
         emit_after=int(g(settings, "agent_emit_after", 300)),  # G: nudge to emit after N tool turns
         emit_force=int(g(settings, "agent_emit_force", 500)),  # G: force the emit at this many turns
+        # A9: the read-loop nudge's threshold. Populated here like every other config-shaped field —
+        # without this the bundle stayed UNSET and `drive_tool_loop`'s literal 25 was the only value
+        # an operator could ever get, off switch included.
+        read_loop_nudge_after=int(g(settings, "agent_read_loop_nudge_after", 25)),
     )
     # C2/H4: the configured context budget must reach EVERY loop, not just the Researcher — the
     # 120k built-in fallback otherwise survives in the Developer's 500-turn implement session (the

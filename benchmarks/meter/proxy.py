@@ -474,6 +474,38 @@ def _body_cost(usage: dict) -> float | None:
 # the window, and if that instant is past the bound the request is answered 429 now rather than
 # after 40 s of holding the socket -- the client's own retry then re-enters the queue when it can
 # be admitted. 0 restores the historical unbounded queue.
+# The longest a single 429 `Retry-After` may hold this handler. Named beside the queue bound
+# because they bound the same thing from two directions: the queue may not hold a request
+# past the client's window, and neither may a retry inside it.
+RETRY_AFTER_CAP_S = 30.0
+
+
+def _usage_frame_is_measurable(frame) -> bool:
+    """Is this streaming frame's `usage` a MEASUREMENT, or merely a usage-shaped object?
+
+    A ZERO-TOKEN FRAME IS NOT AN INVOICE, the same rule `_body_cost` already applies to a reported
+    cost of zero. Accepting one priced the call at `0*rate_in + 0*rate_out` = $0.00 with a non-empty
+    basis, so the row read `metered: true, cost: 0.0` — AND it set `usage_frame_seen`, which
+    discards every forwarded delta, i.e. it is the one door that outranks the estimator while
+    admitting exactly the silent under-count the estimator exists to close. Not hypothetical: this
+    file already records litellm minting `Usage(prompt_tokens=0, completion_tokens=0)` with no cost.
+
+    STATED as a named rule rather than left inline, because it decides money from inside a stream
+    loop no caller can reach (CLAUDE.md's guard-test ladder, tier 2: "a rule nobody can state is a
+    rule nobody reviews"). A non-numeric count is not a measurement either.
+    """
+    if not isinstance(frame, dict):
+        return False
+    usage = frame.get("usage")
+    if not isinstance(usage, dict):
+        return False
+    total = 0
+    for key in ("prompt_tokens", "completion_tokens"):
+        try:
+            total += int(usage.get(key) or 0)
+        except (TypeError, ValueError):
+            return False
+    return total > 0
 RPM_MAX_WAIT_DEFAULT = 40.0
 
 # The `kind` a queue refusal's row carries. Its status is 429, which is ALSO what an upstream
@@ -993,6 +1025,13 @@ class Handler(BaseHTTPRequestHandler):
                     delay = 0.0
                 if delay <= 0:
                     delay = min(2.0 ** attempts, 30.0)
+                # CAPPED, like `core/llm.py::RETRY_AFTER_CAP_S` one package over and for the same
+                # reason `--rpm-max-wait` exists: a gateway answering `Retry-After: 600` parks this
+                # handler for ten minutes on a socket the arm abandoned at its 45 s first-byte
+                # timeout, after which the proxy opens upstream, spends a slot, streams to nobody
+                # and writes a clean-looking row — the empty-200 shape the queue bound was added to
+                # end, arriving through the retry loop it did not cover.
+                delay = min(delay, RETRY_AFTER_CAP_S)
                 exc.close()
                 time.sleep(delay)
                 waited += delay
@@ -1181,7 +1220,7 @@ class Handler(BaseHTTPRequestHandler):
                             if (d.get("content") or d.get("reasoning_content")
                                     or d.get("reasoning")):
                                 deltas += 1
-                    if isinstance(frame, dict) and isinstance(frame.get("usage"), dict):
+                    if _usage_frame_is_measurable(frame):
                         usage_frame_seen = True
                         usage = frame["usage"]
                         pin = int(usage.get("prompt_tokens") or 0)
@@ -1546,7 +1585,14 @@ class Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, built apart from `main` so a test can DRIVE it.
+
+    Its knob that bounds a hold — `--rpm-max-wait` — was guarded by
+    `assert '"--rpm-max-wait"' in src`, a substring pin over this file that a COMMENT satisfies and
+    that never touched argparse or the environment (CLAUDE.md: "a guard test must not be satisfiable
+    by a COMMENT", and tier 1 — drive the property — was available all along).
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1575,7 +1621,11 @@ def main() -> int:
                     help="stop forwarding a stream after this many content deltas and close it as "
                          "a truncated, priced answer (0 = never). Above both arms' largest measured "
                          "complete answer, so it is symmetric by construction")
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     if not args.upstream:
         print("--upstream is required (or set METER_UPSTREAM)", file=sys.stderr)

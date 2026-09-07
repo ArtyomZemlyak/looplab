@@ -143,12 +143,28 @@ def normalize_web_deny(entries) -> tuple:
 
 
 def _host_path(url: str) -> tuple:
+    """The `(host, path components, query)` a deny comparison is made on.
+
+    NORMALIZED, because the raw `urlsplit` output let four ordinary spellings of one page walk
+    through a declared prefix — driven 2026-09-07 against `https://github.com/oripress/AlgoTune/`:
+    `//oripress/…`, `/./oripress/…`, `/oripress/./AlgoTune/…` and the percent-encoded `%6Fripress/…`
+    all answered `None`, as did the trailing-dot FQDN `github.com.`. Real origins serve every one of
+    them as the same page, with no redirect, so the per-hop re-check in `_SSRFRedirectHandler` never
+    fires either. The docstring below argues at length that `/OriPress/` is an evasion `startswith`
+    would admit; `%6F` is that same evasion one encoding away.
+
+    Percent-decoding is done ONCE (`unquote` is not applied to its own output — `%2570` decodes to
+    `%70`, and decoding twice would fence a path that genuinely contains the literal text `%70`),
+    `..` is refused rather than resolved (a path that climbs out is not the prefix's page and is not
+    ours to reinterpret), and the root dot is stripped from the host, which `hostname` leaves on.
+    """
     parsed = urllib.parse.urlsplit(str(url or "").strip())
-    host = (parsed.hostname or "").lower()
-    path = parsed.path or "/"
-    if parsed.query:
-        path += "?" + parsed.query
-    return host, path
+    host = (parsed.hostname or "").lower().rstrip(".")
+    raw = urllib.parse.unquote(parsed.path or "/")
+    parts = [seg for seg in raw.replace("\\", "/").split("/") if seg not in ("", ".")]
+    if any(seg == ".." for seg in parts):
+        return host, None, ""
+    return host, [seg.lower() for seg in parts], (parsed.query or "")
 
 
 def web_deny_match(url: str, deny) -> str | None:
@@ -164,18 +180,23 @@ def web_deny_match(url: str, deny) -> str | None:
     with no path (`https://algotune.io`) covers the whole host; end a prefix with `/` to bound it to
     that DIRECTORY — which it names with or without the slash (`.../AlgoTune/` covers the repo's
     landing page `.../AlgoTune` and everything under it, and not `.../AlgoTune-fork/`)."""
-    host, path = _host_path(url)
-    if not host:
+    host, parts, _query = _host_path(url)
+    if not host or parts is None:
         return None
     for prefix in (deny or ()):
-        p_host, p_path = _host_path(prefix)
-        if not p_host:
+        p_host, p_parts, _p_query = _host_path(prefix)
+        if not p_host or p_parts is None:
             continue
         if host != p_host and not host.endswith("." + p_host):
             continue
-        p_low, low = p_path.lower(), path.lower()
-        if p_path in ("", "/") or low.startswith(p_low) or (
-                p_low.endswith("/") and low.split("?", 1)[0] == p_low[:-1]):
+        # COMPONENT-wise, never a bare string prefix: two of the four prefixes `make_task.py` emits
+        # are declared WITHOUT a trailing slash, and `startswith` made
+        # `…/datasets/oripress/AlgoTune` fence `…/AlgoTune-Bench`, `…/AlgoTuneV2` and every other
+        # sibling sharing the string — the opposite of the property the docstring claims, and
+        # invisible to the operator, since an over-fenced page reads to the model as a policy
+        # refusal. This is `adapters/repo_write_tools.py::manifest_path_collisions`' rule, which
+        # exists for exactly this comparison.
+        if parts[:len(p_parts)] == p_parts:
             return prefix
     return None
 
@@ -232,6 +253,16 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
             raise urllib.error.HTTPError(newurl, code, f"SSRF-blocked redirect: {blocked}", headers, fp)
         prefix = web_deny_match(newurl, self.deny)
         if prefix:
+            # CLOSE THE HOP FIRST. The SSRF raise above hands `fp` to `HTTPError`, which is an
+            # `addinfourl` and therefore closable by whoever catches it; `WebDenyRefusal` carries
+            # two strings and no file, and `_fetch`'s `except WebDenyRefusal: raise` re-raises past
+            # the only frame that could have closed it — so every refused redirect leaked its open
+            # response and socket until GC. The refusal is about a page we are declining to read,
+            # so closing here is not losing anything a caller could still want.
+            try:
+                fp.close()
+            except Exception:  # noqa: BLE001 - a refusal must never fail on its own cleanup
+                pass
             raise WebDenyRefusal(newurl, prefix)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -440,14 +471,36 @@ class WebTools:
         try:
             data = urllib.parse.urlencode({"q": query}).encode()  # POST avoids some bot gates
             html = self._get(_DDG, data=data)
+        except WebDenyRefusal:
+            # A SEARCH THAT REDIRECTS INTO A DENIED PREFIX IS A REFUSAL, not an outage. The broad
+            # `except` below would have turned it into "(web search unavailable: …)" — the
+            # "(unreachable)" shape this module's docstring says the fence must never produce,
+            # because it sends the model looking for a mirror — and it would have been uncountable,
+            # since `execute_result` stamps `web_fetch_refused` from the raised type.
+            raise
         except Exception as e:  # noqa: BLE001 — network is best-effort; never crash the run
             return f"(web search unavailable: {e})"
         titles = _RESULT.findall(html)[: self.max_results]
         snippets = _SNIPPET.findall(html)
         out = []
-        for i, (href, title) in enumerate(titles, 1):
-            snip = _untag(snippets[i - 1]) if i - 1 < len(snippets) else ""
-            out.append(f"{i}. {_untag(title)}\n   {_resolve(href)}\n   {snip[:300]}")
+        denied = 0
+        for href, title in titles:
+            url = _resolve(href)
+            # THE OTHER HALF OF THE FENCE. `_fetch` refuses the denied page and `_search` handed the
+            # model its exact URL and a 300-char snippet of it — and the measured behaviour the
+            # fence exists for (52 of 76 runs fetching their own graded task's published solver)
+            # BEGINS with a search. Rows are dropped rather than annotated, on the spec text's own
+            # reasoning three lines up: naming the prefixes would be handing over the map of what to
+            # look for. The COUNT is stated, because a result list silently one shorter is a lie
+            # about the search.
+            if web_deny_match(url, self.deny):
+                denied += 1
+                continue
+            snip = _untag(snippets[len(out)]) if len(out) < len(snippets) else ""
+            out.append(f"{len(out) + 1}. {_untag(title)}\n   {url}\n   {snip[:300]}")
+        if denied:
+            out.append(f"({denied} result(s) withheld: they are under a prefix this run's task "
+                       f"declares off-limits)")
         return "\n".join(out) if out else "(no results)"
 
     def _fetch(self, url: str) -> str:

@@ -269,9 +269,20 @@ def test_the_second_call_is_refused_now_and_the_ledger_says_by_whom(meter, strea
     assert ledger[0]["status"] == 200 and "kind" not in ledger[0]
 
 
-def test_the_option_is_on_the_command_line_and_in_the_environment():
-    """`--rpm-max-wait` and `METER_RPM_MAX_WAIT`, defaulting to the bound, `0` meaning unbounded."""
-    src = PROXY.read_text(encoding="utf-8")
-    assert '"--rpm-max-wait"' in src and "METER_RPM_MAX_WAIT" in src
+def test_the_option_is_on_the_command_line_and_in_the_environment(monkeypatch):
+    """`--rpm-max-wait` and `METER_RPM_MAX_WAIT`, defaulting to the bound, `0` meaning unbounded.
+
+    DRIVEN through the real parser. This asserted `'"--rpm-max-wait"' in src` over the proxy's own
+    text — a pin a COMMENT carrying that string satisfies, which never reached argparse or the
+    environment at all, i.e. exactly what it claimed to check was the part it could not see.
+    """
+    monkeypatch.delenv("METER_RPM_MAX_WAIT", raising=False)
+    assert proxy.build_parser().parse_args([]).rpm_max_wait == proxy.RPM_MAX_WAIT_DEFAULT
+
+    monkeypatch.setenv("METER_RPM_MAX_WAIT", "7.5")
+    assert proxy.build_parser().parse_args([]).rpm_max_wait == 7.5, "the env var is not read"
+    assert proxy.build_parser().parse_args(["--rpm-max-wait", "3"]).rpm_max_wait == 3.0, (
+        "the flag must win over the environment")
+
     assert proxy.RateLimiter(10, max_wait=0).max_wait == 0.0
     assert proxy.RateLimiter(10, max_wait=None).max_wait == 0.0
