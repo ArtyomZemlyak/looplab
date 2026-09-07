@@ -833,8 +833,15 @@ def test_a_commented_out_stamp_is_seen_by_the_ast_check_and_missed_by_a_substrin
     # And for the enum: the realistic drift there is a RE-SPELLED literal, not a deletion.
     from looplab.agents import unified_agent
     schema = _dedented(unified_agent.UnifiedAgent.triage_crash)
+    # EVERY site, and the count is pinned for the reason `_drop_stamp` pins its own: the vocabulary
+    # reaches this schema TWICE since 2026-09-07 (doc 52 row 32) — the `failure_kind` the
+    # diagnostician answers with, and the `kind` a competing hypothesis would make it — so a
+    # mutation of the first alone leaves the second standing and this driver proves nothing.
+    sites = schema.count("list(DIAGNOSED_FAILURE_REASONS)")
+    assert sites == 2, (f"the failure vocabulary is spelled at {sites} enum sites, not 2 — "
+                        "re-derive this mutation rather than loosening it")
     respelled = schema.replace("list(DIAGNOSED_FAILURE_REASONS)",
-                               '["crash", "oom", "no_metric", "check_failed", "not_learning"]', 1)
+                               '["crash", "oom", "no_metric", "check_failed", "not_learning"]')
     assert "list(DIAGNOSED_FAILURE_REASONS)" not in _enum_sources(respelled), (
         "a vocabulary re-spelled as a literal must redden — that is the typo the registry exists for")
 
