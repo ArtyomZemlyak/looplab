@@ -1396,3 +1396,47 @@ def test_the_open_branch_uses_the_same_rule_as_every_other_event():
     plain = rule(False)
     assert plain("/src/repo/train.py") is not None, "an unconfined fence still refuses the source"
     assert plain("/usr/lib/python3.11/json/__init__.py") is None, "…and nothing else"
+
+
+def test_the_hook_refuses_a_mutation_of_the_fences_own_file_whatever_the_uid():
+    """THE RUNG THE ROOT SKIP RETIRED, and it is uid-INDEPENDENT.
+
+    `test_a_node_cannot_rewrite_the_fence_that_fences_it` asserts TWO independent rungs in one body
+    — the kernel write bit (0444, which DAC-override ignores, hence the root skip) and the audit
+    hook's `_SELF` refusal, which is a Python-level raise and does not care about euid. Bundling
+    them behind a uid-scoped skip retired the second along with the first, and this container runs
+    as root: that is why the merge could drop `_SELF` entirely and stay green through two follow-up
+    review rounds.
+
+    What was dropped: the mutation branch called `_prefixed(r)` instead of going through
+    `_fenced_target`, leaving `_fenced_target` with ZERO callers and `_SELF` — the only rule
+    protecting the generated `sitecustomize.py` from chmod/unlink/rename — dead. `install()` passes
+    the fence dir as `writable`, so the record rung deliberately permits writes there, and the file
+    is outside every editable root by construction; `_SELF` was the whole protection. A node could
+    chmod the fence back to 0644, rewrite it, and every later process of the run would run
+    unfenced — the checkpoint-read incident, re-enabled run-wide.
+
+    Driven on the RENDERED template through the real `_hook`, under `_PROBE_NAME` so nothing is
+    installed in this interpreter.
+
+    MUTATION: call `_prefixed(r)` in the mutation branch again -> all three come back ALLOWED.
+    """
+    src = read_fence.render(("/src/repo",), (), policy="deny", confine=False)
+    ns: dict = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "<fence>", "exec"), ns)
+    # As `install()` binds it: the directory holding the generated fence, with a trailing separator.
+    ns["_SELF"] = ("/run/.looplab-fence/",)
+    target = "/run/.looplab-fence/sitecustomize.py"
+
+    for event, args in (("os.chmod", (target, 0o777)),
+                        ("os.remove", (target,)),
+                        ("os.rename", (target, "/tmp/elsewhere"))):
+        with pytest.raises(Exception) as caught:
+            ns["_hook"](event, args)
+        assert type(caught.value).__name__ == "LoopLabSourceReadRefused", (
+            f"{event} on the fence's own file was permitted ({caught.value!r}) — the hook's `_SELF` "
+            "rung is not consulted, and the kernel rung beside it is void wherever the eval runs "
+            "privileged")
+
+    # …and the rule is still NARROW: an ordinary mutation outside the fence is untouched.
+    ns["_hook"]("os.remove", ("/tmp/some/other/file",))

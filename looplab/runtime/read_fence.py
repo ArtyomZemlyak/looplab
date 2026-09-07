@@ -909,8 +909,20 @@ def _fenced_target(path, dir_fd):
     mount source. The residual — a symlinked final component under `chmod`/`utime`, which do
     follow — is the same class as the documented read-side one."""
     r = _mutation_path(path, dir_fd)
-    if r is None:
-        return None
+    return None if r is None else _mutation_fenced(r)
+
+
+def _mutation_fenced(r):
+    """The mutation POLICY over an already-resolved path: the refused path, or None.
+
+    Split from `_fenced_target` for the reason `_fenced_resolved` is split from `_fenced` one
+    branch over, and after the same defect: the hook's mutation branch needs `r` for its record
+    check, and the 2026-09-07 merge answered that by calling `_prefixed(r)` there directly —
+    which skips `_SELF` and left `_fenced_target` with ZERO callers, i.e. the fence's own
+    self-protection dead. Driven end to end: a fenced child could `chmod` and then `unlink` the
+    generated `sitecustomize.py`, disarming the fence for every process the run started afterwards.
+    One rule, and the branch keeps its resolved path.
+    """
     # BEFORE the root/allow policy, and deliberately not expressible through it: `_SELF` is
     # refused for every caller, allow-list included. See `_SELF`. A run dir is allow-listed on
     # purpose (a run may be `--out`-ed inside the repo it edits) and, far more often, this file
@@ -1044,7 +1056,7 @@ def _hook(event, args):
         for path_i, fd_i in slots:
             try:
                 r = _mutation_path(args[path_i], _dir_fd(args, fd_i))
-                bad = _prefixed(r) if r is not None else None
+                bad = _mutation_fenced(r) if r is not None else None
             except Exception:
                 r = bad = None       # a bug in the fence must never break an unrelated call
             if bad is not None:
