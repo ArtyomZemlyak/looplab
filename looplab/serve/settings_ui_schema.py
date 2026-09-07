@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 193
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 195
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -156,7 +156,13 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # `systemic_failure_stop` — its companion bound, how many crashed Developer sessions a run absorbs
 # before the breaker pauses it, 1 = the historical rule (docs/58 §58.2). Re-derived over the whole
 # keyset, 190 + 3, no duplicate key.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "e38daf33908089167d9e48e27e32d9822b61f24cac63b0954b416d1f4747d94f"
+# (195 since A5, 2026-09-06: `established_context` and `established_context_bytes` beside
+# `developer_stage_guidance` — the block that seeds each chain root with what EARLIER phases of
+# the run already read, and its byte budget. A row rather than an uncurated omission for the
+# same reason as the three above: it changes what every prompt in the run carries, so the
+# operator has to be able to read it and turn it off. Re-derived over the whole keyset,
+# 193 + 2, no duplicate key.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "6a280214a55d99f36a0b872feff17e0cbb71706e897f1e8e7d42083bea71dde7"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

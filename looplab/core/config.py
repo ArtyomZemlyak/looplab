@@ -2100,6 +2100,19 @@ class Settings(BaseSettings):
     # `declare_stages` was called 0 times across six probes while the block cost 4.8-6.0 % of each
     # $1 run -- 5,001 characters of GPU-training advice to a role with one `score` stage.
     developer_stage_guidance: bool = True
+    # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
+    # implement/repair) with a small block carrying what EARLIER phases of this run already read —
+    # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
+    # and an index row for the rest. Measured over 97 AlgoTune probe runs (docs/56 §200.2):
+    # 46.7 % of tool-calling turns (11,853 of 25,381, $25.04 of $63.34 of prompt) requested
+    # nothing but content already retrieved in that run, and 11,235 of them were retrieved by a
+    # DIFFERENT phase. It changes no tool and reaches no metric, champion or selection: an empty
+    # store renders nothing, and OFF restores every prompt byte for byte. LEGACY row False, so a
+    # resumed run gains no prompt bytes it never consented to (`agents/established.py`).
+    established_context: bool = True
+    # The byte budget of that block: the most re-fetched items are carried verbatim until it is
+    # spent, the rest as one-line index rows. ~3 pages of a 3,600-char `read_file` page.
+    established_context_bytes: int = Field(default=12288, ge=0)
     # The operator-pinned developer command the plan loop runs BETWEEN steps, handing its output to
     # the next step ("" = off, and every prompt is byte-identical to what it was). This is our half
     # of doc 53 item 10: AlgoTuner re-runs the real evaluation after each accepted edit and hands its
@@ -2659,6 +2672,9 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # is the historical value and the knob buys no call, no intervention and no selection policy.
     "node_open_budget_floor_usd": 0.0,
     "developer_crash_pause_after": 1,
+    # A5: a resumed pre-2026-09-06 run keeps its prompts byte for byte; the block is new prompt
+    # bytes at every chain root and a run in flight never consented to them.
+    "established_context": False,
     "speculation_depth": 0,
     "speculation_gate_receipt": None,
     "concurrent_research_repeat": False,

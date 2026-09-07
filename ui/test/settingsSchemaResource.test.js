@@ -126,7 +126,7 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   rather than by bumping the number: the catalogue was 187 keys and removing exactly
   //   `developer_step_feedback_command` gave back 186, so this is one real addition with nothing
   //   renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 193)
+  assert.equal(Object.keys(schema.fieldByKey).length, 195)
   //   190 -> 193 (2026-09-06): the three bench-driven knobs of docs/60 §60.9 — `llm_stream_stall_
   //   fallback` (beside `llm_stream`), `node_open_budget_floor_usd` (beside `llm_budget_usd`) and
   //   `developer_crash_pause_after` (beside `systemic_failure_stop`). Verified by intersection:

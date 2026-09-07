@@ -97,7 +97,13 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               0 = uncapped, doc 56 §190-§195. Field set 220 -> 221, so branch (1) of the
 #               assertion below; re-pinned 2026-09-06 — the addition tripped four repo guards
 #               (doc 56 §191) and not this one, because the suite was read through a `-k` run.)
-_EXPECTED_DIGEST = "sha256:4362342bc6e36f676e85278ed49683be477084907bcddd87dcc75727662cf9ae"
+#   2026-09-06  + established_context, established_context_bytes  (A5, docs/60 §60.9: the block
+#               that seeds each chain root with what EARLIER phases of the run already read.
+#               A NEW FIELD PAIR, so branch (1) — real schema growth, 224 -> 226. A replicate
+#               calibrated before it is genuinely different: every chain root now opens with
+#               bytes the old one did not carry, so a speculation receipt issued against the
+#               old prompts should stop verifying.)
+_EXPECTED_DIGEST = "sha256:ddae3bf376fb2b6c5d6a14b5f67f7cc9f191adea1301584cf309b938a6c9291c"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -438,7 +444,7 @@ _EXPECTED_DIGEST = "sha256:4362342bc6e36f676e85278ed49683be477084907bcddd87dcc75
 #               direction. `llm_stream_stall_fallback` only changes how a stalled provider stream
 #               is retried, but the guard is deliberately not clever enough to exempt one knob of
 #               three. Both pins re-set.
-_EXPECTED_FIELD_COUNT = 224
+_EXPECTED_FIELD_COUNT = 226
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

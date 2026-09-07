@@ -1055,6 +1055,20 @@
      "help": "Keep the stage-pipeline block in the Developer's system prompt — ~5,000 characters about GPU training, checkpoints, shards and train.py, plus how to declare a multi-stage eval. Leave ON for repo tasks with a real pipeline; it is what teaches declare_stages. Turn OFF for tasks whose eval declares a SINGLE stage: measured on AlgoTune 2026-08-28, declare_stages was called 0 times across six runs while the block cost 4.8–6.0% of each $1 run. ON reproduces the historical prompt byte for byte, which a resumed run needs."
     },
     {
+     "key": "established_context",
+     "label": "Carry earlier phases' reads into each new phase",
+     "type": "bool",
+     "default": true,
+     "help": "A5: every chain root (Researcher propose, Developer stages/plan/step/implement/repair) is seeded with a small block carrying what earlier phases of this run already read — the reference file, the manifest, the config — verbatim under the byte budget, the rest as index rows naming the exact re-read call. Measured over 97 AlgoTune probe runs: 46.7% of tool-calling turns ($25 of $63 of prompt) requested nothing but content already retrieved in that run, almost all of it by a different phase. Changes no tool; OFF leaves every prompt byte for byte."
+    },
+    {
+     "key": "established_context_bytes",
+     "label": "↳ byte budget of that block",
+     "type": "int",
+     "default": 12288,
+     "help": "The most re-fetched items are carried verbatim until this budget is spent; the rest become one-line index rows. 12288 is about three pages of a 3,600-character read_file page."
+    },
+    {
      "key": "developer_step_feedback_command",
      "label": "↳ between-steps measurement command",
      "type": "text",

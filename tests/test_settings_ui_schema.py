@@ -100,7 +100,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 193
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 195
     # 190 + 3 -> 193 on 2026-09-06: the three bench-driven knobs of docs/60 §60.9 (A7/A10/A12),
     # `llm_stream_stall_fallback`, `node_open_budget_floor_usd` and `developer_crash_pause_after`,
     # each beside the row it modifies (`llm_stream`, `llm_budget_usd`, `systemic_failure_stop`).
@@ -216,7 +216,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # until the arm runs. It gets a row when an arm says which N is right.
     # 224 -> 227 on 2026-09-06: docs/60 §60.9's three bench-driven knobs (A7 engine half, A10,
     # A12), all CURATED — see the 190 -> 193 note above; the two counts move together.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 227
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 229
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

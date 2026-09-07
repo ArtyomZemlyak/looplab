@@ -669,7 +669,7 @@ class LLMRepoDeveloper:
                  prompts=None, cross_run_read_tools: bool = False, memory_dir=None,
                  probe: bool = False, probe_timeout_s: float = 60.0,
                  probe_confine: bool = True, probe_max_calls: int = 0, command_runtime=None,
-                 step_feedback_command: str = ""):
+                 step_feedback_command: str = "", established=None):
         self.client = client
         self.task = task
         self.parser = parser
@@ -691,6 +691,11 @@ class LLMRepoDeveloper:
         # False drops the stage-pipeline block from the system prompt (`_drop_stage_guidance`).
         # True is the default and keeps the historical text byte for byte.
         self._stage_guidance = bool(stage_guidance)
+        # A5 (docs/60): the run's `agents/established.py::EstablishedContext`, shared with the
+        # Researcher by `make_roles`. None (the ctor default, and `Settings.established_context=
+        # False`) leaves every phase prompt byte-identical; a store that recorded nothing renders
+        # nothing, so the plain tests that never read a file are unchanged either way.
+        self._established = established
         # F2 · the PROBE (tools/dev_probe.py). The ctor default is OFF while `Settings.developer_probe`
         # is ON, deliberately: `make_roles` is the operator's knob and passes the setting, and the ~170
         # direct `LLMRepoDeveloper(...)`/`__new__` constructions in the suite are not asking for a live
@@ -1178,6 +1183,7 @@ class LLMRepoDeveloper:
         # is under this repo path" anyway; giving the scouts a real inventory is the fix, and until
         # one exists the honest state is no block rather than an empty string and a false comment.
         read_only = CompositeTools([EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
+        plan_user += self._established_block()
         messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
         try:
             # Full session budget — same contract as every other phase: the soft nudge at
@@ -1189,6 +1195,7 @@ class LLMRepoDeveloper:
                 self.client, read_only, messages, self._plan_emit_spec(),
                 label="Developer·plan", next_label="the implement phase",
                 finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
+                on_tool_result=self._established_hook("plan"),
                 **self._session_opts())
         except Exception:  # noqa: BLE001 — a failed plan phase just degrades to a single session
             return []
@@ -1301,6 +1308,7 @@ class LLMRepoDeveloper:
             step_user += _REPO_DEV_STEP_FEEDBACK_BLOCK.format(
                 name=self._step_feedback_command_name() or "the operator's evaluation",
                 output=feedback)
+        step_user += self._established_block()
         messages = [{"role": "system", "content": system}, {"role": "user", "content": step_user}]
         try:
             # implement steps CONSUME the stages/plan briefs, but don't
@@ -1310,6 +1318,7 @@ class LLMRepoDeveloper:
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
                       fallback=lambda m: "", on_budget=self._note_session_budget,
+                      on_tool_result=self._established_hook("plan_step"),
                       **self._session_opts(cost_budget=self._step_cost_ceiling()))
         except Exception as e:  # noqa: BLE001
             return f"(step {idx} error: {e})"
@@ -1325,6 +1334,21 @@ class LLMRepoDeveloper:
             counter = {"n": 0}
             self._probe_calls = counter
         return counter
+
+    def _established_block(self) -> str:
+        """The "already established" block for a chain root, or "" (see `agents/established.py`).
+        Appended, never spliced, so a run with nothing recorded is byte-identical to the old prompt."""
+        store = getattr(self, "_established", None)
+        if store is None:
+            return ""
+        block = store.render()
+        return ("\n\n" + block) if block else ""
+
+    def _established_hook(self, phase: str):
+        """The `on_tool_result` a phase hands `run_phase`, or None when there is no store — `run_phase`
+        forwards it to the tool loop, whose per-call hook is the one recording site."""
+        store = getattr(self, "_established", None)
+        return None if store is None else store.hook(phase)
 
     def _scout_tools(self, write=None):
         """Read-only repo scouts (read_file / grep / find_files / list_dir) so the Developer can READ
@@ -2062,7 +2086,9 @@ class LLMRepoDeveloper:
                 self.client, read_only, messages, self._stages_emit_spec(),
                 label="Developer·stages", next_label="the plan & implement phases",
                 finalize=_finalize, fallback=lambda m: [], validate=_validate,
-                on_budget=self._note_session_budget, **self._session_opts()) or []
+                on_budget=self._note_session_budget,
+                on_tool_result=self._established_hook("stages"),
+                **self._session_opts()) or []
         except Exception:  # noqa: BLE001 — a failed stages phase degrades to the operator cmd alone
             return []
 
@@ -2171,6 +2197,7 @@ class LLMRepoDeveloper:
         #   3. IMPLEMENT: write the code, one bounded session per plan step (each step its own trace block).
         # A REPAIR (error set) OR a bare / __new__-constructed dev (unit tests, no `_editables`) skips
         # straight to a single bounded session — repair is already narrow; the toy dev has no repo to stage.
+        user += self._established_block()
         is_fresh_repo = error is None and getattr(self, "_editables", None)
         from looplab.agents.agent import CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
@@ -2311,6 +2338,7 @@ class LLMRepoDeveloper:
                               label="Developer·implement", handoff=False,
                               finalize=lambda a: (a or {}).get("summary", ""),
                               fallback=lambda m: "", on_budget=self._note_session_budget,
+                              on_tool_result=self._established_hook("implement"),
                       **self._session_opts())
             else:
                 # repair / toy single session — terminal, so no summary (and repair isn't in a scope
@@ -2369,6 +2397,7 @@ class LLMRepoDeveloper:
                           self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
                           finalize=_finish, validate=_validate_repair,
+                          on_tool_result=self._established_hook("repair" if error else "implement"),
                           # THE ONE CALLER THAT OPTS IN. On an exit with no turn left, bouncing this
                           # summary only drops it and falls to the `lambda m: ""` below — which
                           # discards `rollback_stage` and leaves `repair_verdict` empty, so

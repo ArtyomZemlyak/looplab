@@ -363,6 +363,11 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # and READS the Researcher's handoff brief; CliAgentDeveloper and the single-shot LLMDeveloper
     # never do, so the Researcher skips the per-node summary LLM call for them (handoff=False).
     _handoff_dev = False
+    # A5: ONE store per run, shared by the Researcher and the Developer's phases. Function-local
+    # like every other `looplab.agents` reach from here — `tests/test_agent_factory_split.py`
+    # holds that direction, and a module-level import would close the search<->agents cycle.
+    from looplab.agents.established import established_context_from_settings
+    _established = established_context_from_settings(settings)
     if (settings.developer_backend not in PRESETS
             and not _param_search
             and callable(getattr(task, "repo_spec", None))
@@ -372,7 +377,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
         from looplab.agents.agent import loop_opts_from_settings as _loop_opts
         _handoff_dev = True
         developer = LLMRepoDeveloper(  # C4: plan decomposition + hard per-session backstop
-            client, task, parser=settings.llm_parser, loop_opts=_loop_opts(settings),
+            client, task, parser=settings.llm_parser, loop_opts=_loop_opts(settings), established=_established,
             plan_decompose=getattr(settings, "developer_plan_decompose", True),
             plan_min_steps=getattr(settings, "developer_plan_min_steps", 2),
             plan_max_steps=getattr(settings, "developer_plan_max_steps", 8),
@@ -495,7 +500,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
         from looplab.agents.tool_loop import compose_tools
         tools = compose_tools(providers, settings)
         researcher = ToolUsingResearcher(
-            client, tools,
+            client, tools, established=_established,
             space_hint=getattr(researcher, "space_hint", ""),
             bounds=getattr(researcher, "bounds", None),
             parser=settings.llm_parser, prompts=prompts,
