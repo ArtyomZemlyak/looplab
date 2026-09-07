@@ -199,7 +199,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/metrics` | Online metric SERIES a node's training logged — every scalar (loss, each recall@k, grad | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/trace` | The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads | — |  |
 | `POST` | `/api/runs/{run_id}/project` | *Assign Run* (no docstring) | — |  |
-| `GET` | `/api/runs/{run_id}/prov` | W3C-PROV-style provenance of the search DAG: each node's solution is an entity | — |  |
+| `GET` | `/api/runs/{run_id}/prov` | W3C-PROV-style provenance of the search DAG AND of what the run claimed: each node's | — |  |
 | `POST` | `/api/runs/{run_id}/report_refresh` | Force a high-quality regeneration of the agent-authored run report NOW. Appends a | — |  |
 | `POST` | `/api/runs/{run_id}/reset` | round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and | — |  |
 | `POST` | `/api/runs/{run_id}/resolve-activity-claims` | Guarded operator recovery for an ownership claim that cannot be proven dead. | — |  |

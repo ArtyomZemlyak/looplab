@@ -644,7 +644,14 @@ idea and marks the headings over it, so a `Rationale` carried across verbatim re
 from #3* rather than as this experiment's own justification. A node nobody branched gains no label
 anywhere.
 
-`GET /api/runs/{run_id}/prov`, the W3C-PROV export, carries the same split. A branched node's
+`GET /api/runs/{run_id}/prov`, the W3C-PROV export, carries the same split — and, since 2026-09-07,
+the run's CLAIMS beside its experiments: each deep-research claim is an `ll:Claim` entity generated
+by that memo's pass and `wasDerivedFrom` both the experiments it cites and the exact evidence spans
+it is bound to, carrying D8's verdict (`ll:verdict`), the verifier's own completeness bit and how
+the verdict was BOUND to the claim (`ll:verdict_binding`: by position, by a unique statement match,
+or not at all — a claim never wears its neighbour's verdict). A cited experiment the fold no longer
+holds is named as missing rather than given an invented entity, and an evidence id whose ledger row
+is gone stays in the graph as `unrecorded`. A branched node's
 experiment activity is `wasAssociatedWith` **two** agents with explicit roles — `agent:operator`
 (`prov:Person`, `ll:idea-author`) and the engine's `prov:SoftwareAgent` (`ll:implementer`, because
 the Developer really did write the code) — and carries `ll:authored_fields`,

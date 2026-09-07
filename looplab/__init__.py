@@ -364,6 +364,7 @@ _LAYOUT = {
     "trust_gate": "events",  # the ONE trust_gate_changed write policy, shared by its two surfaces
     "traceview": "events",
     "trajectory": "events",
+    "event_reference": "events",   # the generated event reference (doc 52 row 30)
     "state_delta": "events",   # the SSE stream's delta frames: diff/apply over two folded payloads
     "tracing": "core",
     "train_monitor": "engine",   # per-eval observer + diagnostics + separately opt-in early kill
