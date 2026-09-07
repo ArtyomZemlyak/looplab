@@ -583,6 +583,57 @@ def check_money_cue_reaches_the_choosers(bench: str):
     return blind_named == named, detail
 
 
+def check_waste_after_the_last_node(bench: str):
+    """"$3.6067 of $100.2691 corpus spend (3.6 %) lands AFTER the last evaluated node ... 16 of 69
+    runs end holding one" (`engine/proposal_cues.py`)
+
+    That figure is the one the money cue was meant to shrink, and it has been quoted from a
+    docstring ever since. Driven here from `probe_summary --json`, which already computes the
+    per-probe share (§72: it is only legible beside the spend BEFORE the first node -- `remPde` read
+    11 % on this metric while having spent 91 % before its first).
+
+    Measured 2026-09-08 over 141 probes with a node: **$8.9020 of $142.5275 = 6.2 %**, median per
+    probe 2.0 %, and **82 of 141 end holding an unfinished draw** -- against 3.6 % and 16 of 69. The
+    corpus grew and the share grew with it.
+
+    AND THERE IS NO CONTROL GROUP LEFT. Every probe on this box now carries the money cue in
+    `propose` (`cue_reach`: 141 of 141), so this cannot say whether the cue helped -- only that the
+    waste is still there with it everywhere. A split that pretended otherwise would be the fixture
+    agreeing with the hope.
+    """
+    import subprocess
+    tool = Path(bench) / "looplab" / "benchmarks" / "probe_summary.py"
+    if not tool.is_file():
+        return False, "probe_summary.py is not on this box, so the claim cannot be driven"
+    got = subprocess.run([sys.executable, str(tool), "--json"], capture_output=True, text=True,
+                         timeout=900)
+    try:
+        rows = json.loads(got.stdout)
+    except ValueError:
+        return False, f"probe_summary produced no json ({got.stdout[-160:]!r})"
+    with_node = [r for r in rows if r.get("reached_a_node") and isinstance(r.get("after_pct"),
+                                                                          (int, float))]
+    if not with_node:
+        return False, "no probe on this box reached an evaluated node"
+    # THE KEY IS `spent`, and guessing it cost a run: `r.get("spend") or r.get("usd")` summed to
+    # $0.0000 and the check reported "0.0 % of $0.0000" without noticing it had no money at all.
+    # A denominator of zero is not a measurement, so it is refused below rather than divided by.
+    total = sum(float(r.get("spent") or 0.0) for r in with_node)
+    # `after_pct` is a share of the probe's own spend; the corpus share needs the money back.
+    after = sum(float(r["after_pct"]) / 100.0 * float(r.get("spent") or 0.0) for r in with_node)
+    holding = sum(1 for r in with_node if float(r["after_pct"]) > 1.0)
+    shares = sorted(float(r["after_pct"]) for r in with_node)
+    median = shares[len(shares) // 2]
+    if total <= 0:
+        return False, "probe_summary reported no spend at all -- the money key changed name"
+    corpus = 100.0 * after / total
+    detail = (f"{len(with_node)} probe(s) with a node: {corpus:.1f} % of ${total:.4f} lands after "
+              f"the last evaluated node (median per probe {median:.1f} %), {holding} end holding an "
+              f"unfinished draw -- the quoted figures are 3.6 % and 16 of 69")
+    holds = abs(corpus - 3.6) <= 0.5 and holding == 16
+    return holds, detail
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
@@ -601,6 +652,8 @@ CLAIMS = [
     ("point 9: a speedup divides by the reference's time", check_denominator_composition),
     ("point 8(c): the money cue misses plan/foresight_rank/hyp_prioritize",
      check_money_cue_reaches_the_choosers),
+    ("point 9: 3.6 % of spend lands after the last evaluated node, 16 of 69 runs",
+     check_waste_after_the_last_node),
 ]
 
 
