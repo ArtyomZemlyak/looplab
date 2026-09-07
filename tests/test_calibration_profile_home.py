@@ -127,7 +127,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-09-06  + model_arms (doc 52 row 19: the operator x model router's arms, uncurated and
 #               open-keyed). 221 -> 222, both pins re-set. Inert for a calibration replicate —
 #               the profile's `EngineOptions` declares no arm and the toy policy runs no bandit.
-_EXPECTED_DIGEST = "sha256:54c40ce3c74d5eb5f790f3040341c9bbe461cbbf76b9cf858f10a67f1cae942e"
+_EXPECTED_DIGEST = "sha256:dcaea3a899fec17f9e2e1c9e6b0aece006468d7e71b676612490732f3f4bfb49"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -477,7 +477,13 @@ _EXPECTED_DIGEST = "sha256:54c40ce3c74d5eb5f790f3040341c9bbe461cbbf76b9cf858f10a
 #               path changes what a PAID call is asked and therefore what its answer costs, which
 #               is exactly the kind of difference a speculation receipt must not span.
 #               `_EXPECTED_FIELD_COUNT` goes 225 -> 226 and both pins are re-set.
-_EXPECTED_FIELD_COUNT = 226
+#   2026-09-07  + steady_state_build  (doc 52 row 33: the build fan-out as a refilling lane rather
+#               than a chunk barrier). The 'field set changed too' branch, and the one entry in this
+#               block whose ON path a replicate would genuinely notice: it changes how many
+#               proposals a build batch buys and therefore the run's whole paid shape. It ships off
+#               and the calibration profile builds serially, so nothing moves at rest.
+#               `_EXPECTED_FIELD_COUNT` goes 226 -> 227 and both pins are re-set.
+_EXPECTED_FIELD_COUNT = 227
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

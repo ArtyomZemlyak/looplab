@@ -133,7 +133,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   gates (doc 52 row 32) — a row because it changes what the re-proposal prompt says.
   //   194 -> 195 (2026-09-07): `diagnosis_hypotheses`, the competing explanations the crash
   //   diagnostician considered (doc 52 row 32) — a row because it changes what a paid call asks.
-  assert.equal(Object.keys(schema.fieldByKey).length, 195)
+  //   195 -> 196 (2026-09-07): `steady_state_build`, the build fan-out as a refilling lane
+  //   (doc 52 row 33) — a row because it changes how many provider calls a build batch makes.
+  assert.equal(Object.keys(schema.fieldByKey).length, 196)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')

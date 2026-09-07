@@ -100,7 +100,9 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 195
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 196
+    # 195 -> 196 on 2026-09-07: `steady_state_build`, the build fan-out as a refilling lane
+    # (doc 52 row 33). A row because it changes how many provider calls a build batch makes.
     # 194 -> 195 on 2026-09-07: `diagnosis_hypotheses`, the competing explanations the crash
     # diagnostician considered (doc 52 row 32). A row for the same reason as the one below
     # it: it changes what a paid call is asked, and an operator has to be able to see that.
@@ -223,7 +225,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 226 -> 227 Settings on 2026-09-07: `mcts_cost_weight`, the cost term of the cost-constrained MCTS (doc 52 row 31; a row).
     # 227 -> 228 Settings on 2026-09-07: `novelty_literature` (doc 52 row 32; a row).
     # 228 -> 229 Settings on 2026-09-07: `diagnosis_hypotheses` (doc 52 row 32; a row).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 229
+    # 229 -> 230 Settings on 2026-09-07: `steady_state_build` (doc 52 row 33; a row).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 230
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

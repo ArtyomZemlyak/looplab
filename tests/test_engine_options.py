@@ -153,6 +153,7 @@ ATTR_BY_FIELD = {
     "concept_pivot": "_concept_pivot",
     "graded_novelty": "_graded_novelty",
     "novelty_literature": "_novelty_literature",
+    "steady_state_build": "_steady_state_build",
     "capability_expansion": "_capability_expansion",
     "fingerprint_universal": "_fingerprint_universal",
     "cross_run_concepts": "_cross_run_concepts",

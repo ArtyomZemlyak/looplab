@@ -302,6 +302,7 @@ class EngineOptions:
     concept_pivot: bool = False          # PART IV 2a: concept-graph uncovered-region pivot (opt-in)
     graded_novelty: bool = False         # PART IV 2b: D3 graded novelty into the live gate (level-4/5 allow)
     novelty_literature: bool = False     # doc 52 row 32: the retrieved papers reach the novelty gates
+    steady_state_build: bool = False     # doc 52 row 33: refill a build lane instead of joining a chunk
     capability_expansion: bool = False   # PART IV 2b: D7 capability-expansion forced-jump directive on lock-in
     fingerprint_universal: bool = False  # PART IV CR Step 0: universal (any-script) task-fingerprint tokens
     cross_run_concepts: bool = False     # PART IV CR Step 2: surface prior-run concept outcomes (audit-only)

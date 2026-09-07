@@ -626,6 +626,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         concept_pivot = _opt("concept_pivot")
         graded_novelty = _opt("graded_novelty")
         novelty_literature = _opt("novelty_literature")
+        steady_state_build = _opt("steady_state_build")
         capability_expansion = _opt("capability_expansion")
         fingerprint_universal = _opt("fingerprint_universal")
         cross_run_concepts = _opt("cross_run_concepts")
@@ -921,6 +922,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._concept_pivot = bool(concept_pivot)
         self._graded_novelty = bool(graded_novelty)
         self._novelty_literature = bool(novelty_literature)
+        self._steady_state_build = bool(steady_state_build)
         self._capability_expansion = bool(capability_expansion)
         self._fingerprint_universal = bool(fingerprint_universal)
         self._cross_run_concepts = bool(cross_run_concepts)
@@ -2379,6 +2381,108 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # not a cost. The eval runs in a SUBPROCESS and a busy loop does not slow it. The cost is a FREE
     # GPU with BUILDABLE WORK while the loop is held, which needs board state per instant and cannot
     # be read from spans alone. Until that is measured this carries a cost CEILING, not a cost.
+    async def _steady_state_build_lane(self, creates, state, pairs) -> tuple[RunState, bool]:
+        """AIRA₂'s shape: propose and dispatch the next build the moment a LANE frees (doc 52 row 33).
+
+        The chunked fan-out above is a bulk-synchronous barrier — `_fan` builds start together and
+        NOTHING moves until the slowest finishes, so a fast worker cannot propose from a completed
+        sibling's evidence and the loop pays the maximum of every chunk instead of its mean. This is
+        the same work with the join moved: one lane per free (researcher, developer) pair, and the
+        next proposal happens when a lane opens, against a fold that already contains everything
+        that finished.
+
+        WHAT DOES NOT MOVE, because these are the invariants the barrier was protecting:
+
+        * the PROPOSAL and the RESERVATION stay on the MAIN task, serially, exactly as before
+          (engine invariant #1): a worker still only implements an id the main task has already
+          reserved durably, and ids are still minted under `_id_lock` in a fixed order;
+        * the re-fold happens before EVERY proposal rather than before every chunk, which is
+          strictly more of what the re-fold existed to buy — the novelty gate now also sees the
+          `card_added` / `node_building` receipts of the lanes still running, so it cannot re-propose
+          an idea another lane is building at this moment;
+        * the pause circuit breaker still stops before starting new work, and the group still joins
+          before the turn ends, so no build outlives the turn that started it.
+
+        WHAT DOES MOVE, and is why this ships behind a flag: the researcher is asked for ONE idea per
+        lane instead of `_fan` ideas per chunk. That is more provider calls of a smaller shape, and
+        the diversity that came from asking for `_fan` distinct ideas at once now comes from
+        proposing against a fold that holds the siblings — a different (and, on the field's own
+        account, stronger) way to get it, but not the same bytes.
+        """
+        # A SEMAPHORE and not a `CapacityLimiter`: the limiter is BORROWER-scoped — the task
+        # that acquires must be the one that releases — and the whole point here is that the
+        # MAIN task takes the slot (so it blocks before proposing) while the LANE gives it
+        # back when its build ends. Driven: the limiter raises
+        # `this borrower isn't holding any of this CapacityLimiter's tokens` on the first release.
+        limiter = anyio.Semaphore(len(pairs))
+        free_pairs = list(pairs)
+        started = 0
+        async with anyio.create_task_group() as tg:
+            for _index, action in enumerate(creates):
+                # BLOCKS UNTIL A LANE IS FREE — this is the whole difference from the barrier, and
+                # it is why the fold below sees completions the chunked path could not.
+                await limiter.acquire()
+                if self._create_paused:
+                    limiter.release()
+                    break
+                state = fold(self.store.read_all())
+                ideas, telemetry, dropped = await self._await_batch_proposal(state, 1)
+                if not ideas:
+                    self._record_dropped_batch_cards(dropped)
+                    self._pending_batch_dropped = []
+                    self._pending_batch_novelty_gated = []
+                    limiter.release()
+                    continue
+                idea, telemetry_row = ideas[0], (telemetry[0] if telemetry else None)
+                if self._refuse_degraded_proposal(idea, main_task=True):
+                    # A dead provider hands back a degraded FALLBACK; the barrier path breaks the
+                    # whole batch on one, and so does this — the next turn re-plans.
+                    self._record_dropped_batch_cards(dropped)
+                    self._pending_batch_dropped = []
+                    self._pending_batch_novelty_gated = []
+                    limiter.release()
+                    break
+                if "_scores" in action:
+                    self.store.append(EV_POLICY_DECISION,
+                                      {"scores": action["_scores"], "chosen": action.get("_chosen"),
+                                       "reason": action.get("_reason")})
+                self._append_rung_promotion(action)
+                anchor_id, anchor_attempt = scored_anchor(state)
+                reservation = self._reserve_node_build(
+                    action, idea, scored_against=anchor_id,
+                    scored_against_attempt=anchor_attempt, source="researcher",
+                    steering_context=((telemetry_row or {}).get("_steering_context", [])
+                                      if isinstance(telemetry_row, dict) else []))
+                if reservation is None:
+                    limiter.release()
+                    continue
+                pair = free_pairs.pop()
+                started += 1
+
+                async def _lane(action=action, pair=pair, reservation=reservation, idea=idea,
+                                telemetry_row=telemetry_row):
+                    # The span is per LANE, not per batch: a barrier's cost is one number for the
+                    # slowest member, and the thing this exists to make visible is that the lanes
+                    # no longer wait for each other.
+                    try:
+                        with self.tracer.span("parallel_build_lane", fan=len(pairs),
+                                              parallel_build=self._llm_parallel):
+                            await anyio.to_thread.run_sync(
+                                functools.partial(self._create_node_guarded, action, pair,
+                                                  reservation, idea, telemetry_row))
+                    finally:
+                        # RELEASED IN A FINALLY, and the pair goes back before the slot does: a lane
+                        # that raises must free its pair or the pool leaks a worker per crash, and
+                        # `_create_node_guarded` already turns an unexpected exception into that
+                        # node's own `node_failed` terminal rather than tearing down the group.
+                        free_pairs.append(pair)
+                        limiter.release()
+
+                tg.start_soon(_lane)
+        if self._create_paused:
+            self._drain_create_pause()
+        return fold(self.store.read_all()), started > 0
+
     async def _handle_create_actions(self, creates, state, *, created_no_terminal,
                                      no_mint_turns, decision_seq, max_es, max_s, start):
         """The `creates` branch of the run loop, lifted verbatim (doc 25 ES-05).
@@ -2592,6 +2696,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                      if (self._llm_parallel > 1 and len(creates) > 1
                          and all(a.get("kind") == "draft" for a in creates)
                          and not any(META_CARD_ID in a for a in creates)) else None)
+        if _pb_pairs and len(_pb_pairs) > 1 and self._steady_state_build:
+            # The barrier's replacement (doc 52 row 33), opt-in: propose and dispatch as each lane
+            # frees instead of chunk-join-chunk. Same reservations, same worker, same join before
+            # the turn ends — see `_steady_state_build_lane` for what moves and what does not.
+            state, _built = await self._steady_state_build_lane(creates, state, _pb_pairs)
+            return "continue", state, _no_mint_turns
         if _pb_pairs and len(_pb_pairs) > 1:
             _fan = len(_pb_pairs)
             for _i in range(0, len(creates), _fan):

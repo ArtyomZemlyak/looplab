@@ -1,0 +1,139 @@
+"""The build fan-out refills a lane instead of joining a chunk (doc 52 row 33).
+
+`_handle_create_actions`' parallel build is a bulk-synchronous barrier: `_fan` builds start together
+and NOTHING moves until the slowest finishes, so the loop pays the maximum of every chunk instead of
+its mean and a fast worker cannot propose from a completed sibling's evidence. AIRA₂ dispatches into
+a pool as soon as any worker is free. `Settings.steady_state_build` is that shape.
+
+The headline test DRIVES the difference rather than asserting about the source: four builds, two
+lanes, and the first build made slow on purpose. Under the barrier the third build cannot start
+until the slow one ends; under the lane it starts as soon as the FAST one does. The same fixture run
+with the flag off reproduces the barrier, so the test would fail if the flag did nothing.
+"""
+from __future__ import annotations
+
+import time
+
+import anyio
+import pytest
+
+from looplab.adapters.toytask import ToyTask
+from looplab.core.config import Settings
+from looplab.engine.options import EngineOptions
+from tests.factories import TOY_TASK, make_engine
+
+
+def _timed_engine(run_dir, *, steady: bool, slow_first: float = 0.35):
+    """A 2-wide fan-out whose FIRST build is slow, recording every build's start and end."""
+    task = ToyTask.load(TOY_TASK)
+    engine = make_engine(run_dir, task=task, n_seeds=4, max_nodes=4,
+                         steady_state_build=steady)
+    engine.parallel_build = 2
+    engine.role_factory = task.build_roles
+    timeline: list[tuple[str, float]] = []
+    real = engine._create_node_guarded
+
+    def _timed(action, pair, reservation, idea, telemetry=None):
+        index = len([row for row in timeline if row[0] == "start"])
+        timeline.append(("start", time.monotonic()))
+        if index == 0 and slow_first:
+            time.sleep(slow_first)          # the slowest member of the first chunk
+        else:
+            time.sleep(0.02)
+        try:
+            return real(action, pair, reservation, idea, telemetry)
+        finally:
+            timeline.append(("end", time.monotonic()))
+
+    engine._create_node_guarded = _timed
+    return engine, timeline
+
+
+def _starts_and_ends(timeline):
+    starts = [t for kind, t in timeline if kind == "start"]
+    ends = [t for kind, t in timeline if kind == "end"]
+    return starts, ends
+
+
+@pytest.mark.parametrize("steady,expected", [(True, "refills"), (False, "waits")])
+def test_a_slow_build_blocks_the_next_dispatch_only_under_the_barrier(tmp_path, steady, expected):
+    """THE PROPERTY, driven: with two lanes and a slow first build, does the THIRD build start
+    before the slow one finishes?"""
+    engine, timeline = _timed_engine(tmp_path / expected, steady=steady)
+    anyio.run(engine.run)
+    starts, ends = _starts_and_ends(timeline)
+    if len(starts) < 3:
+        pytest.skip(f"the run built {len(starts)} node(s) — too few to observe the refill")
+    first_end = ends[0] if ends else None
+    assert first_end is not None
+    if steady:
+        # The third dispatch happened while the slow first build was still running.
+        assert starts[2] < max(ends[:2]), (
+            "the lane did not refill: the third build waited for the slowest of the first two")
+    else:
+        # The barrier: nothing starts until the whole chunk has joined.
+        assert starts[2] > max(ends[:2]), (
+            "the default path is no longer a barrier — this test's contrast is gone")
+
+
+def test_the_flag_is_off_by_default_everywhere():
+    assert Settings().steady_state_build is False
+    assert EngineOptions().steady_state_build is False
+    assert EngineOptions.from_settings(Settings()).steady_state_build is False
+
+
+def test_the_lane_run_produces_the_same_kind_of_record_as_the_barrier(tmp_path):
+    """Same reservations, same terminals, same fold: what moved is WHEN a build starts, not what a
+    build writes. Every node still has its `node_building` receipt before its `node_created`."""
+    engine, _ = _timed_engine(tmp_path / "record", steady=True, slow_first=0.0)
+    anyio.run(engine.run)
+    events = engine.store.read_all()
+    building = [e.data["node_id"] for e in events if e.type == "node_building"]
+    created = [e.data["node_id"] for e in events if e.type == "node_created"]
+    assert created, "the lane built nothing"
+    for node_id in created:
+        assert node_id in building, f"node {node_id} was created with no reservation receipt"
+    # ids are still minted serially and never reused
+    assert len(set(building)) == len(building)
+
+
+def test_the_lane_joins_before_the_turn_ends(tmp_path):
+    """No build may outlive the turn that started it — the invariant the barrier's join provided
+    and the pool's `async with` still does."""
+    engine, timeline = _timed_engine(tmp_path / "join", steady=True, slow_first=0.05)
+    anyio.run(engine.run)
+    starts, ends = _starts_and_ends(timeline)
+    assert len(starts) == len(ends), "a build was still running when the run returned"
+
+
+def test_the_pause_breaker_stops_the_lane_from_starting_more_work(tmp_path):
+    """A developer/build crash pauses the create path; the lane must stop DISPATCHING inside the
+    turn, which is the guarantee the barrier gave by checking after each chunk.
+
+    Stated as "no build starts between the pause being raised and the turn draining it", because
+    that is the property — the drain clears the flag and the NEXT turn is allowed to build again,
+    exactly as the barrier path behaves.
+    """
+    engine, timeline = _timed_engine(tmp_path / "paused", steady=True, slow_first=0.0)
+    real_build, real_drain = engine._create_node_guarded, engine._drain_create_pause
+    raised: list[float] = []
+    drained: list[float] = []
+
+    def _pause_after_one(action, pair, reservation, idea, telemetry=None):
+        out = real_build(action, pair, reservation, idea, telemetry)
+        if not raised:
+            engine._create_paused = True
+            raised.append(time.monotonic())
+        return out
+
+    def _drain():
+        drained.append(time.monotonic())
+        return real_drain()
+
+    engine._create_node_guarded = _pause_after_one
+    engine._drain_create_pause = _drain
+    anyio.run(engine.run)
+    assert raised and drained, "the pause was never raised or never drained"
+    starts, _ = _starts_and_ends(timeline)
+    window = [t for t in starts if raised[0] < t < drained[0]]
+    assert not window, f"{len(window)} build(s) started after the pause and before the drain"

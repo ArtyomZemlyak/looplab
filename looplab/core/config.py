@@ -1441,6 +1441,15 @@ class Settings(BaseSettings):
     # paper describes is often exactly right, so the overlap is evidence, not a verdict. Off by
     # default because the second half changes a prompt.
     novelty_literature: bool = False
+    # THE BUILD FAN-OUT AS A LANE, NOT A BARRIER (doc 52 row 33). The parallel build joins a whole
+    # chunk before anything moves, so the loop pays the SLOWEST build of every chunk and a fast
+    # worker cannot propose from a completed sibling's evidence — AIRA₂ dispatches into a pool as
+    # soon as any worker is free. On, the proposal and the reservation stay on the main task exactly
+    # as before, and the next one happens when a LANE frees, against a fold that already holds every
+    # finished sibling AND the receipts of the lanes still running. Off by default because the shape
+    # of the paid call changes: the researcher is asked for ONE idea per lane rather than `_fan`
+    # distinct ideas per chunk, so the diversity comes from the fold rather than from the ask.
+    steady_state_build: bool = False
     # COMPETING HYPOTHESES (doc 52 row 32): ask the crash diagnostician for the OTHER explanations
     # that fit what it read, each with its own confidence and with what would tell it apart from the
     # primary answer. SAGE's multi-hypothesis attribution moved metrics-bearing outputs 42 -> 92 %,
