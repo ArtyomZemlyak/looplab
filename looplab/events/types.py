@@ -1644,7 +1644,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "attempt", "engine_reason", "error", "eval_seconds", "failed_stage", "finish_data",
             "finish_report_planned", "generation", "never_evaluated", "node_id", "reason",
-            "reason_source", "scope", "step", "triage_rationale"
+            "reason_hypotheses", "reason_source", "scope", "step", "triage_rationale"
         ),
     ),
     "node_repaired": PayloadContract(
@@ -1657,7 +1657,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "budget_exhausted", "code", "edit_calls", "engine_reason", "error_evidence",
             "eval_seconds", "footprint_finalized", "idea_footprint", "param_overrides",
             "reason", "reason_evidence", "reason_evidence_resolved", "reason_findings",
-            "reason_source", "reason_summary", "salvaged_metric", "unmet",
+            "reason_hypotheses", "reason_source", "reason_summary", "salvaged_metric", "unmet",
             "unparseable_repairs", "verified"
         ),
     ),

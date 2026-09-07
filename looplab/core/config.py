@@ -1441,6 +1441,15 @@ class Settings(BaseSettings):
     # paper describes is often exactly right, so the overlap is evidence, not a verdict. Off by
     # default because the second half changes a prompt.
     novelty_literature: bool = False
+    # COMPETING HYPOTHESES (doc 52 row 32): ask the crash diagnostician for the OTHER explanations
+    # that fit what it read, each with its own confidence and with what would tell it apart from the
+    # primary answer. SAGE's multi-hypothesis attribution moved metrics-bearing outputs 42 -> 92 %,
+    # and this run's own classifier scores 88/118 on `failure_triage.v1` — roughly a quarter of its
+    # answers are wrong and nothing records what else it considered. Recorded on the failure row
+    # (`reason_hypotheses`), read by nothing that decides: the repair still follows the ONE
+    # `failure_kind`. No extra provider call — the same triage call answers one more field — but it
+    # changes that call's prompt, so it ships off.
+    diagnosis_hypotheses: bool = False
     # PART IV Phase 2b — D7 capability-expansion forced-jump DIRECTIVE (§21.8/§21.13, issue #7). When on
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
     # branch for a long consecutive streak) on an `explore` stance, the Researcher's novelty hint

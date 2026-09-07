@@ -131,7 +131,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   against score, and its unit (relative to the run's mean eval second) has to be shown.
   //   193 -> 194 (2026-09-07): `novelty_literature`, the retrieved papers reaching the novelty
   //   gates (doc 52 row 32) — a row because it changes what the re-proposal prompt says.
-  assert.equal(Object.keys(schema.fieldByKey).length, 194)
+  //   194 -> 195 (2026-09-07): `diagnosis_hypotheses`, the competing explanations the crash
+  //   diagnostician considered (doc 52 row 32) — a row because it changes what a paid call asks.
+  assert.equal(Object.keys(schema.fieldByKey).length, 195)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')

@@ -200,7 +200,21 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
                         # (`core/evidence.py`, doc 52 row 13); the Strategist takes its own inside
                         # `make_strategist`.
                         evidence_envelope=envelope_enabled(settings),
+                        # doc 52 row 32: the competing-hypotheses field on the triage judge.
+                        diagnosis_hypotheses=_hypotheses_enabled(settings),
                         loop_opts=loop_opts_from_settings(settings))   # B1 stuck + C1 plan + C2 summary
+
+
+def _hypotheses_enabled(settings) -> bool:
+    """`Settings.diagnosis_hypotheses`, read through the ONE reader that owns it.
+
+    Function-local import because that reader lives beside the coercion it pairs with
+    (`engine/failure_diagnosis.py::hypotheses_enabled`) and `agents` may reach `engine` only inside
+    a call — the documented deferred edge, not a new module-level dependency.
+    """
+    from looplab.engine.failure_diagnosis import hypotheses_enabled
+
+    return hypotheses_enabled(settings)
 
 
 def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: str = "developer"):

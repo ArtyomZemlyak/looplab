@@ -65,7 +65,8 @@ class UnifiedAgent(WrapsDeveloper):
                  agent_max_turns: int = 0, agent_time_budget_s: float = 0.0,
                  triage_time_budget_s: float = 0.0,
                  loop_opts: Optional[dict] = None, repair_developer=None,
-                 evidence_envelope: bool = False):
+                 evidence_envelope: bool = False,
+                 diagnosis_hypotheses: bool = False):
         # Internal per-stage backends. Named `researcher`/`developer`/`strategist` (not _-prefixed)
         # so the engine's cost roll-up walk (_emit_llm_cost) descends into them and finds every
         # per-stage CostAccountant.
@@ -74,6 +75,9 @@ class UnifiedAgent(WrapsDeveloper):
         # Same rule for the repair stage's own Developer: PUBLIC so the roll-up walk finds its
         # accountant (`costs._CHILD_ATTRS` names it). None = repair shares `developer`, the default.
         self.repair_developer = repair_developer
+        # doc 52 row 32: ask the triage judge for the alternatives it considered. Off = the
+        # historical tool schema and prompt, byte for byte.
+        self._diagnosis_hypotheses = bool(diagnosis_hypotheses)
         self._active_developer = developer
         # THE PROPOSE RECEIPT'S OWN SLOT, initialized so its ABSENCE means something.
         # `roles.researcher_budget_exhausted` falls back to the plain `last_budget_exhausted` for a
@@ -461,6 +465,11 @@ class UnifiedAgent(WrapsDeveloper):
     # raising an AttributeError inside a prompt assembly.
     _evidence_envelope = False
 
+    # The same class default, for the same reason and the same construction path (doc 52 row 32):
+    # a facade built through `object.__new__` to drive one judge must read OFF — the historical
+    # tool schema, byte for byte — rather than raise inside the schema assembly.
+    _diagnosis_hypotheses = False
+
     def _evidence(self, text: str) -> str:
         """The candidate's text as it rides in a judge's user turn: fenced when the envelope is on,
         the historical bytes when it is off."""
@@ -747,6 +756,8 @@ class UnifiedAgent(WrapsDeveloper):
                                            EVIDENCE_LOCATOR_CAP,
                                            EVIDENCE_QUOTE_CAP, EVIDENCE_SOURCES,
                                            FINDINGS_CAP, FINDING_MEANS_CAP,
+                                           HYPOTHESES_CAP, HYPOTHESIS_CAUSE_CAP,
+                                           HYPOTHESIS_DISCRIMINATOR_CAP,
                                            TRIAGE_RATIONALE_CAP,
                                            TRIAGE_BUDGET_CUTOFF_KEY, TRIAGE_TRANSPORT_FAILURE_KEY,
                                            UNANSWERABLE_TRIAGE_ACTION)
@@ -886,6 +897,30 @@ class UnifiedAgent(WrapsDeveloper):
                                   "description": "What that line tells you about this failure."}}}},
                 "rationale": {"type": "string"}},
                 "required": ["action"]}}}
+        if self._diagnosis_hypotheses:
+            # THE OTHER EXPLANATIONS (doc 52 row 32). Added to the schema rather than asked for in
+            # the prose so the alternatives arrive STRUCTURED — a paragraph of "it could also be…"
+            # cannot be bounded, deduped or recorded per hypothesis, and the whole point is that
+            # each one carries its own confidence. No extra call: the same triage answer gains a
+            # field. Off, the schema and the prompt are byte-identical to what they always were.
+            emit_spec["function"]["parameters"]["properties"]["hypotheses"] = {
+                "type": "array",
+                "description": "The OTHER explanations that fit what you read — not a ranked "
+                               "restatement of your answer, and empty when the evidence really "
+                               "does admit one cause. Each one is only useful if a reader can act "
+                               "on it, so say what would tell it apart from your primary answer.",
+                "items": {"type": "object", "properties": {
+                    "cause": {"type": "string",
+                              "description": "The alternative explanation, in one sentence."},
+                    "kind": {"type": "string", "enum": list(DIAGNOSED_FAILURE_REASONS),
+                             "description": "The failure kind this alternative would make it."},
+                    "confidence": {"type": "number",
+                                   "description": "0..1, INDEPENDENT of the others: two "
+                                                  "explanations can both be likely."},
+                    "discriminator": {"type": "string",
+                                      "description": "What would decide between this and your "
+                                                     "primary answer — the file to read, the value "
+                                                     "to print, the run to compare."}}}}
 
         def _finalize(args: dict) -> dict:
             action = str((args or {}).get("action", "")).strip().lower()
@@ -958,6 +993,21 @@ class UnifiedAgent(WrapsDeveloper):
                          "quote": str((f or {}).get("quote", ""))[:EVIDENCE_QUOTE_CAP],
                          "means": str((f or {}).get("means", ""))[:FINDING_MEANS_CAP]}
                         for f in findings[:FINDINGS_CAP] if isinstance(f, dict)],
+                    # THE ALTERNATIVES RIDE BACK RAW AND BOUNDED, like the evidence fields above and
+                    # for the same reason: `failure_diagnosis.coerce_hypotheses` owns the durable
+                    # shape (the cap, the confidence clamp, the `kind` vocabulary check, the
+                    # redaction) and this frame holds neither the redactor nor the workdir. Present
+                    # only when the field was asked for, so an off run's verdict dict is the one it
+                    # always was.
+                    **({"hypotheses": [
+                        {"cause": str((h or {}).get("cause", ""))[:HYPOTHESIS_CAUSE_CAP],
+                         "kind": str((h or {}).get("kind", "")).strip().lower()[:40],
+                         "confidence": (h or {}).get("confidence"),
+                         "discriminator": str((h or {}).get("discriminator",
+                                                            ""))[:HYPOTHESIS_DISCRIMINATOR_CAP]}
+                        for h in ((args or {}).get("hypotheses") or ())[:HYPOTHESES_CAP]
+                        if isinstance(h, dict)]}
+                       if self._diagnosis_hypotheses else {}),
                     "rationale": str((args or {}).get("rationale", ""))[:TRIAGE_RATIONALE_CAP],
                     "missing_dependency": str((args or {}).get("missing_dependency", ""))[:100]}
 

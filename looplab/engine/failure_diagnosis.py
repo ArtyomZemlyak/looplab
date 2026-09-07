@@ -694,6 +694,79 @@ def coerce_findings(verdict, redact=None) -> list:
     return out
 
 
+# ------------------------------------------------ THE OTHER EXPLANATIONS (doc 52 row 32)
+#
+# The diagnostician answers ONE `failure_kind` with a findings trail behind it, and a wrong answer
+# is therefore indistinguishable from a right one until the repair built on it fails. SAGE's
+# multi-hypothesis attribution — carry the alternatives, each with its OWN severity, and say what
+# would tell them apart — moved metrics-bearing outputs 42 -> 92 %. LoopLab's live classifier scores
+# 88/118 on `failure_triage.v1`, i.e. roughly a quarter of its answers are wrong, and nothing in the
+# record says what else it considered.
+#
+# A hypothesis is NOT a ranked restatement of the answer. Each carries its own `confidence`
+# (independent — two explanations can both be likely, which is the whole point) and a
+# `discriminator`: what a reader or the next repair could look at to tell it from the primary. A
+# hypothesis with no discriminator is an opinion; with one it is the next thing to check.
+HYPOTHESES_CAP = 3
+HYPOTHESIS_CAUSE_CAP = 240
+HYPOTHESIS_DISCRIMINATOR_CAP = 240
+
+
+def coerce_hypotheses(verdict, redact=None) -> list:
+    """The alternative explanations, bounded: `[{cause, kind, confidence, discriminator}, …]`.
+
+    Never raises, drops what cannot be read, and keeps the model's ORDER rather than sorting by
+    confidence — the diagnostician's own ranking of what it considered is information, and sorting
+    it away would make a confidently-wrong second hypothesis look like a considered one.
+
+    `kind` is validated against `DIAGNOSED_FAILURE_REASONS` and dropped when it is not one, for the
+    same reason `coerce_failure_kind` refuses: a hypothesis may not smuggle in a label the engine's
+    own vocabulary does not contain, because a reader downstream would take it for a diagnosis.
+    """
+    raw = verdict.get("hypotheses") if isinstance(verdict, dict) else None
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list = []
+    seen: set = set()
+    for item in raw:
+        if len(out) >= HYPOTHESES_CAP:
+            break
+        if not isinstance(item, dict):
+            continue
+        cause = _screened(item.get("cause", ""), HYPOTHESIS_CAUSE_CAP, redact)
+        if not cause or cause.lower() in seen:
+            continue
+        discriminator = _screened(item.get("discriminator", ""), HYPOTHESIS_DISCRIMINATOR_CAP,
+                                  redact)
+        raw_confidence = item.get("confidence")
+        # A missing or unreadable confidence is 0.0 and NOT 0.5: an alternative nobody scored is
+        # not a coin flip, and a reader deciding whether to act on it must not be handed a number
+        # the model never produced.
+        confidence = (round(min(1.0, max(0.0, float(raw_confidence))), 3)
+                      if isinstance(raw_confidence, (int, float))
+                      and not isinstance(raw_confidence, bool)
+                      and float(raw_confidence) == float(raw_confidence)   # NaN is not a confidence
+                      else 0.0)
+        kind = str(item.get("kind", "") or "").strip().lower()
+        row = {"cause": cause, "confidence": confidence, "discriminator": discriminator}
+        if kind in DIAGNOSED_FAILURE_REASONS:
+            row["kind"] = kind
+        seen.add(cause.lower())
+        out.append(row)
+    return out
+
+
+def hypotheses_enabled(settings) -> bool:
+    """`Settings.diagnosis_hypotheses` as the constructor argument the triage judge takes.
+
+    ONE reader, for the reason `core/evidence.py::envelope_enabled` gives: the flag reaches the
+    agent through a factory and the engine through its own settings, and a `getattr` default
+    re-typed at each site is how the two come to disagree. Absent means OFF, which is the
+    byte-identical historical prompt.
+    """
+    return bool(getattr(settings, "diagnosis_hypotheses", False))
+
+
 def evidence_citation_resolves(evidence, workdir) -> bool | None:
     """Does the cited file actually exist inside the node's workdir? `None` when there is nothing
     checkable to resolve (no citation, or a citation into the error text it was handed anyway).

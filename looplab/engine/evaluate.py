@@ -114,6 +114,7 @@ from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagn
                                              failure_headline,
                                               diagnosis_repair_lead,
                                               coerce_evidence, coerce_findings,
+                                              coerce_hypotheses,
                                               diagnosed_failure_reason, diagnosis_tools,
                                               engine_observed_facts, fence_refusal_note, evidence_citation_resolves,
                                               resolve_findings)
@@ -882,6 +883,7 @@ class EvalAttempt:
     _evidence_resolved: Any = None
     _summary: Any = None
     _findings: Any = None
+    _hypotheses: Any = None
     repair_log: list = field(default_factory=list)
     best_depth: int = -1
     next_start: Any = None
@@ -3080,6 +3082,12 @@ class EvaluateMixin:
         # was, and this whole block runs AFTER the triage call it describes — nothing here
         # is spliced into anything the engine pays for.
         a._findings = resolve_findings(coerce_findings(a.triage, self._redact), a.workdir)
+        # THE ALTERNATIVES THE DIAGNOSTICIAN CONSIDERED (doc 52 row 32), beside the trail of
+        # what it read. Empty unless `Settings.diagnosis_hypotheses` asked for them, and read
+        # by nothing that decides: the repair still follows the ONE `failure_kind`, because a
+        # second explanation with its own confidence is evidence for a human and for the next
+        # diagnosis, not a second instruction for this one.
+        a._hypotheses = coerce_hypotheses(a.triage, self._redact)
         if action == "abandon":
             a.triage_outcome = ("abandon", a.triage.get("rationale", ""))
             return PHASE_SETTLED
@@ -3554,6 +3562,7 @@ class EvaluateMixin:
                 # MARKED `resolved: false` and KEPT: the finding stands on its own text, and
                 # a reader owed the summary above is not owed a working link.
                 **({"reason_findings": a._findings} if a._findings else {}),
+                **({"reason_hypotheses": a._hypotheses} if a._hypotheses else {}),
                 # The wall-clock of the eval this repair answers. Additive (invariant #5);
                 # the fold ignores it. It is what makes the COST floor durable across a
                 # resume — see `_durable_repair_seconds`, which sums these rows, and
@@ -4078,6 +4087,8 @@ class EvaluateMixin:
                     data["reason_summary"] = a._summary
                 if a._findings:
                     data["reason_findings"] = a._findings
+                if a._hypotheses:
+                    data["reason_hypotheses"] = a._hypotheses
                 if a.res.failed_stage:                # Phase 1: pinpoint which pipeline stage broke
                     data["failed_stage"] = a.res.failed_stage
                 if a.triage_outcome is not None:
