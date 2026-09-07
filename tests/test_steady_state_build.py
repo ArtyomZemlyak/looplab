@@ -137,3 +137,65 @@ def test_the_pause_breaker_stops_the_lane_from_starting_more_work(tmp_path):
     starts, _ = _starts_and_ends(timeline)
     window = [t for t in starts if raised[0] < t < drained[0]]
     assert not window, f"{len(window)} build(s) started after the pause and before the drain"
+
+
+def _drop_one_per_proposal(engine, dropped_ideas: list):
+    """Make every batch proposal reject one idea beside the one it returns — the shape whose
+    node-less Cards the SUCCESS path is responsible for recording."""
+    from looplab.core.models import Idea
+    real = engine._await_batch_proposal
+
+    async def _with_a_drop(state, width):
+        ideas, telemetry, _dropped = await real(state, width)
+        if not ideas:
+            return ideas, telemetry, _dropped
+        rejected = Idea(hypothesis=f"rejected-{len(dropped_ideas)}",
+                        rationale="a near-duplicate", operator="tweak", params={})
+        dropped_ideas.append(rejected.hypothesis)
+        engine._pending_batch_dropped = [{"idea": rejected, "reason": "semantic_duplicate"}]
+        return ideas, telemetry, [{"idea": rejected, "reason": "semantic_duplicate"}]
+
+    engine._await_batch_proposal = _with_a_drop
+
+
+def test_a_reject_beside_an_accepted_idea_still_gets_its_node_less_card(tmp_path):
+    """THE SUCCESS PATH OWNS THE DROPS TOO. The two failure paths (no ideas, a degraded fallback)
+    record them; a lane that proposed successfully used to return without ever calling
+    `_record_dropped_batch_cards`, so a reject that shared its turn with an accepted idea vanished
+    from the Card board entirely — the one case where the board is meant to say what was refused
+    and why. Driven through the real lane, counting the closed Cards the run actually wrote."""
+    engine, _timeline = _timed_engine(tmp_path / "drops", steady=True, slow_first=0.0)
+    dropped_ideas: list[str] = []
+    recorded: list = []
+    real_record = engine._record_dropped_batch_cards
+
+    def _count(dropped):
+        recorded.extend(d.get("reason") for d in (dropped or []) if isinstance(d, dict))
+        return real_record(dropped)
+
+    engine._record_dropped_batch_cards = _count
+    _drop_one_per_proposal(engine, dropped_ideas)
+    anyio.run(engine.run)
+    assert dropped_ideas, "the fixture never produced a reject"
+    assert recorded.count("semantic_duplicate") == len(dropped_ideas), (
+        f"{len(dropped_ideas)} reject(s) proposed, {recorded.count('semantic_duplicate')} recorded")
+
+
+def test_the_lane_spends_the_batch_capabilities_before_the_next_proposal(tmp_path):
+    """`_pending_batch_novelty_gated` is a ONE-SHOT gate bypass keyed on object identity, and the
+    lane reserves every Idea it accepts — so leaving the list populated carries an already-built
+    proposal into the next iteration as a live bypass. The chunked path clears both lists once its
+    reservations are durable; this asserts the lane does too, observed at each proposal."""
+    engine, _timeline = _timed_engine(tmp_path / "spend", steady=True, slow_first=0.0)
+    real = engine._await_batch_proposal
+    seen_at_entry: list[int] = []
+
+    async def _observe(state, width):
+        seen_at_entry.append(len(getattr(engine, "_pending_batch_novelty_gated", None) or []))
+        return await real(state, width)
+
+    engine._await_batch_proposal = _observe
+    anyio.run(engine.run)
+    assert len(seen_at_entry) > 1, "only one proposal ran — the property is about the NEXT one"
+    assert seen_at_entry[1:] == [0] * len(seen_at_entry[1:]), (
+        f"a spent capability survived into a later proposal: {seen_at_entry}")

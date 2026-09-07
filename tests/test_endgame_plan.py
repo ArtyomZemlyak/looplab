@@ -231,3 +231,26 @@ def test_the_endgame_rule_names_the_sweep_and_a_strategist_may_switch_it_off(tmp
     assert eng._endgame_sweep is True
     eng._apply_strategy({"policy": "greedy", "operators": {"endgame_sweep": False}})
     assert eng._endgame_sweep is False
+
+
+def test_the_brief_names_the_sweep_only_when_the_run_has_a_reserve():
+    """PROMPT STRINGS ARE CONTRACTS, and `endgame_sweep` is an operator over the endgame RESERVE.
+    `endgame_reserve_frac=0` — the legacy default a resumed pre-plan run keeps — builds no plan at
+    all, so the sentence described a knob that could not do anything and invited the Strategist to
+    spend a field on it. Gating on the run's own durable plan also keeps such a resume's brief
+    byte-identical to what it was before the field existed: the ONLY difference between the two
+    briefs below is that clause."""
+    from looplab.agents.strategist import StrategyContext, _strategist_brief
+    from looplab.core.models import RunState
+
+    ctx = StrategyContext()
+    without = _strategist_brief(RunState(), ctx)
+    planned = RunState()
+    planned.plan = {"endgame_start": 8, "phases": [{"name": "endgame", "reserve": True}]}
+    with_plan = _strategist_brief(planned, ctx)
+
+    assert "endgame_sweep" not in without
+    assert "endgame_sweep=false" in with_plan
+    clause = ("endgame_sweep=false keeps the plan's endgame reserve for the ensemble alone "
+              "(default: the reserve also sweeps the champion with the k-NN surrogate); ")
+    assert with_plan.replace(clause, "") == without

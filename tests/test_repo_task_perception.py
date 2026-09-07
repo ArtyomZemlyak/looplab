@@ -16,6 +16,7 @@ from looplab.core.models import RunState
 from looplab.core.profile import profile_dataset
 from looplab.search.foresight import verified_report
 from looplab.tools.run_tools import DataTools
+from tests.factories import make_engine
 
 
 def _data(tmp_path):
@@ -109,15 +110,12 @@ def test_data_tools_serve_the_repo_task(tmp_path):
 
 def test_the_engine_profiles_a_repo_task_at_setup(tmp_path):
     from tests.test_repo_task import _EditConfigDev, _task as _fixture_task
-    from looplab.engine.orchestrator import Engine
-    from looplab.runtime.sandbox import SubprocessSandbox
-    from looplab.search.policy import GreedyTree
 
     raw, _, _ = _data(tmp_path)
     t = _fixture_task(data={"raw": str(raw)})
     researcher, _ = t.build_roles()
-    engine = Engine(tmp_path / "run", task=t, researcher=researcher, developer=_EditConfigDev(),
-                    sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1))
+    engine = make_engine(tmp_path / "run", task=t, researcher=researcher,
+                         developer=_EditConfigDev(), n_seeds=1, max_nodes=1)
     state = anyio.run(engine.run)
     assert state.finished
     rows = [e.data for e in engine.store.read_all() if e.type == "data_profiled"]

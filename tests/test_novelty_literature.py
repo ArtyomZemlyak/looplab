@@ -128,3 +128,25 @@ def test_the_audit_rows_declare_the_key_they_can_now_carry():
 
     for etype in ("novelty_rejected", "novelty_graded", "cross_run_prior"):
         assert "literature" in EVENT_PAYLOAD_KEYS[etype].keys, etype
+
+
+def test_a_non_ascii_idea_is_measured_and_not_silently_zero():
+    """THE TOKENIZER IS THE SHARED ONE (`core/text.py::tokenize`), and this is why. A local
+    `[a-z0-9_]+` class reduces a Cyrillic or CJK idea to NO tokens, so the overlap is empty — and
+    an empty overlap is not "nothing similar was retrieved", it is the answer the caller's own
+    docstring warns must never be read as evidence of absence. The Russian idea below matched
+    nothing at all against a Russian paper on its own subject.
+
+    The `[a-z0-9_]+` class also glued identifiers together; the shared rule splits on underscore,
+    so `train_loss` in an idea meets `training loss` in a title."""
+    russian = [{"id": "p1", "title": "Обучение с подкреплением для отбора признаков",
+                "snippet": "отбор признаков градиентный бустинг"}]
+    hits = literature_overlap("отбор признаков с помощью градиентного бустинга", russian)
+    assert [row["id"] for row in hits] == ["p1"], hits
+
+    from looplab.engine.novelty import _content_tokens
+    assert _content_tokens("train_loss schedule") == {"train", "loss", "schedule"}
+    # …and the ASCII behaviour it replaced is unchanged where it already worked.
+    ascii_hits = literature_overlap("feature selection via gradient boosting",
+                                    [{"id": "p2", "title": "Feature selection with gradient boosting"}])
+    assert [row["id"] for row in ascii_hits] == ["p2"]

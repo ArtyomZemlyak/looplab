@@ -588,6 +588,14 @@ def verify_memo(memo: dict, state: RunState, client=None,
 # unsupported, and a lenient matcher would report the opposite of the thing being measured.
 _MIN_STATEMENT_CHARS = 20              # "Yes." and a list bullet are not synthesis statements
 _MIN_TITLE_CHARS = 12                  # a source title short enough to appear by accident is not a cite
+# THE SAME RULE, APPLIED TO THE OTHER TWO LITERALS, because the memo writes them and the coverage
+# is read as a measurement of it. `_is_bound` asks whether a statement CONTAINS one of these, so a
+# one-character evidence id binds every statement with that letter in it: `{"evidence_ids": ["e"]}`
+# beside two ordinary sentences measured 1.0 coverage for a memo that cites nothing. A real id is
+# `ev-` + 24 hex (`core/research_record.py::evidence_item`) and a real URL is longer than its
+# scheme, so neither floor can refuse an honest cite — they refuse an accidental one.
+_MIN_EVIDENCE_ID_CHARS = 8
+_MIN_URL_CHARS = 12
 _NODE_REFERENCE = re.compile(r"(?:#|\bnode\s+|\bexperiment\s+)(\d{1,6})", re.I)
 
 
@@ -614,17 +622,20 @@ def _binding_vocabulary(memo: dict) -> tuple[set[int], set[str], list[str]]:
         if not isinstance(claim, dict):
             continue
         nodes.update(n for n in (claim.get("node_ids") or ()) if type(n) is int)
-        evidence.update(e for e in (claim.get("evidence_ids") or ()) if isinstance(e, str) and e)
-        literals.extend(u for u in (claim.get("urls") or ()) if isinstance(u, str) and u)
+        evidence.update(e for e in (claim.get("evidence_ids") or ())
+                        if isinstance(e, str) and len(e.strip()) >= _MIN_EVIDENCE_ID_CHARS)
+        literals.extend(u for u in (claim.get("urls") or ())
+                        if isinstance(u, str) and len(u.strip()) >= _MIN_URL_CHARS)
     for item in (memo.get("evidence") or ()):
-        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+        if (isinstance(item, dict) and isinstance(item.get("id"), str)
+                and len(item["id"].strip()) >= _MIN_EVIDENCE_ID_CHARS):
             evidence.add(item["id"])
     for source in (memo.get("sources") or ()):
         if not isinstance(source, dict):
             continue
         url = source.get("url")
         title = source.get("title")
-        if isinstance(url, str) and url:
+        if isinstance(url, str) and len(url.strip()) >= _MIN_URL_CHARS:
             literals.append(url)
         if isinstance(title, str) and len(title.strip()) >= _MIN_TITLE_CHARS:
             literals.append(title.strip())

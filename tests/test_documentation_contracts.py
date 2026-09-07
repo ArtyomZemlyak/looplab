@@ -368,3 +368,20 @@ def test_the_archived_narratives_still_cover_every_package_map_row():
     assert not missing, f"package-map rows with no archived narrative section: {missing}"
     assert "## Engine invariants (the full account)" in archive
     assert "## Conventions and traps (the full account)" in archive
+
+
+def test_the_engine_row_states_the_real_mixin_count():
+    """The package map calls `Engine` "N mixins" and then lists ~35 modules, most of which are not
+    mixins. The number said twenty-one while `Engine.__bases__` held twenty — and CLAUDE.md's own
+    rule for exactly this shape is "the count comes from the parser, never a person". Derived here
+    so the sentence cannot drift again without a red test."""
+    import re
+
+    from looplab.engine.orchestrator import Engine
+
+    claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8-sig")
+    stated = re.search(r"and (\d+) mixins:", claude)
+    assert stated, "the engine row no longer states a mixin count — restate it or drop this guard"
+    assert int(stated.group(1)) == len(Engine.__bases__), (
+        f"CLAUDE.md says {stated.group(1)} mixins; `Engine.__bases__` holds "
+        f"{len(Engine.__bases__)}")

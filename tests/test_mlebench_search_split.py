@@ -27,10 +27,8 @@ from pydantic import BaseModel
 from looplab.adapters import mlebench_grade, mlebench_split
 from looplab.core.errors import ConfigRefusal
 from looplab.core.models import Idea
-from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
-from looplab.runtime.sandbox import SubprocessSandbox
-from looplab.search.policy import GreedyTree
+from tests.factories import make_engine
 
 CLASSES = ["EAP", "HPL", "MWS"]
 TRAIN = [("t1", "the dread shadow horror fear", "HPL"),
@@ -208,8 +206,8 @@ def graders(monkeypatch):
 
 
 def _engine(rd, **kw):
-    return Engine(rd, task=_Task(), researcher=_Stub(), developer=_Dev(),
-                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=2), **kw)
+    return make_engine(rd, task=_Task(), researcher=_Stub(), developer=_Dev(),
+                       n_seeds=2, max_nodes=2, **kw)
 
 
 def test_the_search_sees_the_hidden_slice_and_the_private_answers_once(tmp_path, graders):
@@ -276,9 +274,8 @@ def test_an_undecidable_layout_refuses_the_run_at_start(tmp_path):
             a["sample_submission.csv"] = _csv(["id", "p_fish", "p_bird"], [["e1", "0", "0"]])
             return a
     with pytest.raises(ConfigRefusal, match="holdout_fraction=0"):
-        Engine(tmp_path / "run", task=_Odd(), researcher=_Stub(), developer=_Dev(),
-               sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
-               holdout_fraction=0.5)
+        make_engine(tmp_path / "run", task=_Odd(), researcher=_Stub(), developer=_Dev(),
+                    n_seeds=1, max_nodes=1, holdout_fraction=0.5)
 
 
 def test_a_recarve_draws_from_the_original_files(tmp_path):

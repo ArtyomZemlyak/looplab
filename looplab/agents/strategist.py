@@ -830,9 +830,16 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         "endgame or on a compounding lead, else balanced; "
         "optional ablate_every, merge_mode mean|ensemble, complexity_cue, prefer_sweep — set "
         "prefer_sweep=true to bias the researcher toward an in-process hyperparameter sweep when "
-        "evals are costly and the space is numeric; endgame_sweep=false keeps the plan's endgame "
-        "reserve for the ensemble alone (default: the reserve also sweeps the champion with the "
-        "k-NN surrogate); set request_research=true when the run is "
+        "evals are costly and the space is numeric; "
+        # ONLY WHEN THE RUN HAS A PLAN. `endgame_sweep` is an operator over the endgame RESERVE,
+        # and `endgame_reserve_frac=0` (the legacy default a resumed pre-field run keeps) means
+        # there is no reserve and no plan — so this sentence described a knob that could not do
+        # anything, and the model could spend a field setting it. Gating on the run's own durable
+        # plan is also what keeps a resumed pre-plan run's brief byte-identical to what it was.
+        + ("endgame_sweep=false keeps the plan's endgame reserve for the ensemble alone "
+           "(default: the reserve also sweeps the champion with the k-NN surrogate); "
+           if isinstance(getattr(state, "plan", None), dict) and state.plan else "")
+        + "set request_research=true when the run is "
         "stalled or confused and would benefit from a deep-research step over a stratified run "
         "summary + the "
         "web before continuing; optional timeout (>0), eval_parallel (0..1024), and llm_parallel "

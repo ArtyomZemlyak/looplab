@@ -92,6 +92,29 @@ def test_the_routine_false_positive_is_reported_with_what_distinguishes_it():
     assert report["is_positive"]["rows_per_group"] == 30.0
 
 
+def test_an_imbalanced_target_does_not_make_every_column_a_finding():
+    """RAW PURITY IS THE BASE RATE ON A SKEWED TARGET, so a rung that reported it would report
+    every column of a rare-event table. Driven: at 98/2 an alternating flag and a three-valued
+    group each predict the majority label for every row and score exactly 0.98 unrescaled — the
+    base rate — while explaining nothing. Against the reducible error both are 0.0 and silent, and
+    the column that actually determines the rare event is still 1.0."""
+    target = [0.0] * 98 + [1.0, 1.0]
+    assert categorical_leak({"flag": [float(i % 2) for i in range(100)]}, target) == {}
+    assert categorical_leak({"g": [float(i % 3) for i in range(100)]}, target) == {}
+    leaky = categorical_leak({"grader": list(target)}, target)
+    assert leaky["grader"]["score"] == pytest.approx(1.0)
+    assert leaky["grader"]["purity"] == pytest.approx(1.0)
+    assert leaky["grader"]["base_rate"] == pytest.approx(0.98)
+
+
+def test_the_row_says_both_numbers_so_a_reader_can_tell_the_two_apart():
+    """A column at the bar on a BALANCED target and one at the bar on a skewed one are the same
+    `score` and different findings; `purity` and `base_rate` beside it are what separates them."""
+    balanced = [float(i % 2) for i in range(60)]
+    row = categorical_leak({"is_positive": balanced}, list(balanced))["is_positive"]
+    assert row["purity"] == pytest.approx(1.0) and row["base_rate"] == pytest.approx(0.5)
+
+
 def test_a_short_table_or_a_constant_target_produces_nothing():
     assert categorical_leak({"x": [1.0, 2.0]}, [1.0, 2.0]) == {}
     assert categorical_leak({"x": [float(i % 4) for i in range(40)]}, [7.0] * 40) == {}

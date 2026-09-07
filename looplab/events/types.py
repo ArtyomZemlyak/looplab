@@ -1181,7 +1181,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "comparable_population", "confidence", "direction", "generation", "intermediate",
             "kill", "node_id", "quantile", "reason", "status", "stop_decided", "under_streak"
         ),
-        optional=(),
+        optional=("confidence_valid", "kill_superseded_by", "train_monitor_status"),
     ),
     "belief_admission": PayloadContract(
         "How many researcher-proposed beliefs one proposal turn offered and how many the board admitted.",
@@ -1434,7 +1434,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "finalize_step": PayloadContract(
         "One replay-safe step gate inside a single logical finalization.",
         required=(),
-        optional=("finish_data", "finish_report_planned", "outcome", "scope", "step"),
+        optional=("after_seq", "finish_data", "finish_report_planned", "outcome", "scope", "step"),
     ),
     "force_ablate": PayloadContract(
         "The operator asked for an ablation of one node.",
@@ -1486,7 +1486,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "host_grading": PayloadContract(
         "The host-side scorer's grade over the candidate's predictions.",
         required=("predictions", "scorer"),
-        optional=(),
+        optional=("competition", "n_hidden", "n_labels", "protocol"),
         stored_whole=True,
     ),
     "hypothesis_added": PayloadContract(
@@ -1567,7 +1567,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "calls", "completion_tokens", "cost", "priced_calls", "prompt_tokens",
             "total_tokens"
         ),
-        optional=(),
+        optional=("finalize_scope", "finish_seq"),
         stored_whole=True,
     ),
     "llm_usage": PayloadContract(
@@ -1584,7 +1584,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "memory_read": PayloadContract(
         "One memory / cross-run / skill tool call: the rows it showed and the digest of the exact bytes the role saw.",
         required=("args", "invocation_id", "result_chars", "result_sha256", "rows", "tool"),
-        optional=(),
+        optional=("source",),          # written by `data["source"] = …` after the literal
     ),
     "node_abort": PayloadContract(
         "The operator aborted one node.",
@@ -1642,9 +1642,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "A node's other terminal: why the evaluation produced no number, and who said so.",
         required=(),
         optional=(
-            "attempt", "engine_reason", "error", "eval_seconds", "failed_stage", "finish_data",
-            "finish_report_planned", "generation", "never_evaluated", "node_id", "reason",
-            "reason_hypotheses", "reason_source", "scope", "step", "triage_rationale"
+            "attempt", "card_id", "engine_reason", "error", "error_evidence", "eval_seconds",
+            "failed_stage", "finish_data", "finish_report_planned", "generation", "never_evaluated",
+            "node_id", "reason", "reason_evidence", "reason_evidence_resolved", "reason_findings",
+            "reason_hypotheses", "reason_source", "reason_summary", "scope", "step",
+            "triage_rationale"
         ),
     ),
     "node_repaired": PayloadContract(
@@ -1718,7 +1720,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "prior_injected": PayloadContract(
         "A cross-run prior was put in front of a role at a node — the receipt the citation instrument reads.",
         required=(),
-        optional=("at_node", "phase", "role"),
+        # The last five arrive as `**receipt` from `lessons_priors.py::_pick_role_prior`, a spread
+        # the writer scan reads as opaque — so they are declared from the builder by hand and the
+        # type is named in `tests/test_event_payload_contract.py::OPAQUE_PAYLOAD_WRITERS`.
+        optional=(
+            "at_node", "case", "notes", "phase", "quarantined_useless", "role", "rows", "source"
+        ),
     ),
     "promote": PayloadContract(
         "The operator promoted one node to an alias (`champion` by default).",
@@ -1756,7 +1763,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "report_generated": PayloadContract(
         "A run report was written, at a node and for a stated trigger.",
         required=("at_node", "content", "trigger"),
-        optional=("generation", "refresh_id"),
+        optional=("finalize_scope", "generation", "refresh_id"),
     ),
     "report_refresh_failed": PayloadContract(
         "A paid report refresh failed before anything was written — sanitized, retry-safe.",
@@ -1944,7 +1951,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "strategy_decision": PayloadContract(
         "The Strategist's consult: the strategy it returned and the context it was given.",
         required=("at_node", "ctx", "strategy"),
-        optional=("developer_application",),
+        optional=("developer_application", "width_unfilled"),
     ),
     "trace_export_health": PayloadContract(
         "The span exporter is unhealthy — one row per distinct state, never on a healthy run.",
@@ -1958,7 +1965,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "train_monitor_alert": PayloadContract(
         "The live training-log judge's verdict about one running stage, and the log role it judged.",
         required=("confidence", "generation", "log_role", "node_id", "reason", "status"),
-        optional=(),
+        optional=(
+            "citation_resolved", "confidence_valid", "evidence_locator", "evidence_source", "fault",
+            "kill", "kill_role_withheld", "kill_superseded_by", "repair_decided", "stage",
+            "stop_decided", "trajectory", "trajectory_veto"
+        ),
     ),
     "trust_gate_changed": PayloadContract(
         "The run's trust gate was changed, by a named source (last write wins).",

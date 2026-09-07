@@ -34,13 +34,11 @@ from looplab.adapters.repo_task import (EvalSpec, HostScorerSpec, RepoTask,
                                         host_scorer_outside_editables)
 from looplab.adapters.tasks import validate_task
 from looplab.core.models import Idea
-from looplab.engine.orchestrator import Engine
 from looplab.events.replay import fold
 from looplab.runtime.command_eval import (HOST_STAGE_KEY, STAGE_KEYS, SUBJECT_TOKEN,
                                           expand_subject, host_program_token, run_command_eval,
                                           validate_stages)
-from looplab.runtime.sandbox import SubprocessSandbox
-from looplab.search.policy import GreedyTree
+from tests.factories import make_engine
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 _M = {"kind": "stdout_json", "key": "metric"}
@@ -128,8 +126,8 @@ def test_the_host_stage_key_is_engine_stamped_and_never_declarable():
 # ------------------------------------------------------------------------- 2. THE PIPELINE SHAPE
 def _engine(tmp_path, task, developer):
     researcher, _ = task.build_roles()
-    return Engine(tmp_path / "run", task=task, researcher=researcher, developer=developer,
-                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=3))
+    return make_engine(tmp_path / "run", task=task, researcher=researcher,
+                       developer=developer, n_seeds=2, max_nodes=3)
 
 
 class _Dev:
@@ -322,3 +320,43 @@ def test_a_task_without_a_host_scorer_records_nothing_new(tmp_path):
     assert not (best.metric_provenance or {}).get("host_scorer")
     assert all("self_metric" not in e.data for e in engine.store.read_all()
                if e.type == "node_evaluated")
+
+
+def test_the_host_stage_is_the_pipelines_only_score_stage(tmp_path):
+    """`validate_stages` reserves nothing for the OPERATOR's own list — they own scoring — which
+    is right when their `cmd` IS the scorer. With a host scorer declared the engine appends a
+    stage called `score` after it, so an operator pipeline that already ends in one produced TWO:
+    both writing `score.log`, collapsing to one row in the per-NAME projection and leaving a
+    stage-scoped re-run with no way to say which.
+
+    The candidate's becomes `self_score` — the name this module already uses beside a host scorer —
+    and the runtime reads `self_metric` off the stage BEFORE the host one by position, so the
+    number on the record is unchanged. A pipeline that declares `self_score` too gets a suffix
+    rather than the collision back."""
+    from looplab.engine.eval_stages import EvalStagesMixin
+    from looplab.runtime import command_eval
+
+    class _Stages(EvalStagesMixin):
+        metric_subject = "audit"
+
+    host = {"command": [sys.executable, str(tmp_path / "host.py")]}
+    declared = [{"name": "train", "command": ["python", "t.py"]},
+                {"name": "score", "command": ["python", "s.py"]}]
+    es = {"stages": declared, "host_scorer": host, "command": ["python", "s.py"]}
+    names = [s["name"] for s in _Stages()._resolve_stages(tmp_path, es, params={})]
+    assert names == ["train", "self_score", "score"], names
+    assert len(names) == len(set(names))
+    # …and the host stage is the last one, carrying the key only the engine may stamp.
+    resolved = _Stages()._resolve_stages(tmp_path, es, params={})
+    assert resolved[-1].get(command_eval.HOST_STAGE_KEY) is True
+
+    # WITHOUT a host scorer the operator's `score` keeps its name: they own scoring.
+    plain = {"stages": declared, "command": ["python", "s.py"]}
+    assert [s["name"] for s in _Stages()._resolve_stages(tmp_path, plain, params={})] == [
+        "train", "score"]
+
+    taken = {"stages": [{"name": "self_score", "command": ["python", "a.py"]},
+                        {"name": "score", "command": ["python", "s.py"]}],
+             "host_scorer": host, "command": ["python", "s.py"]}
+    collided = [s["name"] for s in _Stages()._resolve_stages(tmp_path, taken, params={})]
+    assert collided == ["self_score", "self_score_1", "score"], collided

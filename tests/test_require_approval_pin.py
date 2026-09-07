@@ -20,11 +20,9 @@ import anyio
 
 from looplab.adapters.toytask import ToyTask
 from looplab.core.config import RUN_START_PINNED_FIELDS, run_start_pinned_settings
-from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
-from looplab.runtime.sandbox import SubprocessSandbox
-from looplab.search.policy import GreedyTree
+from tests.factories import make_engine
 
 TASK = Path(__file__).resolve().parents[1] / "examples" / "toy_task.json"
 
@@ -32,8 +30,7 @@ TASK = Path(__file__).resolve().parents[1] / "examples" / "toy_task.json"
 def _engine(rd, **kw):
     task = ToyTask.load(TASK)
     r, d = task.build_roles()
-    return Engine(rd, task=task, researcher=r, developer=d, sandbox=SubprocessSandbox(),
-                  policy=GreedyTree(n_seeds=2, max_nodes=4), **kw)
+    return make_engine(rd, task=task, researcher=r, developer=d, n_seeds=2, max_nodes=4, **kw)
 
 
 def _started(rd):

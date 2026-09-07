@@ -27,6 +27,7 @@ import pytest
 
 from looplab.runtime import read_allowlist, read_fence
 from looplab.runtime.sandbox import run_argv
+from tests.factories import make_engine
 
 
 def _world(tmp_path):
@@ -292,9 +293,6 @@ def _git_repo(root, tracked):
 def _repo_run(tmp_path, policy):
     import anyio
     from looplab.adapters.repo_task import EvalSpec, RepoTask
-    from looplab.engine.orchestrator import Engine
-    from looplab.runtime.sandbox import SubprocessSandbox
-    from looplab.search.policy import GreedyTree
 
     src = _git_repo(Path(tmp_path) / "repo", {"looplab_eval.py": _FORGER})
     task = RepoTask(id="p", direction="max", editable_path=str(src), protect=["looplab_eval.py"],
@@ -302,9 +300,8 @@ def _repo_run(tmp_path, policy):
                                   metric={"kind": "stdout_json", "key": "metric"}))
     researcher, developer = task.build_roles()
     run_dir = tmp_path / ("run-" + policy)
-    engine = Engine(run_dir, task=task, researcher=researcher, developer=developer,
-                    sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
-                    read_fence=policy)
+    engine = make_engine(run_dir, task=task, researcher=researcher, developer=developer,
+                         n_seeds=1, max_nodes=1, read_fence=policy)
     state = anyio.run(engine.run)
     rows = [json.loads(x) for x in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
             if x.strip()]

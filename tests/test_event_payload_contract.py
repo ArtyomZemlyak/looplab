@@ -87,6 +87,45 @@ def test_every_key_a_writer_writes_is_declared(writers):
         f"event writers put undeclared keys in the payload: {undeclared}")
 
 
+# The event types whose payload is built by a spread the writer scan CANNOT resolve, so their keys
+# are declared from the builder by hand instead of derived from the append site. Shrink-only, and
+# not empty by accident: `prior_injected` writes `{…, **receipt}` where the receipt is built five
+# frames away, and while the scan silently reported "no undeclared keys" for it, five of its eight
+# keys had no row at all and the generated reference under-described the record.
+OPAQUE_PAYLOAD_WRITERS = frozenset({
+    "agent_validated", "card_enriched", "concept_coverage_snapshot", "coverage_snapshot",
+    "cross_run_prior", "diversity_archive", "finalize_step", "novelty_graded",
+    "novelty_rejected", "prior_injected", "run_finished", "run_started", "run_width_settled",
+    "setup_step", "spec_drift", "stage_finished"})
+
+
+def test_the_writer_scan_says_which_types_it_cannot_verify(writers):
+    """A SCAN THAT CANNOT SEE A PAYLOAD MUST NOT READ AS A CLEAN ONE. `test_every_key_a_writer
+    _writes_is_declared` passes vacuously for a type built by an unresolvable `**spread` — there
+    are no literal keys to compare — so the set of such types is named here and may only shrink.
+
+    Adding a type to the allow-list is the honest move ONLY together with a hand-written key list
+    on its contract row; removing the spread is better."""
+    opaque = {etype for etype, row in writers.items() if row["opaque"]}
+    assert opaque <= OPAQUE_PAYLOAD_WRITERS, (
+        "a new event payload is built by a spread the scan cannot resolve, so nothing checks its "
+        f"declared keys: {sorted(opaque - OPAQUE_PAYLOAD_WRITERS)}")
+    assert OPAQUE_PAYLOAD_WRITERS <= opaque, (
+        "listed as opaque but the scan can now read it — delete the row: "
+        f"{sorted(OPAQUE_PAYLOAD_WRITERS - opaque)}")
+    for etype in OPAQUE_PAYLOAD_WRITERS:
+        assert EVENT_PAYLOAD_KEYS[etype].keys, (
+            f"{etype} is unverifiable AND declares no key — the record is undescribed either way")
+
+
+def test_a_key_added_to_a_payload_after_its_literal_is_seen(writers):
+    """`data["source"] = …` after the dict literal is a payload key, and the dict walk cannot see
+    it: `memory_read.source` reached the log undeclared while this scan reported the type fully
+    covered. Pinned on the one live instance so the subscript hop cannot be dropped as dead code."""
+    assert "source" in writers["memory_read"]["any"], (
+        "the writer scan stopped following subscript writes into the payload")
+
+
 def test_required_keys_are_written_by_every_literal_writer(writers):
     """`required` is a claim about writers TODAY, so it is checked against every literal one. A key
     one site omits (or writes only inside a conditional spread) is `optional`, whatever it means."""

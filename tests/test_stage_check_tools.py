@@ -34,6 +34,7 @@ from looplab.engine.eval_stages import (STAGE_CHECK_LOOK_INVITATION, STAGE_CHECK
 from looplab.engine.options import EngineOptions
 from looplab.runtime.command_eval import STAGE_CHECK_INCONCLUSIVE, run_command_eval
 from looplab.tools.log_tools import LogQueryTools
+from tests.factories import make_engine
 
 # The window `command_eval._run_stages` hands the checker, spelled here so a test that claims to be
 # about the tail is actually about THAT tail.
@@ -90,14 +91,10 @@ def _looker(answer: str) -> _Client:
 
 def _engine(tmp_path, client, *, tools=True):
     from looplab.adapters.toytask import ToyTask
-    from looplab.engine.orchestrator import Engine
-    from looplab.runtime.sandbox import SubprocessSandbox
-    from looplab.search.policy import GreedyTree
     task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
     researcher, developer = task.build_roles()
-    engine = Engine(tmp_path / "run", task=task, researcher=researcher, developer=developer,
-                    sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=3),
-                    stage_check_tools=tools)
+    engine = make_engine(tmp_path / "run", task=task, researcher=researcher,
+                         developer=developer, n_seeds=2, max_nodes=3, stage_check_tools=tools)
     engine._eval_spec = {"metric": {"reader": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)"}}
     engine._reflect_client = lambda: client
     return engine

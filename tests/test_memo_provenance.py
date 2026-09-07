@@ -119,3 +119,25 @@ def test_the_engine_records_the_coverage_for_every_memo_it_writes():
     # two statements, neither bound: the memo cites no node, no evidence id and no source
     assert memo["provenance"]["statements"] == 3 and memo["provenance"]["bound"] == 0
     assert memo["provenance"]["coverage"] == pytest.approx(0.0)
+
+
+def test_a_token_short_enough_to_appear_by_accident_does_not_bind():
+    """`_is_bound` asks whether a statement CONTAINS one of the memo's literals, and the memo
+    WRITES those literals — so a one-character evidence id binds every statement carrying that
+    letter. Measured before the floor: `{"evidence_ids": ["e"]}` beside two ordinary sentences
+    reported 1.0 coverage for a memo that cites nothing, which is the number reading backwards.
+
+    The floors are set below the shortest honest cite (`ev-` + 24 hex, and a URL longer than its
+    scheme), so an accidental match is refused and a real one is not."""
+    prose = "The model converges quickly. Tuning the learning rate helped a lot here."
+    assert provenance_coverage({"summary": prose, "claims": [{"evidence_ids": ["e"]}]})["coverage"] == 0.0
+    assert provenance_coverage({"summary": prose, "evidence": [{"id": "a"}]})["coverage"] == 0.0
+    assert provenance_coverage({"summary": prose, "claims": [{"urls": ["a.io"]}]})["coverage"] == 0.0
+
+    real = "ev-1a2b3c4d5e6f7a8b9c0d1e2f"
+    bound = provenance_coverage({"summary": f"The learning rate is what moved it ({real}).",
+                                 "evidence": [{"id": real}]})
+    assert bound["coverage"] == 1.0, "the floor must not refuse a real evidence id"
+    url = "https://arxiv.org/abs/2401.00001"
+    assert provenance_coverage({"summary": f"The schedule follows {url} exactly, step for step.",
+                                "sources": [{"url": url}]})["coverage"] == 1.0

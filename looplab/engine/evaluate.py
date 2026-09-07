@@ -932,6 +932,28 @@ class EvalAttempt:
             return False
 
 
+# THE SLOTS THAT CARRY ONE DIAGNOSIS, and the whole reason they are named in one place: each of
+# them rides a durable failure row through the same `if a._x` test, so a value left over from an
+# EARLIER attempt is that attempt's account printed on this one's record, indistinguishable from
+# the real thing. Two sites clear them (a fresh attempt, and a chain whose next attempt is not
+# diagnosed) and both go through `reset_diagnosis`, because the version that spelled the
+# assignments out at each site is the version that reset four of the five: `_hypotheses` was added
+# beside `_findings` at the WRITE site and at neither RESET site.
+DIAGNOSIS_SLOTS = ("_evidence", "_evidence_resolved", "_summary", "_findings", "_hypotheses")
+# The slots a failure row also carries but which are REBOUND rather than cleared: a failure always
+# has an author, so the reset for `_reason_source` is `REASON_SOURCE_ENGINE` and not None. Named
+# here so the exception is written down rather than widening the rule above.
+DIAGNOSIS_DEFAULTED = ("_reason_source",)
+
+
+def reset_diagnosis(a: "EvalAttempt") -> None:
+    """Clear every `DIAGNOSIS_SLOTS` value on `a`. `None`, never `""`/`[]` — see the two call
+    sites: an absent key on the durable row means "nobody was asked", which is a different fact
+    from "asked and wrote nothing down"."""
+    for slot in DIAGNOSIS_SLOTS:
+        setattr(a, slot, None)
+
+
 class EvaluateMixin:
     """The engine's eval-task cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
@@ -2387,15 +2409,12 @@ class EvaluateMixin:
         # are OMITTED from a durable row when None rather than written empty: an absent key
         # means "nobody was asked", which is deliberately not the same fact as "asked and cited
         # nothing" (`failure_diagnosis.EVIDENCE_SOURCE_NONE`).
-        a._evidence = None
-        a._evidence_resolved = None
         # …and the ACCOUNT plus the trail behind it, on the same rule. `None`/`None` and not
         # `""`/`[]`, deliberately: an empty summary and an empty list are a diagnostician that
         # was asked and wrote nothing down, which is a real and different answer from one that
         # was never asked. The durable rows omit the keys in both cases and an old row omits
         # them too — the reader-side default (invariant #5) is "nobody looked".
-        a._summary = None
-        a._findings = None
+        reset_diagnosis(a)
         # THE EVIDENCE THE JUDGE DECIDES ON: this node's repair history, newest last. One row per
         # attempt — what failed, what the fix claimed it would do, and which files it actually
         # touched. Rows made in THIS process are appended from loop locals (every field is already
@@ -2688,8 +2707,7 @@ class EvaluateMixin:
         # of a DIFFERENT failure written in confident prose on this attempt's row, which is
         # strictly worse than an absent one — a reader cannot tell it apart from a correct
         # one, and that is exactly the property the summary is trusted for.
-        a._evidence, a._evidence_resolved = None, None
-        a._summary, a._findings = None, None
+        reset_diagnosis(a)
         # The node's whole account of what went wrong — see `_eval_failure_text`, which is
         # where the no-metric hint and the blank-stderr fallback now live.
         a.err = self._eval_failure_text(a.res)

@@ -225,6 +225,51 @@ def _payload_dict_keys(node: ast.AST) -> tuple[set[str], set[str], bool]:
     return always, maybe, opaque
 
 
+def subscript_string_keys(scope, name: str, *, after: int, before: int) -> set[str]:
+    """`{k}` for every `name["k"] = …` in `scope` BETWEEN two source lines.
+
+    The window is the whole soundness of this: one function often assigns `data` several times and
+    appends several different event types from it, so an unwindowed walk hands every append every
+    other one's keys (measured: 13 types gained keys they never carry). `after` is the line of the
+    dict literal this payload resolved to and `before` the append call, so only the writes that
+    can actually reach THAT payload are collected.
+    """
+    out: set[str] = set()
+    for node in scope:
+        for target in (node.targets if isinstance(node, ast.Assign) else
+                       [node.target] if isinstance(node, ast.AnnAssign) else []):
+            if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+                    and target.value.id == name and isinstance(target.slice, ast.Constant)
+                    and isinstance(target.slice.value, str)
+                    and after < getattr(node, "lineno", 0) < before):
+                out.add(target.slice.value)
+    return out
+
+
+def _scope_bodies(tree: ast.AST) -> Iterator[list[ast.AST]]:
+    """Every module/function scope's OWN nodes, cut at each nested `def`.
+
+    `ast.walk(module)` reaches into every function, so a name-resolution pass run over the module
+    sees every local of every function in the file at once — which is how one function's `payload`
+    literal was read as another's. Yielding each scope's own nodes makes "the last assignment to
+    this name" mean what it says."""
+    stack: list[ast.AST] = [tree]
+    while stack:
+        scope = stack.pop()
+        own: list[ast.AST] = []
+        pending = list(ast.iter_child_nodes(scope))
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                stack.append(node)          # its body belongs to ITS scope, not this one
+                # …but the decorators and defaults are evaluated HERE, so keep them.
+                pending.extend(node.decorator_list)
+                continue
+            own.append(node)
+            pending.extend(ast.iter_child_nodes(node))
+        yield own
+
+
 def _event_type_names() -> dict[str, str]:
     """Every module-level name that IS an event type — the `EV_*` constants plus their aliases.
 
@@ -279,15 +324,19 @@ def event_payload_writers() -> dict[str, dict]:
 
     found: dict[str, dict] = {}
     for path, tree in iter_trees():
-        scopes = [n for n in ast.walk(tree)
-                  if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))]
-        for scope in scopes:
+        # EACH SCOPE'S OWN NODES, never the module's view of every nested function. `ast.walk` on
+        # the Module reaches every body, so a file where two functions each build a local
+        # `payload` had the module pass hand each append the OTHER one's dict literal and
+        # subscript writes — measured: three event types gained an `after_seq` only
+        # `finalize_step` writes. `_own_nodes` cuts at every nested def, so a name resolves in the
+        # scope that actually binds it.
+        for scope in _scope_bodies(tree):
             assigned: dict[str, list[ast.AST]] = {}
-            for node in ast.walk(scope):
+            for node in scope:
                 if (isinstance(node, ast.Assign) and len(node.targets) == 1
                         and isinstance(node.targets[0], ast.Name)):
                     assigned.setdefault(node.targets[0].id, []).append(node.value)
-            for node in ast.walk(scope):
+            for node in scope:
                 if not (isinstance(node, ast.Call) and node.args):
                     continue
                 etype = event_type(node.args[0])
@@ -297,14 +346,30 @@ def event_payload_writers() -> dict[str, dict]:
                            next((k.value for k in node.keywords if k.arg == "data"), None))
                 if payload is None:
                     continue
+                subscripts: set[str] = set()
                 if isinstance(payload, ast.Name):
+                    payload_name = payload.id
                     literals = [v for v in assigned.get(payload.id, []) if isinstance(v, ast.Dict)]
                     if not literals:
                         continue
-                    payload = literals[-1]
+                    # `data["source"] = …` AFTER the literal is a payload key too, and one the
+                    # dict walk cannot see: `memory_read.source` reached the log undeclared while
+                    # this scan reported the type fully covered. A subscript write is `maybe` —
+                    # every one found so far is conditional, and a scan that called it `always`
+                    # would be claiming more than it checked.
+                    # THE LITERAL NEAREST ABOVE THE CALL, not the scope's last one: a function
+                    # that builds several payloads reuses the name, and `literals[-1]` then reads
+                    # a LATER event's dict as this one's. It is also what makes the subscript
+                    # window below sound — the keys collected are the ones assigned between this
+                    # payload's literal and this append.
+                    above = [v for v in literals if v.lineno <= node.lineno]
+                    payload = above[-1] if above else literals[-1]
+                    subscripts = subscript_string_keys(
+                        scope, payload_name, after=payload.lineno, before=node.lineno)
                 if not isinstance(payload, ast.Dict):
                     continue
                 always, maybe, opaque = _payload_dict_keys(payload)
+                maybe |= subscripts
                 row = found.setdefault(etype, {"always": None, "any": set(), "sites": [],
                                                "opaque": False})
                 row["sites"].append(f"{path.relative_to(PKG.parent)}:{node.lineno}")

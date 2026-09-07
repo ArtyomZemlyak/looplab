@@ -32,6 +32,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
 from looplab.agents.roles import researcher_budget_exhausted
 from looplab.engine.card_reservation import discarded_proposal_receipt
 from looplab.engine.shared import effective_researcher_eval_timeout
+from looplab.core.text import tokenize
 from looplab.core.tracing import current_ids
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
 
@@ -250,7 +251,17 @@ LITERATURE_OVERLAP_LIMIT = 3
 
 
 def _content_tokens(text: str) -> set[str]:
-    return {token for token in re.findall(r"[a-z0-9_]+", str(text or "").lower())
+    """`core/text.py::tokenize` minus stopwords and one- and two-character tokens.
+
+    THE SHARED TOKENIZER AND NOT A LOCAL `[a-z0-9_]+`, for the reason its own module docstring
+    gives: an ASCII class silently reduces a Cyrillic or CJK idea to NOTHING, and this function's
+    empty answer means "no overlap found", which the caller's docstring then reads as evidence
+    that the run's reading does not describe the proposal. Driven: a Russian idea against a
+    Russian paper scored zero on every pair. NFKC + casefold also fold the compatibility spellings
+    a title and a prose sentence differ by, and underscore stays a separator there — `train_loss`
+    matching a prose "training loss" is the shape this measure exists to catch.
+    """
+    return {token for token in tokenize(text)
             if len(token) >= _LITERATURE_MIN_TOKEN and token not in _LITERATURE_STOPWORDS}
 
 

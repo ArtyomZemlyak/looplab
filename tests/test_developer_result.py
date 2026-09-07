@@ -37,6 +37,7 @@ from looplab.agents.roles import DEVELOPER_OUTPUT_ATTRS, DeveloperResult, develo
 from looplab.core.models import Idea
 from looplab.engine.node_build import NodeBuildMixin
 from tests._source_scan import function_tree
+from tests.factories import make_engine
 
 
 # ------------------------------------------------------------------------------- 1. THE ENVELOPE
@@ -167,12 +168,10 @@ def _toy_engine(tmp_path, developer, **kw):
 
     from looplab.adapters.toytask import ToyTask
     from looplab.engine.orchestrator import Engine
-    from looplab.runtime.sandbox import SubprocessSandbox
-    from looplab.search.policy import GreedyTree
     task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
     kw.setdefault("auto_install_deps", False)
-    return Engine(tmp_path / "run", task=task, researcher=_Researcher(), developer=developer,
-                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=2), **kw)
+    return make_engine(tmp_path / "run", task=task, researcher=_Researcher(),
+                       developer=developer, n_seeds=1, max_nodes=2, **kw)
 
 
 @pytest.mark.anyio

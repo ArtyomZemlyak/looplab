@@ -285,7 +285,19 @@ class EvalStagesMixin:
             clean, err = command_eval.validate_stages(
                 task_stages, allow_env=True, existing_run=True)
             if err is None:
-                return _expand(clean) + ([self._with_final_needs(es, host)] if host else [])
+                if host:
+                    # THE HOST'S IS THE ONLY `score`. `validate_stages` reserves nothing for the
+                    # OPERATOR's own list (they own scoring), which is right when their `cmd` IS
+                    # the scorer — but with a host scorer declared the engine appends a second
+                    # stage by that name, and two stages called `score` write one `score.log`,
+                    # collapse to one row in the per-NAME projection (`Node.stages`) and make a
+                    # stage-scoped re-run ambiguous. Their stage becomes `self_score`, which is
+                    # the name this module already gives the candidate's own scoring beside a
+                    # host one (`_candidate_then_host`) and which the runtime reads `self_metric`
+                    # off by POSITION, not by name — so the number is recorded exactly as before.
+                    clean = self._rename_candidate_score(clean)
+                    return _expand(clean) + [self._with_final_needs(es, host)]
+                return _expand(clean)
             # A BAD operator list falls back to the SINGLE COMMAND, and must not fall THROUGH to the
             # developer-manifest branch below. Falling through handed stage authorship to the
             # agent-authored looplab_stages.json in exactly the case this branch exists to prevent
@@ -433,6 +445,27 @@ class EvalStagesMixin:
         if isinstance(hs.get("env"), dict) and hs["env"]:
             stage["env"] = dict(hs["env"])
         return stage
+
+    @staticmethod
+    def _rename_candidate_score(stages):
+        """An operator stage named `score` becomes `self_score` — the name reserved beside a host
+        scorer — so the engine's appended host stage is the pipeline's only `score`.
+
+        A suffix is added when `self_score` is itself taken, because the whole point is that no two
+        stages share a name; `validate_stages` has already refused duplicates among the declared
+        ones, so the walk terminates on the first free spelling."""
+        taken = {str(stage.get("name") or "") for stage in stages}
+        out = []
+        for stage in stages:
+            if str(stage.get("name") or "").lower() != "score":
+                out.append(stage)
+                continue
+            name, suffix = "self_score", 1
+            while name in taken:
+                name, suffix = f"self_score_{suffix}", suffix + 1
+            taken.add(name)
+            out.append(dict(stage, name=name))
+        return out
 
     def _candidate_then_host(self, es, params, score_cmd, score_timeout, host):
         """The pipeline for a task with a host scorer and no usable preceding stages: the

@@ -468,6 +468,8 @@ if _RECORD:
         try:
             _wd = _realpath(_wd)
         except Exception:
+            # a bug in the fence must never break the launch: fall back to the lexical path, which
+            # is the same prefix compare against a root that was itself realpath-ed at generation
             _wd = _abspath(_wd)
         _WRITABLE = _WRITABLE + (_wd if _wd.endswith(_SEP) else _wd + _SEP,)
 
@@ -815,7 +817,8 @@ def _hook(event, args):
                 hit = (flags.__class__ is int and (flags & _WRITE_FLAGS) != 0
                        and _record_write(p) is not None)
             except Exception:
-                return
+                return                   # a bug in the RECORD must never break an unrelated open;
+                                         # the refusal above has already run, so nothing is let past
             if hit:
                 _report(p, event, _RECORD_MESSAGE)
         return

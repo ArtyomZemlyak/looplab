@@ -2418,7 +2418,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         free_pairs = list(pairs)
         started = 0
         async with anyio.create_task_group() as tg:
-            for _index, action in enumerate(creates):
+            for action in creates:
                 # BLOCKS UNTIL A LANE IS FREE — this is the whole difference from the barrier, and
                 # it is why the fold below sees completions the chunked path could not.
                 await limiter.acquire()
@@ -2453,6 +2453,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     scored_against_attempt=anchor_attempt, source="researcher",
                     steering_context=((telemetry_row or {}).get("_steering_context", [])
                                       if isinstance(telemetry_row, dict) else []))
+                # THE REJECTS GET THEIR NODE-LESS CARDS HERE, on the SUCCESS path too, and the
+                # two capabilities are spent in the same breath — exactly as the chunked path does
+                # after its reservations are durable. Without this a lane that proposed one idea
+                # and rejected three recorded only the one: the three drops never reached the Card
+                # board at all (the two failure paths above record them, so the loss showed only
+                # when the proposal SUCCEEDED), and `_pending_batch_novelty_gated` kept an
+                # already-reserved Idea as a live one-shot gate bypass into the next iteration.
+                self._record_dropped_batch_cards(dropped)
+                self._pending_batch_dropped = []
+                self._pending_batch_novelty_gated = []
                 if reservation is None:
                     limiter.release()
                     continue

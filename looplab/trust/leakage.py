@@ -154,9 +154,12 @@ def categorical_leak(features: dict[str, list[float]], target: Sequence[float],
 
     `{name: {"score", "rung", "distinct", "rows_per_group"}}` for every column at or above
     `CATEGORICAL_LEAK_ADVISORY`, where `score` is the correlation ratio η² for a continuous target
-    (the share of its variance explained by the grouping) and the weighted purity — the accuracy of
-    predicting each group's most common label — for a small-cardinality one. Both are 1.0 exactly
-    when the column determines the target, which is the shape being looked for.
+    (the share of its variance explained by the grouping) and, for a small-cardinality one, the
+    weighted purity — the accuracy of predicting each group's most common label — RESCALED against
+    the base rate a constant prediction already reaches (`(purity - base) / (1 - base)`; the raw
+    `purity` and the `base_rate` ride along on the row). Both are 1.0 exactly when the column
+    determines the target, which is the shape being looked for, and the rescaling is what keeps
+    that true on an imbalanced one — see the block at the purity branch.
 
     ADVISORY, never a verdict: the caller reports it and nothing in the engine reads it. `distinct`,
     `rows_per_group` and `binned` ride along because they are what tells a real leak from the two
@@ -209,8 +212,26 @@ def categorical_leak(features: dict[str, list[float]], target: Sequence[float],
             if distinct < 2:
                 continue
         if classes <= _MAX_TARGET_CLASSES:
+            # PURITY AGAINST THE BASE RATE, not raw purity. Predicting the majority label for
+            # EVERY row already scores the base rate, so on an imbalanced target raw purity is
+            # near 1.0 for a column that explains nothing: at 98/2, an alternating flag and a
+            # three-valued group both measure exactly 0.98 — the base rate — and every column of
+            # a rare-event table lands in the advisory. That is the "routine shape" this rung
+            # says it cannot distinguish, arriving by arithmetic rather than by evidence.
+            #
+            # The normalization is the share of the REDUCIBLE error the grouping removes
+            # (Cohen's kappa against the majority-class baseline): 1.0 exactly when the column
+            # determines the target — the property the docstring claims for both rungs — 0.0
+            # when it does no better than the base rate, and scale-free across imbalance. The
+            # raw purity rides along as `purity` because a reader comparing it to `base_rate` is
+            # what tells a strong column on a balanced target from one on a skewed one.
             correct = sum(max(bucket.count(v) for v in set(bucket)) for bucket in groups.values())
-            score = correct / len(pairs)
+            purity = correct / len(pairs)
+            labels = [y for _x, y in pairs]
+            base = max(labels.count(v) for v in set(labels)) / len(labels)
+            if base >= 1.0:
+                continue                     # a constant target is explained by everything
+            score = (purity - base) / (1.0 - base)
             rung = "purity"
         else:
             mean = sum(y for _x, y in pairs) / len(pairs)
@@ -227,6 +248,9 @@ def categorical_leak(features: dict[str, list[float]], target: Sequence[float],
         if score >= bar:
             out[name] = {"score": round(score, 6), "rung": rung, "distinct": distinct,
                          "rows_per_group": round(rows_per_group, 3), "binned": binned}
+            if rung == "purity":
+                out[name]["purity"] = round(purity, 6)
+                out[name]["base_rate"] = round(base, 6)
     return out
 
 

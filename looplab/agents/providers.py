@@ -39,6 +39,13 @@ def _make_abstractor(settings):
     calls."""
     if not getattr(settings, "memora", False):
         return None
+    # BOTH FACTORIES ARE IMPORTED HERE and not left to the module scope this function was
+    # extracted INTO: `factory.py` had them at module level, `providers.py` does not, so the call
+    # below raised `NameError` — which the blind except then read as "a client we can't build" and
+    # degraded to lexical, silently, for every run with the shipped `memora_llm` default. A dead
+    # feature that reports nothing is exactly what the containment census exists to make countable,
+    # and the containment here is legitimate; the missing name was not.
+    from looplab.core.llm import make_llm_client, make_llm_client_for
     from looplab.tools.memora import chat_completer, make_abstractor
     complete = None
     cache_path = None
