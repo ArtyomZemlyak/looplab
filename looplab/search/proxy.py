@@ -142,3 +142,84 @@ class ProxyScorer:
         if predicted == threshold:
             return False
         return state.is_better(threshold, predicted)
+
+
+# ------------------------------------------------------- IS THE PROXY ANY GOOD (doc 52 row 31)
+#
+# This module KILLS: a candidate below the kill fraction is recorded `node_failed
+# reason="proxy_skipped"` and never runs. The pre-execution judges the field ships measure
+# themselves before they are trusted with that — Meta's research preference models report 0.684 ->
+# 0.729, predict-before-execute 61.5 % pairwise, and Rehearse measured its judge decaying 82.8 ->
+# 56.9 % late in a loop while remaining willing to decide. LoopLab's proxy had no accuracy number at
+# all, on any run, which is the state a kill switch may not be in.
+#
+# `pairwise_accuracy` is that number, computed from the run's own folded record: over every PAIR of
+# scored-and-then-evaluated nodes whose realized metrics differ, did the proxy order them the way
+# the evaluation did? Pairwise rather than a correlation coefficient because ordering is what the
+# kill actually uses, and because it is the measure the field's own numbers are quoted in.
+#
+# THE MEASUREMENT IS BIASED OPTIMISTIC AND SAYS SO. A node the proxy killed has no realized metric —
+# that is what killing means — so it can never enter a pair, and the accuracy is computed over the
+# survivors the proxy already approved. That is not a flaw to be corrected here (the counterfactual
+# does not exist in the record); it is a caveat the report has to CARRY, because an accuracy quoted
+# without it reads as "the kill is 78 % right" when what was measured is "the ordering among the
+# ones it let through is 78 % right".
+def pairwise_accuracy(state: RunState) -> dict:
+    """How often the proxy ordered two candidates the way their evaluations later did.
+
+    `{"scored": n, "evaluated": n, "pairs": n, "concordant": n, "tied_predictions": n,
+      "accuracy": float | None, "killed": n, "killed_evaluated": n, "unscored": n}` — `accuracy` is
+    None below one ordered pair, which is a different answer from 0.0 and must not render the same.
+    """
+    scored = {nid: value for nid, value in (state.proxy_scores or {}).items()
+              if isinstance(value, (int, float))}
+    killed = list(state.proxy_skipped or ())
+    # The realized side: the same pool every other measurement in this repo counts — a tombstoned,
+    # aborted or gate-flagged node's metric is not evidence about anything.
+    realized = {}
+    for nid in scored:
+        node = (state.nodes or {}).get(nid)
+        if node is None or node.metric is None or not node.feasible or node.tombstoned:
+            continue
+        if nid in state.aborted_nodes or nid in state.breed_excluded:
+            continue
+        realized[nid] = node.metric
+    ids = sorted(realized)
+    pairs = concordant = tied = 0
+    for index, left in enumerate(ids):
+        for right in ids[index + 1:]:
+            if realized[left] == realized[right]:
+                continue          # a tie carries no ordering to be right or wrong about
+            predicted = scored[left] - scored[right]
+            if predicted == 0:
+                # A PREDICTION tie is not a wrong ordering, it is no ordering — counting it as
+                # discordant would report a proxy that predicts a constant (every candidate the
+                # same k-NN mean, which happens with one neighbour) as 0 % accurate rather than as
+                # what it is: a scorer offering nothing for the kill to rank by.
+                tied += 1
+                continue
+            pairs += 1
+            observed = realized[left] - realized[right]
+            if predicted * observed > 0:
+                concordant += 1
+    return {
+        "scored": len(scored),
+        "evaluated": len(realized),
+        "pairs": pairs,
+        "concordant": concordant,
+        "tied_predictions": tied,
+        # None, never 0.0: "the proxy got none right" and "there was no pair to be right about"
+        # are opposite facts, and this number is read by a person deciding whether to arm a kill.
+        "accuracy": (concordant / pairs) if pairs else None,
+        "killed": len(killed),
+        # A killed node with a metric is the ONLY counterfactual the record can hold (a re-run, an
+        # injected node, a salvage). Counted separately because it is the evidence that would make
+        # the number unbiased, and there is normally none of it.
+        "killed_evaluated": sum(1 for nid in killed
+                                if nid in realized),
+        # NOT "abstained": a node carries no proxy score for three different reasons — the proxy
+        # was never consulted about it (a seed, or anything before `warmup`), it returned None for
+        # want of numeric signal, or `should_skip` abstained beyond the support radius. The record
+        # does not separate them, so the field is named for what it counts.
+        "unscored": max(0, len(state.nodes or {}) - len(scored)),
+    }

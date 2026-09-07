@@ -1198,3 +1198,39 @@ def edit_types(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
                        f"(deleted at {example['deleted_between']})")
     if not cycling:
         typer.echo("  none — no line this run added had been deleted by its own ancestry.")
+
+
+@app.command(name="proxy-accuracy")
+def proxy_accuracy(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
+    """Was the proxy that KILLED candidates in this run any good? (read-only, no model)
+
+    Pairwise ranking accuracy of `search/proxy.py`'s predictions against the metrics that actually
+    came back — the measure the field quotes its own pre-execution judges in (predict-before-execute
+    61.5 %; Rehearse's judge decaying 82.8 -> 56.9 % late in a loop). The number is biased
+    OPTIMISTIC by construction and the report says so: a killed node has no realized metric, so the
+    accuracy is over the candidates the proxy already approved.
+    """
+    from looplab.search.proxy import pairwise_accuracy
+
+    store = _require_run_dir(run_dir)
+    _echo_log_integrity(store, run_dir)
+    report = pairwise_accuracy(fold(store.read_all()))
+    typer.echo(f"proxy scored {report['scored']} candidate(s); {report['evaluated']} of them were "
+               f"evaluated and can be checked; {report['killed']} were KILLED "
+               f"(`proxy_skipped`), {report['unscored']} node(s) carry no proxy score")
+    if report["accuracy"] is None:
+        typer.echo("pairwise accuracy: NOT MEASURABLE — no pair of scored nodes came back with "
+                   "different metrics. This is not 0 %, and it is not evidence the proxy works.")
+        return
+    typer.echo(f"pairwise accuracy: {100 * report['accuracy']:.1f}% "
+               f"({report['concordant']} of {report['pairs']} ordered pairs"
+               + (f"; {report['tied_predictions']} pair(s) the proxy scored EQUAL, which offer the "
+                  "kill no ordering at all" if report["tied_predictions"] else "") + ")")
+    typer.echo("  measured over the candidates the proxy LET THROUGH: a killed node has no metric, "
+               "so the kill's own error rate is not in this number"
+               + (f" (except {report['killed_evaluated']} killed node(s) that were evaluated anyway "
+                  "— the only counterfactual this run holds)" if report["killed_evaluated"] else "."))
+    if report["accuracy"] < 0.6 and report["killed"]:
+        typer.echo("  BELOW THE FIELD'S OWN BAR (predict-before-execute reports 61.5 % pairwise) "
+                   "while this run let it kill: `proxy_kill_fraction=0` turns the kill off and "
+                   "keeps the score as an audit signal.")

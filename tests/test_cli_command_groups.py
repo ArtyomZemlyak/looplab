@@ -74,7 +74,11 @@ GROUPS = {
                      # did this run actually do" over the run's own record — here, what KIND of
                      # edit each experiment made and how much of it the lineage had already tried.
                      "landlock-check", "stage-dups", "parser-stats", "comparability",
-                     "tokens", "repair-candidates", "edit-types"},
+                     # `proxy-accuracy` (doc 52 row 31) is the same again: it folds this run's own
+                     # `proxy_scored` rows against the metrics that came back and prints one
+                     # number. It writes nothing, spends nothing, and reads no cross-run store —
+                     # and it is the number the `proxy_skipped` KILL should be armed on.
+                     "tokens", "repair-candidates", "edit-types", "proxy-accuracy"},
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",

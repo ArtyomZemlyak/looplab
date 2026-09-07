@@ -19,6 +19,7 @@ looplab timings         Wall-clock breakdown per node + run-level, reconciled ag
 looplab tokens          TOKEN breakdown by phase, reconciled against the durable llm_usage ledger
 looplab stage-dups      Duplicated stage work, and what a cross-node reuse key would have done
 looplab edit-types      What KIND of edit each experiment made, which kinds paid, and how much was already tried once (doc 52 row 31)
+looplab proxy-accuracy  Was the proxy that KILLED candidates any good? Pairwise ranking accuracy against the metrics that came back (doc 52 row 31)
 looplab parser-stats    How the structured-output parser actually behaved on this box, per role
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
@@ -1078,6 +1079,43 @@ it does.
 **What it will not do.** A pair whose file set is missing from the record is NOT classified and is
 counted separately — an unreadable record is not a pair that changed nothing. The lineage is the
 FIRST-parent chain: a line deleted in a sibling's branch is not this node's history.
+
+---
+
+## `proxy-accuracy`
+
+Read-only, no model. Was the proxy that KILLED candidates in this run any good?
+
+```bash
+looplab proxy-accuracy RUN_DIR
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (folds its `events.jsonl`; reads `proxy_scored` against the metrics that came back) |
+
+`search/proxy.py::pairwise_accuracy` counts, over every pair of scored-and-evaluated nodes whose
+realized metrics differ, how often the proxy ordered them the way the evaluation later did — the
+measure the field quotes its own pre-execution judges in (predict-before-execute reports 61.5 %
+pairwise; Rehearse measured its judge decaying 82.8 → 56.9 % late in a loop *while remaining willing
+to decide*). A pair the proxy scored EQUAL is reported separately: that is no ordering, not a wrong
+one.
+
+```
+proxy scored 14 candidate(s); 11 of them were evaluated and can be checked; 3 were KILLED
+(`proxy_skipped`), 2 node(s) carry no proxy score
+pairwise accuracy: 63.6% (35 of 55 ordered pairs)
+  measured over the candidates the proxy LET THROUGH: a killed node has no metric, so the kill's
+  own error rate is not in this number.
+```
+
+**The number is biased optimistic, and the report says so.** A killed node has no realized metric —
+that is what killing means — so it can never enter a pair, and what is measured is the ordering
+among the candidates the proxy already approved. The only counterfactual a run can hold is a killed
+node that was evaluated anyway (a re-run, an injection), and the report counts those separately.
+
+`proxy_kill_fraction=0` (the default) turns the kill off and keeps the score as an audit signal;
+this command is what that decision should be made on.
 
 ---
 
