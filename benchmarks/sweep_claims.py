@@ -680,6 +680,96 @@ def check_reference_use_band(bench: str):
     return inside >= 0.5 * len(have), detail
 
 
+# TEST divided by the best TRAIN, per task, measured 2026-09-08 over the 141 probes that have both.
+# Pinned rather than recomputed: a band derived from the probes it judges cannot be failed by them.
+#   (low, high, probes it was measured over)
+TEST_TRAIN_BANDS = {
+    "edge_expansion": (0.892, 1.033, 118),
+    "discrete_log": (0.890, 1.260, 11),     # its cached times run p90/p10 = 276; the width is the tail
+    "pde_heat1d": (0.991, 1.054, 10),
+    # pagerank is NOT here on purpose. Its one probe reads x0.993, and pinning that as a band
+    # flagged that very probe on the next run -- 0.99296 is outside 0.993-0.993 by rounding alone.
+    # One measurement is a point; a band needs at least two, and saying so is cheaper than
+    # inventing a tolerance nobody measured.
+}
+
+MIN_PROBES_FOR_A_BAND = 2
+
+
+def check_test_tracks_train(bench: str):
+    """"тест против train" -- point 9 asks for the pair per probe; this is what the pair DOES.
+
+    Every node is evaluated on TRAIN and the champion is scored once on TEST (§84), so the two are
+    different measurements on different instance sets. Measured 2026-09-08 over the 141 probes that
+    have both:
+
+        task              probes   median   min     max
+        edge_expansion      118     0.995   0.892   1.033
+        discrete_log         11     1.001   0.890   1.260
+        pde_heat1d           10     1.022   0.991   1.054
+        pagerank              1     0.993   0.993   0.993
+
+    TEST tracks the best TRAIN to about a per cent, and the SPREAD IS THE TASK'S OWN TAIL:
+    `discrete_log`, whose cached per-instance times run p90/p10 = 276, swings from 0.890 to 1.260 --
+    which is the uncertainty riding on the number the list calls the corpus's finest
+    (14.5186 against 2.8369). `edge_expansion`, tail 1.2, holds inside 11 %.
+
+    The verdict is per TASK, not global: a probe outside its own task's measured band is the thing
+    worth reading, and a global band would hide `discrete_log`'s width behind `edge_expansion`'s 118
+    probes.
+    """
+    import subprocess
+    import collections
+    tool = Path(bench) / "looplab" / "benchmarks" / "probe_summary.py"
+    if not tool.is_file():
+        return False, "probe_summary.py is not on this box, so the pair cannot be driven"
+    got = subprocess.run([sys.executable, str(tool), "--json"], capture_output=True, text=True,
+                         timeout=900)
+    try:
+        rows = json.loads(got.stdout)
+    except ValueError:
+        return False, f"probe_summary produced no json ({got.stdout[-160:]!r})"
+    pairs = [(r.get("probe"), r.get("task") or "?", max(r["nodes"]), float(r["test"]))
+             for r in rows
+             if isinstance(r.get("test"), (int, float)) and r.get("nodes") and max(r["nodes"]) > 0]
+    if not pairs:
+        return False, "no probe on this box has both a TEST score and an evaluated node"
+    by_task = collections.defaultdict(list)
+    for _probe, task, best, test in pairs:
+        by_task[task].append(test / best)
+    said = []
+    for task, ratios in sorted(by_task.items(), key=lambda kv: -len(kv[1])):
+        r = sorted(ratios)
+        said.append(f"{task} x{r[len(r) // 2]:.3f} ({min(r):.3f}-{max(r):.3f}, n={len(r)})")
+    # AGAINST A PINNED BAND, NOT AGAINST ITSELF. The first cut derived each task's band from the
+    # same probes it then judged, so nothing could ever fall outside it and the check reported
+    # HOLDS on its own tautology -- the shape this file exists to catch, written into this file.
+    # The bands below are the measurement of 2026-09-08; a future probe outside one is the thing
+    # worth reading, and a band that has visibly moved is worth re-pinning WITH a line saying why.
+    loud, unpinned, thin = [], [], set()
+    for probe, task, best, test in pairs:
+        band = TEST_TRAIN_BANDS.get(task)
+        if band is None:
+            if len(by_task[task]) < MIN_PROBES_FOR_A_BAND:
+                thin.add(task)          # one probe is a point, not a band
+            else:
+                unpinned.append(task)
+            continue
+        lo, hi, _n = band
+        if not lo <= test / best <= hi:
+            loud.append(f"{probe} on {task} x{test / best:.3f} outside {lo:.3f}-{hi:.3f}")
+    detail = "; ".join(said)
+    if loud:
+        detail += "; OUTSIDE the pinned band: " + ", ".join(sorted(loud))
+    if unpinned:
+        detail += ("; UNPINNED task(s): " + ", ".join(sorted(set(unpinned)))
+                   + " -- add the measured band to TEST_TRAIN_BANDS with the date")
+    if thin:
+        detail += ("; too few probes for a band: " + ", ".join(sorted(thin))
+                   + f" (under {MIN_PROBES_FOR_A_BAND}); not judged")
+    return not loud and not unpinned, detail
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
@@ -701,6 +791,7 @@ CLAIMS = [
     ("point 9: 3.6 % of spend lands after the last evaluated node, 16 of 69 runs",
      check_waste_after_the_last_node),
     ("point 9: the reference-use baseline is 4.9-8.3 %", check_reference_use_band),
+    ("point 9: TEST against TRAIN, per task", check_test_tracks_train),
 ]
 
 
