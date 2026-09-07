@@ -61,6 +61,13 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     "agents": {
         "looplab.core.llm": ("_reasoning_of",),
         "looplab.runtime.sandbox": ("_kill_tree",),
+        # A9 (docs/60): the path-keyed read nudge tells the model how many PAGES the file it
+        # keeps re-reading actually is, and the page width has to be the reader's OWN — a
+        # second copy of `RESULT_CAP - 400` in the loop is a number that goes stale the day
+        # the reader's budget moves, in a sentence whose whole job is to be arithmetic the
+        # model can act on. Declared rather than promoted: the constant is private because
+        # `reposcout` owns the page, and this registry is what makes a rename a red test.
+        "looplab.tools.reposcout": ("_MAX_READ",),
     },
     "cli": {
         "looplab.adapters.tasks": ("_make_abstractor",),

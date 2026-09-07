@@ -51,15 +51,13 @@ _BANNED_LITERAL_SPELLINGS = (
 def test_every_protocol_site_uses_the_predicate_not_a_literal():
     """A site added later with a bare `== "error"` would silently exclude the ceiling. The scan is
     the whole `looplab/` tree, not a file list: the file list is how eight sites went unseen."""
-    from pathlib import Path
+    from _source_scan import PKG, iter_sources
 
-    root = Path(__file__).resolve().parents[1] / "looplab"
     offenders = []
-    for path in sorted(root.rglob("*.py")):
-        src = path.read_text(encoding="utf-8")
+    for path, src in iter_sources():
         for banned in _BANNED_LITERAL_SPELLINGS:
             if banned in src:
-                offenders.append(f"{path.relative_to(root.parent)}: {banned}")
+                offenders.append(f"{path.relative_to(PKG.parent)}: {banned}")
     assert not offenders, (
         "decision sites still keying on the literal instead of `is_guarded_abort`:\n  "
         + "\n  ".join(offenders))
