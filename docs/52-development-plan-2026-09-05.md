@@ -421,11 +421,19 @@ OPEN[mcts-selection-has-no-cost-term] MARS's cost-constrained MCTS balances expe
 execution expense; every policy in `search/policy.py` ranks by metric alone and `budget_aware` is a
 prompt cue. proof:absent:eval_cost@looplab/search/policy.py
 
-OPEN[edit-cycling-and-edit-type-unannotated] nothing classifies a node's committed diff by edit type
-or detects lines re-introduced byte-identically after a deletion earlier in the lineage — EvoTrace:
-~30 % of added lines, rising in 118 / 121 runs, with gains concentrated in three of nine edit types;
-`tools/node_diff.py` already reads both nodes' committed files. Replaces the seed-distance scalar as
-the field-measured diagnostic. proof:absent:reintroduc@looplab/tools/node_diff.py+absent:edit_type@looplab/tools/node_diff.py
+*Closed 2026-09-07 (row 31 shipped): the marker `edit-cycling-and-edit-type-unannotated` stood
+here. `tools/node_diff.py::EDIT_TYPES` is a closed, deterministic vocabulary — comment, import,
+definition, control_flow, hyperparameter, data_io, logging, call_argument, whitespace, other — that
+`classify_line` assigns in that fixed precedence (one regex pass, no model, the trailing comment
+separated first, so `lr = 3e-4  # tuned` is a hyperparameter edit and `print(f"loss={loss}")` is
+logging rather than a keyword-argument one). `reintroduced_lines` walks the FIRST-parent chain and
+reports the lines this node adds that its own lineage already deleted byte for byte, naming the pair
+that deleted each; a sibling's deletion is not this node's history, and a trivial line is not
+evidence. Both surface as the `edits` section of `diff_nodes` (in the default answer, so the agent
+about to re-propose a deletion is told before it does) and as `looplab edit-types`, which ranks the
+kinds by the direction-aware gain of every parent->child pair and prints the run's own
+re-introduction rate. A pair whose file set is missing is counted as unclassified, never as a pair
+that changed nothing (`tests/test_edit_types.py`). Deleted per the index rule.*
 
 OPEN[proxy-prediction-accuracy-unmeasured] the pre-execution judges the field ships MEASURE
 themselves (Meta's research preference models 0.684 → 0.729; predict-before-execute 61.5 % pairwise;

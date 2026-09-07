@@ -41,6 +41,11 @@ from looplab.engine.comparability import record_of as comparability_record_of
 from looplab.trust.scan_receipt import trust_scan_summary
 from looplab.cli import (
     _RUN_DIR_HINT, _echo_log_integrity, _print_result, _require_run_dir, app)
+# The rendering half of `timings` and `tokens` (doc 25 CT-01's line cap, doc 52 row 31):
+# printing and the shared span vocabulary, extracted so a new diagnostic does not have to buy
+# its room by deleting why-comments.
+from looplab.cli.run_report import (echo_card_spend, echo_containments, echo_section,
+                                    minutes, span_category, span_seconds, traced_seconds)
 
 
 @app.command()
@@ -113,72 +118,6 @@ def speculation_gate(
     }, option=orjson.OPT_INDENT_2).decode())
 
 
-def _span_category(sp: dict) -> str:
-    """The report row a span belongs to. Same vocabulary for the per-node and the run-level section,
-    deliberately: an operator reading `LLM` / `tools` / `eval` / `repair` / `op:<name>` under a node
-    must not have to learn a second vocabulary to read the run-level block below it."""
-    k = sp.get("kind")
-    if k == "generation":
-        return "LLM"
-    if k == "tool":
-        return "tools"
-    if k == "operation":
-        nm = str(sp.get("name") or "")
-        if "eval" in nm:
-            return "eval"
-        if "repair" in nm:
-            return "repair"
-        return f"op:{nm}" if nm else "op"
-    return k or "other"
-
-
-def _span_seconds(value) -> float:
-    """A span's `duration_s`/`start` as a usable non-negative float, else 0.0.
-
-    A span line can be a well-formed JSON object with a junk field — `spans.jsonl` is written by a
-    tracer that promises never to raise into the operation it observes (`default=str` in its
-    exporter), so a stray non-numeric duration reaches a reader intact. A bare `float()` on it would
-    take down the whole report over one bad span, which is the failure this command's lenient read
-    exists to prevent.
-    """
-    if type(value) not in (int, float):        # `type`, not isinstance: `float(True)` is 1.0
-        return 0.0
-    return float(value) if math.isfinite(value) and value > 0 else 0.0
-
-
-def _traced_seconds(intervals: list) -> float:
-    """Wall-clock seconds during which AT LEAST ONE span was open — the union of `[start, start+dur)`.
-
-    Not the sum: the engine builds, evaluates and researches concurrently (`llm_parallel`,
-    `eval_parallel`, the background research task), so summing self-time can exceed the run's own
-    wall clock and would make the residual below go negative. A union cannot, so `wall - traced` is
-    always a real, non-negative quantity: the time no span covered.
-    """
-    total = 0.0
-    cur_start = cur_end = None
-    for start, end in sorted(intervals):
-        if cur_start is None:
-            cur_start, cur_end = start, end
-        elif start > cur_end:                 # a genuine gap — bank the block and open a new one
-            total += cur_end - cur_start
-            cur_start, cur_end = start, end
-        else:
-            cur_end = max(cur_end, end)
-    if cur_start is not None:
-        total += cur_end - cur_start
-    return total
-
-
-def _minutes(seconds: float) -> float:
-    return round(seconds / 60, 1)
-
-
-def _echo_section(title: str, cats: dict, note: str = "") -> None:
-    """One `node N`/`run-level` block: total, then its rows biggest-first with a share of the block."""
-    total = sum(v[0] for v in cats.values()) or 1.0
-    typer.echo(f"\n{title} — {_minutes(total)} min:" + (f"   {note}" if note else ""))
-    for cat, (secs, n) in sorted(cats.items(), key=lambda x: -x[1][0]):
-        typer.echo(f"  {cat:10} {_minutes(secs):>6} min  ({n} spans, {round(100*secs/total)}%)")
 
 
 @app.command()
@@ -301,69 +240,7 @@ def tokens(run_dir: Path = typer.Argument(...),
         typer.echo(f"residual   : {out['residual']:>14,} tokens "
                    f"({'spans over-attribute' if out['residual'] < 0 else 'unattributed by any span'})")
 
-    # THE PER-CARD HALF. Phase answers "which KIND of work spent it"; this answers "which EXPERIMENT
-    # spent it, and was that experiment ever evaluated" — the question a run cannot otherwise ask,
-    # because the durable ledger carries no card and no node. Printed by DEFAULT rather than behind a
-    # flag: the defect this closes is that nobody could see it, and an opt-in view is not seen.
-    # Suppressed when no card resolves at all, which is every serial-path run — a lone `(no card)`
-    # row states nothing and would push the phase table off a terminal for no reader's benefit.
-    card_nodes = {}
-    if state is not None:
-        from looplab.core.models import is_unevaluated_speculative_discard
-        for node in (state.nodes or {}).values():
-            card = getattr(getattr(node, "idea", None), "card_id", None)
-            if not isinstance(card, str) or not card.strip():
-                continue
-            owned = card_nodes.setdefault(card, {"nodes": [], "discarded": []})
-            owned["nodes"].append(node.id)
-            # The run's SINGLE answer to "did this node spend budget", not a second spelling of it.
-            if is_unevaluated_speculative_discard(state, node):
-                owned["discarded"].append(node.id)
-    by_card = token_spend_by_card(rows, card_nodes=card_nodes, ledger_total=ledger_total)
-    real = [r for r in by_card["rows"] if r["card"] != CARD_UNATTRIBUTED]
-    if real:
-        typer.echo("")
-        typer.echo(f"{'tokens':>14}  {'share':>6}  {'calls':>6}  nodes                 card")
-        for row in by_card["rows"]:
-            nodes = ",".join(str(n) for n in row["nodes"]) or "-"
-            if row["wholly_discarded"]:
-                nodes += " DISCARDED"
-            typer.echo(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
-                       f"{nodes:<21} {row['card']}")
-        # A build that minted NO node is invisible to the rule above, which needs the card to OWN
-        # one — measured on v9, that hid 40.1M tokens (card-2's first build and card-5's only one,
-        # both `skipped: stale`), while card-2's row read as a healthy 97.6M. Priced from the
-        # durable log's own `card_build_requested` -> `card_build_done` windows rather than by
-        # widening `wholly_discarded`, which answers a different question and answers it correctly.
-        builds = []
-        if state is not None:
-            open_req = {}
-            for ev in EventStore(ev_path).read_all():
-                kind = getattr(ev, "type", None) or (ev.get("type") if isinstance(ev, dict) else None)
-                data = getattr(ev, "data", None) or (ev.get("data") if isinstance(ev, dict) else None) or {}
-                ts = getattr(ev, "ts", None) or (ev.get("ts") if isinstance(ev, dict) else None)
-                cid = data.get("card_id")
-                if kind == "card_build_requested":
-                    open_req[cid] = ts
-                elif kind == "card_build_done":
-                    builds.append({"card": cid, "start": open_req.pop(cid, None), "end": ts,
-                                   "skipped": data.get("skipped"), "node_id": data.get("node_id")})
-        by_build = token_spend_by_build(rows, builds)
-        if by_build["skipped_builds"]:
-            share = (100 * by_build["skipped_tokens"] / by_card["attributed"]) if by_card["attributed"] else 0.0
-            typer.echo(f"{by_build['skipped_tokens']:>14,}  {share:>5.1f}%  {'':>6}  "
-                       f"built and SKIPPED as stale, minting no node "
-                       f"({by_build['skipped_builds']} of {by_build['builds']} builds)")
-        lost = [r for r in by_card["rows"] if r["wholly_discarded"]]
-        if lost:
-            spent = sum(r["tokens"] for r in lost)
-            share = 100 * sum(r["share"] for r in lost)
-            # Stated as what it IS — a build that was paid for and never evaluated — and NOT as
-            # waste: the freshness gate discards a prefetch whose selection no longer holds, which
-            # is the machinery working. What the number buys the operator is the ability to weigh
-            # that trade, which until now had no visible price at all.
-            typer.echo(f"{spent:>14,}  {share:>5.1f}%  {'':>6}  "
-                       f"built and never evaluated ({len(lost)} card(s) discarded before dispatch)")
+    echo_card_spend(state, rows, ev_path, ledger_total)
     # `read_jsonl_lenient_with_health` returns a plain DICT, and its damage key is `invalid_lines`.
     # `getattr(health, "damaged", 0)` was therefore always 0 by two independent routes — a dict has
     # no such attribute and there is no such key — so an unreadable `spans.jsonl` (the routine shape
@@ -385,18 +262,6 @@ def tokens(run_dir: Path = typer.Argument(...),
                    f"(counted as calls above, attributed to no phase)")
 
 
-def _echo_containments(spans: list) -> None:
-    """HOW MANY OF THIS RUN'S SPANS SWALLOWED A FAILURE (doc 52 row 14): the read side of
-    `core/containment.py::contain`, printed only when something was contained so a run with no
-    stamp — every pre-row-14 run on disk included — keeps the historical report byte for byte."""
-    from looplab.core.containment import contained_summary
-    total, stamped, top = contained_summary(spans)
-    if not total:
-        return
-    typer.echo(f"\ncontained failures: {total} across {stamped} span(s) — swallowed by a handler that "
-               f"stamped the span (core/containment.py::contain); not an error count, an honesty count")
-    for key, count in top:
-        typer.echo(f"  {count:>4} × {key}")
 
 
 @app.command()
@@ -476,10 +341,10 @@ def timings(run_dir: Path = typer.Argument(...),
         # short. Showing both is what makes that visible instead of leaving two numbers to disagree
         # in different places. Only flagged when they actually differ by more than rounding.
         if type(budget_elapsed) in (int, float) and math.isfinite(budget_elapsed):
-            cross = (f"   (budget.elapsed_s says {_minutes(float(budget_elapsed))} min)"
+            cross = (f"   (budget.elapsed_s says {minutes(float(budget_elapsed))} min)"
                      if abs(float(budget_elapsed) - wall) > 1.0
                      else "   (budget.elapsed_s agrees)")
-        typer.echo(f"run wall clock {_minutes(wall)} min "
+        typer.echo(f"run wall clock {minutes(wall)} min "
                    f"({round(wall, 1)} s, events.jsonl first -> last timestamp)" + cross)
     elif ev_path.exists():
         typer.echo("run wall clock unknown (no event carries a usable timestamp).")
@@ -504,7 +369,7 @@ def timings(run_dir: Path = typer.Argument(...),
     for sp in spans:
         parent = sp.get("parent_id")
         if isinstance(parent, str) and parent:   # a non-string id is damage, not a parent link
-            child_sum[parent] += _span_seconds(sp.get("duration_s"))
+            child_sum[parent] += span_seconds(sp.get("duration_s"))
 
     per_node: dict = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))
     # A separate dict, NOT a sentinel node id: `-1` is a REAL node id here (the run-setup span uses
@@ -514,7 +379,7 @@ def timings(run_dir: Path = typer.Argument(...),
     intervals: list = []
     no_start = 0
     for sp in spans:
-        raw = _span_seconds(sp.get("duration_s"))
+        raw = span_seconds(sp.get("duration_s"))
         dur = raw
         if sp.get("kind") == "operation":
             span_id = sp.get("span_id")
@@ -525,7 +390,7 @@ def timings(run_dir: Path = typer.Argument(...),
         # was genuinely open that long, and its children's coverage is already inside that window.
         # An old/degraded span without a `start` still contributes its self time above; it just
         # cannot say WHEN, so it is counted and named rather than quietly dropped from both.
-        start = _span_seconds(sp.get("start"))
+        start = span_seconds(sp.get("start"))
         if start:
             intervals.append((start, start + raw))
         else:
@@ -537,20 +402,20 @@ def timings(run_dir: Path = typer.Argument(...),
             nid = None
         if nid is None:
             if node is None:
-                cell = run_level[_span_category(sp)]
+                cell = run_level[span_category(sp)]
                 cell[0] += dur
                 cell[1] += 1
             continue
         if node is not None and nid != node:
             continue
-        cell = per_node[nid][_span_category(sp)]
+        cell = per_node[nid][span_category(sp)]
         cell[0] += dur
         cell[1] += 1
 
     for nid in sorted(per_node):
-        _echo_section(f"node {nid}", per_node[nid])
+        echo_section(f"node {nid}", per_node[nid])
     if run_level:
-        _echo_section("run-level", run_level,
+        echo_section("run-level", run_level,
                       note="(no node owns it: researcher / strategist / card producer / wrap-up)")
 
     if node is not None:
@@ -565,17 +430,17 @@ def timings(run_dir: Path = typer.Argument(...),
                    f"absent from `traced`.")
     # Run-scope like the reconciliation, but it needs no wall clock: a spans-only directory still
     # says what it contained.
-    _echo_containments(spans)
+    echo_containments(spans)
     if wall is None or wall <= 0:
         return
-    traced = min(_traced_seconds(intervals), wall)
+    traced = min(traced_seconds(intervals), wall)
     untraced = max(0.0, wall - traced)
-    typer.echo(f"\nreconciliation vs {_minutes(wall)} min wall clock:")
-    typer.echo(f"  attributed {_minutes(attributed):>6} min  ({round(100*attributed/wall)}%)  "
+    typer.echo(f"\nreconciliation vs {minutes(wall)} min wall clock:")
+    typer.echo(f"  attributed {minutes(attributed):>6} min  ({round(100*attributed/wall)}%)  "
                f"sum of the rows above; overlaps under concurrency")
-    typer.echo(f"  traced     {_minutes(traced):>6} min  ({round(100*traced/wall)}%)  "
+    typer.echo(f"  traced     {minutes(traced):>6} min  ({round(100*traced/wall)}%)  "
                f"wall clock with at least one span open")
-    typer.echo(f"  untraced   {_minutes(untraced):>6} min  ({round(100*untraced/wall)}%)  "
+    typer.echo(f"  untraced   {minutes(untraced):>6} min  ({round(100*untraced/wall)}%)  "
                f"no span open — not attributable from spans.jsonl")
 
     # WAS THIS RUN STARVED? The rows above charge wall clock to WORK; this asks the complementary
@@ -597,15 +462,15 @@ def timings(run_dir: Path = typer.Argument(...),
         occ = eval_occupancy(durable_events)
         if occ["span_seconds"] > 0:
             typer.echo(f"\neval occupancy (from events.jsonl, not spans):")
-            typer.echo(f"  bootstrap  {_minutes(occ['bootstrap_seconds']):>6} min  "
+            typer.echo(f"  bootstrap  {minutes(occ['bootstrap_seconds']):>6} min  "
                        f"before the first evaluation could start — not starvation")
-            typer.echo(f"  dead       {_minutes(occ['dead_seconds']):>6} min  "
-                       f"({round(100*occ['dead_share'])}% of the {_minutes(occ['span_seconds'])} min "
+            typer.echo(f"  dead       {minutes(occ['dead_seconds']):>6} min  "
+                       f"({round(100*occ['dead_share'])}% of the {minutes(occ['span_seconds'])} min "
                        f"since) with NO evaluation running")
             for start, end in occ["dead_windows"]:
-                typer.echo(f"    idle {_minutes(start):>6}-{_minutes(end):<6} min "
-                           f"({_minutes(end - start)} min)")
-            busy = ", ".join(f"{k}: {_minutes(v)} min"
+                typer.echo(f"    idle {minutes(start):>6}-{minutes(end):<6} min "
+                           f"({minutes(end - start)} min)")
+            busy = ", ".join(f"{k}: {minutes(v)} min"
                              for k, v in sorted(occ["concurrency"].items()))
             typer.echo(f"  concurrent evaluations — {busy}")
             if occ["open_intervals"]:
@@ -1238,3 +1103,98 @@ def comparability(
         raise typer.Exit(3)
     if worst == UNKNOWN:
         raise typer.Exit(4)
+
+
+@app.command(name="edit-types")
+def edit_types(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
+    """What KIND of edit each experiment made, which kinds paid, and how much was already tried.
+
+    The search's own diagnostic, and the one the field measured rather than assumed: EvoTrace
+    classified committed edits across 121 agent runs and found the gains concentrated in three of
+    nine types, while ~30 % of ADDED lines were lines the same lineage had already deleted — a share
+    that ROSE over the run in 118 of the 121. LoopLab could not tell either fact about itself: the
+    diff was there (`tools/node_diff.py`), the classification was not.
+
+    Read-only, no model, no write. Every pair is a node against its FIRST parent (the lineage a
+    re-introduction is defined over), and the improvement column is direction-aware, taken from the
+    run's own `run_started`.
+    """
+    store = _require_run_dir(run_dir)
+    _echo_log_integrity(store, run_dir)
+    from looplab.tools.node_diff import (EDIT_TYPES, classify_edits, node_record,
+                                         reintroduced_lines)
+
+    state = fold(store.read_all())
+    minimize = str(getattr(state, "direction", "min") or "min").lower() != "max"
+    pairs = []
+    unreadable = 0
+    for node_id in sorted(state.nodes):
+        node = state.nodes[node_id]
+        parents = [p for p in (getattr(node, "parent_ids", None) or ())
+                   if isinstance(p, int) and not isinstance(p, bool) and p in state.nodes]
+        if not parents:
+            continue
+        left, right = node_record(state, parents[0]), node_record(state, node_id)
+        if left is None or right is None:
+            continue
+        counts = classify_edits(left, right)
+        if not counts["recoverable"]:
+            unreadable += 1        # a missing file set is not a pair that made no edit
+            continue
+        if not counts["files"]:
+            continue
+        parent_metric, metric = state.nodes[parents[0]].metric, node.metric
+        gain = None
+        if isinstance(parent_metric, (int, float)) and isinstance(metric, (int, float)):
+            gain = (parent_metric - metric) if minimize else (metric - parent_metric)
+        pairs.append({"node": node_id, "parent": parents[0], "counts": counts, "gain": gain})
+    if not pairs:
+        typer.echo("no parent->child pair in this run carries two comparable file sets — "
+                   "nothing to classify. (A run of seeds only has no edits to measure.)")
+        return
+
+    scored = [p for p in pairs if p["gain"] is not None]
+    typer.echo(f"edit types over {len(pairs)} parent->child pair(s), {len(scored)} with both "
+               f"metrics (direction={'min' if minimize else 'max'})")
+    if unreadable:
+        typer.echo(f"  {unreadable} pair(s) NOT classified — a file set is missing from the "
+                   "record, which is not the same as a pair that changed nothing.")
+    typer.echo(f"{'type':<16}{'+lines':>8}{'-lines':>8}{'pairs':>7}{'improved':>10}{'mean gain':>13}")
+    for kind in EDIT_TYPES:
+        added = sum(p["counts"]["added"].get(kind, 0) for p in pairs)
+        removed = sum(p["counts"]["removed"].get(kind, 0) for p in pairs)
+        if not added and not removed:
+            continue
+        # A pair is COUNTED under every type it touches, and that is the honest reading: a diff that
+        # changes a hyperparameter and a control-flow line is evidence about both, and splitting the
+        # gain between them would invent an attribution the record cannot support.
+        touching = [p for p in scored
+                    if p["counts"]["added"].get(kind) or p["counts"]["removed"].get(kind)]
+        improved = sum(1 for p in touching if p["gain"] > 0)
+        mean = (sum(p["gain"] for p in touching) / len(touching)) if touching else None
+        typer.echo(f"{kind:<16}{added:>8}{removed:>8}{len(touching):>7}"
+                   f"{(str(improved) + '/' + str(len(touching))) if touching else '—':>10}"
+                   f"{(f'{mean:+.6g}' if mean is not None else '—'):>13}")
+    typer.echo("  a pair is counted under EVERY type its diff touches; the gain is the pair's, not "
+               "the type's share of it — this ranks kinds, it does not attribute a metric to one.")
+
+    total_added = total_back = 0
+    cycling = []
+    for pair in pairs:
+        cycle = reintroduced_lines(state, pair["node"])
+        total_added += cycle["added"]
+        total_back += cycle["count"]
+        if cycle["count"]:
+            cycling.append((pair["node"], cycle))
+    share = (100.0 * total_back / total_added) if total_added else 0.0
+    typer.echo(f"\nre-introduced lines: {total_back} of {total_added} substantive added lines "
+               f"({share:.0f}%) had already been deleted earlier in the same lineage")
+    for node_id, cycle in cycling[:8]:
+        node_share = 100.0 * cycle["count"] / max(cycle["added"], 1)
+        typer.echo(f"  node {node_id}: {cycle['count']}/{cycle['added']} ({node_share:.0f}%), "
+                   f"lineage depth {cycle['depth']}")
+        for example in cycle["examples"][:2]:
+            typer.echo(f"      {example['path']}: {example['line'][:100]}  "
+                       f"(deleted at {example['deleted_between']})")
+    if not cycling:
+        typer.echo("  none — no line this run added had been deleted by its own ancestry.")

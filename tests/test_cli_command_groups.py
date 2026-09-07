@@ -67,8 +67,14 @@ GROUPS = {
                      # `repair-candidates` reads this run's own repair ledger and RANKS,
                      # deciding nothing. Neither calls a model, writes anything, or touches a
                      # cross-run store — the three clauses that keep the rest of this set here.
+                     # `edit-types` (doc 52 row 31) is the same contract once more: it folds THIS
+                     # run's own log, classifies each node's committed diff against its first
+                     # parent with a regex pass, calls no model, writes nothing and reads no
+                     # cross-run store. It belongs beside `stage-dups` because both answer "what
+                     # did this run actually do" over the run's own record — here, what KIND of
+                     # edit each experiment made and how much of it the lineage had already tried.
                      "landlock-check", "stage-dups", "parser-stats", "comparability",
-                     "tokens", "repair-candidates"},
+                     "tokens", "repair-candidates", "edit-types"},
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",
@@ -160,6 +166,13 @@ def test_each_group_docstring_says_what_it_mutates():
 
 def test_no_group_is_a_god_module_again():
     """The finding's own measure. Not a style rule — 1701 lines is how three domains hid in one.
+
+    The named extraction was DONE on 2026-09-07 rather than the cap raised again: `looplab
+    edit-types` (doc 52 row 31) spent the last of the headroom at 1335 lines, so the rendering half
+    this docstring had already named — the shared span vocabulary, `echo_section`,
+    `echo_containments` and the per-card / per-build tables — moved to `looplab/cli/run_report.py`,
+    which took the module back to 1200. The cap stays 1250: the next diagnostic pays the same
+    price, and the extraction to do when THAT is spent is `timings`' own reconciliation block.
 
     `inspect_cmds` gets its own cap, raised 1100 -> 1250 on 2026-08-29, the same discipline as
     `agents/factory.py`'s argued 520 -> 530 (see `test_agent_factory_split.py`): the crossing was

@@ -18,6 +18,7 @@ looplab speculation-gate Validate paired Card-speculation evidence and publish t
 looplab timings         Wall-clock breakdown per node + run-level, reconciled against the run's duration
 looplab tokens          TOKEN breakdown by phase, reconciled against the durable llm_usage ledger
 looplab stage-dups      Duplicated stage work, and what a cross-node reuse key would have done
+looplab edit-types      What KIND of edit each experiment made, which kinds paid, and how much was already tried once (doc 52 row 31)
 looplab parser-stats    How the structured-output parser actually behaved on this box, per role
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
@@ -1025,6 +1026,58 @@ itself — and this command prints both rather than letting one stand in for the
 
 **A row written before 2026-08-17 carries neither field** and is counted as *unkeyed*, not as
 evidence either way; a run from before that date reports `unrecorded=N` and no duplication.
+
+---
+
+## `edit-types`
+
+Read-only, no model. What KIND of edit each experiment made, which kinds paid, and how much of what
+this run "added" it had already deleted once.
+
+```bash
+looplab edit-types RUN_DIR
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (folds its `events.jsonl`; reads the committed `files` of each node and its FIRST parent) |
+
+The classification is deterministic — one regex pass per changed line, no model — over the closed
+vocabulary `looplab/tools/node_diff.py::EDIT_TYPES`: `comment`, `import`, `definition`,
+`control_flow`, `hyperparameter`, `data_io`, `logging`, `call_argument`, `whitespace`, `other`. A
+line is asked those questions in that order and takes the first that answers yes, so
+`print(f"loss={loss}")` is `logging` rather than `call_argument` and `lr = 3e-4  # tuned` is a
+hyperparameter edit rather than a comment.
+
+The shape of the output (illustrative):
+
+```
+edit types over 12 parent->child pair(s), 11 with both metrics (direction=min)
+type              +lines  -lines  pairs  improved    mean gain
+import                14       2      6       2/6   +0.0004120
+hyperparameter        41      33     10      6/10   +0.0031400
+data_io               12       9      4       1/4   -0.0002210
+control_flow          27      15      7       3/7   +0.0009900
+  a pair is counted under EVERY type its diff touches; the gain is the pair's, not the type's share
+  of it — this ranks kinds, it does not attribute a metric to one.
+
+re-introduced lines: 34 of 118 substantive added lines (29%) had already been deleted earlier in the
+same lineage
+  node 9: 12/31 (39%), lineage depth 5
+      train.py: scheduler = "cosine"  (deleted at node 4 -> node 6)
+```
+
+**Why this exists.** EvoTrace classified committed edits across 121 agent runs and found the gains
+concentrated in three of nine types, while ~30 % of ADDED lines were lines the same lineage had
+already deleted — a share that ROSE over the run in 118 of the 121. LoopLab shipped the diff
+(`diff_nodes`) and neither fact, so nothing could tell a run that is exploring from one that is
+cycling. The same classification is a section of the agent-facing tool
+(`diff_nodes(section="edits")`), so the agent that is about to re-propose a deletion is told before
+it does.
+
+**What it will not do.** A pair whose file set is missing from the record is NOT classified and is
+counted separately — an unreadable record is not a pair that changed nothing. The lineage is the
+FIRST-parent chain: a line deleted in a sibling's branch is not this node's history.
 
 ---
 
