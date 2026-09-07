@@ -13597,3 +13597,43 @@ node whose stdout the record did not keep, which is the case the heuristic was w
 mutations red: the stopwatch alone, a regex loose enough to match the word `no_speedup` in prose
 (these logs contain it — the model writes about it), and reading the reason without putting it in
 the row.
+
+## §324 — one word for two worlds: a zero the candidate earned was leaving as "not measured"
+
+Following §323's thread into the corpus: every zero-metric node on this box now carries a bridge
+reason, and the split is
+
+```
+no_valid_speedups 6   evaluator_error 4   invalid_results 2   compilation_failed 1
+```
+
+across 13 nodes in 13 probes, at 8.3–60.9 s. `pulse`'s own docstring said "all 12 zeros in the
+corpus are ... 41-47 s of real evaluation that came back invalid" — wrong on the count, the range
+and the kind: only **2** are `invalid_results`. Twelve of the thirteen probes finished with a real
+score anyway (169–262 on `edge_expansion`); the zeros are single nodes inside them.
+
+The thirteenth is the finding. **`remPde4` finished at 0.0**, and its `final.json` says why:
+
+```
+reason: no_valid_speedups
+is_solution_errors_distinct: 100,  is_solution_error_lines: 122
+"Solution verification failed: max abs err=0.131, max rel err=1.39e+06"
+```
+
+The candidate answered every instance and every answer was wrong. But `no_valid_speedups` sits in
+`compare_arms`' `NOT_SOLVERS_FAULT` — correctly, for the world it was named after, where nothing ran
+at all — so this row left as "not measured", and `arm_readout.score` dropped it too on
+`value <= 0`. Under the arena's own rule (100 % validity or nothing) that zero is real and belongs
+in the mean, exactly as the module's docstring already says of `spectral_clustering` at 95/100.
+Dropping earned failures biases an arm **upward**.
+
+One word covering two worlds is the shape; the evidence that separates them was sitting in the same
+JSON object. Both tools now read it: a non-positive speedup whose block carries `is_solution_errors`
+is a real zero, and one whose block is empty is still the arena's. Four mutations red — every
+`no_valid_speedups` to one side, then to the other, an empty error list counted as evidence, and the
+readout still dropping an earned zero.
+
+Measured rather than assumed, because this touches the registered arm: `remPde4` is the **only**
+`final.json` on the box with a non-positive speedup, and `arm_fidelity.assigned_cap` answers `None`
+for it — no probe in §190's design is affected and its readout does not move. The rule is fixed
+before a design needs it rather than after.

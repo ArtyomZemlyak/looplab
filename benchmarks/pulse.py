@@ -11,7 +11,11 @@ breakage, a quiet mismatch between what I thought I was doing and what I was doi
 Point 2 never needed the value. It needs: did new nodes arrive, were any of them ZERO, and if so is
 that zero a ruler refusal or a solver failure. The discriminator WAS `eval_seconds` -- a zero in
 under five seconds is the harness declining, a zero at 45 s is an evaluation that ran and failed --
-and all 12 zeros in the corpus are the second kind, at 41-47 s, carrying `violations`.
+and the twelve zeros the corpus held when that was written looked like the second kind.
+RE-COUNTED 2026-09-07 with the reasons read instead of the seconds: thirteen zero nodes across
+thirteen probes -- `no_valid_speedups` 6, `evaluator_error` 4, `invalid_results` 2,
+`compilation_failed` 1 -- spanning 8.3 to 60.9 s. Only TWO are the kind that sentence described
+(§324), and ten of the thirteen are the arena's rather than the solver's.
 
 The bridge, though, says why by name: `looplab_eval` classifies every refusal
 (`baseline_measured_in_pass`, `regime_not_scorable_for_task`, `evaluator_timeout`, twelve more) and

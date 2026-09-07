@@ -170,7 +170,25 @@ def score(name: str):
                       "TRAIN and the champion is scored once on TEST (§84); the two are different "
                       "measurements and averaging across them means nothing")
     value = record.get("speedup")
-    if not isinstance(value, (int, float)) or value <= 0:
+    if not isinstance(value, (int, float)):
+        return None, f"speedup is {value!r}"
+    if value <= 0:
+        # A ZERO THAT THE CANDIDATE EARNED IS A SCORE. §324: `no_valid_speedups` names two different
+        # worlds -- nothing ran (the arena's failure) and everything ran and every answer was wrong
+        # (the candidate's) -- and this line excluded both, which drops real failures out of the
+        # mean and biases an arm upward. The evidence is beside the reason: `remPde4` carries
+        # `is_solution_errors_distinct: 100`. The arena's rule is 100 % validity or nothing, so that
+        # zero belongs in the mean.
+        #
+        # INERT ON TODAY'S DESIGN, measured rather than assumed: `remPde4` is the only `final.json`
+        # on this box with a non-positive speedup and `arm_fidelity.assigned_cap` answers None for
+        # it, so no probe in the registered arm is affected and §190's readout does not move.
+        block = record.get("no_speedup")
+        earned = isinstance(block, dict) and bool(
+            block.get("is_solution_errors_distinct") or block.get("is_solution_error_lines")
+            or (isinstance(block.get("is_solution_errors"), list) and block["is_solution_errors"]))
+        if earned:
+            return 0.0, None
         return None, f"speedup is {value!r}"
     return float(value), None
 

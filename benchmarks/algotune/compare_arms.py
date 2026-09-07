@@ -224,8 +224,31 @@ def _arm_b_final(final_json: Path) -> tuple[float | None, str]:
         # "the run refused to start". Already a `--`; carry the sentence so the table says which.
         return None, reason or str(row.get("error") or "")
     if value <= 0 and reason in NOT_SOLVERS_FAULT:
+        # EXCEPT WHEN THE EVIDENCE SAYS THE CANDIDATE ANSWERED AND ANSWERED WRONGLY. The reason word
+        # is the bridge's summary; `is_solution_errors` beside it is what actually happened.
+        if validation_failed(block):
+            return value, f"{reason} (every instance failed is_solution -- a real zero)"
         return None, reason
     return value, reason
+
+
+def validation_failed(block) -> bool:
+    """Did the candidate's answers FAIL `is_solution`, as opposed to nothing having been timed?
+
+    §324. `no_valid_speedups` covers two different worlds and the vocabulary has one word for them:
+    nothing ran at all (the arena's failure), or everything ran and every answer was wrong (the
+    candidate's). `remPde4` on this box is the second -- its `final.json` carries
+    `is_solution_errors_distinct: 100` and lines like "max abs err=0.131, max rel err=1.39e+06" --
+    and it was being excluded from the means as an arena failure. The arena's own rule is 100 %
+    validity or nothing, so that zero is real and belongs in the mean, exactly as this module's
+    docstring says of `spectral_clustering` at 95/100.
+    """
+    if not isinstance(block, dict):
+        return False
+    if block.get("is_solution_errors_distinct") or block.get("is_solution_error_lines"):
+        return True
+    errs = block.get("is_solution_errors")
+    return bool(isinstance(errs, list) and errs)
 
 
 def _arm_b_regime(final_json: Path) -> str | None:
