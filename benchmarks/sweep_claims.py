@@ -634,6 +634,52 @@ def check_waste_after_the_last_node(bench: str):
     return holds, detail
 
 
+def check_reference_use_band(bench: str):
+    """"База обращений к референсу — 4.9-8.3 % (§69.1), НЕ 3.0 %"
+
+    Driven from `probe_summary --json` over every probe with a `run_probe` span. Measured
+    2026-09-08 across 142 probes:
+
+        ref_pct       median 8.3 %   p25 5.3   p75 12.5   max 30.0
+        ref_call_pct  median 8.3 %   p25 5.4   p75 12.1   max 38.9
+
+    The list is right that 3.0 % is wrong, and the band it offers instead is the OLD corpus's: only
+    **30 of 142** probes fall inside 4.9-8.3 %, and today's spread runs from a quarter below it to
+    half again above.
+
+    AND THE QUESTION HAS TWO ANSWERS PER PROBE. `ref_imports`/`ref_calls` count occurrences anywhere
+    in the run's text -- all 142 probes have at least one -- while `ref_pct` is the share of the
+    model's own `run_probe` spans that carry one. **20 probes** import the reference in code they
+    wrote and never touch it from a probe, so "does the model use the reference" answers yes or no
+    depending on which of the two a reader picks up. Both are printed here for that reason.
+    """
+    import subprocess
+    tool = Path(bench) / "looplab" / "benchmarks" / "probe_summary.py"
+    if not tool.is_file():
+        return False, "probe_summary.py is not on this box, so the claim cannot be driven"
+    got = subprocess.run([sys.executable, str(tool), "--json"], capture_output=True, text=True,
+                         timeout=900)
+    try:
+        rows = json.loads(got.stdout)
+    except ValueError:
+        return False, f"probe_summary produced no json ({got.stdout[-160:]!r})"
+    have = [r for r in rows if isinstance(r.get("ref_pct"), (int, float))]
+    if not have:
+        return False, "no probe on this box has a run_probe span to measure"
+    pcts = sorted(float(r["ref_pct"]) for r in have)
+    med = pcts[len(pcts) // 2]
+    lo, hi = pcts[len(pcts) // 4], pcts[3 * len(pcts) // 4]
+    inside = sum(1 for x in pcts if 4.9 <= x <= 8.3)
+    split = sum(1 for r in have
+                if (r.get("ref_imports") or 0) > 0 and float(r["ref_pct"]) == 0.0)
+    detail = (f"{len(have)} probe(s): reference reached in {med:.1f} % of run_probe spans "
+              f"(p25 {lo:.1f}, p75 {hi:.1f}); {inside} of {len(have)} inside the quoted 4.9-8.3 %; "
+              f"{split} import it in written code and never from a probe, so the question has two "
+              "answers per probe")
+    # The band HOLDS only if it describes the corpus -- most of it inside, not a third.
+    return inside >= 0.5 * len(have), detail
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
@@ -654,6 +700,7 @@ CLAIMS = [
      check_money_cue_reaches_the_choosers),
     ("point 9: 3.6 % of spend lands after the last evaluated node, 16 of 69 runs",
      check_waste_after_the_last_node),
+    ("point 9: the reference-use baseline is 4.9-8.3 %", check_reference_use_band),
 ]
 
 
