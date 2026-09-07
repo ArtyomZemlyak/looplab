@@ -121,6 +121,115 @@ def _spearman(a: Sequence[float], b: Sequence[float]) -> float:
     return _pearson(_ranks([p[0] for p in pairs]), _ranks([p[1] for p in pairs]))
 
 
+# ------------------------------------------- THE RESIDUE THE TWO COEFFICIENTS CANNOT SEE (row 34)
+#
+# `target_leakage` runs Pearson beside a tie-averaged rank coefficient, so a monotone re-encoding of
+# the target is caught. Two shapes still read ~0 on BOTH: `y**2` about a symmetric mean (a perfect
+# functional dependence with no monotone component) and a categorical id that maps to the label.
+# Those are exactly the leaks a grader-adjacent column takes in practice.
+#
+# WHY THIS RUNG DOES NOT GATE, and why that is the finding rather than a shortfall. The statistic
+# that sees them — how much of the target's variance the column's own GROUPS explain — has real
+# false positives that a coefficient does not: a binary feature that perfectly predicts a binary
+# target is routine and legitimate (a diagnosis column against a diagnosed label), and so is any
+# column with as many groups as rows, which explains everything by construction. `target_leakage`
+# ABORTS A RUN, and a gate that aborts on a routine shape is worse than the gap it closes. So this
+# reports and is read by nothing that decides — the measurement it needs before it may fire is a
+# rate over real tasks, which is what `categorical-leak-rung-never-measured` now stands for.
+CATEGORICAL_LEAK_ADVISORY = 0.98      # the same bar the gating rungs use, deliberately: the number
+                                      # is not what is unproven here — firing on it is
+# THE BINNED RUNG GETS A LOWER BAR, and it is not a looser one. Binning a continuous column into
+# equal-count quantile bins throws away every within-bin difference, so its η² is a LOWER BOUND on
+# the dependence: the exact `y**2` this rung exists for measures 0.967 over the 12 bins a 60-row
+# table allows, not 1.0. Holding it to 0.98 would demand MORE evidence of the shape that is hardest
+# to see than of the shape a coefficient already catches.
+CATEGORICAL_LEAK_BINNED_ADVISORY = 0.90
+_MIN_ROWS_PER_GROUP = 5               # below this a column explains the target by cardinality alone
+_MAX_TARGET_CLASSES = 20              # a target with more distinct values is treated as continuous
+
+
+def categorical_leak(features: dict[str, list[float]], target: Sequence[float],
+                     *, exclude: Sequence[str] = ()) -> dict:
+    """How much of the target each column's own GROUPS explain — the non-monotone, categorical rung.
+
+    `{name: {"score", "rung", "distinct", "rows_per_group"}}` for every column at or above
+    `CATEGORICAL_LEAK_ADVISORY`, where `score` is the correlation ratio η² for a continuous target
+    (the share of its variance explained by the grouping) and the weighted purity — the accuracy of
+    predicting each group's most common label — for a small-cardinality one. Both are 1.0 exactly
+    when the column determines the target, which is the shape being looked for.
+
+    ADVISORY, never a verdict: the caller reports it and nothing in the engine reads it. `distinct`,
+    `rows_per_group` and `binned` ride along because they are what tells a real leak from the two
+    routine shapes this statistic cannot distinguish on its own — a two-valued flag against a
+    two-valued label, and an id column with one row per group.
+
+    `exclude` is the columns the gating rungs already flagged. The point of this one is the RESIDUE:
+    a column Pearson already caught does not need saying twice, and reporting it here would bury the
+    finding this exists for under every ordinary strong correlation.
+    """
+    import math
+
+    out: dict[str, dict] = {}
+    skip = set(exclude or ())
+    clean_target = [float(v) for v in target
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and math.isfinite(float(v))]
+    if len(clean_target) < 2 * _MIN_ROWS_PER_GROUP:
+        return out
+    classes = len(set(clean_target))
+    for name, column in (features or {}).items():
+        if name in skip:
+            continue
+        pairs = _finite_pairs(column, target)
+        if len(pairs) < 2 * _MIN_ROWS_PER_GROUP:
+            continue
+        groups: dict[float, list[float]] = {}
+        for x, y in pairs:
+            groups.setdefault(x, []).append(y)
+        distinct = len(groups)
+        rows_per_group = len(pairs) / distinct
+        if distinct < 2 or len(set(y for _x, y in pairs)) < 2:
+            continue          # a constant column, or a constant target that everything "explains"
+        binned = False
+        if rows_per_group < _MIN_ROWS_PER_GROUP:
+            # A CONTINUOUS column: one row per value, so its raw groups explain any target by
+            # arithmetic. Bin it into equal-count quantile bins instead — that is what turns the
+            # non-monotone case into something measurable (`y**2` is nearly constant WITHIN a bin of
+            # x, so the bins explain the target) while an id column stays near zero, because its
+            # bins carry mixed labels. Both halves matter: without the binning the id column is a
+            # false positive, and without the continuous branch `y**2` is invisible.
+            ordered = sorted(pairs, key=lambda pair: pair[0])
+            bins = max(2, min(20, len(pairs) // _MIN_ROWS_PER_GROUP))
+            groups = {}
+            for index, (_x, y) in enumerate(ordered):
+                groups.setdefault(float(index * bins // len(ordered)), []).append(y)
+            distinct = len(groups)
+            rows_per_group = len(pairs) / distinct
+            binned = True
+            if distinct < 2:
+                continue
+        if classes <= _MAX_TARGET_CLASSES:
+            correct = sum(max(bucket.count(v) for v in set(bucket)) for bucket in groups.values())
+            score = correct / len(pairs)
+            rung = "purity"
+        else:
+            mean = sum(y for _x, y in pairs) / len(pairs)
+            total = sum((y - mean) ** 2 for _x, y in pairs)
+            if total <= 0:
+                continue                     # a constant target is explained by everything
+            within = 0.0
+            for bucket in groups.values():
+                bucket_mean = sum(bucket) / len(bucket)
+                within += sum((y - bucket_mean) ** 2 for y in bucket)
+            score = 1.0 - (within / total)
+            rung = "eta_squared"
+        bar = CATEGORICAL_LEAK_BINNED_ADVISORY if binned else CATEGORICAL_LEAK_ADVISORY
+        if score >= bar:
+            out[name] = {"score": round(score, 6), "rung": rung, "distinct": distinct,
+                         "rows_per_group": round(rows_per_group, 3), "binned": binned}
+    return out
+
+
 def target_leakage(features: dict[str, list[float]], target: list[float],
                    threshold: float = 0.98) -> dict:
     """Flag feature columns near-perfectly correlated with the target (a proxy/leak).
@@ -141,8 +250,12 @@ def target_leakage(features: dict[str, list[float]], target: list[float],
             flagged[name] = round(r if abs(r) >= abs(rho) else rho, 6)
             detail[name] = {"pearson": round(r, 6), "spearman": round(rho, 6),
                             "rung": "linear" if abs(r) >= threshold else "monotone"}
+    # THE THIRD RUNG RIDES BESIDE THE VERDICT AND IS NOT PART OF IT (doc 52 row 34): `leak` and
+    # `flagged` are what the engine acts on, and this rung may not abort a run until its false
+    # positive rate over real tasks is measured. A reader who wants it has it; nothing decides on it.
     return {"detector": "target_leakage", "leak": bool(flagged),
-            "threshold": threshold, "flagged": flagged, "flagged_detail": detail}
+            "threshold": threshold, "flagged": flagged, "flagged_detail": detail,
+            "categorical_advisory": categorical_leak(features, target, exclude=flagged)}
 
 
 _FIT_RE = re.compile(r"\.(fit|fit_transform)\s*\(([^)]*)\)")
