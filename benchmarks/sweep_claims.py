@@ -462,6 +462,70 @@ def check_snapshot_refusals(bench: str):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def check_denominator_composition(bench: str):
+    """"КАЖДУЮ ЗАКОНЧИВШУЮСЯ ПРОБУ РАЗБИРАЙ" -- a speedup divides by "the reference's time", and
+    between a third and a half of that number is not the reference solving anything.
+
+    Measured 2026-09-07 at each dataset's own instance size, under the bench interpreter (§299),
+    against the cached per-instance median every score on this box divides by:
+
+        pde_heat1d      146.5 ms cached   75.4 ms solving   49 % harness
+        pagerank        109.2 ms cached   60.3 ms solving   45 % harness
+        discrete_log      2.18 ms cached   1.23 ms solving   43 % harness
+        edge_expansion   45.4 ms cached   30.4 ms solving   33 % harness
+
+    THE SHARE IS WHAT MATTERS, AND IT IS NEARLY THE SAME FROM 2 ms TO 146 ms. A FIXED per-instance
+    cost would be almost all of a 2 ms number and a rounding error in a 146 ms one; this is
+    proportional, so it divides out of a speedup instead of compressing it. That is not an argument,
+    it is bounded by a score already on the box: `remEE8` reads 276.7268 on `edge_expansion`, so its
+    whole measured per-instance time is 45.4/276.7 = 0.164 ms, and a fixed part of the reference's
+    15.0 ms of overhead cannot exceed that -- at most 1.1 % of it is fixed.
+
+    Driven from the recorded readings (`cached_ms`, `solver_ms`) and the probes' own `final.json`,
+    so it costs no timing run; a task whose reading predates those fields is reported as unmeasured
+    rather than passed over.
+    """
+    have = {}
+    try:
+        for line in open(Path(bench) / DRIFT_LOG, encoding="utf-8", errors="replace"):
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            cached, solver = row.get("cached_ms"), row.get("solver_ms")
+            if isinstance(cached, (int, float)) and isinstance(solver, (int, float)) \
+                    and 0 < solver < cached:
+                have[row.get("task")] = (float(cached), float(solver), str(row.get("stamp") or ""))
+    except OSError as exc:
+        return False, f"cannot read the drift log: {type(exc).__name__}"
+    if not have:
+        return False, ("no reading records both halves of the denominator yet -- run "
+                       "ruler_selfcheck --record once per task")
+    said, worst = [], 0.0
+    for task, (cached, solver, _stamp) in sorted(have.items()):
+        share = 100 * (cached - solver) / cached
+        best = max((v for v in _scores(bench, task).values()), default=None)
+        if best and best > 1:
+            fixed = 100 * (cached / best) / (cached - solver)
+            worst = max(worst, fixed)
+            # A BOUND IS NOT A MEASUREMENT, and the mark says which one this is. The bound comes
+            # from the best score on the box -- a candidate's whole measured time cannot be less
+            # than a fixed cost every instance pays -- so a task nobody has beaten badly leaves the
+            # question open rather than answered. discrete_log's best is 16.8, which bounds nothing
+            # useful; edge_expansion's 276.7 bounds it at 1 %.
+            said.append(f"{task}: {share:.0f} % harness, and a score of {best:.1f} bounds the FIXED "
+                        f"part at {fixed:.1f} % of it{'  <-- not bounded below 10 %' if fixed >= 10 else ''}")
+        else:
+            said.append(f"{task}: {share:.0f} % harness (no score here to bound the fixed part)")
+    # THE BOOLEAN ANSWERS THE LIST'S CLAIM, which is that a speedup divides by the reference's time.
+    # It does not: between a third and a half of the denominator is harness. Reusing this boolean
+    # for the second question -- is that overhead fixed or proportional -- would let one answer hide
+    # the other, so the second lives in the detail with its own mark.
+    return False, "; ".join(said)
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
@@ -477,6 +541,7 @@ CLAIMS = [
      check_campaign_evidence_overwrite),
     ("point 8: NOT CHECKED -- a snapshot whose destination vanished, and two at once",
      check_snapshot_refusals),
+    ("point 9: a speedup divides by the reference's time", check_denominator_composition),
 ]
 
 

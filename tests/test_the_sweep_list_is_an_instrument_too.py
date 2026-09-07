@@ -485,3 +485,51 @@ def test_a_reading_written_before_the_regime_key_counts_as_the_wide_one(tmp_path
     _, detail = sweep_claims.check_ruler_constants(old)
     line = [p for p in detail.split("; ") if p.startswith("pagerank")][0]
     assert "2 quiet wide read(s)" in line, line
+
+
+def test_the_denominator_check_is_driven_from_the_records(tmp_path):
+    """§320. A speedup divides by "the reference's time" and a third to a half of that number is
+    harness. What decides whether that matters is the SHAPE: a proportional overhead divides out of
+    a ratio, a fixed one compresses every score toward one.
+
+    The fixture supplies a fixed-looking overhead -- a task whose best score is small enough that
+    the candidate's whole measured time is most of the reference's overhead -- and the check must
+    fail on it. The passing fixture differs only in the score."""
+    rows = [{"task": "edge_expansion", "subset": "test", "stamp": "2026-09-07T10:00:00",
+             "median": 1.0, "values": [1.0], "busy_cpus_outside_lane": 0, "regime": "w22x1r3",
+             "cached_ms": 45.4, "solver_ms": 30.4}]
+    bench = _drift_log(tmp_path / "fixed", rows)
+    probe = Path(bench) / "model-probes" / "p1"
+    (probe / "runs" / "edge_expansion" / "run").mkdir(parents=True)
+    (probe / "runs" / "edge_expansion" / "run" / "events.jsonl").write_text("", encoding="utf-8")
+    (probe / "final.json").write_text(json.dumps({"subset": "test", "speedup": 4.0}),
+                                      encoding="utf-8")
+    ok, detail = sweep_claims.check_denominator_composition(bench)
+    assert not ok, detail            # the list's claim is stale either way: 33 % of it is harness
+    assert "33 % harness" in detail, detail
+    # 45.4/4 = 11.35 ms, three quarters of the 15 ms of overhead -- the fixed shape is not excluded
+    assert "not bounded below 10 %" in detail, detail
+
+    (probe / "final.json").write_text(json.dumps({"subset": "test", "speedup": 276.7268}),
+                                      encoding="utf-8")
+    _, detail2 = sweep_claims.check_denominator_composition(bench)
+    assert "1.1 %" in detail2, detail2      # 0.164 ms -- proportional, so it divides out of a ratio
+    assert "not bounded" not in detail2, detail2
+
+
+def test_a_reading_without_the_solver_half_is_not_a_measurement_of_zero(tmp_path):
+    """Twenty rows predate these two fields. Treating a missing solver half as zero would report
+    every one of them as "100 % harness" -- a measurement-shaped number standing for no measurement,
+    which is this file's whole subject."""
+    # cached_ms PRESENT and solver_ms ABSENT is the case that happens: the cached median is always
+    # there, and the in-process timing is what fails (a task with no buildable reference, a wrong
+    # size, a timeout). A check that filled the missing half with zero would call it 100 % harness.
+    legacy = _drift_log(tmp_path / "legacy", [
+        {"task": "edge_expansion", "subset": "test", "stamp": "2026-09-06T12:00:00",
+         "median": 0.99, "values": [0.99], "busy_cpus_outside_lane": 0, "regime": "w22x1r3",
+         "cached_ms": 45.4},
+    ])
+    ok, detail = sweep_claims.check_denominator_composition(legacy)
+    assert not ok
+    assert "no reading records both halves" in detail, detail
+    assert "100 %" not in detail, detail

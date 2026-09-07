@@ -64,3 +64,22 @@ def test_the_line_states_the_overhead_and_not_the_cached_number(tmp_path, capsys
     # above the cached one means the comparison failed (wrong size, cold cache), not that the
     # harness has negative overhead.
     assert "direct < cached" in body, body
+
+
+def test_the_reading_records_both_halves(tmp_path):
+    """Recorded, not recomputed: a sweep that had to re-time the solver half would cost a minute a
+    task, and the alternative it fell back to before was quoting the number from a comment."""
+    import json
+
+    log = tmp_path / "readings.jsonl"
+    ruler_selfcheck.append_reading(log, "pde_heat1d", "test", [1.0], 1.0,
+                                   stamp="2026-09-07T10:00:00", lane="33-43,81-91", busy=0,
+                                   regime="w22x1r3", solver_ms=75.4, cached_ms=146.5)
+    row = json.loads(log.read_text(encoding="utf-8").strip())
+    assert row["solver_ms"] == 75.4 and row["cached_ms"] == 146.5
+    # A reading taken before the fields existed says None rather than zero: an absent measurement
+    # and a measured zero would otherwise both read as "no overhead".
+    ruler_selfcheck.append_reading(log, "pde_heat1d", "test", [1.0], 1.0,
+                                   stamp="2026-09-07T10:00:01", lane=None)
+    second = json.loads(log.read_text(encoding="utf-8").splitlines()[1])
+    assert second["solver_ms"] is None and second["cached_ms"] is None

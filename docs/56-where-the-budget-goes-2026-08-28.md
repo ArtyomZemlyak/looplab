@@ -13466,3 +13466,44 @@ reason, and only when the in-process number is the smaller of the two — a dire
 cached one means the comparison failed, not that the harness has negative overhead. Four mutations
 red, including one that takes the first integer in the file name (`_T100ms_` → 100 instead of
 `_n8_` → 8) and one that times it under whichever interpreter happens to be running.
+
+## §320 — the overhead does not order with the gap either, and it is proportional
+
+**Prediction 13, refuted.** With the denominator split measured on two tasks, the natural guess was
+that the regime gap lives in the harness half: `pde_heat1d` 49 % harness and a −4.5 % gap,
+`edge_expansion` 33 % and none. Measuring the other two at their own dataset sizes:
+
+| task | cached | in-process | harness share | regime gap |
+|---|---|---|---|---|
+| pde_heat1d | 146.5 ms | 76.5 ms | 48 % | −4.5 % |
+| pagerank | 109.2 ms | 60.6 ms | **44 %** | **+0.3 %** |
+| discrete_log | 2.2 ms | 1.3 ms | 42 % | −2.5 % |
+| edge_expansion | 45.5 ms | 29.7 ms | 35 % | +0.3 % |
+
+`pagerank` carries the second-largest overhead share and no gap at all, `discrete_log` a smaller
+share and a real gap. The two do not order together. Seventh wall.
+
+What the four measurements do establish is the **shape** of the overhead, and it is the thing that
+decides whether it matters. The share is 35–48 % across per-instance times spanning **2 ms to
+146 ms**. A fixed per-instance cost cannot do that — it would be almost all of a 2 ms number and a
+rounding error in a 146 ms one. And the bound is not an argument but a score already on the box:
+`remEE8` reads **276.7268** on `edge_expansion`, so its whole measured per-instance time is
+45.5/276.7 = 0.164 ms, and a fixed cost every instance pays cannot exceed that — at most **1.0 %**
+of the reference's 15.8 ms of overhead is fixed. Proportional overhead divides out of a ratio, so it
+does not compress the scores; that is now established rather than hoped.
+
+`check_denominator_composition` drives this every sweep from the recorded readings, which now carry
+both halves (`cached_ms`, `solver_ms`) so nothing has to be re-timed. Its boolean answers the list's
+own claim — that a speedup divides by the reference's time, which it does not, a third to a half
+being harness — and the second question, fixed or proportional, has its own mark in the detail,
+because reusing one boolean for two questions lets one answer hide the other. `discrete_log` carries
+that mark: its best score here is 16.8, which bounds the fixed part only at 14 %, so on that task
+the question stays open.
+
+Four mutations red: calling any overhead proportional, bounding the fixed part with the reference
+instead of the candidate, filling a missing solver half with zero — the fixture for that one has
+`cached_ms` present and `solver_ms` absent, which is the case that actually happens — and the
+earlier pair on the in-process timing.
+
+Also worth recording for point 9: the best `edge_expansion` TEST score on this box is **276.7268**
+(`remEE8`), not the 224.4432 the standing list carries, and not `accEE`'s own 224.8846.

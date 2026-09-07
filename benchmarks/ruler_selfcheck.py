@@ -318,7 +318,8 @@ def busy_cpus_outside_lane() -> int | None:
 
 def append_reading(path, task: str, subset: str, values, median: float, stamp=None,
                    lane: str | None = None, busy: int | None = None,
-                   regime: str | None = None) -> dict:
+                   regime: str | None = None, solver_ms: float | None = None,
+                   cached_ms: float | None = None) -> dict:
     """Append one dated reading, so the drift becomes a SERIES rather than a single number.
 
     §214 measured `edge_expansion` at 0.8861 against the sweep's 0.9847 and could say the cached
@@ -350,6 +351,13 @@ def append_reading(path, task: str, subset: str, values, median: float, stamp=No
     row = {"stamp": stamp or datetime.datetime.now().isoformat(timespec="seconds"),
            "task": task, "subset": subset, "lane": lane,
            "busy_cpus_outside_lane": busy, "regime": regime,
+           # THE TWO HALVES OF THE DENOMINATOR, recorded rather than recomputed: the cached
+           # per-instance median this reading divided by, and the same reference timed in a plain
+           # process at the dataset's own size. §319 measured the split at 33-49 % across four
+           # tasks; a sweep that had to re-time it would either cost a minute per task or go back
+           # to quoting the number from a comment.
+           "cached_ms": (round(float(cached_ms), 4) if isinstance(cached_ms, (int, float)) else None),
+           "solver_ms": (round(float(solver_ms), 4) if isinstance(solver_ms, (int, float)) else None),
            "values": [round(float(v), 6) for v in values],
            "median": round(float(median), 6)}
     path = Path(path)
@@ -543,7 +551,7 @@ def main(argv=None) -> int:
         seen = [b for b in busy_seen if b is not None]
         append_reading(args.record, args.task, args.subset, vals, median, args.stamp,
                        args.lane, max(seen) if seen else None,
-                       observed_regime(args.task, args.subset))
+                       observed_regime(args.task, args.subset), direct, cached)
         print(f"  recorded to {args.record}")
     if said is not None and abs(median - said) > 0.02:
         print("  DRIFT: the cached baseline and today's box no longer agree. Within one task this "
