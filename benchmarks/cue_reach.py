@@ -88,6 +88,10 @@ def main(argv=None) -> int:
     ap.add_argument("--pattern", default=MONEY, help="regex to look for (default: the money cue)")
     ap.add_argument("--naive", action="store_true",
                     help="also print the truncated-read figure, to show the gap")
+    # A MACHINE-READABLE ANSWER, because §289 already paid for the alternative: a regex over this
+    # table's prose dropped every capped probe and invented "0.0 % against a control's 9.1 %" from
+    # a parenthesis. `sweep_claims` drives this tool every sweep; it may not read it by eye.
+    ap.add_argument("--json", action="store_true", help="emit the table as JSON, not as columns")
     args = ap.parse_args(argv)
 
     paths = [p for root in args.roots for p in spans_of(root)]
@@ -95,6 +99,16 @@ def main(argv=None) -> int:
         print("no spans.jsonl under any of the given roots", file=sys.stderr)
         return 2
     rows, (grand, blind) = reach(paths, args.pattern, naive=args.naive)
+    if args.json:
+        print(json.dumps({
+            "logs": len(paths), "pattern": args.pattern,
+            "grand_usd": round(grand, 6), "blind_usd": round(blind, 6),
+            "phases": [{"phase": phase, "spans": n, "sees": h,
+                        "reach_pct": round(100 * h / n, 2) if n else 0.0,
+                        "usd": round(usd, 6),
+                        "share_pct": round(100 * usd / grand, 2) if grand else 0.0}
+                       for phase, n, h, usd, _nh in rows]}, sort_keys=True))
+        return 0
     head = f'{"phase":22s} {"spans":>6s} {"sees":>6s} {"%":>6s} {"cost":>9s} {"share":>6s}'
     print(f"{len(paths)} span log(s), pattern /{args.pattern}/")
     print(head + ("   naive%" if args.naive else ""))

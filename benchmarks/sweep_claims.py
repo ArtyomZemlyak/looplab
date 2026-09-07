@@ -526,6 +526,63 @@ def check_denominator_composition(bench: str):
     return False, "; ".join(said)
 
 
+def check_money_cue_reaches_the_choosers(bench: str):
+    """"денежная подсказка не доходит до plan/foresight_rank/hyp_prioritize"
+
+    DRIVEN on the newest probes with `cue_reach`, which resolves chained prompts -- reading
+    `attributes.input` directly reports a phase as blind whenever `input_from` is set, and that
+    error has been made by hand twice (31.7 % where the truth was 99.3 %).
+
+    Measured 2026-09-08 over the three newest probe trees:
+
+        plan_step 100 %   propose 90 %   deep_research 90 %   plan 100 %   repropose 88 %
+        foresight_rank 0 % (2.1 % of spend)   hyp_prioritize 0 %
+
+    So the claim is two-thirds stale: `plan` was closed on 2026-08-31 through the Developer's own
+    note (`repo_developer.py::_propose_plan`) and reads 100 %, and `propose`/`repropose` -- which
+    the same list once called blind -- are near ninety. What remains blind is the foresight panel,
+    and that is a RECORDED DECISION rather than an oversight (`engine/proposal_cues.py`): a ranker
+    choosing between candidates it did not generate has no cheaper option to switch to, so the
+    sentence would cost tokens on every call and change nothing. Its own revisit threshold is "a
+    few per cent", which is why this check reports the SHARE and not just the reach.
+    """
+    import subprocess
+    tool = Path(bench) / "looplab" / "benchmarks" / "cue_reach.py"
+    roots = sorted(glob.glob(f"{bench}/model-probes/*/runs"), key=os.path.getmtime, reverse=True)
+    roots = [str(Path(r).parent) for r in roots if "/_ruler/" not in r][:3]
+    if not tool.is_file() or not roots:
+        return False, "cue_reach.py or a probe tree is missing, so the claim cannot be driven"
+    # `--json`, not the columns: §289 measured what parsing this kind of table by eye costs.
+    got = subprocess.run([sys.executable, str(tool), "--json", *roots],
+                         capture_output=True, text=True, timeout=600)
+    try:
+        table = json.loads(got.stdout.strip().splitlines()[-1])
+        rows = {r["phase"]: (r["reach_pct"], r["share_pct"]) for r in table["phases"]}
+    except (ValueError, IndexError, KeyError, TypeError):
+        return False, f"cue_reach produced no table ({got.stdout[-160:]!r})"
+    if not rows:
+        return False, "cue_reach found no spans in the newest probes"
+    said, still_blind = [], []
+    for phase in ("plan", "propose", "repropose", "foresight_rank", "hyp_prioritize"):
+        if phase not in rows:
+            said.append(f"{phase}: no spans in these probes")
+            continue
+        reach, share = rows[phase]
+        said.append(f"{phase} {reach:.0f} % of spans, {share:.1f} % of spend")
+        if reach == 0.0:
+            still_blind.append((phase, share))
+    # The claim HOLDS only if all three named phases are still blind. `plan` alone refutes it.
+    named = {"plan", "foresight_rank", "hyp_prioritize"}
+    blind_named = {p for p, _ in still_blind} & named
+    detail = "; ".join(said)
+    if blind_named:
+        over = [f"{p} at {sh:.1f} %" for p, sh in still_blind if p in named and sh >= 3.0]
+        detail += ("; STILL BLIND: " + ", ".join(sorted(blind_named))
+                   + (" -- and past its own 'a few per cent' revisit line: " + ", ".join(over)
+                      if over else " -- a recorded decision, both under 3 % of spend"))
+    return blind_named == named, detail
+
+
 CLAIMS = [
     ("point 5: seven entries in .baseline_times", check_baseline_count),
     ("point 3: add the abandoned remDL $0.1292 when reconciling", check_abandoned_remdl),
@@ -542,6 +599,8 @@ CLAIMS = [
     ("point 8: NOT CHECKED -- a snapshot whose destination vanished, and two at once",
      check_snapshot_refusals),
     ("point 9: a speedup divides by the reference's time", check_denominator_composition),
+    ("point 8(c): the money cue misses plan/foresight_rank/hyp_prioritize",
+     check_money_cue_reaches_the_choosers),
 ]
 
 
