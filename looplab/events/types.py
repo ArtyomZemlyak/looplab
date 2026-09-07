@@ -41,6 +41,8 @@ How to add an event type:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 # --- DOMAIN events folded into RunState by `replay.fold`. The engine owns domain reduction and
 #     effects; authenticated server/CLI paths may append explicitly allow-listed control intents or
 #     receipts through EventStore serialization. Route every new non-engine append through the protocol's
@@ -1019,26 +1021,9 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # `replay._HANDLERS` (folded) OR in this set (diagnostic), never both and never neither — so adding a
 # new event type FORCES a conscious "does the fold read this?" decision (arch-review §5 P2: the old
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
-# OPEN[event-payloads-have-no-registry] the registry states the envelope and the evolution rules and
-# nothing about what any type CARRIES: 65 of the constants have no describing comment, the fold reads
-# 205 distinct (handler, key) pairs, and 15 types are named in no document. Invariant #5's
-# additive-only rule cannot be checked against a contract that exists only as handler code.
-# proof:absent:EVENT_PAYLOAD_KEYS@looplab/events/types.py
-#
-# THE CHEAP MECHANICAL VERSION WAS TRIED 2026-09-02 AND DOES NOT ANSWER THIS, so the next reader
-# does not have to re-derive it. Joining "keys the fold READS" (per handler, `d.get`/`d[...]` by AST)
-# against "keys a writer WRITES" would make the dead-reader defect checkable — the shape
-# `RunTools._research_memo` carried for six weeks, keyed on a `summary` no writer produced. Run over
-# the tree it reports FOUR types whose handler reads a key no writer writes, and all four are
-# artifacts of the scan rather than findings: `hint`/`replace` and `pause`/`node_id` are CONTROL
-# INTENTS whose payload `serve/control_validation.py` normalizes rather than spelling as a literal,
-# and `node_failed`/`node_repaired` build their payload in a variable. The write side is only
-# enumerable for literal `append(EV_X, {...})` calls — 77 of the types — so a join over it is too
-# weak to convict, and a join strong enough would have to follow a dict through the function that
-# builds it.
-#
-# So this is a DOCUMENTATION job of real size, not a mechanical one, and that is why it is still
-# open: the 65 undescribed constants and the 15 undocumented types are the actual work.
+# The payload contract each type carries is at the END of this module
+# (`EVENT_PAYLOAD_KEYS`, doc 52 row 30) — including this partition, which the generated
+# reference prints beside every row.
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
     EV_TRACE_EXPORT_HEALTH, EV_BELIEF_ADMISSION, EV_NODE_BUILD_DELTA,
@@ -1059,3 +1044,944 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_AGENT_PHASE_STARTED, EV_AGENT_CHECKPOINTED, EV_AGENT_PHASE_COMPLETED,
     EV_PRIOR_INJECTED, EV_MEMORY_READ,
 })
+
+# --------------------------------------------------------------- THE PAYLOAD CONTRACT (doc 52 row 30)
+#
+# Everything above states the ENVELOPE and the evolution rules and nothing about what any type
+# CARRIES: 65 of the constants had no describing comment, the fold reads 364 distinct (handler, key)
+# pairs, and ten types were named in no document. Invariant #5's additive-only rule cannot be checked
+# against a contract that exists only as handler code, so here is the contract, one row per
+# registered type. It is what `docs/guide/event-reference.md` is generated from
+# (`python -m looplab.events.event_reference`) and what `tests/test_event_payload_contract.py`
+# re-derives from source — both sides — on every run:
+#
+#   * every key `replay.fold` reads off a payload, FOLLOWING the helpers a handler hands it to, is
+#     declared here or the guard is red. A handler that starts reading `d["new_key"]` with no row is
+#     the DEAD-READER defect (`RunTools._research_memo` keyed for six weeks on a `summary` no writer
+#     produced) turned into a test failure;
+#   * every key a writer PUTS in a payload is declared here too — `store.append(EV_X, {…})`,
+#     `append_many`, and the wrappers (`_append_proposal_event`, `emit_phase_event`) alike;
+#   * `required` is what a writer must write TODAY, and that is CHECKED: every literal writer of the
+#     type must write every required key unconditionally. It is deliberately NOT a claim about old
+#     rows — a log written before a key existed does not carry it, which is the whole point of
+#     invariant #5 — so the fold defaults BOTH halves, and the guard proves it by folding every
+#     registered type with an EMPTY payload;
+#   * `stored_whole` marks the types whose handler keeps the payload OBJECT (`st.archive = d`,
+#     `st.novelty_events.append(d)`). For those the fold has no key contract at all: whatever a
+#     writer puts in the dict reaches `RunState` and every projection over it, so a key added there
+#     is a new field of the UI's data model, not a private note. It is re-derived by the guard.
+#
+# THE CHEAP MECHANICAL VERSION — join "keys the fold reads" against "keys a writer writes", convict
+# the difference — was tried 2026-09-02 and does not answer this, which is why this table is
+# authored rather than generated. Run over the tree it reports four types whose handler reads a key
+# no writer writes, and all four are artifacts of the scan: `hint`/`replace` and `pause`/`node_id`
+# are CONTROL INTENTS whose payload `serve/control_validation.py` normalizes rather than spelling as
+# a literal, and `node_failed`/`node_repaired` build their payload in a variable. The write side is
+# enumerable only for literal payloads, so a join over it is too weak to convict — hence a DECLARED
+# vocabulary that both sides are checked against, rather than an inferred one.
+#
+# Adding a key: put it in `optional` — never in `required`, because no existing log carries it —
+# give the reader a default, and regenerate the page. Adding a TYPE: the four steps at the top of
+# this module plus a row here; the guard refuses a registered type with no contract, and a contract
+# row for a type that is not registered.
+@dataclass(frozen=True)
+class PayloadContract:
+    """What one event type's ``data`` dict carries.
+
+    ``summary`` is the one-line description the generated reference prints; ``required`` and
+    ``optional`` partition the declared vocabulary (a key may never be in both). ``stored_whole`` is
+    re-derived from ``replay.py`` by the guard rather than trusted from here.
+    """
+
+    summary: str
+    required: tuple[str, ...] = ()
+    optional: tuple[str, ...] = ()
+    stored_whole: bool = False
+
+    @property
+    def keys(self) -> frozenset[str]:
+        """Every key this type is declared to carry."""
+        return frozenset(self.required) | frozenset(self.optional)
+
+
+EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
+    "ablate": PayloadContract(
+        "One ablation of the champion's code: which blocks were removed and what each removal cost the metric.",
+        required=("generation", "impacts", "parent_id"),
+        optional=(
+            "ablation_id", "attempt", "blocks", "eval_seconds", "mode", "skipped", "superseded",
+            "top_block"
+        ),
+        stored_whole=True,
+    ),
+    "agent_checkpointed": PayloadContract(
+        "An agentic role's mid-loop checkpoint: the turn, the plan it works from, the todo updates it just made.",
+        required=("label", "plan", "plan_updates", "todos", "turn"),
+        optional=(),
+    ),
+    "agent_decision": PayloadContract(
+        "The unified agent's pick of the next action, beside the legal set it was offered.",
+        required=("at_node", "chosen", "legal", "rationale", "recommended"),
+        optional=(),
+        stored_whole=True,
+    ),
+    "agent_phase_completed": PayloadContract(
+        "One agentic phase ended: how it exited, after how many turns and seconds.",
+        required=("exit", "label", "plan_updates", "seconds", "turns"),
+        optional=(),
+    ),
+    "agent_phase_started": PayloadContract(
+        "One agentic phase began: its label, tool surface and the turn/time budget it was given.",
+        required=("emit", "label", "max_turns", "time_budget_s", "tools"),
+        optional=(),
+    ),
+    "agent_validated": PayloadContract(
+        "The Developer's self-validation over a build: which checks ran, whether it shipped, after how many attempts.",
+        required=(),
+        optional=(
+            "attempt", "attempts", "checks", "fell_back", "generation", "node_id", "ok",
+            "shipped_ok"
+        ),
+    ),
+    "annotation": PayloadContract(
+        "An operator note pinned to one node.",
+        required=("text",),
+        optional=("node_id",),
+    ),
+    "applied_params_backfilled": PayloadContract(
+        "What the configuration that actually RAN assigned to the declared params, read back off the workdir.",
+        required=(
+            "applied_params", "generation", "node_id", "read_at", "unrecoverable",
+            "workdir_digest"
+        ),
+        optional=(),
+    ),
+    "approval_granted": PayloadContract(
+        "The operator ratified the node the run paused on (HITL).",
+        required=("generation", "node_id"),
+        optional=("attempt",),
+    ),
+    "approval_requested": PayloadContract(
+        "The run paused for a human decision about one node, at a named log position.",
+        required=("after_seq", "generation", "metric", "node_id"),
+        optional=("attempt",),
+    ),
+    "asha_rank": PayloadContract(
+        "One ASHA tick's ranking of a running node against its comparable population.",
+        required=(
+            "comparable_population", "direction", "endpoint_underperforming", "generation",
+            "intermediate", "kill_comparable", "node_id", "population", "quantile",
+            "resource_underperforming", "underperforming"
+        ),
+        optional=(),
+    ),
+    "asha_verdict": PayloadContract(
+        "The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence.",
+        required=(
+            "comparable_population", "confidence", "direction", "generation", "intermediate",
+            "kill", "node_id", "quantile", "reason", "status", "stop_decided", "under_streak"
+        ),
+        optional=(),
+    ),
+    "belief_admission": PayloadContract(
+        "How many researcher-proposed beliefs one proposal turn offered and how many the board admitted.",
+        required=(
+            "admitted", "blank", "board_read", "capped", "proposed", "repeated", "restated",
+            "shape"
+        ),
+        optional=(),
+    ),
+    "best_confirmed": PayloadContract(
+        "The champion the run confirmed by re-evaluation, and whether that confirmation was significant.",
+        required=("generations", "node_id", "search_epoch", "significant"),
+        optional=("attempt", "generation"),
+    ),
+    "budget": PayloadContract(
+        "The finalization budget receipt: wall clock, in-process seconds, evaluation seconds and node count.",
+        required=(),
+        optional=(
+            "elapsed_s", "eval_s", "finalize_scope", "finish_seq", "nodes", "process_s",
+            "speculation"
+        ),
+    ),
+    "budget_extend": PayloadContract(
+        "An operator raising a live run's node, time or parallelism budget.",
+        required=(),
+        optional=(
+            "add_nodes", "eval_parallel", "llm_parallel", "max_eval_seconds", "max_parallel",
+            "max_seconds", "parallel_build", "timeout"
+        ),
+    ),
+    "card_added": PayloadContract(
+        "A research Card minted into durable inventory: its id, statement and the action it owns.",
+        required=(),
+        optional=(
+            "action", "at_node", "concepts", "footprint", "generation", "id", "idea", "node_id",
+            "ownership_receipt", "parent_card_id", "parent_generations", "parent_id",
+            "parent_ids", "rationale", "scored_against", "scored_against_empty",
+            "scored_against_generation", "source", "statement", "steering_context"
+        ),
+        stored_whole=True,
+    ),
+    "card_auto_dropped": PayloadContract(
+        "The engine dropped a Card as a lifecycle effect, with the reason (`dropped_by=engine`).",
+        required=("dropped_by", "id", "reason"),
+        optional=("by",),
+    ),
+    "card_build_attempted": PayloadContract(
+        "One dispatch attempt for a Card's build, indexed so a repeat is visible instead of silently re-issued.",
+        required=("card_id", "generation", "index"),
+        optional=(),
+    ),
+    "card_build_done": PayloadContract(
+        "A Card's build finished: the node it produced, or the reason it was skipped.",
+        required=("error", "eval_seconds", "generation", "node_id", "reason"),
+        optional=("card_id", "skipped", "speculative"),
+    ),
+    "card_build_requested": PayloadContract(
+        "The durable selection-and-compute gate for one Card's build.",
+        required=("card_id", "generation"),
+        optional=(),
+    ),
+    "card_dropped": PayloadContract(
+        "The operator stopped a Card (server-stamped).",
+        required=("id",),
+        optional=("by", "dropped_by", "reason"),
+    ),
+    "card_edited": PayloadContract(
+        "The operator rewrote a Card's statement.",
+        required=("id",),
+        optional=("source", "statement"),
+    ),
+    "card_enriched": PayloadContract(
+        "A Card's novelty / cross-run / footprint delta (last write by seq wins).",
+        required=(),
+        optional=("generation", "id", "node_id", "proposal_ref"),
+        stored_whole=True,
+    ),
+    "card_merged": PayloadContract(
+        "Alias Cards folded into a canonical one, with the seq that decided the edge.",
+        required=("aliases", "canonical", "merged_by", "source_event_seq"),
+        optional=("statement",),
+    ),
+    "card_ranked": PayloadContract(
+        "The board's priority order over the Cards, with per-Card confidence and reason.",
+        required=(),
+        optional=("at_node", "confidence", "order", "ranked", "reason"),
+    ),
+    "card_reopened": PayloadContract(
+        "The operator resumed a dropped Card (server-stamped).",
+        required=("id",),
+        optional=("by", "dropped_by", "reason"),
+    ),
+    "card_reprioritized": PayloadContract(
+        "The operator moved one Card's priority.",
+        required=("id",),
+        optional=("pinned", "priority", "source"),
+    ),
+    "card_resource_pinned": PayloadContract(
+        "The operator pinned one Card's GPU footprint.",
+        required=("id",),
+        optional=("gpu_mem_mib", "gpus", "pinned", "source"),
+    ),
+    "command_ack": PayloadContract(
+        "The engine folded one server command intent — the causal ack that closes it.",
+        required=("command_id", "event_seq"),
+        optional=(),
+    ),
+    "comment_created": PayloadContract(
+        "An operator comment on one node, at that node's generation.",
+        required=("node_id",),
+        optional=("node_generation", "text"),
+    ),
+    "comment_edited": PayloadContract(
+        "A new revision of one comment, compare-and-swapped against the version the author saw.",
+        required=("comment_id",),
+        optional=("expected_version", "node_generation", "node_id", "text"),
+    ),
+    "comment_resolution_changed": PayloadContract(
+        "One comment's resolved flag moved, compare-and-swapped against the version the author saw.",
+        required=("comment_id",),
+        optional=("expected_version", "node_generation", "node_id", "resolved"),
+    ),
+    "concept_consolidation": PayloadContract(
+        "A concept-vocabulary consolidation: which ids were renamed into which.",
+        required=("mode", "rename"),
+        optional=(),
+    ),
+    "concept_coverage_snapshot": PayloadContract(
+        "The concept-coverage gate's snapshot at one node, and which of its rules fired.",
+        required=(),
+        optional=(
+            "at_node", "current_streak", "directive", "experiments", "fired", "locked_axis",
+            "projection_token", "recent_axis", "streak", "tag_mode", "top_concept",
+            "top_concept_frac", "uncovered_axes", "uncovered_key"
+        ),
+    ),
+    "concept_edge": PayloadContract(
+        "Edges added to the concept graph, and the mode that derived them.",
+        required=("edges", "mode"),
+        optional=(),
+    ),
+    "concept_lens_completed": PayloadContract(
+        "A paid concept-lens projection's terminal: the validated spec, or an authoritative decline.",
+        required=(
+            "generation", "lens_request_id", "outcome", "reason", "request_digest",
+            "resolution", "resolution_id"
+        ),
+        optional=(),
+    ),
+    "concept_lens_failed": PayloadContract(
+        "A concept-lens attempt that failed before any provider call — retry-safe, no projection written.",
+        required=(),
+        optional=("error_kind", "generation", "lens_request_id", "request_digest"),
+    ),
+    "concept_lens_started": PayloadContract(
+        "The durable idempotency claim for one paid concept-lens projection.",
+        required=(),
+        optional=("generation", "lens_request_id", "request_digest"),
+    ),
+    "concept_tag_edited": PayloadContract(
+        "The operator re-tagged one node's concepts; the classifier cadence must not clobber it.",
+        required=("node_id",),
+        optional=("concepts", "node_generation"),
+    ),
+    "confirm_done": PayloadContract(
+        "The fulfillment receipt for one `force_confirm` request.",
+        required=("generation", "node_id"),
+        optional=("attempt",),
+    ),
+    "confirm_eval": PayloadContract(
+        "One seed of a champion-confirmation re-evaluation, with its metric and eval seconds.",
+        required=("eval_seconds", "generation", "metric", "node_id", "seed"),
+        optional=("attempt", "error", "reason", "superseded"),
+    ),
+    "coverage_snapshot": PayloadContract(
+        "The search's coverage snapshot at one node.",
+        required=(),
+        optional=(
+            "at_node", "dominant_theme_frac", "niches", "nodes", "operators",
+            "projection_token", "recent_dominant_frac", "theme_entropy", "themes", "top_themes"
+        ),
+        stored_whole=True,
+    ),
+    "cross_run_prior": PayloadContract(
+        "Concepts of this proposal a SIMILAR earlier run already tried, and how those runs went.",
+        required=(),
+        optional=(
+            "concept_source", "matched_concepts", "prior_runs", "prior_runs_complete",
+            "prior_runs_omitted", "prior_runs_total", "stance", "v"
+        ),
+        stored_whole=True,
+    ),
+    "data_leakage": PayloadContract(
+        "The deterministic leakage scan's verdicts over the task's data.",
+        required=("leak", "verdicts"),
+        optional=(),
+        stored_whole=True,
+    ),
+    "data_profiled": PayloadContract(
+        "The task's data profile: the columns the bounded profiler read.",
+        required=("columns",),
+        optional=(),
+    ),
+    "data_provenance": PayloadContract(
+        "Where each of the task's declared data assets came from.",
+        required=("assets",),
+        optional=(),
+        stored_whole=True,
+    ),
+    "deep_research": PayloadContract(
+        "An operator request for a deep-research pass — the intent itself, with no payload.",
+        required=(),
+        optional=(),
+        stored_whole=True,
+    ),
+    "deps_declared": PayloadContract(
+        "The dependency directives a task declared, what the resolver pinned, and what it dropped.",
+        required=(
+            "action", "command", "digest", "directives", "dropped", "env_delta", "file",
+            "observed", "pin_count", "pins", "pins_truncated", "root"
+        ),
+        optional=(),
+    ),
+    "deps_installed": PayloadContract(
+        "The packages one evaluation installed and how they resolved.",
+        required=("generation", "node_id", "packages", "resolved", "round"),
+        optional=("source",),
+    ),
+    "diversity_archive": PayloadContract(
+        "The finalization snapshot of the diversity archive.",
+        required=(),
+        optional=("elites", "finalize_scope", "finish_seq", "niches", "resolution"),
+        stored_whole=True,
+    ),
+    "drift_unavailable": PayloadContract(
+        "Why the run could not compare its environment against the one it started in.",
+        required=("reason",),
+        optional=(),
+    ),
+    "env_changed": PayloadContract(
+        "A resume observed that the Python/library environment differs from the one the run started in.",
+        required=("now", "was"),
+        optional=(),
+    ),
+    "finalization_finished": PayloadContract(
+        "The wrap-up for one finish (keyed by that finish's seq) completed.",
+        required=("finish_seq",),
+        optional=(),
+    ),
+    "finalize_step": PayloadContract(
+        "One replay-safe step gate inside a single logical finalization.",
+        required=(),
+        optional=("finish_data", "finish_report_planned", "outcome", "scope", "step"),
+    ),
+    "force_ablate": PayloadContract(
+        "The operator asked for an ablation of one node.",
+        required=("node_id",),
+        optional=("attempt", "generation"),
+    ),
+    "force_confirm": PayloadContract(
+        "The operator asked for a confirmation re-evaluation of one node.",
+        required=("node_id",),
+        optional=("attempt", "generation"),
+    ),
+    "foresight_selected": PayloadContract(
+        "The pre-execution foresight pick among candidate actions, with its confidence.",
+        required=(),
+        optional=("attempt", "confidence", "generation", "node_id"),
+    ),
+    "fork": PayloadContract(
+        "The operator asked to branch a new node from an existing one.",
+        required=("from_node_id",),
+        optional=("attempt", "generation"),
+        stored_whole=True,
+    ),
+    "fork_done": PayloadContract(
+        "The fulfillment receipt for one `fork` request, indexed into the request queue.",
+        required=("from_node_id", "generation", "idx"),
+        optional=("skipped",),
+    ),
+    "fork_unfulfilled": PayloadContract(
+        "A `fork` request the engine could not serve — recorded instead of silently dropped.",
+        required=("from_node_id", "generation", "idx"),
+        optional=(),
+    ),
+    "full_retrain_charged": PayloadContract(
+        "A repair that forced a full retrain, and the evaluation budget it spent.",
+        required=("attempt", "generation", "node_id", "spent"),
+        optional=(),
+    ),
+    "hint": PayloadContract(
+        "An operator hint pushed into the next proposals; `replace` swaps the standing one.",
+        required=("text",),
+        optional=("replace", "source"),
+        stored_whole=True,
+    ),
+    "holdout_evaluated": PayloadContract(
+        "The node's number on the agent-invisible holdout split, beside the search metric and their gap.",
+        required=("gap", "generation", "metric", "n_holdout", "node_id", "search_epoch"),
+        optional=("attempt", "protocol"),
+    ),
+    "host_grading": PayloadContract(
+        "The host-side scorer's grade over the candidate's predictions.",
+        required=("predictions", "scorer"),
+        optional=(),
+        stored_whole=True,
+    ),
+    "hypothesis_added": PayloadContract(
+        "A research hypothesis on the board — operator-authored, or engine-written after a deep-research pass.",
+        required=("source", "statement"),
+        optional=("at_node", "concept_tags", "concepts", "id", "parent_belief_id"),
+    ),
+    "hypothesis_concepts": PayloadContract(
+        "The concept ids one hypothesis was tagged with, against a named vocabulary.",
+        required=("at_vocab", "concepts", "hyp_id", "mode"),
+        optional=(),
+    ),
+    "hypothesis_merged": PayloadContract(
+        "Alias hypotheses folded into a canonical one.",
+        required=("aliases", "at_node", "canonical", "statement"),
+        optional=(),
+    ),
+    "hypothesis_ranked": PayloadContract(
+        "The board's priority order over the open hypotheses, with confidence.",
+        required=(),
+        optional=("attempt", "generation", "node_id", "order"),
+        stored_whole=True,
+    ),
+    "hypothesis_updated": PayloadContract(
+        "One hypothesis's status moved.",
+        required=("id",),
+        optional=("status",),
+    ),
+    "inject_done": PayloadContract(
+        "The fulfillment receipt for one `inject_node` request.",
+        required=("idx",),
+        optional=(),
+    ),
+    "inject_failed": PayloadContract(
+        "An `inject_node` request that could not be materialized, with the reason.",
+        required=("error", "idx", "reason"),
+        optional=(),
+    ),
+    "inject_node": PayloadContract(
+        "An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node.",
+        required=(),
+        optional=(
+            "code", "deleted", "files", "forked_from", "idea", "origin", "parent_generations",
+            "parent_id", "parent_ids", "source_node", "source_run"
+        ),
+        stored_whole=True,
+    ),
+    "lessons_distilled": PayloadContract(
+        "The lessons one distillation pass drew from this run's node pairs.",
+        required=("at_node", "count", "lessons", "pairs", "trigger"),
+        optional=(),
+        stored_whole=True,
+    ),
+    "lessons_reconciled": PayloadContract(
+        "A re-evaluation changed an outcome, so this run's lessons were re-derived.",
+        required=("at_node", "derivation", "lessons", "n_added", "n_retired", "pairs", "reflect"),
+        optional=(),
+    ),
+    "lessons_refreshed": PayloadContract(
+        "The cross-run lesson store was re-read at a node, and whether it changed.",
+        required=("at_node",),
+        optional=("changed", "chars", "error", "skipped"),
+        stored_whole=True,
+    ),
+    "lessons_store_unavailable": PayloadContract(
+        "The lesson store could not be read this cadence; the next one retries the same unread store.",
+        required=("error", "mode"),
+        optional=("count", "phase"),
+    ),
+    "literature_retrieved": PayloadContract(
+        "The papers one deep-research pass READ, beside the memo it produced.",
+        required=("at_node", "items"),
+        optional=("memo_id",),
+    ),
+    "llm_cost": PayloadContract(
+        "The finalization roll-up of the run's provider spend.",
+        required=(
+            "calls", "completion_tokens", "cost", "priced_calls", "prompt_tokens",
+            "total_tokens"
+        ),
+        optional=(),
+        stored_whole=True,
+    ),
+    "llm_usage": PayloadContract(
+        "One sanitized provider-call delta, folded cumulatively into the run's durable ledger.",
+        required=(),
+        optional=("priced_calls", "usage_id"),
+        stored_whole=True,
+    ),
+    "log_repaired": PayloadContract(
+        "The `looplab repair-log` receipt for a rewritten torn log: what was dropped, and where the backup is.",
+        required=("backup", "corrupt_line", "dropped_lines", "good_records", "ts"),
+        optional=(),
+    ),
+    "memory_read": PayloadContract(
+        "One memory / cross-run / skill tool call: the rows it showed and the digest of the exact bytes the role saw.",
+        required=("args", "invocation_id", "result_chars", "result_sha256", "rows", "tool"),
+        optional=(),
+    ),
+    "node_abort": PayloadContract(
+        "The operator aborted one node.",
+        required=("node_id",),
+        optional=("attempt", "generation", "reason"),
+    ),
+    "node_build_delta": PayloadContract(
+        "A build byte-identical to another node's — the duplicate is surfaced, never refused.",
+        required=("generation", "identical_to", "node_id", "parent_ids", "source_digest"),
+        optional=(),
+    ),
+    "node_building": PayloadContract(
+        "A node id was reserved and its build started; `node_created` clears the marker.",
+        required=("node_id", "operator", "parent_ids"),
+        optional=("attempt", "card_build_generation", "card_id", "generation", "speculative"),
+    ),
+    "node_concepts": PayloadContract(
+        "The concept ids one node was tagged with, by which mode, against a named vocabulary.",
+        required=("at_vocab", "concepts", "generation", "mode", "node_id"),
+        optional=("at_pending", "attempt"),
+        stored_whole=True,
+    ),
+    "node_confirmed": PayloadContract(
+        "A node's confirmation statistics over its seeds (mean, std).",
+        required=("generation", "mean", "node_id", "seeds", "std"),
+        optional=("attempt",),
+    ),
+    "node_created": PayloadContract(
+        "A node exists: its idea, the code and files the Developer wrote, and its parents.",
+        required=("code", "files", "idea", "node_id", "operator", "parent_ids"),
+        optional=(
+            "attempt", "card_build_generation", "deleted", "eval_start_boundary",
+            "footprint_finalized", "forked_from", "generation", "materialize_aborted_intent",
+            "model_arm", "origin", "parent_generations", "research_origin", "seed",
+            "speculative"
+        ),
+    ),
+    "node_eval_started": PayloadContract(
+        "A node's evaluation was dispatched — the promise `node_created`'s eval-start boundary made.",
+        required=("generation", "node_id"),
+        optional=("attempt",),
+    ),
+    "node_evaluated": PayloadContract(
+        "A node's terminal: its metric, the trials behind it, its secondary metrics and any trust violations.",
+        required=(
+            "eval_seconds", "extra_metrics", "generation", "metric", "node_id", "stdout_tail",
+            "trials", "violations"
+        ),
+        optional=(
+            "attempt", "extra_metrics_direction", "extra_metrics_provenance",
+            "metric_provenance", "resource_curve", "self_metric"
+        ),
+    ),
+    "node_failed": PayloadContract(
+        "A node's other terminal: why the evaluation produced no number, and who said so.",
+        required=(),
+        optional=(
+            "attempt", "engine_reason", "error", "eval_seconds", "failed_stage", "finish_data",
+            "finish_report_planned", "generation", "never_evaluated", "node_id", "reason",
+            "reason_source", "scope", "step", "triage_rationale"
+        ),
+    ),
+    "node_repaired": PayloadContract(
+        "One repair round on a failing node: what it changed, on what evidence, and the verdict on the change.",
+        required=(
+            "attempt", "changed", "deleted", "error_in", "files", "generation", "node_id",
+            "rationale", "stages_passed", "triage_action"
+        ),
+        optional=(
+            "budget_exhausted", "code", "edit_calls", "engine_reason", "error_evidence",
+            "eval_seconds", "footprint_finalized", "idea_footprint", "param_overrides",
+            "reason", "reason_evidence", "reason_evidence_resolved", "reason_findings",
+            "reason_source", "reason_summary", "salvaged_metric", "unmet",
+            "unparseable_repairs", "verified"
+        ),
+    ),
+    "node_reset": PayloadContract(
+        "The operator re-ran an existing node in place from a named stage.",
+        required=("node_id",),
+        optional=("attempt", "from_stage", "generation"),
+    ),
+    "node_tombstoned": PayloadContract(
+        "Nodes struck from selection without deleting their history.",
+        required=("node_ids",),
+        optional=(),
+    ),
+    "node_verified": PayloadContract(
+        "The selection verifier's score for one node, over a named evidence digest.",
+        required=(),
+        optional=("attempt", "evidence_digest", "generation", "node_id", "score"),
+    ),
+    "novelty_graded": PayloadContract(
+        "The graded-novelty verdict on a proposal the flat gate would have rejected.",
+        required=(),
+        optional=("grade", "level", "rationale", "recommendation", "shared_concepts", "stance"),
+        stored_whole=True,
+    ),
+    "novelty_rejected": PayloadContract(
+        "A near-duplicate proposal the novelty gate nudged off, with the distance that decided it.",
+        required=(),
+        optional=(
+            "action", "distance", "generation", "kind", "node_id", "nudged", "original",
+            "reason", "stance"
+        ),
+        stored_whole=True,
+    ),
+    "pause": PayloadContract(
+        "The run paused — by an operator, or by the engine with a stated reason.",
+        required=(),
+        optional=("attempt", "detail", "generation", "node_id", "reason"),
+    ),
+    "phase_progress": PayloadContract(
+        "One build/eval phase started or finished — the live activity feed's row.",
+        required=("phase", "stage", "status"),
+        optional=(),
+    ),
+    "plan": PayloadContract(
+        "The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve.",
+        required=(),
+        optional=("at_node", "endgame_start", "phases", "reason", "reserve"),
+        stored_whole=True,
+    ),
+    "policy_decision": PayloadContract(
+        "The search policy's pick among the legal actions, with the scores behind it.",
+        required=("chosen", "reason", "scores"),
+        optional=(),
+    ),
+    "prior_injected": PayloadContract(
+        "A cross-run prior was put in front of a role at a node — the receipt the citation instrument reads.",
+        required=(),
+        optional=("at_node", "phase", "role"),
+    ),
+    "promote": PayloadContract(
+        "The operator promoted one node to an alias (`champion` by default).",
+        required=("node_id",),
+        optional=("alias", "attempt", "generation"),
+        stored_whole=True,
+    ),
+    "proxy_scored": PayloadContract(
+        "The pre-eval proxy's score for a candidate, or its abstention when the nearest neighbour is too far.",
+        required=("abstained", "generation", "nearest", "node_id", "score", "skipped"),
+        optional=("attempt",),
+    ),
+    "readmodel_skipped": PayloadContract(
+        "The SQLite read-model sidecar could not be updated.",
+        required=("error",),
+        optional=(),
+    ),
+    "reflection_note": PayloadContract(
+        "The run-end distillation: the causal note, the lessons and the auto-skills it proposed.",
+        required=(
+            "at_nodes", "coverage_digest", "fingerprint", "finish_seq", "lessons", "n_lessons",
+            "n_skill_candidates", "n_skills", "n_skills_demoted", "note", "prior_citations",
+            "skill_candidates", "skills", "skills_demoted", "task_id"
+        ),
+        optional=(),
+    ),
+    "repair_critic_verdict": PayloadContract(
+        "The critic's judgement on one repair round, over the durable repairs it could see.",
+        required=(
+            "after", "attempt", "durable_repairs", "generation", "judged", "node_id",
+            "rationale", "source", "verdict"
+        ),
+        optional=(),
+    ),
+    "report_generated": PayloadContract(
+        "A run report was written, at a node and for a stated trigger.",
+        required=("at_node", "content", "trigger"),
+        optional=("generation", "refresh_id"),
+    ),
+    "report_refresh_failed": PayloadContract(
+        "A paid report refresh failed before anything was written — sanitized, retry-safe.",
+        required=(),
+        optional=("error_kind", "generation", "refresh_id"),
+    ),
+    "report_refresh_started": PayloadContract(
+        "The durable idempotency claim for one paid report refresh.",
+        required=(),
+        optional=("generation", "refresh_id"),
+    ),
+    "research_attempted": PayloadContract(
+        "A deep-research pass was PAID for — the receipt its memo closes by `attempt_id`.",
+        required=("at_node", "attempt_id", "manual", "trigger"),
+        optional=(),
+    ),
+    "research_completed": PayloadContract(
+        "One deep-research memo: its claims with evidence bindings, plan, literature and verifier verdicts.",
+        required=("at_node", "memo", "served_manual", "trigger"),
+        optional=("attempt_id", "converged_skips", "memo_id"),
+    ),
+    "restart": PayloadContract(
+        "The operator handed a paused run to a replacement owner.",
+        required=(),
+        optional=(),
+    ),
+    "resume": PayloadContract(
+        "The operator resumed a paused run.",
+        required=(),
+        optional=(),
+    ),
+    "resume_requested": PayloadContract(
+        "A durable resume intent, appended before the engine is spawned.",
+        required=("mode",),
+        optional=("launch_claim", "request_seq"),
+    ),
+    "resume_served": PayloadContract(
+        "The replacement owner acquired the singleton lock and served the resume.",
+        required=(),
+        optional=("activity_recovery", "engine_owner_boundary"),
+    ),
+    "reward_hack_suspected": PayloadContract(
+        "The reward-hack scan's signals about one node's code, over a named code digest.",
+        required=("code_digest", "evidence_version", "generation", "node_id", "signals"),
+        optional=("attempt",),
+    ),
+    "run_abort": PayloadContract(
+        "The run was aborted, with the reason.",
+        required=("reason",),
+        optional=(),
+    ),
+    "run_concepts": PayloadContract(
+        "The run's BASE concept set, which nodes inherit.",
+        required=("concepts",),
+        optional=(),
+    ),
+    "run_finished": PayloadContract(
+        "The run ended: the reason, the log position it ended at, and its final spend.",
+        required=(),
+        optional=(
+            "after_seq", "calls", "completion_tokens", "cost", "finalization_required",
+            "finalize_scope", "priced_calls", "prompt_tokens", "reason", "total_tokens"
+        ),
+    ),
+    "run_loop_exited": PayloadContract(
+        "Why the engine's outer loop exited (one of `RUN_EXIT_REASONS`).",
+        required=("reason",),
+        optional=(),
+    ),
+    "run_reopened": PayloadContract(
+        "A finished run was reopened for more work.",
+        required=(),
+        optional=(),
+    ),
+    "run_setup_finished": PayloadContract(
+        "The task's setup command finished: exit code, environment delta, stderr tail.",
+        required=(
+            "command", "dropped_requirements", "env_delta", "exit_code", "stderr_tail",
+            "timed_out"
+        ),
+        optional=(),
+    ),
+    "run_setup_started": PayloadContract(
+        "The task's setup command started, in a named working directory.",
+        required=("after_interrupted_attempt", "command", "cwd"),
+        optional=(),
+    ),
+    "run_started": PayloadContract(
+        "The run's launch record: task, goal, direction, and the settings pinned at launch (invariant #6).",
+        required=(),
+        optional=(
+            "card_driven_selection", "config_hash", "direction", "dirty_inputs", "env",
+            "eval_env", "eval_env_absent_from_task", "eval_parallel", "goal",
+            "holdout_fraction", "holdout_select", "llm_parallel", "require_approval", "run_id",
+            "run_uid", "select_verifier", "select_verifier_contract", "select_verifier_samples",
+            "speculation_calibration_gpu_inventory", "speculation_calibration_profile_digest",
+            "speculation_calibration_seed", "speculation_depth", "speculation_depth_auto",
+            "speculation_gate_receipt_digest", "speculation_implementation_digest",
+            "speculation_policy_scope", "speculation_runtime_scope_sha256", "task_id",
+            "trust_gate", "verifier_ci_tie", "workspace"
+        ),
+    ),
+    "run_width_settled": PayloadContract(
+        "The run's live width was re-pinned, with the evidence behind the new value.",
+        required=(),
+        optional=(
+            "evidence", "finish_data", "finish_report_planned", "previous", "reason", "scope",
+            "step"
+        ),
+    ),
+    "rung_promoted": PayloadContract(
+        "The successive-halving rung that promoted a named set of survivors.",
+        required=(),
+        optional=("finish_data", "finish_report_planned", "rung", "scope", "step", "survivors"),
+    ),
+    "score_metrics_backfilled": PayloadContract(
+        "Secondary metrics read back off the score stage's own artifact after the fact.",
+        required=(
+            "extra_metrics", "generation", "node_id", "precision_decimals", "read_at",
+            "unrecoverable"
+        ),
+        optional=(),
+    ),
+    "set_strategy": PayloadContract(
+        "The operator set the search strategy.",
+        required=("strategy",),
+        optional=(),
+    ),
+    "setup_finished": PayloadContract(
+        "Workspace setup finished, with the manifest it produced.",
+        required=("manifest", "seconds"),
+        optional=(),
+    ),
+    "setup_started": PayloadContract(
+        "Workspace setup started, for a goal and a repo.",
+        required=("goal", "phase", "repo"),
+        optional=(),
+    ),
+    "setup_step": PayloadContract(
+        "One workspace-setup step.",
+        required=(),
+        optional=("sources", "step"),
+    ),
+    "spec_approval_requested": PayloadContract(
+        "The proposed evaluation spec is waiting for a human.",
+        required=("eval",),
+        optional=(),
+    ),
+    "spec_approved": PayloadContract(
+        "The evaluation spec was ratified; the optimization loop trusts it from here.",
+        required=(),
+        optional=(),
+    ),
+    "spec_drift": PayloadContract(
+        "One evaluation's spec drifted from the ratified one.",
+        required=(),
+        optional=("attempt", "generation", "node_id", "seed"),
+        stored_whole=True,
+    ),
+    "spec_proposed": PayloadContract(
+        "The onboarding agent's proposed evaluation spec and metric adapter.",
+        required=(),
+        optional=("eval", "metric"),
+        stored_whole=True,
+    ),
+    "speculation_depth_settled": PayloadContract(
+        "The speculation depth this run settled on, and the evidence behind it.",
+        required=("reason",),
+        optional=(
+            "depth", "error", "eval_seconds", "evidence", "generation", "node_id", "previous"
+        ),
+    ),
+    "stage_finished": PayloadContract(
+        "One stage of a multi-stage eval pipeline finished: name, status, exit code, seconds.",
+        required=(),
+        optional=("attempt", "exit_code", "generation", "name", "node_id", "seconds", "status"),
+    ),
+    "stage_rollback": PayloadContract(
+        "A failed stage's rollback to a checkpoint — accepted, or refused with a reason.",
+        required=(
+            "accepted", "attempt", "failed_stage", "generation", "node_id", "refusal", "stage"
+        ),
+        optional=(),
+    ),
+    "strategy_decision": PayloadContract(
+        "The Strategist's consult: the strategy it returned and the context it was given.",
+        required=("at_node", "ctx", "strategy"),
+        optional=("developer_application",),
+    ),
+    "trace_export_health": PayloadContract(
+        "The span exporter is unhealthy — one row per distinct state, never on a healthy run.",
+        required=(),
+        optional=(
+            "accepted_spans", "buffered_bytes", "buffered_spans", "dropped_spans",
+            "export_failures", "exported_spans", "loss_receipt_failures", "queued_spans",
+            "shutdown", "worker_alive", "worker_stop_reason"
+        ),
+    ),
+    "train_monitor_alert": PayloadContract(
+        "The live training-log judge's verdict about one running stage, and the log role it judged.",
+        required=("confidence", "generation", "log_role", "node_id", "reason", "status"),
+        optional=(),
+    ),
+    "trust_gate_changed": PayloadContract(
+        "The run's trust gate was changed, by a named source (last write wins).",
+        required=("source", "trust_gate"),
+        optional=(),
+    ),
+    "trust_scan": PayloadContract(
+        "Which trust detectors ran over one node's code, how many findings they made, over what digest.",
+        required=(),
+        optional=(
+            "code_digest", "detectors", "evidence_version", "findings", "generation", "node_id"
+        ),
+    ),
+    "verifier_group_scored": PayloadContract(
+        "One verifier round over a GROUP of nodes, keyed on the contract and evidence digests.",
+        required=("contract", "members", "requested_samples", "v"),
+        optional=(),
+    ),
+    "workspace_changed": PayloadContract(
+        "The workspace directory differs from the one the run started in.",
+        required=("now", "was"),
+        optional=(),
+    ),
+    "workspace_seeded": PayloadContract(
+        "One node's workspace was seeded with materialized inputs.",
+        required=("materialized", "node_id"),
+        optional=(),
+    ),
+}

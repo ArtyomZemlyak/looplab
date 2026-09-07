@@ -180,6 +180,8 @@ run that reaches a quiet moment ends with exactly the evidence it would have had
 
 ## Event log = canonical replay state
 
+**Every event type, what it records and the keys its payload carries: [Event reference](event-reference.md)** — generated from `looplab/events/types.py::EVENT_PAYLOAD_KEYS`, which is also what pins engine invariant #5 (a payload key is additive, and every reader defaults it).
+
 `events.jsonl` is the append-only source of truth for the **replayable run state**: nodes, metrics,
 controls, approvals, terminal scopes, and numeric LLM usage. The engine writes domain effects; the
 server writes serialized control intents; and the durable accountant may append `llm_usage` from a
