@@ -59,9 +59,10 @@ from looplab.serve.concept_frame import (MAX_LENS_BODY_BYTES as _CONCEPT_FRAME_M
 from looplab.serve.engine_proc import _engine_liveness, reconcile_pending_resume
 from looplab.serve.log_pages import (
     DEFAULT_BYTES, DEFAULT_ROWS, MAX_BYTES, MAX_ROWS, MIN_BYTES, EventLogPager)
+from looplab.events.state_delta import DELTA_VERSION, diff as state_diff
 from looplab.serve.protocol import (
     EXPECTED_RUN_GENERATION_FIELD, PHASE_FINALIZING, POLL_SECONDS, RUN_GENERATION_FIELD,
-    SSE_DONE, SSE_STATE)
+    SSE_DONE, SSE_STATE, SSE_STATE_DELTA)
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.paid_ledger import (
     FAIL_CLOSED, PaidLedgerSpec, append_claim, confirm_terminal_receipt, fold_paid_ledger,
@@ -1881,7 +1882,9 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/runs/{run_id}/events")
     async def stream_events(run_id: str, request: Request):
-        """Stream canonical public state frames, including the Cards completeness receipt."""
+        """Stream canonical public state frames — a full `state` frame first, then `state_delta`
+        frames against the frame this connection last sent — including the Cards completeness
+        receipt."""
         rd = _run_dir(run_id)
         try:
             initial_entry = rd.lstat()
@@ -1914,6 +1917,9 @@ def build_router(srv) -> APIRouter:
             last_generation = None
             last_event_count = None
             last_beat = time.monotonic()
+            # The payload this CONNECTION last sent, as its own parsed copy (never the cache's
+            # object), so the next frame can be a delta against it (doc 52 row 29).
+            last_payload = None
             # A quiet/"thinking" run (a long LLM call or eval) advances no seq and flips no liveness,
             # so without this the stream goes byte-silent. Behind jupyter-server-proxy (tornado) and
             # any nginx hop, an idle read-timeout then tears the connection down → the client reconnects
@@ -1940,18 +1946,35 @@ def build_router(srv) -> APIRouter:
                 event_count = payload.get("event_count")
                 if (payload["seq"] != last_sent or alive != last_alive
                         or generation != last_generation or event_count != last_event_count):
+                    same_generation = generation == last_generation
                     last_sent = payload["seq"]
                     last_alive = alive
                     last_generation = generation
                     last_event_count = event_count
                     last_beat = time.monotonic()
-                    # CODEX AGENT: every event serializes and retransmits the complete growing folded
-                    # state, so one long-lived client receives quadratic bytes and repeats whole-state
-                    # encoding. Stream bounded deltas/event batches plus generation/checkpoint receipts,
-                    # reserving full snapshots for initial/recovery sync.
+                    full = json.dumps(payload)
+                    # THE DELTA FRAME (doc 52 row 29). Until 2026-09-06 every tick re-sent the whole
+                    # folded state, so one long-lived tab received O(events × state) bytes and the
+                    # server repeated whole-state encoding per tick. A frame after the first on THIS
+                    # connection is a delta against the payload this connection last sent
+                    # (`events/state_delta.py::diff`), keyed on that payload's seq, and only when it
+                    # is smaller than the snapshot; a generation change sends the full frame. The
+                    # client applies it to the exact snapshot it holds and reconnects for a full frame
+                    # on any mismatch (`ui/src/stateDelta.js`). A fresh connection — one presenting
+                    # `Last-Event-ID` included — always starts with a full frame.
+                    kind, body = SSE_STATE, full
+                    if last_payload is not None and same_generation:
+                        delta = {"version": DELTA_VERSION, "base_seq": last_payload["seq"],
+                                 "seq": payload["seq"], RUN_GENERATION_FIELD: generation,
+                                 "event_count": event_count,
+                                 "ops": state_diff(last_payload, payload)}
+                        encoded = json.dumps(delta)
+                        if len(encoded) < len(full):
+                            kind, body = SSE_STATE_DELTA, encoded
+                    last_payload = json.loads(full)
                     yield (f"id: {payload['seq']}\n"
-                           f"event: {SSE_STATE}\n"
-                           f"data: {json.dumps(payload)}\n\n")
+                           f"event: {kind}\n"
+                           f"data: {body}\n\n")
                     if (payload["state"].get("finished") and alive is False
                             and payload["state"].get("phase") != PHASE_FINALIZING):
                         # ``run_finished`` precedes the engine releasing its singleton while terminal

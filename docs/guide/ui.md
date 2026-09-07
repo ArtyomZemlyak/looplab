@@ -1,7 +1,7 @@
 # Web UI
 
 LoopLab ships a live React control plane. It's a **separate read/control process** — it tails each
-run's `events.jsonl`, folds it with `replay.fold`, streams the state to the browser over SSE, serves
+run's `events.jsonl`, folds it with `replay.fold`, streams the state to the browser over SSE (a full frame per connection, then deltas keyed on the seq the tab last saw), serves
 the built React app, and submits interactive controls through the server-owned durable command
 lifecycle. It never changes the engine in-process and is never imported by it (ADR-18).
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import {
   deadlineGet, fetchEventStream, observeRunGeneration, runApiPath,
 } from './api.js'
+import { applyStateDelta } from './stateDelta.js'
 import { withBuilding } from './buildingModel.js'
 import {
   COMMAND_POLL_MAX_TRANSIENT, COMMAND_POLL_REPEAT_MS, COMMAND_POLL_START_MS,
@@ -288,8 +289,10 @@ export function useCommandStatusPoll({ runId, command, paused, observe, onRecord
 // tested without React; imported at the top of this module.
 
 // Subscribe to a run's live folded state over SSE. The server emits `event: state` frames whose
-// data is { state, seq, generation, event_count? }. Returns the latest live state + connection
-// status; event_count is optional only for compatibility with a legacy server. Auto-reconnects.
+// data is { state, seq, generation, event_count? } and, after the first frame on a connection,
+// `event: state_delta` frames — a diff against the payload this connection last accepted, applied by
+// `stateDelta.js` (doc 52 row 29). Returns the latest live state + connection status; event_count is
+// optional only for compatibility with a legacy server. Auto-reconnects.
 //
 // The DECISIONS this effect makes — snapshot validation, monotonicity, which status ends a run,
 // where each backoff ramp stops — live in ./runStateModel.js (doc 25 UI-09) so they can be stated
@@ -322,6 +325,9 @@ export function useRunState(runId, {
     let pollTimer = null
     let last = initialRunIdentity()
     let lastStreamEventId = ''
+    // The payload this connection last ACCEPTED, which a `state_delta` frame applies to (doc 52
+    // row 29). Reset with the cursor: a delta before a full frame on a connection is a divergence.
+    let heldPayload = null
     let terminalMode = false
     let terminalDelay = TERMINAL_PROBE_MS
     let terminalRequest = null
@@ -430,6 +436,7 @@ export function useRunState(runId, {
         const delay = backoff
         acceptedTerminal = false
         lastStreamEventId = ''
+        heldPayload = null
         setConnected(false)
         controller.abort()
         reconnect(delay)
@@ -452,11 +459,18 @@ export function useRunState(runId, {
             enterTerminalMode()
             return
           }
-          if (event.type !== 'state') return
+          if (event.type !== 'state' && event.type !== 'state_delta') return
           let p
           let next
           try {
-            p = JSON.parse(event.data)
+            // A `state_delta` frame is the server's diff against the payload this connection last
+            // accepted (`stateDelta.js`): it applies only to that exact snapshot, and a delta that
+            // does not — a wrong base, a delta before any full frame — is a divergence, handled
+            // exactly like a cursor mismatch: no acknowledgement, a full resync.
+            p = event.type === 'state_delta'
+              ? applyStateDelta(heldPayload, JSON.parse(event.data))
+              : JSON.parse(event.data)
+            if (!p) throw new Error('Run stream delta does not apply to the held snapshot.')
             if (!streamCursorMatchesSnapshot(event.lastEventId, p)) {
               throw new Error('Run stream cursor does not match its snapshot.')
             }
@@ -467,6 +481,7 @@ export function useRunState(runId, {
             rejectLiveStream()
             return
           }
+          heldPayload = p
           acceptedTerminal = terminalSnapshot(p)
           lastStreamEventId = nextStreamCursor(event.lastEventId, next)
           backoff = MIN_BACKOFF_MS

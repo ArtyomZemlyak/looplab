@@ -649,10 +649,15 @@ vocabulary, so looking widens what the checker SEES and nothing it may SAY. `tes
 drives the property (a silent fallback at the start of a stage whose tail is a healthy bar), the line,
 the byte-identical off path, the money bound and the pipeline end to end.*
 
-OPEN[sse-retransmits-the-whole-folded-state] `serve/routers/runs.py`'s state stream serializes and
-retransmits the complete, growing folded state on every event (its own `CODEX AGENT` note), so a long
-run's tab costs O(events × state) bytes; the fix is a delta stream keyed on the seq the client last
-saw. proof:`present:f"data: {json.dumps(payload)}\n\n")@looplab/serve/routers/runs.py`
+*Closed 2026-09-06 (row 29 shipped, slice b): the marker `sse-retransmits-the-whole-folded-state`
+stood here. `serve/routers/runs.py::stream_events` sends a full `state` frame first on every
+connection and, after it, `state_delta` frames — `events/state_delta.py::diff` against the payload this
+connection last sent, keyed on its seq (`base_seq`), only when smaller than the snapshot, never across
+a generation change; `ui/src/stateDelta.js::applyStateDelta` applies one only to the exact snapshot the
+tab holds and the hook reconnects for a full frame on any mismatch, the same refusal a cursor mismatch
+gets. `tests/test_state_delta.py` drives the differ's round trip and the stream through the real
+server (a full frame, then a delta that reproduces `/state`); `ui/test/stateDelta.test.js` drives the
+browser half. Deleted per the index rule.*
 
 *Closed 2026-09-06 (row 29 shipped, slice a): the marker `cross-run-tools-are-a-process-wide-flag`
 stood here. `serve/principal.py` names the party — `owner` (the token holder), `local` (the

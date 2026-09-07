@@ -185,7 +185,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/cost` | *Run Cost* (no docstring) | — |  |
 | `POST` | `/api/runs/{run_id}/deletions` | Delete one exact run generation through an operation-bound durable transaction. | — |  |
 | `GET` | `/api/runs/{run_id}/deletions/{operation_id}` | *Observe Run Deletion* (no docstring) | — |  |
-| `GET` | `/api/runs/{run_id}/events` | Stream canonical public state frames, including the Cards completeness receipt. | — |  |
+| `GET` | `/api/runs/{run_id}/events` | Stream canonical public state frames — a full `state` frame first, then `state_delta` | — |  |
 | `GET` | `/api/runs/{run_id}/lifecycle` | Bounded identity/liveness probe used after a terminal SSE stream closes. | — |  |
 | `GET` | `/api/runs/{run_id}/log` | Raw event envelopes (for the activity feed + event/span explorer). `since` = exclusive | — |  |
 | `GET` | `/api/runs/{run_id}/log-page` | Bounded timeline transport. Cursors survive append and fail closed across run reset. | — |  |
