@@ -56,7 +56,7 @@ def test_a_whole_read_is_carried_verbatim_and_a_window_is_only_indexed():
 
 
 def test_the_most_refetched_item_comes_first_and_the_budget_binds():
-    store = EstablishedContext(budget_bytes=len(est._HEADER.encode()) + 400, item_bytes=6144)
+    store = EstablishedContext(budget_bytes=len(est._HEADER.encode()) + 500, item_bytes=6144)
     store.record("read_file", {"path": "once.py"}, "A" * 200, phase="plan")
     for _ in range(3):
         store.record("read_file", {"path": "thrice.py", "start_line": 1}, "B" * 200, phase="plan_step")
@@ -67,6 +67,78 @@ def test_the_most_refetched_item_comes_first_and_the_budget_binds():
     # the thrice-read file spends the budget; the once-read one degrades to an index row
     assert "B" * 200 in block
     assert "A" * 200 not in block and "`once.py`" in block and "not carried" in block
+
+
+def test_an_index_row_is_charged_and_the_rows_are_capped():
+    """An index row is cheap and a run reads an unbounded number of distinct paths. Uncharged and
+    uncapped, the block grows with the run and is pasted into every chain root after that — the
+    opposite of what it is for. Over either bound the remainder is ONE counted line."""
+    store = EstablishedContext(budget_bytes=len(est._HEADER.encode()) + 200, item_bytes=1)
+    for i in range(40):
+        store.record("read_file", {"path": f"f{i:02d}.py"}, "body", phase="plan")
+    block = store.render()
+    assert len(block.encode()) < len(est._HEADER.encode()) + 400, "the budget did not bind"
+    assert block.count("\n- `") <= est._MAX_INDEX_ROWS
+    assert "more file(s) read earlier in this run, not listed" in block
+    # the count is honest: every path is either a row or in the tally
+    tallied = int(block.split("(+")[1].split(" more")[0])
+    assert block.count("\n- `") + tallied == 40
+
+
+def test_a_refusal_is_never_stored_as_the_files_first_page():
+    """Decided by the READER's own vocabulary. A `(no such file: x)` carried under a header that
+    promises the file verbatim is worse than not carrying it: it asserts the refusal twice."""
+    from looplab.tools.reposcout import REFUSAL_PREFIXES
+    store = EstablishedContext()
+    for prefix in REFUSAL_PREFIXES:
+        assert store.record("read_file", {"path": "gone.py"}, f"{prefix} gone.py)") is False
+    assert store.record("read_file", {"path": "gone.py"}, "(error: boom)") is False
+    assert store.render() == ""
+    assert store.record("read_file", {"path": "real.py"}, "x = 1\n") is True
+
+
+def test_a_write_drops_the_page_it_invalidates_and_the_row_says_so():
+    """THE defect the predecessor of this block was removed for: a file read in `plan`, rewritten
+    in `plan_step`, then seeded into the next phase as its "first page verbatim"."""
+    store = EstablishedContext()
+    store.record("read_file", {"path": "solver.py"}, "old = 1\n", phase="plan")
+    assert "old = 1" in store.render()
+    hook = store.hook("plan_step")
+    hook("write_file", {"path": "solver.py", "content": "new = 2\n"}, "wrote solver.py")
+    block = store.render()
+    assert "old = 1" not in block, "a pre-edit page must never be carried forward"
+    assert "CHANGED since you read it" in block and "`solver.py`" in block
+    # …and a re-read after the write is the CURRENT bytes, so it may be carried again
+    hook("read_file", {"path": "solver.py"}, "new = 2\n")
+    after = store.render()
+    assert "new = 2" in after and "CHANGED since you read it" not in after
+
+
+def test_every_writer_invalidates_and_a_reader_is_not_a_writer():
+    store = EstablishedContext()
+    for tool, slot in est.WRITE_TOOL_PATH_SLOTS.items():
+        store.record("read_file", {"path": "w.py"}, "before\n")
+        assert "before" in store.render(), tool
+        assert store.invalidate(tool, {slot: "./w.py"}) is True, tool
+        assert "before" not in store.render(), tool
+    assert store.invalidate("read_file", {"path": "w.py"}) is False
+    assert store.invalidate("write_file", {}) is True, "a writer with no path is still handled"
+
+
+def test_the_write_table_names_the_real_write_tools():
+    """Pinned against the writer's own specs, so a renamed or added write tool is a red test rather
+    than a page that silently survives the edit that invalidated it."""
+    import ast, inspect
+    from looplab.adapters import repo_write_tools as rw
+    dispatched = {
+        n.comparators[0].value
+        for n in ast.walk(ast.parse(inspect.getsource(rw)))
+        if isinstance(n, ast.Compare) and isinstance(n.left, ast.Name) and n.left.id == "name"
+        and n.comparators and isinstance(n.comparators[0], ast.Constant)
+        and isinstance(n.comparators[0].value, str)
+    }
+    for tool in est.WRITE_TOOL_PATH_SLOTS:
+        assert tool in dispatched, f"{tool} is not a tool `repo_write_tools` dispatches"
 
 
 def test_tool_loop_notes_are_stripped_and_an_oversized_page_is_indexed():

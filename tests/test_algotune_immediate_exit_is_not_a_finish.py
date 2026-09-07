@@ -282,3 +282,48 @@ def test_campaign_status_keeps_it_out_of_the_median(tmp_path):
     assert CA.IMMEDIATE_EXIT_STATE in out.stdout, out.stdout
     assert "EXITED IMMEDIATELY" in out.stdout, out.stdout
     assert "scored: median" not in out.stdout, "an immediate exit reached the median"
+
+
+def test_record_done_takes_the_task_rather_than_a_caller_scoped_global():
+    """A marker that is not written is how a terminal task gets silently re-run.
+
+    `record_done`'s own comments contemplate a call from outside `run_one`, and the script runs
+    under `set -u`: reading `run_one`'s `$T` from there aborts the shell BEFORE the marker exists.
+    Driven — the function is extracted and called with no `T` in scope at all, and must still
+    write its marker. (Found by review, 2026-09-06.)
+    """
+    import re
+    import subprocess
+    import tempfile
+
+    src = CAMPAIGN.read_text(encoding="utf-8")
+    body = re.search(r"^record_done\(\) \{.*?^\}", src, re.S | re.M)
+    assert body, "record_done is no longer a top-level function"
+    code = "\n".join(l for l in body.group(0).splitlines() if not l.strip().startswith("#"))
+    assert not re.search(r'"\$T"', code), (
+        "record_done reads the caller's `$T`; pass the task as its sixth argument instead")
+    with tempfile.TemporaryDirectory() as tmp:
+        marker = f"{tmp}/m.done"
+        script = f"""set -u
+LANE_COUNT=1; CORES_PER_LANE=1; LANE_LAYOUT=x; ARM=A; IMMEDIATE_EXIT_S=60
+ruler_fields() {{ echo "eval_workers=1 regime=w1x1r3 baseline_sha256=deadbeef"; }}
+already_measured() {{ return 1; }}
+successful_calls() {{ echo 7; }}
+ended_on_failure() {{ echo no; }}
+{body.group(0)}
+record_done "{marker}" 0 $(( $(date +%s) - 120 )) 0-1 "" "edge_expansion"
+"""
+        run = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+        assert run.returncode == 0, run.stderr
+        assert "unbound variable" not in run.stderr, run.stderr
+        written = Path(marker).read_text(encoding="utf-8")
+    assert "state=ran_to_completion" in written and "regime=w1x1r3" in written, written
+
+
+def test_every_record_done_call_site_passes_the_task():
+    """The fallback keeps a forgetful caller writing a marker; the call sites must not need it."""
+    import re
+    calls = re.findall(r"^\s*record_done .*$", CAMPAIGN.read_text(encoding="utf-8"), re.M)
+    assert calls, "no record_done call sites found"
+    for call in calls:
+        assert call.rstrip().endswith('"$T"'), f"call site does not name the task: {call.strip()}"

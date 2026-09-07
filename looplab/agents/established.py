@@ -42,9 +42,26 @@ READ_TOOL_PATH_SLOTS: dict[str, str] = {
     "read_installed": "module",
     "read_asset": "name",
 }
+# …and the WRITERS, because a page carried forward under "do not re-fetch" must never be the
+# version before an edit. THIS IS THE DEFECT THE PREDECESSOR OF THIS BLOCK WAS REMOVED FOR (the
+# G2 read-dedup cache, P3): a file read in `plan`, rewritten in `plan_step`, and then seeded into
+# the next phase as its "first page verbatim" is a confident lie about the working set — and the
+# store is per RUN, so without this the same page would cross NODE boundaries too. A write drops
+# the CONTENT and keeps the row: "you read this N times and it has changed since" is true and
+# useful, "here is what it said" is not. `looplab_stages.json` is written through `declare_stages`
+# rather than these three, and is registered here for the same reason.
+WRITE_TOOL_PATH_SLOTS: dict[str, str] = {
+    "write_file": "path",
+    "edit_file": "path",
+    "delete_file": "path",
+}
 # A tool-loop note appended to a result (`_REPEAT_NOTE`, `_READ_LOOP_NOTE`) is advice to the
 # model that made the call, not content of the file; it is stripped before the page is kept.
 _NOTE_MARK = "\n(note: "
+# The reader's OWN refusal vocabulary (`tools/reposcout.REFUSAL_PREFIXES`, the tuple
+# `read_file_checked` decides by), not a two-prefix guess: a refusal stored as content renders
+# `(no such file: x)` under a header promising the file's first page verbatim.
+_MAX_INDEX_ROWS = 24
 DEFAULT_BUDGET_BYTES = 12288
 DEFAULT_ITEM_BYTES = 6144
 
@@ -109,16 +126,19 @@ class EstablishedContext:
         if path is None:
             return False
         text = _strip_notes(result)
-        # A refusal or an error is not established content — the model was told the file could
-        # not be read, and carrying that sentence forward would assert it twice.
-        if not text.strip() or text.lstrip().startswith("(error") or text.lstrip().startswith("(refused"):
+        # A refusal or an error is not established content — the model was told the file could not
+        # be read, and carrying that sentence forward would assert it twice, under a header saying
+        # it is the file. Decided by the READER's own vocabulary, imported rather than re-listed.
+        from looplab.tools.reposcout import REFUSAL_PREFIXES
+        stripped = text.lstrip()
+        if not text.strip() or stripped.startswith("(error") or stripped.startswith(REFUSAL_PREFIXES):
             return False
         key = (str(tool), path)
         with self._lock:
             item = self._items.get(key)
             if item is None:
                 item = {"tool": str(tool), "path": path, "count": 0, "phases": [],
-                        "content": None, "sha": None}
+                        "content": None, "sha": None, "changed": False}
                 self._items[key] = item
                 self._order.append(key)
             item["count"] += 1
@@ -126,15 +146,40 @@ class EstablishedContext:
                 item["phases"].append(phase)
             if item["content"] is None and _is_whole_or_first_page(args) \
                     and len(text.encode("utf-8")) <= self.item_bytes:
+                # A re-read AFTER a write is the CURRENT bytes, so it may be carried again and the
+                # row stops being "changed since" — the flag describes the carried page, not history.
                 item["content"] = text
                 item["sha"] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+                item["changed"] = False
+        return True
+
+    def invalidate(self, tool: str, args: dict) -> bool:
+        """A write/edit/delete of a carried path drops its CONTENT and marks the row changed.
+
+        Returns True when the call was a registered writer (whether or not anything was carried),
+        so the hook can tell "handled" from "not a file tool"."""
+        slot = WRITE_TOOL_PATH_SLOTS.get(str(tool or ""))
+        if slot is None:
+            return False
+        path = _canonical_path((args or {}).get(slot))
+        if path is None:
+            return True
+        with self._lock:
+            for key, item in self._items.items():
+                if key[1] == path:
+                    item["content"] = None
+                    item["sha"] = None
+                    item["changed"] = True
         return True
 
     def hook(self, phase: str, inner: Optional[Callable] = None) -> Callable:
         """An `on_tool_result(name, args, result)` for `drive_tool_loop`, composed over an
         existing one so a caller that already observes results keeps observing them."""
         def _on_tool_result(name, args, result):
-            self.record(name, args, result, phase=phase)
+            # The write half first: a tool is one or the other, and a writer must drop the page it
+            # invalidates even on the turn that also re-reads it.
+            if not self.invalidate(name, args):
+                self.record(name, args, result, phase=phase)
             if inner is not None:
                 inner(name, args, result)
         return _on_tool_result
@@ -158,6 +203,12 @@ class EstablishedContext:
             return ""
         out = [_HEADER]
         used = len(_HEADER.encode("utf-8"))
+        # EVERY line is charged, index rows included, and the rows are capped. An index row is
+        # cheap and there is no bound on how many distinct paths a run reads: uncharged, the block
+        # grew linearly with the run and was pasted into every chain root afterwards, which is the
+        # opposite of what it is for. Over the budget the remainder becomes one counted line.
+        indexed = 0
+        omitted = 0
         for row in rows:
             phases = ", ".join(row["phases"]) or "an earlier phase"
             times = f"read {row['count']}x" + (f" across {phases}" if row["phases"] else "")
@@ -172,8 +223,18 @@ class EstablishedContext:
                     out.append(body)
                     used += size
                     continue
-            out.append(f"\n- `{row['path']}` ({row['tool']}; {times}; not carried — re-read once "
-                       f"with `{call}` and work from your copy)\n")
+            why = ("CHANGED since you read it — re-read" if row.get("changed")
+                   else "not carried — re-read once")
+            line = f"\n- `{row['path']}` ({row['tool']}; {times}; {why} with `{call}`)\n"
+            size = len(line.encode("utf-8"))
+            if indexed >= _MAX_INDEX_ROWS or used + size > self.budget_bytes:
+                omitted += 1
+                continue
+            out.append(line)
+            used += size
+            indexed += 1
+        if omitted:
+            out.append(f"\n- (+{omitted} more file(s) read earlier in this run, not listed)\n")
         return "".join(out)
 
 

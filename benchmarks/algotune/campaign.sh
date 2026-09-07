@@ -944,12 +944,20 @@ ruler_fields() {   # $1 = task, $2 = subset, $3 = cpus. Echoes "eval_workers=…
   esac
 }
 
-record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpus, $5 = run dir
+record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpus, $5 = run dir,
+                  # $6 = task (see below)
   RC=$2
   WALL=$(( $(date +%s) - $3 ))
+  # THE TASK IS A PARAMETER, not `run_one`'s global. This function's own comments contemplate a
+  # call from outside that function, and under `set -u` (line 45) reading a caller-scoped `$T`
+  # there aborts the shell BEFORE the marker is written — and an unwritten marker is precisely how
+  # a terminal task gets silently re-run (the 230-minute case the block below is about). The
+  # fallback keeps a forgetful caller writing a marker with `regime=?` rather than none at all:
+  # a missing ruler field is a recoverable gap in the record, an absent marker is a repeated run.
+  RD_TASK="${6:-${T:-}}"
   # The ruler rides in REGIME so every marker line below carries it without a fifth edit per state.
   # `test` is the graded split for both arms: arm A's `final_speedup` and arm B's champion pass.
-  REGIME="cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE layout=$LANE_LAYOUT $(ruler_fields "$T" test "$4")"
+  REGIME="cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE layout=$LANE_LAYOUT $(ruler_fields "$RD_TASK" test "$4")"
   # A `.done` marker means "this task-arm reached a TERMINAL state and must not be re-run". It must
   # NOT be written for a run that was interrupted: an interrupted task has no verdict, and a marker
   # makes a later resume SKIP it silently. Measured 2026-08-20: stopping a campaign wrote six
@@ -1012,8 +1020,8 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
       # The check is positive-evidence only: it needs the meter log to be readable AND to hold rows
       # for this arm, so a missing or untagged log leaves the old behaviour rather than refusing
       # markers for runs that were fine.
-      OK_CALLS="$(successful_calls "$ARM" "$T" "${ATTEMPT:-}" "$3")"
-      if [ "$(ended_on_failure "$ARM" "$T" "${ATTEMPT:-}" "$3")" = "yes" ]; then
+      OK_CALLS="$(successful_calls "$ARM" "$RD_TASK" "${ATTEMPT:-}" "$3")"
+      if [ "$(ended_on_failure "$ARM" "$RD_TASK" "${ATTEMPT:-}" "$3")" = "yes" ]; then
         echo "  [$(date +%H:%M:%S)][$4] ENDED ON A FAILED CALL after ${WALL}s (rc=0, ok_calls=${OK_CALLS:-?})" \
              "-- the endpoint cut this run, it did not finish. No marker written, task still owed"
         return 0
@@ -1256,7 +1264,7 @@ run_one() {                       # $1 = task, $2 = cpu list
     run_bounded "$OUT/A-$T.log" taskset -c "$CPUS" ./algotune.sh agent --standalone \
         "$ALGOTUNE_MODEL_KEY" "$T" > "$OUT/A-$T.log" 2>&1
     RC=$?
-    record_done "$MARKER" "$RC" "$S" "$CPUS" ""
+    record_done "$MARKER" "$RC" "$S" "$CPUS" "" "$T"
     [ -s "$MARKER" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm A done ($(cat "$MARKER"))"
   else
     TASK_ROOT="$RUNS_ROOT/$T"
@@ -1340,7 +1348,7 @@ PROTEOF
         echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"
       fi
     fi
-    record_done "$MARKER" "$RC" "$S" "$CPUS" "$TASK_ROOT/run"
+    record_done "$MARKER" "$RC" "$S" "$CPUS" "$TASK_ROOT/run" "$T"
     [ -s "$MARKER" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm B done ($(cat "$MARKER"))"
   fi
 }
