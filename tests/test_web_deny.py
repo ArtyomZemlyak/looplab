@@ -247,3 +247,33 @@ def test_the_generated_task_file_carries_the_declaration(tmp_path):
     deny = normalize_web_deny(spec["eval"]["web_deny"])
     assert web_deny_match(_SOLVER, deny) and web_deny_match("https://algotune.io/x", deny)
     assert spec["eval"]["protect_packages"] == ["AlgoTuner", "AlgoTuneTasks"]
+
+
+def test_a_refused_SEARCH_is_a_tool_result_and_not_an_escaping_exception():
+    """`_search` re-raises `WebDenyRefusal` so it is not swallowed into "(web search unavailable)",
+    and NOTHING above caught it: `execute_result`'s `web_search` branch had no try, and neither
+    `_run_tool_call` nor `drive_tool_loop` has one.
+
+    Driven: the exception escaped the provider entirely. Inside `DeepResearcher.research` the outer
+    `except Exception` then discards the WHOLE paid session as "(deep research unavailable: …)" —
+    the "(unreachable)" shape this module's docstring says the fence must never produce — plus a
+    lost memo and a dangling tool_call_id. Reachable whenever a search redirects into a declared
+    prefix, or when the search endpoint itself is one.
+
+    MUTATION: drop the `except WebDenyRefusal` from the `web_search` branch -> this raises instead
+    of returning, and the refusal stops being countable on the span.
+    """
+    from looplab.tools.web import WebDenyRefusal, WebTools
+
+    prefix = "https://html.duckduckgo.com/"
+    tools = WebTools(enabled=True, deny=(prefix,))
+    tools._get = lambda url, data=None: (_ for _ in ()).throw(
+        WebDenyRefusal("https://html.duckduckgo.com/html/", prefix))
+
+    result = tools.execute_result("web_search", {"query": "algotune solver"})
+
+    assert result.is_error is True and result.retryable is False
+    # The SAME structured answer `web_fetch` gives, so one query counts the refusals of both.
+    assert result.structured["refused"] == "web_deny"
+    assert result.structured["web_fetch_refused"] == prefix
+    assert "refused" in str(result.content) and "unavailable" not in str(result.content)

@@ -435,8 +435,23 @@ class WebTools:
                                       "grounding)", is_error=True, retryable=False,
                               provenance={"source": "web"})
         if name == "web_search":
-            return ToolResult(content=self._deliver(self._search(
-                str((args or {}).get("query", "")).strip())), provenance={"source": "web"})
+            try:
+                found = self._search(str((args or {}).get("query", "")).strip())
+            except WebDenyRefusal as refused:
+                # SAME ANSWER AS `web_fetch`'s, and it was missing: `_search` deliberately re-raises
+                # a refusal so it is not swallowed into "(web search unavailable: …)", and nothing
+                # above caught it — `_run_tool_call` and `drive_tool_loop` have no try either, so it
+                # escaped the provider. Inside `DeepResearcher.research` the outer `except Exception`
+                # then discarded the WHOLE paid session as "(deep research unavailable: …)", which is
+                # the "(unreachable)" shape this module's docstring says the fence must never
+                # produce, plus a lost memo and a dangling tool_call_id. Reachable whenever a search
+                # redirects into a declared prefix — or when the search endpoint itself is one.
+                return ToolResult(
+                    content=str(refused), is_error=True, retryable=False,
+                    structured={"refused": "web_deny", "web_fetch_refused": refused.prefix,
+                                "url": refused.url},
+                    provenance={"source": "web", "fence": "web_deny"})
+            return ToolResult(content=self._deliver(found), provenance={"source": "web"})
         if name == "web_fetch":
             url = str((args or {}).get("url", "")).strip()
             try:
