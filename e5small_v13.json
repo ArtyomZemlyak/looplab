@@ -1,0 +1,103 @@
+{
+  "kind": "repo",
+  "id": "e5small-dr-unified-v2",
+  "goal": "Maximize test recall@100 on the ESCI v2 dense-retrieval benchmark by fine-tuning the SentenceTransformer backbone at /home/jovyan/data/embedder/d0rj/e5-small-en-ru.\n\nThe repo is /home/jovyan/data/vectorizer-unified \u2014 read it before changing anything. You realise an idea by EDITING THE REPO; nothing here is applied automatically.\n\nCLAIM[v10-backbone-path-resolves] the backbone named above is the model on disk at that path decided:`present:XLMRobertaModel@/home/jovyan/data/embedder/d0rj/e5-small-en-ru/config.json`\n\nDATA: use dataset_version '2'. The local data root is already exported into every stage's environment \u2014 do not set it in code.\n\nSCALE CAVEAT, the one thing you cannot derive from your own tools: the operator's manual benchmark table was measured against a ~37k-item catalogue and this eval indexes ~641k, so its absolute numbers are NOT on this scale and a lower number here is not a gap to close. Use that table for the RANKING of backbones and recipes; take every target value and every comparison from runs on THIS eval, which `list_sibling_runs` and `diff_nodes` will give you.",
+  "direction": "max",
+  "seed": 0,
+  "editable_path": "/home/jovyan/data/vectorizer-unified",
+  "edit_surface": [
+    "**/*"
+  ],
+  "protect": [],
+  "seed_mode": "",
+  "editables": [],
+  "references": [],
+  "data": {},
+  "eval": {
+    "command": [
+      "python",
+      "-m",
+      "vectorsearch.test"
+    ],
+    "stages": [],
+    "cwd": ".",
+    "metric": {
+      "pattern": "RECALL@100: ([0-9.]+)",
+      "kind": "stdout_regex",
+      "subject_glob": [
+        "vectorsearch/experiments/*/final/model.safetensors"
+      ],
+      "applied_config_glob": "vectorsearch/experiments/*/final/config.yaml"
+    },
+    "params_style": "none",
+    "timeout": 36000.0,
+    "setup": [],
+    "setup_timeout": 600.0,
+    "run_setup": [],
+    "run_setup_timeout": 1800.0,
+    "profiles": {},
+    "cross_check": null,
+    "drift_tolerance": 1e-06,
+    "metrics": {
+      "Recall_at_10": {
+        "kind": "stdout_regex",
+        "pattern": "Recall_at_10: ([0-9.]+)",
+        "direction": "max"
+      },
+      "Recall_at_100": {
+        "kind": "stdout_regex",
+        "pattern": "Recall_at_100: ([0-9.]+)",
+        "direction": "max"
+      },
+      "nDCG_at_10": {
+        "kind": "stdout_regex",
+        "pattern": "nDCG_at_10: ([0-9.]+)",
+        "direction": "max"
+      },
+      "nDCG_at_100": {
+        "kind": "stdout_regex",
+        "pattern": "nDCG_at_100: ([0-9.]+)",
+        "direction": "max"
+      },
+      "MAP_at_10": {
+        "kind": "stdout_regex",
+        "pattern": "MAP_at_10: ([0-9.]+)",
+        "direction": "max"
+      },
+      "MAP_at_100": {
+        "kind": "stdout_regex",
+        "pattern": "MAP_at_100: ([0-9.]+)",
+        "direction": "max"
+      },
+      "MRR_at_10": {
+        "kind": "stdout_regex",
+        "pattern": "MRR_at_10: ([0-9.]+)",
+        "direction": "max"
+      },
+      "MRR_at_100": {
+        "kind": "stdout_regex",
+        "pattern": "MRR_at_100: ([0-9.]+)",
+        "direction": "max"
+      },
+      "Precision_at_10": {
+        "kind": "stdout_regex",
+        "pattern": "Precision_at_10: ([0-9.]+)",
+        "direction": "max"
+      },
+      "Precision_at_100": {
+        "kind": "stdout_regex",
+        "pattern": "Precision_at_100: ([0-9.]+)",
+        "direction": "max"
+      }
+    },
+    "constraints": [],
+    "inputs": [
+      "/home/jovyan/data/dr-local/v2/test.parquet",
+      "/home/jovyan/data/dr-local/v2/smkt_all.index.parquet"
+    ]
+  },
+  "params": {},
+  "onboard": false,
+  "onboard_command": [],
+  "onboard_timeout": 600.0
+}

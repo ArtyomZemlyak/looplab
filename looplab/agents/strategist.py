@@ -268,6 +268,19 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     dev = strat.get("developer")
     if isinstance(dev, str) and dev in ctx.available_developers:
         out["developer"] = dev
+    elif isinstance(dev, str) and dev:
+        # SAY THAT IT WAS DROPPED (2026-09-03). Everything above is the reason: the drop happens
+        # before `_prepare_strategy_developer` runs, so its `refused` receipt cannot fire for a name
+        # it never receives, and the durable decision then carries the rationale ("switch developer
+        # to agentless") with no `developer` and no receipt of any kind — a history that reads as a
+        # switch that happened. That was tolerable while nothing could PRODUCE the field; adding the
+        # producer above makes it reachable, so the refusal is recorded in the same breath.
+        #
+        # A separate key, not `developer`: writing the requested name into the field would be the
+        # very claim this refuses. `_record_strategy` lifts it into the same `developer_application`
+        # receipt shape the factory refusal uses, so one reader answers "what happened to the
+        # developer this decision asked for" for every arm.
+        out["developer_refused"] = dev
     ops = strat.get("operators")
     if isinstance(ops, dict):
         clean: dict = {}
@@ -389,7 +402,15 @@ class RuleStrategist:
         return strat or None
 
     def _decide_machinery(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
+        # Imported at CALL time for the reason every other `search` import in this module is:
+        # `search` imports `agents` at module scope, so a module-level import here would close the
+        # cycle into an ImportError at startup (`tests/test_agents_search_direction.py`).
+        from looplab.search.policy import policy_fills_width
+
         avail = ctx.available_policies
+        # The live eval width this run settles to. Read once here because the racing-schedule arm
+        # below must not select a policy that cannot fill it.
+        width = getattr(ctx, "eval_parallel", None)
         # Seed phase: cheap broad drafts at smoke fidelity (greedy is fine; nothing to exploit yet).
         if ctx.phase == "seed":
             return {"policy": "greedy", "fidelity": "smoke",
@@ -481,7 +502,18 @@ class RuleStrategist:
                     "source": "rule"}
 
         # Many cheap candidates to race + ASHA available -> successive-halving over fidelities.
-        if "asha" in avail and ctx.phase == "explore":
+        # ...AND ONLY IF IT CAN KEEP THE SLOTS BUSY. `RuleStrategist` is the fallback for EVERY LLM
+        # failure ("RuleStrategist on any parse/transport failure, so a flaky model never crashes the
+        # run"), so an endpoint hiccup at width >= 2 used to select, without reading the width, the
+        # very schedule this module's own brief tells the model about: "a racing schedule
+        # (`asha`/`bohb`) fills one slot once its seed target is met… an unresolved arm blocks both
+        # seeding and promotion", measured at 5.94 of 8.03 starved GPU-hours across the corpus and
+        # 0.00 in every GreedyTree and EvolutionaryPolicy run.
+        #
+        # `policy_fills_width` is the predicate that brief already cites, asked here rather than
+        # re-derived: it is False ONLY for a racing schedule asked to fill more than one slot, and
+        # answers True for an unknown name, so this arm keeps exactly the behaviour it had at width 1.
+        if "asha" in avail and ctx.phase == "explore" and policy_fills_width("asha", width):
             return {"policy": "asha", "policy_params": {"eta": 3}, "fidelity": "adaptive",
                     "rationale": "exploring breadth: race candidates with ASHA "
                                  "(smoke rung -> promote survivors to full)",
@@ -583,6 +615,18 @@ class _StrategyOut(BaseModel):
 
     policy: Optional[str] = None
     fidelity: Optional[str] = None
+    # The DEVELOPER BACKEND this decision asks for. The switch machinery below it — `validate_strategy`
+    # (which has whitelisted this key all along), `_prepare_strategy_developer`'s four refusal arms and
+    # its `developer_application` receipt — had no live producer at all: `extra="forbid"` meant a model
+    # naming one had its whole tool call rejected, and the operator's `/control` validator refused the
+    # key too. So the capability existed and could not be reached from either end.
+    #
+    # The vocabulary has ONE home (`core/config.py::developer_switch_names`) and the value is NOT
+    # constrained here: this is the model's proposal, and `validate_strategy` is the paranoid
+    # whitelist over it (`ctx.available_developers`, derived from that same home). Constraining it at
+    # the schema would make a hallucinated name reject the ENTIRE decision — its policy, its widths,
+    # its rationale — where dropping one field is the behaviour every other field here already has.
+    developer: Optional[str] = None
     novelty_stance: Optional[str] = None    # explore|balanced|exploit — novelty pressure downstream
     ablate_every: Optional[int] = None
     merge_mode: Optional[str] = None
@@ -739,6 +783,11 @@ def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
         strat["policy"] = out.policy
     if out.fidelity:
         strat["fidelity"] = out.fidelity
+    if out.developer:
+        # Copied VERBATIM: `validate_strategy` is the whitelist and the only thing entitled to
+        # refuse a name, so filtering here would hide a hallucinated backend from the receipt that
+        # exists to record exactly that.
+        strat["developer"] = out.developer
     if out.novelty_stance:
         strat["novelty_stance"] = out.novelty_stance
     if out.request_research:

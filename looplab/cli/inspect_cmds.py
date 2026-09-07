@@ -33,6 +33,7 @@ from looplab.core.run_deletion import (
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed)
 from looplab.events.eventstore import EventStore
+from looplab.cli.token_report import echo_card_and_build_tables
 from looplab.events.readmodel import (
     STATUS_CURRENT, coverage_watermark, publish_readmodel, read_watermark, readmodel_status)
 from looplab.events.replay import fold
@@ -302,69 +303,14 @@ def tokens(run_dir: Path = typer.Argument(...),
         typer.echo(f"residual   : {out['residual']:>14,} tokens "
                    f"({'spans over-attribute' if out['residual'] < 0 else 'unattributed by any span'})")
 
-    # THE PER-CARD HALF. Phase answers "which KIND of work spent it"; this answers "which EXPERIMENT
-    # spent it, and was that experiment ever evaluated" — the question a run cannot otherwise ask,
-    # because the durable ledger carries no card and no node. Printed by DEFAULT rather than behind a
-    # flag: the defect this closes is that nobody could see it, and an opt-in view is not seen.
-    # Suppressed when no card resolves at all, which is every serial-path run — a lone `(no card)`
-    # row states nothing and would push the phase table off a terminal for no reader's benefit.
-    card_nodes = {}
-    if state is not None:
-        from looplab.core.models import is_unevaluated_speculative_discard
-        for node in (state.nodes or {}).values():
-            card = getattr(getattr(node, "idea", None), "card_id", None)
-            if not isinstance(card, str) or not card.strip():
-                continue
-            owned = card_nodes.setdefault(card, {"nodes": [], "discarded": []})
-            owned["nodes"].append(node.id)
-            # The run's SINGLE answer to "did this node spend budget", not a second spelling of it.
-            if is_unevaluated_speculative_discard(state, node):
-                owned["discarded"].append(node.id)
-    by_card = token_spend_by_card(rows, card_nodes=card_nodes, ledger_total=ledger_total)
-    real = [r for r in by_card["rows"] if r["card"] != CARD_UNATTRIBUTED]
-    if real:
-        typer.echo("")
-        typer.echo(f"{'tokens':>14}  {'share':>6}  {'calls':>6}  nodes                 card")
-        for row in by_card["rows"]:
-            nodes = ",".join(str(n) for n in row["nodes"]) or "-"
-            if row["wholly_discarded"]:
-                nodes += " DISCARDED"
-            typer.echo(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
-                       f"{nodes:<21} {row['card']}")
-        # A build that minted NO node is invisible to the rule above, which needs the card to OWN
-        # one — measured on v9, that hid 40.1M tokens (card-2's first build and card-5's only one,
-        # both `skipped: stale`), while card-2's row read as a healthy 97.6M. Priced from the
-        # durable log's own `card_build_requested` -> `card_build_done` windows rather than by
-        # widening `wholly_discarded`, which answers a different question and answers it correctly.
-        builds = []
-        if state is not None:
-            open_req = {}
-            for ev in EventStore(ev_path).read_all():
-                kind = getattr(ev, "type", None) or (ev.get("type") if isinstance(ev, dict) else None)
-                data = getattr(ev, "data", None) or (ev.get("data") if isinstance(ev, dict) else None) or {}
-                ts = getattr(ev, "ts", None) or (ev.get("ts") if isinstance(ev, dict) else None)
-                cid = data.get("card_id")
-                if kind == "card_build_requested":
-                    open_req[cid] = ts
-                elif kind == "card_build_done":
-                    builds.append({"card": cid, "start": open_req.pop(cid, None), "end": ts,
-                                   "skipped": data.get("skipped"), "node_id": data.get("node_id")})
-        by_build = token_spend_by_build(rows, builds)
-        if by_build["skipped_builds"]:
-            share = (100 * by_build["skipped_tokens"] / by_card["attributed"]) if by_card["attributed"] else 0.0
-            typer.echo(f"{by_build['skipped_tokens']:>14,}  {share:>5.1f}%  {'':>6}  "
-                       f"built and SKIPPED as stale, minting no node "
-                       f"({by_build['skipped_builds']} of {by_build['builds']} builds)")
-        lost = [r for r in by_card["rows"] if r["wholly_discarded"]]
-        if lost:
-            spent = sum(r["tokens"] for r in lost)
-            share = 100 * sum(r["share"] for r in lost)
-            # Stated as what it IS — a build that was paid for and never evaluated — and NOT as
-            # waste: the freshness gate discards a prefetch whose selection no longer holds, which
-            # is the machinery working. What the number buys the operator is the ability to weigh
-            # that trade, which until now had no visible price at all.
-            typer.echo(f"{spent:>14,}  {share:>5.1f}%  {'':>6}  "
-                       f"built and never evaluated ({len(lost)} card(s) discarded before dispatch)")
+    # THE PER-CARD HALF, in `cli/token_report.py`. Phase answers "which KIND of work spent it";
+    # that module answers "which EXPERIMENT spent it, and was that experiment ever evaluated" — the
+    # question a run cannot otherwise ask, because the durable ledger carries no card and no node.
+    # It is printed by DEFAULT rather than behind a flag: the defect it closes is that nobody could
+    # see it, and an opt-in view is not seen.
+    echo_card_and_build_tables(rows, state=state, ev_path=ev_path, ledger_total=ledger_total,
+                               by_card_fold=token_spend_by_card, by_build_fold=token_spend_by_build,
+                               unattributed=CARD_UNATTRIBUTED)
     # `read_jsonl_lenient_with_health` returns a plain DICT, and its damage key is `invalid_lines`.
     # `getattr(health, "damaged", 0)` was therefore always 0 by two independent routes — a dict has
     # no such attribute and there is no such key — so an unreadable `spans.jsonl` (the routine shape
@@ -986,7 +932,20 @@ def repair_candidates(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
                    + ("." if state.repair_ledger else
                       " (and the repair ledger is empty — a pre-ledger log records none)."))
         return
-    typer.echo(f"repaired files: {len(rows)}  repair rows: {len(state.repair_ledger)}")
+    # The ledger is BOUNDED, so its length is what was kept and never what happened. Printing it
+    # bare made the cap read as a total; a reader deciding whether a repair pattern is real needs to
+    # know the sample was cut and by how much.
+    omitted = getattr(state, "repair_ledger_omitted", None) or {}
+    dropped = int(omitted.get("rows", 0) or 0)
+    typer.echo(f"repaired files: {len(rows)}  repair rows: {len(state.repair_ledger)}"
+               + (f"  (+{dropped} not recorded — the ledger is bounded per node and per run)"
+                  if dropped else ""))
+    if dropped:
+        worst = sorted(((int(n or 0), str(k)) for k, n in (omitted.get("nodes") or {}).items()),
+                       reverse=True)[:3]
+        if worst:
+            typer.echo("  most truncated: "
+                       + ", ".join(f"#{nid} (+{count})" for count, nid in worst))
     for row in rows:
         reasons = ", ".join(f"{k}x{v}" for k, v in row["reasons"].items())
         typer.echo(f"  {row['node_count']:>2} node(s)  {row['path']}"

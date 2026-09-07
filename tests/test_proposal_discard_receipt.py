@@ -93,9 +93,19 @@ def test_the_commit_pass_stays_SILENT_because_it_is_also_the_batch_entry_point()
 
 
 def test_the_planner_pass_receipts_the_discard_and_names_itself():
-    """`_prepare_node_idea._link` runs immediately after the proposal call and nowhere else, so it
-    is the one pass that can know a PAID proposal was refused. Before this it returned None and the
-    caller unwound through `_discard_node_build_telemetry`, which appends nothing."""
+    """`_prepare_node_idea._link` runs immediately after the proposal call, so it is a pass that can
+    know a PAID proposal was refused. Before this it returned None and the caller unwound through
+    `_discard_node_build_telemetry`, which appends nothing.
+
+    RE-POINTED 2026-09-02, and the reason matters more than the edit. This asserted the literal
+    fields of an inline dict, and that dict was one of THREE hand-written copies: the batch draft
+    lane in `novelty.py::_link_card` and the Layer-5 speculative producer each run a paid propose
+    and refuse one too, and both lost it in silence — while this branch's own comment claimed to be
+    "THE ONLY PLACE ... and nowhere else". The payload is now
+    `card_reservation.py::discarded_proposal_receipt`, so what this file can still pin is that THIS
+    branch calls it and names ITSELF; the row's fields are driven directly in
+    `tests/test_discarded_proposal_receipt.py`, which also holds the other two lanes.
+    """
     from looplab.engine import orchestrator
 
     src = inspect.getsource(orchestrator.Engine._prepare_node_idea)
@@ -103,10 +113,18 @@ def test_the_planner_pass_receipts_the_discard_and_names_itself():
     assert tail, "the planner receipt moved — re-point this test at it"
     branch = tail.split("return plan.idea")[0]
     assert "_append_proposal_event(EV_NOVELTY_REJECTED" in branch
-    assert '"pass": "planner"' in branch
-    assert '"card_duplicate" if plan.disposition == "duplicate"' in branch
-    assert '"disposition": str(plan.disposition)' in branch
-    assert "_discarded_proposal_text(linked)" in branch
+    assert "discarded_proposal_receipt(" in branch
+    assert 'lane="planner"' in branch, "the row must name the pass that wrote it"
+    assert "plan.disposition" in branch, "the disposition decides duplicate vs unplannable"
+    assert "linked" in branch, "the hypothesis comes off the idea this pass just paid for"
+
+    # ...and the constructor really produces what this branch stopped spelling.
+    from looplab.engine.card_reservation import discarded_proposal_receipt
+
+    row = discarded_proposal_receipt("duplicate", 3, None, lane="planner")
+    assert row["pass"] == "planner" and row["kind"] == "card_duplicate"
+    assert row["disposition"] == "duplicate" and row["action"] == "dropped"
+    assert discarded_proposal_receipt("stale", 3, None, lane="planner")["kind"] == "card_unplannable"
 
 
 def test_an_accepted_disposition_is_never_receipted_as_a_discard():

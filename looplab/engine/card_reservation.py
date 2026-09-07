@@ -122,6 +122,45 @@ from looplab.search.card_selection import (META_CARD_ID, SpeculativeSelectionCon
 CLAIM_ATTACHED_FIELD = "card_attached"
 
 
+def scored_anchor(state) -> tuple[Optional[int], Optional[int]]:
+    """The `(best_node_id, attempt)` a proposal is scored under, read from ONE fold.
+
+    Both halves of the card's score fence must come from the same `state` object. They used to be
+    read from two: the caller passed `scored_against=state.best_node_id` from its own fold, and
+    `_card_score_snapshot` then took `node.attempt` from the FRESH fold `_reserve_node_build._plan`
+    takes under the CAS. That was unreachable-by-construction while the propose ran on the loop
+    thread — the loop was frozen, so the two folds were the same log — and `_await_batch_proposal`
+    offloading the paid propose to a worker opened the window to the propose's whole duration.
+
+    The pair matters more than either half. `cards.py::card_score_fence_state` answers `stale`
+    exactly on `scored_against_generation != anchor_attempt`, so an anchor that RE-RAN mid-propose
+    got the OLD id beside its NEW attempt and read `current` — the one case the generation is in
+    the receipt to catch. The stale id alone is not a defect and must not be "fixed": the ladder
+    narrowed champion-equality away on 2026-08-13, deliberately, and `card_selection` asks only
+    that the anchor be live. Both readers want the champion the proposal was scored under.
+
+    `(None, None)` on an empty board is the honest answer, not a refusal — `_card_score_snapshot`
+    turns a `None` id into the `scored_against_empty` triple.
+
+    DELEGATED, because this is the first half of `_card_score_snapshot` and a second spelling of it
+    was wrong in two ways that a re-derivation of a rule is always wrong in. It omitted that
+    method's refusal — a tombstoned or aborted champion came back as a live anchor here while the
+    snapshot refuses it — and, when the anchor's node was simply absent, it returned
+    `attempt=None`, which is an OVERLOADED sentinel: `requested_attempt=None` means "the caller has
+    no opinion" one function down, so the attempt was then taken from the FRESH fold beside an id
+    from the OLD one, which is exactly the two-fold mismatch this pair exists to close.
+
+    A refused anchor answers `(None, None)` — the same thing an empty board does. That is the safe
+    direction and not a loss: `_card_score_snapshot` maps it to `scored_against_empty`, and a
+    champion that has been tombstoned or aborted is not something a proposal can be scored against.
+    """
+    snapshot = CardReservationMixin._card_score_snapshot(state, None)
+    if snapshot is None:
+        return None, None
+    node_id, attempt, empty = snapshot
+    return (None, None) if empty else (node_id, attempt)
+
+
 def _fold(events):
     """Fold THROUGH the orchestrator module attribute — see the module docstring.
 
@@ -152,6 +191,36 @@ def _discarded_proposal_text(idea) -> str:
     except Exception:  # noqa: BLE001 — a receipt must never raise into the reservation path
         return ""
     return text[:_DISCARDED_PROPOSAL_TEXT_MAX]
+
+
+# THE ONE SHAPE OF A DISCARDED-PROPOSAL RECEIPT, so the lanes that emit it cannot spell it three
+# ways. It landed in `orchestrator.py::_link` first (bd182357) with a comment reading "THE ONLY
+# PLACE A DISCARDED PROPOSAL IS RECEIPTED ... and nowhere else", which overstated its own coverage:
+# the BATCH draft lane (`novelty.py::_link_card`) and the Layer-5 SPECULATIVE producer each run a
+# paid propose and then refuse one too, and both lost it in silence. A `duplicate` disposition is a
+# busy board's ordinary answer, so this is not an edge case — it is the same 24.1 min / 81 calls /
+# 4.27M tokens loss bd182357 measured, one lane over.
+#
+# Here rather than on the mixin because BOTH callers are Engine methods in different modules and a
+# constructor with no `self` is what makes the row testable without simulating a turn.
+def discarded_proposal_receipt(disposition: str, node_id: int, idea, *, lane: str) -> dict:
+    """The `novelty_rejected` payload for a proposal a card planner refused.
+
+    `lane` names WHICH pass discarded it (`planner`, `batch_planner`, `speculative`) — the receipts
+    are otherwise identical and the whole reason this exists is that the lanes were measurably not
+    equivalent. Never raises: a receipt may not cost a build its refusal.
+    """
+    duplicate = str(disposition) == "duplicate"
+    return {
+        "node_id": node_id, "generation": 0,
+        "kind": "card_duplicate" if duplicate else "card_unplannable",
+        "reason": ("an existing card already owns this action" if duplicate
+                   else "the card plan named no bounded action"),
+        "action": "dropped",
+        "disposition": str(disposition),
+        "pass": lane,
+        "hypothesis": _discarded_proposal_text(idea),
+    }
 
 
 class _BuildReservation(NamedTuple):
@@ -741,7 +810,9 @@ class CardReservationMixin:
     @staticmethod
     def _card_score_snapshot(
             state: RunState,
-            requested: Optional[int]) -> Optional[tuple[Optional[int], Optional[int], bool]]:
+            requested: Optional[int],
+            requested_attempt: Optional[int] = None,
+            ) -> Optional[tuple[Optional[int], Optional[int], bool]]:
         """Identity of the node a card is scored against: `(id, attempt, empty)`, or None to REFUSE.
 
         The two falsy-looking outcomes are different answers and both are load-bearing. A bare
@@ -750,6 +821,21 @@ class CardReservationMixin:
         legitimately nothing to score against yet (no best node); that is a valid snapshot and it
         compares equal across two folds, which is what the pre-launch freshness fence needs.
         Every caller therefore checks ``is None`` BEFORE unpacking.
+
+        ``requested_attempt`` EXISTS BECAUSE THE ID AND THE ATTEMPT MUST COME FROM ONE FOLD. This
+        runs inside `_reserve_node_build._plan`, under a fresh `_fold(events)`, while `requested`
+        comes from whatever the caller folded — and since the batch propose was offloaded to a
+        thread, the loop keeps running and those two folds can be minutes apart. Reading the
+        attempt from the fresh state while taking the id from the old one mints a pair the
+        proposal was never scored against: if the anchor RE-RAN mid-propose, the receipt records
+        the new attempt beside the old id, and `cards.py::card_score_fence_state` compares exactly
+        that field to the live attempt — so the card reads ``current`` precisely when the metric it
+        was scored against no longer exists. That comparison is the whole reason the generation is
+        in the receipt ("the metric the proposal was scored against no longer exists even though
+        the id does"). Callers that name an anchor therefore name its attempt too, and the fence
+        can then honestly answer ``stale``. The STALE ID ITSELF IS NOT THE DEFECT: the freshness
+        ladder narrowed away champion-equality on 2026-08-13 on purpose, and `card_selection`
+        only checks the anchor is live — both want the champion the proposal was scored under.
         """
         score_id = state.best_node_id if requested is None else requested
         if score_id is None:
@@ -759,7 +845,8 @@ class CardReservationMixin:
         node = state.nodes.get(score_id)
         if node is None or node.tombstoned or score_id in state.aborted_nodes:
             return None
-        return score_id, node.attempt, False
+        attempt = node.attempt if requested_attempt is None else requested_attempt
+        return score_id, attempt, False
 
     @classmethod
     def _next_available_card_id(cls, events, state: RunState, excluded=()) -> str:
@@ -940,6 +1027,7 @@ class CardReservationMixin:
     def _plan_native_card(cls, events, state: RunState, idea: Idea, *, parents: list[int],
                           parent_generations: dict[str, int], scored_against: Optional[int],
                           source: str, at_node: int,
+                          scored_against_attempt: Optional[int] = None,
                           implementation_ref: Optional[str] = None, excluded=(),
                           steering_context=(), cross_run_receipt=None,
                           superseded_card_id: Optional[str] = None,
@@ -983,7 +1071,7 @@ class CardReservationMixin:
         # NODE's Idea is rebuilt through the same validators at every fold, so the un-healed value was
         # already not what replay saw, only what the Developer was handed.
         idea = cls._fixed_point_idea(idea)
-        score_snapshot = cls._card_score_snapshot(state, scored_against)
+        score_snapshot = cls._card_score_snapshot(state, scored_against, scored_against_attempt)
         if score_snapshot is None:
             return _CardReservationPlan("invalid", None, None, None)
         score_id, score_generation, score_empty = score_snapshot
@@ -1102,6 +1190,7 @@ class CardReservationMixin:
 
     def _reserve_node_build(self, action: dict, idea: Optional[Idea] = None, *,
                             scored_against: Optional[int] = None,
+                            scored_against_attempt: Optional[int] = None,
                             source: str = "researcher",
                             implementation_ref: Optional[str] = None,
                             steering_context=(), cross_run_receipt=None,
@@ -1156,7 +1245,9 @@ class CardReservationMixin:
                 plan = self._plan_native_card(
                     events, state, idea, parents=parents,
                     parent_generations=parent_generations,
-                    scored_against=scored_against, source=source, at_node=node_id,
+                    scored_against=scored_against,
+                    scored_against_attempt=scored_against_attempt,
+                    source=source, at_node=node_id,
                     implementation_ref=implementation_ref, steering_context=steering_context,
                     cross_run_receipt=cross_run_receipt,
                     retry_attach=retry_attach,
@@ -1513,6 +1604,9 @@ class CardReservationMixin:
                if isinstance(action, dict) and META_CARD_ID not in action]
         if not raw:
             return []
+        # MAIN TASK, before the paid proposal(s) and before any Card receipt: the node-OPEN floor
+        # (`_refuse_node_open_below_floor`) — a Card staged here is the run's next node cycle.
+        self._refuse_node_open_below_floor(f"{len(raw)} Card proposal(s)")
         proposal_events = self.store.read_all()
         proposal_state = _fold(proposal_events)
         proposal_node_ceiling = self._node_id_ceiling(proposal_events, proposal_state)
@@ -1611,38 +1705,21 @@ class CardReservationMixin:
                         # window — the same hazard invariant #1 records for `train_monitor_alert`. A
                         # worker-thread append lands at instants the main-task ordering excluded, so
                         # the loss it can cause is a proposal the run already paid for.
-                        captured: list = []
-                        try:
-                            with self._capture_proposal_events() as captured:
-                                idea = await anyio.to_thread.run_sync(
-                                    functools.partial(
-                                        self._prepare_node_idea,
-                                        action,
-                                        proposal_state,
-                                        researcher=self.researcher,
-                                        prospective_node_id=proposal_node_ceiling + offset,
-                                        source=source,
-                                        proposal_events=proposal_events,
-                                    )
-                                )
-                            # PUBLISHED FROM THE MAIN TASK, and published WHETHER OR NOT the idea formed.
-                            # A refused proposal is exactly when the receipt matters most: the discard
-                            # receipt (`bd182357`) exists because a paid propose that produced no card
-                            # left no trace at all, and dropping the intents on `idea is None` would
-                            # restore that silence for the case it was written for. Layer 5 drops them
-                            # only when it ABANDONS and re-makes the proposal, which this lane never does.
-                        # …AND PUBLISHED ON THE WAY OUT, since 2026-08-31, because a RAISE from the offloaded
-                        # call discarded every buffered row. `_reject_and_repropose` appends `budget_exceeded`
-                        # through this very sink and then RE-RAISES — its own docstring says "appended BEFORE
-                        # re-raising so the rejection is on the log even though the run is ending" — and both
-                        # shipped researchers propagate it. Pre-offload every row was durable at emit time;
-                        # buffering made the publish conditional on a clean return without anyone deciding that.
-                        # `store.append` is sync and legal during unwind, so the `finally` costs nothing and keeps
-                        # the promise the sink was introduced to keep.
-                        finally:
-                            for _event_type, _data, _trace_id, _span_id in captured:
-                                self.store.append(_event_type, _data,
-                                                  trace_id=_trace_id, span_id=_span_id)
+                        # ONE helper for the capture->offload->publish triple, and it carries the
+                        # proposal pool and the publish-in-`finally` durability rule for every lane
+                        # at once. Published WHETHER OR NOT the idea formed: a refused proposal is
+                        # exactly when the receipt matters most (`bd182357`). Layer 5 drops a prefix
+                        # only when it ABANDONS and re-makes the proposal, which this lane never does.
+                        idea = await self._offload_under_proposal_sink(
+                            functools.partial(
+                                self._prepare_node_idea,
+                                action,
+                                proposal_state,
+                                researcher=self.researcher,
+                                prospective_node_id=proposal_node_ceiling + offset,
+                                source=source,
+                                proposal_events=proposal_events,
+                            ))
                     if idea is None:
                         continue
                     prepared.append((
@@ -1657,6 +1734,7 @@ class CardReservationMixin:
 
             staged: list[str] = []
             refused: collections.Counter = collections.Counter()
+            attached = 0
             for action, idea, source, at_node, steering, advisory_receipt in prepared:
                 # The BATCH lane reaches here without passing `_prepare_node_idea`'s `_link` funnel
                 # (`_consume_batch_proposal` hands its Ideas straight to the stager), so the proposal
@@ -1678,6 +1756,13 @@ class CardReservationMixin:
                 )
                 if card_id is not None:
                     staged.append(card_id)
+                elif getattr(self, "_card_stage_attached_to", None) is not None:
+                    # An attach is a HANDOFF, not a loss: the proposal repairs a question a live
+                    # Card already owns, staging can never publish it as inventory, and the serial
+                    # boundary builds the node (`_stage_prepared_card`'s attach branch). Counting
+                    # it under the fence-moved warning below announced a mid-propose authority
+                    # race that never happened, on a refusal that is permanent by design.
+                    attached += 1
                 else:
                     refused[getattr(self, "_card_stage_refusal", None) or "unnamed"] += 1
 
@@ -1695,9 +1780,15 @@ class CardReservationMixin:
             # cadence over.
             if refused:
                 _LOG.warning(
-                    "card staging refused %d of %d prepared proposal(s) — the fence moved during "
-                    "the paid propose: %s", sum(refused.values()), len(prepared),
+                    "card staging refused %d of %d prepared proposal(s): %s (a named slug is the "
+                    "fence half that moved during the paid propose; unnamed = refused before any "
+                    "fence, i.e. entry validation or CAS exhaustion)",
+                    sum(refused.values()), len(prepared),
                     ", ".join(f"{name}={count}" for name, count in sorted(refused.items())))
+            if attached:
+                _LOG.info(
+                    "card staging attached %d prepared proposal(s) to existing Cards — handed to "
+                    "the serial boundary, not lost", attached)
 
             # Preserve the existing audit treatment for batch proposals rejected before Node ownership.
             # Accepted staged Cards land first, so rejected receipts allocate fresh ids after them.

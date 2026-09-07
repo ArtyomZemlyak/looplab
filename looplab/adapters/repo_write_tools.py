@@ -285,6 +285,14 @@ class RepoWriteTools:
     def __init__(self, surface, protected, prefixes=None, editables=None,
                  operator_stages: bool = False, data_mounts=None, time_budget=None):
         self.files: dict[str, str] = {}
+        # HOW MANY TIMES THE MODEL REACHED FOR THE WRITE SURFACE, refusals and no-op edits INCLUDED.
+        # `self.files` above is the RESULT; this is the ATTEMPT, and the two answer different
+        # questions. Measured across every inert repair with spans (v11 x2, v13 x2): ZERO edit-like
+        # tool calls in sessions of 22.5, 23.6, 24.4 and 27.3 minutes — they read, they reasoned at
+        # length, and they never once tried to write. `self.files` cannot tell that apart from "tried
+        # and every attempt was refused", which is a different defect with a different remedy (and is
+        # `#92`'s territory). Counted BEFORE dispatch for exactly that reason.
+        self.edit_calls = 0
         self.deleted: list[str] = []
         self._surface = list(surface or [])
         self._protected = set(protected or [])
@@ -327,6 +335,18 @@ class RepoWriteTools:
             except OSError:
                 continue
         return None
+
+    def exists(self, p: str) -> bool:
+        """Is this repo-relative path readable in the workspace the node will actually run in?
+
+        The staged overlay first, then the editable roots on disk — `_current`'s own resolution,
+        which is the only one that matches what the sandbox materializes. PUBLIC because a rule in
+        another package has to ask it: `engine/repair_verify.py::build_declared_script_never_written`
+        used to test membership in `self.files`, i.e. "did THIS session write it", and refused a
+        stage naming the repo's own committed trainer. Reaching `_current` across a package would be
+        the cross-package private seam this tree already guards against.
+        """
+        return self._current(p) is not None
 
     @staticmethod
     def _safe_rel(p: str):
@@ -421,6 +441,8 @@ class RepoWriteTools:
 
     def execute(self, name: str, args: dict) -> str:
         args = args or {}
+        if name in ("write_file", "edit_file", "delete_file"):
+            self.edit_calls += 1        # BEFORE the dispatch: a refused attempt is still an attempt
         if name == "declare_stages":
             return self._declare_stages((args or {}).get("stages"))
         p = self._safe_rel(args.get("path", ""))

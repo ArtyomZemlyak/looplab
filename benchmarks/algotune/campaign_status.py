@@ -240,10 +240,11 @@ def main() -> int:
         # never produces made that rescue dead code.
         state = CA.marker_state(args.out, args.arm, task, runs_root)
         wall = _wall_minutes(args.out, args.arm, task)
-        if state in CA.HARNESS_CUT_STATES:
-            # Delegated, not re-tested: `compare_arms.HARNESS_CUT_STATES` is the one place that says
-            # which states mean "this harness stopped the run". A membership test spelled here would
-            # be the fourth copy of that rule, and the copies are what come apart.
+        if state in CA.NOT_AT_BUDGET_STATES:
+            # Delegated, not re-tested: `compare_arms.NOT_AT_BUDGET_STATES` is the one place that
+            # says which states mean "terminal, but not a measurement at the budget" -- the two
+            # harness cuts and, since 2026-09-06, an immediate exit. A membership test spelled here
+            # would be the fourth copy of that rule, and the copies are what come apart.
             wall_cut.append(task)
         elif state in ("unfinished", "refused"):
             owed.append(task)
@@ -268,7 +269,7 @@ def main() -> int:
         # THE MEANS EXCLUDE WHAT THEY MUST, on the same rule `compare_arms.py` applies: a wall-cut
         # task-arm was stopped by a clock rather than by the budget every other row is compared at,
         # so it is shown and not averaged.
-        comparable = [(t, v, w) for t, v, w, st in scored if st not in CA.HARNESS_CUT_STATES]
+        comparable = [(t, v, w) for t, v, w, st in scored if st not in CA.NOT_AT_BUDGET_STATES]
         if comparable:
             values = sorted(v for _, v, _ in comparable)
             walls = [w for _, _, w in comparable if w is not None]
@@ -281,7 +282,7 @@ def main() -> int:
               f"score -- see this file's docstring.")
     if wall_cut:
         print(f"{len(wall_cut)} task-arm(s) were STOPPED BY THE HARNESS (a wall cut or a stall cut) "
-              f"rather than by the budget, so they are shown and not averaged: "
+              f"or EXITED IMMEDIATELY, i.e. not at the budget, so they are shown and not averaged: "
               + ", ".join(sorted(wall_cut)))
     if owed:
         print(f"{len(owed)} task-arm(s) have no .done marker from campaign.sh and are still OWED: "

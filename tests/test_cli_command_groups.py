@@ -162,15 +162,16 @@ def test_no_group_is_a_god_module_again():
     2026-08-29 review annotations took master to 1197; this branch's own additions bring the merged
     file to 1224. That is run diagnostics doing its job, not a second domain moving in.
 
-    THE HEADROOM IS ONE LINE, not master's "one small command wide", and the tighter of the two
-    disciplines wins because the cap has now been raised three times: 1224 is far past the point the
-    split was performed at, so the honest answer to the next overrun is the EXTRACTION, which is
-    already named — the `tokens` command's rendering half (the per-card / per-build table echoes) is
-    a coherent unit that can move beside `events/token_spend.py`'s pure folds into a cli-side helper
-    module. Banking 26 lines of slack instead would be a cap that stopped being consulted, the exact
-    trade `test_agent_factory_split.py` refuses next door.
+    THE MERGE OVERRAN IT AND THE ANSWER WAS THE EXTRACTION, not a fourth raise. The merged file
+    measured 1237 against a cap of 1225, and the paragraph this one replaces had already named the
+    unit to move: the `tokens` command's rendering half — the per-card and per-build table echoes —
+    is now `cli/token_report.py::echo_card_and_build_tables`, beside `events/token_spend.py`'s pure
+    folds it renders. That took the file to 1183 and the cap DOWN to 1200 rather than up. Banking
+    the slack instead would have been a cap that stopped being consulted, the exact trade
+    `test_agent_factory_split.py` refuses next door — and the cap coming down with the extraction is
+    what keeps the next overrun a real question rather than a formality.
     """
-    caps = {"inspect_cmds": 1225}
+    caps = {"inspect_cmds": 1200}
     for module_name in GROUPS:
         lines = len((_CLI / f"{module_name}.py").read_text(encoding="utf-8").splitlines())
         assert lines < caps.get(module_name, 1100), f"{module_name} is back to {lines} lines"

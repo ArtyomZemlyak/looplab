@@ -100,10 +100,60 @@ def test_index_mentions_every_numbered_document():
     #   the same half-hour drift `af0c99c0` paid for one entry up, and the reason it is caught at
     #   all is that the count is a separate literal from the membership check. Two guards, because
     #   a document ADDED to the index still moves the inventory and only one of them can see that.
-    assert len(numbered) == 57, "the derived numbered-document inventory changed"
+    #   57 -> 58 (2026-09-06): doc 59, the bench-results analysis. The document, its index row, its
+    #   mkdocs nav row and this count move in one change — and the same change wires doc 58 into the
+    #   nav, which `f316f392` had not (57 was there, 58 was not; `omitted_files: info` cannot see it).
+    #   NOTE for the merge: `origin/master` independently holds a `50-` and a `51-` with different
+    #   content from this branch's 50/51 — the SEVENTH collision, two blocks this time.
+    #   58 -> 59 (2026-09-06): doc 60, the SOTA plan derived from the benches. Document, index row,
+    #   nav row and this count in one change.
+    #   49 -> 50 (2026-09-02): the whole-tree architecture review (doc 50). No collision — the number
+    #   was claimed by checking the glob AND the index table together.
+    #   50 -> 51 (2026-09-03): the second external-works synergy pass (doc 51). No collision — the
+    #   number was claimed by checking the glob AND the index table together, and no sibling
+    #   worktree held an unmerged `51-` at the time.
+    #   59 + 2 -> 61 (2026-09-06), at the MERGE with master, and this is the SEVENTH
+    #   collision — the first where two BLOCKS met rather than two documents. Master held
+    #   `50-architecture-review-2026-09-02` and `51-external-works-synergy-2026-09-03`;
+    #   this branch held `50-benchmark-landscape`, `51-algotune-arm-operational-notes` and
+    #   `52-bench-box-jhub-l40s`. Resolved as the SIXTH was: master's numbers stay (they
+    #   are the published line, and the two are cross-referenced from each other and from
+    #   the index), and the LATER-merged block is renumbered — 50/51/52 -> 61/62/63,
+    #   contiguous so the trio that cross-references itself stays together, with every
+    #   link, every prose `doc NN`, the index's first column, the mkdocs nav and
+    #   `benchmarks/algotune/README.md` moved in this same change. 54 remains the gap it
+    #   already was. Master's two documents are the +2; nothing was dropped.
+    assert len(numbered) == 61, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
+
+
+def test_claude_md_does_not_grow():
+    """A RATCHET, not a target: `CLAUDE.md` may shrink freely and may not grow.
+
+    It is read in full at the head of every agent turn in this repository — 247,023 bytes here,
+    about 58,000 tokens, paid again on every turn of every session. The 2026-09-02 whole-tree
+    review named the absence of any bound on it (`claude-md-has-no-size-budget`); this is that
+    bound, in the only form that costs nothing to adopt. It deliberately does NOT prescribe a
+    smaller size — half the file is measurements that belong in `docs/` and moving them is real
+    work with real judgement in it — it only stops the file getting worse while nobody is looking.
+
+    RAISING THE NUMBER IS THE THING THIS EXISTS TO MAKE DELIBERATE. A row that genuinely belongs
+    here (a new package, a rule an agent must not rediscover) is worth its bytes; a paragraph of
+    measurement is worth a doc and a one-line pointer. If you are about to raise it, ask which of
+    the two you have — and if it is the first, raise it and say in the note below what bought it.
+    """
+    #   247,023 -> 252,338 at the 2026-09-06 MERGE with master, and this is the one raise the
+    #   docstring above says to make deliberately: master's own additions to the `core/` and
+    #   `events/` rows (`run_identity.py`, `trust_gate.py`) plus its 99 commits' worth of rules,
+    #   meeting this branch's. Both sides' bytes are rules an agent must not rediscover, which is
+    #   the first of the two cases named above; not one byte of measurement was added by the merge.
+    size = (ROOT / "CLAUDE.md").stat().st_size
+    assert size <= 252_338, (
+        f"CLAUDE.md grew to {size:,} bytes (the ratchet is 252,338). Every agent turn in this "
+        "repository pays for it. Move the measurement into docs/ and leave a pointer, or raise "
+        "the ratchet here and say what bought the bytes.")
 
 
 def test_all_relative_markdown_links_resolve():

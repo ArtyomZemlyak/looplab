@@ -486,8 +486,16 @@ def test_resumed_asha_monitor_closes_pre_crash_episode(tmp_path, monkeypatch):
         "node_id": 0, "generation": 0, "underperforming": True,
         "intermediate": 0.3, "quantile": 0.5, "population": 3,
     }))
+    # WAIT FOR THE ROW, do not bet 80 ms that it arrives. This used a fixed `window=0.08`, which is
+    # a wall-clock wager on the monitor emitting its second rank inside that slice — it holds when
+    # the test runs alone and loses under full-suite load (observed once in a whole-suite run, green
+    # in isolation and on three consecutive runs of this file). `until=` with the file's own settle
+    # deadline is the idiom four other tests here already use, and it cannot weaken the guard: the
+    # assertion below is unchanged and still demands exactly [True, False], so an extra or a missing
+    # transition still fails.
     _run_loop(stub, wd, {"kind": "stdout_json", "key": "recall"}, "max", {}, monkeypatch,
-              finals=[0.80, 0.70, 0.60], window=0.08)
+              finals=[0.80, 0.70, 0.60],
+              until=lambda s: len([1 for t, _d in s.store.events if t == EV_ASHA_RANK]) >= 2)
     transitions = [data["underperforming"] for event_type, data in stub.store.events
                    if event_type == EV_ASHA_RANK]
     assert transitions == [True, False]

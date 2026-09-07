@@ -8,6 +8,7 @@ by the main engine task.  The mixin is inert unless both Card selection and a po
 from __future__ import annotations
 
 import functools
+import collections
 import logging
 import time
 from dataclasses import dataclass, field, replace
@@ -89,6 +90,18 @@ CARD_BUILD_SKIP_REASONS = (
     "commit_not_ours",           # the committed node is not this build's
 )
 
+# WHY a consumed raw proposal staged nothing BEFORE the staging fence could say — the two
+# pre-staging paths of `_serve_raw_card_stage`, named beside `CARD_BUILD_SKIP_REASONS` because a
+# bare slug on a warning nobody can look up is the defect both registries exist for. Deliberately
+# NOT members of `CARD_STAGE_REFUSALS`: that tuple may only carry slugs `_stage_prepared_card`
+# itself emits (`tests/test_card_stage_refusals.py` pins the set in both directions), and neither
+# of these is a staging refusal. `unrecorded` stays the residual for a stager `None` that set no
+# slug (entry validation, CAS exhaustion) — the signal a refusal path forgot to name itself.
+RAW_STAGE_PRE_STAGING_REASONS = (
+    "producer_failed",           # the paid propose raised — nothing reached the stager
+    "proposal_refused",          # the propose completed but formed no idea (novelty/degraded gates)
+)
+
 
 @dataclass(frozen=True)
 class SpecBuildResult:
@@ -124,6 +137,13 @@ class SpecBuildResult:
 # failed proposal into an unreadable log line. The type name is kept in front of it because the bare
 # `str(exc)` of several provider errors is empty.
 _PRODUCER_ERROR_CAP = 2_048
+
+
+def _proposal_limiter():
+    """Lazy hop to `novelty.proposal_limiter` — the same shape the monitors use for
+    `evaluate._watch_limiter`, and it keeps the import graph one-directional at module load."""
+    from looplab.engine.novelty import proposal_limiter
+    return proposal_limiter()
 
 
 def producer_error_text(exc: BaseException, prefix: str = "") -> str:
@@ -1324,12 +1344,19 @@ class SpeculationMixin:
                         or terminal_node.status is not NodeStatus.pending
                     ):
                         return None
-                    self.store.append_many(developer_crash_records(
+                    records = developer_crash_records(
                         node_id, terminal_node.attempt, result.code,
                         "auto-paused: a Developer session crashed (LLM unreachable or a hard "
                         "error, unresolved within the node) — resume once it's fixed",
-                    ), expected_last_seq=tail)
-                    self._create_paused = True
+                    )
+                    # `terminal_state` is the exact prefix this CAS appends onto, so the rank the
+                    # terminal takes is decidable before it lands: below
+                    # `developer_crash_pause_after` the transaction is the terminal alone.
+                    pause_due = self._developer_crash_pause_due(terminal_state, node_id)
+                    self.store.append_many(records if pause_due else records[:1],
+                                           expected_last_seq=tail)
+                    if pause_due:
+                        self._create_paused = True
                     return None
 
                 # A crash terminal that could not land leaves the node pending: the ordinary
@@ -1502,6 +1529,9 @@ class SpeculationMixin:
         self._refresh_speculation_budget(state)
         if self._node_reservation_slots_remaining(state, events=events) < 1:
             return False
+        # The node-OPEN floor, before a build is elected: a prefetch is a node cycle bought early,
+        # and one the ceiling would discard is not worth requesting (`_refuse_node_open_below_floor`).
+        self._refuse_node_open_below_floor("a speculative Card build")
         excluded = self._election_excluded_card_ids(state)
         actions = speculative_card_actions(
             state,
@@ -1986,6 +2016,7 @@ class SpeculationMixin:
     ) -> None:
         try:
             try:
+                # The proposal pool, not anyio's default — see `novelty.proposal_limiter`.
                 result = await anyio.to_thread.run_sync(
                     functools.partial(
                         self._prepare_raw_card_stage,
@@ -1996,6 +2027,7 @@ class SpeculationMixin:
                         roles,
                     ),
                     abandon_on_cancel=False,
+                    limiter=_proposal_limiter(),
                 )
             except Exception as exc:
                 # Mirror the request-driven producer guard: one raw proposal fault yields a consumed,
@@ -2021,15 +2053,44 @@ class SpeculationMixin:
             self._spec_raw_stage_inflight = False
             notify_producer(notify, ("raw_proposal", proposal_state.search_epoch))
 
-    def _serve_raw_card_stage(self) -> tuple[bool, bool]:
-        """Main-task-only commit of one prepared proposal and its buffered audit intents."""
+    def _serve_raw_card_stage(self) -> tuple[bool, bool, Optional[str]]:
+        """Main-task-only commit of one prepared proposal and its buffered audit intents.
 
+        The third member says WHY a consumed result staged nothing, from the path that knows:
+        `RAW_STAGE_PRE_STAGING_REASONS` for the two paths that never reach the stager, the staging
+        fence's own `CARD_STAGE_REFUSALS` slug (or `unrecorded`) when `_stage_prepared_card`
+        refused, and `None` both for a staged Card and for the attach HANDOFF — which is not an
+        abandonment: the serial boundary builds that node (see the attach branch below). The
+        caller used to re-derive this by reading `self._card_stage_refusal`, which only
+        `_stage_prepared_card` writes — so on the pre-staging paths the attribute still held
+        whatever slug the LAST staging call anywhere recorded (the create lane's, possibly turns
+        earlier), and a producer crash was warned as e.g. `best_moved`: a specific-looking wrong
+        cause an operator then greps the fences for.
+        """
         result = self._spec_raw_stage_result
         if result is None:
-            return False, False
+            return False, False, None
         self._spec_raw_stage_result = None
-        if not result.success or result.idea is None:
-            return True, False
+        if not result.success:
+            # PUBLISHED, not dropped. The producer ran a full paid Researcher call under
+            # `_capture_proposal_events`; whatever novelty/governance receipts it buffered before it
+            # raised describe work that really happened and was really paid for. Until 2026-09-02
+            # both of these branches returned without publishing, so the Layer-5 lane was the WORST
+            # of the three discard paths: the receipt was captured and then thrown away.
+            #
+            # This is deliberately NOT the same case as the stale-fence refusal below, and the
+            # difference is stated there: a moved fence abandons a SUCCESSFUL proposal that will be
+            # re-made from the same state, so dropping keeps the log from carrying two receipts for
+            # one eventual card. Here nothing is re-made from anything — the call failed or the
+            # planner refused it — and the receipts are the only record that this lane paid.
+            self._publish_proposal_events(result.audit_events)
+            return True, False, "producer_failed"
+        if result.idea is None:
+            # The refusal case bd182357 exists for, on the third lane. `_prepare_node_idea`
+            # returning None IS the novelty gate or the card planner refusing a paid proposal, and
+            # the receipt explaining which is in `audit_events`.
+            self._publish_proposal_events(result.audit_events)
+            return True, False, "proposal_refused"
         card_id = self._stage_prepared_card(
             result.action,
             result.idea,
@@ -2056,23 +2117,18 @@ class SpeculationMixin:
                 # its novelty/governance receipts describe a real paid call; on a stale-fence refusal
                 # the whole proposal is being abandoned and re-made, so dropping them keeps the log
                 # honest, but here the work is being handed to the serial spine and the receipts are
-                # the only record that this lane paid for it at all.
-                for event_type, data, trace_id, span_id in result.audit_events:
-                    self.store.append(event_type, data, trace_id=trace_id, span_id=span_id)
-            return True, False
+                # the only record that this lane paid for it at all. No abandon reason for the same
+                # reason: handed-on work is not abandoned work.
+                self._publish_proposal_events(result.audit_events)
+                return True, False, None
+            return True, False, str(getattr(self, "_card_stage_refusal", "") or "unrecorded")
         # the Card commit above and these proposal-audit events are separate appends. A crash
         # or append failure after EV_CARD_ADDED leaves an executable durable Card whose novelty/governance
         # audit prefix was silently lost; `_spec_raw_stage_result` was already cleared, so resume cannot
         # repair it. Commit the Card and its bounded audit intents in one tail-fenced append_many, or add a
         # durable proposal receipt plus recovery gate that keeps the Card non-selectable until it is closed.
-        for event_type, data, trace_id, span_id in result.audit_events:
-            self.store.append(
-                event_type,
-                data,
-                trace_id=trace_id,
-                span_id=span_id,
-            )
-        return True, True
+        self._publish_proposal_events(result.audit_events)
+        return True, True, None
 
     async def _close_developer_sentinel_once(self) -> bool:
         """Recover one sentinel lifecycle without ever re-pausing an acknowledged crash."""
@@ -2089,6 +2145,11 @@ class SpeculationMixin:
             records = developer_crash_records(
                 node.id, node.attempt, node.code,
                 "auto-paused: recovered a Developer crash before GPU dispatch")
+            # The terminal this sweep appends takes the next crash rank; below the run's
+            # `developer_crash_pause_after` it owns no pause, exactly as the live sites decide.
+            pause_due = self._developer_crash_pause_due(state, node.id)
+            if not pause_due:
+                records = records[:1]
         else:
             # A legacy writer (or a crash in the old two-append path) may already have made the
             # sentinel terminal while losing only its pause. Folded ``paused`` cannot distinguish
@@ -2103,6 +2164,9 @@ class SpeculationMixin:
                     and candidate.id not in state.aborted_nodes
                     and not candidate.tombstoned
                     and type(candidate.terminal_event_seq) is int
+                    # A crash whose log position is below `developer_crash_pause_after` never
+                    # owed a pause: a missing one there is the DESIGN, not a lost append.
+                    and self._developer_crash_pause_due(state, candidate.id)
                     and not self._has_exact_developer_pause(
                         events,
                         node_id=candidate.id,
@@ -2119,11 +2183,13 @@ class SpeculationMixin:
             records = developer_crash_records(
                 node.id, node.attempt, node.code,
                 "auto-paused: recovered a terminal Developer crash", terminal=False)
+            pause_due = True
         tail = events[-1].seq if events else -1
         try:
             async with self._write_lock:
                 self.store.append_many(records, expected_last_seq=tail)
-            self._create_paused = True
+            if pause_due:
+                self._create_paused = True
             return True
         except EventStoreConcurrencyError:
             return True
@@ -2330,9 +2396,42 @@ class SpeculationMixin:
         """Commit one prepared raw proposal, then — where the session may still produce — elect and
         start its producer in the same turn."""
 
-        raw_consumed, raw_staged = self._serve_raw_card_stage()
+        raw_consumed, raw_staged, abandon_reason = self._serve_raw_card_stage()
         if not raw_consumed:
             return
+        if not raw_staged and abandon_reason is not None:
+            # A PREPARED PROPOSAL WAS ABANDONED, and until 2026-08-31 that left no trace of any kind.
+            # Measured on v12: node 2's card took FIVE propose phases — four speculative ones
+            # completed `ok: true` and staged nothing (604.8 + 317.7 + 139.8 + 524.5 s = 26.5 min of
+            # its 44.6-minute bill) before the fifth minted `card-2`. The run has zero
+            # `novelty_rejected` / `card_auto_dropped` rows and its console had zero `refused` lines.
+            #
+            # THE RECEIPT DROP ABOVE IS DELIBERATE AND IS NOT WHAT THIS FIXES. `_consume_prepared_
+            # raw_stage` republishes the audit prefix only on an ATTACH refusal, because "on a
+            # stale-fence refusal the whole proposal is being abandoned and re-made, so dropping
+            # them keeps the log honest" — republishing novelty rows for work about to be repeated
+            # would double-count it. A COUNTED LINE carries no novelty rows, so it cannot.
+            #
+            # `_stage_card_creates` has counted its refusals since 6262f3a1; that counter is on the
+            # CREATE lane and this one reaches `_stage_prepared_card` by another route, so it had
+            # none. The reason rides on the serve's own RETURN — the staging fence's
+            # `CARD_STAGE_REFUSALS` slug (or `unrecorded`) when the stager refused, one of
+            # `RAW_STAGE_PRE_STAGING_REASONS` when the producer crashed or the proposal formed no
+            # idea, and no reason at all for the attach handoff, which is handed on and built
+            # rather than abandoned. It is NOT read off `_card_stage_refusal` here: only
+            # `_stage_prepared_card` writes that attribute, so on the pre-staging paths it still
+            # held an unrelated earlier call's slug and this warning misattributed a producer
+            # crash to a fence that never fired. The DURATION is deliberately not repeated here:
+            # it is already on this phase's `phase_progress` row, and one number in two places is
+            # how they drift.
+            reason = abandon_reason
+            counter = getattr(self, "_spec_raw_stage_abandoned", None)
+            if counter is None:
+                counter = self._spec_raw_stage_abandoned = collections.Counter()
+            counter[reason] += 1
+            _LOG.warning(
+                "the speculative lane abandoned a prepared proposal: %s (%d so far this run; the "
+                "seconds it cost are on its own phase_progress row)", reason, counter[reason])
         session.progressed = True
         # THE COMMIT ABOVE IS DELIBERATELY UNGATED, and `gates.stopping` is the gate it is ungated
         # against.  A prepared raw stage is already PAID FOR, and `_spec_raw_stage_result` counts in

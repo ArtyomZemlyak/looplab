@@ -38,10 +38,11 @@ from looplab.core.models import (CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_REPLAY_S
                      Event, Idea, Node, NodeStatus, RunState, Trial,
                      coerce_node_id as _coerce_node_id,
                      hypothesis_id,
-                     EXTRA_METRIC_DECLARED, normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
+                     EXTRA_METRIC_DECLARED, normalize_extra_metric_backfill,
+                     normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
                      normalize_researcher_footprint,
                      normalize_steering_context,
-                     run_setup_key)
+                     run_setup_key, BENIGN_TERMINAL_REASONS)
 # The derived Card ledger (doc 25 EV-01). ONLY the names this module's own handlers call are
 # imported: a re-export of a helper `card_ledger` then calls internally would look like a patch seam
 # while a monkeypatch through it silently missed the fold, which is the exact failure the flat-import
@@ -66,6 +67,7 @@ from looplab.events.card_ledger import (
     derive_cards as _derive_cards,
 )
 from looplab.events.comment_projection import apply_comment_event
+from looplab.events.finalize_scope import is_guarded_abort
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
@@ -286,6 +288,7 @@ class _FoldCtx:
         "concept_input_capped", "concept_input_invalid", "run_base_capped",
         "run_base_invalid", "run_base_seen", "event_index",
         "card_enrichment_index", "card_enrichment_omissions", "charged_repair_seqs",
+        "repair_ledger_keys", "repair_ledger_per_node",
     )
 
     def __init__(self):
@@ -308,6 +311,14 @@ class _FoldCtx:
         # duplicate or re-folded row shares its SEQ, a per-process ordinal restart does not.
         self.charged_repair_seqs: set[tuple[int, int]] = set()
         self.charged_ablation_ids: set[str] = set()
+        # `_record_repair_ledger`'s idempotence key for EVERY row it has seen — including the ones
+        # the caps DROPPED. Scanning `st.repair_ledger` cannot answer for a dropped row (it is not
+        # there), so a duplicate or re-folded `node_repaired` past a cap re-incremented the omission
+        # counters and the CLI's "N dropped" over-reported. The per-node tally rides along for the
+        # same reason it is cheap here and quadratic there: the cap check used to `sum()` the whole
+        # ledger on every row, +18 ms per fold on the repair-heavy corpus run, on the poll path.
+        self.repair_ledger_keys: set[tuple] = set()
+        self.repair_ledger_per_node: dict[int, int] = {}
         # (physical event seq, physical fold index, content). The index is needed for legacy logs
         # whose envelopes have no meaningful seq but whose report->finish adjacency is still valid.
         self.pending_finish_report: tuple[int, int, dict] | None = None
@@ -992,9 +1003,27 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             _charge_terminal_cost(st, n, d, ctx)
 
 
-_FAILURE_SPIKE_IGNORED_REASONS = {
-    "aborted", "cancelled", "card_dropped", "proxy_skipped", "superseded",
-}
+# DERIVED, not spelled. This set and `serve/attention.py`'s owner-alert filter are the same
+# judgement — "this node ended for a reason that says nothing about the experiment" — and were
+# hand-written twice; both carried `cancelled`, which no terminal writer mints, so each held one
+# word that could never match and neither could tell. See `core/models.py::BENIGN_TERMINAL_REASONS`.
+#
+# THE UNIFICATION MOVED THIS SET, AND SAYING ONLY THE `cancelled` HALF UNDERSTATED IT. The two
+# hand-written copies were not the same: `attention.py` also carried `frozen` and this one did not,
+# so taking the shared set ADDED a live reason here. `frozen` is minted by
+# `engine/speculation.py::_fail_reserved_build` when a speculative build is terminalized by a
+# transient pause/stop/budget crossing — the engine's own doing, at a moment the run is already
+# stopping — which is exactly the judgement this set encodes, so the two readers agreeing is the
+# correct end state and `attention.py` was the one that had it right.
+#
+# BUT IT CHANGES FOLDED STATE ON A PRESERVED LOG, which is why it is written down rather than left
+# to the shared set's docstring. `_counts_as_current_failure` feeds `_add_current_failure`, so
+# `RunState.current_failure_count`, `failure_spike_level` and `failure_spike_seq` all move on any
+# log containing a `frozen` terminal, and the consecutive-failure breaker no longer counts one. All
+# three fields are `Field(exclude=True)`, so a corpus check that digests `model_dump()` cannot see
+# this at all — the reason it went unnoticed. `tests/test_failure_spike_ignores_frozen.py` pins the
+# membership deliberately.
+_FAILURE_SPIKE_IGNORED_REASONS = set(BENIGN_TERMINAL_REASONS)
 
 
 def _counts_as_current_failure(st: RunState, n: Node) -> bool:
@@ -1102,27 +1131,58 @@ _SALVAGE_CAUSE_TRIAGE_ACTION = "salvage_cause_fix"
 
 
 _REPAIR_LEDGER_MAX = 200
+# ...and no single node may take more than this share of it. The global cap alone is first-come, so
+# ONE node that repairs pathologically often consumes the whole ledger: measured, a node with 2,345
+# repair rows would fill all 200 slots before any other node recorded one, and the ledger's entire
+# purpose is telling a LATER node what a SIBLING had to fix. A per-node bound is what keeps it a
+# cross-node channel rather than a transcript of the worst node's first two hundred attempts.
+_REPAIR_LEDGER_MAX_PER_NODE = 20
 _REPAIR_LEDGER_RATIONALE_CAP = 400
 
 
-def _record_repair_ledger(st: RunState, d: dict) -> None:
+def _record_repair_ledger(st: RunState, d: dict, ctx: "_FoldCtx") -> None:
     """Append one row to the cross-node repair ledger — see `RunState.repair_ledger` for why it
     exists and what it deliberately does NOT do.
 
     Recorded OUTSIDE the pending/generation guard below on purpose: that guard protects the node's
     own CODE from a duplicate or post-terminal row, and this records a fact about the run rather
     than mutating a node. Idempotence is provided instead by the (node, attempt, generation) key, so
-    a double-fold collapses to the same single row and replay stays a pure function of the log."""
+    a double-fold collapses to the same single row and replay stays a pure function of the log.
+
+    THE KEY LIVES ON THE FOLD CONTEXT, not on `st.repair_ledger`, and that is what makes the
+    guarantee above true for a DROPPED row too. A row the caps refused is not in the ledger, so a
+    scan of the ledger could never recognise its duplicate: a re-folded or duplicated
+    `node_repaired` past a cap re-incremented `repair_ledger_omitted` and the CLI's "N dropped"
+    over-reported — the exact honesty the counter was added for. `_on_node_repaired`'s own comment
+    names "a duplicate or post-terminal `node_repaired` (corrupt/double-fold)" as the case it
+    defends against.
+
+    The context is also where the counting belongs. The per-node tally used to `sum()` the entire
+    ledger before the O(1) global cap was even consulted, so once the ledger was full every
+    remaining row paid a 200-entry scan to reach a decision the length check had already made —
+    +18 ms per fold on the repair-heavy corpus run, paid on every state poll of a live run.
+    """
     node_id = d.get("node_id")
     attempt = d.get("attempt")
     generation = d.get("generation")
     if type(node_id) is not int:
         return
     key = (node_id, attempt, generation)
-    for row in st.repair_ledger:
-        if (row.get("node_id"), row.get("attempt"), row.get("generation")) == key:
-            return
-    if len(st.repair_ledger) >= _REPAIR_LEDGER_MAX:
+    if key in ctx.repair_ledger_keys:
+        return
+    ctx.repair_ledger_keys.add(key)
+    # BOTH bounds, and each records what it dropped. A silent cap made the CLI print 200 as a total
+    # and let `lessons_reconcile` generalize over a truncated population — see
+    # `RunState.repair_ledger_omitted`. The cheap bound is asked first.
+    if (len(st.repair_ledger) >= _REPAIR_LEDGER_MAX
+            or ctx.repair_ledger_per_node.get(node_id, 0) >= _REPAIR_LEDGER_MAX_PER_NODE):
+        omitted = st.repair_ledger_omitted
+        omitted["rows"] = int(omitted.get("rows", 0)) + 1
+        nodes = omitted.setdefault("nodes", {})
+        # Keyed by the node's STRING id: this dict is serialized to JSON in every projection, where
+        # an integer key becomes a string anyway — so folding to one spelling here keeps a replayed
+        # state equal to a round-tripped one.
+        nodes[str(node_id)] = int(nodes.get(str(node_id), 0)) + 1
         return
     # `changed` is the path list the repair itself declared; fall back to the keys of `files` so a
     # row written before that column existed still names what it touched.
@@ -1130,6 +1190,7 @@ def _record_repair_ledger(st: RunState, d: dict) -> None:
     if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
         paths = sorted((d.get("files") or {}).keys()) if isinstance(d.get("files"), dict) else []
     rationale = d.get("rationale")
+    ctx.repair_ledger_per_node[node_id] = ctx.repair_ledger_per_node.get(node_id, 0) + 1
     st.repair_ledger.append({
         "node_id": node_id,
         "attempt": attempt,
@@ -1149,7 +1210,7 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # or post-terminal node_repaired (corrupt/double-fold) is a no-op — mirrors the
     # `first_terminal` guard above. The LLM/subprocess are never re-invoked; the final code
     # and metric/status are reconstructed purely from this event + the terminal event.
-    _record_repair_ledger(st, d)
+    _record_repair_ledger(st, d, ctx)
     n = _node_for_event(st, d)
     if (n is not None and n.id not in st.aborted_nodes and not n.tombstoned
             and _generation_matches(n, d)
@@ -1243,6 +1304,10 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.extra_metrics_provenance = {}
         # ...and so did the DIRECTION map saying which way was better on them.
         n.extra_metrics_direction = {}
+        # ...and so did the RECONSTRUCTION marker. It describes the map this reset just cleared, and
+        # a stale one would mark a later LIVE measurement as backfilled — the exact inversion, with
+        # the sign flipped.
+        n.extra_metrics_backfill = {}
         n.violations = []
         n.feasible = True
         # WHERE THE OLD METRIC CAME FROM described the old metric, which this epoch just cleared.
@@ -1376,25 +1441,28 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     if not isinstance(found, dict) or not found:
         return
     node.extra_metrics = normalize_extra_metrics(found)
-    # OPEN[score-backfill-fold-drops-backfilled-marker] the docstring's "backfilled marker beside
-    # it" never reaches folded state, and neither does `precision_decimals`.
-    # proof:line:EXTRA_METRIC_DECLARED&&node.extra_metrics})@looplab/events/replay.py
-    # REVIEW 2026-08-25 (correctness): the sibling handler below stamps `backfilled: true` into the
-    # record it folds, so a reconstruction is legible as one on every surface; THIS handler folds
-    # only values + a bare `declared` channel, and the marker plus the per-key decimals the writer
-    # argues a reader "must not have to guess" (`maintenance/backfill_score_metrics.py`) live only
-    # on the raw event row — which no surface reads. So a recovered 2-decimal nDCG@100 renders on
-    # the extras table, the exports and `read_experiment` exactly like a live operator-declared
-    # measurement (`extraMetricIsDeclared` answers true for it), and v4's nodes 0 and 1 — equal on
-    # every recovered row only because the print statement cannot separate them — read as MEASURED
-    # ties. That is the reconstruction-presented-as-measurement inversion both backfill docstrings
-    # exist to refuse, committed by the one handler of the pair that promises otherwise. Fix
-    # direction: carry the marker + decimals somewhere the fold keeps (the sibling stamps its
-    # record inside `metric_provenance`, which is a plain dict) and teach the extras readers the
-    # absent-means-live default; or stop the docstring claiming a marker exists. Delete this
-    # marker with either.
     node.extra_metrics_provenance = normalize_extra_metric_channels(
         {k: EXTRA_METRIC_DECLARED for k in node.extra_metrics})
+    # THE MARKER THE DOCSTRING PROMISES, and it did not exist in folded state until 2026-09-02.
+    # The sibling handler below stamps `backfilled: true` into the record it folds, so a
+    # reconstruction is legible as one on every surface; this one folded values plus a bare
+    # `declared` channel, and the marker — with the per-key decimals the writer argues a reader
+    # "must not have to guess" — lived only on the raw event row, which no surface reads. A
+    # recovered 2-decimal nDCG@100 therefore rendered on the extras table, the exports and
+    # `read_experiment` exactly like a live operator-declared measurement, and v4's nodes 0 and 1
+    # — equal on every recovered row ONLY because the print statement cannot separate them — read
+    # as MEASURED ties. That is the reconstruction-presented-as-measurement inversion both backfill
+    # docstrings exist to refuse, committed by the one handler of the pair that promised otherwise.
+    #
+    # The channel STAYS `declared` and that is deliberate: the operator's own scoring program
+    # printed these numbers, so `auto` and `engine` are both false about them. What was missing was
+    # never the channel — it was the second, orthogonal fact that the value was recovered from a log
+    # afterwards rather than recorded while the run was happening.
+    node.extra_metrics_backfill = normalize_extra_metric_backfill({
+        "backfilled": True,
+        "backfilled_at": d.get("read_at"),
+        "precision_decimals": d.get("precision_decimals"),
+    })
     # ...and NOT `extra_metrics_direction`. See the docstring: the axis stays unorientable because
     # nothing in this run ever said which way is better about it.
 
@@ -1554,6 +1622,10 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.extra_metrics_provenance = {}
         # ...and so did the DIRECTION map saying which way was better on them.
         n.extra_metrics_direction = {}
+        # ...and so did the RECONSTRUCTION marker. It describes the map this reset just cleared, and
+        # a stale one would mark a later LIVE measurement as backfilled — the exact inversion, with
+        # the sign flipped.
+        n.extra_metrics_backfill = {}
         n.violations = []
         n.feasible = True
         # See the same line in `_requeue_partition_bound_results`: the provenance describes the metric this
@@ -2957,7 +3029,13 @@ def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
     if (clean_statement and len(clean_statement) <= _CARD_REPLAY_STATEMENT_MAX
             and statement_bytes <= _CARD_REPLAY_STATEMENT_MAX_BYTES):
         receipt = {"statement": clean_statement}
-        for key, limit in (("id", 256), ("source", 64), ("rationale", 400)):
+        # `parent_belief_id` carries the QUESTION-UNDER-QUESTION edge, resolved at the append site
+        # by `research_cadence.question_parent_rows` (statement of a same-memo sibling, or an id
+        # already on the board). Bounded exactly like `id` because it IS one; absent leaves the key
+        # out entirely, so every log on disk folds byte-identically and a writer that said nothing
+        # is never turned into a writer that claimed "no parent".
+        for key, limit in (("id", 256), ("parent_belief_id", 256),
+                           ("source", 64), ("rationale", 400)):
             value = d.get(key)
             if isinstance(value, str) and value.strip() and len(value.strip()) <= limit:
                 receipt[key] = value.strip()
@@ -3467,10 +3545,14 @@ def _on_run_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # the class the engine decided; this is the account it wrote at the same moment.
     _detail = d.get("error")
     st.stop_detail = str(_detail) if isinstance(_detail, str) and _detail.strip() else None
-    # Drop dangling markers on normal completion. Error finishes deliberately retain crash prefixes:
-    # older/external writers may need resume recovery to append the missing node_failed receipt. Other
-    # terminal reasons must not leave a false in-flight pulse on a run that is over.
-    if d.get("reason") != "error":
+    # Drop dangling markers on normal completion. GUARDED-ABORT finishes deliberately retain crash
+    # prefixes: older/external writers may need resume recovery to append the missing node_failed
+    # receipt. Other terminal reasons must not leave a false in-flight pulse on a run that is over.
+    # The CLASS predicate (`finalize_scope.is_guarded_abort`), not the literal: the ceiling's
+    # `budget_exhausted` is written by the SAME outer guard, from the same mid-build exception, so
+    # the recovery this clause preserves the prefix for applies to it identically — docs/57's ninth
+    # site, found by the tree-wide literal scan and not by the review that counted six.
+    if not is_guarded_abort(d.get("reason")):
         st.building = None
         st.buildings.clear()
 

@@ -21,7 +21,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from looplab.core.llm import make_llm_client, make_llm_client_for, resolve_llm_target
+from looplab.core.llm import (make_llm_client, make_llm_client_for, resolve_llm_target,
+                              run_cost_accountant)
 from looplab.core.prompts import PromptStore
 
 if TYPE_CHECKING:                      # `adapters.tasks` re-exports from HERE, so a runtime import
@@ -95,6 +96,10 @@ def make_developer_factory(task: TaskAdapter, settings):
         # to one and not the other is exactly the three-way disagreement that registry closed.
         from looplab.core.config import DEVELOPER_BACKEND_ALIASES
         b = DEVELOPER_BACKEND_ALIASES.get(backend, backend)
+        # Attach the run's ONE accountant to the PARENT before forking it: `model_copy` is shallow,
+        # so a copy taken after the attach shares the ceiling and one taken before mints a second
+        # (`core/llm.py::run_cost_accountant`). A swapped-in Developer meters on the run's budget.
+        run_cost_accountant(settings)
         s = settings.model_copy(update={"developer_backend": b})
         if b == "default" and settings.developer_backend != "default":
             from looplab.agents.preflight import preflight_in_process_developer_replacement
@@ -199,8 +204,8 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
     lone provider), or None when nothing is available."""
     providers = _shared_providers(task, settings, run_dir, role="strategist")
     if getattr(settings, "web_search", False):              # web search/fetch (network-optional)
-        from looplab.tools.web import WebTools
-        providers.append(WebTools(enabled=True))
+        from looplab.tools.web import build_web_tools        # carries the task's `web_deny`
+        providers.append(build_web_tools(task))
     if not providers:
         return None
     from looplab.agents.tool_loop import compose_tools
@@ -218,6 +223,10 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     stage gets its own client + read-only run tools for self-driving action choice."""
     from looplab.agents.strategist import make_strategist
     from looplab.agents.unified_agent import UnifiedAgent
+    # The run's ONE accountant is attached to the parent BEFORE this fork, so the split roles and
+    # the clients built from the parent afterwards (deep researcher, report writer) meter on one
+    # ceiling; the `wrap_up_only` path used to copy first and run two (`run_cost_accountant`).
+    run_cost_accountant(settings)
     split = settings.model_copy(update={"unified_agent": False})
     researcher, developer = make_roles(
         task, split, run_dir, _developer_role="implement")   # H3/stage target applied inside
@@ -354,6 +363,11 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # and READS the Researcher's handoff brief; CliAgentDeveloper and the single-shot LLMDeveloper
     # never do, so the Researcher skips the per-node summary LLM call for them (handoff=False).
     _handoff_dev = False
+    # A5: ONE store per run, shared by the Researcher and the Developer's phases. Function-local
+    # like every other `looplab.agents` reach from here — `tests/test_agent_factory_split.py`
+    # holds that direction, and a module-level import would close the search<->agents cycle.
+    from looplab.agents.established import established_context_from_settings
+    _established = established_context_from_settings(settings)
     if (settings.developer_backend not in PRESETS
             and not _param_search
             and callable(getattr(task, "repo_spec", None))
@@ -363,7 +377,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
         from looplab.agents.agent import loop_opts_from_settings as _loop_opts
         _handoff_dev = True
         developer = LLMRepoDeveloper(  # C4: plan decomposition + hard per-session backstop
-            client, task, parser=settings.llm_parser, loop_opts=_loop_opts(settings),
+            client, task, parser=settings.llm_parser, loop_opts=_loop_opts(settings), established=_established,
             plan_decompose=getattr(settings, "developer_plan_decompose", True),
             plan_min_steps=getattr(settings, "developer_plan_min_steps", 2),
             plan_max_steps=getattr(settings, "developer_plan_max_steps", 8),
@@ -416,7 +430,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
             base_url=dev_base_url, brief=brief,
             spec=PRESETS[settings.developer_backend],
             cmd_override=([settings.agent_cmd] if settings.agent_cmd else None),
-            workdir_files=workdir_files,
+            timeout=settings.agent_timeout, workdir_files=workdir_files,
             patch_gate=(settings.agent_patch_gate or bool(repo_spec)),
             surface=surface, seed_dirs=seed_dirs,
             protect=(repo_spec["protected_names"] if repo_spec else None),
@@ -486,7 +500,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
         from looplab.agents.tool_loop import compose_tools
         tools = compose_tools(providers, settings)
         researcher = ToolUsingResearcher(
-            client, tools,
+            client, tools, established=_established,
             space_hint=getattr(researcher, "space_hint", ""),
             bounds=getattr(researcher, "bounds", None),
             parser=settings.llm_parser, prompts=prompts,

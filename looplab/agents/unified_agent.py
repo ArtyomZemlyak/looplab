@@ -73,6 +73,13 @@ class UnifiedAgent(WrapsDeveloper):
         # accountant (`costs._CHILD_ATTRS` names it). None = repair shares `developer`, the default.
         self.repair_developer = repair_developer
         self._active_developer = developer
+        # THE PROPOSE RECEIPT'S OWN SLOT, initialized so its ABSENCE means something.
+        # `roles.researcher_budget_exhausted` falls back to the plain `last_budget_exhausted` for a
+        # non-facade researcher — but on THIS object that name carries the DEVELOPER's last code
+        # stage, so a converged propose would fall back to a budget-cut repair's stamp and warn
+        # TRUNCATED about a proposal that emitted on its own terms. Defining the slot makes "this
+        # object answers for the researcher role" a fact the reader can test rather than infer.
+        self.last_propose_budget_exhausted = ""
         self.strategist = strategist
         self._pilot_client = pilot_client
         self._pilot_tools = pilot_tools
@@ -124,7 +131,26 @@ class UnifiedAgent(WrapsDeveloper):
         # is THIS agent; forward them (P2 — roles.forward_hints owns the rule) to the internal
         # researcher that actually reads them.
         forward_hints(self, self.researcher)
-        return self.researcher.propose(state, parent)
+        idea = self.researcher.propose(state, parent)
+        # WHICH BOUND ENDED THIS PROPOSE: mirror the inner researcher's per-call receipt onto the
+        # facade, exactly as `WrapsDeveloper._sync_audit` mirrors the Developer's after every code
+        # stage — `RESEARCHER_OUTPUT_ATTRS` names the attr and `_prepare_node_idea._link` reads it
+        # off the handle the engine holds, which in unified mode is THIS facade. Without the hop
+        # the funnel read whatever `_sync_audit` last stamped here: a budget-cut repair made every
+        # later proposal warn TRUNCATED, and a genuinely cut propose (set on the inner researcher
+        # only) was never reported at all.
+        # A ROLE-SCOPED NAME, because this facade IS the developer too. Under the shipped
+        # `Settings.unified_agent`, `agents/factory.py::make_roles` returns one object as both
+        # roles, so writing the plain `last_budget_exhausted` here put the PROPOSE receipt where
+        # `_sync_audit` puts the REPAIR one and `engine/evaluate.py` reads it to stamp the durable
+        # `node_repaired.budget_exhausted`. A repair whose delegate raised — swallowed by
+        # `_evaluate`'s own `except Exception as _repair_exc`, which leaves `_sync_audit` unreached
+        # — then recorded a proposal's cutoff as a fact about a repair that had no budget at all.
+        # `roles.researcher_budget_exhausted` reads this first and the plain name after it, so a
+        # non-facade researcher is unchanged.
+        self.last_propose_budget_exhausted = getattr(
+            self.researcher, "last_budget_exhausted", "") or ""
+        return idea
 
     def bind_state(self, state, parent=None) -> None:
         """Bind the run state to EVERY per-stage Developer backend, not just the active one.
@@ -160,8 +186,14 @@ class UnifiedAgent(WrapsDeveloper):
         return dev
 
     def implement(self, idea: Idea) -> str:
-        code = self._for_stage("implement").implement(idea)
-        self._sync_audit()
+        try:
+            code = self._for_stage("implement").implement(idea)
+        finally:
+            # IN A `finally`: a delegate that RAISES must not leave this facade mirroring the
+            # previous call. The engine reads these off the facade and its repair path swallows
+            # the exception, so an unreached sync records the last successful stage's audit as
+            # this one's.
+            self._sync_audit()
         return code
 
     def implement_from(self, idea: Idea, parent) -> str:
@@ -169,15 +201,19 @@ class UnifiedAgent(WrapsDeveloper):
         improve patches the parent's solution instead of regenerating from the baseline."""
         dev = self._for_stage("implement")
         impl = getattr(dev, "implement_from", None)
-        code = impl(idea, parent) if callable(impl) else dev.implement(idea)
-        self._sync_audit()
+        try:
+            code = impl(idea, parent) if callable(impl) else dev.implement(idea)
+        finally:
+            self._sync_audit()          # see `implement` — a raising delegate must not leave a stale mirror
         return code
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
         dev = self._for_stage("repair")
         rep = getattr(dev, "repair", None)
-        out = rep(idea, code, error) if callable(rep) else dev.implement(idea)
-        self._sync_audit()
+        try:
+            out = rep(idea, code, error) if callable(rep) else dev.implement(idea)
+        finally:
+            self._sync_audit()          # see `implement` — a raising delegate must not leave a stale mirror
         return out
 
     def repair_from(self, idea: Idea, node, error: str) -> str:
@@ -185,9 +221,11 @@ class UnifiedAgent(WrapsDeveloper):
         OWN files) when available, else the plain repair(idea, node.code, error)."""
         dev = self._for_stage("repair")
         rf = getattr(dev, "repair_from", None)
-        out = (rf(idea, node, error) if callable(rf)
-               else self.repair(idea, getattr(node, "code", ""), error))
-        self._sync_audit()
+        try:
+            out = (rf(idea, node, error) if callable(rf)
+                   else self.repair(idea, getattr(node, "code", ""), error))
+        finally:
+            self._sync_audit()          # see `implement` — a raising delegate must not leave a stale mirror
         return out
 
     # ----------------------------------------------------------- Strategist
@@ -460,7 +498,15 @@ class UnifiedAgent(WrapsDeveloper):
         "  - 'no_metric': it completed and simply never produced the number.\n"
         "  - 'check_failed': the declared condition really did not hold and that IS the whole "
         "story.\n"
-        "Choose from those FIVE only. The other kinds — timeout, diverged, stalled, drift, setup "
+        "  - 'diverged': ONLY when the tagged kind is 'check_failed' and what the check refused is "
+        "a NON-FINITE or exploded loss (inf, nan, |loss| in the 1e+8 range) — the objective blew "
+        "up numerically, which is neither 'not learning' nor a bug. On any other tagged kind the "
+        "divergence watchdog was watching and did not fire, and 'diverged' is refused.\n"
+        "Choose from those only. When the tagged kind is 'check_failed' and you answer "
+        "'not_learning', cite a 'log' source — the loss series is what that claim is ABOUT, and "
+        "the check's refusal is the sentence you are contradicting, not evidence for it; an "
+        "override cited from the error text alone is refused and the check's verdict is kept. The "
+        "other kinds — timeout, stalled, drift, setup "
         "and the two filesystem stage contracts (needs/expect) — are facts the ENGINE recorded out "
         "of band about what IT did or stat'ed, they are never in question here, and you will not be "
         "asked about one. In particular do NOT answer 'timeout' for a run that ran out of budget: "
@@ -742,11 +788,13 @@ class UnifiedAgent(WrapsDeveloper):
                 # relabel a watchdog kill, a deadline, a drift rejection, a setup failure or a
                 # FILESYSTEM stage contract into something the memory playbook answers, which is
                 # precisely the incident `tests/test_watchdog_kill_is_not_an_oom.py` exists to
-                # prevent. `not_learning` is the one member that is on BOTH lists and it is a
-                # registered exception with its argument at `DIAGNOSED_ENGINE_FINAL_OVERLAP`: the
-                # engine produces it from a watchdog KILL, the diagnostician answers it about a run
-                # nothing killed, and the asymmetry (never asked when the engine already said it) is
-                # what keeps the two apart.
+                # prevent. `not_learning` and `diverged` are the two members on BOTH lists and each
+                # is a registered exception with its argument at `DIAGNOSED_ENGINE_FINAL_OVERLAP`:
+                # the engine produces them from a watchdog KILL, the diagnostician answers them
+                # about a run nothing killed, and the asymmetry (never asked when the engine already
+                # said it) is what keeps the two apart. `diverged` is further bound by
+                # `DIAGNOSED_CONTEXT_BOUND` to a tagged `check_failed` — the enum cannot express
+                # that, so the description says it and `diagnosed_failure_reason` enforces it.
                 "failure_kind": {"type": "string", "enum": list(DIAGNOSED_FAILURE_REASONS),
                                  "description": "What this failure really was. The tagged kind is "
                                                 "what the engine saw from outside the process; "
@@ -760,7 +808,16 @@ class UnifiedAgent(WrapsDeveloper):
                                                 "that refused and says nothing about why; if you "
                                                 "believe the check was a false positive, that IS "
                                                 "the diagnosis and the repair is pointed at the "
-                                                "check rather than at the experiment."},
+                                                "check rather than at the experiment. "
+                                                "`diverged` is admissible ONLY when the tagged kind "
+                                                "is `check_failed` and the check refused a "
+                                                "non-finite or exploded loss (inf/nan, |loss| in "
+                                                "the 1e+8 range); on any other tagged kind it is "
+                                                "refused as out of vocabulary. `not_learning` "
+                                                "over a tagged `check_failed` stands only if you "
+                                                "cite a 'log' source (the loss series); cited "
+                                                "from the error text alone, the check's own "
+                                                "verdict is kept."},
                 # WHERE THE DIAGNOSIS STANDS, in three fields rather than folded into `rationale`.
                 # Separate because the ENGINE re-resolves the locator against the workdir and
                 # records whether it resolved (`failure_diagnosis.evidence_citation_resolves`),

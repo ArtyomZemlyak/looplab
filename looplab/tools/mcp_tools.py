@@ -27,6 +27,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.jsonutil import canonical_json_digest
 from looplab.tools._base import ToolCapability, ToolResult
 
 # The LoopLab repo root (…/looplab, two levels above this file) — where the default `.mcp.json`
@@ -289,8 +290,14 @@ class McpTools:
                               provenance={"source": "mcp", "tool": name})
 
     @classmethod
-    def from_config(cls) -> "McpTools":
-        cfg = load_config()
+    def from_config(cls, cfg=None) -> "McpTools":
+        """Connect one server set. `cfg` lets a caller that has ALREADY READ the configuration hand
+        it over rather than have this read it a second time — `cached()` keys its map on the digest
+        of what it read, and a second read is a different file: the operator edits `.mcp.json` in
+        the gap, the entry is stored under the OLD digest holding servers from the NEW config, and
+        re-resolving the new config misses and spawns a second full set that can never be reclaimed.
+        """
+        cfg = load_config() if cfg is None else cfg
         if not cfg:
             return cls([])
         try:
@@ -307,19 +314,65 @@ class McpTools:
 
     @classmethod
     def cached(cls) -> "McpTools":
-        """Process-global instance: connect to each MCP server ONCE (a live server owns a background
-        thread + event loop + subprocess), not on every assistant turn. build_tools calls this.
+        """Connect to each MCP server ONCE per CONFIGURATION — a live server owns a background thread,
+        an event loop and a subprocess, so this must not run per assistant turn. `build_tools` calls it.
+
+        KEYED ON THE RESOLVED CONFIG, not process-global (2026-09-03). A bare `_CACHED` answers with
+        whatever server set the FIRST caller in this process happened to resolve, forever. Two things
+        follow from that and both are wrong. An operator who edits `.mcp.json` or re-points
+        `LOOPLAB_MCP_CONFIG` keeps talking to the old servers with no way to tell — MCP tools are
+        arbitrary external side effects, so "which server am I actually calling" is not a detail. And
+        the day a per-principal configuration source exists, an unkeyed cache hands one principal the
+        servers another principal's session connected: the cache would be the thing that broke the
+        isolation, silently, with no code change anywhere near it.
+
+        The key is a digest of the config `load_config` resolves, which is what actually determines
+        the server set. It is deliberately not "the principal": there IS no per-principal config
+        source today (the config is env vars plus a repo file), so keying on an identity the config
+        does not vary with would spawn N identical subprocess sets and buy nothing — see the open
+        item beside this one. Keying on the config is correct now AND correct then.
 
         Double-checked under a lock: two concurrent first turns (two tabs/sessions — the workers are
-        plain threads) would otherwise both see `_CACHED is None`, both `from_config()`, and each spawn
-        a full set of server handles (thread + loop + subprocess); the loser's set orphans and leaks
-        for the process lifetime."""
-        global _CACHED
-        if _CACHED is None:
-            with _CACHE_LOCK:
-                if _CACHED is None:
-                    _CACHED = cls.from_config()
-        return _CACHED
+        plain threads) would otherwise both miss, both `from_config()`, and each spawn a full set of
+        server handles; the loser's set orphans and leaks for the process lifetime.
+
+        NOTHING IS EVICTED, and that is a property of the value rather than a policy choice: a handle
+        owns a thread, a loop and a subprocess and exposes no way to close them, so dropping one from
+        the map leaks all three. Instead the number of DISTINCT configurations one process will
+        connect for is bounded, and past the bound this answers with the inert empty provider rather
+        than spawning more. Give a handle a `close()` and this becomes an ordinary LRU.
+        """
+        cfg = load_config()
+        # ONE READ, keyed and connected. `from_config()` used to `load_config()` again, so the entry
+        # could be stored under one configuration's digest while holding handles connected from
+        # another — the exact cross-configuration leak this keying was added to prevent.
+        key = canonical_json_digest(cfg) if cfg else ""
+        if key is None:
+            # `canonical_json_digest` RETURNS None (it does not raise) for a value with no canonical
+            # form, and `json.loads` accepts bare `NaN`/`Infinity`/`-Infinity` while `canonical_json`
+            # uses `allow_nan=False`. `None` as a live dict key is an identity two DIFFERENT configs
+            # would share, so the second caller would be handed the first one's connected servers —
+            # silently, against a `dict[str, McpTools]` annotation that gives no hint. An
+            # unrepresentable configuration is an operator problem and is refused the way the
+            # distinct-configuration bound below is: no handles, and a line saying why.
+            _LOG.warning(
+                "the resolved MCP configuration has no canonical form (a non-finite JSON literal "
+                "such as NaN or Infinity), so it cannot be keyed; returning no MCP tools for it")
+            return cls([])
+        cached = _CACHED.get(key)
+        if cached is not None:
+            return cached
+        with _CACHE_LOCK:
+            cached = _CACHED.get(key)
+            if cached is None:
+                if len(_CACHED) >= _MAX_CACHED_CONFIGS:
+                    _LOG.warning(
+                        "refusing to connect a %dth distinct MCP configuration in one process; "
+                        "returning no MCP tools for this one (handles cannot be closed, so the "
+                        "existing %d stay connected)", len(_CACHED) + 1, len(_CACHED))
+                    return cls([])
+                cached = _CACHED[key] = cls.from_config(cfg)
+        return cached
 
 
 class GatedMcpTools:
@@ -380,5 +433,10 @@ class GatedMcpTools:
                                    "approved": True}, meta=result.meta)
 
 
-_CACHED: Optional["McpTools"] = None
+# config digest -> the connected provider for it. See `McpTools.cached` for why nothing is evicted.
+_CACHED: dict[str, "McpTools"] = {}
 _CACHE_LOCK = threading.Lock()
+# How many DISTINCT MCP configurations one process will spawn server handles for. Realistically one;
+# the bound exists because each entry costs a thread, an event loop and a subprocess per server and
+# none of them can be reclaimed.
+_MAX_CACHED_CONFIGS = 8

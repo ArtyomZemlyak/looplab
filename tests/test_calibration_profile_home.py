@@ -93,22 +93,30 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
-#   2026-09-04  + developer_probe_max_calls  (the per-run cap on developer-probe calls, added by
-#               `e224c5f3` so §190's registered arm could set a treatment that actually reaches
-#               `DevProbeTools`). The 'field set changed too' branch, verified that way rather than
-#               from the count: an AST diff of `Settings` between `e224c5f3^` and `e224c5f3` reports
-#               exactly `['developer_probe_max_calls']` added and nothing removed, so a +2/-1 cannot
-#               be hiding behind the +1. `_EXPECTED_FIELD_COUNT` goes 220 -> 221 and both pins are
-#               re-set.
-#               FOUND RED TWO DAYS LATE, on 2026-09-06, by a sweep that ran the whole suite rather
-#               than the tests near its own edit -- the commit that added the field shipped without
-#               re-pinning, so this gate has been failing since 04:19 on 2026-09-04. The default is
-#               `0`, which is "no cap", so nothing about a shipped run changed; what changed is the
-#               envelope a receipt is compared against, and that is precisely what the digest is
-#               for. Whether the knob is INERT for a calibration replicate is not claimed here: it
-#               was not established, and the guard is deliberately not clever enough to need it.
-#               Old receipts stop verifying, which is the correct outcome for a real schema change.
-_EXPECTED_DIGEST = "sha256:74faf6b4a9913b90defc376eef098bb94e0bda6d281cf274a7f0920bacfba5cb"
+#   2026-09-04  + developer_probe_max_calls  (a NEW FIELD: the probe-cap experiment instrument,
+#               0 = uncapped, doc 56 §190-§195. Field set 220 -> 221, so branch (1) of the
+#               assertion below; re-pinned 2026-09-06 — the addition tripped four repo guards
+#               (doc 56 §191) and not this one, because the suite was read through a `-k` run.)
+#   2026-09-06  + established_context, established_context_bytes  (A5, docs/60 §60.9: the block
+#               that seeds each chain root with what EARLIER phases of the run already read.
+#               A NEW FIELD PAIR, so branch (1) — real schema growth, 224 -> 226. A replicate
+#               calibrated before it is genuinely different: every chain root now opens with
+#               bytes the old one did not carry, so a speculation receipt issued against the
+#               old prompts should stop verifying.)
+#   2026-09-03  + agent_timeout               (the wall on ONE external coding-agent invocation).
+#               This is the "field set changed too" branch: 215 -> 216, so the calibration envelope
+#               really is different and old receipts SHOULD stop verifying. It is also the clearest
+#               possible instance of why the SIBLING check had to stop being an equality — a field
+#               that no calibration run can be affected by (calibration uses the toy backend and
+#               never launches a coding agent) legitimately moves THIS pin, which binds the complete
+#               settings map, while it must NOT revoke a preserved snapshot merely for predating it.
+#               See `search/speculation_quality.py`'s directional field check.
+#   2026-09-06  MERGE with master. Both sides grew the schema independently and the merge
+#               keeps both, so BOTH pins are RECOMPUTED from the merged module rather than
+#               taken from either side — neither side's digest describes it. Verified the
+#               prescribed way, by DIFFING the field set rather than adding the integers:
+#               master adds `agent_timeout`, this branch adds ten, nothing is removed.
+_EXPECTED_DIGEST = "sha256:db81e747b03d97f7e49cf0090b689a0d8f5b206d8bfa34668ee19736e5802cf7"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -435,7 +443,39 @@ _EXPECTED_DIGEST = "sha256:74faf6b4a9913b90defc376eef098bb94e0bda6d281cf274a7f09
 #               neither parent's digest describes it. Old receipts SHOULD stop verifying: whether
 #               a single-command eval is health-checked at all is part of the envelope a
 #               speculation receipt was measured in.
-_EXPECTED_FIELD_COUNT = 221
+#   2026-09-06  + llm_stream_stall_fallback, node_open_budget_floor_usd, developer_crash_pause_after
+#               (221 -> 224 profile rows, 224 -> 227 Settings): docs/60 §60.9's A7 (engine half),
+#               A10 and A12. The "field set changed too" branch, verified the prescribed way rather
+#               than by adding the integers: an AST scan of `Settings`' annotated assignments
+#               against HEAD reports exactly those three added and [] removed, so no +1/-1 pair is
+#               hiding behind the +3. All three are non-variant fields and join the profile. Old
+#               receipts SHOULD stop verifying, and two of the three are not inert for a replicate:
+#               `node_open_budget_floor_usd` is a NEW STOP (a calibration replicate under a ceiling
+#               now ends before opening a node it cannot finish, where before it ended mid-cycle),
+#               and `developer_crash_pause_after` decides how many crashed Developer sessions a
+#               run absorbs before it freezes — a different population of terminals in either
+#               direction. `llm_stream_stall_fallback` only changes how a stalled provider stream
+#               is retried, but the guard is deliberately not clever enough to exempt one knob of
+#               three. Both pins re-set.
+#   2026-09-02  + single_command_divergence_watch (214 -> 215). The "field set changed too" branch,
+#               and verified by DIFFING THE FIELD SET rather than reading the count, as the
+#               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated assignments
+#               between the commit that last pinned 214 (`cc6a64e`) and HEAD reports exactly
+#               [single_command_divergence_watch] added and [] removed, so no +1/-1 pair is hiding
+#               behind the new integer. Old receipts SHOULD stop verifying, and this one is as far
+#               from inert as the list gets: it gives the SINGLE-COMMAND eval path a deterministic
+#               divergence stop it never had — the one path with no early stop at all, even though
+#               its own branch comment says the command IS the training and `eval_log_plan` grants
+#               it LOG_ROLE_TRAINING for that reason. It ships ON (measured: the shipped
+#               `_StageHealthMonitor` replayed over every preserved log fires on 0 of 110 scoring
+#               phases and 2 of 133 `train.log`, both true positives), so a replicate calibrated
+#               after it can have a stage stopped and REPAIRED — `diverged` is in `FAILURE_REASONS`
+#               — where a replicate calibrated before it would have run that stage to its wall.
+#               That is a different number of evaluations on the same failing node, which is
+#               precisely what a speculation receipt asserts about.
+#   2026-09-06  MERGE with master, same rule as the 2026-08-29 entry above: the count is
+#               RE-DERIVED from the merged profile, never added, and the digest with it.
+_EXPECTED_FIELD_COUNT = 227
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

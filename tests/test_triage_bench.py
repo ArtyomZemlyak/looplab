@@ -385,6 +385,108 @@ def test_agreement_and_accuracy_are_separate_fields():
     assert not [f for f in vars(report) if "combined" in f or "overall" in f]
 
 
+def test_diverged_is_reachable_only_over_a_tagged_check_failed_and_the_ceiling_says_so():
+    """`answerable_for` asks "unwinnable" PER HANDOFF (2026-09-06): the four
+    `rubertlite-dense-retrieval` rows whose truth is `diverged` and whose engine answer is
+    `check_failed` stopped being unwinnable the day `diverged` was admitted over that one context,
+    and a row handed as `crash` with the same truth would still be. Driven over the real corpus
+    against a hand count, and over a synthetic handoff for the direction the corpus does not
+    contain."""
+    if triage_score.LIVE_SHAPE != triage_score.LIVE_SHAPE_OWNERSHIP:
+        pytest.skip("context-bound answers exist only under the ownership split")
+    assert "diverged" in triage_score.answerable_for("check_failed")
+    for other in triage_score.LIVE_DIAGNOSABLE_REASONS - {"check_failed"}:
+        assert "diverged" not in triage_score.answerable_for(other)
+    assert triage_score.answerable_for("check_failed") - triage_score.answerable_for("crash") == {
+        "diverged"}
+    rows = read_dataset(DEFAULT_DATASET)["rows"]
+    live = triage_score.score_dataset(rows, triage_score.live_engine_candidate(), name="live",
+                                      live=True)
+    det = {r["case_id"]: triage_score.live_engine_candidate()(r) for r in rows}
+    by_hand = sum(1 for r in rows
+                  if det[r["case_id"]] in triage_score.LIVE_DIAGNOSABLE_REASONS
+                  and r["label"]["reason"] not in (None, LABEL_UNKNOWN)
+                  and r["label"]["reason"] != det[r["case_id"]]
+                  and r["label"]["reason"] not in triage_score.answerable_for(det[r["case_id"]]))
+    assert live.unreachable_by_diagnosis == by_hand
+    # The four diverged-over-check_failed rows are now reachable — so a synthetic candidate handing
+    # every diverged-truth row on as `crash` instead makes exactly those four unreachable again.
+    diverged_cf = [r for r in rows if r["label"]["reason"] == "diverged"
+                   and det[r["case_id"]] == "check_failed"]
+    assert len(diverged_cf) == 4
+    as_crash = triage_score.score_dataset(
+        rows, lambda r: "crash" if r["label"]["reason"] == "diverged" else det[r["case_id"]],
+        name="driven", live=True)
+    assert as_crash.unreachable_by_diagnosis == live.unreachable_by_diagnosis + 4 + sum(
+        1 for r in rows if r["label"]["reason"] == "diverged" and det[r["case_id"]] == "diverged")
+
+
+def test_a_model_named_diverged_is_charged_as_its_own_cost():
+    """The one diagnosed kind that is also NEVER_SALVAGED gets its own row, above the opposed pair
+    it would otherwise fall into, and the row is in `ERROR_COSTS` — as is every class `cost_of`
+    can produce, derived by exhausting the label vocabulary rather than listed."""
+    assert triage_score.cost_of("diverged", "check_failed") == "diverged_without_the_flag"
+    assert triage_score.cost_of("diverged", "not_learning") == "diverged_without_the_flag"
+    assert triage_score.cost_of("diverged", "oom") == "diverged_without_the_flag"
+    assert triage_score.cost_of("diverged", "diverged") == "correct"
+    # The ENGINE-named direction is unchanged: `oom` for a real divergence is still the opposed
+    # directive, and `check_failed` for one is still the generic-for-specific round.
+    assert triage_score.cost_of("oom", "diverged") == "opposed_directive"
+    assert triage_score.cost_of("check_failed", "diverged") == "generic_for_specific"
+    produced = {triage_score.cost_of(a, t) for a in LABELS for t in LABELS if a != t}
+    assert produced <= set(triage_score.ERROR_COSTS), produced - set(triage_score.ERROR_COSTS)
+    assert "diverged_without_the_flag" in produced
+
+
+def test_the_override_rule_replay_line_reads_the_production_rule(tmp_path):
+    """A captured-answers arm replays `failure_diagnosis.reason_override_refused` — the shipped
+    rule, never a copy — over its own records and reports how many labelled rows it CHANGES and
+    which way; an arm with no records (the frozen incumbent) prints no such line."""
+    from looplab.engine.failure_diagnosis import (EVIDENCE_SOURCE_LOG,
+                                                  OVERRIDE_EVIDENCE_REQUIRED)
+    assert ("check_failed", "not_learning") in OVERRIDE_EVIDENCE_REQUIRED
+    rows = [{"case_id": c, "label": {"reason": t, "basis": "reviewed"}, "provenance": {}}
+            for c, t in (("a", "check_failed"), ("b", "check_failed"), ("c", "not_learning"),
+                         ("d", "oom"), ("e", LABEL_UNKNOWN))]
+    records = [
+        # cited the error text: the rule turns it back to the engine's word — wrong -> right
+        {"case_id": "a", "engine_reason": "check_failed", "reason": "not_learning",
+         "evidence": {"source": "error", "locator": "", "quote": "Loss stagnant"}},
+        # cited the log: stands — unchanged, still wrong
+        {"case_id": "b", "engine_reason": "check_failed", "reason": "not_learning",
+         "evidence": {"source": "log", "locator": "train.log:9", "quote": "loss 13.3"}},
+        # cited nothing about a genuine not_learning: right -> wrong, and reported as such
+        {"case_id": "c", "engine_reason": "check_failed", "reason": "not_learning",
+         "evidence": {"source": "none", "locator": "", "quote": ""}},
+        # a pair the rule does not name: untouched
+        {"case_id": "d", "engine_reason": "crash", "reason": "oom",
+         "evidence": {"source": "error", "locator": "", "quote": "OutOfMemoryError"}},
+        # unlabelled rows are not counted at all
+        {"case_id": "e", "engine_reason": "check_failed", "reason": "not_learning",
+         "evidence": {"source": "error", "locator": "", "quote": "x"}},
+    ]
+    path = tmp_path / "cand.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    candidate = triage_score.jsonl_candidate(path)
+    report = triage_score.score_dataset(rows, candidate, name="cand")
+    assert report.correct == 2                      # the CAPTURE is what is scored: b? no — c, d
+    o = report.override_rule
+    assert o == {"changed": 2, "wrong_to_right": 1, "right_to_wrong": 1, "wrong_to_wrong": 0,
+                 "correct_before": 2, "correct_after": 2, "labelled": 4,
+                 "lacked": {EVIDENCE_SOURCE_LOG: 2}}
+    text = triage_score.format_report(report)
+    assert "OVERRIDE RULE REPLAYED" in text and "rows the rule CHANGES on this capture : 2 of 4" in text
+    assert "wrong -> right 1   right -> wrong 1   wrong -> wrong 0" in text
+    # A bare `{case_id, reason}` capture carries nothing to replay: nothing changes, and it says so.
+    bare = tmp_path / "bare.jsonl"
+    bare.write_text(json.dumps({"case_id": "a", "reason": "not_learning"}) + "\n", encoding="utf-8")
+    bare_report = triage_score.score_dataset(rows, triage_score.jsonl_candidate(bare), name="b")
+    assert bare_report.override_rule["changed"] == 0
+    frozen = triage_score.score_dataset(rows, triage_score.frozen_replay_candidate(), name="f")
+    assert frozen.override_rule is None
+    assert "OVERRIDE RULE REPLAYED" not in triage_score.format_report(frozen)
+
+
 def test_the_cost_model_does_not_charge_a_flag_guarded_salvage_error():
     """`timeout` and `diverged` are in `NEVER_SALVAGED_REASONS`, and `metric_salvage` ALSO re-reads
     `res.timed_out` / `res.diverged` one line below the reason test — so a wrong label on either
@@ -500,9 +602,13 @@ def test_the_live_arm_scores_todays_classifier_and_says_what_it_is_not_scoring()
     # counted, and the reachable ceiling drops by exactly that many.
     forbidden = sorted(set(LABELS) - triage_score.LIVE_ANSWERABLE_REASONS - {LABEL_UNKNOWN})
     assert forbidden, "nothing is forbidden; see above"
-    target = forbidden[0]
+    # The first forbidden label THAT HAS ROWS: sorted, `diverged` came first until 2026-09-06
+    # admitted it, and `drift` (next) has no row in this corpus — a drive over zero rows proves
+    # nothing and used to be caught only by the assert below.
+    with_rows = [t for t in forbidden if any(r["label"]["reason"] == t for r in rows)]
+    assert with_rows, "no row carries any forbidden label, so the drive below proves nothing"
+    target = with_rows[0]
     marked = [r for r in rows if r["label"]["reason"] == target]
-    assert marked, "no row carries %r, so the drive below proves nothing" % target
     handed = sorted(triage_score.LIVE_DIAGNOSABLE_REASONS)[0]
     driven = triage_score.score_dataset(
         rows, lambda row: handed if row["label"]["reason"] == target else row["label"]["reason"],

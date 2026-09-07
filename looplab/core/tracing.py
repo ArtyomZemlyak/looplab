@@ -31,6 +31,7 @@ import contextvars
 import hashlib
 import io
 import math
+import logging
 import os
 import sys
 import threading
@@ -102,8 +103,28 @@ _OTEL_ENV_TRUE = frozenset({"1", "on", "t", "true", "y", "yes"})
 # permit ``capacity * 8 MiB`` resident memory.  The worker stores the already-serialized physical row:
 # exact byte accounting and no unbounded deepcopy, at the deliberate cost of keeping JSON encoding on
 # the span-closing caller.  File open/heal/lock/flush/receipt I/O is what moves off that caller.
+# The exporter's own alarm channel, and it must NOT be `self._writer`. See the loss-receipt
+# block in the worker: the durable receipt is written through the very file that may have
+# stopped, so an exporter that dies takes its own alarm with it. Measured on v12 — three hours
+# of frozen spans with not one console line.
+_LOG = logging.getLogger(__name__)
+
 TRACE_EXPORT_QUEUE_MAX_SPANS = 256
 TRACE_EXPORT_QUEUE_MAX_BYTES = 16 * 1024 * 1024
+# The failure REASON rides a durable diagnostic row, so it is bounded like every other string on
+# one: a provider message can be arbitrarily long and an unbounded field on a row emitted once per
+# failure is a second loss mechanism. Phase-prefixed because the export and the loss RECEIPT fail
+# through different writers and the remedy differs.
+TRACE_EXPORT_ERROR_MAX_CHARS = 240
+
+
+def _bounded_export_error(phase: str, exc: BaseException) -> str:
+    """`phase: ExcType: message`, bounded — never raises, whatever the exception's __str__ does."""
+    try:
+        detail = str(exc)
+    except Exception:  # noqa: BLE001 - a broken __str__ must not break the diagnostic
+        detail = "<unprintable>"
+    return f"{phase}: {type(exc).__name__}: {detail}"[:TRACE_EXPORT_ERROR_MAX_CHARS]
 TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS = 30_000
 _TRACE_EXPORT_WORKER_IDLE_S = 60.0
 _TRACE_EXPORT_LOSS_RECEIPT_INTERVAL_S = 1.0
@@ -115,6 +136,30 @@ _TRACE_EXPORT_DROP_REASONS = (
     "worker_start",
     "shutdown",
     "shutdown_timeout",
+)
+
+# WHY the export worker last stopped.  A drop reason says which SPAN was lost; this says which
+# CONDITION retired the thread that would have written it, and the two answer different questions:
+# `runs/e5small-dr-unified-v12` wrote its last span at 18:20 and kept appending events for ten and a
+# half hours with no exporter thread alive and ZERO drops recorded, because the worker had already
+# returned before any row could be dropped.  `worker_alive: false` names the symptom; without this
+# the condition behind it is unrecoverable after the fact.
+#
+# `crashed` is the member that could not be observed at all: an exception escaping `_worker_main`
+# killed the thread with `self._worker` still pointing at it, so the only trace was an
+# `is_alive()` that had silently turned False.  It is not hypothetical bookkeeping — it is the one
+# stop this class had no record of, and the reason the registry exists rather than a bare flag.
+#
+# Registry-guarded in BOTH directions by `tests/test_trace_worker_stop_reason.py`: a stop recorded
+# with an unregistered word reads as a diagnosis nobody can look up, and a registered word nothing
+# emits is a decoy — the same rule `engine/speculation.py::CARD_BUILD_SKIP_REASONS` states.
+TRACE_WORKER_STOP_REASONS = (
+    "abandoned",        # terminal ownership released: this process may no longer write spans
+    "shutdown",         # `shutdown()` — one-shot, the exporter is finished
+    "retired",          # `_retire_requested`: hand the file off, a later submit restarts the worker
+    "idle",             # nothing queued for `_worker_idle_s` and no loss delta outstanding
+    "receipt_failed",   # the loss receipt itself could not be written and the queue was empty
+    "crashed",          # an exception escaped the worker loop
 )
 
 
@@ -410,6 +455,26 @@ _CAPTURE_LLM_IO = False
 # the node/phase tokens, and copied across task/thread spawns like the other contextvars — so the
 # policy follows its run into the `anyio.to_thread` eval workers and the concurrent build threads.
 _capture_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_capture", default=None)
+
+
+def annotate_generation(key: str, value) -> bool:
+    """Set one attribute on the innermost OPEN generation span; True when a generation took it.
+
+    The write-anytime sibling of `record_paid_call`'s write-once stamps, for a fact that changes
+    across a call's attempts and that the caller cannot stamp afterwards because the call may raise
+    before it returns: `core/llm.py::_post` records `stream_attempts` — whether each attempt went
+    out over SSE — on every attempt, so a call the ceiling or the retry ladder ends mid-way still
+    says how it was sent. Same non-throwing, silent-when-untraced discipline as every entry point
+    here: observability never decides whether the paid work proceeds.
+    """
+    rec = next((r for r in reversed(_stack.get()) if r.get("kind") == "generation"), None)
+    if rec is None:
+        return False
+    try:
+        SpanHandle(rec, None).set(key, value)
+    except Exception:  # noqa: BLE001 - the tracer's diagnostic boundary must stay non-throwing
+        return False
+    return True
 
 
 def set_llm_capture(enabled: bool) -> None:
@@ -1459,8 +1524,20 @@ class AsyncJsonlSpanExporter:
         self._unreported_export_failures = 0
         self._loss_receipts = 0
         self._loss_receipt_failures = 0
+        # WHAT the last failure WAS, not only that there was one. `export_failures` counts; this
+        # says why, and without it a permanent deterministic failure is unattributable from inside
+        # the product. Measured on v13: the exporter froze at 3,970 spans and logged its loss 3,449
+        # times — "trace export lost spans: none (export failures: 1)" — while the delegate's
+        # exception was swallowed by the two `except Exception: pass` handlers below. Six candidate
+        # causes had to be eliminated from OUTSIDE the process (writability, ENOSPC, a stale
+        # descriptor, a held flock, descriptor/path divergence, a torn tail) because the one thing
+        # that would have named it was discarded. Bounded, phase-prefixed, last-wins.
+        self._last_export_error: str = ""
         self._receipt_requested = False
         self._next_receipt_at = 0.0
+        self._worker_stop_reason = ""
+        self._worker_stop_detail = ""
+        self._worker_stops = {reason: 0 for reason in TRACE_WORKER_STOP_REASONS}
 
     def _ensure_process(self) -> None:
         """A fork child starts empty; parent-owned queued rows must never be exported twice."""
@@ -1611,7 +1688,48 @@ class AsyncJsonlSpanExporter:
             "duration_s": 0.0,
         }
 
+    def _retire_worker_locked(self, reason: str, detail: str = "") -> None:
+        """Retire the worker thread, recording WHICH condition did it. Caller holds `_condition`.
+
+        The three statements of a retirement — drop the handle, record the reason, wake the
+        waiters — used to be spelled out at each terminal, and the reason was spelled nowhere.  One
+        helper is what keeps a sixth terminal from shipping with two of the three.
+        """
+        assert reason in TRACE_WORKER_STOP_REASONS, reason  # registry, not a free-form word
+        self._worker = None
+        self._worker_stop_reason = reason
+        self._worker_stop_detail = detail[:200]
+        self._worker_stops[reason] = self._worker_stops.get(reason, 0) + 1
+        self._condition.notify_all()
+
     def _worker_main(self) -> None:
+        """Run the export loop and record the condition that retired it — a crash included.
+
+        THE ONE STOP THIS CLASS HAD NO RECORD OF. An exception escaping the loop killed the thread
+        with `self._worker` still pointing at it, so the only evidence was an `is_alive()` that had
+        silently turned False: `worker_alive: false` with every drop counter at zero, which is
+        byte-identical to an idle retirement. A submit does restart a dead worker
+        (`_start_worker_locked`), so a crash is recoverable — but a crash that RECURS is a
+        different fault from a worker that went idle, and neither the exporter nor the engine's
+        `trace_export_health` row could tell them apart.
+
+        The exception is re-raised after it is recorded: `threading.excepthook` printing the
+        traceback is the second, louder half, and swallowing it here would put this method back in
+        the business of hiding the thing it exists to surface.
+        """
+        try:
+            self._worker_loop()
+        except BaseException as exc:  # noqa: BLE001 - recorded and re-raised, never swallowed
+            with self._condition:
+                self._retire_worker_locked("crashed", f"{type(exc).__name__}: {exc}")
+            # `_LOG` is independent of `self._writer`, so this survives whatever stopped the worker
+            # — the same reason the loss-receipt warning below is emitted through it.
+            _LOG.warning(
+                "trace export worker crashed and stopped: %s: %s — spans are dropped until a "
+                "later submit restarts it", type(exc).__name__, exc)
+            raise
+
+    def _worker_loop(self) -> None:
         while True:
             item: Optional[bytes] = None
             loss: Optional[tuple[dict[str, int], int]] = None
@@ -1629,8 +1747,7 @@ class AsyncJsonlSpanExporter:
                             reason: 0 for reason in _TRACE_EXPORT_DROP_REASONS}
                         self._unreported_export_failures = 0
                         self._receipt_requested = False
-                        self._worker = None
-                        self._condition.notify_all()
+                        self._retire_worker_locked("abandoned")
                         return
                     pending_loss = (
                         any(self._unreported_drops.values())
@@ -1648,8 +1765,8 @@ class AsyncJsonlSpanExporter:
                         self._active = True
                         break
                     if self._shutdown or self._retire_requested:
-                        self._worker = None
-                        self._condition.notify_all()
+                        self._retire_worker_locked(
+                            "shutdown" if self._shutdown else "retired")
                         return
                     if pending_loss:
                         self._condition.wait(max(
@@ -1658,13 +1775,33 @@ class AsyncJsonlSpanExporter:
                     self._condition.wait(self._worker_idle_s)
                     if not self._queue and not any(self._unreported_drops.values()) \
                             and self._unreported_export_failures == 0:
-                        self._worker = None
-                        self._condition.notify_all()
+                        self._retire_worker_locked("idle")
                         return
 
             if loss is not None:
                 drops, export_failures = loss
+                # SAY IT WHERE THE BROKEN COMPONENT CANNOT SWALLOW IT. Every path below writes the
+                # receipt through `self._writer`, i.e. through the exporter itself — so the alarm for
+                # "the exporter is losing spans" was delivered by the exporter. When it stops, so
+                # does its own alarm, and the silence is guaranteed rather than unlucky.
+                #
+                # MEASURED on `runs/e5small-dr-unified-v12` (2026-08-31): `spans.jsonl` and
+                # `.spans-append.jsonl` both froze at 18:20 while `events.jsonl`, the llm-usage
+                # outbox and every node directory kept writing past 21:25 — three hours and ~1760
+                # events with no span record, and NOT ONE console line. A `py-spy dump` of the live
+                # pid showed seven threads and no exporter among them.
+                #
+                # `_LOG` is independent of `self._writer`, so this line survives whatever stopped it.
+                # It is emitted BEFORE the durable attempt on purpose: the attempt is what may fail.
+                _LOG.warning(
+                    "trace export lost spans: %s (export failures: %d; last error: %s) — this is "
+                    "the exporter reporting its own loss through the logger, because the durable "
+                    "receipt below rides the writer that may be the thing that broke",
+                    ", ".join(f"{reason}={count}" for reason, count in sorted(drops.items())
+                              if count) or "none",
+                    export_failures, self._last_export_error or "none recorded")
                 succeeded = False
+                receipt_error = ""
                 try:
                     # Direct delegate call: a loss receipt cannot be evicted by the queue it reports.
                     receipt_line = _span_jsonl_line(
@@ -1674,9 +1811,11 @@ class AsyncJsonlSpanExporter:
                     succeeded = True
                 except _AsyncExportAbandoned:
                     pass
-                except Exception:  # noqa: BLE001 - retain the delta for a later export/flush attempt
-                    pass
+                except Exception as exc:  # noqa: BLE001 - retain the delta for a later attempt
+                    receipt_error = _bounded_export_error("receipt", exc)
                 with self._condition:
+                    if receipt_error:
+                        self._last_export_error = receipt_error
                     self._active = False
                     # Consume this exact delta after ONE delegate attempt whether it returned or
                     # raised. The write may have committed before a descriptor/path post-validation
@@ -1697,8 +1836,7 @@ class AsyncJsonlSpanExporter:
                         # Do not leave a daemon retrying forever on a dead filesystem. New deltas can
                         # trigger a new receipt later; this ambiguous delta is never attempted twice.
                         if not self._queue:
-                            self._worker = None
-                            self._condition.notify_all()
+                            self._retire_worker_locked("receipt_failed")
                             return
                     self._condition.notify_all()
                 continue
@@ -1706,6 +1844,7 @@ class AsyncJsonlSpanExporter:
             assert item is not None
             succeeded = False
             abandoned = False
+            export_error = ""
             try:
                 # Exactly one delegate attempt. Retrying after an exception could duplicate a row
                 # whose bytes committed before a post-write identity/visibility check failed.
@@ -1716,9 +1855,13 @@ class AsyncJsonlSpanExporter:
                 with self._condition:
                     self._record_drop_locked(
                         "shutdown_timeout", durable=False)
-            except Exception:  # noqa: BLE001 - diagnostics never crash the observed operation
-                pass
+            except Exception as exc:  # noqa: BLE001 - diagnostics never crash the observed operation
+                # SWALLOWED, but no longer SILENT. Retaining the delta for a later attempt is right;
+                # discarding the reason is what made this class undiagnosable.
+                export_error = _bounded_export_error("export", exc)
             with self._condition:
+                if export_error:
+                    self._last_export_error = export_error
                 self._buffered_bytes = max(0, self._buffered_bytes - len(item))
                 self._active = False
                 if succeeded:
@@ -1751,7 +1894,7 @@ class AsyncJsonlSpanExporter:
         with self._condition:
             return not self._abandon_active
 
-    def metrics(self) -> dict[str, int | bool]:
+    def metrics(self) -> dict[str, int | bool | str]:
         """Return a process-local, race-consistent exporter health snapshot."""
         self._ensure_process()
         with self._condition:
@@ -1767,6 +1910,27 @@ class AsyncJsonlSpanExporter:
                 "loss_receipts": self._loss_receipts,
                 "loss_receipt_failures": self._loss_receipt_failures,
                 "worker_alive": bool(self._worker is not None and self._worker.is_alive()),
+                # WHAT the last export/receipt failure WAS. Empty means none has failed in this
+                # process — never "failed for no reason".
+                "last_export_error": self._last_export_error,
+                # WHY it is not alive. `worker_alive: false` alone cannot tell an idle retirement
+                # from a crash, and those have opposite remedies; the engine's
+                # `trace_export_health` row publishes this whole dict, so the reason travels with
+                # the symptom it explains. Empty means the worker has never stopped in this
+                # process — never "stopped for no reason".
+                #
+                # (These two paragraphs were STACKED above `last_export_error`, so a reader
+                # debugging a stalled exporter was told an empty `last_export_error` meant "the
+                # worker has never stopped" — the opposite of what that field says, and exactly the
+                # misdiagnosis the six-cause v12 hunt this code documents exists to prevent.)
+                "worker_stop_reason": self._worker_stop_reason,
+                # The detail and the per-reason tallies are for a HUMAN reading the durable
+                # `trace_export_health` row; nothing branches on them, and deliberately so —
+                # `events/types.py::trace_export_health_signature` keys that row on the fields that
+                # DECIDE health, so a growing tally cannot make an unchanged state look new.
+                "worker_stop_detail": self._worker_stop_detail,
+                **{f"stopped_{reason}": self._worker_stops.get(reason, 0)
+                   for reason in TRACE_WORKER_STOP_REASONS},
                 "shutdown": self._shutdown,
             }
 
@@ -2188,18 +2352,57 @@ class Tracer:
                     otel_cm.__exit__(None, None, None)
                 except Exception:  # noqa: BLE001
                     pass
-            _stack.reset(token)
-            _current_tracer.reset(tok_tr)
-            if _tok_node is not None:
-                _node_ctx.reset(_tok_node)
-            _generation_ctx.reset(_tok_generation)
-            if _tok_phase is not None:
-                _phase_ctx.reset(_tok_phase)
-            if _tok_prev is not None:
-                _prev_gen.reset(_tok_prev)     # restore the outer trace's chain (or None at top level)
-            _capture_ctx.reset(_tok_cap)       # restore the enclosing run's policy (or None = process)
+            # EXPORT BEFORE THE RESETS, and the ordering is the whole fix. Every `reset` below is a
+            # `ContextVar.reset`, which RAISES `ValueError: ... was created in a different Context`
+            # when a span's enter and exit land in different contexts — and this `finally` used to
+            # end with the export, so one raising reset skipped it and the span vanished. Driven:
+            # entering under `contextvars.copy_context().run(...)` and exiting outside it produces
+            # exactly that ValueError and NO row, while the tracer itself keeps working.
+            #
+            # MEASURED on `runs/e5small-dr-unified-v12/spans.jsonl`: 4 parent ids appear on 268
+            # children while owning no row of their own — `891a4e7216bf6d` alone has 256, and it is
+            # the parent of the last six spans the run ever wrote. A row is written on CLOSE, so an
+            # operation that loses its close writes nothing while its children write normally.
+            #
+            # The export is still wrapped, so a failing exporter cannot mask the in-flight
+            # exception; moving it first only stops the CONTEXT bookkeeping from deciding whether a
+            # diagnostic gets recorded.
             try:
                 self.exporter.export(rec)
             except Exception:  # noqa: BLE001 - spans are diagnostics: an export failure (disk full,
                 pass           # a non-serializable attribute) must never mask the in-flight exception
+            # EVERY RESTORE IS ATTEMPTED, AND NONE OF THEM MAY REPLACE THE CALLER'S EXCEPTION.
+            # `ContextVar.reset` raises `ValueError: Token ... was created in a different Context`
+            # when the span is exited on a context the token was not made in — a shape this tree
+            # made MORE reachable, not less, when the paid proposal moved to `anyio.to_thread`
+            # (`novelty._offload_under_proposal_sink`, `_await_batch_proposal`), because a thread
+            # hop copies the context. Raised from a `finally` that is exactly what the export two
+            # lines above is wrapped to prevent: it REPLACES the exception already unwinding, so an
+            # eval failing with `BudgetExceeded` or an `OSError` surfaced as a `ValueError` about a
+            # ContextVar token, every `except BudgetExceeded` in the tree missed it, and the
+            # tracer's own bookkeeping decided the caller's terminal. It also abandoned the six
+            # restores after the one that raised, leaving the tracer's state describing a span that
+            # has closed.
+            #
+            # SO EVERY RESTORE IS ATTEMPTED, AND THE FAILURE IS RE-RAISED ONLY INTO A CLEAN EXIT.
+            # Swallowing it outright would hide a genuine tracer bug — which is what
+            # `test_the_failed_reset_still_raises_and_is_not_swallowed` is about, and that property
+            # is kept: when the block exited normally there is nothing to mask and the error is the
+            # only news, so it propagates. When an exception is already unwinding, the caller's is
+            # the one that describes what happened and the tracer's bookkeeping does not get to
+            # overwrite it. `sys.exc_info()` inside the `finally` of a generator context manager IS
+            # the in-flight exception, because `__exit__` throws it into the generator.
+            _reset_error: BaseException | None = None
+            for _var, _tok in ((_stack, token), (_current_tracer, tok_tr),
+                               (_node_ctx, _tok_node), (_generation_ctx, _tok_generation),
+                               (_phase_ctx, _tok_phase), (_prev_gen, _tok_prev),
+                               (_capture_ctx, _tok_cap)):
+                if _tok is None:
+                    continue        # never entered (node/phase/prev are conditional); nothing to restore
+                try:
+                    _var.reset(_tok)
+                except (ValueError, RuntimeError) as exc:  # noqa: PERF203 - a cross-context token,
+                    _reset_error = _reset_error or exc     # or a var reset twice
+            if _reset_error is not None and sys.exc_info()[0] is None:
+                raise _reset_error
                 #                or crash the traced engine operation.

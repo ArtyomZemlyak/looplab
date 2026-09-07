@@ -103,7 +103,12 @@ so from evidence:
   false refusals" as a property of the checker that ships. `CORPUS_LIMITS` says so in the header,
   so the caveat travels with the number instead of living only here.
 * 4 of the 16 are `diverged` (`loss=inf` for all 20 epochs, `loss=nan`, `loss=-1.5e+10`,
-  `-2.35e+08`) — caught by the stage CHECKER because the diverge watchdog did not exist yet;
+  `-2.35e+08`) — caught by the stage CHECKER because the diverge watchdog did not exist yet. Until
+  2026-09-06 those four were UNWINNABLE for a diagnostician: `diverged` was engine-final only, so
+  handed `check_failed` it could say `not_learning` (it did, 4 of 4) and never the truth. It is now
+  admissible over a tagged `check_failed` and nothing else
+  (`failure_diagnosis.DIAGNOSED_CONTEXT_BOUND`), and `triage_score.answerable_for` asks
+  "unwinnable" per handoff rather than once for the whole vocabulary;
 * exactly ONE — node 12 — is genuinely `not_learning`: its loss fell 0.986 → 0.0195 monotonically
   while validation recall@100 stayed at 0.0028. That is the case the word was added for, and it is
   1 of 122 rows, not 16.
@@ -231,8 +236,23 @@ _NONFINITE_MIN_HITS = 3
 
 # The last `SomeError: message` line of a traceback — the careful reader's read, and the one thing
 # a human does first. Only accepted as a label when it names an exception that is NOT an OOM.
-_TERMINAL_EXCEPTION = re.compile(r"^(?:\[rank\d+\]:\s*)?([A-Za-z_][\w.]*(?:Error|Exception|Exit))"
-                                 r": (.*)$", re.MULTILINE)
+#
+# A COPY of `engine/failure_diagnosis.py::_HEADLINE_RE`, on `judge_corpus.VERDICTS`' argument: a
+# bench that moves when production moves cannot detect that it moved. What a copy may not be is
+# arbitrarily DIFFERENT, and these two had drifted on three clauses — production tolerates leading
+# whitespace (a launcher indents each child's traceback inside its own report block) and any
+# bracketed stream tag, and it accepts `…Interrupt`; this one anchored at the line start, allowed
+# only `[rank\d+]: `, and accepted `…Exit`. So the bench could not see the headline the
+# diagnostician was shown on exactly the indented-traceback case production widened for.
+#
+# The two are now the same shape, with the deliberate differences kept and stated: this one REQUIRES
+# the `": "` (a bench label needs a message to be about) and keeps `Exit` beside `Interrupt`, since
+# `SystemExit: 2` is a definite crash for labelling purposes even though it is not a headline worth
+# pushing to a Developer. `tests/test_judge_bench.py` asserts they agree on the shapes that matter.
+_TERMINAL_EXCEPTION = re.compile(
+    r"^[ \t]*(?:\[[^\]]{1,32}\]:[ \t]*)?"
+    r"((?:[A-Za-z_][\w.]*\.)?[A-Za-z_]\w*(?:Error|Exception|Exit|Interrupt))"
+    r": (.*)$", re.MULTILINE)
 _NOT_A_CRASH_EXCEPTIONS = frozenset({"OutOfMemoryError", "torch.OutOfMemoryError",
                                      "torch.cuda.OutOfMemoryError", "MemoryError"})
 

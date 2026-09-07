@@ -413,10 +413,194 @@ EV_SETUP_STEP = "setup_step"
 # obligation since 2026-08-20 and it is the opposite kind: a phase that SPENDS must ALSO open a span
 # (`engine/shared.py::_paid_progress`), because a beacon alone leaves its money untraceable.
 EV_PHASE_PROGRESS = "phase_progress"
+
+# WHY THE RUN LOOP STOPPED. Diagnostic, appended exactly once as the loop unwinds, and it exists
+# because the durable record could not answer that question at all.
+#
+# MEASURED over every run on this box on 2026-08-31: five carry a `pause` or a `run_finished` row
+# and THREE (`rubertlite-dr-unified-v6`, `rubertlite-dr-unified-v9`, `e5small-dr-unified-v11`)
+# carry neither. v11's last event is a `trust_scan`; anyone folding its log today sees a run that is
+# still in flight, forever. Chasing it through the record ruled out a crash (`_run_engine_guarded`
+# re-raises, and v11 PRINTED its summary), a budget stop (0 rows, no budget configured), max_nodes
+# (12 of 24), an operator stop, a pause, and the approval exit (`require_approval=False`) — and then
+# ran out of record. The loop has thirteen `break`/`return` statements and no invariant that any of
+# them writes a reason.
+#
+# This is the same defect `card_build_done.skipped_reason` (8c7af6a7, "the nine bare `stale` exits
+# are gone") and `node_repaired`'s bound (ffdb34e3) fixed one and two levels down: a bare exit reads
+# as nothing happened. `unattributed` is deliberately a legal value — a row saying the engine could
+# not name its own exit is still infinitely more than the silence it replaces.
+EV_RUN_LOOP_EXITED = "run_loop_exited"
+
+# The span exporter's own loss receipt is written BY the exporter (`AsyncJsonlSpanExporter`), so an
+# exporter whose worker has stopped reports NOTHING: v12 lost 10.5 hours of spans in total silence
+# while `events.jsonl` kept flowing normally, and `metrics()` — a "process-local, race-consistent
+# exporter health snapshot" — was read by no surface in the product. The ENGINE is the one writer
+# that survives a dead exporter, so it publishes that snapshot itself. Diagnostic, dedup'd, and
+# emitted ONLY while the exporter is unhealthy: a run whose spans are fine appends no row at all.
+EV_TRACE_EXPORT_HEALTH = "trace_export_health"
+
+# THE BOARD'S OWN REFUSALS, written down. `classify_research_beliefs` answers, per memo, how many
+# of its directions became open beliefs and why the rest did not — and until this row that answer
+# reached a `_LOG.warning` and nothing else. Establishing that v12's cap refused 394 of 413
+# proposals (including all 55 requests for the seed-replicate experiment) required reconstructing
+# the board memo by memo and re-running the classifier, because the run records the memo BEFORE it
+# classifies and never records the verdict.
+#
+# DIAGNOSTIC rather than BACKGROUND_APPENDABLE, and the two are not interchangeable here. Its
+# siblings at the same append site (`hint`, `hypothesis_added`) are FOLDED events that the
+# concurrent research task is licensed to write because they move no reader's position. This row
+# is not folded at all — nothing needs it in RunState — and DIAGNOSTIC_EVENTS is excluded WHOLESALE
+# from `speculation._proposal_authority_seq`, which is the stronger form of that same licence.
+EV_BELIEF_ADMISSION = "belief_admission"
+
+# A BUILT NODE THAT CHANGED NOTHING. Measured across the three e5small runs with workspaces: 2 of
+# 47 parent edges are nodes whose SOURCE is byte-identical to the parent they claimed to modify —
+# one on a false premise about that parent ("node 10's UNCLIPPED footprint" when node 10 was
+# clipped), one a restatement of an experiment ten nodes earlier. Each paid a full train to
+# re-measure its own parent. Nothing catches it: the novelty gate keys on operator+params and on a
+# repo task the experiment is the code edit, `_intra_batch_dup` compares only siblings of one
+# batch, and none of the thirteen `CARD_BUILD_SKIP_REASONS` is "identical to its parent".
+#
+# RECORDED, NOT REFUSED, on this rung: a refusal would have destroyed both of them, and they are
+# the only replicates this box has produced (they answer the sigma question at |delta| 0.000573 and
+# 0.002519). The operator gets the visibility and keeps the choice.
+EV_NODE_BUILD_DELTA = "node_build_delta"
+
+# The closed vocabulary of run-loop exits, in the registry shape this repo uses for every duck-typed
+# word (`CARD_BUILD_SKIP_REASONS`, `CARD_STAGE_REFUSALS`, `REPAIR_VERDICTS`, `TRIAGE_ACTIONS`): a
+# two-way AST guard keeps the loop's exits and this tuple in step, so a FOURTEENTH exit cannot be
+# added without naming itself.
+# EVERY MEMBER IS PRODUCIBLE, and the guard asserts it. A vocabulary carrying words the deriver
+# cannot return is the "word no reader can branch on" defect in reverse: it reads as coverage that
+# does not exist. The loop's finer exits — the leakage gate, the systemic gate, a forced-request
+# drain, `_handle_create_actions` signalling break — all collapse into one of these five today,
+# because the derivation reads the FOLD and the fold does not record which `break` was taken. Adding
+# them is the second rung: name them at the exits, then extend this tuple in the SAME change.
+RUN_EXIT_REASONS: tuple[str, ...] = (
+    "finished",              # the report was written — `state.finished`
+    "aborted",               # an operator abort/stop landed — `state.stop_requested`
+    "paused",                # a pause latched: an operator stop or one of the three breakers
+    "awaiting_approval",     # HITL: EV_APPROVAL_REQUESTED is on the log, the run is resumable
+    "unattributed",          # the loop exited and the engine could not name why — see above
+)
+
+
+# The stop reasons that mean SPANS ARE BEING LOST, as opposed to a worker parking between submits.
+# Deliberately a denylist of the harmful ones rather than an allowlist of the benign: a SIXTH reason
+# added to `TRACE_WORKER_STOP_REASONS` without touching this set reads as routine, which is the safe
+# direction for a diagnostic that must not cry wolf. `tests/test_trace_export_health_is_published.py`
+# pins both halves.
+_TRACE_WORKER_STOPS_THAT_LOSE_SPANS = frozenset({"crashed", "receipt_failed", "abandoned"})
+
+
+def trace_export_unhealthy(snapshot) -> bool:
+    """Is this exporter health snapshot worth a durable row?
+
+    THREE INDEPENDENT SYMPTOMS, any one of which means spans are being lost right now:
+
+      * `shutdown` — the exporter stopped accepting and never resumes (`_accepting` is set False
+        in exactly two places, and `shutdown()` is the terminal one);
+      * a dead worker with rows still QUEUED — an idle exporter with an empty queue legitimately
+        has no thread, so the queue is what separates "resting" from "stranded";
+      * any recorded loss — a drop, an export failure, or a loss receipt that itself failed to
+        write, which is the exact circularity that made v12's outage silent.
+
+    A healthy exporter matches none of them, which is what keeps this off a good run's log.
+    """
+    if not isinstance(snapshot, dict):
+        return False
+
+    def _count(key: str) -> int:
+        value = snapshot.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    if bool(snapshot.get("shutdown")):
+        return True
+    # A WORKER THAT DIED FOR A BAD REASON, and this clause exists because the three tests below
+    # showed the predicate silent on exactly the case the row was written for. `core/tracing.py::
+    # TRACE_WORKER_STOP_REASONS` landed after this predicate did, and it splits the five terminal
+    # paths that used to be byte-identical from the outside: `idle` and `retired` are ROUTINE — the
+    # worker parks and the next submit restarts it — while `crashed` (an exception escaped the
+    # loop), `receipt_failed` (the loss receipt itself could not be written) and `abandoned`
+    # (terminal ownership released; this process may no longer write spans) each mean spans are
+    # being lost NOW. Before this, a crashed worker with an empty queue and no drops published
+    # nothing, which is precisely v12's shape: no receipts, no drops, no thread, no row.
+    if str(snapshot.get("worker_stop_reason") or "") in _TRACE_WORKER_STOPS_THAT_LOSE_SPANS:
+        return True
+    if not bool(snapshot.get("worker_alive")) and _count("queued_spans") > 0:
+        return True
+    return any(_count(key) > 0 for key in
+               ("dropped_spans", "export_failures", "loss_receipt_failures"))
+
+
+def trace_export_health_signature(snapshot) -> tuple:
+    """The part of an exporter snapshot that DECIDES health — the dedup key for the durable row.
+
+    The engine writes one `trace_export_health` row per distinct unhealthy STATE. Fingerprinting the
+    whole snapshot does not answer that question and quietly answers a different one: `metrics()`
+    also carries `accepted_spans`, `exported_spans`, `queued_spans` and `buffered_bytes`, which move
+    with essentially every span, while `trace_export_unhealthy` LATCHES — `_drop_counts` and
+    `_export_failures` are cumulative and never reset. So after ONE transient drop the predicate is
+    True forever, the fingerprint differs on every outer-loop turn, and a ~25-key row is appended
+    and fsync'd each time: on the ~2.5 min/turn rate this repo measured, roughly 580 rows and 580
+    fsyncs per 24 h run, on a FUSE run dir where this file's neighbour records ~200 ms per append —
+    for a fact that never changed.
+
+    So the key is exactly the facts the predicate reads, and nothing else. The three LOSS counters
+    stay raw, because a loss that is still growing genuinely is news and the row records how much;
+    `queued_spans` is reduced to the boolean the predicate asks it for, since on a live exporter it
+    moves every turn while answering the same question. The throughput counters — `accepted_spans`,
+    `exported_spans`, `buffered_bytes` — decide nothing here and are simply absent.
+
+    It lives beside the predicate so a fourth symptom cannot be added to one and forgotten in the
+    other. The row still carries the FULL snapshot: the throughput counts are what an operator
+    wants to read; they are just not what makes a state new.
+    """
+    if not isinstance(snapshot, dict):
+        return ()
+
+    def _count(key: str) -> int:
+        value = snapshot.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    return (
+        bool(snapshot.get("shutdown")),
+        bool(snapshot.get("worker_alive")),
+        str(snapshot.get("worker_stop_reason") or ""),
+        _count("queued_spans") > 0,
+        _count("dropped_spans"),
+        _count("export_failures"),
+        _count("loss_receipt_failures"),
+    )
+
+
+def run_exit_reason(state) -> str:
+    """Name the run loop's exit from the FINAL FOLD, in `RUN_EXIT_REASONS`.
+
+    Derived, not passed. Thirteen hand-set locals would be thirteen chances to forget one and would
+    add control flow to the hottest loop in the engine; a derivation is complete by construction and
+    cannot disagree with the state a reader reconstructs from the same log.
+
+    ORDER IS THE SEMANTICS. `finished` wins over everything: a run that wrote its report ended, and
+    a pause latched on the way out does not un-end it. `aborted` precedes `paused` because
+    `replay._on_pause` latches a pause for an abort too, and "the operator stopped it" is the more
+    specific answer. `awaiting_approval` is last of the named ones because it is the only resumable
+    state that is neither a pause nor a stop.
+    """
+    if getattr(state, "finished", False):
+        return "finished"
+    if getattr(state, "stop_requested", False):
+        return "aborted"
+    if getattr(state, "paused", False):
+        return "paused"
+    if getattr(state, "awaiting_approval", False):
+        return "awaiting_approval"
+    return "unattributed"
 # WHICH long operation is reporting. Closed so that a stage name can be rendered as a label without
 # every reader re-deriving the vocabulary.
 PROGRESS_STAGE_BUILD = "build"      # idea -> code: one node's whole build, `_create_node_scoped`
-# ONE stage, and the absence of a `resume` one is a MEASURED result rather than an omission. A resume
+# TWO stages, and the absence of a `resume` one is a MEASURED result rather than an omission. A resume
 # is just as blank as a build — every line of `Engine._enter_run` runs before the loop's first turn,
 # so no node, marker or pending count has moved and the run looks dead — and beacons were added there
 # and REVERTED, because the event log is the wrong channel for that particular wait. Thirteen tests
@@ -430,8 +614,31 @@ PROGRESS_STAGE_BUILD = "build"      # idea -> code: one node's whole build, `_cr
 # it?", and the prologue is precisely where the authorization fences, the finalize-scope
 # reconciliation and the width pins all read the raw log. Making a resume visible needs a channel
 # that is NOT events.jsonl (a run-dir progress sidecar the server tails is the obvious candidate);
-# adding a stage here without that channel would reintroduce all thirteen.
-PROGRESS_STAGES: frozenset[str] = frozenset({PROGRESS_STAGE_BUILD})
+# adding a RESUME stage here without that channel would reintroduce all thirteen.
+#
+# THE PARAGRAPH ABOVE IS ABOUT THE RESUME PROLOGUE SPECIFICALLY, not about the set's size, and the
+# `eval` stage below is exempt for the reason it names: what broke was thirteen readers that key on
+# the raw log AT THE PROLOGUE — the authorization fences, the finalize-scope reconciliation and the
+# exact width/event-count pins across a resume. An eval beacon lands nowhere near any of them.
+# `eval_stages._emit_progress` does append `phase_progress` on the single-command path too, so every
+# run's log did grow; that is the class of change this warning gates, and it was weighed rather than
+# skipped.
+
+# idea -> metric: one node's EVALUATION, i.e. the pipeline `run_command_eval` actually executes.
+# It is the second long silent stretch, and the larger one: a build is minutes, an evaluation is
+# hours. `stage_finished` is FOLDED and lands at each stage's COMPLETION, so between two stage rows
+# the durable record says only "this node is being evaluated" — which is why every status surface in
+# the UI labelled the whole of it "Training / evaluating". On a real repo pipeline
+# (`mine` -> `train` -> `score`) that sentence is FALSE for two of the three stages, and it is false
+# in the direction that matters: an operator reading "training" while a miner runs cannot tell a
+# stalled miner from a healthy trainer.
+#
+# The engine could not answer it either. `train_monitor.resolve_stage_log` picks the freshest-mtime
+# log and its own docstring concedes "the sandbox's live stage cursor genuinely is unobservable from
+# here" — so the watchdog that may KILL a stage was naming its subject by a filesystem guess. This
+# beacon is that cursor, published once by the only code that knows it: the stage loop itself.
+PROGRESS_STAGE_EVAL = "eval"
+PROGRESS_STAGES: frozenset[str] = frozenset({PROGRESS_STAGE_BUILD, PROGRESS_STAGE_EVAL})
 # The steps of each stage, in the order they actually happen. The ORDER is meaningful to a reader (a
 # UI may render a stepper) but it is NOT a contract the engine has to satisfy, and a surface that
 # assumes every phase appears will be wrong on most real runs. Which ones fire is CONFIGURATION-
@@ -470,6 +677,30 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
     # one is noise, and a phase listed here that nothing emits would be worse: this table is what a
     # UI stepper would render, so an entry no run ever reaches shows the operator a step that never
     # completes. Add one here only together with its append site.
+    PROGRESS_STAGE_EVAL: (
+        # ONE phase, and the pipeline stage's own name rides in the beacon's `name` DETAIL rather
+        # than becoming a phase of its own. That split is forced, not stylistic: a phase is a CLOSED
+        # word `assert_progress_phase` can refuse at the append site, and eval stage names are
+        # AGENT-AUTHORED — `mine`, `train`, `score`, `data_prep`, whatever the Developer wrote into
+        # `looplab_stages.json`. Registering them is impossible (the set is not knowable here) and
+        # leaving the phase open would forfeit exactly the typo-proofing this table exists for. The
+        # varying part therefore rides as detail, exactly as `node_id`, `operator` and `count`
+        # already do for the build phases above.
+        #
+        # WHAT A READER MAY CONCLUDE FROM THE NAME: nothing. `train` is a slug the agent chose, and
+        # `eval_log_plan`'s own docstring spends a page on why a stage NAME proves nothing. The
+        # beacon therefore carries the resolved `role` (a `LOG_ROLES` member) beside the name, which
+        # IS authenticated — it comes from the manifest declaration the engine already trusts to say
+        # what runs and in what order. A surface that wants to claim "training" reads the role; a
+        # surface that wants to SHOW the operator which step is running reads the name, because the
+        # name is what that operator sees in the stage strip, the logs tab and the trace bands.
+        "stage",
+        # NO `repair` phase, and its absence is a decision rather than an omission. An inline repair
+        # is a Developer call inside `_evaluate`'s own attempt loop, so it is genuinely a build-shaped
+        # step happening under an eval — but it has no append site here, and this table's own rule
+        # (stated for `commit` above) is that a listed phase nothing emits shows the operator a step
+        # that never completes. Add it here together with its append site, not before.
+    ),
 }
 # The two statuses get NAMES for the same reason the event type does: a beacon has no reader that
 # fails loudly, so a reader comparing against a bare `"started"` degrades to "nothing is open"
@@ -715,6 +946,36 @@ SETUP_THREAD_APPENDABLE: frozenset[str] = frozenset({
     EV_RUN_SETUP_STARTED, EV_RUN_SETUP_FINISHED,
 })
 
+# Invariant #1's FOURTH writer, and the one it did not name. The invariant says "UI/CLI append only
+# control intents (allow-listed in `serve/protocol.py::CONTROL_EVENTS`)" — the ASSISTANT'S TOOL
+# LAYER is neither, and `tools/machine_runs_tools.py::MachineRunsTools` appends these two FOLDED
+# types directly. Neither is in `CONTROL_EVENTS`; `node_tombstoned` has no other writer in the tree
+# at all. So the seam existed, was reachable by an LLM, and was declared nowhere.
+#
+# Registering it is NOT a promotion to a control intent. It is the same move `BACKGROUND_APPENDABLE`
+# and `SETUP_THREAD_APPENDABLE` make for the engine's own thread-side seams: state the exception, at
+# the site, with a guard, so a FIFTH folded type cannot join it silently. Making these two tools
+# command-backed (the `submit` path their eight siblings already take, with an idempotency key and
+# an observed generation) is the larger correct end state and is a separate change: it needs a
+# `ControlSpec` row in each of `control_validation.py`'s five tables, a worker phase for the
+# `config.snapshot.json` mirror the gate write also owes, and a purge path for the tombstone's
+# irreversible sibling.
+#
+# What membership REQUIRES, and both members satisfy: the write goes through the tool layer's
+# `_mutation_intent` + `commands.mutation_guard` generation fence (so it cannot land on a
+# post-reset replacement run), and it appends under the tail CAS its own read formed against —
+# `node_tombstoned` with `expected_last_seq=expected_tail`, `trust_gate_changed` through
+# `events/trust_gate.py::apply_trust_gate`, which is also the config PUT's writer. That second one
+# is the reason this registry is worth having: until it landed, the tool appended BARE while its
+# router twin CASed, retried and refolded for idempotence — one rule, two implementations, and the
+# weaker one was the LLM-driven one.
+#
+# Guarded in both directions by `tests/test_assistant_appendable.py`, which re-derives the appended
+# types from the provider's own `ast.Call` nodes.
+ASSISTANT_APPENDABLE: frozenset[str] = frozenset({
+    EV_TRUST_GATE_CHANGED, EV_NODE_TOMBSTONED,
+})
+
 # Conditional extension for legacy Hypothesis/Policy selection only. ``hypothesis_merged`` became a
 # Card ownership/lifecycle input when native Card selection landed, so it is not universally neutral.
 # The overlap call site must prove Card-driven selection is off; Card mode performs consolidation only
@@ -741,8 +1002,29 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # `replay._HANDLERS` (folded) OR in this set (diagnostic), never both and never neither — so adding a
 # new event type FORCES a conscious "does the fold read this?" decision (arch-review §5 P2: the old
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
+# OPEN[event-payloads-have-no-registry] the registry states the envelope and the evolution rules and
+# nothing about what any type CARRIES: 65 of the constants have no describing comment, the fold reads
+# 205 distinct (handler, key) pairs, and 15 types are named in no document. Invariant #5's
+# additive-only rule cannot be checked against a contract that exists only as handler code.
+# proof:absent:EVENT_PAYLOAD_KEYS@looplab/events/types.py
+#
+# THE CHEAP MECHANICAL VERSION WAS TRIED 2026-09-02 AND DOES NOT ANSWER THIS, so the next reader
+# does not have to re-derive it. Joining "keys the fold READS" (per handler, `d.get`/`d[...]` by AST)
+# against "keys a writer WRITES" would make the dead-reader defect checkable — the shape
+# `RunTools._research_memo` carried for six weeks, keyed on a `summary` no writer produced. Run over
+# the tree it reports FOUR types whose handler reads a key no writer writes, and all four are
+# artifacts of the scan rather than findings: `hint`/`replace` and `pause`/`node_id` are CONTROL
+# INTENTS whose payload `serve/control_validation.py` normalizes rather than spelling as a literal,
+# and `node_failed`/`node_repaired` build their payload in a variable. The write side is only
+# enumerable for literal `append(EV_X, {...})` calls — 77 of the types — so a join over it is too
+# weak to convict, and a join strong enough would have to follow a dict through the function that
+# builds it.
+#
+# So this is a DOCUMENTATION job of real size, not a mechanical one, and that is why it is still
+# open: the 65 undescribed constants and the 15 undocumented types are the actual work.
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
-    EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS,
+    EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS, EV_RUN_LOOP_EXITED,
+    EV_TRACE_EXPORT_HEALTH, EV_BELIEF_ADMISSION, EV_NODE_BUILD_DELTA,
     EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
     EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN,

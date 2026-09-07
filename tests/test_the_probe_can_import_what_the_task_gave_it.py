@@ -19,11 +19,35 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from looplab.tools.dev_probe import DevProbeTools  # noqa: E402
+from looplab.runtime import landlock  # noqa: E402
+
+
+# Same rule as `tests/test_dev_probe.py`: on a kernel without Landlock the confined probe FAILS
+# CLOSED (`exit=3`, by design), so any test that actually launches one is skipped here rather than
+# red. Derivation-only tests keep running.
+_NO_LANDLOCK = landlock.unavailable_reason()
+
+
+@pytest.fixture(autouse=True)
+def _skip_when_the_kernel_cannot_confine(monkeypatch):
+    if not _NO_LANDLOCK:
+        return
+    original = DevProbeTools.execute_result
+
+    def _guarded(self, name, args, **kw):
+        code = str((args or {}).get("code") or "") if isinstance(args, dict) else ""
+        if name == "run_probe" and code.strip() and getattr(self, "confine_reads", True):
+            pytest.skip(f"the probe's kernel read rung fails closed here: {_NO_LANDLOCK}")
+        return original(self, name, args, **kw)
+
+    monkeypatch.setattr(DevProbeTools, "execute_result", _guarded)
 
 
 class _Staged:

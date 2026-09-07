@@ -5,6 +5,27 @@ return a crude text extraction). Behind an explicit flag (`web_search` in Settin
 egress is unreliable on some boxes / corporate proxies, and every call degrades gracefully — a
 blocked/failed request returns a clear "(unavailable)" string rather than crashing the run.
 Dependency-free (stdlib urllib + tiny regex parsing), exactly like `LiteratureTools`.
+
+THE WEB DENY-LIST (`EvalSpec.web_deny`, 2026-09-06). `web_fetch` reaches the open web, and the open
+web holds PUBLISHED SOLUTIONS to benchmark tasks. Measured over the AlgoTune probe corpus
+(docs/56 §150, finding 13, re-derived by hand): **52 of 76 runs (68 %) fetched AlgoTune's published
+solver source for the very task they were being graded on**, every one of the 52 with the solver's
+source in the tool result — while the card's fence ("the evaluator and the timer are fenced and
+are not yours to look at") was PROSE. The measured effect on score was negative, so this is a
+validity hazard rather than score inflation, and no result in that document could be stratified on
+it. A fence that is merely stated holds right up until it matters (`tools/env_inspect.py`'s own
+measurement: a route that opens under pressure).
+
+So the fence is a DECLARATION, exactly like `protect_packages` one field over: the operator who
+built the task names the URL prefixes that hold the graded task's published solutions, leaderboard
+or grader (`web_deny`), and a fetch under one is REFUSED with a message that names the declaration
+— never a silent empty page and never "(unreachable)", which would send the model looking for a
+mirror. It is never DERIVED from the URL or the page (docs/36: a fence is a boundary the operator
+declares, not a heuristic over names) — a heuristic that guessed "looks like a solutions page"
+would refuse a legitimate write-up and still miss the mirror it did not know. Empty (the default)
+fences nothing, byte for byte the historical tool. A refusal rides on the tool span as
+`result_structured.web_fetch_refused` (the prefix that fired) so a run can be audited for it —
+doc 60 A3's acceptance is "refusal count = 0 on a control run", which needs the count to exist.
 """
 from __future__ import annotations
 
@@ -82,19 +103,142 @@ def _peer_blocked(response) -> str | None:
     return None
 
 
+class WebDenyRefusal(Exception):
+    """A fetch landed under an operator-declared `web_deny` prefix (directly, or via a redirect).
+
+    Its OWN type so `_fetch` can answer with the refusal sentence rather than letting the generic
+    network `except` turn it into "(web fetch unavailable: ...)" — the "(unreachable)" shape the
+    deny-list exists NOT to produce: it reads as a transport failure and sends the model to a
+    mirror. Carries the URL that matched and the prefix that fired."""
+
+    def __init__(self, url: str, prefix: str):
+        super().__init__(web_deny_refusal(url, prefix))
+        self.url = url
+        self.prefix = prefix
+
+
+def normalize_web_deny(entries) -> tuple:
+    """Validate operator-declared `web_deny` prefixes into the ONE form `web_deny_match` compares.
+
+    Each entry must be an absolute `http(s)://` URL with a host; anything else is a `ValueError`
+    naming the entry, because a prefix that can never match is a fence that fences nothing while
+    the task file says it does — the same reason `envsafe.validate_env_map` refuses rather than
+    drops. Whitespace is stripped, the scheme and host are lower-cased (both are case-insensitive
+    by RFC 3986), the path is kept as written. Duplicates collapse, order is kept."""
+    out: list[str] = []
+    for raw in (entries or ()):
+        text = str(raw or "").strip()
+        if not text:
+            raise ValueError("web_deny: an empty entry fences nothing; remove it")
+        parsed = urllib.parse.urlsplit(text)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+            raise ValueError(
+                f"web_deny: {text!r} is not an absolute http(s) URL prefix (it needs a scheme and "
+                "a host, e.g. 'https://github.com/org/repo/')")
+        norm = urllib.parse.urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(),
+                                        parsed.path, parsed.query, ""))
+        if norm not in out:
+            out.append(norm)
+    return tuple(out)
+
+
+def _host_path(url: str) -> tuple:
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    return host, path
+
+
+def web_deny_match(url: str, deny) -> str | None:
+    """The declared prefix that covers `url`, or None.
+
+    A prefix covers a URL when the URL's host IS the prefix's host or a subdomain of it
+    (`www.algotune.io` under `algotune.io`; never `algotune.io.evil.example`, which a bare string
+    `startswith` would have admitted), and the URL's path starts with the prefix's path — compared
+    case-insensitively, since the harmless direction of a case mismatch is over-fencing and the
+    harmful one (`/OriPress/AlgoTune` walking around `/oripress/AlgoTune`) is an evasion. The
+    SCHEME is deliberately not compared: the declaration is about a RESOURCE, not a transport, and
+    the `http://` spelling of a denied `https://` page is the same page one redirect later. A prefix
+    with no path (`https://algotune.io`) covers the whole host; end a prefix with `/` to bound it to
+    that DIRECTORY — which it names with or without the slash (`.../AlgoTune/` covers the repo's
+    landing page `.../AlgoTune` and everything under it, and not `.../AlgoTune-fork/`)."""
+    host, path = _host_path(url)
+    if not host:
+        return None
+    for prefix in (deny or ()):
+        p_host, p_path = _host_path(prefix)
+        if not p_host:
+            continue
+        if host != p_host and not host.endswith("." + p_host):
+            continue
+        p_low, low = p_path.lower(), path.lower()
+        if p_path in ("", "/") or low.startswith(p_low) or (
+                p_low.endswith("/") and low.split("?", 1)[0] == p_low[:-1]):
+            return prefix
+    return None
+
+
+def web_deny_refusal(url: str, prefix: str) -> str:
+    """The refusal sentence. NAMES THE DECLARATION and says the page exists: "(unavailable)" would
+    send the model to a mirror, and a silent empty page would read as an empty page."""
+    return (f"(web_fetch refused: {url} is under the operator-declared `web_deny` prefix {prefix}. "
+            "Published solutions, leaderboards and the grader of the task being evaluated are "
+            "fenced from this run — the page exists, this is a fence and not an unreachable URL, "
+            "and a mirror of it is fenced by the same declaration. Ground the idea in the task's "
+            "own description and in your own measurements instead.)")
+
+
+def task_web_deny(task) -> tuple:
+    """The task's declared `EvalSpec.web_deny`, through its `eval_spec()` hook — `()` for a task
+    with no spec, an adapter that raises, or a declaration that does not validate, the same
+    total-and-quiet contract `repo_developer._grader_packages` keeps for `protect_packages`."""
+    try:
+        spec_fn = getattr(task, "eval_spec", None)
+        ev = spec_fn() if callable(spec_fn) else {}
+        return normalize_web_deny((ev or {}).get("web_deny") or ())
+    except Exception:  # noqa: BLE001 - no spec, no fence: never let a fence break tool construction
+        return ()
+
+
+def build_web_tools(task) -> "WebTools":
+    """The ONE constructor of the Researcher-side web tool, carrying the task's `EvalSpec.web_deny`.
+
+    Two sites compose `WebTools` (`agents/factory.py::build_strategist_tools` and
+    `agents/deep_research.py::make_deep_researcher`), and until 2026-09-06 both spelled
+    `WebTools(enabled=True)` — so the operator's declaration reached neither, which is how 52 of 76
+    AlgoTune runs fetched their own task's published solver (docs/56 §150 #13). It lives HERE and
+    not in the factory because it is the fence's own composition rule and `agents/factory.py`
+    holds a line ceiling whose guard prescribes extraction (`tests/test_agent_factory_split.py`).
+    A task with no spec fences nothing (`task_web_deny`)."""
+    return WebTools(enabled=True, deny=task_web_deny(task))
+
+
 class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Re-run the SSRF check on every redirect target: urlopen follows redirects without re-checking,
-    so a public URL could 302 into 169.254.169.254 / an internal host and exfiltrate it otherwise."""
+    so a public URL could 302 into 169.254.169.254 / an internal host and exfiltrate it otherwise.
+
+    Since 2026-09-06 the operator's `web_deny` is re-checked on every hop for the same reason: a
+    fetch of a short-link or a mirror that 302s INTO a denied prefix is the denied page arriving one
+    hop later, and a preflight over the caller's URL cannot see it."""
+    def __init__(self, deny=()):
+        super().__init__()
+        self.deny = tuple(deny or ())
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         blocked = _ssrf_blocked(newurl)
         if blocked:
             raise urllib.error.HTTPError(newurl, code, f"SSRF-blocked redirect: {blocked}", headers, fp)
+        prefix = web_deny_match(newurl, self.deny)
+        if prefix:
+            raise WebDenyRefusal(newurl, prefix)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 _SSRF_OPENER = urllib.request.build_opener(_SSRFRedirectHandler)
 
-from looplab.tools._base import fn_spec
+from looplab.tools._base import ToolResult, fn_spec
 
 _DDG = "https://html.duckduckgo.com/html/"
 _UA = "Mozilla/5.0 (compatible; LoopLab/1.0; +https://example.invalid/looplab)"
@@ -194,14 +338,24 @@ def _resolve(href: str) -> str:
 
 
 class WebTools:
-    """`web_search` + `web_fetch`. `enabled=False` (or a network failure) -> a graceful message."""
+    """`web_search` + `web_fetch`. `enabled=False` (or a network failure) -> a graceful message.
+
+    `deny` is the operator's `EvalSpec.web_deny` (see the module docstring): URL prefixes a
+    `web_fetch` may not reach. Empty fences nothing and leaves every byte of the historical tool in
+    place — the spec text, the opener, the answers."""
 
     def __init__(self, enabled: bool = True, max_results: int = 5, timeout: float = 8.0,
-                 max_bytes: int = 4000):
+                 max_bytes: int = 4000, deny=()):
         self.enabled = enabled
         self.max_results = max_results
         self.timeout = timeout
         self.max_bytes = max_bytes
+        self.deny = normalize_web_deny(deny)
+        # The module opener when nothing is fenced (it is a documented patch seam —
+        # `tests/test_web_tools.py` binds `_SSRF_OPENER.open`), and a private one carrying the
+        # deny-list otherwise, so the redirect re-check can see the declaration.
+        self._opener = (_SSRF_OPENER if not self.deny
+                        else urllib.request.build_opener(_SSRFRedirectHandler(deny=self.deny)))
 
     def specs(self) -> list[dict]:
         return [
@@ -215,23 +369,50 @@ class WebTools:
             fn_spec(
                 "web_fetch",
                 "Fetch a single web page (from a web_search result URL) and return its main text, "
-                "truncated. Use to read a promising result in more detail.",
+                "truncated. Use to read a promising result in more detail."
+                # Spliced only when something IS fenced, so an unfenced task's spec is byte-identical
+                # (prompt strings are contracts). The model is told the shape of the refusal, not
+                # the list: naming the prefixes would be handing it the map of what to look for.
+                + (" Some URL prefixes are fenced by the operator (the published solutions, "
+                   "leaderboard or grader of the task being evaluated); a fetch under one is "
+                   "refused and says so." if self.deny else ""),
                 {"url": {"type": "string", "description": "an http(s) URL to fetch"}},
                 ["url"]),
         ]
 
     def execute(self, name: str, args: dict) -> str:
+        return self.execute_result(name, args).content
+
+    def execute_result(self, name: str, args: dict, *, cancel_check=None) -> ToolResult:
+        """The typed twin of `execute`. A `web_deny` refusal is DATA on the result, not only a
+        sentence in it: `structured.web_fetch_refused` names the prefix that fired and rides onto the
+        tool span as `result_structured` (`agents/tool_loop.py::_run_tool_call` stamps every key of
+        `ToolResult.trace_attributes`), which is what makes "how many fetches did this run have
+        refused" a question `spans.jsonl` can answer. Every other answer is the historical string."""
         if not self.enabled:
-            return "(web tools disabled — enable web_search to use general web grounding)"
+            return ToolResult(content="(web tools disabled — enable web_search to use general web "
+                                      "grounding)", is_error=True, retryable=False,
+                              provenance={"source": "web"})
         if name == "web_search":
-            return self._search(str((args or {}).get("query", "")).strip())
+            return ToolResult(content=self._search(str((args or {}).get("query", "")).strip()),
+                              provenance={"source": "web"})
         if name == "web_fetch":
-            return self._fetch(str((args or {}).get("url", "")).strip())
-        return f"(unknown tool: {name})"
+            url = str((args or {}).get("url", "")).strip()
+            try:
+                text = self._fetch(url)
+            except WebDenyRefusal as refused:
+                return ToolResult(
+                    content=str(refused), is_error=True, retryable=False,
+                    structured={"refused": "web_deny", "web_fetch_refused": refused.prefix,
+                                "url": refused.url},
+                    provenance={"source": "web", "fence": "web_deny"})
+            return ToolResult(content=text, provenance={"source": "web"})
+        return ToolResult(content=f"(unknown tool: {name})", is_error=True, retryable=False,
+                          provenance={"source": "web"})
 
     def _get(self, url: str, data: bytes | None = None) -> str:
         req = urllib.request.Request(url, data=data, headers={"User-Agent": _UA})
-        with _SSRF_OPENER.open(req, timeout=self.timeout) as r:   # re-checks SSRF on each redirect hop
+        with self._opener.open(req, timeout=self.timeout) as r:   # re-checks SSRF on each redirect hop
             # The preflight `_ssrf_blocked` and the transport resolve DNS INDEPENDENTLY, so a short-TTL
             # rebind can hand the check a public address and the connect a loopback/RFC1918/metadata one.
             # Verify the peer we actually reached before reading: no internal body ever reaches the
@@ -270,13 +451,23 @@ class WebTools:
         return "\n".join(out) if out else "(no results)"
 
     def _fetch(self, url: str) -> str:
+        """The page text, or a refusal string. RAISES `WebDenyRefusal` for a fenced URL — the one
+        exception this method lets out, because `execute_result` must tell a refusal from a page
+        and the string alone cannot carry the prefix onto the span."""
         if not url or not url.startswith(("http://", "https://")):
             return "(web_fetch needs an http(s) URL)"
         blocked = _ssrf_blocked(url)
         if blocked:
             return f"(web_fetch refused: {blocked})"
+        # BEFORE the request, not after: a refused page must never be downloaded at all, and the
+        # SSRF preflight above is the precedent for refusing on the caller's URL.
+        prefix = web_deny_match(url, self.deny)
+        if prefix:
+            raise WebDenyRefusal(url, prefix)
         try:
             html = self._get(url)
+        except WebDenyRefusal:
+            raise                                   # a redirect landed under a denied prefix
         except Exception as e:  # noqa: BLE001 — network is best-effort; never crash the run
             return f"(web fetch unavailable: {e})"
         text = _untag(html)

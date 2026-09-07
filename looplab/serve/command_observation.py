@@ -28,7 +28,7 @@ import orjson
 
 from looplab.core.atomicio import same_file_entry
 from looplab.core.models import Event, RunState
-from looplab.engine.finalize import incomplete_finalize_scope
+from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
 from looplab.events.eventstore import decode_event_record, event_sequence_continues
 from looplab.events.replay import fold
 from looplab.events.types import EV_CARD_DROPPED, EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
@@ -288,17 +288,23 @@ class CommandObservation:
         return self.max_non_control_seq > after_seq
 
     def domain_failure_after(self, after_seq: int) -> Optional[Event]:
+        """The first GUARDED-ABORT finish after `after_seq` — a terminal the CLI guard wrote rather
+        than the engine's clean finish, `error` or the ceiling's `budget_exhausted` alike
+        (`events/finalize_scope.py::is_guarded_abort`). The literal `"error"` this read until
+        docs/57 let a ceiling-ended wrap-up pass as a clean one."""
         event = next(
             (event for event in self._run_finishes
-             if event.seq > after_seq and (event.data or {}).get("reason") == "error"),
+             if event.seq > after_seq and is_guarded_abort((event.data or {}).get("reason"))),
             None,
         )
         return event.model_copy(deep=True) if event is not None else None
 
     def has_non_error_finish_after(self, after_seq: int) -> bool:
+        """A CLEAN engine finish after `after_seq` — the complement of `domain_failure_after`, on
+        the same class predicate so the two cannot disagree about what a finish is."""
         return any(
             event.seq > after_seq
-            and str((event.data or {}).get("reason") or "").lower() != "error"
+            and not is_guarded_abort((event.data or {}).get("reason"))
             for event in self._run_finishes
         )
 

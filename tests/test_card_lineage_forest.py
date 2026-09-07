@@ -207,7 +207,11 @@ def test_the_rollup_counts_children_by_bucket_and_never_moves_the_parent_status(
         "the direction keeps its own lane; borrowing a child's is the defect this replaces")
     assert dirc.child_rollup == {
         "children": 4, "open": 1, "running": 1, "evaluated": 1, "failed": 0 + 1, "dropped": 0,
-        "nodes": 2, "best_delta": 0.004, "best_card_id": "e"}
+        "nodes": 2, "best_delta": 0.004, "best_card_id": "e",
+        # No `nodes`/champion ride into this fold, so the champion-relative pair is honestly
+        # absent — None, never a zero (ed7fba9e widened the rollup with the pair; this exact-dict
+        # compare has to name it or it pins the pre-widening shape forever).
+        "best_vs_champion": None, "best_vs_champion_card_id": None}
 
 
 def test_the_child_count_stays_exact_when_the_published_id_list_clips():

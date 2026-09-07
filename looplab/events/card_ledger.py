@@ -488,6 +488,20 @@ def _record_establisher_id(nodes: dict[int, Node]) -> int | None:
     return None
 
 
+def _usable_evidence(evidence_ids: Iterable[int], nodes: Mapping) -> tuple[list, list]:
+    """One spelling of a card's evidence populations: (present & non-tombstoned, usable evaluated).
+
+    `_evidence_verdict` (the `best_delta`/`supported` half of a card's verdict) and
+    `_apply_card_lineage`'s champion-relative best (the other half of the SAME `child_rollup`
+    record) both filter evidence through this. They were two hand-spelled copies ~2,500 lines
+    apart, which is how the two halves of one record come to be computed over different
+    populations when the predicate moves.
+    """
+    ev = [nodes[i] for i in evidence_ids if i in nodes and not nodes[i].tombstoned]
+    return ev, [n for n in ev if n.status is NodeStatus.evaluated and n.feasible
+                and n.metric is not None]
+
+
 def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direction: str,
                       record_setters: set[int], is_abandoned: bool,
                       *, record_establisher: int | None,
@@ -501,9 +515,7 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
     over its parent (or set a run record); tested if evaluated without improvement; testing while
     evidence still runs; open with no (usable) evidence; abandoned overrides all."""
     better = (lambda a, b: a > b) if direction == "max" else (lambda a, b: a < b)
-    ev = [nodes[i] for i in evidence_ids if i in nodes and not nodes[i].tombstoned]
-    evaluated = [n for n in ev if n.status is NodeStatus.evaluated and n.feasible
-                 and n.metric is not None]
+    ev, evaluated = _usable_evidence(evidence_ids, nodes)
     supported = False
     best_delta: float | None = None
     for n in evaluated:
@@ -1639,11 +1651,27 @@ def _seed_cards_from_receipts(
                      "hypothesis_added", present=True)}
                 if isinstance(question_concepts, list) and question_concepts else {}
             )
+            # THE QUESTION-UNDER-QUESTION EDGE, on the same non-native path as the concepts above.
+            # `_card_added_snapshot` already decodes `parent_card_id` for a NATIVE card; a question
+            # arrives through `hypothesis_added`, whose carrier names its parent `parent_belief_id`
+            # — resolved at the append site by `question_parent_rows` against this memo's own
+            # statements or the live board, never fabricated. Same rule as the tags: absent leaves
+            # the field alone, so every log on disk folds byte-identically.
+            #
+            # NOT re-guarded here. A self-edge and a cycle are refused by `_apply_card_lineage`
+            # step 2/3, which is the authoritative place for both (it resolves aliases first, so it
+            # sees the id the row actually landed under, and it peels cycles exactly rather than
+            # refusing whole chains). A duplicate check here was written and removed: no mutant
+            # could kill it, because every case it caught the lineage pass already refused. A guard
+            # no test can fail is not a guard.
+            question_parent = _card_id(d.get("parent_belief_id")) if not native_row else None
+            question_edge = {"parent_card_id": question_parent} if question_parent else {}
             cards[cid] = Card(
                 id=cid, statement=stmt, seed_statement=stmt,
                 source=str(d.get("source") or "human"),   # mirror _derive_hypotheses' default
                 rationale=str(d.get("rationale", ""))[:400], created_at_node=at_node,
                 **question_source,
+                **question_edge,
                 **snapshot,
             )
             card_origins[cid] = "card_added_unbound" if native_row else "hypothesis_shadow"
@@ -2957,7 +2985,9 @@ def _apply_card_selection_readiness(st: RunState, ledger: _CardLedger, aliases: 
         c.selection_ready = not blockers
 
 
-def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases) -> None:
+def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases, *,
+                        nodes: Mapping | None = None, direction: str = "max",
+                        champion_metric: float | None = None) -> None:
     """Publish the DIRECTION -> EXPERIMENT forest: `card_kind`, `parent_card_id`, `child_card_ids`,
     `child_rollup`.
 
@@ -2999,6 +3029,24 @@ def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases) -> None:
     hundred experiments under it is training. `card_child_rollup` returns COUNTS instead, exact even
     where `child_card_ids` clips at `CARD_CHILD_LIMIT`.
     """
+    # `nodes`/`direction`/`champion_metric` ride in because the anchor verdict (#136) needs a
+    # METRIC and this phase's own scope is cards-only. Optional so every caller and test that
+    # builds a ledger by hand keeps working — an absent map or anchor yields no anchor number,
+    # the same answer a direction with no anchor already gets.
+    #
+    # THE CHAMPION IS PASSED DOWN, NEVER RE-DERIVED. `derive_cards` hands in the metric of the
+    # `best_node_id` the fold just elected (`replay._select_best` runs immediately before it), so
+    # the baseline carries every rule of the real selection ladder — aborted nodes, trust flags,
+    # unusable metrics, the confirm/holdout/approval overrides. The first cut re-derived it here
+    # as a raw max/min over feasible non-tombstoned metrics, i.e. a SECOND champion definition:
+    # a demoted seed-lucky leader, an aborted node or a hard-flagged one then supplied the
+    # baseline (an honest win read as a loss on the board, the question listing and the wire),
+    # and a NaN metric made `max()` order-dependent. `isfinite` for the same reason
+    # `card_child_rollup` refuses it: a NaN champion silently reports no verdict for the run.
+    node_map = nodes if isinstance(nodes, Mapping) else {}
+    if not (isinstance(champion_metric, float) and not isinstance(champion_metric, bool)
+            and math.isfinite(champion_metric)):
+        champion_metric = None
     cards = ledger.cards
     _canon = aliases.canon
 
@@ -3072,7 +3120,33 @@ def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases) -> None:
         kids.sort()
         parent = cards[parent_id]
         parent.child_card_ids = kids[:CARD_CHILD_LIMIT]
-        parent.child_rollup = card_child_rollup([cards[k] for k in kids])
+        # The anchor half (#136): a direction answered by a first-generation DRAFT has no
+        # `best_delta`, because that number's baseline is the child's own PARENT NODE and a draft
+        # has none. Three of v11's four answered directions read `null` for exactly that reason
+        # while their children had measured 0.773951 / 0.759164 / 0.718923. Compare against the
+        # question's OWN anchor instead — the champion it was asked against — which is what "does X
+        # help?" means.
+        # THE BASELINE IS THE RUN CHAMPION, and it is the second baseline I tried. The first was
+        # the direction's own `scored_against`, which is the semantically ideal answer to "does X
+        # help?" — and MEASURED on v11 it is `None` on every one of the nine directions, because a
+        # direction is derived from a belief row and never carries a score fence. A fallback that is
+        # null exactly where it is needed is not a fallback. The champion metric is on every run
+        # that has evaluated anything, needs no per-card field, and answers the question an operator
+        # actually reads this board for: did anything under this question beat the best we have.
+        # It arrives as the validated `champion_metric` parameter — the intake above says why it is
+        # passed down from the fold's own `_select_best` rather than derived here.
+        _child_metrics: dict[str, float] = {}
+        for k in kids:
+            _, _usable = _usable_evidence(getattr(cards[k], "evidence", None) or [], node_map)
+            _best = None
+            for _n in _usable:
+                _best = _n.metric if _best is None else (
+                    max(_best, _n.metric) if direction == "max" else min(_best, _n.metric))
+            if _best is not None:
+                _child_metrics[k] = float(_best)
+        parent.child_rollup = card_child_rollup(
+            [cards[k] for k in kids],
+            champion_metric=champion_metric, child_metrics=_child_metrics, direction=direction)
         # The concept union over EVERY child, not only the published ids — same reason the rollup
         # counts every child. Written to `child_concept_tags` and never to `concept_tags`, whose
         # `concept_source` provenance says who AUTHORED a membership and may not be handed a
@@ -3152,5 +3226,12 @@ def derive_cards(
     _apply_card_belief_lineage(st, ledger, aliases)
     _apply_card_actionable(ledger)
     _apply_card_selection_readiness(st, ledger, aliases, building_card_nodes)
-    _apply_card_lineage(ledger, aliases)
+    # The RUN CHAMPION the fold just elected: `replay._select_best` runs immediately before
+    # `_derive_cards`, so `st.best_node_id` already carries the whole selection ladder (aborted
+    # nodes, trust flags, unusable metrics, confirm/holdout/approval). Passing its metric down is
+    # what keeps `best_vs_champion` from being baselined on a node the run refuses to call best.
+    _best_node = st.nodes.get(getattr(st, "best_node_id", None))
+    _apply_card_lineage(ledger, aliases, nodes=st.nodes,
+                        direction=str(getattr(st, "direction", "max") or "max"),
+                        champion_metric=getattr(_best_node, "metric", None))
     _publish_visible_cards(st, ledger, control_ids)

@@ -175,6 +175,8 @@ to spend them.
 """
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 
 # `FAILURE_REASONS` is the closed vocabulary every tuple below partitions or draws from. It is
@@ -271,20 +273,75 @@ DIAGNOSABLE_ENGINE_REASONS: tuple[str, ...] = ("crash", "no_metric", "check_fail
 # to rewrite an experiment that may have nothing wrong with it. A wrong `check_false_positive`
 # therefore costs exactly one repair round pointed at the check instead of at the code — the same
 # thing every other wrong kind costs.
+#
+# `diverged` IS THE SECOND REGISTERED OVERLAP WITH ENGINE-FINAL (2026-09-06), AND IT IS BOUND TO ONE
+# CONTEXT. The `failure_triage.v1` bench over 118 labelled rows found four whose truth is
+# `diverged` — `rubertlite-dense-retrieval` nodes 15/60/68/74, `loss=inf` for 20 epochs, `loss=nan`,
+# `-2e+10`, `-2.35e+08` — and every one of them was UNWINNABLE BY CONSTRUCTION: the divergence
+# watchdog did not exist when those runs trained, so the truth arrived through a DIFFERENT channel
+# (the stage CHECKER, another model, read the non-finite loss and returned `check_failed`), and the
+# diagnostician, handed `check_failed`, could answer `not_learning` (it did, 4 of 4, each time
+# describing the divergence in its own rationale) but never the word that was true. So it is
+# admitted — under `DIAGNOSED_CONTEXT_BOUND`, ONLY where the engine's own answer is `check_failed`,
+# and refused everywhere else — on `not_learning`'s three bullets plus the one that bounds it:
+#
+#   * THE ASYMMETRY HOLDS EXACTLY AS FOR `not_learning`. The engine never ASKS about its own
+#     `diverged` (a watchdog kill is engine-final, first branch of `diagnosed_failure_reason`), and
+#     a model may only NAME it where the engine said `check_failed`, i.e. where the engine has
+#     already delegated the reading to a model. On a `crash` or a `no_metric` the same answer is an
+#     out-of-vocabulary kind: the divergence watchdog was watching that process and did not fire,
+#     and a model saying it should have is asserting a mechanism it cannot observe — `timeout`'s
+#     exact shape, refused for `timeout`'s exact reason.
+#   * IT IS NOT DISJOINT FROM `metric_salvage.NEVER_SALVAGED_REASONS`, and that is stated rather
+#     than hidden: it is the one diagnosed kind on that list. What contains it is ORDERING, not
+#     vocabulary — `_salvage_eval_metric` runs on the deterministic answer branches ABOVE the triage
+#     call and the loop recomputes `reason` from `_failure_reason(res)` on every attempt, so no
+#     diagnosed word has ever reached the gate — plus the flag: `salvage_condition` re-reads
+#     `res.diverged` beside the reason, so "a diverged training is never salvaged" is a property of
+#     the RESULT. A diagnosed `diverged` therefore cannot suppress a metric; what a wrong one costs
+#     is the numerics directive against a run whose loss was finite, and a durable row naming a
+#     never-salvaged reason for a node the gate would have admitted — which is why the judgebench
+#     charges it as its own cost class (`triage_score.ERROR_COSTS["diverged_without_the_flag"]`).
+#   * IT NEEDS NO LOG CITATION where `not_learning` does (`OVERRIDE_EVIDENCE_REQUIRED` below),
+#     and the difference is what each claim IS. "The loss never descended" is a claim about a
+#     SERIES, which only a log holds, and the bench measured the diagnostician overriding a correct
+#     `check_failed` with it on 7-9 of 15 rows from the error text alone. "The loss is not finite"
+#     is a claim about ONE VALUE, and on every corpus row the checker's own refusal — the error
+#     text the diagnostician is handed — already quotes it.
 DIAGNOSED_FAILURE_REASONS: tuple[str, ...] = (
-    "crash", "oom", "no_metric", "check_failed", "not_learning", "check_false_positive")
+    "crash", "oom", "no_metric", "check_failed", "not_learning", "check_false_positive",
+    "diverged")
 
-# The two ANSWER-ONLY kinds, i.e. the members no classifier produces. `oom` because both of its
+# WHERE A CONTEXT-BOUND ANSWER IS ADMISSIBLE: kind -> the engine's own answers under which a
+# diagnostician may name it. A kind absent from this map is admissible on every DIAGNOSABLE reason;
+# a kind present here is REFUSED (an out-of-vocabulary answer, i.e. `unclassified`) on any other,
+# because outside that context the word asserts an engine mechanism that was watching and did not
+# fire. `diverged` on a `check_failed`: the checker (a model) already read the non-finite value and
+# the engine delegated that reading, so a second reader naming the cause contradicts nothing the
+# engine observed. `diverged` on a `crash`: the divergence watchdog observed that process to its
+# exit and stayed silent.
+DIAGNOSED_CONTEXT_BOUND: dict[str, tuple[str, ...]] = {"diverged": ("check_failed",)}
+
+# The ANSWER-ONLY kinds, i.e. the members no classifier produces. `oom` because both of its
 # producers were the deleted text rules (see `DIAGNOSABLE_ENGINE_REASONS`), `not_learning` because
 # its only engine producer is a watchdog KILL and the diagnostician's answer is about a run nothing
 # killed. Spelled so the guard test can assert the two vocabularies' relationship exactly instead of
-# asserting "they overlap somehow".
+# asserting "they overlap somehow". `diverged` is deliberately NOT here: `_failure_reason` returns
+# it (the divergence watchdog's kill), so it is an engine-final answer that a model may ALSO name in
+# one context, not a kind only a model can name — the two facts are `DIAGNOSED_ENGINE_FINAL_OVERLAP`
+# and `DIAGNOSED_CONTEXT_BOUND`, and `tests/test_inline_repair_reason_coverage.py` holds this tuple
+# disjoint from the classifier's own returns.
 DIAGNOSED_ONLY_REASONS: tuple[str, ...] = ("oom", "not_learning", "check_false_positive")
 
 # The registered overlap with ENGINE-FINAL, spelled once so the guard test can assert it EXACTLY
-# rather than assert "some overlap is allowed". Adding a member here means arguing the three bullets
-# above for it.
-DIAGNOSED_ENGINE_FINAL_OVERLAP: tuple[str, ...] = ("not_learning",)
+# rather than assert "some overlap is allowed". Adding a member here means arguing the bullets above
+# for it. The asymmetry that keeps the engine safe is the same for both members: the engine never
+# ASKS about its own `not_learning` (the training watchdog's kill) or its own `diverged` (the
+# divergence watchdog's kill) — an engine-final answer is returned before the verdict is read — and
+# a model may only name either where the engine said `check_failed`, the one stage status that is
+# itself another model's reading. `diverged` is additionally bound to that context by
+# `DIAGNOSED_CONTEXT_BOUND`; `not_learning` is admissible on every diagnosable reason.
+DIAGNOSED_ENGINE_FINAL_OVERLAP: tuple[str, ...] = ("not_learning", "diverged")
 
 # --- "Nobody could say" ------------------------------------------------------------------------
 # THE FALLBACK, AND IT IS NOT A REGEX. When the diagnostician was WIRED and ASKED and could not
@@ -351,6 +408,36 @@ EVIDENCE_SOURCE_NONE = "none"       # it cited nothing readable
 EVIDENCE_SOURCES: tuple[str, ...] = (EVIDENCE_SOURCE_CODE, EVIDENCE_SOURCE_LOG,
                                      EVIDENCE_SOURCE_ERROR, EVIDENCE_SOURCE_NONE)
 
+# --- The override rule: text may NOMINATE, never DECIDE, at the one place text overrides a verdict
+# `(engine's own answer, diagnostician's answer) -> the evidence SOURCE the override must cite`, in
+# `evidence_source` or in any `findings[].source`. Absent that source the engine's own answer
+# STANDS, and the row records `reason_override_refused = <the source it lacked>`.
+#
+# THE MEASUREMENT. Over the 118 labelled rows of `failure_triage.v1`, the diagnostician answered
+# `not_learning` about a `check_failed` on 7-9 rows whose truth WAS `check_failed` — the engine's
+# own stage verdict was right and the model overrode it — and on those rows its citation was the
+# ERROR text (the checker's refusal, i.e. the very sentence it was contradicting) or nothing. Where
+# it cited a LOG it was wrong too, on this corpus, but there the claim is at least of the right
+# SHAPE: "the objective never descended" is a claim about a series, a series lives in a stage log,
+# and the diagnostician has `read_log`/`metric_series` for exactly this. Replayed over the captured
+# answers with the rule applied: durable 97 -> 103 of 118 (12 rows moved, 7 wrong -> right, 1
+# right -> wrong, 4 wrong -> wrong), widened 102 -> 105 (9 moved, 4 / 1 / 4). The one loss each
+# time is `rubertlite-dense-retrieval` node 12 — the corpus's single genuine `not_learning` — whose
+# answer cited NOTHING; the rule holds it to the same bar as the wrong ones, which is the point.
+#
+# THIS IS DOC 44's RULE, not a confidence threshold. `check_failed` is the one DIAGNOSABLE status
+# whose "channel" is itself a model, and `not_learning` is the one answer that DISPUTES that model's
+# reading by restating it more strongly ("the check said the loss did not move; I say it never
+# learned"). A restatement grounded in the same text is not a second reading; a citation into the
+# series is. The rule is keyed on the PAIR so a third pair has to be argued in, and it is a REFUSAL
+# of the override, never a refusal of the diagnosis: the summary, the evidence and the findings are
+# still recorded on the row beside the engine's word.
+#
+# `diverged` on a `check_failed` is deliberately NOT a key — see `DIAGNOSED_FAILURE_REASONS`.
+OVERRIDE_EVIDENCE_REQUIRED: dict[tuple[str, str], str] = {
+    ("check_failed", "not_learning"): EVIDENCE_SOURCE_LOG,
+}
+
 # Durable-row bounds. The locator is a path (possibly `path:line`) and the quote is one line of
 # what was there; both land on `node_failed`/`node_repaired`, so both are capped at the row-sized
 # 300 every other model-authored string on those rows wears.
@@ -401,7 +488,110 @@ DIAGNOSIS_SUMMARY_CAP = 1200
 DIAGNOSIS_CODE_LOOK_TURNS = 3
 
 
-def coerce_failure_kind(value, fallback: str) -> str:
+
+# How far back into `res.stderr` the headline scan looks, and how much of one line it keeps. The
+# reach is generous because the evidence is measured at 1,659-14,192 characters from EOF on the
+# corpus and `res.stderr` is already clamped to 64 KB upstream; the keep is tight because this text
+# is PREPENDED to a 500-character window and a headline that crowds out the tail has traded one
+# missing fact for another.
+_HEADLINE_REACH = 64_000
+_HEADLINE_KEEP = 400
+_HEADLINE_LINES = 2
+_HEADLINE_TOTAL = 600
+# The last line of a Python traceback: `<dotted.Name>Error: message`. Three things the anchor has to
+# tolerate, each measured on the corpus rather than guessed:
+#   * LEADING WHITESPACE — a launcher indents each child's traceback inside its own report block;
+#   * a BRACKETED STREAM TAG — `torchrun` prefixes every line with `[rank0]: `, which put the OOM
+#     line outside a left-margin anchor entirely (0 of 2 DDP corpus entries matched with one);
+#   * a DOTTED module path, so `torch.OutOfMemoryError` and a bare `ValueError` both match.
+# It is still ANCHORED, so a message that merely mentions an error name ("retrying after ValueError")
+# is not mistaken for a terminal line.
+_HEADLINE_RE = re.compile(
+    r"^[ \t]*(?:\[[^\]]{1,32}\]:[ \t]*)?"
+    r"(?P<line>(?:[A-Za-z_][\w.]*\.)?[A-Za-z_]\w*(?:Error|Exception|Interrupt)\b.*)$", re.M)
+
+
+def failure_headline(stderr: str, redact=None) -> str:
+    """The exception line(s) a failed process ended on, or `""`.
+
+    WHY IT IS PUSHED. `engine/evaluate.py::_eval_failure_text` hands the repair path — the Developer's
+    prompt, the durable `node_repaired.error_in`, the judge's history rows and the terminal's `error`
+    — the LAST 500 CHARACTERS of stderr, and the fact that says what died is routinely outside it.
+    Measured on `runs/e5small-dr-unified-v4` node 4, `torch.OutOfMemoryError` is 952 characters from
+    EOF and 329 of the 500-character window is a tqdm bar's trailing whitespace; the three corpus
+    entries in `tests/test_torch_oom_is_an_oom.py` put it 1,659 / 12,991 / 14,192 characters out. So
+    the Developer was asked to fix an out-of-memory failure without the allocation size, the device
+    or the free memory — all of which its own process printed.
+
+    IT DECIDES NOTHING, and that is what separates it from the marker scan this module deleted. The
+    OOM markers went because they were TEXT WITH THE LAST WORD: nothing downstream re-checked the
+    reason they minted. This mints no reason, moves no gate and reaches no vocabulary — the failure
+    is still `crash`, the diagnostician is still asked, and `_failure_reason` never sees this string.
+    Its failure mode is correspondingly benign: an exception shape the pattern misses means no
+    headline, i.e. exactly the previous behaviour, so incompleteness costs context and can never cost
+    a wrong answer. A classifier has no such asymmetry, which is why one may not be written from a
+    pattern list and this may.
+
+    THE LONGEST MESSAGE FIRST, NOT THE LAST LINE. "Last" is the obvious rule and the corpus refutes
+    it: a `torchrun` launcher prints every rank's traceback and then its own
+    `ChildFailedError:` — a line with an EMPTY message body — and `subprocess.CalledProcessError`
+    reports a child's exit status after the child has already said why. Both are wrappers, and both
+    are last. Ranking by message length puts the line that explains the failure first, and it is a
+    property of wrappers rather than a list of their names: a wrapper's whole content is "something
+    below me failed". Ties break by lastness.
+
+    UP TO `_HEADLINE_LINES`, because the wrapper is not worthless — "this died under torchrun across
+    two ranks" is real context — it is just not the headline. The total is bounded because this text
+    is PREPENDED to a 500-character tail, and a headline that crowds out the tail has traded one
+    missing fact for another.
+
+    `redact` IS `Engine._redact` AND IS NOT OPTIONAL IN PRODUCTION. This string is prepended to the
+    repair prompt (so it reaches the provider and lands verbatim in `spans.jsonl`, which records
+    whole prompts) and rides the durable `node_repaired.error_in`. The 500-character tail one line
+    away at its call site has been going through `self._redact` for exactly that reason, and this
+    reads sixty-four thousand: measured over the preserved stage/console logs, a 500-char window
+    carries 0 masks while a 64 KB read carries 384 — including a real `password`. An exception
+    message quoting a connection string, a token-bearing URL or an env dump was reaching the model
+    and the log unmasked.
+
+    IT REDACTS THE WINDOW, THEN EXTRACTS — the C2 ordering `_screened` states one function over:
+    masking after a cut can be truncated away, and the extraction IS a cut, so a `sk-`+12 stub the
+    shape rule no longer matches would land verbatim. Optional only so the shaping can be unit
+    tested without an Engine; a redactor that raises yields NO headline, never the raw text.
+    """
+    if not isinstance(stderr, str) or not stderr:
+        return ""
+    window = stderr[-_HEADLINE_REACH:]
+    if redact is not None:
+        try:
+            window = str(redact(window) or "")
+        except Exception:  # noqa: BLE001 - a redactor that raises must not lose the terminal…
+            return ""      # …but it must also never fail OPEN and let the raw text through
+    seen: list[str] = []
+    for line in _HEADLINE_RE.findall(window):
+        text = line.strip()
+        if text and text not in seen:
+            seen.append(text)
+    if not seen:
+        return ""
+    # Longest message body first; a later line wins a tie, which keeps the historical "the line the
+    # process ended on" preference wherever two lines say equally much.
+    ranked = sorted(enumerate(seen), key=lambda pair: (len(pair[1]), pair[0]), reverse=True)
+    out: list[str] = []
+    budget = _HEADLINE_TOTAL
+    for _index, text in ranked[:_HEADLINE_LINES]:
+        piece = text[:min(_HEADLINE_KEEP, budget)]
+        if not piece:
+            break
+        out.append(piece)
+        budget -= len(piece) + 1
+        if budget <= 0:
+            break
+    return " | ".join(out)
+
+
+
+def coerce_failure_kind(value, fallback: str, engine_reason=None) -> str:
     """Normalize a diagnostician-supplied failure kind to a member of `DIAGNOSED_FAILURE_REASONS`,
     failing closed to `fallback`.
 
@@ -409,9 +599,50 @@ def coerce_failure_kind(value, fallback: str) -> str:
     because the two callers want different ones: `diagnosed_failure_reason` below passes `""` so it
     can tell "no readable kind" from "a kind", while a caller that merely wants a safe string can
     pass the engine's own answer. Pure and total over junk — a non-string, a `None`, a list, a
-    number all answer `fallback`."""
+    number all answer `fallback`.
+
+    `engine_reason`, when given, applies `DIAGNOSED_CONTEXT_BOUND`: a kind admissible only under
+    certain engine answers is `fallback` under any other. Left `None` the bound is not applied,
+    which is what a caller with no engine answer in hand (an intake layer) gets — the refusal has to
+    be spelled where the engine's own answer is known, and that is `diagnosed_failure_reason`."""
     v = str(value or "").strip().lower()
-    return v if v in DIAGNOSED_FAILURE_REASONS else str(fallback)
+    if v not in DIAGNOSED_FAILURE_REASONS:
+        return str(fallback)
+    if engine_reason is not None and v in DIAGNOSED_CONTEXT_BOUND:
+        if str(engine_reason) not in DIAGNOSED_CONTEXT_BOUND[v]:
+            return str(fallback)
+    return v
+
+
+def cited_sources(verdict) -> frozenset:
+    """Every evidence SOURCE the diagnostician's verdict cites — the primary `evidence_source` plus
+    each `findings[].source` — after the same normalization the durable row gets, so a `log` with no
+    locator is `none` here exactly as it is on the row. Empty for a non-dict; never raises.
+
+    Unredacted on purpose: only the SOURCE words are read, never the locator or the quote, so
+    nothing model-authored passes through here on its way anywhere durable."""
+    if not isinstance(verdict, dict):
+        return frozenset()
+    return frozenset(item["source"] for item in coerce_findings(verdict, None))
+
+
+def reason_override_refused(deterministic: str, verdict) -> str:
+    """The evidence source a diagnostician's override LACKED, or `""` when the override stands (or
+    there is no override to refuse).
+
+    The pure half of `OVERRIDE_EVIDENCE_REQUIRED`, split out so a caller can stamp WHY the engine's
+    own answer stood on the durable row (`reason_override_refused`) beside the answer itself —
+    `diagnosed_failure_reason` applies it and returns only the pair. Reads the verdict's raw kind
+    through the same coercion the decision uses, so the two cannot disagree about which pair a
+    verdict is. Total over junk."""
+    det = str(deterministic)
+    if det not in DIAGNOSABLE_ENGINE_REASONS or not isinstance(verdict, dict):
+        return ""
+    kind = coerce_failure_kind(verdict.get("failure_kind"), "", engine_reason=det)
+    required = OVERRIDE_EVIDENCE_REQUIRED.get((det, kind))
+    if not required or required in cited_sources(verdict):
+        return ""
+    return required
 
 
 def _screened(value, cap: int, redact=None) -> str:
@@ -710,7 +941,15 @@ def diagnosed_failure_reason(deterministic: str, verdict) -> tuple[str, str]:
          `UNCLASSIFIED_REASON` with `REASON_SOURCE_UNDIAGNOSED`. It was asked and it could not
          answer, and that is a fact worth recording as itself. See `UNCLASSIFIED_REASON` for the
          four properties that make this safe to route.
-      4. Otherwise the diagnostician's kind is the reason and the source says so — INCLUDING when
+      4. The kind is CONTEXT-BOUND (`DIAGNOSED_CONTEXT_BOUND`) and the engine's own answer is not
+         one it may be named under -> `UNCLASSIFIED_REASON` / `REASON_SOURCE_UNDIAGNOSED`, exactly
+         like an out-of-vocabulary kind, because outside its context that is what it is: a word
+         asserting an engine mechanism that was watching and did not fire.
+      5. The kind OVERRIDES the engine's answer on a pair `OVERRIDE_EVIDENCE_REQUIRED` names and the
+         verdict cites no evidence of the required SOURCE -> the engine's own answer with
+         `REASON_SOURCE_ENGINE`. Text nominated and could not decide; `reason_override_refused`
+         says which source it lacked, so the caller can record the refusal beside the word.
+      6. Otherwise the diagnostician's kind is the reason and the source says so — INCLUDING when
          it agrees with the engine. That is a 2026-08-20 change from `judged_failure_reason`, which
          stamped `engine` on agreement: under ownership-by-decision the diagnostician DID decide,
          and `engine_reason` on the same row is what lets a reader recover whether the two agreed.
@@ -732,9 +971,11 @@ def diagnosed_failure_reason(deterministic: str, verdict) -> tuple[str, str]:
     from looplab.engine.triage import AGENT_TRIAGE_ACTIONS
     if str(verdict.get("action", "")).strip().lower() not in AGENT_TRIAGE_ACTIONS:
         return UNCLASSIFIED_REASON, REASON_SOURCE_UNDIAGNOSED
-    kind = coerce_failure_kind(verdict.get("failure_kind"), "")
+    kind = coerce_failure_kind(verdict.get("failure_kind"), "", engine_reason=det)
     if not kind:
         return UNCLASSIFIED_REASON, REASON_SOURCE_UNDIAGNOSED
+    if reason_override_refused(det, verdict):
+        return det, REASON_SOURCE_ENGINE
     return kind, REASON_SOURCE_TRIAGE
 
 

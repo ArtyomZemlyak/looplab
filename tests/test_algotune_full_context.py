@@ -41,11 +41,6 @@ def _root(tmp: Path, *, n: int = 4408, with_dataset: bool = True, task: str = "d
         data.mkdir(parents=True)
         # A ragged adjacency list plus an external array reference: both real shapes from the
         # campaign's own dataset, and both were described WRONGLY by the first implementation.
-        # OPEN[suite-requires-an-undeclared-numpy] 22 tests (19 here + 3 in
-        # test_algotune_profile_command.py) fail on the documented install with
-        # ModuleNotFoundError, because this import is neither a declared dev dependency nor
-        # skip-guarded.
-        # proof:absent:numpy@pyproject.toml+absent:importorskip@tests/test_algotune_full_context.py
         # REVIEW 2026-08-30 (baseline-red): `pip install -e ".[dev,ui]" && python -m pytest` is the
         # repo's own recipe and its suite contract is "runs fully offline", with optional-dep tests
         # auto-skipping (live-LLM, docker). numpy is in neither `[dev]` nor the core deps. Either

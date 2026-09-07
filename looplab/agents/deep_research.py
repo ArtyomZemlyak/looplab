@@ -323,7 +323,31 @@ class _MemoOut(_StringifiedListTolerant):
     # A prompt that names a field and a schema that lacks it is a feature shipped INERT. The guard
     # in `tests/test_memo_question_experiment_split.py` now re-derives the prompt's field names from
     # the text and asserts each one exists here, so the two cannot move apart again.
-    open_questions: list[str] = Field(default_factory=list)
+    # THE SHAPE RULE LIVES HERE, not only in the prose ~100 lines below, and that is the whole fix.
+    # The prose has asked for "broad questions a FAMILY of experiments would answer" since v5 and
+    # the model has obeyed the TYPE while ignoring the SIZE: measured on the live board, v12's
+    # twelve questions run 195-469 characters, median 311 — LONGER than the 23 work cards they are
+    # supposed to be broader than (median 164) — against the prose's own example of 49. They are not
+    # mis-typed; only 1 of 21 questions across v11+v12 carries the arms of its own sweep. They are
+    # OVER-QUALIFIED: each embeds its own evidence and caveats ("given the DCL denominator is
+    # currently capped at the local batch", "(0.7681, node 2)", "at recorded-identical footprints"),
+    # which is exactly what makes an operator read a direction as a hypothesis.
+    #
+    # A field description is the only channel in front of the model at the moment the emit call is
+    # constructed — the same measured reason `question_concepts` and `question_parents` carry one.
+    # This field, which governs the shape, was the one of the three with no description at all.
+    open_questions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Broad open questions a FAMILY of experiments would answer, which cannot be run as they "
+            "stand. ONE clause each, and SHORT — 'does distilling from a stronger teacher help "
+            "here' is the target shape and length. Do NOT carry the evidence that motivated the "
+            "question: no scores, no node ids, no footprints, no 'given that ...' caveats, and no "
+            "list of the candidate settings you would try. All of that belongs in `reasoning`, in "
+            "`findings`, or — if you already know the exact change — in `next_experiments`. A "
+            "question the reader must parse for two lines to see what it is about is a hypothesis, "
+            "not a direction, and it will head a branch of the board for the rest of the run."),
+    )
     next_experiments: list[str] = Field(default_factory=list)
     # WHAT EACH QUESTION IS ABOUT, as concept ids, positionally aligned with `open_questions`.
     # A list-of-lists rather than objects because the emit schema is what a provider renders into a
@@ -348,6 +372,29 @@ class _MemoOut(_StringifiedListTolerant):
     # value for a field it has nothing to say about pads it, and a fabricated concept membership is
     # a lie the fold will persist and the board will render. Absence is recoverable; a wrong
     # membership is not. The default stays, and a memo that genuinely has nothing may still say so.
+    # WHICH BROADER QUESTION EACH QUESTION SITS UNDER, positionally aligned with `open_questions`
+    # exactly like `question_concepts`. A flat list of strings rather than objects for the same
+    # reason: the emit schema becomes a provider tool signature, and the alignment rule is one
+    # sentence checked at the append site, not trusted.
+    #
+    # Without it a question can only ever be a LEAF: measured on e5small-dr-unified-v12, all 11
+    # `hypothesis_added` rows carried [at_node, concepts, source, statement] and nothing else, while
+    # `Card` has carried `parent_card_id`/`child_card_ids` the whole time. The model was permitted a
+    # tree it had no way to describe.
+    #
+    # It carries a `description` for the measured reason `question_concepts` does: the field is the
+    # only channel in front of the model at the moment the emit call is constructed.
+    question_parents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Which BROADER open question each entry of open_questions sits under, at the SAME "
+            "position: question_parents[0] is the parent of open_questions[0]. Give the parent's "
+            "EXACT statement text when it is another entry of this same open_questions list, or an "
+            "existing DIRECTION_ID from the board. Empty string means the question is top-level, "
+            "which is the right answer whenever no listed question genuinely contains it — a "
+            "fabricated parent files the question under a lineage it does not belong to, and that "
+            "is not recoverable."),
+    )
     question_concepts: list[list[str]] = Field(
         default_factory=list,
         description=(
@@ -898,6 +945,7 @@ class DeepResearcher:
         memo.open_questions = clean["open_questions"]
         memo.next_experiments = clean["next_experiments"]
         memo.question_concepts = clean["question_concepts"]
+        memo.question_parents = clean.get("question_parents") or []
         memo.sources = clean["sources"]
         return memo
 
@@ -1002,8 +1050,11 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     if _repo_reader is not None:
         providers.append(_repo_reader)
     if getattr(settings, "web_search", False):
-        from looplab.tools.web import WebTools
-        providers.append(WebTools(enabled=True))
+        # Through the tool module's one constructor, so the task's `EvalSpec.web_deny` reaches the
+        # stage that makes essentially every `web_fetch` of a run (docs/56 §150 #13: 52 of 76 runs
+        # fetched their own task's published solver here).
+        from looplab.tools.web import build_web_tools
+        providers.append(build_web_tools(task))
     # Through `compose_tools`, not a hand-rolled `CompositeTools(providers)`. The comment above says
     # this stage uses the same capability assembly as the Researcher — and then the composition step
     # was spelled out separately, which is how it silently missed `Settings.hide_empty_tools`:

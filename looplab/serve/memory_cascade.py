@@ -41,6 +41,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+from looplab.core.run_identity import row_belongs_to_run
 from looplab.core.jsonlio import (
     read_jsonl_lenient, replace_jsonl_rows_atomic_preserving_quarantine)
 
@@ -101,22 +102,31 @@ class RunIdentity:
         self.run_uid = _text(run_uid)
 
     def owns(self, row: dict) -> bool:
-        row_uid = _text(row.get("run_uid"))
-        if row_uid:
-            # A row that names its incarnation is matched ONLY on that. Falling back to `run_id` here
-            # is what destroyed the other run's rows: two incarnations named `demo` are two runs.
-            return bool(self.run_uid) and row_uid == self.run_uid
-        # The LEGACY fallback, and it fires even for a uid-keyed caller — deliberately, because a
-        # row written before `run_uid` existed has no other identity and would otherwise be
-        # uncascadable forever. What it costs is real and is NOT hypothetical: two checkouts sharing
-        # `~/.looplab/memory`, both holding a run directory named `demo`, and deleting the one that
-        # has a uid also deletes the other's uid-less rows.
-        #
-        # That residual is disclosed rather than hidden — see `name_matched` on the receipt and
-        # `identity: "mixed"`. Before, `identity` keyed on the CALLER alone and asserted `run_uid`
-        # for a purge that had in fact matched rows by directory name, so the class docstring's
-        # "the ambiguity is disclosed" promise held only in the all-legacy case.
-        return bool(self.run_id) and _text(row.get("run_id")) == self.run_id
+        """Was `row` written by this run? THE shared predicate, not a second reading of it.
+
+        A row that names its incarnation is matched ONLY on that — falling back to `run_id` there is
+        what destroyed the other run's rows, since two incarnations named `demo` are two runs. A
+        row that names none falls back to the directory NAME even for a uid-keyed caller,
+        deliberately, because a row written before `run_uid` existed has no other identity and would
+        otherwise be uncascadable forever.
+
+        What that costs is real and NOT hypothetical: two checkouts sharing `~/.looplab/memory`,
+        both holding a run directory named `demo`, and deleting the one that has a uid also deletes
+        the other's uid-less rows. The residual is disclosed rather than hidden — see `name_matched`
+        on the receipt and `identity: "mixed"`. Before, `identity` keyed on the CALLER alone and
+        asserted `run_uid` for a purge that had in fact matched rows by directory name, so the class
+        docstring's "the ambiguity is disclosed" promise held only in the all-legacy case.
+
+        DELEGATED to `core/run_identity.py::row_belongs_to_run`, which is where every READER of the
+        same question already asks it. `core/run_identity.py`'s own docstring says this module
+        "worked this out first for the destructive path and this is that reasoning RE-STATED" — and
+        a re-statement is what the two were: the identical three-branch rule, in two files, one of
+        which is behind an irreversible delete. Tighten it there and the readers stop attributing
+        rows this purge still removes; tighten it here and the receipt stops describing what the
+        readers do. The COMMENTS stay, because the cost is accepted for a different reason on each
+        side, and only this side is destructive.
+        """
+        return row_belongs_to_run(row, run_uid=self.run_uid, run_id=self.run_id)
 
     def name_matched(self, row: dict) -> bool:
         """Did attributing this row rest on a directory NAME while a uid was available to key on?

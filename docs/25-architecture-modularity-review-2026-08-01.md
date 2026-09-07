@@ -9181,7 +9181,7 @@ UI-12's request-timeout wrappers are a separate finding and remain open.
 
 #### UI-14 · LOW · over-engineering · effort: small — **PARTIALLY RESOLVED (2026-08-14)**
 
-> **OPEN[built-awaiting-commit-lane-has-no-producer]** the `speculating` lane is fed; `built-awaiting-commit` is still dead configuration — the authoring projection publishes only `speculating`/`building`, so nothing can ever occupy that lane. proof:absent:built-awaiting-commit@looplab/events/authoring_projection.py
+> **DECLINED[built-awaiting-commit-lane-is-reserved]** the `speculating` lane is fed; `built-awaiting-commit` is RESERVED configuration, not a defect. measured: docs/25 — it is in `CARD_OPTIONAL_STATUSES`, rendered only when occupied, so its operator-visible cost is **0 columns**; **0 of the 13** statuses `card_ledger.py::_apply_card_status` can emit is this one, so no card occupies it. The state it names has no durable receipt between `card_build_attempted` and `node_created`, and that window is **0.4 s** by `authoring_projection.py`'s own measurement. `ui/src/cardBoardModel.js` records the precedent: `coded` sat unreachable for a year and became real on 2026-08-14 with NO board change — which is exactly what a reserved lane buys. Occupying it is a product decision about whether a 0.4 s window is worth an event.
 
 > **Status update (2026-08-14).** Resolved by the projection arm the recommendation asked for, for
 > one of the two lanes. The lane table moved to the pure model `ui/src/cardBoardModel.js`

@@ -209,6 +209,17 @@ export function rollupChips(rollup) {
       ? ` by ${rollup.best_card_id}` : ''
     chips.push({ key: 'best', label: `best ${best > 0 ? '+' : ''}${best}${owner}` })
   }
+  // The champion-relative verdict, mirrored from `card_rollup_brief`'s own second number — a
+  // DIFFERENT baseline from `best_delta` (the run champion, not each child's parent), and the one
+  // that answers a direction answered by DRAFTS, whose children have no parent to delta against.
+  // Omitting it here while the Python half and the wire carried it left the operator's board
+  // showing an answered question as unmeasured — the exact defect the pair was added to end.
+  const anchor = rollup.best_vs_champion
+  if (typeof anchor === 'number' && Number.isFinite(anchor)) {
+    const owner = typeof rollup.best_vs_champion_card_id === 'string' && rollup.best_vs_champion_card_id
+      ? ` by ${rollup.best_vs_champion_card_id}` : ''
+    chips.push({ key: 'champion', label: `best vs champion ${anchor > 0 ? '+' : ''}${anchor}${owner}` })
+  }
   return chips
 }
 

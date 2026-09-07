@@ -1,7 +1,7 @@
 # 53. What the AlgoTune campaign says about OUR loop (2026-08-26)
 
-Companion to [doc 51](51-algotune-arm-operational-notes-2026-08-20.md) (what was touched in the
-third-party checkout) and [doc 52](52-bench-box-jhub-l40s-2026-08-20.md) (the box). Those two are
+Companion to [doc 62](62-algotune-arm-operational-notes-2026-08-20.md) (what was touched in the
+third-party checkout) and [doc 63](63-bench-box-jhub-l40s-2026-08-20.md) (the box). Those two are
 about the *harness*. This one is about **LoopLab itself** — the eight task-arms the campaign scored
 against AlgoTuner, read as evidence about our loop rather than as a scoreboard.
 

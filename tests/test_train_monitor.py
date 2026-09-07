@@ -1129,7 +1129,7 @@ def test_a_HEALTHY_stage_that_cannot_MEET_ITS_WALL_still_records(tmp_path, monke
     def _doomed(alert, trajectory, resolved, log_plan, *, grace_cap=None):
         alert["projected_overrun_s"] = 4700.0
         alert["stage_wall_s"] = 36000.0
-        alert["overrun_beyond_grace_s"] = 2900.0
+        alert[_tm.OVERRUN_BEYOND_BAR_KEY] = 2900.0
         alert["stage_grace_s"] = 1800.0
 
     monkeypatch.setattr(_tm, "stamp_projected_overrun", _doomed)
@@ -1148,7 +1148,7 @@ def test_a_HEALTHY_stage_that_cannot_MEET_ITS_WALL_still_records(tmp_path, monke
     assert alerts[0]["status"] == "healthy", (
         "and it must say the training was HEALTHY: the row is about the CLOCK, and relabelling it "
         "as a health concern would be a false claim about the loss")
-    assert alerts[0]["overrun_beyond_grace_s"] == 2900.0, (
+    assert alerts[0][_tm.OVERRUN_BEYOND_BAR_KEY] == 2900.0, (
         "the projection must ride the row it opened — mutation: open the gate but write the alert "
         "without absorbing the fields, and the operator gets a bare healthy row with no reason")
 

@@ -39,7 +39,7 @@ import anyio
 import orjson
 
 from looplab.core.llm import BudgetExceeded
-from looplab.core.errors import BudgetExceeded, is_run_ending
+from looplab.core.errors import BudgetExceeded, exception_leaves, is_run_ending
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
                                  coerce_node_id,
                                  developer_artifact_footprint, developer_stuck_reason,
@@ -96,9 +96,11 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
 # measurement behind the line, and for why the diagnostician IS the triage call rather than a second
 # agent (8.7 provider calls per failure, already paid).
 from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagnosis_summary,
+                                             failure_headline,
                                               diagnosis_repair_lead,
                                               coerce_evidence, coerce_findings,
                                               diagnosed_failure_reason, diagnosis_tools,
+                                              reason_override_refused,
                                               engine_observed_facts, evidence_citation_resolves,
                                               resolve_findings)
 # NOTE what is deliberately NOT imported here: `UNCLASSIFIED_REASON` and `REASON_SOURCE_UNDIAGNOSED`.
@@ -262,6 +264,12 @@ def _effective_repair_cap(inline_repair_attempts: int) -> int:
     return int(inline_repair_attempts) or _UNLIMITED_REPAIR_CEILING
 
 
+# OPEN[eval-attempt-is-one-giant-method] `_evaluate` is 1,898 lines reading 51 engine attributes,
+# with 20 appends, 15 `_write_lock` blocks and 4 folds; six test files `inspect.getsource` it, at
+# seven sites, to find things.
+# The phases its own comments name (admit / run_attempt / settle_outcome / salvage / decide_repair /
+# apply_repair / write_terminal) are the split, with every append and lock staying where it is.
+# proof:`absent:class EvalAttempt@looplab/engine/evaluate.py`
 def _repair_attempts_left(attempt: int, cap: int) -> int:
     """How many repairs this node may still make — against the bound that will actually stop it.
 
@@ -638,6 +646,7 @@ from looplab.events.replay import fold
 from looplab.events.replay import event_generation_binds
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_INSTALLED,
+                                  EV_NODE_BUILD_DELTA,
                                   EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
@@ -844,6 +853,25 @@ class SpeculativeEvaluationInvariantError(AssertionError):
 _LOG = logging.getLogger(__name__)
 
 
+# THE STOPS `_evaluate`'s CONTAINMENT MAY NEVER ABSORB, named once and read twice — by the `except`
+# clause for the exception it arrives as, and by the leaf test for the exception it arrives INSIDE.
+# Cancellation is not a member because `anyio.get_cancelled_exc_class()` needs a running backend and
+# so cannot be resolved at import; both readers splice it in.
+#
+#   * KeyboardInterrupt / SystemExit — the interpreter is unwinding for a reason no node terminal
+#     should paper over.
+#   * BudgetExceeded — a SPEND LIMIT, a fact about the RUN. Every `except BudgetExceeded: raise` on
+#     the paths beneath `_evaluate` exists to hand it to `Engine.run`'s global hard stop; contained,
+#     it becomes `node_failed{reason: "engine_error"}` plus an `engine_error` pause, i.e. the
+#     operator's own budget reported to them as a fault of the box.
+#   * SpeculativeEvaluationInvariantError — the engine's REASONING is wrong (an unconfirmed
+#     prediction was about to cross into the sandbox). Containment downgrades an ENVIRONMENT fault
+#     to one node's terminal, which is right because the box was at fault and the engine was not;
+#     recording this one that way hides the exact crossing the invariant exists to make impossible.
+_EVAL_DELIBERATE_STOPS = (KeyboardInterrupt, SystemExit, BudgetExceeded,
+                          SpeculativeEvaluationInvariantError)
+
+
 class EvaluateMixin:
     """The engine's eval-task cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
@@ -1022,6 +1050,63 @@ class EvaluateMixin:
             return False
         self.store.append(EV_NODE_EVAL_STARTED, {
             "node_id": node.id, "generation": node.attempt})
+        return True
+
+    def _record_node_build_delta(self, node) -> bool:
+        """Say whether this node's built SOURCE differs from the parent it claims to modify.
+
+        Placed after MATERIALIZATION and before the train. That is where the GPU hours are, and it
+        is the last moment the question is free to ask.
+
+        IT USED TO RUN ONE STEP TOO EARLY and could therefore never fire on the population it was
+        measured for. `_record_eval_start_boundary` is the natural-looking home — it is the
+        "this node is now evaluating" receipt — but it runs BEFORE `self._materialize(node, workdir)`
+        creates `nodes/node_<id>` at all (and, on the card path, before `_card_eval_one` even
+        starts). `source_tree_digest` therefore answered "" for the node's own tree and the function
+        returned at its first guard, so no row could exist for a node's FIRST evaluation: exactly
+        the 47 parent edges the feature cites. Only a reset or a stage-scoped re-run, whose workdir
+        already exists, could produce one.
+
+        MEASURED across the three e5small runs with workspaces — 2 of 47 parent edges are nodes
+        whose source is byte-identical to a parent's, each having trained a full recipe to
+        re-measure it. One was proposed on a false premise about that parent ("node 10's UNCLIPPED
+        footprint"; node 10's config.yaml:279 reads `max_grad_norm: 1.0`), the other restated an
+        experiment ten nodes earlier in different words.
+
+        RECORDED, NOT REFUSED. A refusal here would have destroyed both, and they are the only
+        replicates this box has produced — they are what answers the noise question (|delta| 0.000573
+        and 0.002519 against a 0.010945 gap to the champion). Visibility first, the same rung
+        `trace_export_health` and `belief_admission` shipped on.
+
+        Best-effort throughout: a digest that cannot be computed yields no row, never an exception,
+        because a diagnostic may not cost a node its evaluation.
+        """
+        parents = [p for p in (getattr(node, "parent_ids", None) or []) if p is not None]
+        if not parents:
+            return False
+        try:
+            from pathlib import Path as _Path
+            from looplab.engine.workspace import source_tree_digest
+            root = _Path(self.run_dir) / "nodes"
+            mine = source_tree_digest(root / f"node_{node.id}")
+            if not mine:
+                return False
+            same = [p for p in parents
+                    if source_tree_digest(root / f"node_{p}") == mine]
+        except Exception:  # noqa: BLE001 - a diagnostic may never cost a node its evaluation
+            return False
+        try:
+            assert EV_NODE_BUILD_DELTA in DIAGNOSTIC_EVENTS   # see the type's own note
+            self.store.append(EV_NODE_BUILD_DELTA, {
+                "node_id": node.id, "generation": node.attempt,
+                "parent_ids": list(parents),
+                # The parents this build is INDISTINGUISHABLE from. Empty is the healthy case and is
+                # still recorded, so a run where nothing collided differs from a run nobody
+                # instrumented — the same reason `belief_admission` is not gated on `dropped`.
+                "identical_to": same,
+                "source_digest": mine[:16]})
+        except Exception:  # noqa: BLE001
+            return False
         return True
 
     async def _auto_pause_provider_failure(self, what: str) -> None:
@@ -1830,9 +1915,111 @@ class EvaluateMixin:
                     repaired_footprint["gpu_mem_mib"], min(held_mem))
         return repaired_footprint
 
+    @staticmethod
+    def _crash_detail(exc: BaseException) -> str:
+        """Name what actually went wrong, through however many `ExceptionGroup`s it arrived in.
+
+        `_evaluate`'s body runs its eval beside a watcher inside a nested `anyio` task group, so an
+        exception from the eval reaches the containment handler wrapped: `str(exc)` is
+        `"unhandled errors in a TaskGroup (1 sub-exception)"`, which names nothing. That string on a
+        durable terminal sends the operator looking for a traceback in a process that has exited —
+        the exact uselessness the terminal exists to avoid — so the group is flattened to the leaves
+        it carries. Bounded, because a nested group is a tree and this runs on the failure path.
+        """
+        named: list[str] = []
+        for leaf in exception_leaves(exc):
+            if len(named) >= 4:                     # bounded: a nested group is a tree, and this
+                break                               # runs on the failure path
+            named.append(f"{type(leaf).__name__}: {leaf}")
+        return " | ".join(named) or f"{type(exc).__name__}: {exc}"
+
+    async def _contain_eval_crash(self, node_id: int, generation: int, exc: BaseException) -> None:
+        """Close ONE node on an unexpected exception, instead of letting it cancel every sibling.
+
+        `_evaluate` runs as a child of the RUN-SCOPED eval task group and its three callers are
+        `try/finally` with no `except`, so before this existed an `OSError` from `_materialize` or
+        `_write_node_files`, an ENOSPC from a `store.append`, or a `KeyError` on a hand-edited node
+        took the whole group down: every in-flight sibling cancelled mid-training with no terminal of
+        its own, the run exiting on a traceback, and resume finding all of them still `pending` and
+        re-spending their GPU hours. On a two-card box that is one bad node destroying its
+        neighbour's multi-hour training.
+
+        THREE PROPERTIES, each of them the reason a narrower fix would not do.
+
+        * **SHIELDED.** The terminal is appended inside `anyio.CancelScope(shield=True)` for exactly
+          the reason the `gpu_unpinnable` handler states at length: acquiring `_write_lock` is a
+          cancellation checkpoint, so a group already being torn down preempts the append and the
+          promised terminal is silently skipped — leaving the node `pending` after all, which is the
+          state this exists to prevent.
+
+        * **`engine_error` is its own reason, not `crash`.** `crash` means the CANDIDATE's process
+          died and is in `FAILURE_REASONS`, so it is repairable: the Developer would be handed a
+          disk-full or a permissions fault and asked to fix the training script, which cannot work
+          and spends a paid triage call to discover it. This is the ENGINE failing, so it must not
+          be diagnosed, must not be repaired, and must not be salvaged — the reason is deliberately
+          outside every one of those vocabularies, which is what makes it terminal by omission
+          rather than by a fourth list to keep in sync.
+
+        * **IT PAUSES THE RUN.** A node closed this way is evidence about the box, not about the
+          idea: the disk is full, the run directory went read-only, an inode vanished. Continuing to
+          dispatch is how one such fault becomes N failed nodes and a budget spent on nothing. The
+          pause is appended in the SAME locked section as the terminal so a reader can never see one
+          without the other, and it is skipped if the run is already stopping.
+
+        A LAST-RESORT append that itself fails is swallowed, and that is not laxity: this handler
+        exists on the path where the event log may be exactly what is broken, and raising here would
+        re-enter the failure mode it was written to contain, one frame further out.
+        """
+        from looplab.events.types import EV_PAUSE
+
+        detail = self._crash_detail(exc)
+        try:
+            with anyio.CancelScope(shield=True):
+                async with self._write_lock:
+                    state = fold(self.store.read_all())
+                    node = state.nodes.get(node_id)
+                    # Only if this lifecycle is still open. A body that already wrote its own
+                    # terminal and then raised on the way out (a tracer teardown, a span export) must
+                    # not get a second one — the fold is idempotent on duplicates, but the second row
+                    # would carry a reason that contradicts the first.
+                    if (node is not None and node.status is NodeStatus.pending
+                            and generation >= 0 and node.attempt == generation):
+                        self.store.append(EV_NODE_FAILED, {
+                            "node_id": node_id, "generation": generation,
+                            "error": self._redact(detail)[:400], "reason": "engine_error"})
+                    if not (state.paused or state.finished or state.stop_requested):
+                        self.store.append(EV_PAUSE, {
+                            "reason": "engine_error",
+                            "detail": self._redact(
+                                f"evaluation of node {node_id} raised {detail}")[:400]})
+        except BaseException:                          # noqa: BLE001 — see the docstring
+            pass
+        _LOG.exception("evaluation of node %s raised; the node is closed and the run is paused",
+                       node_id)
+
     async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter,
                         max_es: Optional[float] = None) -> None:
-        async with limiter:
+        # CONTAINMENT (2026-09-03). Everything below runs as a CHILD of the run-scoped eval task
+        # group, and its three callers are `try/finally` with no `except`. So an exception that is
+        # not one of the fail-closed terminals handled inside — an OSError from `_materialize` or
+        # `_write_node_files`, an ENOSPC from a `store.append`, a `KeyError` on a hand-edited node —
+        # escaped into the group and CANCELLED EVERY SIBLING EVAL, mid-training, with no terminal for
+        # any of them: the run exits on a traceback, resume finds every one of those nodes still
+        # `pending`, and re-spends their GPU hours. On a two-card box that is one bad node destroying
+        # its neighbour's multi-hour training.
+        #
+        # This is the `gpu_unpinnable` shape generalised. That handler already establishes the whole
+        # rule for one exception type — terminalize THIS node under `_write_lock` rather than let the
+        # raise reach the group — and the argument does not depend on which exception it was; it
+        # depends on the BLAST RADIUS, which is identical for all of them.
+        #
+        # A cancellation is RE-RAISED and never terminalized: it is how a reset, an abort and an
+        # operator stop reach this worker, and answering one with a `node_failed` would invent a
+        # failure out of a deliberate intervention. `KeyboardInterrupt`/`SystemExit` likewise — the
+        # process is going down and a terminal claiming the node failed would be a lie about why.
+        _contained_generation = [-1]
+        try:
+         async with limiter:
           with self.tracer.span("evaluate", new_trace=True, node_id=node_id) as sp:
             events_at_start = self.store.read_all()
             state = fold(events_at_start)
@@ -1856,6 +2043,11 @@ class EvaluateMixin:
             # cross into the sandbox. See `_assert_speculative_selection_confirmed`.
             self._assert_speculative_selection_confirmed(state, node)
             generation = node.attempt       # immutable identity of THIS worker's node lifecycle
+            # ...and published to the containment handler at the top, which has no other way to name
+            # the lifecycle it is closing. Re-folding there would read whatever generation is CURRENT
+            # at failure time, which after a concurrent reset is a different lifecycle than the one
+            # that raised — and a terminal on the wrong generation is worse than none.
+            _contained_generation[0] = generation
             # The trace is opened before the fold above so pre-start exits remain observable. Once
             # this worker has an exact lifecycle, stamp the root; the span index uses that root receipt
             # to keep reset attempts disjoint while every nested generation/tool stays in this trace.
@@ -1983,6 +2175,12 @@ class EvaluateMixin:
             if not _reuse:
                 self._materialize(node, workdir)    # seed tree -> node edits -> task assets
                 _stamp_workdir(node)                # the workdir now IS this manifest
+            # THE BUILD DELTA, here rather than on the eval-start receipt: the question is about
+            # BYTES ON DISK, and until the line above there are none. Fold-ignored and diagnostic,
+            # so a concurrent eval task may append it (invariant #1); best-effort throughout, so it
+            # can never cost this node its evaluation.
+            self._record_node_build_delta(node)
+            if not _reuse:
                 # A stage-scoped re-run whose workdir was GONE has nothing to reuse — the re-seed just
                 # wiped any artifacts. Skipping earlier stages now would run the restarted stage against
                 # MISSING inputs, so drop the start_stage and re-run the FULL pipeline instead.
@@ -2085,6 +2283,10 @@ class EvaluateMixin:
             # nothing" (`failure_diagnosis.EVIDENCE_SOURCE_NONE`).
             _evidence = None
             _evidence_resolved = None
+            # WHY THE ENGINE'S OWN WORD STOOD over a diagnostician that named a different one — the
+            # evidence source the override lacked (`failure_diagnosis.OVERRIDE_EVIDENCE_REQUIRED`),
+            # or None when no override was refused. Omitted from the row when None, same rule.
+            _override_refused = None
             # …and the ACCOUNT plus the trail behind it, on the same rule. `None`/`None` and not
             # `""`/`[]`, deliberately: an empty summary and an empty list are a diagnostician that
             # was asked and wrote nothing down, which is a real and different answer from one that
@@ -2372,6 +2574,7 @@ class EvaluateMixin:
                 # one, and that is exactly the property the summary is trusted for.
                 _evidence, _evidence_resolved = None, None
                 _summary, _findings = None, None
+                _override_refused = None
                 # The node's whole account of what went wrong — see `_eval_failure_text`, which is
                 # where the no-metric hint and the blank-stderr fallback now live.
                 err = self._eval_failure_text(res)
@@ -2657,6 +2860,14 @@ class EvaluateMixin:
 
                 _repair_tools, _monitor_verdicts = await anyio.to_thread.run_sync(
                     _repair_inputs, abandon_on_cancel=True)
+                # OPEN[repair-path-holds-the-engine-loop] the three paid repair-path calls (`_triage_crash`,
+                # `_repair`, `_repair_critic`) are plain sync calls on the engine loop: driven with a 5 ms ticker,
+                # ZERO loop ticks pass during one, so watchdog kills, operator aborts and sibling terminals wait out
+                # a 116-276 s median (one recorded case 88.3 min). The propose lanes were offloaded 2026-08-30; this
+                # path was not, and the ContextVar reason given for the direct call is false (a worker thread
+                # inherits the caller's context). Offload with `to_thread.run_sync`, but make the Developer's
+                # per-call outputs a RETURN value first: today the freeze is what serialises concurrent repairs on
+                # the shared instance. proof:`present:triage = self._triage_crash(state, node, err@looplab/engine/evaluate.py`
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
                                             depth=_depth,
@@ -2700,6 +2911,11 @@ class EvaluateMixin:
                 # `idea_rejected`, which is the engine's word for "the lineage is wrong" and not a
                 # classification of the eval at all — it stays the last word, and `_reason_source`
                 # below records that the engine chose it.
+                # …and WHY the engine's word stood when it did: the source the override lacked
+                # (doc 44's "text may nominate, never decide" at the one pair where text overrides a
+                # stage verdict). Read off the same verdict and the same deterministic answer the
+                # rule above read, BEFORE `reason` is rebound, so the two cannot disagree.
+                _override_refused = reason_override_refused(reason, triage) or None
                 reason, _reason_source = diagnosed_failure_reason(reason, triage)
                 # WHERE THE DIAGNOSTICIAN SAID IT LOOKED, and whether that citation resolves. The
                 # evidence is not decoration: no out-of-band probe exists for a failure KIND (see
@@ -2964,7 +3180,10 @@ class EvaluateMixin:
                         # what went wrong and what to do about it" then "…and here is how to say you
                         # cannot", never the other way round.
                         new_code = self._repair(
-                            node, self._repair_error_context(reason, _err_in, state=state, node=node)
+                            node, self._repair_error_context(
+                                reason, _err_in, state=state, node=node,
+                                headline=failure_headline(
+                                    getattr(res, "stderr", "") or "", self._redact))
                             + developer_stuck_contract(DEVELOPER_STUCK_PREFIX),
                             state)
                     except BudgetExceeded:
@@ -3013,6 +3232,11 @@ class EvaluateMixin:
                 # own terms, which is the common case (median repair uses 13 % of its clock).
                 _budget_exhausted = str(
                     getattr(self.developer, "last_budget_exhausted", "") or "").strip()[:32]
+                # DID THE SESSION EVER TRY TO WRITE. Snapshotted HERE for the same concurrency
+                # reason as the bound above. `changed: []` says the tree did not move; this says
+                # whether the model reached for the write surface at all, and the pair is what turns
+                # `inert` from one word into two distinct failures with different remedies.
+                _edit_calls = int(getattr(self.developer, "last_edit_calls", 0) or 0)
                 # THE DEVELOPER SAYING "I DO NOT KNOW HOW TO FIX THIS" (F8). The first of the two
                 # signals the operator asked for, and the one that already existed as a capability
                 # and had no way to be expressed: a Developer that knew it was beaten could only
@@ -3174,6 +3398,7 @@ class EvaluateMixin:
                         # fold-ignored (invariant #5); no metric, champion, selectability or
                         # violation moves on it, and `INERT_REPAIR_LIMIT` is untouched.
                         **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
+                        "edit_calls": _edit_calls,
                         # A DECLARED COORDINATE THIS REPAIR MOVED, if any. Additive and fold-ignored
                         # (invariant #5), and OMITTED when empty rather than written as `[]`: an
                         # absent key on an old row means "nobody looked", which is not the same fact
@@ -3209,6 +3434,11 @@ class EvaluateMixin:
                         **({"reason_evidence": _evidence} if _evidence else {}),
                         **({"reason_evidence_resolved": _evidence_resolved}
                            if _evidence_resolved is not None else {}),
+                        # WHY THE ENGINE'S WORD STOOD, when a diagnostician named another and the
+                        # override was refused for lacking this evidence source. Additive,
+                        # fold-ignored, omitted when no override was refused.
+                        **({"reason_override_refused": _override_refused}
+                           if _override_refused else {}),
                         # WHAT HAPPENED, IN PROSE — same additive, fold-ignored, omitted-when-absent
                         # rule as the pair above, and the absence means the same thing: nobody was
                         # asked. This is the column that makes the row readable a week later
@@ -3282,6 +3512,7 @@ class EvaluateMixin:
                     # divergence here would show one node two different histories depending on
                     # whether the process had resumed.
                     **({"budget_exhausted": _budget_exhausted} if _budget_exhausted else {}),
+                    "edit_calls": _edit_calls,
                     # Same omit-when-empty rule as the durable row above, and for the same reason:
                     # `_format_repair_log` renders this row and the rebuilt one identically, so a
                     # `[]` here and an absent key there would render two different histories for
@@ -3742,6 +3973,8 @@ class EvaluateMixin:
                         data["reason_evidence"] = _evidence
                     if _evidence_resolved is not None:
                         data["reason_evidence_resolved"] = _evidence_resolved
+                    if _override_refused:
+                        data["reason_override_refused"] = _override_refused
                     # THE ACCOUNT AND ITS TRAIL, on the same rule as on `node_repaired` above. This
                     # is the row a whole run is audited from and the row most likely to be read
                     # after everything else is gone, which is exactly why the SUMMARY has to carry
@@ -3769,3 +4002,54 @@ class EvaluateMixin:
                             triage_outcome[0], self._redact(str(triage_outcome[1]))[:300])
                     self.store.append(EV_NODE_FAILED, data)
                 self._maybe_crash()
+        except (anyio.get_cancelled_exc_class(), *_EVAL_DELIBERATE_STOPS):
+            # A deliberate stop is not a node failure. Cancellation is how a reset, an operator abort
+            # and a run stop reach this worker; answering one with a `node_failed` would invent a
+            # failure out of an intervention, and swallowing it would break structured concurrency.
+            #
+            # `BudgetExceeded` is in this tuple and not the one below, and it is the member the
+            # containment's own argument gets wrong. It is an `Exception` — so the blanket clause
+            # DOES reach it — and every `except BudgetExceeded: raise` on the paths under here
+            # (`_triage_crash`, `_repair`, `crash_repair`) exists to hand it up to `Engine.run`,
+            # whose `except BudgetExceeded: raise  # global hard stop` ends the run. Contained
+            # instead, a SPEND LIMIT is filed as `engine_error` — a reason deliberately outside
+            # every failure vocabulary, so no diagnosis, no repair, no salvage — and the run is
+            # paused with `reason="engine_error"`, i.e. the operator's own budget reaches them as a
+            # box fault. The three below are environment faults about ONE node; this is a fact about
+            # the whole run, and it was never this handler's to absorb.
+            #
+            # An INVARIANT VIOLATION must stay loud for the opposite reason. The containment below
+            # downgrades an ENVIRONMENT fault — a full disk, a read-only directory — to one node's
+            # terminal, which is right because the engine's reasoning was sound and the box was not.
+            # `SpeculativeEvaluationInvariantError` says the engine's reasoning is WRONG: an
+            # unconfirmed prediction was about to cross into the sandbox. Recording that as a node
+            # failure and pausing would hide the exact thing the invariant exists to make impossible,
+            # and would let the next run make the same crossing with a tidier receipt.
+            raise
+        except Exception as exc:                                       # noqa: BLE001 — see above
+            # `Exception`, NOT `BaseException`, and the line is deliberate. Every measured production
+            # shape is an `Exception` — an OSError from `_materialize`/`_write_node_files`, an ENOSPC
+            # from a `store.append`, a KeyError on a hand-edited node — while a bare `BaseException`
+            # outside the three re-raised above means the interpreter is unwinding for a reason no
+            # node terminal should paper over. It is also a seam this repo already documents:
+            # `tests/test_repair_stop_decision.py`'s `_Kill(BaseException)` carries "a BaseException
+            # so `_evaluate`'s containment cannot absorb it", and a test that has to sneak past a
+            # handler is a handler reaching further than its own argument does.
+            #
+            # BUT THE CLAUSE ABOVE IS NOT ENOUGH ON ITS OWN, and this is the half that shipped
+            # wrong. The body runs its eval beside a watcher inside a nested `anyio` task group, so
+            # a deliberate stop raised in there reaches this handler WRAPPED: the object is an
+            # `ExceptionGroup` — itself an `Exception` — and the tuple above never matches it. A
+            # `BudgetExceeded` from the inline repair therefore arrived here as a group and was
+            # filed as `engine_error`, i.e. the operator's own spend limit reported as a box fault,
+            # with the run paused instead of stopped. So the question is asked of the LEAVES.
+            #
+            # ANY leaf, not all of them: a mixed group means the run is ending AND one node also hit
+            # an environment fault, and losing the run-level stop is strictly worse than leaving
+            # that node `pending` for resume — which is what every escape did before this handler
+            # existed anyway.
+            if any(isinstance(leaf, _EVAL_DELIBERATE_STOPS + (anyio.get_cancelled_exc_class(),))
+                   for leaf in exception_leaves(exc)):
+                raise
+            await self._contain_eval_crash(node_id, _contained_generation[0], exc)
+

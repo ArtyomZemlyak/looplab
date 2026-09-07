@@ -1232,6 +1232,25 @@ class Settings(BaseSettings):
     # 0 disables it entirely. 3 rather than 1: a first node can fail on something a Developer really
     # can repair, and stopping a whole run on one crash would be worse than the grind it prevents.
     systemic_failure_stop: int = Field(default=3, ge=0)
+    # How many Developer-session CRASHES (`node_failed` with `reason: developer_crash` — the
+    # `(developer error: …)` sentinel, a provider that could not be reached even after the client's
+    # own within-call retries) a run absorbs before the circuit breaker auto-PAUSES it. Counted PER
+    # RUN over the event log, in log order: the crash whose position reaches this number requests
+    # the pause, every crash below it still terminalizes its node exactly as before and the search
+    # goes on. `1` is the historical rule — pause on the FIRST crash — and is the default because
+    # nothing about the breaker's argument has changed: a Developer that cannot finish one node has
+    # hit something a NEW node cannot fix, and rapid-firing more dead nodes is the wrong answer (the
+    # 403 blowout spun 67 of them). What changed is what a pause COSTS on an unattended stand: in the
+    # 2026-08-24 campaign 9 of 20 arm-B runs ended `PAUSED — a Developer session crashed` and were
+    # never resumed (docs/58 §58.2), each having reached ~$1.00 anyway — the pause was the end of the
+    # run, not a freeze somebody lifted. A bench profile sets `2`, i.e. one automatic retry, because
+    # there is no operator to resume and a single crashed session is, on that stand, usually one
+    # flapped socket. Per RUN and not per phase or chunk, on `_probe_call_counter`'s ground: the
+    # thing being bounded is what the whole run has spent on dead sessions. The recovery sweep
+    # (`speculation.py::_close_developer_sentinel_once`) reads the same rule, so a below-threshold
+    # crash terminal with no pause after it is the DESIGN and is not "recovered" into one.
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins a resumed pre-2026-09-06 run to `1`.
+    developer_crash_pause_after: int = Field(default=1, ge=1)
     # PART V (F1): concept CLASSIFIER re-tag + consolidation cadence, DECOUPLED from strategist_every. The
     # LLM concept map is heavier and slower-moving than a strategy consult, so it refreshes on its own
     # (sparser) interval. Researcher-authored idea.concepts still fold immediately at node_created — this
@@ -1542,6 +1561,19 @@ class Settings(BaseSettings):
     # use the raw agent output unchecked.
     validate_agent: bool = True
     agent_max_retries: int = 1    # re-prompts of the agent on an invalid result
+    # How long ONE external coding-agent invocation may run before it is killed.
+    #
+    # IT WAS UNREACHABLE. `CliAgentDeveloper.__init__` carries `timeout: float = 600.0` and
+    # `agents/factory.py` never passed the argument, so on every composed run that constructor
+    # default WAS the value and no config, env var or UI field could move it — a launch-time
+    # constant nobody chose for a repo task, where the agent seeds a whole worktree, reads it and
+    # writes several files. The default here is that same 600.0, so an unset config is
+    # byte-identical to what shipped.
+    #
+    # Bounded like every other wall in this file rather than left open: an agent that never exits is
+    # a build slot held forever. NOT the eval clock — `max_eval_timeout` bounds the Researcher's
+    # per-node evaluation, a different wall on a different process.
+    agent_timeout: float = Field(default=600.0, gt=0, le=24 * 3600.0)
     # Patch-gated multi-file agent (ADR-7 Rule 3): run the CLI agent in a git worktree and
     # accept only edits whose paths match `agent_surface` (reject-not-strip out-of-surface
     # touches). Lets the agent create helper modules, not just solution.py. Degrades to
@@ -1843,6 +1875,21 @@ class Settings(BaseSettings):
     # is detected and retried on a fresh connection — the fix for silent multi-minute hangs. Set False
     # to use one blocking read (old per-op timeout semantics) if an endpoint streams badly.
     llm_stream: bool = True
+    # What the client does with a request whose STREAM stalled (an idle-timeout mid-body, an in-band
+    # SSE error frame, a keepalive-only 200): `True` (the historical behaviour, byte for byte) retries
+    # the next attempt of that call WITHOUT SSE and, after `core/llm.py::STREAM_STALL_DEGRADE_AFTER`
+    # stalls, stops streaming for the client's lifetime — the right trade on an endpoint that
+    # answers the same request fine without SSE while its stream wedges. `False` retries a stalled
+    # stream AS A STREAM, on the same backoff, and never degrades. It exists because on a stand
+    # whose proxy has a whole-request read timeout the non-SSE attempt is exactly the request that
+    # timeout kills: without SSE the 300 s window measures the whole generation. Measured on the
+    # 2026-09-03 bench batch (docs/56 §173-175): under `LOOPLAB_LLM_STREAM=1` `oldCK9` still sent
+    # 58 of 301 calls unstreamed on this fallback's initiative, 4 died at the 300 s wall, and
+    # $0.10 of its $1.00 went on twenty re-sends of one body. Per-run rather than per-call because
+    # the stand's property (does the proxy bound the whole request?) is a property of the endpoint,
+    # not of any one prompt. No `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: `True` IS the historical
+    # value, so a resumed run gains nothing.
+    llm_stream_stall_fallback: bool = True
     # LLM IDLE timeout (seconds). Stream mode: the INTER-TOKEN stall limit — a steady generation is
     # never cut off, only a silent endpoint. Non-stream: bounds the whole read. Raise for endpoints
     # with a long prefill on huge prompts; lower to fail fast on a flaky shared endpoint.
@@ -1892,6 +1939,24 @@ class Settings(BaseSettings):
     #
     # Priced calls only -- a local model reports no cost and can never trip it.
     llm_budget_usd: float = Field(default=0.0, ge=0.0)
+    # Do not OPEN a new node once `llm_budget_usd - spent` is below this many dollars; finish the run
+    # on the same `BudgetExceeded` the ceiling raises instead (`CostAccountant.require_headroom`).
+    # A node cycle that opens with less than it costs is bought and then discarded at the ceiling:
+    # measured over the 76-run AlgoTune probe corpus (docs/56 §156), $5.91 of $76.73 (7.7 %) landed
+    # AFTER the last node a run ever evaluated, and the median completed cycle costs $0.3370. The
+    # threshold is the measured knee and NOT the audit's p75 ($0.4481): replayed against every
+    # threshold, $0.10 refuses 61 empty cycles, redirects $1.54 and costs exactly ONE real node,
+    # which scored 0 — while p75 refuses 54 real nodes including the corpus's best (277.23). It is
+    # sharp: $0.15 already costs three nodes and a 211.40. Re-derive with
+    # `benchmarks/budget_gate_curve.py` before moving it; the boundary compares with a 1e-9
+    # tolerance because `1.00 - 0.92` is `0.0799…` and a cent of float error there is one 277.23.
+    # Inert without a ceiling (`llm_budget_usd` 0 = no limit, so there is no remainder to test) and
+    # `0` turns it off. Checked on the MAIN task at the node-open decision only — never inside a
+    # worker thread or an eval child — so every existing ceiling path (the deferred stop, the
+    # in-flight-eval drain, `run_finished.reason = budget_exhausted`) handles it unchanged.
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins a resumed pre-2026-09-06 run to `0.0`: a stop is new
+    # authority, and re-entry never adds one to a run already in flight.
+    node_open_budget_floor_usd: float = Field(default=0.10, ge=0.0)
     # Stop ADVERTISING a tool whose provider reports it holds nothing right now
     # (`tools/_base.py::INVENTORY_CONTRACT`). It is the offer that is withheld, never the route: a
     # withheld tool still dispatches if the model calls it, so nothing becomes unreachable, and the
@@ -2048,6 +2113,19 @@ class Settings(BaseSettings):
     # `declare_stages` was called 0 times across six probes while the block cost 4.8-6.0 % of each
     # $1 run -- 5,001 characters of GPU-training advice to a role with one `score` stage.
     developer_stage_guidance: bool = True
+    # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
+    # implement/repair) with a small block carrying what EARLIER phases of this run already read —
+    # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
+    # and an index row for the rest. Measured over 97 AlgoTune probe runs (docs/56 §200.2):
+    # 46.7 % of tool-calling turns (11,853 of 25,381, $25.04 of $63.34 of prompt) requested
+    # nothing but content already retrieved in that run, and 11,235 of them were retrieved by a
+    # DIFFERENT phase. It changes no tool and reaches no metric, champion or selection: an empty
+    # store renders nothing, and OFF restores every prompt byte for byte. LEGACY row False, so a
+    # resumed run gains no prompt bytes it never consented to (`agents/established.py`).
+    established_context: bool = True
+    # The byte budget of that block: the most re-fetched items are carried verbatim until it is
+    # spent, the rest as one-line index rows. ~3 pages of a 3,600-char `read_file` page.
+    established_context_bytes: int = Field(default=12288, ge=0)
     # The operator-pinned developer command the plan loop runs BETWEEN steps, handing its output to
     # the next step ("" = off, and every prompt is byte-identical to what it was). This is our half
     # of doc 53 item 10: AlgoTuner re-runs the real evaluation after each accepted edit and hands its
@@ -2438,6 +2516,7 @@ class Settings(BaseSettings):
             value = getattr(self, field)
             if value not in allowed:
                 raise ValueError(f"{field} must be {'|'.join(allowed)}, got {value!r}")
+        self._check_case_insensitive_enum_fields()
         self._check_member_fields()
         self._check_llm_profiles()
         return self
@@ -2454,6 +2533,40 @@ class Settings(BaseSettings):
     _MEMBER_FIELDS: typing.ClassVar[tuple] = (
         ("inline_repair_reasons", lambda: FAILURE_REASONS),
     )
+
+    # The CASE-INSENSITIVE sibling of `_ENUM_FIELDS`, and it is separate for a reason that would be
+    # a regression if it were folded in. `llm.reasoning_body` does `(mode or "").strip().lower()` and
+    # `(style or "auto").lower()` before reading either value, so `llm_reasoning="High"` works today
+    # and refusing it here would break a config that is doing nothing wrong. The vocabulary is
+    # therefore matched the way the READER matches it, not the way the table above does.
+    #
+    # WHY THEY BELONG IN A VOCABULARY AT ALL — two different failures, and the second is the quiet
+    # one this whole mechanism exists for. Probed against the real `reasoning_body`:
+    #   * `llm_reasoning="banana"` -> `{"reasoning_effort": "banana"}` on an effort-style provider,
+    #     which 400s. Loud, but only at the provider, and the reject classifier then flips reasoning
+    #     OFF for that client's lifetime — so a typo degrades every later call silently.
+    #   * `llm_reasoning_style="banana"` -> `{}`. The `if/elif` chain shapes NOTHING and returns an
+    #     empty body, so reasoning is simply never requested and no error is raised anywhere. That is
+    #     the no-op fall-through `_ENUM_FIELDS` was built for, on a field whose default is `high`.
+    #
+    # Spelled out rather than imported from `core/llm.py` for the read_fence reason one table up:
+    # `config` stays import-light, and `tests/test_reasoning_vocabulary.py` pins these against the
+    # reader's own branches so the two cannot drift.
+    _CASE_INSENSITIVE_ENUM_FIELDS: typing.ClassVar[tuple] = (
+        # "" = send nothing (server default); off|none|false|0 = disable; on = default depth;
+        # low|medium|high = that effort.
+        ("llm_reasoning", ("", "off", "none", "false", "0", "on", "low", "medium", "high")),
+        # auto picks qwen for qwen* models else effort; none shapes nothing and relies on
+        # `llm_reasoning_extra` alone, which is a legitimate choice rather than a typo.
+        ("llm_reasoning_style", ("auto", "qwen", "effort", "none")),
+    )
+
+    def _check_case_insensitive_enum_fields(self) -> None:
+        for field, allowed in self._CASE_INSENSITIVE_ENUM_FIELDS:
+            value = getattr(self, field)
+            if str(value or "").strip().lower() not in allowed:
+                raise ValueError(
+                    f"{field} must be {'|'.join(a or '(empty)' for a in allowed)}, got {value!r}")
 
     def _check_member_fields(self) -> None:
         for field, vocabulary in self._MEMBER_FIELDS:
@@ -2597,6 +2710,19 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # engine re-pinning one mid-log, and re-entry must not add that treatment to it — the same reason
     # every other concurrency row here is pinned to its historical value.
     "proposal_width": False,
+    # 2026-09-06, two rows and one named non-row. `node_open_budget_floor_usd` is a NEW STOP — a
+    # run that used to spend its last dollar on a node it could not finish now finishes early — and
+    # a stop is authority, so a resumed run keeps the `0.0` (off) it ran under. Its (c) is the
+    # commit that added the field. `developer_crash_pause_after` moved no default (1 is the rule the
+    # breaker has always applied), but a bench profile lowers the run's tolerance FROM the snapshot
+    # side and a pre-field snapshot must not adopt whatever the live profile says: pinned to the
+    # historical 1. `llm_stream_stall_fallback` gets NO row on `redact_output`'s ground (b): `True`
+    # is the historical value and the knob buys no call, no intervention and no selection policy.
+    "node_open_budget_floor_usd": 0.0,
+    "developer_crash_pause_after": 1,
+    # A5: a resumed pre-2026-09-06 run keeps its prompts byte for byte; the block is new prompt
+    # bytes at every chain root and a run in flight never consented to them.
+    "established_context": False,
     "speculation_depth": 0,
     "speculation_gate_receipt": None,
     "concurrent_research_repeat": False,
@@ -2891,6 +3017,51 @@ def migrate_config_snapshot(data: dict) -> dict:
 _AGENT_STAGE_MAP_FIELDS = ("agent_stage_models", "agent_stage_base_urls")
 
 
+def _canonicalize_snapshot_reasoning(data: dict) -> dict:
+    """Map a HISTORICALLY ACCEPTED reasoning spelling onto the canonical one, warning, on resume.
+
+    `_CASE_INSENSITIVE_ENUM_FIELDS` closed these two vocabularies to catch a typo at submit, and it
+    is right to: on an effort-style provider `llm_reasoning="banana"` reaches the wire as
+    `reasoning_effort: "banana"`, 400s, and the reject classifier then flips reasoning off for that
+    client's whole lifetime. But the check runs on EVERY `Settings(**snapshot)` build, and the
+    vocabulary it closed was narrower than the reader that had been accepting these values for
+    months — asymmetrically so. `core/llm.py::reasoning_body` computes `on = mode not in ("off",
+    "none", "false", "0")`, so `false`/`0` were valid OFF spellings (and are in the set) while
+    `true`/`1`/`yes`/`enabled` were equally valid ON spellings against a qwen-style endpoint and are
+    NOT. A run launched with `llm_reasoning=true` — the shipped shape on a qwen box — worked, was
+    snapshotted verbatim, and after the check landed could no longer be resumed, finalized, or have
+    its config read by the server: an unrelated hardening making an otherwise healthy run
+    unrecoverable, with the only remedy being to hand-edit `config.snapshot.json`.
+
+    So the ASYMMETRY between submit and reload is drawn here, exactly as
+    `adapters/repo_task.py::_grandfathered` draws it for the task document and
+    `refuse_unknown_settings_keys` for the settings layers: strict is the default, and only the
+    reload path softens — by CANONICALIZING, never by skipping the check, so a resumed run gets the
+    same behaviour it had rather than an unvalidated string.
+
+    The mapping is `reasoning_body`'s own rule and nothing else: a spelling the reader disables on
+    becomes `off`, any other non-empty unknown becomes `on`. `tests/test_reasoning_vocabulary.py`
+    pins it against that reader's branches so the two cannot drift. `llm_reasoning_style` is NOT
+    canonicalized: an unknown style shapes nothing at all (`{}`), so there is no historical
+    behaviour to preserve and the run resumes with the refusal it deserves.
+    """
+    effective = dict(data)
+    raw = effective.get("llm_reasoning")
+    if not isinstance(raw, str):
+        return effective
+    mode = raw.strip().lower()
+    allowed = dict(Settings._CASE_INSENSITIVE_ENUM_FIELDS)["llm_reasoning"]
+    if not mode or mode in allowed:
+        return effective
+    # `reasoning_body`'s off-list, verbatim. Anything else non-empty enabled reasoning.
+    effective["llm_reasoning"] = "off" if mode in ("off", "none", "false", "0") else "on"
+    _LOG.warning(
+        f"config snapshot llm_reasoning={raw!r} is not in the closed vocabulary this build "
+        f"validates; resuming as {effective['llm_reasoning']!r}, which is what it MEANT to the "
+        "reader that accepted it; snapshot evidence was not rewritten")
+    return effective
+
+
 def _filter_unknown_snapshot_agent_stages(data: dict) -> dict:
     """Filter obsolete stage keys/values from an effective resume copy, warning in stable order.
 
@@ -2962,7 +3133,8 @@ def settings_from_snapshot(data: dict) -> Settings:
             f"this run's config.snapshot.json declares format v{found}, but this build understands "
             f"at most v{CONFIG_SNAPSHOT_SCHEMA}. It was written by a newer LoopLab; resuming here "
             "would silently drop settings this build does not know. Upgrade LoopLab to resume it.")
-    migrated = _filter_unknown_snapshot_agent_stages(migrate_config_snapshot(data))
+    migrated = _canonicalize_snapshot_reasoning(
+        _filter_unknown_snapshot_agent_stages(migrate_config_snapshot(data)))
     migrated.pop("llm_api_key", None)
     migrated.pop("llm_api_key_base_url", None)
     migrated.pop(CONFIG_SNAPSHOT_SCHEMA_KEY, None)   # a document marker, never a Settings field

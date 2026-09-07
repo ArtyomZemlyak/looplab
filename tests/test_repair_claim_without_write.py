@@ -112,16 +112,14 @@ def test_the_verdict_tier_is_untouched():
 # its one shot, said nothing to the model, and additionally destroyed the summary and the
 # `rollback_stage` the emit carried.
 
-def _loop(monkeypatch, *, forced_summary, exit_kind, validate):
+def _loop(monkeypatch, *, forced_summary, exit_kind, validate, terminal_salvage=False):
     """Drive the REAL `drive_tool_loop` to one of its forced-emit exits.
 
-    `terminal_salvage=True` since 2026-08-31, and it is the whole point of this harness rather than
-    a knob to make a red test green. The blanket `and may_retry` this file was written against
-    became a CALLER's policy on master (`08525b97`), defaulting FALSE so the stages session keeps
-    the operator's wall-budget and manifest fences on every exit — and `repo_developer`'s repair
-    session, the one caller that opts in, is exactly what this harness stands in for. Driving it
-    without the flag would be driving the STAGES caller and asserting the repair caller's contract
-    about it.
+    `terminal_salvage` is a per-CALLER policy (`08525b97`), and this harness MIRRORS
+    `drive_tool_loop`'s own default rather than the repair session's choice: the two cases below
+    are the two callers, and a harness that quietly opted one of them in would make the
+    did-not-opt-in half unwritable — it would be asserting the repair caller's contract about the
+    stages caller. So each case names its policy, and the default here is the loop's default.
     """
     from looplab.agents import tool_loop
 
@@ -140,7 +138,7 @@ def _loop(monkeypatch, *, forced_summary, exit_kind, validate):
         _Client(), None, [{"role": "user", "content": "go"}], spec,
         max_turns=(1 if exit_kind == "exhausted" else 4),
         finalize=lambda a: (a or {}).get("summary", ""),
-        fallback=lambda m: "", validate=validate, terminal_salvage=True)
+        fallback=lambda m: "", validate=validate, terminal_salvage=terminal_salvage)
     return out, seen
 
 
@@ -151,11 +149,23 @@ def test_budget_exhaustion_keeps_the_repair_instead_of_discarding_it(monkeypatch
     `last_rollback_stage` is never set from the emit, and `is_developer_stuck` can never fire. That
     is strictly worse than an unverified summary, which `inert`/`unmet` already grade on bytes.
     """
+    _bounce = lambda a: repair_claimed_without_writing((a or {}).get("summary", ""), wrote=False)
+
     out, _ = _loop(monkeypatch, forced_summary=_V8_SUMMARY, exit_kind="exhausted",
-                   validate=lambda a: repair_claimed_without_writing(
-                       (a or {}).get("summary", ""), wrote=False))
+                   validate=_bounce, terminal_salvage=True)
 
     assert out == _V8_SUMMARY, "the terminal salvage must keep the emit it paid for"
+
+    # ...and the OTHER half of the same rule, since 2026-08-30: the skip is a per-call POLICY that
+    # defaults FALSE, so every other caller keeps its validator on every exit. The stages session's
+    # `validate` is the operator's wall budget and the manifest-collision fence; a blanket skip
+    # would disable both on any exit with no turn left, and `_finalize` would persist whatever was
+    # merely shape-valid. Asserting only the opt-in is how that default flips without a red test.
+    out_default, _ = _loop(monkeypatch, forced_summary=_V8_SUMMARY, exit_kind="exhausted",
+                           validate=_bounce)
+
+    assert out_default == "", (
+        "a caller that did not opt in must still be validated on the exhausted exit")
 
 
 def test_the_prose_exit_delivers_the_REFUSAL_not_a_generic_nudge(monkeypatch):

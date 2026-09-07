@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.core.models import RunState
+from looplab.core.run_identity import row_belongs_to_run
 from looplab.engine.lessons_priors import LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER
 from looplab.events.eventstore import read_jsonl_lenient
 from looplab.events.replay import fold
@@ -366,7 +367,15 @@ class LessonReconcileMixin:
         stale_pairs: list[tuple] = []
         reflect_stale = False
         for idx, o in enumerate(rows):
-            if not isinstance(o, dict) or o.get("run_id") != state.run_id:
+            # "THIS RUN'S LESSONS" IS AN INCARNATION, NOT A DIRECTORY NAME. Keyed on the name alone,
+            # a lesson written by a PREVIOUS run of the same name could not match the new run's
+            # evidence signature, was judged stale, and was RETIRED here under the lock — and the
+            # reflect batch re-bought. Names are reused the moment a run is deleted and re-created
+            # and are `demo`/`baseline` on half the corpus (`serve/memory_cascade.py`), while every
+            # writer already records `run_uid`. `row_belongs_to_run` keeps the legacy fallback for a
+            # row that names no incarnation, which would otherwise become unreachable forever.
+            if not row_belongs_to_run(o, run_uid=getattr(state, "run_uid", ""),
+                                      run_id=state.run_id):
                 continue
             if not self._lesson_evidence_stale(state, o):
                 continue
@@ -389,6 +398,9 @@ class LessonReconcileMixin:
         fresh_reflect: list = []
         comp: list = []
         pairs_used: list = []
+        # Bound here so every path has it: only the branch that actually MAKES the paid call fills
+        # it, which is the point — a pass that never called cannot have spent anything.
+        spent_pairs_this_pass: list = []
         derivation = "failed" if client_failed else ("unavailable" if client is None else "empty")
         _stale_pairs = {tuple(p) for p in stale_pairs}
         if client is not None:
@@ -400,6 +412,19 @@ class LessonReconcileMixin:
                     exclude = [p for p in self._e._spent_pairs(state)
                                if tuple(p) not in _stale_pairs]
                     comp, pairs_used = self._e._comparative_lessons(state, fp, exclude=exclude)
+                    # WHAT WAS PAID FOR, bound the instant the provider call returns and never
+                    # cleared below. `pairs_used` is reset to `[]` when the re-derivation commits
+                    # nothing, and until 2026-09-03 the ledger append was gated on THAT — so a pass
+                    # that spent a real LLM call and produced no committed lesson left its pairs
+                    # UNSPENT, and the next cadence re-selected and re-paid for them. Measured on
+                    # `rubertlite-dense-retrieval` (81 nodes, 22 firings): three pairs — (23,14),
+                    # (14,7), (24,14) — each distilled and paid for twice.
+                    #
+                    # The ledger's own contract is "later firings must not re-spend LLM budget on
+                    # the same pair", i.e. SPENT means PAID, not fruitful — and the mid-run cadence
+                    # already reads it that way in as many words ("even with 0 lessons"). This was
+                    # the one writer of the three that did not.
+                    spent_pairs_this_pass = list(pairs_used)
                 derivation = "rederived" if fresh_reflect or comp else "empty"
             except Exception:  # noqa: BLE001
                 # model-backed rewriting can fail without keeping superseded evidence active.
@@ -488,12 +513,15 @@ class LessonReconcileMixin:
         if not fresh:
             pairs_used = []
         # Ledger consistency: the re-derived pairs are (re-)spent so run-end reflection won't double
-        # them — recorded as a lessons_distilled(reconcile) exactly like the mid-run cadence.
-        if pairs_used:
+        # them — recorded as a lessons_distilled(reconcile) exactly like the mid-run cadence, and
+        # like that cadence keyed on what was PAID FOR rather than on what committed. The `lessons`
+        # list still carries only what committed, so the receipt never claims a lesson that is not
+        # in the store; `count` says how many that was, and zero is a real answer.
+        if spent_pairs_this_pass:
             from looplab.core.advisory_payloads import research_lesson_receipt
             self._e.store.append(EV_LESSONS_DISTILLED, {
                 "at_node": len(state.nodes), "trigger": "reconcile", "count": len(comp),
-                "pairs": [[pr["a"], pr["b"]] for pr in pairs_used],
+                "pairs": [[pr["a"], pr["b"]] for pr in spent_pairs_this_pass],
                 "lessons": [research_lesson_receipt(lz, state) for lz in comp]})
         # Audit sidecar (fold ignores it): what drifted and what replaced it.
         self._e.store.append(EV_LESSONS_RECONCILED, {

@@ -28,7 +28,9 @@ from looplab.core.errors import budget_stop_leaf
 from looplab.core.llm import BudgetExceeded
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
-from looplab.events.types import (
+from looplab.events.types import (EV_RUN_LOOP_EXITED, EV_TRACE_EXPORT_HEALTH,
+                                  trace_export_unhealthy, trace_export_health_signature,
+                                  run_exit_reason,
     EV_ABLATE,
     EV_APPROVAL_REQUESTED,
     EV_COMMAND_ACK,
@@ -57,7 +59,8 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_deriv
 from looplab.engine.audit import AuditMixin
 from looplab.engine.cadence import occupancy_due
 from looplab.engine.card_reservation import (CardReservationMixin, _BuildReservation,
-                                            _discarded_proposal_text)
+                                             scored_anchor,
+                                            discarded_proposal_receipt)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
 from looplab.engine.costs import bind_cost_accountants, seed_prior_spend
@@ -84,6 +87,7 @@ from looplab.engine.finalize import (
     finalize_run,
     finalize_scope_quiescent,
     incomplete_finalize_scope,
+    is_guarded_abort,
     mark_finish_report_complete,
     scoped_finish_report,
 )
@@ -135,7 +139,7 @@ from looplab.search.policy import KIND_EXPAND, SearchPolicy
 from looplab.core.profile import profile_dataset
 from looplab.events.replay import fold
 from looplab.agents.roles import (Developer, Researcher, is_researcher_fallback,
-                                  researcher_fallback_cause)
+                                  researcher_budget_exhausted, researcher_fallback_cause)
 from looplab.runtime.sandbox import Sandbox
 from looplab.core.tracing import (
     TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS, AsyncJsonlSpanExporter, Tracer)
@@ -258,6 +262,29 @@ class _DeferredBudgetStop:
 # see the scan — when the pool has fully drained and the head STILL does not fit, which proves it
 # wants more than the box physically has and must not be allowed to wedge the batch.
 _HEAD_BYPASS_LIMIT = 3
+
+
+def budget_stop_recheck(budget_stop: list) -> bool:
+    """Did the spend ceiling fire while the SERIAL dispatcher was waiting for resources?
+
+    `_dispatch_evals`' serial branch tests its deferred-stop sink at the top of the queue loop and
+    nowhere else, and the resource wait below that test can last HOURS: the host GPU-pool lease
+    waits on every co-hosted run (CLAUDE.md: "potentially for hours"), re-folding every 0.5 s and
+    re-checking the LIFECYCLE gates — never the ceiling. A `BudgetExceeded` the overlapped research
+    captured during that wait was therefore never consulted, and one more evaluation was admitted
+    and STARTED on a run that was already over (docs/57 `serial-dispatch-admits-one-eval-past-the-
+    ceiling`): GPU burnt for nothing, and its first paid call then raised the ceiling from INSIDE
+    the eval, the terminal-losing shape the drain does not cover. The parallel branch gates at its
+    refill point for exactly this reason; this is that gate for the serial wait, asked at the two
+    instants a captured stop can first be seen — the head of each wait tick, and the moment a
+    reservation comes back — because the sink is appended by a task on the same event loop, so it
+    can only move across an `await`.
+
+    A named predicate rather than an inline `if budget_stop:` so the rule has a home a test can
+    point at; the dispatch test could not see the window before, because its host had no
+    `_wait_reserve_node_resources` and the `hasattr` skipped the whole wait.
+    """
+    return bool(budget_stop)
 
 
 
@@ -545,6 +572,18 @@ def systemic_failure_stop_reason(state, threshold: int) -> Optional[str]:
             "({why})").format(n=len(failed), why=", ".join(reasons[:4]))
 
 
+def _task_declared_env(task) -> bool:
+    """Does the TASK itself declare the environment its eval needs?
+
+    `RepoTask.eval.env` is the durable home (it rides `task.snapshot.json`); a `Settings.eval_env`
+    is the launch-time override that does not. Duck-typed because not every task model has an
+    `eval` section, and a task that declares nothing is the common, correct case for tasks whose
+    eval needs no environment at all — this only ever qualifies a run that IS using one.
+    """
+    eval_spec = getattr(task, "eval", None)
+    return bool(getattr(eval_spec, "env", None))
+
+
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
              ConceptCadenceMixin, VerifierTiebreakMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
@@ -784,6 +823,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # STORED RAW: 0 is OFF here (every other interval knob reads 0 that way too), so a clamp
         # would turn "never stop the run for me" into "stop after one failure".
         self.systemic_failure_stop = _opt("systemic_failure_stop")
+        # STORED RAW as well; `_developer_crash_pause_due` settles a junk value to the historical 1.
+        self.developer_crash_pause_after = _opt("developer_crash_pause_after")
+        # The node-OPEN floor under the spend ceiling (`_refuse_node_open_below_floor`). Raw: 0 and
+        # junk both read as OFF there, and a positive value is only ever compared, never clamped.
+        self.node_open_budget_floor_usd = _opt("node_open_budget_floor_usd")
         self.deep_researcher = deep_researcher
         # STORED RAW, deliberately — this was `max(0, deep_research_every)` until 2026-08-07, and
         # under the new spelling that clamp is exactly backwards: `0` now means "start immediately"
@@ -1298,6 +1342,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # CLI's guarded-abort handler, which buys the finish report AFTER `run()` has raised -- calls
         # `defer_trace_retirement()` and owns `retire_tracer()` instead.
         self._trace_retirement_deferred = False
+        # Last exporter-health snapshot PUBLISHED (not merely observed): the row is a state
+        # change, so an exporter that stays broken is recorded once, not once per loop turn.
+        self._trace_export_health_seen: tuple = ()
         # Task assets (e.g. the dataset) materialized into each node's sandbox workdir.
         assets = getattr(task, "assets", None)
         self._assets: dict = assets() if callable(assets) else {}
@@ -1607,6 +1654,44 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         mark_finish_report_complete(self, scope)
         return finished.seq == tail_seq + 1
 
+    def _record_trace_export_health(self) -> bool:
+        """Publish the span exporter's own health while it is failing. Returns whether a row landed.
+
+        The exporter's loss receipt is written BY the exporter, so a worker that has stopped
+        reports nothing at all: v12 wrote its last span at 18:20 and kept appending events for the
+        next ten and a half hours with no receipt, no warning and no surface — `metrics()` carried
+        the whole story (`worker_alive`, `shutdown`, per-reason drops) and was read by NOTHING in
+        the product. The engine is the one writer that outlives a dead exporter, so it publishes
+        that snapshot here, on the run's own log.
+
+        DIAGNOSTIC and dedup'd: `trace_export_unhealthy` keeps a healthy run's log untouched, and
+        `trace_export_health_signature` keeps a permanently-dead exporter to one row per distinct
+        state — the fields that DECIDE health, because the snapshot's counters are monotonic and
+        keying on them makes "distinct state" mean "another turn happened".
+        """
+        exporter = getattr(getattr(self, "tracer", None), "exporter", None)
+        snapshot_fn = getattr(exporter, "metrics", None)
+        if not callable(snapshot_fn):
+            return False
+        try:
+            snapshot = dict(snapshot_fn())
+        except Exception:  # noqa: BLE001 - a diagnostic read must never stop the run loop
+            return False
+        if not trace_export_unhealthy(snapshot):
+            return False
+        # The DECIDING fields only — never the whole snapshot. `metrics()` also carries
+        # `accepted_spans`/`exported_spans`/`queued_spans`/`buffered_bytes`, which move with
+        # essentially every span, while `trace_export_unhealthy` LATCHES on cumulative counters that
+        # are never reset. Keyed on the whole dict, "one row per distinct state" therefore became
+        # one fsync'd row per outer-loop turn for the rest of the run after a single transient drop.
+        # The derivation lives beside the predicate so the two cannot come apart.
+        fingerprint = trace_export_health_signature(snapshot)
+        if fingerprint == self._trace_export_health_seen:
+            return False
+        self._trace_export_health_seen = fingerprint
+        self.store.append(EV_TRACE_EXPORT_HEALTH, snapshot)
+        return True
+
     async def run(self) -> RunState:
         """Run under one shared broker context inherited by anyio tasks and worker threads."""
         # The engine's OWN main-loop thread. The concurrent build fan-out dispatches `_create_node` to
@@ -1670,6 +1755,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # exception case and let a genuine multi-failure group through as itself.
                     raise _sole_task_group_error(group) from None
         finally:
+            # The raising exits' half of the run-loop exit receipt (see `_record_run_loop_exit`):
+            # a no-op when the fall-through already recorded it or the loop was never entered. It runs
+            # BEFORE the exporter is retired, so the receipt still reaches an open trace.
+            self._record_run_loop_exit()
             # ONE exporter lifetime per run, and it must end before the lifecycle lock may be
             # released: a background span that closes after that point would append behind a
             # reset/clear instead of being rejected.  `retire_tracer` is that terminal barrier.
@@ -1850,6 +1939,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     async def _run_with_llm_broker(self) -> RunState:
         entry_finished = self._enter_run()
+        # Only an ENTERED loop owes an exit receipt: `_enter_run` raising (e.g. the speculation
+        # receipt gate refusing re-entry) must keep the log byte-identical —
+        # `tests/test_speculation_runtime_gate.py` pins those bytes.
+        self._run_loop_exit_owed = True
         start = time.time()
         # The creation-level runaway guard's two bounds and the rule that charges them — see
         # `CreationRunawayCounters`, which carries the whole argument for why they read the LOG.
@@ -1861,6 +1954,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # below then reaches its CAS over a log with no evaluation in flight.
             if self._eval_drain_requested:
                 await self._drain_adopted_evals()
+            # Before the decision prefix is read, so a published row is part of THIS turn's fold
+            # and cannot move the tail under the seq recheck below.
+            self._record_trace_export_health()
             decision_events = self.store.read_all()
             state = fold(decision_events)
             decision_seq = decision_events[-1].seq if decision_events else -1
@@ -1903,11 +1999,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 continue
             # Terminal/operator gates precede ALL work, including reset rebuilds. An explicit pause
             # must freeze a queued rerun; a scoped developer-crash pause must stop a stale reset batch.
-            # A prior invocation guard may have appended run_finished(error) after a durable abort.
-            # That is a retryable failed wrap-up, not the abort's terminal result; republish the
-            # stable abort scope and let scoped finalization deduplicate every completed side effect.
+            # A prior invocation guard may have appended a guarded-abort run_finished (`error`, or
+            # the ceiling's `budget_exhausted`) after a durable abort. That is a retryable failed
+            # wrap-up, not the abort's terminal result; republish the stable abort scope and let
+            # scoped finalization deduplicate every completed side effect. `is_guarded_abort` and
+            # never the literal: the ceiling is the ORDINARY terminal of a budgeted campaign, and a
+            # literal `"error"` here made it read as a clean finish nothing needed to retry.
             if (state.finished and state.stop_requested
-                    and str(state.stop_reason or "").lower() == "error"):
+                    and is_guarded_abort(state.stop_reason)):
                 abort = next(
                     (event for event in reversed(decision_events)
                      if event.type == EV_RUN_ABORT),
@@ -2137,10 +2236,67 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # diversity archive, case store. Draining here — not at the task group's join, which happens
         # after `finalize_run` has already returned — is what keeps that read complete.
         await self._drain_adopted_evals()
+        # WHY THE LOOP STOPPED, exactly once — the receipt rule, the `finished` skip and the
+        # exactly-once latch all live on `_record_run_loop_exit`. This fall-through covers the
+        # thirteen `break`s; `Engine.run`'s outer `finally` calls the same helper so the RAISING
+        # exits (the BudgetExceeded hard stop, a provider/store error, cancellation) get the same
+        # receipt — the previous inline append sat only here and silently skipped every one of
+        # them, i.e. exactly the exit classes the motivating v11 chase had to rule out by hand.
+        self._record_run_loop_exit()
         # Finalize (extracted to looplab/engine/finalize.py, a pure move): budget summary,
         # diversity archive, LLM cost roll-up, case store + reflection note, read-model,
         # trace.json + tree.html. Event emission order is preserved exactly.
         return finalize_run(self, entry_finished=entry_finished, start_time=start)
+
+    def _record_run_loop_exit(self) -> None:
+        """Append the run loop's exit receipt exactly once per entered loop, wherever the exit is.
+
+        WHY THE LOOP STOPPED, DERIVED FROM THE FINAL FOLD rather than from thirteen hand-set
+        locals: a derivation cannot disagree with the state a reader reconstructs from the same
+        log. `unattributed` is a legal answer and the reason this exists — measured 2026-08-31,
+        three runs of eight (v6, v9, v11) ended with NO pause and NO `run_finished` row; v11's
+        last event is a `trust_scan`, so anyone folding its log sees a run still in flight,
+        forever. A row saying the engine could not name its own exit is infinitely more than that
+        silence, and it is the input a second rung would need to turn `unattributed` into a
+        specific reason per exit.
+
+        THE `finished` EXIT WRITES NO ROW, deliberately: `run_finished` already names that exit on
+        the log, and the terminal gate appends it immediately after `finalize_step(begun)` — the
+        head of `events/finalize_protocol.py::QUIET_FINALIZATION_SUFFIX`, whose readers
+        (`search/speculation_quality.py::_validate_calibration_terminal` and the real-run half of
+        `tests/test_finalize_protocol.py`) demand that exact contiguous terminal shape. The first
+        cut appended `run_loop_exited: finished` between `run_finished` and `budget`, which made
+        the speculation gate refuse every calibration run recorded at that commit.
+
+        CALLED FROM TWO PLACES because the exits are of two kinds: `_run_with_llm_broker`'s
+        fall-through covers the thirteen `break`s, and `Engine.run`'s outer `finally` covers the
+        raising exits — BudgetExceeded, a provider/store error, cancellation. `_run_loop_exit_owed`
+        makes the pair exactly-once: latched only after `_enter_run` returns (a refused re-entry
+        must keep the log byte-identical) and cleared on the first receipt. Errors are contained
+        because the receipt must never break a shutdown — and a raise from `Engine.run`'s
+        `finally` would REPLACE the exception already unwinding (`shared.py::_append_progress_row`
+        documents that shape).
+        """
+        if not getattr(self, "_run_loop_exit_owed", False):
+            return
+        self._run_loop_exit_owed = False
+        try:
+            events = self.store.read_all()
+            # A staged terminal boundary that is still OPEN owns this exit. The loop is stopping
+            # precisely so the (resumed) finalization can finish that scope, and a row spliced
+            # after `finalize_step(begun)` is an event `events/finalize_scope.py`'s recovery
+            # projection does not recognize — measured by `tests/test_stop_finalize_resume.py` and
+            # `tests/test_report.py`: it turned a begun-only crash recovery into a silent
+            # no-recovery and a paid finish report into a re-bill. The receipt yields to the
+            # protocol here exactly as it yields to `run_finished` on the finished path.
+            from looplab.events.finalize_scope import incomplete_finalize_scope
+            if incomplete_finalize_scope(events) is not None:
+                return
+            reason = run_exit_reason(fold(events))
+            if reason != "finished":
+                self.store.append(EV_RUN_LOOP_EXITED, {"reason": reason})
+        except Exception:  # noqa: BLE001 - contain: never mask the exception already in flight
+            _LOG.warning("the run loop's exit receipt could not be appended", exc_info=True)
 
     def _settle_terminal_gate(self, state, reason: str, *, decision_seq: int,
                               max_es: Optional[float] = None,
@@ -2357,6 +2513,27 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return [action for action in lane
                 if action.get("kind") in ("draft", "improve", "merge")][:free]
 
+    # OPEN[serial-node-build-holds-the-loop] the 2026-08-29/31 offloads moved only the two propose lanes:
+    # the Developer call in this serial lane, and the fork/inject/rerun proposes, still run on the loop
+    # with no in-flight guard — while `_occupancy_paced_creates` delivers work here precisely when an
+    # eval is burning. Driven: a fork served with an adopted eval, and a width-2 Card claim with node 0
+    # in flight, each ran the paid call on the loop thread with ZERO ticks. One helper on the proposal
+    # pool covers all four sites; the own-node worker seam already licenses their appends.
+    # proof:absent:_offload_node_build@looplab/engine/orchestrator.py
+    #
+    # MEASURED 2026-09-04 — the largest loop hold, but the HARM is not established and the
+    # difference decides whether the offload is worth its risk. `card_build` wall, and how much
+    # overlaps a live evaluation (union of eval windows, NOT a per-pair sum: the first cut summed
+    # pairs and reported 149% of the build wall, which is impossible on one thread, and is retracted):
+    #     v11  13 builds  608.6 min   93% overlaps an eval,  7% with none
+    #     v4   16 builds  621.6 min   42% overlaps an eval, 58% with none (362 min)
+    # v11's nine evaluations collapse into ONE continuous union window, so "93%" there says the box
+    # was always evaluating — not that a build displaced anything.
+    #
+    # WHAT IS STILL MISSING, and it is exactly what would justify the change: overlapping an eval is
+    # not a cost. The eval runs in a SUBPROCESS and a busy loop does not slow it. The cost is a FREE
+    # GPU with BUILDABLE WORK while the loop is held, which needs board state per instant and cannot
+    # be read from spans alone. Until that is measured this carries a cost CEILING, not a cost.
     async def _handle_create_actions(self, creates, state, *, created_no_terminal,
                                      no_mint_turns, decision_seq, max_es, max_s, start):
         """The `creates` branch of the run loop, lifted verbatim (doc 25 ES-05).
@@ -2551,6 +2728,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # was selected with that Node hidden, and the claim must revalidate the SAME question or
             # it retires the Card as unclaimable. Empty whenever nothing is in flight, which is every
             # ordinary create turn — that path is byte-identical.
+            # The node-OPEN floor, asked BEFORE the claim mints durable reservations: a refusal
+            # here leaves nothing reserved and nothing owed (`_refuse_node_open_below_floor`).
+            self._refuse_node_open_below_floor(f"a Card lane of {len(creates)} node(s)")
             _card_reservations = self._claim_existing_card_builds(
                 creates, ignored_pending_node_ids=self._running_eval_node_ids())
             if _card_reservations is None:
@@ -2585,6 +2765,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # (the serial path gets this for free — each node lands before the next proposes).
                 if _i:
                     state = fold(self.store.read_all())
+                # MAIN TASK, before the paid batch proposal and before any reservation: the
+                # node-OPEN floor for this whole chunk (`_refuse_node_open_below_floor`).
+                self._refuse_node_open_below_floor(f"a build chunk of {len(_chunk)} node(s)")
                 # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned
                 # 1:1 with _ideas), so each build emits ITS OWN
                 # hypothesis_ranked/foresight_selected.
@@ -2615,26 +2798,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Proposal is complete before durable reservation: a native Card receipt must
                 # bind the exact immutable statement/action.  The MAIN TASK serially commits
                 # card_added -> node_building for each idea, then workers only implement.
+                # ONE FOLD FOR BOTH HALVES of the score fence. `state` here was folded before the
+                # minutes-long awaited propose above, and `_reserve_node_build._plan` re-folds fresh
+                # under the CAS — so reading the id here and the ATTEMPT there recorded a pair the
+                # proposal was never scored against, and the card then read `current` in exactly the
+                # case the generation is in the receipt to catch. The stale ID is not the defect and
+                # is deliberately kept: see `scored_anchor`.
+                _anchor_id, _anchor_attempt = scored_anchor(state)
                 _reserved = [
                     # `retry_attach` stays off (default): these Ideas came from the shared batch
                     # proposal and never crossed `_prepare_node_idea._link`, so no earlier pass
                     # planned an attach for this pass to agree with.
                     #
-                    # OPEN[chunk-scored-against-stale-across-offload] `state` here was folded BEFORE
-                    # the minutes-long awaited batch propose above, and `_reserve_node_build`'s plan
-                    # re-folds everything else fresh but records this anchor VERBATIM into the
-                    # immutable Card receipt — so a best-improving terminal landing mid-propose
-                    # (impossible pre-offload: the loop was frozen) mints a durable receipt scored
-                    # against a superseded node, silently. The card lane REFUSES on exactly this
-                    # drift (`_stage_prepared_card`'s best fence); this lane records it.
-                    # proof:`line:_a, _idea,&&scored_against=state.best_node_id@looplab/engine/orchestrator.py`
-                    # REVIEW 2026-08-30 (P2 record integrity): either re-fold for the anchor at
-                    # reservation time, or record both anchors (proposed-against vs committed-at) —
-                    # the receipt is read by the freshness ladder, card_selection and
-                    # speculation_quality's replicate invariants, which assume it names the best at
-                    # reservation.
+                    # The score fence's two halves are bound ABOVE, from one fold, since
+                    # 2026-08-31. `state` here is the pre-propose fold and `_plan` re-folds fresh
+                    # under the CAS, so reading the id here and the ATTEMPT there recorded a pair
+                    # the proposal was never scored against. Half of the original finding was
+                    # WRONG and is deliberately not fixed: the stale ID is the correct record —
+                    # `cards.py::card_score_fence_state` narrowed champion-equality away on
+                    # 2026-08-13 because it killed cards permanently on an unrelated node's win,
+                    # and `card_selection` asks only that the anchor be live. Both readers want
+                    # the champion the proposal was scored under.
                     self._reserve_node_build(
-                        _a, _idea, scored_against=state.best_node_id,
+                        _a, _idea, scored_against=_anchor_id,
+                        scored_against_attempt=_anchor_attempt,
                         source="researcher",
                         steering_context=(
                             (_tel or {}).get("_steering_context", [])
@@ -2705,6 +2892,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         )
                     raise
             else:
+                # One node per iteration on this path, so the floor is asked per node — the
+                # decision `Settings.node_open_budget_floor_usd` is about, on the main task.
+                self._refuse_node_open_below_floor(f"a new {a.get('kind')} node")
                 self._create_node(a)  # sequential -> deterministic ids/proposals
             if self._create_paused:
                 self._drain_create_pause()
@@ -3417,6 +3607,31 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # would revoke every issued calibration receipt, and the calibration
                             # profile declares no environment.
                             **({"eval_env": dict(self._eval_env)} if self._eval_env else {}),
+                            # …AND WHETHER THE TASK ITSELF CARRIES IT. A SETTING rides
+                            # `config.snapshot.json`, so a RESUME reproduces it (invariant #6) — but
+                            # it does NOT ride `task.snapshot.json`, and the documented way to start
+                            # the next run on this box is to COPY that snapshot. So a value that
+                            # lives only in the launch line survives every resume and is lost by the
+                            # one operation an operator actually performs between runs.
+                            #
+                            # MEASURED: `eval.env` is null on EVERY task file on this box (v11, v12,
+                            # v13 and all three snapshots). v12 was launched from such a copy without
+                            # the flag, every node crashed in `botocore ListObjects` on an unset
+                            # `VS_LOCAL_DATA_ROOT`, each paid a triage+repair to rediscover the local
+                            # corpus, and node 14 died of it (#147). `adapters/repo_task.py::eval.env`
+                            # is where the tree already says this fact belongs — "a fact about the
+                            # TASK", "every node inherits it instead of each one spending a repair
+                            # attempt rediscovering it".
+                            #
+                            # PRESENT ONLY WHEN THE SETTING IS CARRYING A FACT THE TASK DOES NOT, so
+                            # a healthy run's payload stays byte-identical and
+                            # `speculation_quality._CALIBRATION_RUN_STARTED_FIELDS` keeps its key-set
+                            # equality — the calibration profile declares no environment, so this key
+                            # can never appear for it, by the same argument the line above makes.
+                            # A NOTICE, NOT A REFUSAL: the run is correct, its successor is the one
+                            # at risk.
+                            **({"eval_env_absent_from_task": True}
+                               if self._eval_env and not _task_declared_env(self.task) else {}),
                             # The SETTLED widths, not their AUTO sentinel: re-entry must never
                             # re-derive this run's execution treatment from a different box.
                             **self._run_start_settled_widths(),
@@ -3809,11 +4024,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._repin_settled_widths(_entry)
         self._require_pinned_speculation_receipt(_entry)
         self._pending_finalize_scope = incomplete_finalize_scope(_events)
-        # A failed finalize attempt is recorded as finished(reason=error) by the CLI guard, but its
-        # durable stop is still pending. Treat that as NOT already finalized so the retry below can
-        # write run_finished(aborted) and re-run budget/archive/case/cost wrap-up exactly once.
+        # A failed finalize attempt is recorded as a guarded-abort finish (`error`, or the ceiling's
+        # `budget_exhausted`) by the CLI guard, but its durable stop is still pending. Treat that as
+        # NOT already finalized so the retry below can write run_finished(aborted) and re-run
+        # budget/archive/case/cost wrap-up exactly once. The CLASS predicate, not the literal —
+        # see `events/finalize_scope.py::GUARDED_ABORT_REASONS`.
         entry_finished = bool(_entry.finished and self._pending_finalize_scope is None and not (
-            _entry.stop_requested and str(_entry.stop_reason or "").lower() == "error"))
+            _entry.stop_requested and is_guarded_abort(_entry.stop_reason)))
         # Restore Card authority before replaying the active Strategy: its conditional governance
         # grant for card_scoring depends on this run-start-pinned value, not the ambient snapshot.
         if _entry.run_id:
@@ -4297,6 +4514,24 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return True
         return False
 
+    # OPEN[paid-cadences-hold-the-engine-loop] every paid cadence below executes as one event-loop
+    # callback: the Strategist consult (unbounded turns under the shipped `agent_max_turns=0`), the
+    # concept re-tag/consolidation pass (`_RETAG_CAP` 20 + `_HYP_TAG_CAP` 60 sequential tag calls),
+    # the verifier tie-break and the report refresh. `at_creation_boundary` made these gates due WHILE evaluations run, so the hold
+    # now lands on top of a live GPU. They write FOLDED rows, so the fix is the offload-under-a-capture-
+    # sink discipline `novelty.py` already uses, not a bare `to_thread`.
+    # proof:absent:_offload_cadence@looplab/engine/orchestrator.py
+    #
+    # MEASURED 2026-09-04, and the answer RE-RANKS this DOWN rather than closing it. Every
+    # `operation` span on v11 (a full 24 h run, 9 evaluations), totalled by name:
+    #     strategist_consult 3 calls 5.9 min | concept_coverage 2 calls 4.9 min
+    #     foresight_rank     2 calls 2.7 min | report           3 calls 2.0 min
+    #     -> every paid cadence together ~15.5 min, against `evaluate` at 5026.6 min.
+    # The cadences named above are 0.3% of the run. The offload they ask for is a concurrency change
+    # against invariant #1, and 0.3% does not buy that risk. The same sweep found where the hold
+    # actually is: `card_build`, 608.6 min over 13 calls — the serial-node-build item, not this one.
+    # LEFT OPEN because the description is accurate and a costlier Strategist could change the
+    # number; what is recorded is that nobody should spend the risk until it does.
     def _run_cadences(self, state: RunState) -> RunState:
         # Breadth read-model: record the run's narrowing curve at the strategist cadence BEFORE the
         # Strategist decides, so the same snapshot both (a) feeds the meta-controller's decision
@@ -4601,7 +4836,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 this_trig, trig = trig, "repeat"
                 sig, recorded = await anyio.to_thread.run_sync(
                     functools.partial(self._research_attempt_step, snap, this_trig,
-                                      manual=False, last_sig=last_sig),
+                                      manual=False, last_sig=last_sig,
+                                      converged_skips=converged),
                     abandon_on_cancel=False)
                 if sig is None:
                     next_sleep = base
@@ -4667,25 +4903,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         reservation = None
                         generation = None
                         skip_eval = False
-                        # OPEN[serial-dispatch-admits-one-eval-past-the-ceiling] the only ceiling
-                        # gate on this branch is the loop-top `break`, and the resource wait below
-                        # can last HOURS — a `budget_stop` captured during it is never consulted,
-                        # so one more evaluation is admitted and STARTED after the ceiling.
-                        # proof:absent:budget_stop_recheck@looplab/engine/orchestrator.py
-                        # REVIEW 2026-08-30 (money): the host GPU-pool lease waits on every
-                        # co-hosted run (CLAUDE.md: "potentially for hours"), the wait loop
-                        # re-folds every 0.5 s and re-checks lifecycle — and not the ceiling. The
-                        # admitted eval burns GPU on a run that is already over, and its first
-                        # paid call then raises BudgetExceeded from INSIDE the eval, the
-                        # terminal-losing shape the drain does not cover. The parallel branch
-                        # gates at its refill point for exactly this reason; this wait has no
-                        # equivalent. The dispatch test cannot see it: its host has no
-                        # `_wait_reserve_node_resources`, so the `hasattr` skips the window.
-                        # Consult `budget_stop` inside the wait loop (or right before
-                        # `_evaluate`).
+                        # The wait below is the one place on this branch where a deferred ceiling
+                        # can land between the loop-top `break` and `_evaluate` — see
+                        # `budget_stop_recheck` for the hours it cost. It is asked at the head of
+                        # every tick and again the instant a reservation is granted; a stop found
+                        # there skips the eval, and the loop-top test then ends the queue.
                         if node is not None and hasattr(self, "_wait_reserve_node_resources"):
                             generation = node.attempt
                             while True:
+                                if budget_stop_recheck(budget_stop):
+                                    skip_eval = True
+                                    break
                                 # Resource waits must not pin a stale fold forever.  A GPU->CPU Card
                                 # re-pin does not release a GPU (and therefore does not bump the pool
                                 # epoch), so re-fold after every bounded condition tick and fence the
@@ -4718,6 +4946,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 )
                                 if reservation is None:
                                     continue
+                                # The ceiling may have fired during the `await` that just granted
+                                # these devices. Hand them back and start nothing: the eval would
+                                # spend GPU on a run that is over and raise from inside itself.
+                                if budget_stop_recheck(budget_stop):
+                                    self._release_gpus(reservation.get("gpu_ids"))
+                                    reservation = None
+                                    skip_eval = True
+                                    break
                                 admitted = fold(self.store.read_all())
                                 live = admitted.nodes.get(node.id)
                                 if self._skip_if_aborted(a, admitted):
@@ -5212,23 +5448,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `_triage_crash` / `_repair_error_context` / `_prepare_env` live in
     # looplab/engine/crash_repair.py (CrashRepairMixin — inherited, zero call-site churn).
 
-    # OPEN[consume-batch-docstring-names-retired-callers] the docstring below still says the two
-    # call sites "each read that protocol by hand" and names one of them `run`'s chunk — since
-    # 2026-08-30 neither calls this directly (both await `_await_batch_proposal`, whose own
-    # docstring names the chunk's real home `_handle_create_actions`), so a caller-hunting reader
-    # is sent to methods that no longer contain the call.
-    # proof:`line:Two call sites&&concurrent-build chunk@looplab/engine/orchestrator.py`
-    # REVIEW 2026-08-30 (P3 doc drift): one sentence — both call sites now reach this through the
-    # awaited wrapper (worker thread + main-task publish) — and one name fix.
     def _consume_batch_proposal(self, state, width: int):
         """Run one batched proposal and READ its three-attribute result. Returns
         ``(ideas, telemetry, dropped)``.
 
         `_propose_batch` (novelty.py) signals its results through three instance attributes rather
         than a return value: `_pending_batch_telemetry`, `_pending_batch_dropped` and
-        `_pending_batch_novelty_gated`. Two call sites — `run`'s concurrent-build chunk and
-        `_stage_card_creates` — each read that protocol by hand, including the padding rule and the
-        snapshot-before-reset ordering (doc 25 ES-08).
+        `_pending_batch_novelty_gated`. Two call sites — `_handle_create_actions`' concurrent-build
+        chunk and `card_reservation.py::_stage_card_creates` — used to read that protocol by hand,
+        including the padding rule and the snapshot-before-reset ordering (doc 25 ES-08), which is
+        what this funnel replaced.
+
+        NEITHER CALLS THIS DIRECTLY ANY MORE (2026-08-30): both `await _await_batch_proposal`, which
+        runs this on a worker thread under `_capture_proposal_events` and publishes the buffered
+        folded rows from the main task. A reader hunting callers of THIS name finds the wrapper, not
+        the two methods; the chunk also left `run` for `_handle_create_actions` (doc 25 ES-05), so
+        the old name sent that reader somewhere the call had never been.
 
         The padding is load-bearing: telemetry must align 1:1 with `ideas` so each build emits ITS
         OWN hypothesis_ranked/foresight_selected. A short list silently shifts every later idea's
@@ -5237,7 +5472,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         Both `dropped` and `telemetry` are SNAPSHOTTED (copied) here, so a caller may reset the
         attributes at whatever point its own durability ordering requires without losing what it is
         about to record. Resetting stays at the call sites precisely because that ordering differs:
-        `run` clears after the reservations are durable, `_stage_card_creates` clears in a `finally`.
+        `_handle_create_actions` clears after the reservations are durable, `_stage_card_creates`
+        clears in a `finally`.
         """
         # The BATCH proposal's progress beacon, and the one that matters most: on the shipped default
         # width this — not `_prepare_node_idea` from `_create_node_scoped` — is the path a run
@@ -5293,47 +5529,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         concurrent task by name — and a beacon that stayed behind would announce the phase from a
         thread that is no longer in it.
         """
-        # OPEN[batch-offload-shares-default-thread-limiter] the offload below rides anyio's shared
-        # 40-token default thread pool — the pool each in-flight `_run_eval` worker holds a token of
-        # for its eval's whole multi-hour duration — so at operator-raised `eval_parallel` near or
-        # above 40 (the schema admits 1024) the paid proposal QUEUES BEHIND the evals before it even
-        # starts: board starvation through the pool instead of the loop.
-        # proof:absent:limiter=@looplab/engine/orchestrator.py
-        # REVIEW 2026-08-30 (P2 capacity): `evaluate.py::_watch_limiter` names this exact hazard and
-        # gave the watchdog tick its own pool for it; the proposal lanes (this one and the
-        # per-action offload in card_reservation.py) got none. Give them a small dedicated
-        # CapacityLimiter the way the watchdog has one.
-        captured: list = []
-        try:
-            with self._capture_proposal_events() as captured:
-                result = await anyio.to_thread.run_sync(
-                    functools.partial(self._consume_batch_proposal, state, width))
-        # OPEN[batch-offload-drops-buffered-receipts-on-raise] the publish below runs only on a
-        # clean return: a raise from the offloaded funnel (BudgetExceeded included — whose
-        # `budget_exceeded` novelty_rejected is appended by `_reject_and_repropose` BEFORE the
-        # re-raise precisely so "the rejection is on the log even though the run is ending", and
-        # which both shipped researchers propagate) exits the capture and discards every buffered
-        # folded receipt from the batch's completed rolls. Pre-offload each row was durable at emit
-        # time; driven at HEAD both ways. Cancellation at the await is NOT the trigger — the
-        # non-abandoned wait is shielded and this sync loop runs before the next checkpoint.
-        # proof:`present:for _event_type, _data, _trace_id, _span_id in captured:@looplab/engine/orchestrator.py`
-        # REVIEW 2026-08-30 (P1 durability): publish `captured` in a try/finally (append is sync and
-        # legal during unwind) or ferry it out through the result the way Layer 5's
-        # `SpecRawStageResult.audit_events` does; the per-action lane in card_reservation.py shares
-        # the shape. (A raise also skips the chunk caller's `_record_dropped_batch_cards`, but it
-        # did pre-offload too — the buffered sink rows are the regression, not that half.)
-        # PUBLISHED ON THE WAY OUT, since 2026-08-31, and the `finally` is the whole of the fix.
-        # A RAISE from the offloaded funnel discarded every buffered row: `_reject_and_repropose`
-        # appends `budget_exceeded` through this sink and then RE-RAISES — its docstring says
-        # "appended BEFORE re-raising so the rejection is on the log even though the run is ending"
-        # — and both shipped researchers propagate it. Pre-offload each row was durable at emit
-        # time; buffering silently made the publish conditional on a clean return. `store.append`
-        # is sync and legal during unwind. Cancellation was never the trigger (the non-abandoned
-        # wait is shielded, so this ran before the next checkpoint) and is unaffected.
-        finally:
-            for _event_type, _data, _trace_id, _span_id in captured:
-                self.store.append(_event_type, _data, trace_id=_trace_id, span_id=_span_id)
-        return result
+        # RIDES THE PROPOSAL POOL, not anyio's shared 40-token default, since 2026-08-31. An
+        # in-flight `_run_eval` holds a default token for its whole multi-hour duration and
+        # `eval_parallel` is admitted to 1024, so at a raised width the paid proposal queued behind
+        # the evals before it even started. See `novelty.proposal_limiter` for the derivation of the
+        # size and for the two sibling lanes that share it.
+        return await self._offload_under_proposal_sink(
+            functools.partial(self._consume_batch_proposal, state, width))
 
     def _fail_reserved_build(self, *, node_id: int, card_id: Optional[str], generation: int,
                              reason: str, error: str, drop_card: bool = True,
@@ -5623,6 +5825,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # node and raise a provider pause naming a failure that is not happening now.
             if proposed and self._refuse_degraded_proposal(candidate, main_task=False):
                 return None
+            # WHICH BOUND ENDED THE PAID PROPOSE, if any. `roles.RESEARCHER_OUTPUT_ATTRS` carries
+            # the rule; the Researcher sets it per call and "" means the model emitted on its own
+            # terms — and in unified mode `UnifiedAgent.propose` mirrors it onto the facade this
+            # handle is, exactly as `_sync_audit` does for the Developer's, or this read reports
+            # the DEVELOPER's last cutoff instead. Surfaced HERE for the per-action lanes
+            # (draft/improve/debug and a preproposed idea crossing `_prepare_node_idea`); the
+            # BATCH lane hands its Ideas straight to the stager without crossing `_link`
+            # (card_reservation.py's staging loop says so), so `novelty._propose_batch` makes the
+            # same check per roll at the propose site. Warning-only on purpose: with
+            # `agent_max_turns`/`agent_time_budget_s` both shipping at 0 this can only fire for an
+            # operator who set a cap, and the value of saying so is telling a TRUNCATED proposal
+            # from a converged one — the distinction a cap destroys if nobody records it.
+            if proposed:
+                _bound = researcher_budget_exhausted(researcher)
+                if _bound:
+                    _LOG.warning(
+                        "the proposal for node %s was cut short by its %s budget — it did not "
+                        "emit on its own terms, so treat it as TRUNCATED rather than converged",
+                        prospective_node_id, _bound)
             linked = (candidate if isinstance(candidate, Idea)
                       else Idea.model_validate(candidate)).model_copy(deep=True)
             linked.card_id = None  # a Researcher/plugin can never claim writer namespace authority
@@ -5663,9 +5884,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     "action": "dropped",
                 })
             elif plan.disposition not in {"mint", "reuse", "attach"}:
-                # THE ONLY PLACE A DISCARDED PROPOSAL IS RECEIPTED, and the placement is the
-                # decision. This branch runs immediately after the proposal call and nowhere else,
-                # so it is the one pass that can know a PAID proposal was refused. It returned None
+                # A DISCARDED PROPOSAL IS RECEIPTED HERE, and the placement is the decision. This
+                # branch runs immediately after the proposal call, so it is a pass that can know a
+                # PAID proposal was refused. (It said "THE ONLY PLACE ... and nowhere else" until
+                # 2026-09-02, and that overstated its coverage: the batch draft lane in
+                # `novelty.py::_link_card` and the Layer-5 speculative producer each run a paid
+                # propose and refuse one too, and both lost it in silence. All three now emit
+                # `card_reservation.py::discarded_proposal_receipt`, which is why the payload moved
+                # out of this branch — three hand-written copies of one row is how they came to
+                # disagree about whether the row exists at all.) It returned None
                 # on a non-accepting disposition and the caller (`_create_node_scoped`) then unwound
                 # through `_discard_node_build_telemetry`, which despite its name appends nothing —
                 # its body only nulls the per-role prediction attributes so a later build cannot
@@ -5685,18 +5912,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 #
                 # REFUSING THE MINT IS UNCHANGED — a card whose owner is in flight must not be
                 # minted twice. What is fixed is refusing in SILENCE.
-                self._append_proposal_event(EV_NOVELTY_REJECTED, {
-                    "node_id": prospective_node_id, "generation": 0,
-                    "kind": "card_duplicate" if plan.disposition == "duplicate"
-                            else "card_unplannable",
-                    "reason": ("an existing card already owns this action"
-                               if plan.disposition == "duplicate"
-                               else "the card plan named no bounded action"),
-                    "action": "dropped",
-                    "disposition": str(plan.disposition),
-                    "pass": "planner",
-                    "hypothesis": _discarded_proposal_text(linked),
-                })
+                self._append_proposal_event(EV_NOVELTY_REJECTED, discarded_proposal_receipt(
+                    plan.disposition, prospective_node_id, linked, lane="planner"))
             return plan.idea if plan.disposition in {"mint", "reuse", "attach"} else None
 
         if preproposed is not None:
@@ -5829,6 +6046,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if reserved is None:
             proposal_events = self.store.read_all()
             proposal_state = fold(proposal_events)
+            # Both halves of the score fence, from THIS fold — the paid propose below runs between
+            # here and the reservation. See `card_reservation.scored_anchor`.
+            _proposal_anchor_id, _proposal_anchor_attempt = scored_anchor(proposal_state)
             if self._build_parent_snapshot(proposal_state, action) is None:
                 return
             prospective_node_id = self._node_id_ceiling(proposal_events, proposal_state)
@@ -5856,7 +6076,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             with self._progress(PROGRESS_STAGE_BUILD, "reserve", node_id=prospective_node_id,
                                 prospective=True, operator=action.get("kind")):
                 reserved = self._reserve_node_build(
-                    action, idea, scored_against=proposal_state.best_node_id,
+                    action, idea, scored_against=_proposal_anchor_id,
+                    scored_against_attempt=_proposal_anchor_attempt,
                     source=source, steering_context=steering_context,
                     # The ordinary build spine, and the ONE site that commits an attach. `_link` above
                     # planned with the same flag, so a `debug` re-attempt of a question card-N already
@@ -6073,10 +6294,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # (which folds `paused=False`): a worker's byte position relative to an external
                 # control is nondeterministic. `_request_create_pause` records the intent; the MAIN
                 # task appends it where it already observes `_create_paused`, after the join.
-                self._request_create_pause(
-                    node_id,
-                    "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
-                    "unresolved within the node) — resume once it's fixed")
+                # "FIRST" is `developer_crash_pause_after`'s default; above it, this crash requests
+                # the pause only when its position in the log reaches the run's threshold, and a
+                # crash below it keeps exactly the terminal appended above (`developer_crash_rank`).
+                if self._developer_crash_pause_due(fold(self.store.read_all()), node_id):
+                    self._request_create_pause(
+                        node_id,
+                        "auto-paused: a Developer session crashed (LLM unreachable or a hard "
+                        "error, unresolved within the node) — resume once it's fixed")
         self._consume_node_build_telemetry(
             node_id, 0, researcher=researcher, developer=developer)
 
@@ -6330,11 +6555,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self._discard_node_build_telemetry()
                 return
             if is_developer_error(code):
-                for crash_type, crash_data in developer_crash_records(
-                        node.id, generation, code,
-                        "auto-paused: a Developer session crashed (LLM unreachable or a hard "
-                        "error, unresolved within the node) — resume once it's fixed"):
-                    self.store.append(crash_type, crash_data)
+                crash_terminal, crash_pause = developer_crash_records(
+                    node.id, generation, code,
+                    "auto-paused: a Developer session crashed (LLM unreachable or a hard "
+                    "error, unresolved within the node) — resume once it's fixed")
+                # Terminal first and unconditionally; the pause beside it only once this crash
+                # reaches `developer_crash_pause_after` (1 = always, the historical pair).
+                self.store.append(*crash_terminal)
+                if self._developer_crash_pause_due(fold(self.store.read_all()), node.id):
+                    self.store.append(*crash_pause)
         self._consume_node_build_telemetry(node.id, generation)
 
     def _prepare_injected_node(
@@ -6445,6 +6674,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         researcher here — but everything downstream (eval, confirmation, best-selection, lineage)
         is identical to an agent-authored node, so a hand-added winner can be selected as best."""
         state = fold(self.store.read_all())
+        _op_anchor_id, _op_anchor_attempt = scored_anchor(state)
         prepared = self._prepare_injected_node(state, req)
         idea = prepared.idea
         parents = prepared.parent_ids
@@ -6458,7 +6688,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 "parent_generations": parent_generations,
             },
             idea,
-            scored_against=state.best_node_id,
+            scored_against=_op_anchor_id,
+            scored_against_attempt=_op_anchor_attempt,
             source="operator",
             implementation_ref=implementation_ref,
             # NO ATTACH HERE, deliberately (`retry_attach` defaults off and this site keeps it off).
@@ -6579,12 +6810,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self._discard_node_build_telemetry()
                 return
             if is_developer_error(code):
-                for crash_type, crash_data in developer_crash_records(
-                        node_id, 0, code,
-                        "auto-paused: a Developer session crashed while building an injected node "
-                        "(LLM unreachable or a hard error, unresolved within the node) — resume "
-                        "once it's fixed"):
-                    self.store.append(crash_type, crash_data)
+                crash_terminal, crash_pause = developer_crash_records(
+                    node_id, 0, code,
+                    "auto-paused: a Developer session crashed while building an injected node "
+                    "(LLM unreachable or a hard error, unresolved within the node) — resume "
+                    "once it's fixed")
+                # Same split as `_rerun_node`: the terminal always, the pause at the threshold.
+                self.store.append(*crash_terminal)
+                if self._developer_crash_pause_due(fold(self.store.read_all()), node_id):
+                    self.store.append(*crash_pause)
         if developer_called:
             self._consume_node_build_telemetry(node_id, 0)
 

@@ -349,8 +349,64 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     # step of every run -- and the corpus reading it is trying to settle whether the money
     # ceiling ever fires (docs/56 §85). A silent falsy default would answer that question
     # wrongly and look like data.
-    "last_budget_facts")
+    "last_budget_facts",
+    # HOW MANY EDIT/WRITE/DELETE CALLS THE SESSION MADE, refusals included. `last_budget_exhausted`
+    # above tells "the clock ended it"; this tells whether the session ever TRIED to change a file,
+    # and the two together separate "ran out of time mid-edit" from "read for 25 minutes and never
+    # reached for the write surface". Measured over every inert repair with spans (v11 x2, v13 x2):
+    # ZERO edit calls in sessions of 22.5-27.3 minutes, which is why the budget lever was refused.
+    "last_edit_calls")
 RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
+
+# The RESEARCHER's outbound ASSIGNMENTS, the mirror of `DEVELOPER_OUTPUT_ATTRS` above.
+# `RESEARCHER_ACTION_ATTRS` could not hold these: its contract test needle-checks `def {attr}(`,
+# because an action is a METHOD. These are values a role writes during a call and the engine reads
+# after it, so they need the assignment-scanning half of the same contract.
+RESEARCHER_OUTPUT_ATTRS: tuple[str, ...] = (
+    # WHICH BOUND ENDED THE PROPOSE LOOP ("turns" / "time"), "" when the model emitted on its own
+    # terms. Exactly the `last_budget_exhausted` argument the Developer half already carries, and
+    # for a sharper reason here: `agent_max_turns` and `agent_time_budget_s` both ship at 0 (no
+    # cap), so today the turn count IS where a proposal converged — which is what makes the
+    # measured distribution (24..319 turns over v11's nineteen proposals, median 62) trustworthy.
+    # The moment any cap is set, a TRUNCATED proposal and a CONVERGED one become indistinguishable
+    # in the record unless this is carried. `tool_loop.py::_note_budget` has announced it through
+    # `on_budget` since it was written; `on_budget` is in `EXPLICIT_ONLY_LOOP_ARGS`, so it can only
+    # ever arrive at a call site by hand, and the Researcher's was the one that never passed it.
+    "last_budget_exhausted",
+    # THE SAME RECEIPT UNDER A ROLE-SCOPED NAME, and it is not a duplicate — it is what keeps the
+    # two receipts apart on ONE object. Under the shipped `Settings.unified_agent`,
+    # `agents/factory.py::make_roles` returns the SAME `UnifiedAgent` as both roles, so
+    # `self.researcher` and `self.developer` are one object and both halves were writing
+    # `last_budget_exhausted` on it: `propose` mirrored the inner researcher's cutoff, and
+    # `WrapsDeveloper._sync_audit` mirrored the inner developer's after each code stage. Whichever
+    # ran last won, and `engine/evaluate.py` stamps the DURABLE `node_repaired.budget_exhausted`
+    # from it — so a repair whose delegate raised (swallowed by `_evaluate`'s own
+    # `except Exception as _repair_exc`, which leaves `_sync_audit` unreached) recorded the value a
+    # PROPOSAL had written minutes earlier, as a fact about a repair that had no budget cutoff.
+    #
+    # A plain (non-facade) researcher writes only `last_budget_exhausted` and is not also a
+    # developer, so both spellings are read through `researcher_budget_exhausted` below.
+    "last_propose_budget_exhausted",
+)
+
+
+def researcher_budget_exhausted(researcher) -> str:
+    """WHICH BOUND ENDED THIS ROLE'S LAST PROPOSE — "turns" / "time" / "" — from either spelling.
+
+    THE FALLBACK IS ON ABSENCE, NOT ON EMPTINESS, and that distinction is the whole rule. On a
+    `UnifiedAgent` the plain `last_budget_exhausted` carries the DEVELOPER's last code stage, so
+    falling back whenever the scoped name is merely EMPTY would report a budget-cut repair as this
+    proposal's cutoff — the same confusion in the other direction. An object that DEFINES the scoped
+    slot has answered for the researcher role, "" included; only an object that does not define it
+    at all is a plain researcher, which writes the one name and is not also a developer.
+    """
+    # Both names spelled as LITERALS: `tests/test_role_output_contract.py` scans for
+    # `getattr(<expr>, "<attr>")`, so a loop over a tuple of names would make this reader invisible
+    # to the registry that exists to catch a one-sided rename.
+    scoped = getattr(researcher, "last_propose_budget_exhausted", None)
+    if scoped is not None:
+        return str(scoped or "").strip()[:32]
+    return str(getattr(researcher, "last_budget_exhausted", "") or "").strip()[:32]
 
 # Duck-typed attributes that answer "does building one node make provider calls at all?" — the seam
 # `engine/orchestrator.py::_build_calls_an_llm` reads, and the other half of the same AUTO width
@@ -1590,11 +1646,12 @@ class WrapsDeveloper:
         """Mirror the wrapped developer's per-call outputs onto this wrapper.
 
         EVERY member of `DEVELOPER_OUTPUT_ATTRS` the engine reads off `self.developer` has to be
-        here, and two were not. `last_rollback_stage` and `last_budget_exhausted` are set on the
-        INNER developer by `adapters/repo_developer.py`, while `engine/evaluate.py` reads them off
-        the FACADE — and under the shipped default (`Settings.unified_agent`) the engine's developer
-        is a `UnifiedAgent`, i.e. a wrapper. Both have a FALSY default at their reader, so the
-        omission did not fail: every `node_repaired` row recorded "no rollback was requested" and
+        here, and THREE were not: `last_rollback_stage`, `last_budget_exhausted` and
+        `last_edit_calls` are set on the INNER developer by `adapters/repo_developer.py`, while
+        `engine/evaluate.py` reads them off the FACADE — and under the shipped default
+        (`Settings.unified_agent`) the engine's developer is a `UnifiedAgent`, i.e. a wrapper. Each
+        has a FALSY default at its reader, so the omission did not fail: every `node_repaired` row
+        recorded "no rollback was requested" and
         "the session finished on its own terms", which is precisely the reading each attribute was
         added to stop being the only one available. `tests/test_developer_output_forwarding.py`
         derives the required set from the engine's own `getattr` sites.
@@ -1608,6 +1665,7 @@ class WrapsDeveloper:
         self.last_footprint = getattr(self._wrapped, "last_footprint", None)
         self.last_rollback_stage = getattr(self._wrapped, "last_rollback_stage", "") or ""
         self.last_budget_exhausted = getattr(self._wrapped, "last_budget_exhausted", "") or ""
+        self.last_edit_calls = getattr(self._wrapped, "last_edit_calls", 0) or 0
 
 
 # --------------------------------------------------------------------------- #

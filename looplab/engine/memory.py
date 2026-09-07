@@ -829,6 +829,56 @@ def skill_source_digest(statement) -> str:
     return hashlib.sha256(str(statement or "").encode("utf-8")).hexdigest()
 
 
+# A skill body is distilled from `node_created.code` — the candidate's own source. That code is
+# deliberately OUTSIDE `Engine._redact` because it is the record of what ran, and inside its own run
+# that is right. A SKILL CARD is the opposite kind of object: it leaves the run, lands in the shared
+# skills directory, and is mounted into every later Researcher's toolset. So a hard-coded token in a
+# winning snippet shipped, verbatim, to every future run on the box.
+#
+# REDACTED AT THE WRITE, not at the read. `use_skill` reads these files back verbatim, and so does
+# anyone with a shell; redacting on the way out would leave the secret on disk and merely hide it
+# from one reader.
+#
+# The cap is generous and DISCLOSED. `redact_persisted_text` truncates, and a silently shortened
+# code snippet is a skill that teaches a technique with its ending removed — so the body is clipped
+# only if it exceeds this, and the card says so where a reader will see it.
+_MAX_SKILL_BODY_CHARS = 20_000
+
+
+def redacted_skill_body(body: str) -> str:
+    """The skill body as it may be persisted: credential shapes and this box's own env values gone.
+
+    `entropy=False` deliberately. The entropy pass was measured to zero false positives on 1,652
+    persisted LOG TAILS, and a skill body is not a log tail — it is CODE, where a long mixed-case
+    alphanumeric literal is as likely to be a legitimate constant, a model id or a checksum as a
+    credential. The two authenticated rungs (known credential shapes, and the values of this box's
+    own secret-shaped environment variables) carry no such ambiguity and are what actually catch a
+    pasted token.
+    """
+    from looplab.core.redact import _redact_persisted
+
+    # THE TRUNCATION BIT COMES FROM THE BOUNDER, never from `len(body)`. `core/redact.py`'s own
+    # docstring names that reconstruction as a shipped bug and `_redact_persisted` exists solely to
+    # expose the fact "from the one place that knows it": the redactor NFKC-normalizes and masks
+    # BEFORE bounding, so the raw length says nothing about truncation in either direction. Both
+    # directions were live here — a body of compatibility characters EXPANDS past the cap and is
+    # clipped while `len(body) <= cap`, so the card shipped an amputated code snippet carrying the
+    # bounder's own marker and DENYING it was clipped; and a body just over the cap carrying a
+    # masked `sk-…` credential redacts back under it and is not clipped, while the card asserts it
+    # was — a false receipt on a file mounted into every later Researcher's toolset.
+    #
+    # The receipt therefore no longer quotes a character count either: the number a reader could
+    # check is the raw one, and the raw one is not what the cap was applied to.
+    text = str(body or "")
+    clipped, truncated = _redact_persisted(
+        text, max_chars=_MAX_SKILL_BODY_CHARS, entropy=False)
+    if truncated:
+        clipped = (clipped.rstrip()
+                   + f"\n\n<!-- clipped: the distilled body did not fit the "
+                     f"{_MAX_SKILL_BODY_CHARS}-character skill-card limit -->")
+    return clipped
+
+
 def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                      fingerprint: list[str], task_id: str, *, identity_claim: Optional[str] = None,
                      classifier_version: str = "", source_statement: str = "") -> Optional[Path]:
@@ -933,7 +983,7 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                     f"source_task: {source_task}\n"
                     f"fingerprints: {json.dumps(fps)}\n"
                     "---\n\n"
-                    f"# {statement.strip()}\n\n{body.strip()}\n")
+                    f"# {statement.strip()}\n\n{redacted_skill_body(body).strip()}\n")
             atomic_write_text(p, text)
         return p
     except Exception:  # noqa: BLE001 — skill distillation is best-effort, never fails a run

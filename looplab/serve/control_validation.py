@@ -56,6 +56,7 @@ from looplab.core.redact import redact_secrets
 from looplab.events.comment_projection import (
     COMMENT_ID_RE, COMMENT_MAX_PER_NODE_GENERATION, COMMENT_MAX_PER_RUN, COMMENT_MAX_VERSION,
     normalize_comment_text)
+from looplab.events.finalize_scope import is_guarded_abort
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
@@ -560,7 +561,7 @@ def _normalize_set_strategy(ctx: _ControlIntake) -> dict:
         raise HTTPException(400, "strategy must be a non-empty JSON object")
     unknown_strategy = set(strategy) - {
         "policy", "policy_params", "fidelity", "eval_parallel", "llm_parallel",
-        "llm_lane_limits", "card_scoring",
+        "llm_lane_limits", "card_scoring", "developer",
     }
     if unknown_strategy:
         raise HTTPException(
@@ -577,6 +578,23 @@ def _normalize_set_strategy(ctx: _ControlIntake) -> dict:
         if fidelity not in {"smoke", "full", "adaptive"}:
             raise HTTPException(400, "strategy.fidelity must be smoke, full, or adaptive")
         clean_strategy["fidelity"] = fidelity
+    developer = strategy.get("developer")
+    if developer is not None:
+        # REFUSED here, not dropped, and that asymmetry is `core/appconfig.py`'s: the operator is
+        # present at this boundary and can fix a typo, so a 400 naming the valid set is strictly
+        # better than silently keeping the current backend. `validate_strategy` drops instead
+        # because there the author is a MODEL, and a hallucinated name must not take a whole
+        # decision — or the run — down.
+        #
+        # `developer_switch_names()` is the one home of this vocabulary (`core/config.py`), the same
+        # set `engine/strategy.py::_available_developers` offers the Strategist, so the operator and
+        # the model cannot come to be told different things are switchable.
+        from looplab.core.config import developer_switch_names
+        names = sorted(developer_switch_names())
+        if not isinstance(developer, str) or developer not in names:
+            raise HTTPException(
+                400, f"strategy.developer must be one of: {', '.join(names)}")
+        clean_strategy["developer"] = developer
     for name, upper in (("eval_parallel", 1024), ("llm_parallel", 64)):
         if strategy.get(name) is None:
             continue
@@ -856,6 +874,16 @@ def _normalize_fork_receipt(ctx: _ControlIntake, parents: list, idea: Idea) -> d
 
 def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     data = ctx.data
+    # BEFORE the import, because the import MINTS this key and after it runs a server-derived
+    # `origin` is indistinguishable from a submitted one.
+    if "origin" in data:
+        raise HTTPException(400, {
+            "code": "origin_forged",
+            "message": ("origin is derived by the server from the source experiment and must not "
+                        "be supplied"),
+            "remediation": ("seed from another run with source_run/source_node and let the server "
+                            "record where it came from"),
+        })
     if data.get("source_run") and data.get("source_node") is not None:
         _import_cross_run_source(ctx)
     # The RESIDUAL allow-list: the event's own fields MINUS the two the import consumes.  It is not
@@ -963,6 +991,19 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     if not isinstance(deleted, list):
         raise HTTPException(400, "deleted must be a list of relative path strings")
     data["deleted"] = [_relative_file_name(name, "deleted") for name in deleted]
+    # `origin` IS SERVER-DERIVED PROVENANCE, exactly like the fork receipt's stamped half, and it was
+    # the one the client could write. `_import_cross_run_source` mints it from the source node it
+    # just read — run id, node id, that node's `robust_metric`, its lifecycle generation — and the
+    # fold then keeps it verbatim, the DAG renders it as a verified cross-run seed CARRYING A METRIC,
+    # and `routers/reviews.py::_SUMMARY_OMIT_KEYS` scrubs it from every review capability precisely
+    # because it discloses the portfolio. A caller that supplies its own is claiming a measured
+    # result in another run that need not exist.
+    #
+    # Same refusal as `forked_from`'s `fork_receipt_forged`, and for the same reason: what the
+    # server derives, the client may not assert. `_import_cross_run_source` runs earlier in this
+    # same normalizer and sets `data["origin"]` itself, so the legitimate path is unaffected — it is
+    # the SUBMITTED payload that may not carry one, which is why the check reads the raw body rather
+    # than `data`.
     origin = data.get("origin")
     if origin is not None and not isinstance(origin, dict):
         raise HTTPException(400, "origin must be a JSON object or null")
@@ -1479,7 +1520,10 @@ def _decide_run_abort(service, rd: Path, event_type: str, state, alive: bool,
             "retry after engine_running becomes false", retryable=True)
     if pending_finalize:
         return "attach", None
-    if state.finished and str(state.stop_reason or "").lower() != "error":
+    # A guarded-abort finish (`error`, or the ceiling's `budget_exhausted`) still owes its wrap-up,
+    # so an operator's abort on it is APPENDED like on an `error` finish — a literal `"error"` here
+    # answered `noop` for every ceiling-ended run (`events/finalize_scope.py::is_guarded_abort`).
+    if state.finished and not is_guarded_abort(state.stop_reason):
         return "noop", None
     return "append", None
 

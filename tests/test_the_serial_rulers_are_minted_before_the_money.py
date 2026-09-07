@@ -28,6 +28,7 @@ export REPO="{repo}"
 export ALGOTUNE_BASELINE_CACHE_DIR="$CACHE"
 export TASKS="{tasks}"
 export PREMINT_LANE="0-1"
+export ALGOTUNE_PREMINT="${{WANT_MINT:-1}}"   # doubled: this line lives in a .format() template
 sed -n '/^scoring_workers() {{/,/^}}/p' "{script}" > "$WORK/a.sh"
 sed -n '/^premint_serial_rulers() {{/,/^}}/p' "{script}" > "$WORK/b.sh"
 . "$WORK/a.sh"; . "$WORK/b.sh"
@@ -35,7 +36,7 @@ premint_serial_rulers
 """
 
 
-def _run(tasks, cache_files=(), shim_writes=True):
+def _run(tasks, cache_files=(), shim_writes=True, want_mint="1"):
     with tempfile.TemporaryDirectory() as tmp:
         work, cache, shim = Path(tmp) / "w", Path(tmp) / "c", Path(tmp) / "s"
         for d in (work, cache, shim):
@@ -60,7 +61,8 @@ done
 [ -n "$t" ] && echo '{}' > "$ALGOTUNE_BASELINE_CACHE_DIR/${t}__${s}__lane22r3.json"
 """ if shim_writes else "exit 1\n"), encoding="utf-8")
         (shim / "python3").chmod(0o755)
-        env = {**os.environ, "WORK": str(work), "CACHE": str(cache), "SHIM": str(shim)}
+        env = {**os.environ, "WORK": str(work), "CACHE": str(cache), "SHIM": str(shim),
+               "WANT_MINT": want_mint}
         got = subprocess.run(["bash", "-c", DRIVE.format(repo=REPO, script=SCRIPT, tasks=tasks)],
                              capture_output=True, text=True, env=env, timeout=300)
         return got.stdout + got.stderr, sorted(p.name for p in cache.iterdir())
@@ -92,3 +94,23 @@ def test_a_mint_that_fails_names_the_task_that_will_be_refused():
     assert "WARNING" in out and "max_clique_cpsat" in out, out
     assert "will be REFUSED at scoring time" in out, out
     assert files == [], files
+
+
+def test_minting_is_opt_in_because_a_preflight_ran_it_for_real():
+    """Measured 2026-09-07: three ORPHANED `campaign.sh` processes (ppid 1) were minting into the
+    box's LIVE `.baseline_times` on lane `0,48`, hours after the runs that started them were killed
+    -- every campaign test that drives this script for its preflight was also driving a real
+    three-minute timing per task, into the one directory the whole bench divides by. Eight
+    `__lane2r3` entries got there that way.
+
+    So the pre-flight NAMES what is missing and mints only when asked. The fixture below is the one
+    that matters: without the flag, nothing is written and the operator is told which task will be
+    refused."""
+    out, files = _run("max_clique_cpsat", want_mint="0")
+    assert files == [], files
+    assert "MISSING serial ruler for max_clique_cpsat/test" in out, out
+    assert "ALGOTUNE_PREMINT=1" in out, out
+    assert "will be REFUSED at scoring time" in out, out
+
+    asked, minted = _run("max_clique_cpsat", want_mint="1")
+    assert "max_clique_cpsat__test__lane22r3.json" in minted, (asked, minted)

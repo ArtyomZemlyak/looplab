@@ -159,6 +159,16 @@ class EngineOptions:
     # has ever produced a metric. 0 = off, which is the bare-library default — a direct
     # `Engine(...)` gains no new terminal. See `orchestrator.systemic_failure_stop_reason`.
     systemic_failure_stop: int = 0
+    # How many Developer-session crashes a run absorbs before the circuit breaker auto-pauses it
+    # (`node_build.py::developer_crash_rank`). 1 = pause on the FIRST crash, which is the rule the
+    # breaker has always applied, so this is the same on both sides and NOT a divergence-table row.
+    developer_crash_pause_after: int = 1
+    # Refuse to OPEN a node when less than this many dollars of `llm_budget_usd` remain
+    # (`CostAccountant.require_headroom`). 0.0 = OFF here and 0.10 in `Settings`, a DELIBERATE
+    # divergence on `systemic_failure_stop`'s exact ground: it is a NEW STOP, and a bare
+    # `Engine(...)` must not acquire a terminal it never had — even one that only ever fires beside
+    # a ceiling the caller set.
+    node_open_budget_floor_usd: float = 0.0
     # Run the stage every N created nodes. `-1` = OFF (manual/strategist only) — the bare-library
     # value, so a direct `Engine(...)` gains no cadence-driven paid think. `0` is NOT off here: since
     # 2026-08-07 it means "start immediately, then every node" (`engine/cadence.py`), which is the

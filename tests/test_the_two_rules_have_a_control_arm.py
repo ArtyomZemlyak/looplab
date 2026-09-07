@@ -21,6 +21,19 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+def _preregister(probe_dir: Path) -> None:
+    """`run_probe.sh::require_preregistration` refuses an ARM (a card or settings variant) with no
+    PREREGISTERED.txt since 2026-09-06; these tests launch the `--no-unteachable-rules` variant as
+    a CONTROL for the rules, which to the launcher is an arm. A complete, honest file: the outcome
+    and the size these tests do not measure are named as such."""
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    (probe_dir / "PREREGISTERED.txt").write_text(
+        "primary_outcome: (dry run -- the card's text, not a score; nothing is measured)\n"
+        "batches: 1\npower: 0.0\n"
+        "arm_power: python benchmarks/arm_power.py --batches 1  (not run: a dry run spends nothing)\n",
+        encoding="utf-8")
 MAKE = REPO / "benchmarks" / "algotune" / "make_task.py"
 ARENA = Path("/var/tmp/looplab-bench/AlgoTune")
 
@@ -115,6 +128,8 @@ def test_the_probe_records_which_card_it_ran(tmp_path):
 
     def _instrument(label, env_extra):
         out = tmp_path / label
+        if env_extra:
+            _preregister(out)      # a card variant is an ARM, and an arm launches only preregistered
         env = {**os.environ, "PROBE_DRY_RUN": "1", "PROBE_OUT_ROOT": str(tmp_path), **env_extra}
         r = subprocess.run(
             ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",
@@ -226,6 +241,8 @@ def test_the_record_pins_the_card_itself_not_only_the_flags(tmp_path):
         pytest.skip("bench root not on this box")
 
     def _hash(label, extra):
+        if extra:
+            _preregister(tmp_path / label)
         env = {**os.environ, "PROBE_DRY_RUN": "1", "PROBE_OUT_ROOT": str(tmp_path), **extra}
         r = subprocess.run(
             ["bash", str(probe), "deepseek-v4-flash", label, "44-47", "pde_heat1d",

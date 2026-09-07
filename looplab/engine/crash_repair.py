@@ -648,7 +648,8 @@ class CrashRepairMixin:
                     "source": CRITIC_SOURCE_UNREACHABLE}
 
     def _repair_error_context(self, reason: str, error: str,
-                              state: Optional[RunState] = None, node=None) -> str:
+                              state: Optional[RunState] = None, node=None,
+                              *, headline: str = "") -> str:
         """Error context handed to Developer.repair(). A timeout gets an explicit cost-reduction
         directive (the code was too slow, not wrong — shrink it to fit the budget). With deep_repair
         (C3) a crash is enriched with the failure taxonomy + a 'reproduce then fix' directive; else
@@ -664,6 +665,31 @@ class CrashRepairMixin:
             if chain:
                 chain += "\n\n"
         error = chain + (error or "")
+        # WHAT THE PROCESS SAID IT DIED OF, for the role that cannot go and look.
+        #
+        # `error` here is `_eval_failure_text`'s last 500 characters of stderr, and the fact that
+        # says what died is routinely outside it. Measured on `runs/e5small-dr-unified-v4` node 4,
+        # `torch.OutOfMemoryError` sits 952 characters from EOF and 908 for "Tried to allocate 2.25
+        # GiB", while 329 of that 500-char window is a tqdm bar's trailing whitespace — an effective
+        # reach of ~171 characters of real text. The three corpus entries in
+        # `tests/test_torch_oom_is_an_oom.py` put it 1,659 / 12,991 / 14,192 characters out. So the
+        # Developer was asked to fix an out-of-memory failure without the allocation size, the device
+        # or the free memory, all of which its own process printed.
+        #
+        # HERE AND NOT IN `_eval_failure_text`, and the split is the whole design. That function
+        # feeds TWO roles and they are not in the same position: the DIAGNOSTICIAN holds
+        # `repair_log_tools` and can PULL the line out of the stage log itself, while the DEVELOPER
+        # gets this string and nothing else. docs/44 measured the diagnostician's prompt as
+        # byte-identical and argued the trade from ~8.8 provider calls per failure
+        # (`tests/test_diagnosis_record.py` pins that as an equality, not a budget); pushing into
+        # `_eval_failure_text` would have broken it to give the fact to a reader that could already
+        # fetch it. Pushing here gives it to the reader that cannot, and the diagnostician's prompt
+        # stays byte-for-byte what it was.
+        #
+        # It DECIDES nothing — see `failure_diagnosis.failure_headline`, which holds the argument for
+        # why a text rule is admissible for a push and is not for a classification.
+        if headline and headline not in error:
+            error = f"[{headline}]\n{error}"
         # Repair-side twin of the Layer-4 proposal cue. Explicit footprints own the device count;
         # an unspecified footprint retains the historical parallel single-device rule.
         footprint = normalize_researcher_footprint(

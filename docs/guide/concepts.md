@@ -541,7 +541,16 @@ once or rejectable but cannot expose persistent approval.
 
 The older `POST .../control` and `POST .../resume` routes remain compatibility surfaces. Legacy
 mutation events cannot overtake an active/retryable command or incomplete finalize; the mutation-free,
-stop-aware `/resume` route remains available specifically to attach a recovery driver. Current Web,
+stop-aware `/resume` route remains available specifically to attach a recovery driver.
+`/control` now ANNOUNCES its deprecation on every successful append — `Deprecation: true`, a `Link`
+naming `/commands` as the successor version, and a `Warning` stating the exact hazard: it has no
+durable request identity, so a lost-response retry re-appends an ADDITIVE intent instead of
+resolving to the record it already created. There is deliberately **no `Sunset`**, because RFC 8594's
+field carries a date and no removal date has been agreed; the header pair is `Deprecation` + `Link`
+until one is. The server also tallies who still calls it, by event type and User-Agent
+(`routers/control.py::legacy_control_callers`), so the migration is a number rather than an
+intention. Behaviour is otherwise unchanged: requiring `expected_seq` here was tried and reverted,
+because a silent 409 breaks the compatibility this route exists to provide. Current Web,
 boss, and TUI controls use the command lifecycle above. Report regeneration remains a background job,
 but its run-generation lease and cost events share the same destructive boundary.
 Standalone legacy CLI `stop`, `finalize`, `resume`, and `approve` commands are not yet participants in
@@ -684,6 +693,30 @@ step boundary of a build (`propose` → `novelty` → `reserve` → `implement`/
 *diagnostic* event: `replay.fold` ignores it by design, because it is transient progress and a resume
 must rebuild the same `RunState` with or without it, and because it is appended from concurrent
 producers where only a fold-ignored type is permitted (invariant #1).
+
+An **evaluation** had the same hole, one level down and far larger: a build is minutes, an evaluation
+is hours. `stage_finished` is folded but lands only at a stage's *completion*, so between two stage
+rows nothing could say whether a node was mining negatives, training or scoring — and on a real
+`mine` → `train` → `score` pipeline the single label every status surface showed, "Training /
+evaluating", is false for two of the three. The engine's own watchdog had the same problem and
+guessed: `train_monitor.resolve_stage_log` picks the freshest-mtime log, and its docstring concedes
+that "the sandbox's live stage cursor genuinely is unobservable from here".
+
+So the stage loop publishes that cursor itself: one `phase_progress` beacon on the `eval` stage as
+each pipeline step begins, and one however it leaves. The step's own name (`mine`, `train`, `score`)
+rides as *detail* rather than becoming a phase, because eval stage names are agent-authored and a
+phase is a closed word `assert_progress_phase` can refuse. Beside the name rides the **role** the
+engine resolved from the manifest through `train_monitor.eval_log_plan` — and that split is the
+point: `train` is a slug the agent chose, so a surface may *show* the name but may only *claim*
+"Training" from the role. A pipeline that declares no `role: "training"` therefore reads
+"Stage `train` · 2 of 3" and not "Training", which is deliberately weaker than guessing from a slug
+that would usually be right — `eval_log_plan` refuses the same inference for kill authority, and a
+status surface quietly applying a looser rule would let an operator read an engine claim into a word
+the candidate picked.
+
+Both halves are closed in the browser by the same rule: a `started` with no `finished` is *live* by
+design, so the cursor is closed in a `finally` — an unclosed beacon would report a node that died
+hours ago as still training, which is the one failure mode that makes a live signal worse than none.
 
 A **resume** is just as blank as a build was — every line of `Engine._enter_run` runs before the
 loop's first turn, so nothing the UI polls has moved — and it deliberately has **no** beacon. The
@@ -1414,6 +1447,115 @@ raising on it, so repairing that carrier is exactly what makes this reachable. A
 non-list row still yields no concepts for that question, and a question with none is registered
 exactly as it was before any of this shipped.
 
+**A node that trains says whether its build changed anything.** Measured across the three
+e5small runs with workspaces: **2 of 47 parent edges** are nodes whose SOURCE is byte-identical to
+the parent they claimed to modify, each having paid a full train to re-measure that parent —
+`v12 15 -> 10` (proposed as "node 10's UNCLIPPED footprint" when node 10's `config.yaml:279`
+already read `max_grad_norm: 1.0`) and `v11 10 -> 0` (the same 3→6 epoch extension as node 0,
+restated ten nodes later). Nothing caught either: the novelty gate keys on operator + params and
+on a repo task the experiment IS the code edit, `_intra_batch_dup` compares only siblings of ONE
+batch, and none of the thirteen `CARD_BUILD_SKIP_REASONS` is "identical to its parent".
+
+    build finishes
+        │
+        ▼
+    node_eval_started                      <- the last moment the question is free to ask
+        │
+        ├──▶ source_tree_digest(child)      content sha256 over .py/.yaml/... , EXCLUDING
+        │    source_tree_digest(parent)     experiments/ (checkpoints the TRAIN writes), caches
+        │                                   and .ipynb_checkpoints
+        ▼
+    node_build_delta {node_id, parent_ids, identical_to, source_digest}
+        │
+        ├── identical_to == []   the ordinary case, still recorded
+        └── identical_to == [3]  this build changed NOTHING against node 3
+        │
+        ▼
+    train runs either way   <- RECORDED, NOT REFUSED
+
+`source_tree_digest` exists rather than a call to the older `_dir_fingerprint` because both of that
+helper's branches answer a different question: it returns the **git HEAD** for a path inside a repo
+(every node workspace is one), which is blind to the uncommitted build edits that ARE the
+experiment, and its fallback keys on `mtime_ns`, which always differs between two separately-created
+workspaces. A guard on the first fires always-or-never; a guard on the second fires never.
+
+It is a receipt and not a refusal on this rung, deliberately: refusing would have destroyed both
+collisions, and those two accidents are the only replicates this box has ever produced — they are
+what answers the run-to-run noise question (|Δ| 0.000573 and 0.002519, against a 0.010945 gap to
+the champion). The operator gets the visibility and keeps the choice.
+
+**What the board REFUSED is now written down.** `classify_research_beliefs` has always returned
+the four causes — blank, repeated, restated, capped — and until 2026-09-02 their only consumer was
+a `_LOG.warning`. The memo receipt cannot carry them: `research_completed` is appended in
+`_record_deep_research` BEFORE the classification runs. So the run recorded what deep research
+PROPOSED and never what the board DID with it:
+
+    memo returns N directions
+        │
+        ├──▶ research_completed          the proposals, durable
+        │
+        ▼
+    classify_research_beliefs(open board, directions)
+        │
+        ├──▶ admitted ──▶ hypothesis_added rows          durable
+        ├──▶ _LOG.warning("… n no room, m already …")    console only, gone on restart
+        └──▶ belief_admission  {proposed, admitted, capped, restated, repeated, blank,
+                                board_read}              durable  ← this row
+
+Measured on `e5small-dr-unified-v12` and it is why the row exists: 36 memos proposed 413
+directions, **394 were capped**, 2 restated, 0 repeated, 17 admitted. Fifty-five of the capped
+were the same experiment — the run-to-run noise floor, the seed pinning, the replicate of node 2's
+config — refused by the CAP every time, never as a duplicate. Getting those numbers meant
+reconstructing the board memo by memo and re-running the classifier by hand. The cap value is an
+operator decision and this row is the number that decision needs.
+
+`belief_admission` is DIAGNOSTIC, not `BACKGROUND_APPENDABLE`, and the two are not
+interchangeable: the folded events the same task appends (`hint`, `hypothesis_added`) are licensed
+because they move no reader's position, while a diagnostic row is excluded WHOLESALE from
+`speculation._proposal_authority_seq` — the stronger form of that licence. It carries `board_read`
+because a failed board read leaves the classifier with no open statements, and `capped`/`restated`
+then describe nothing real.
+
+**A question may also sit under a BROADER question**, and until 2026-09-02 it could not: every
+`hypothesis_added` row on `e5small-dr-unified-v12` carried exactly `[at_node, concepts, source,
+statement]`, while `Card` had carried `parent_card_id` and `child_card_ids` the whole time. The
+model was permitted a tree it had no way to describe, and the only edge any prompt asked for was
+experiment -> direction. `question_parents[i]` names the parent of `open_questions[i]` — the twin of
+`question_concepts`, resolved by the twin function, with the same order rule for the same measured
+reason. The path is five links long and each one is a place the feature could ship inert:
+
+    _MemoOut.question_parents          the EMIT schema; its `description` is the only channel in
+      │                                front of the model when the tool call is constructed
+      ▼
+    sanitize_research_memo_payload     builds its OWN dict — a key it does not know is dropped, which
+      │                                is how question_concepts once recorded "no concepts" about
+      ▼                                memos structurally unable to hold any
+    ResearchMemo.question_parents      the carrier; a schema asking for what the memo cannot hold
+      │                                ships the feature inert
+      ▼
+    question_parent_rows(...)          RESOLVES: the exact statement of another question in THIS
+      │                                memo (through hypothesis_id, the board's own content
+      │                                address) or an id already on the board. Unmatched -> NO EDGE.
+      ▼                                Cycles closed inside one memo are dropped whole.
+    hypothesis_added.parent_belief_id  the durable row; absent leaves the key out entirely
+      │
+      ▼
+    _on_hypothesis_added -> Card.parent_card_id -> _apply_card_lineage fills child_card_ids
+
+A wrong edge is not recoverable and an absent one is, so nothing is ever fabricated: a parent naming
+neither a sibling statement nor a live board id yields a question with no parent, exactly as before.
+Self-edges and cycles are refused **once**, by `_apply_card_lineage` steps 2-3, which resolves
+aliases first and peels cycles exactly; two earlier duplicate guards (one in the resolver, one in
+the ledger) were deleted because no mutant could kill them — a guard no test can fail is not a
+guard.
+
+The board read behind `known_ids` is its own hazard and cost a near-miss: `_record_research_steering`
+runs on the concurrent research task and is handed the memo, not the state, so reaching for `state`
+raised `NameError` **inside the projection's own try/except** — one log line, and every question
+registration for that memo silently vanished. `tests/test_memo_questions_reach_the_board.py` caught
+it as `(0, 1) == (2, 1)`. `_board_card_ids()` now folds for itself, best-effort: a fold that fails
+yields no board ids and a question registers with no parent rather than not registering at all.
+
 **The carrier had a SECOND blockage and it was the ENCODING**, found live on the run launched from
 the fix above. That run's first memo came back rich — 10 findings, 11 claims, 64 sources — and the
 console read `deep research: emitted memo kept, 1 field(s) refused for shape: open_questions`, so
@@ -1793,9 +1935,13 @@ drives a `✍️ writing` / `🔧 repairing` / `🔀 merging` status (by the nod
 node's trace live; a `pending` node is being **trained** (the sandbox eval — no LLM), shown as
 `running (training)` with no live pulse. The Dock's status strip goes one level finer, from the
 `phase_progress` beacons above: it names the STEP ("Proposing 4 experiments…", "Writing code for
-experiment #7…") rather than only the fact that a build is running,
+experiment #7…", "Experiment #5 training / evaluating · train 2/3…") rather than only the fact that a
+build or an evaluation is running,
 and its age clock measures the current *phase* rather than the whole build — so `40m` beside "Writing
-code for experiment #7…" means the Developer has been going forty minutes. The decode is the pure
+code for experiment #7…" means the Developer has been going forty minutes. The two lanes are
+COMPOSED, not ranked: the strip used to return on the first build it found, so on any run wide enough
+to build and evaluate at once — the shipped default — every evaluating and queued node was invisible
+in the one surface that claims to say what is happening now. The decode is the pure
 model `ui/src/buildingModel.js::openPhases`/`livePhase`/`phaseLabel`; `Dock.jsx` keeps only the choice
 of which label to show. A resume still shows only the transport strip's "Resume requested…". The assistant chat streams the same way — interstitial prose
 (`SSE_TEXT`) and tool steps (`SSE_STEP`) between tool rounds, Claude-Desktop-style.
@@ -1839,3 +1985,142 @@ Where each concept lives in the code:
 | Static HTML lineage tree | `events/htmlview.py` |
 | Task adapters + loader | `adapters/tasks.py`, `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
 | Strategist / Deep-Research / report | `agents/strategist.py`, `agents/deep_research.py`, `serve/report.py` |
+
+
+## A question's SHAPE, and why it is recorded rather than refused
+
+The operator's complaint, four runs running: *"the questions are huge — that is more hypothesis than
+question; I need broader directions."* It was an impression nobody could check, because nothing in
+the run said how big a question was. Measured on `runs/e5small-dr-unified-v12` on 2026-09-03:
+
+| | n | min | median | max |
+|---|---|---|---|---|
+| questions (`card_kind: direction`) | 12 | 195 | **311** | 469 |
+| work cards | 23 | 23 | **164** | 347 |
+| the emit prompt's own example of a good question | 1 | — | **49** | — |
+
+The questions are LONGER than the work cards they are supposed to be broader than, and 6.3x the
+example. They are not mis-typed — the unambiguous experiment-brief shape, a question carrying the
+arms of its own sweep (`512x32 vs 2048x8 vs 4096x4`), is **1 of 21** across v11 and v12. They are
+OVER-QUALIFIED: each embeds the evidence that motivated it.
+
+A first predicate — "the question names an exact value" — flagged 13 of 21 and was **refuted**:
+v11's hits cite the champion score as grounding, which is legitimate. That refutation is kept
+executable in `tests/test_question_shape_is_recorded.py::test_grounding_is_not_a_sweep`.
+
+```
+  WHERE THE SHAPE RULE LIVES  (the fix is the arrow that was missing)
+
+   emit prompt prose  ──────────────────────────────► the model
+   "broad questions a FAMILY of experiments would        ▲   reads the tool signature, ~100 lines
+    answer"  … says BROAD, never says SHORT              │   away from the prose
+                                                         │
+   _MemoOut.question_concepts  ── description ───────────┤   had one
+   _MemoOut.question_parents   ── description ───────────┤   had one
+   _MemoOut.open_questions     ── (nothing) ─────────────X   HAD NONE — and it is the field
+                                    │                        that governs the shape
+                                    └── now carries: one clause, SHORT, no scores, no node ids,
+                                        no footprints, no "given that …", no candidate settings
+
+  AND THE FALSIFIER, so the next run reports on itself instead of needing an operator's eye:
+
+   memo ─► classify_research_beliefs ─► BeliefAdmission{admitted, blank, repeated, restated, capped}
+                                             │
+                                             └─► belief_admission row
+                                                 {proposed, admitted, capped, restated, repeated,
+                                                  blank, board_read,
+                                                  shape: {n, chars_median, chars_max,
+                                                          with_sweep_arms}}   <- NEW
+
+   Reported, never enforced: a long question is not automatically a bad one, and a refusal here
+   would drop a real direction over a style rule. `chars_median` on the next run against 311 is the
+   whole experiment.
+```
+
+
+## `inert` was one word for two failures — `edit_calls` makes it two
+
+A repair that changes nothing is recorded `verified: inert`. #81 established that every inert repair
+in the corpus had exhausted its session bound, and #82 added `budget_exhausted` so the row says WHICH
+bound. That still left one word covering two different failures with opposite remedies:
+
+| what happened | `changed` | `edit_calls` | remedy |
+|---|---|---|---|
+| never reached for the write surface | `[]` | **0** | not a clock problem — more time buys more reading |
+| tried, and every attempt was refused | `[]` | **> 0** | the refusal path (#92's territory) |
+| wrote, and the bytes were identical | `[]` | > 0 | a proposal that was a no-op |
+
+MEASURED over every inert repair that still has spans (v11 ×2, v13 ×2 — v12's are gone because that
+run pinned pre-fix tracing code, the loss #149 closed): **0, 0, 0, 0** edit-like tool calls, in
+sessions of 22.5, 23.6, 24.4 and 27.3 minutes. Each ended inside one long generation (302 s, 242 s,
+215 s, 192 s, 147 s appear in the tails) after reading widely.
+
+That number took a 450 MB span scan across two runs to obtain, and it refuted the last of four
+candidate fixes for v13 node 0 — wall time separates inert from productive repairs perfectly (all
+inert ≥22.5 min, all productive ≤18.3 min, n=11), so the budget looked like the lever until this
+said there was nothing for more time to finish.
+
+```
+  WHERE THE COUNT COMES FROM, and why it is counted where it is
+
+   model ──calls──► RepoWriteTools.execute(name, args)
+                          │
+                          ├─ name in {write_file, edit_file, delete_file} ?
+                          │        edit_calls += 1     ◄── BEFORE the dispatch, so a REFUSED
+                          │                                attempt still counts. `self.files`
+                          │                                below records only what LANDED.
+                          ├─ declare_stages → staged manifest, NOT an edit
+                          └─ dispatch ──► self.files[path] = content   (the RESULT)
+
+   session end ──► developer.last_edit_calls = write.edit_calls
+                          │        registered in roles.DEVELOPER_OUTPUT_ATTRS beside
+                          │        last_budget_exhausted, the precedent it copies
+                          ▼
+   engine ──► _edit_calls = getattr(developer, "last_edit_calls", 0)   ◄── snapshot, not a late read:
+                          │                                                the developer is SHARED
+                          ▼                                                across concurrent evals
+              node_repaired{... verified, budget_exhausted, edit_calls}
+
+   REPORTED, NEVER REFUSED — the same rung as trace_export_health, belief_admission and
+   node_build_delta. Nothing here changes what a repair is allowed to do.
+```
+
+
+## A build that declares a stage it never wrote
+
+MEASURED on `runs/e5small-dr-unified-v13`, which lost two of its four nodes to this:
+
+| node | stage | error | exit |
+|---|---|---|---|
+| 0 | `mine` | `No module named vectorsearch.mine_stage` | 0.505 s |
+| 2 | `teacher_embeddings` | `can't open file '.../teacher_embeddings.py'` | 0.209 s |
+
+Each then bought **two** repair sessions of ~30 min — all four `inert`, all four `changed: []`,
+`budget_exhausted: time` — and died. The stage cost half a second; the **cascade** cost ~2 h a node.
+
+I rejected this check two cycles earlier with *"it saves 0.5 s against a 47-minute cost"*. That
+reasoned about the stage's own duration and was wrong: the sub-second failure is what triggers the
+cascade. Three sites were then eliminated by the tree's own reasoning before the right one:
+
+```
+  submit time            repo_task.eval_entrypoint_unprotected is DELIBERATELY silent on a
+                         resolvable-but-absent entrypoint — "the Developer AUTHORS the eval
+                         entrypoint" IS the designed flow.                            REFUSED
+  declare_stages tool    the stages phase runs with READ-ONLY tools, so the script
+                         cannot exist yet when the manifest is declared.               REFUSED
+  the stage runner       too late: the node exists, and the cascade is the cost.       REFUSED
+  the IMPLEMENT emit     manifest and final write-ledger are both known here.          <- HERE
+
+  and only the SCRIPT form:
+      python teacher_embeddings.py   -> ["teacher_embeddings.py"]        1 candidate, decidable
+      python -m vectorsearch.mine_stage -> [".../mine_stage.py", ".../__main__.py"]  \
+      python -m pytest                  -> ["pytest.py", "pytest/__main__.py"]       /  IDENTICAL
+  A module with no local file is how INSTALLED code looks — which is why
+  eval_stages._stage_reachable_files already treats that form as OPAQUE. Refusing it would reject
+  every legitimate `python -m pytest` stage. So v13 node 0 is NOT caught, and that is the correct
+  trade: a false refusal costs a healthy build, a missed catch costs one node.
+```
+
+The rung is `repair_verify.build_declared_script_never_written`, bounced ONCE at the implement emit
+from the same `_bounced` shot the repair rung uses — a session gets one bounce, whichever rung
+fires, because two would spend it arguing instead of editing.

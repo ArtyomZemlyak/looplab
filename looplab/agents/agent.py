@@ -77,6 +77,21 @@ _IDEA_SPACE_TOOL = ("Your idea space is the WHOLE experiment, not just hyperpara
 # internal `drive_tool_loop(...)` call resolving through THIS module's (patched) global at call
 # time. Defined in tool_loop, that call would resolve tool_loop's UNPATCHED binding and the seam
 # would silently break — behavior seams beat file size.
+def _established_block(store) -> str:
+    """The "already established" block appended to a chain root's user turn, or "" — see
+    `agents/established.py`. "" when there is no store OR nothing was recorded, so the prompt is
+    byte-identical in both of those states (the LEGACY snapshot default is the first)."""
+    if store is None:
+        return ""
+    block = store.render()
+    return ("\n\n" + block) if block else ""
+
+
+def _established_hook(store, phase: str):
+    """The per-call `on_tool_result` that records a read into the run's store, or None."""
+    return None if store is None else store.hook(phase)
+
+
 def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str = "the next phase",
               handoff: bool = True, finalize, fallback, **loop_kwargs):
     """`drive_tool_loop` + cross-phase handoff summaries. When a `handoff_scope` is active it (1)
@@ -148,8 +163,11 @@ class ToolUsingResearcher:
                  max_turns: int = 0, prompts: Optional[PromptStore] = None,
                  context_budget_chars: int | None = None, time_budget_s: float = 0.0,
                  loop_opts: Optional[dict] = None, offer_sweep: bool = True,
-                 handoff: bool = True):
+                 handoff: bool = True, established=None):
         self.client = client
+        # A5 (docs/60): the run's shared `agents/established.py::EstablishedContext`, or None —
+        # None and an empty store both leave the propose prompt byte-identical.
+        self._established = established
         self.tools = tools          # object with .specs() and .execute(name, args)
         self.space_hint = space_hint
         self.bounds = bounds
@@ -309,10 +327,25 @@ class ToolUsingResearcher:
                                                      memo_verdicts=bool(getattr(
                                                          self, "_memo_verdict_cue", False)))
                 + answered_by_context(self.tools)
+                + _established_block(getattr(self, "_established", None))
                 + hint_block + cue +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
         ]
+        # WHICH BOUND ENDED THIS PROPOSE, or "" when the model emitted on its own terms.
+        # `tool_loop.py::_note_budget` has announced every cutoff since it was written, and
+        # `on_budget` is in `EXPLICIT_ONLY_LOOP_ARGS` — it can NEVER arrive through `loop_opts`, so
+        # a call site that does not pass it by hand is announcing to nobody. Crash triage passes it;
+        # the Developer session passes it; this was the one paid loop that did not, which mattered
+        # the moment anyone wanted to CAP it: with `agent_max_turns` at 0 today the turn count is
+        # where a proposal converged, and under a cap a truncated proposal would be
+        # indistinguishable from a converged one in the record. Reset per call, never accumulated.
+        self.last_budget_exhausted = ""
+
+        def _note_cutoff(payload) -> None:
+            kind = (payload or {}).get("kind") if isinstance(payload, dict) else None
+            self.last_budget_exhausted = str(kind or "")[:32]
+
         try:
             # Every loop OPTION (the turn/time/context budgets included) is folded into
             # self.loop_opts once in __init__ (see there) — pass the merged bundle straight through,
@@ -330,7 +363,9 @@ class ToolUsingResearcher:
                             else "the Developer (single-shot implement)"),
                 handoff=getattr(self, "handoff", True),
                 finalize=self._finalize, fallback=self._fallback,
-                validate=self._validate_emit, **self.loop_opts)
+                validate=self._validate_emit, on_budget=_note_cutoff,
+                on_tool_result=_established_hook(getattr(self, "_established", None), "propose"),
+                **self.loop_opts)
             return bind_idea_to_board_card(result, self._visible_board_cards)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run
             raise

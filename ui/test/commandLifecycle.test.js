@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  COMMAND_ENVELOPE_VERSION,
   CONTROL, clearAssistantRunTransport, clearRunCommandLock, clearRunTransport, commandCanRetry, commandFailureRecord, commandFeedback,
   commandEventForAction, commandRecordMatchesAction, createIdempotencyKey, isTransientCommandReadError,
   getRunCommand, loadAssistantRunTransport, observeRunGeneration,
@@ -526,6 +527,12 @@ test('transport recovery persists the same key before command id and restores it
     action: 'finalize', idempotencyKey, record: { status: 'submitting' }, statusUnavailable: true,
   }, storage), true)
   assert.deepEqual(loadRunTransport('demo run', storage), {
+    // `v` is the envelope's own protocol version (`commandStorage.js::COMMAND_ENVELOPE_VERSION`).
+    // Pinned here rather than ignored: this assertion is the EXACT recovered shape, and a version
+    // that silently stopped being persisted would take the forward-compatibility branch with it —
+    // an envelope written without one reads as version 1 forever, which is right as a migration and
+    // wrong as a permanent state.
+    v: COMMAND_ENVELOPE_VERSION,
     runId: 'demo run', action: 'finalize', expectedGeneration: GEN_A,
     idempotencyKey, commandId: '',
     record: { status: 'submitting' }, statusUnavailable: true, observationKind: null,

@@ -34,6 +34,7 @@ from looplab.core.models import (
     RunState,
     card_ownership_receipt,
 )
+from looplab.engine.card_reservation import CARD_STAGE_REFUSALS
 from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import (
     Engine,
@@ -998,7 +999,7 @@ def test_raw_producer_exception_becomes_consumable_failure_result(tmp_path, monk
     result = engine._spec_raw_stage_result
     assert result is not None and result.success is False
     assert result.error == "RuntimeError: raw producer exploded"
-    assert engine._serve_raw_card_stage() == (True, False)
+    assert engine._serve_raw_card_stage() == (True, False, "producer_failed")
     assert engine._spec_raw_stage_result is None
 
 
@@ -1508,7 +1509,7 @@ def test_a_paid_raw_proposal_survives_every_row_a_concurrent_task_may_append(tmp
     assert committed.pending_hints and committed.research, "the fixture did not move the old cues"
 
     engine._spec_raw_stage_result = result
-    assert engine._serve_raw_card_stage() == (True, True), (
+    assert engine._serve_raw_card_stage() == (True, True, None), (
         "a proposal the run already paid for was discarded because the world it did not read "
         "moved on")
     committed_rows = engine.store.read_all()
@@ -1591,7 +1592,7 @@ def test_a_late_commit_never_mints_a_score_anchor_the_proposal_never_read(tmp_pa
 
     control, control_anchor, control_receipts = _served(
         tmp_path / "anchor-live", moved=False)
-    assert control == (True, True) and len(control_receipts) == 1, (
+    assert control == (True, True, None) and len(control_receipts) == 1, (
         f"the {world_change!r} control never staged, so its moved case proves nothing")
     assert _recorded(control_receipts[0]) == control_anchor
 
@@ -1599,7 +1600,21 @@ def test_a_late_commit_never_mints_a_score_anchor_the_proposal_never_read(tmp_pa
     assert all(_recorded(receipt) == moved_anchor for receipt in moved_receipts), (
         f"a Card was staged asserting a score anchor its proposal never read: "
         f"{[_recorded(r) for r in moved_receipts]} against a proposal-time {moved_anchor}")
-    assert moved == (True, False) and not moved_receipts
+    assert moved[:2] == (True, False) and not moved_receipts
+    # The third member is the CAUSE the refusing path knew (`08525b97`), and it is asserted as a
+    # registered slug rather than a literal because both world-changes are refused by the same
+    # anchor clause and the slug is that clause's, not this parametrization's.
+    assert moved[2] in CARD_STAGE_REFUSALS, moved[2]
+
+
+# Each stale door's own refusal slug (`engine/card_reservation.py::CARD_STAGE_REFUSALS`), so the
+# test below pins the CAUSE and not merely the refusal.
+_DOOR_REFUSAL = {
+    "epoch": "search_epoch_moved",
+    "ceiling": "node_ceiling_moved",
+    "lifecycle": "run_stopping",
+    "parent": "parent_moved",
+}
 
 
 @pytest.mark.parametrize("door", ["epoch", "ceiling", "lifecycle", "parent"])
@@ -1653,11 +1668,15 @@ def test_a_stale_world_still_voids_a_paid_raw_proposal(tmp_path, door):
         return outcome, [event.type for event in engine.store.read_all()]
 
     control, control_types = _served(tmp_path / f"raw-live-{door}", stale=False)
-    assert control == (True, True) and control_types.count("card_added") == 1, (
+    assert control == (True, True, None) and control_types.count("card_added") == 1, (
         f"the {door} control never staged, so its stale case proves nothing")
 
     stale, stale_types = _served(tmp_path / f"raw-stale-{door}", stale=True)
-    assert stale == (True, False)
+    # Each door must report ITS OWN cause. That third member exists (`08525b97`) because the caller
+    # used to re-derive the reason from `self._card_stage_refusal`, an attribute only the staging
+    # path writes — so a refusal from any other path was warned under whatever slug the last staging
+    # call anywhere had left there. A per-door literal is what makes that unrepeatable.
+    assert stale == (True, False, _DOOR_REFUSAL[door])
     assert "card_added" not in stale_types
     assert "raw_stale_audit_test" not in stale_types
 

@@ -18,19 +18,23 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
+import statistics
 import uuid
-from typing import Iterable, Optional
+from typing import Iterable, NamedTuple, Optional
 
 from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
 from looplab.core.advisory_payloads import MAX_SUPERSEDED_NODE_REFS
+from looplab.core.cards import hypothesis_id
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.jsonutil import canonical_json_digest
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
 from looplab.engine.cadence import at_creation_boundary, deep_research_window
 from looplab.events.replay import fold
-from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
+from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_BELIEF_ADMISSION,
+                                  EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
                                   EV_REPORT_GENERATED, EV_RESEARCH_ATTEMPTED,
                                   EV_RESEARCH_COMPLETED,
                                   BACKGROUND_APPENDABLE,
@@ -78,9 +82,53 @@ def normalized_belief_key(statement) -> str:
     return " ".join(str(statement or "").split()).casefold()
 
 
-def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[str], *,
-                           cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP,
-                           counted: "Iterable[str] | None" = None) -> list[str]:
+class BeliefAdmission(NamedTuple):
+    """WHY each of a memo's directions did or did not become a board row.
+
+    `admitted` is the whole of what `admit_research_beliefs` has always answered; the four counts
+    beside it exist because the ONE number the caller had was their SUM, reported to the operator as
+    "not registered as beliefs" and then explained by the board and the cap. That explanation is
+    true of two of the four and false of the other two, which are facts about the MEMO and about
+    nothing else: a memo listing the same question twice, or carrying one blank entry, raised an
+    operator-facing refusal for a board that had refused nothing and a cap that never bound. The
+    over-statement scales with how repetitive the model is, which is the thing the number exists to
+    help diagnose.
+
+      `blank`     an entry that was never a statement (empty / whitespace / None).
+      `repeated`  the memo restating ITSELF — collapsed against an earlier entry of the same memo.
+      `restated`  already an open belief on the board: rule 1, the duplicate the board refuses.
+      `capped`    genuinely new, and the board had no room: rule 2.
+    """
+    admitted: list
+    blank: int
+    repeated: int
+    restated: int
+    capped: int
+
+    @property
+    def dropped(self) -> int:
+        """Everything that did not become a row — the historical single number."""
+        return self.blank + self.repeated + self.restated + self.capped
+
+    @property
+    def refused(self) -> int:
+        """The drops the BOARD is answerable for, i.e. the ones a cap/dedup account explains."""
+        return self.restated + self.capped
+
+    def reasons(self) -> str:
+        """The non-zero causes, in the operator's words. Empty string when nothing was dropped.
+
+        Only the causes that FIRED are named: a line that always lists four numbers, three of them
+        zero, is the wall of text every bounded-output rule in this repo exists to refuse.
+        """
+        named = ((self.restated, "already on the board"), (self.capped, "no room"),
+                 (self.repeated, "the memo repeated itself"), (self.blank, "blank"))
+        return ", ".join(f"{n} {why}" for n, why in named if n)
+
+
+def classify_research_beliefs(open_statements: Iterable[str], directions: Iterable[str], *,
+                              cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP,
+                              counted: "Iterable[str] | None" = None) -> BeliefAdmission:
     """Which of a memo's directions may become OPEN BELIEFS, given the board already open.
 
     PURE and stateable on purpose (CLAUDE.md tier 2): the rule used to be "all five, every memo,
@@ -126,22 +174,99 @@ def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[
     def _keys(statements) -> set:
         return {normalized_belief_key(s) for s in statements if str(s or "").strip()}
 
-    seen = _keys(open_statements)
-    occupied = set(seen) if counted is None else _keys(counted)
+    board = _keys(open_statements)
+    occupied = set(board) if counted is None else _keys(counted)
+    # `witnessed` is the CLASSIFIER's memory and is deliberately not `seen`: the admission rule
+    # remembers a key only once it holds a row, so it cannot tell the memo's own repeat of a
+    # REFUSED direction from a first sighting. Nothing here reaches the admission decision — a key
+    # is witnessed after the two rules that could still admit it have both been asked.
+    witnessed: set = set()
     admitted: list[str] = []
+    blank = repeated = restated = capped = 0
     for direction in directions:
         text = str(direction or "").strip()
         if not text:
+            blank += 1
             continue
         key = normalized_belief_key(text)
-        if key in seen:
+        if key in board:
+            restated += 1
             continue
+        if key in witnessed:       # never registered twice, whether or not it holds a slot
+            repeated += 1
+            continue
+        witnessed.add(key)
         if len(occupied) >= max(0, int(cap)):
-            break
-        seen.add(key)          # never registered twice, whether or not it holds a slot
-        occupied.add(key)      # …and a newly admitted direction is unanswered, so it holds one
+            # NOT a `break`, and the admitted list is identical either way: `occupied` only ever
+            # grows, so once the cap binds nothing further can be admitted. What the `break` cost
+            # was the CLASSIFICATION of the tail — every remaining entry, blank and repeat alike,
+            # went unexamined and was charged to the cap by subtraction.
+            capped += 1
+            continue
+        occupied.add(key)      # …a newly admitted direction is unanswered, so it holds one
         admitted.append(text)
-    return admitted
+    return BeliefAdmission(admitted, blank, repeated, restated, capped)
+
+
+# The arms of a sweep, written into the question itself: "512x32 vs 2048x8 vs 4096x4". This is the
+# ONE shape that is unambiguously an experiment brief rather than a direction, and it is deliberately
+# narrow. The obvious wider predicate — "the question names an exact value" — was written first and
+# REFUTED against the corpus: it flagged 13 of 21 questions across v11 and v12, but v11's hits are
+# the champion score cited as EVIDENCE (`0.79`), which is legitimate grounding, not a proposed
+# setting. Narrowed to this, it is 1 of 21. A count that conflates grounding with over-specification
+# would make the shape row unreadable in exactly the direction that matters.
+_SWEEP_ARMS = re.compile(r"\d[\d.,\u00d7x]*\s*(?:vs\.?|versus)\s*\d")
+
+
+def question_shape(statements: list[str]) -> dict:
+    """How BIG the admitted questions are — the operator's complaint, as a number the run records.
+
+    "The questions are huge, more hypothesis than question" was an operator impression for four
+    runs and could not be checked without reading the board by hand. Measured when it finally was:
+    v12's twelve questions run 195-469 characters, median 311, against the emit prompt's own example
+    of 49 — and LONGER than the work cards they are supposed to be broader than (median 164).
+
+    LENGTH IS THE HONEST MEASURE HERE, and it is reported rather than enforced. A long question is
+    not automatically a bad one, so nothing refuses on this; it is the falsifier for whether the
+    field description added beside `_MemoOut.open_questions` actually changed the shape on the next
+    run. Cheap by construction: a `len()` and one regex per admitted statement, on a path that
+    already walks the same list.
+    """
+    lengths = sorted(len(text) for text in statements if isinstance(text, str) and text.strip())
+    if not lengths:
+        return {"n": 0, "chars_median": 0, "chars_max": 0, "with_sweep_arms": 0}
+    return {
+        "n": len(lengths),
+        # The median of an even-length list is the mean of the two middle values, which is not an
+        # integer; rounding keeps the wire integral rather than shipping 311.5 to a reader that
+        # only ever compares it against another median.
+        "chars_median": int(round(statistics.median(lengths))),
+        "chars_max": lengths[-1],
+        "with_sweep_arms": sum(
+            1 for text in statements
+            if isinstance(text, str) and _SWEEP_ARMS.search(text)),
+    }
+
+
+def admit_research_beliefs(open_statements: Iterable[str], directions: Iterable[str], *,
+                           cap: int = DEEP_RESEARCH_OPEN_BELIEF_CAP,
+                           counted: "Iterable[str] | None" = None) -> list[str]:
+    """Which of a memo's directions may become OPEN BELIEFS — the admitted list alone.
+
+    The rule itself lives in `classify_research_beliefs`, which answers the same question and also
+    says WHY each of the others was dropped. A caller that reports a refusal to a human wants the
+    classifier, because the four causes do not have one explanation between them.
+
+    NO PRODUCTION CALLER TODAY, and the docstring said the opposite ("what every caller that only
+    needs the list keeps calling, unchanged") from the commit that split the rule out: the engine's
+    one consumer, `_admissible_beliefs`, calls the classifier directly because it also records the
+    refusal counts. This is kept as the tree's NAME for the rule — nine comments across four files
+    cite it, `DEEP_RESEARCH_OPEN_BELIEF_CAP`'s own comment above among them — and as the thin
+    surface a caller that genuinely wants only the list may use. It is one line over the
+    classifier, so it
+    cannot answer a different question; what it must not do is read as the path production takes.
+    """
+    return classify_research_beliefs(open_statements, directions, cap=cap, counted=counted).admitted
 
 
 # HOW MANY DIRECTIONS THE PUSHED HINT CARRIES — a bound on a PROMPT, not on the record.
@@ -201,6 +326,79 @@ def question_concept_rows(questions: Iterable, per_question: Iterable) -> dict[s
         if isinstance(row, list) and row:
             joined[statement] = row
     return joined
+
+
+def question_parent_rows(questions, per_question, known_ids=None) -> dict[str, str]:
+    """Join each question to the belief id of the BROADER question it sits under.
+
+    Positional, exactly like `question_concept_rows`, and deliberately its twin: `question_parents[i]`
+    names the parent of `questions[i]`. Same order rule for the same measured reason — blanks are
+    skipped AFTER the index is read, never before, or every question after a top-level one inherits
+    its predecessor's parent and the tree grows edges nobody authored.
+
+    A parent may be named two ways, because a memo mints questions that do not exist yet:
+
+      * the exact STATEMENT of another question in THIS memo (the common case — a memo proposing a
+        broad question and two narrower ones under it has no ids to point at), resolved through
+        `hypothesis_id`, which is the same content address the board itself keys on;
+      * an id already on the board (`known_ids`), used as given.
+
+    RESOLVED, NEVER FABRICATED. A name that matches neither yields no parent, and the question is
+    registered exactly as it was before this shipped. That is the same rule the concept join uses:
+    a wrong edge is not recoverable, an absent one is.
+
+    REFUSED: any edge lying on a cycle closed inside this memo — including the degenerate one-step
+    cycle, a question naming its OWN statement as parent. Both are the same defect (a row that is
+    its own ancestor makes `card_child_rollup` recurse), so they are refused by one walk rather than
+    two rules. An explicit self-parent branch WAS written here and removed: no mutant could kill it,
+    because the cycle walk already reached every case it did. A guard no test can fail is not a
+    guard. The whole cycle is dropped rather than one arbitrary member, because which member is
+    "the wrong one" is not knowable here.
+
+    Edges pointing at the EXISTING board cannot close a cycle in this memo, so only same-memo ids
+    are walked.
+    """
+    rows = list(per_question or [])
+    statements: list[str] = []
+    by_id: dict[str, str] = {}
+    for question in questions or []:
+        statement = str(question or "").strip()
+        if not statement:
+            continue
+        statements.append(statement)
+        by_id.setdefault(hypothesis_id(statement), statement)
+    on_board = {str(i) for i in (known_ids or []) if str(i or "").strip()}
+
+    edges: dict[str, str] = {}
+    for index, question in enumerate(questions or []):
+        statement = str(question or "").strip()
+        if not statement:
+            continue
+        raw = str(rows[index] or "").strip() if index < len(rows) else ""
+        if not raw:
+            continue
+        if raw in statements:
+            parent = hypothesis_id(raw)
+        elif raw in on_board or raw in by_id:
+            parent = raw
+        else:
+            continue
+        edges[statement] = parent
+
+    # Drop any edge that lies on a cycle CLOSED INSIDE this memo (see the docstring: this is also
+    # what refuses a self-parent).
+    doomed: set[str] = set()
+    for statement in list(edges):
+        seen = {hypothesis_id(statement)}
+        walk = statement
+        while walk in edges:
+            nxt = edges[walk]
+            if nxt in seen:
+                doomed.add(statement)
+                break
+            seen.add(nxt)
+            walk = by_id.get(nxt, "")
+    return {k: v for k, v in edges.items() if k not in doomed}
 
 
 def is_pure_belief(card) -> bool:
@@ -455,7 +653,8 @@ class ResearchCadenceMixin:
         return fold(self.store.read_all())
 
     def _research_attempt_step(self, state: RunState, trigger: str, *, manual: bool = False,
-                               last_sig: Optional[str] = None) -> tuple[Optional[str], bool]:
+                               last_sig: Optional[str] = None,
+                               converged_skips: int = 0) -> tuple[Optional[str], bool]:
         """ONE paid Deep-Research think — receipt, provider call, record — as a single INDIVISIBLE
         step. The one spelling shared by the serial cadence (`_run_deep_research`) and BOTH concurrent
         seams (`orchestrator._spawn_research`, `orchestrator._research_overlap_loop`).
@@ -524,7 +723,8 @@ class ResearchCadenceMixin:
                 return sig, False
             self._record_deep_research(
                 memo, trigger=trigger, manual=manual, attempt_id=attempt_id,
-                superseded=self._results_since_snapshot(state))
+                superseded=self._results_since_snapshot(state),
+                converged_skips=converged_skips)
             return sig, True
 
     def _results_since_snapshot(self, snapshot: RunState) -> dict:
@@ -612,7 +812,8 @@ class ResearchCadenceMixin:
     @in_llm_lane("deep_research")
     def _record_deep_research(self, memo, *, trigger: str, manual: bool,
                               attempt_id: Optional[str] = None,
-                              superseded: Optional[dict] = None) -> None:
+                              superseded: Optional[dict] = None,
+                              converged_skips: int = 0) -> None:
         """Append the memo to the event log. Called from BOTH the main-task cadence AND the
         concurrent research task — see the note above; every append here must stay in
         BACKGROUND_APPENDABLE.
@@ -624,7 +825,26 @@ class ResearchCadenceMixin:
         `superseded` is `_results_since_snapshot`'s receipt: the results that landed while the
         provider was answering. Stamped INSIDE the memo payload, because the fold keeps only
         `d["memo"]` and this fact has to reach the prompt that quotes the summary. `None` (every
-        caller that predates it) and an empty receipt both leave the payload byte-identical."""
+        caller that predates it) and an empty receipt both leave the payload byte-identical.
+
+        `converged_skips` MAKES THE CONVERGENCE GATE OBSERVABLE, and until 2026-08-31 it was not.
+        The repeat loop pays a provider for every tick and, when `research_memo_sig` matches the
+        previous one, discards the answer as "same conclusions" and backs off — incrementing an
+        in-process counter and writing NOTHING. Repeat passes are deliberately unreceipted (they
+        ride a timer, not a durable gate), so a skipped pass left no trace at all and the corpus
+        could not tell "the gate fired forty times" from "it has never fired".
+        THAT MATTERS BECAUSE THE GATE IS AN EXACT HASH. Measured over every preserved log: ZERO of
+        178 recorded memos collide under it — but that counts only what was RECORDED, which is
+        precisely the population a skip is absent from. Meanwhile `e5small-dr-unified-v4` produced
+        75 memos whose directions are 17 % exactly repeated with 168 near-duplicate pairs and a
+        consecutive-summary similarity reaching 0.98, i.e. the thing the gate exists to suppress is
+        demonstrably present while the gate's own firing rate is unknown. `64e788ed` then widened
+        the signature, which makes it fire LESS by construction — a change nobody could measure.
+        NO NEW EVENT TYPE, and the count is the loop's own: it resets to 0 on every recorded memo,
+        so at this moment it is exactly the number of paid passes skipped SINCE THE LAST RECORD.
+        Additive and fold-ignored (invariant #5), omitted when zero so an absent key on an old row
+        means "nobody counted" rather than "none were skipped". A window that ENDS while converged
+        loses only its own tail; every earlier row still carries the rate."""
         from looplab.core.advisory_payloads import (
             research_claim_ref,
             research_memo_ref,
@@ -682,22 +902,23 @@ class ResearchCadenceMixin:
             "memo": memo_d,
             **({"memo_id": memo_id} if memo_id is not None else {}),
             "at_node": memo.at_node, "trigger": trigger, "served_manual": manual,
-            **({"attempt_id": attempt_id} if attempt_id else {})})
+            **({"attempt_id": attempt_id} if attempt_id else {}),
+            **({"converged_skips": int(converged_skips)}
+               if isinstance(converged_skips, int) and converged_skips > 0 else {})})
         # Steer the next proposals: retain the legacy hint projection for replay compatibility.
         # It is explicitly model-generated advisory data, not operator authority; prompt rendering
         # filters this source while the research memo/open-hypothesis channels carry the signal.
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
-        # OPEN[next-experiments-never-reach-proposal] the concrete half of the new memo split has no
-        # production reader, so an experiments-only memo steers no later work.
-        # proof:absent:memo_d.get("next_experiments")@looplab/engine/research_cadence.py
-        # REVIEW 2026-08-27 (P1 delivery): the durable model says these entries are left to be
-        # proposed as real work, but this writer reads only the legacy union and open questions. A
-        # schema-valid memo that omits the optional compatibility field therefore appends its paid
-        # `research_completed` row yet emits no hint, card or executable proposal for its concrete
-        # list.
-        # AMENDED 2026-08-29 — THIS REVIEW'S OWN PARENTHETICAL REMEDY IS SPENT, and re-deriving it
-        # is what the next reader must not repeat. It said "route that list through the real
-        # proposal intake (or a dedicated bounded hint)"; the second half cannot work.
+        # WHERE `next_experiments` IS DELIVERED, and it is deliberately NOT from here. This writer
+        # reads only the legacy union and open questions; the concrete half of the memo split
+        # reaches a Researcher through `tools/run_tools.py::_research_memo`, which renders
+        # `open_questions + next_experiments` as the memo's directions when
+        # `recommended_directions` is empty. The reasoning below is kept because every alternative
+        # route was tried on paper and each fails for a reason a later reader would otherwise
+        # re-derive.
+        # THE PARENTHETICAL REMEDY THIS ONCE CARRIED IS SPENT, and re-deriving it is what the next
+        # reader must not repeat. It said "route that list through the real proposal intake (or a
+        # dedicated bounded hint)"; the second half cannot work.
         # `agents/hints.py::render_hint_directives` is the ONLY renderer of `state.hints`, and it
         # FILTERS deep-research rows out on BOTH keys — `source == "deep_research"` and the
         # `DEEP_RESEARCH_HINT_PREFIX` text, the second catching rows folded from logs older than the
@@ -733,9 +954,12 @@ class ResearchCadenceMixin:
         # filled `next_experiments`, and memo 4 is `(next 7, directions 0, questions 0)` — a
         # schema-valid memo whose ONLY content is the concrete list, which steered nothing in that
         # run because the reader did not exist yet, not because the design lacks one.
-        # SO THIS IS NOT CODE WORK. It is unexercised delivery: the next run launched from master
-        # is what turns 11-of-18 memos from unreadable into read, and the marker stays only until a
-        # run carrying `899f6244` shows a `next_experiments` entry reaching a proposal.
+        # SO THIS IS NOT CODE WORK, and it carries no open-item marker for exactly that reason: a
+        # marker's proof must be RE-DERIVABLE FROM THE TREE, and this one's could never go green —
+        # the reader is one package over and invariant #1 forbids this background task from ever
+        # becoming it, so an `absent:` proof pointed at this file would hold forever. What remains
+        # is unexercised delivery, which is the ordinary state of a recently shipped change: the
+        # next run launched from master is what turns 11-of-18 memos from unreadable into read.
         # WHAT BECOMES A BOARD ROW is now what the memo itself called a QUESTION, not everything it
         # would try next. `recommended_directions` was described to the model as "specific next
         # experiments to try", so it correctly returned experiments and every one of them landed as
@@ -747,7 +971,17 @@ class ResearchCadenceMixin:
         # keeps every log already on disk and every memo from a pre-split prompt folding exactly as
         # it did — absence means "this memo did not draw the distinction", never "it has no
         # questions".
-        questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()] or directions
+        open_questions = [q for q in memo_d.get("open_questions", []) if str(q).strip()]
+        questions = open_questions or directions
+        # WHICH MEMO FIELD `questions` CAME FROM, minted at the site that decides the
+        # fallback. The refusal line names it to the operator, and it named the wrong one:
+        # `_admissible_beliefs` has been handed `questions` since the 2026-08-27 split while
+        # its message still said "recommended direction(s)", so on every memo that filled
+        # `open_questions` the operator was pointed at the field carrying NONE of the refused
+        # items — and on the shape that field is empty, at a field with nothing in it at all.
+        # Derived from the same binding the fallback is, never re-derived downstream from
+        # `questions is directions`: one rule, one place.
+        question_channel = "open question" if open_questions else "recommended direction"
         # TWO CHANNELS, TWO GATES, and they were one until 2026-08-27. The legacy hint projection
         # is keyed on `recommended_directions` and the board registration on `questions`, but both
         # sat under `if directions:` — so a schema-valid memo that filled `open_questions` and left
@@ -780,7 +1014,8 @@ class ResearchCadenceMixin:
         # exactly the signal the caller needs; swallowing there would discard a paid think in
         # silence. The boundary is "is the memo on disk", not "is this an append".
         try:
-            self._record_research_steering(memo, memo_d, directions, questions)
+            self._record_research_steering(memo, memo_d, directions, questions,
+                                           question_channel)
         except BudgetExceeded:
             raise
         except Exception as exc:  # noqa: BLE001 — see above: a durable memo is not undone by this
@@ -789,7 +1024,7 @@ class ResearchCadenceMixin:
                          1 if directions else 0, len(questions or []), exc)
 
     def _record_research_steering(self, memo, memo_d: dict, directions: list,
-                                  questions: list) -> None:
+                                  questions: list, question_channel: str) -> None:
         """The hint + open-belief projections of an ALREADY-DURABLE memo. Split out of
         `_record_deep_research` so the boundary "the memo is on disk" is a place in the code and not
         a comment — the caller's one `try` covers exactly this and nothing above it."""
@@ -818,6 +1053,21 @@ class ResearchCadenceMixin:
             # spelled twice is a join that will disagree with itself.
             by_statement = question_concept_rows(
                 memo_d.get("open_questions") or [], memo_d.get("question_concepts") or [])
+            # THE SECOND POSITIONAL JOIN, and it is deliberately resolved against the SAME question
+            # list for the same reason: `question_parents[i]` names the parent of
+            # `open_questions[i]`. `known_ids` is the live board, so a memo may also file a new
+            # question under a direction that already exists.
+            # ONE FOLD, read twice. Both the parent edge below and the admission decision at the
+            # bottom of this block ask about the same board, and folding twice made them ask about
+            # two — see `_board_card_ids`. Best-effort exactly like its readers: a fold that raises
+            # yields None and each falls back to its own historical degradation.
+            try:
+                board = fold(self.store.read_all())
+            except Exception:  # noqa: BLE001 - a read must never cost the memo its questions
+                board = None
+            parent_by_statement = question_parent_rows(
+                memo_d.get("open_questions") or [], memo_d.get("question_parents") or [],
+                known_ids=self._board_card_ids(board))
             # NO INTAKE TRUNCATION, and the bare `5` that used to be here was wrong twice over.
             # `DEEP_RESEARCH_OPEN_BELIEF_CAP` is DERIVED from `BOARD_PROMPT_CARDS` precisely so
             # raising the prompt window cannot leave a stale literal behind (see its comment), and
@@ -828,14 +1078,90 @@ class ResearchCadenceMixin:
             # empty" outcome this cadence's own cap fix was written for. `admit_research_beliefs`
             # owns both the dedup universe and the cap, and it bounds its OUTPUT, so handing it the
             # whole list is what lets the cap mean what it says.
-            for direction in self._admissible_beliefs(questions):
+            for direction in self._admissible_beliefs(
+                    questions, channel=question_channel, board=board):
                 concepts = by_statement.get(str(direction).strip())
+                parent = parent_by_statement.get(str(direction).strip())
                 self.store.append(EV_HYPOTHESIS_ADDED, {
                     "statement": direction, "source": "deep_research",
                     "at_node": memo.at_node,
-                    **({"concepts": concepts} if concepts else {})})
+                    **({"concepts": concepts} if concepts else {}),
+                    **({"parent_belief_id": parent} if parent else {})})
 
-    def _admissible_beliefs(self, directions: list) -> list[str]:
+    def _board_card_ids(self, board=None) -> list[str]:
+        """The ids currently on the board, for resolving a parent named as an EXISTING direction.
+
+        Folded here rather than taken from the ENGINE's caller: `_record_research_steering` runs on
+        the concurrent research task and is handed the memo, not the state. `state` is simply not in
+        scope there — reaching for it raised `NameError` inside the projection's own try/except,
+        which logged one line and swallowed EVERY question registration for the memo. The guards
+        caught it as `(0, 1) == (2, 1)`: zero questions reached the board.
+
+        `board` lets the fold be done ONCE and shared with `_admissible_beliefs`, which needs the
+        same one. Two folds of the same log twelve lines apart is not only a second read of a
+        multi-megabyte file per memo: it is two BOARDS, and the parent edge and the admission
+        decision were each taken against a different one.
+
+        BEST-EFFORT, exactly like `_admissible_beliefs`: a fold that fails yields no board ids, so
+        a parent named as an existing direction goes unresolved and the question registers with no
+        parent — the behaviour it had before any of this shipped. Refusing to register a direction
+        because a fold hiccuped would drop the stage's only durable output, which is the same
+        reason that method gives.
+
+        `RunState.cards` is a MAPPING id -> Card, so the KEYS are the ids. Iterating it for `.id`
+        attributes yields the key strings and reads "" off each — that was the first version, and
+        it would have made every board-id parent unresolvable while looking like it worked.
+        """
+        try:
+            board = fold(self.store.read_all()) if board is None else board
+            return list(getattr(board, "cards", None) or {})
+        except Exception:  # noqa: BLE001 - a diagnostic read must never cost the memo its questions
+            return []
+
+    def _record_belief_admission(self, verdict, proposed: int, board_read: bool) -> None:
+        """Write down what the board did with this memo's directions.
+
+        THE COUNTS EXISTED AND WENT NOWHERE. `classify_research_beliefs` already returns
+        admitted/blank/repeated/restated/capped, and until this row their only consumer was the
+        `_LOG.warning` below. A console line is not a record: it is not in the run directory, it
+        does not survive a restart, and it cannot be counted across runs. Establishing that v12's
+        cap refused 394 of 413 proposals — including all 55 requests for the seed-replicate
+        experiment the run kept asking for — meant reconstructing the board memo by memo and
+        re-running the classifier by hand, because `research_completed` is appended in
+        `_record_deep_research` BEFORE the classification happens and cannot carry the verdict.
+
+        The cap value is an operator decision, and this row is the number that decision needs.
+
+        `EV_BELIEF_ADMISSION` is DIAGNOSTIC, not BACKGROUND_APPENDABLE, and the distinction is
+        load-bearing: the folded events this same task appends (`hint`, `hypothesis_added`) are
+        licensed because they move no reader's position, while a diagnostic row is excluded
+        WHOLESALE from `speculation._proposal_authority_seq` — the stronger form of the same
+        argument. Best-effort by construction: a store that refuses the append costs a diagnostic
+        row and never the memo's steering.
+        """
+        assert EV_BELIEF_ADMISSION in DIAGNOSTIC_EVENTS   # see the type's own note
+        try:
+            self.store.append(EV_BELIEF_ADMISSION, {
+                "proposed": int(proposed),
+                "admitted": len(verdict.admitted),
+                "capped": int(verdict.capped),
+                "restated": int(verdict.restated),
+                "repeated": int(verdict.repeated),
+                "blank": int(verdict.blank),
+                # Whether these counts describe the LIVE board or the degraded path: when the board
+                # read failed the classifier saw no open statements, so `restated`/`capped` cannot
+                # be read as facts about what was already open.
+                "board_read": bool(board_read),
+                # HOW BIG the questions this memo actually put on the board are. The counts above
+                # say how many survived; this says what shape they are, which is the half the
+                # operator has been reading by eye. See `question_shape` for why length rather than
+                # a specificity predicate.
+                "shape": question_shape(verdict.admitted)})
+        except Exception:  # noqa: BLE001 - a receipt may never cost the memo its directions
+            pass
+
+    def _admissible_beliefs(self, directions: list, *,
+                            channel: str = "recommended direction", board=None) -> list[str]:
         """Read the open belief board and apply `admit_research_beliefs` to this memo's directions.
 
         THE WRITE-SIDE HALF of the duplicate fix, and deliberately a REFUSAL TO APPEND rather than a
@@ -855,8 +1181,19 @@ class ResearchCadenceMixin:
         would otherwise add five rows per memo forever, and one extra row from a concurrent human is
         exactly the case where the human's intent should win.
         """
+        # A BOARD WE COULD NOT READ IS UNKNOWN, NOT EMPTY. The `except` below degrades the
+        # admission to the pre-bound behaviour on purpose (see the docstring), but the two empty
+        # lists it leaves behind are a fallback and not a measurement — reporting "0 open" off them
+        # tells the operator the board was clear when in fact the fold raised.
+        # ONE FOLD PER MEMO, and `board` is how the caller shares it. `_record_research_steering`
+        # resolved the PARENT edge against `_board_card_ids()`'s fold and then reached this method,
+        # which folded the whole log again twelve lines later — a second `read_all()` of a
+        # multi-megabyte log per memo, and worse, TWO BOARDS: a card appended between them could be
+        # a legal parent for a question the very next line refused as `restated`, i.e. an edge
+        # pointing at a board state that never coexisted with the decision that used it.
+        board_read = True
         try:
-            board = fold(self.store.read_all())
+            board = fold(self.store.read_all()) if board is None else board
             # A DIRECTION THAT HAS BEEN TAKEN UP NO LONGER OCCUPIES A SLOT, and without this clause
             # the cap is permanent. `open_research_beliefs()` means "open and carrying no EVIDENCE",
             # and a direction never carries any — since the `parent_card_id` edge shipped, the
@@ -883,21 +1220,99 @@ class ResearchCadenceMixin:
             # card for a question already under way, and since a direction never accrues evidence the
             # open population then grew unbounded past the five-row prompt window.
             taken_up = {c.parent_card_id for c in board.cards.values() if c.parent_card_id}
-            beliefs = [c for c in board.open_research_beliefs() if is_pure_belief(c)]
+            # FILTERED BEFORE THE COLLAPSE — see `open_research_beliefs`' own docstring. As a
+            # list comprehension AFTER it, a belief whose first-elected card owned an action
+            # was not narrowed but DELETED: its pure sibling never became the representative,
+            # so the question left the dedup universe and a later memo restating it opened a
+            # second row for work already under way.
+            beliefs = board.open_research_beliefs(only=is_pure_belief)
             open_statements = [c.seed_statement for c in beliefs]
             unanswered = [c.seed_statement for c in beliefs if c.id not in taken_up]
         except Exception:  # noqa: BLE001 — see the docstring: degrade to the pre-bound behaviour
+            board_read = False
             open_statements = unanswered = []
-        admitted = admit_research_beliefs(open_statements, directions, counted=unanswered)
-        dropped = len(directions) - len(admitted)
-        if dropped:
+        verdict = classify_research_beliefs(open_statements, directions, counted=unanswered)
+        self._record_belief_admission(verdict, len(directions), board_read)
+        if verdict.dropped:
             # Not silent: the operator reading the log sees a memo whose directions did not all
-            # become cards, and the memo body + `hint` row still carry every one of them.
-            _LOG.info("deep research: %d of %d recommended direction(s) not registered as beliefs "
-                      "(%d already open, cap %d) — the memo and its hint still carry them",
-                      dropped, len(directions), len(unanswered),
-                      DEEP_RESEARCH_OPEN_BELIEF_CAP)
-        return admitted
+            # become cards, and the MEMO BODY still carries every one of them.
+            #
+            # WARNING, NOT INFO.
+            # CLAIM[cli-logs-at-warning-by-default] the CLI configures logging once, at its entry
+            # point, and the level it installs absent `LOOPLAB_LOG_LEVEL` is WARNING — so an INFO
+            # record still reaches nobody on a run nobody asked to be verbose, and a run started
+            # from the UI is no different (`serve/engine_proc.py` spawns `python -m looplab.cli`).
+            # decided:line:DEFAULT_LOG_LEVEL&&WARNING@looplab/cli/__init__.py
+            #
+            # THAT PIN USED TO SAY "nothing in `looplab/` configures logging", which was true and was
+            # the defect rather than the justification: with no configuration anywhere, the level of
+            # every site in the package was Python's default rather than anyone's choice, `lastResort`
+            # (fixed at WARNING) was what put a record on stderr, and this line — the one telling an
+            # operator a paid memo's directions were refused, under a comment reading "Not silent" —
+            # was written at INFO and was silent on every run ever recorded. The general fix landed in
+            # `cli/__init__.py::_configure_cli_logging`; what keeps THIS line correct is no longer the
+            # absence of a knob but the DEFAULT of the one that now exists. No count is written down
+            # here — `tests/test_dropped_directions_reach_the_operator.py` re-derives the whole
+            # population from the tree, because a hand-copied total is the drift CLAUDE.md's claim
+            # rule and its own "the count comes from the parser, never from a person" both stop.
+            #
+            # THE HINT IS NOT THE RECORD, and this line said it was until the level change made
+            # anyone read it. `deep_research_hint_text` carries the FIRST
+            # `DEEP_RESEARCH_HINT_DIRECTIONS` directions and no more — the same false half
+            # `admit_research_beliefs`' own docstring already retracted ("reading it as the record
+            # is how 'nothing is lost' gets believed by whoever next decides a drop is safe"), left
+            # standing in the one place an operator would see it. A memo that recommends more
+            # directions than the hint carries is the ordinary case and not the corner one — which
+            # is exactly the memo this line fires about — so the hint half was false on essentially
+            # every emission. The memo body is the record; it is what this now names.
+            #
+            # EACH NUMBER NAMES THE POPULATION IT COMES FROM, because there are two and reporting
+            # the narrow one as "already open" produced a line that refutes itself. `unanswered` is
+            # only the subset occupying a cap slot; the DEDUP universe that refuses a restatement is
+            # `open_statements`, taken-up directions included. A board of three taken-up directions,
+            # restated by a memo, logged "3 of 3 … (0 already open, cap 5)" — nothing open, room for
+            # five, and all three refused, with nothing in the line able to explain it.
+            # AND THE NOUN NAMES A FIELD, so it is passed in rather than written here. This
+            # method is handed `questions` — `open_questions` when the memo filled it — and
+            # said "recommended direction(s)" about all of it, which on the ordinary memo
+            # shape points the operator at a list holding none of the refused items and
+            # often nothing at all. The DEFAULT is the fallback channel, so a memo that drew
+            # no distinction reads exactly as it always did.
+            board_state = (f"{len(open_statements)} open, {len(unanswered)} of them unanswered"
+                           if board_read else "unreadable")
+            # AND WHY EACH ONE WAS DROPPED, because the four causes do not share an
+            # explanation. The single number this used to print was their SUM, offered to the
+            # operator with the board and the cap as the account — true of `restated` and
+            # `capped`, and false of the two that are facts about the MEMO. A memo listing one
+            # question twice logged "2 of 4 … (board: 0 open, cap 5)": literally true, an
+            # alarm about a provably empty board, and unexplainable by any number in the line.
+            said = ("deep research: %d of %d %s(s) not registered as beliefs (%s; board: %s, "
+                    "cap %d) — the memo body still carries every one" % (
+                        verdict.dropped, len(directions), channel, verdict.reasons(),
+                        board_state, DEEP_RESEARCH_OPEN_BELIEF_CAP))
+            # ONCE PER DISTINCT SENTENCE, the `core/tracing.py::_untraced_seen` bound applied
+            # to content rather than to a call site. Research repeats on a timer
+            # (`concurrent_research_interval_s`), and once the board fills every later memo is
+            # refused whole — so the unbounded form prints one WARNING per tick, for the life
+            # of the run, into the stream carrying the package's genuine degradations (evals
+            # running UNFENCED, a re-executed setup). A key on the rendered line and not on
+            # the site is what keeps that from hiding anything: any number that moves — a
+            # different count, a different cause, a board that changed, a board that became
+            # unreadable — is a different sentence and speaks. Per-ENGINE, never module-level:
+            # one engine is one run, and a process-wide memo would let one run silence another
+            # (and would make the suite order-dependent, since tests share a process).
+            # It needs no ceiling and that is a fact about the CALLER, not an optimism: this
+            # method runs once per RECORDED MEMO, and a run's memos are bounded by
+            # `concurrent_research_max_calls` — so the set holds at most one short string per
+            # memo, whatever the model puts in one.
+            already = getattr(self, "_belief_refusal_said", None)
+            if already is None:
+                already = set()
+                setattr(self, "_belief_refusal_said", already)
+            if said not in already:
+                already.add(said)
+                _LOG.warning("%s", said)
+        return verdict.admitted
 
     @staticmethod
     def _card_enrichment_subject(state: RunState, node_id: int):

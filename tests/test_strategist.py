@@ -621,40 +621,58 @@ def test_a_registered_developer_decision_reaches_the_engine(tmp_path):
                                     "requested_backend": name, "applied_backend": name}
 
 
-def test_an_unknown_developer_decision_is_dropped_and_leaves_no_receipt(tmp_path):
-    """The NEGATIVE control, and the expensive case — pinned as it actually behaves, not as one
-    might hope. `agentless` (the name the dead RuleStrategist arm proposed) and a plain typo are
-    both DROPPED by `validate_strategy` before `_prepare_strategy_developer` can see them, so:
+def test_an_unknown_developer_decision_is_dropped_AND_SAYS_SO(tmp_path):
+    """The expensive case, and this test PINNED THE DEFECT for a day after it was fixed.
 
-    * the factory is never asked, the live Developer never moves — correct, nothing else exists;
-    * but there is NO `developer_application` receipt, because that refusal record is written by
-      `_prepare_strategy_developer` and it only ever receives what survived the whitelist;
-    * and the decision's own RATIONALE is recorded verbatim beside a strategy with no `developer`.
+    `agentless` (the name the dead RuleStrategist arm proposed) and a plain typo are both DROPPED
+    by `validate_strategy` before `_prepare_strategy_developer` can see them — correctly: the model
+    is not present to fix a typo, and a hallucinated name must not take a run down. What was wrong
+    is that the drop was SILENT: no `developer_application` receipt, because that record is written
+    by `_prepare_strategy_developer` and it only ever receives what survived the whitelist, while
+    the decision's own RATIONALE was recorded verbatim beside a strategy with no `developer`. The
+    durable history then read as a Developer switch that never happened.
 
-    So the durable history reads as a Developer switch that never happened. That is why the fix is
-    upstream — ONE vocabulary in `core/config.py`, with a source scan (see
-    `tests/test_developer_backend_registry.py`) that makes a producer naming an unregistered backend
-    a red test rather than a decision the run silently loses."""
+    `developer_refused` was added to close exactly that — and could not: the engine validates the
+    decision, MERGES it onto the live strategy, and validates AGAIN, and the second pass rebuilds
+    its output from scratch and mints the receipt only from an input `developer` key the merged
+    dict no longer has. So the marker was stripped between the two passes and this test, written
+    "as it actually behaves, not as one might hope", stayed green over a defect the tree believed
+    was closed.
+
+    It now asserts the fix. Everything else is unchanged: nothing is built, nothing swaps, the rest
+    of the decision still applies.
+    """
     for name in ("agentless", "ghost"):
         r = _developer_decision_effect(tmp_path, name)
         assert name not in r["offered"], f"{name} is registered now — re-point this test"
         assert r["factory_calls"] == [] and not r["swapped"]
         assert r["live_backend"] == "default"
         assert "developer" not in r["active"] and "developer" not in r["recorded"]
-        assert r["application"] is None
-        # The rationale survives the field it explains — the whole cost, in one assertion.
+        assert r["application"] is not None, (
+            "a dropped switch must leave a receipt — without one the rationale below is the only "
+            "durable trace and it describes a switch that never happened")
+        assert r["application"]["status"] == "refused"
+        assert r["application"]["requested_backend"] == name
+        assert r["application"]["applied_backend"] == "default"
+        assert r["application"]["reason_code"] == "unknown_backend"
+        # The rationale survives the field it explains — now BESIDE the record of why.
         assert r["recorded"]["rationale"] == f"switch developer to {name}"
         assert r["recorded"]["policy"] == "mcts"      # the REST of the decision did apply
 
 
 def test_without_a_factory_no_developer_is_offered_at_all(tmp_path):
-    """A real backend is unreachable when nothing can build it, and it is dropped the same silent
-    way. `_prepare_strategy_developer`'s `factory_unavailable` refusal is therefore unreachable from
-    the consult path by construction — it serves the direct `_record_strategy` callers above."""
+    """A real backend is unreachable when nothing can build it, and it is dropped the same way —
+    but no longer the same SILENT way, since `developer_refused` now survives the engine's second
+    validation pass. `_prepare_strategy_developer`'s own `factory_unavailable` refusal stays
+    unreachable from the consult path by construction (the name never survives the whitelist), so
+    what the operator sees here is `unknown_backend`: from this run's point of view a backend with
+    no factory is not offered at all, which is what `ctx.available_developers` says."""
     r = _developer_decision_effect(tmp_path, "opencode", factory=False)
     assert r["offered"] == ["default"]
     assert r["factory_calls"] == [] and not r["swapped"]
-    assert "developer" not in r["active"] and r["application"] is None
+    assert "developer" not in r["active"]
+    assert r["application"] is not None and r["application"]["status"] == "refused"
+    assert r["application"]["requested_backend"] == "opencode"
 
 
 def test_resume_refuses_when_a_recorded_developer_backend_cannot_be_rebuilt(tmp_path):

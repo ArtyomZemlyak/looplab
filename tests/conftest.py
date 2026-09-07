@@ -5,10 +5,37 @@ the repo root — which is exactly where a developer's real `.env` lives. Withou
 values would leak into every `Settings()` built in a test and break default-asserting tests
 (e.g. `Settings().max_parallel == 1`). Disable dotenv loading for the whole suite so tests see only
 field defaults plus whatever a test sets explicitly via monkeypatch.
+
+The other class of fixture here bounds what a test may WAIT on. A test that waits without a bound
+cannot fail — it can only hang, and a hang costs the whole run while naming no assertion:
+
+    test calls subprocess.run(...)
+              │
+              ├── with an explicit timeout=  ──▶ used unchanged (setdefault, never assignment)
+              │                                   a test driving timeout behaviour keeps its own
+              └── with NO timeout            ──▶ _SUBPROCESS_WAIT_BOUND_S (900s, env-overridable)
+                                                        │
+                                    child exits in time ├──▶ normal result
+                                    child wedges        └──▶ TimeoutExpired: ONE test fails, by
+                                                             name, and run() kills the child so it
+                                                             stops holding what the next test needs
+
+    without the bound:  select() forever ──▶ no result, no name, the whole suite lost
+
+MEASURED 2026-09-01: `test_otel_bridge.py::test_spans_become_real_recording_otel_spans` sat in
+`communicate()` for 65 minutes with its child
+already exited (the pytest process held both ends of its own capture pipe, so the read never saw
+EOF). It passes in isolation in seconds. 78 subprocess waits then existed in tests/, 20 with a
+timeout and 58 without. Bounding it here rather than at 58 call sites also means a NEW call site
+cannot reintroduce the hang.
 """
 from __future__ import annotations
 
+import os
+import shutil
+from pathlib import Path
 import pathlib
+import subprocess
 
 import pytest
 
@@ -37,6 +64,45 @@ def _isolation_patch():
     patch = pytest.MonkeyPatch()
     yield patch
     patch.undo()
+
+
+# A test that waits on a child with no bound cannot FAIL — it can only hang, and a hang costs the
+# whole run while naming no assertion. MEASURED 2026-09-01:
+# `test_otel_bridge.py::test_spans_become_real_recording_otel_spans` sat in
+# `communicate()` for 65 minutes with its child already exited and both ends of the capture pipe
+# held by the pytest process itself; the same file passes in isolation in seconds. An AST sweep of
+# tests/ at that moment: 78 subprocess waits, 20 with `timeout=`, 58 without. Bounding it here
+# rather than at 58 call sites means a NEW call site cannot reintroduce the hang either.
+#
+# Deliberately generous: this is a disaster bound, not a performance budget. The longest honest
+# waits in this suite run a real engine over geesefs while a training run holds the box, and a
+# bound that fires on those would be a harness that fails as its own defect — the exact thing it
+# exists to prevent.
+_SUBPROCESS_WAIT_BOUND_S = float(
+    os.environ.get("LOOPLAB_TEST_SUBPROCESS_TIMEOUT_S", "900"))
+
+
+@pytest.fixture(autouse=True)
+def _bound_every_subprocess_wait(_isolation_patch):
+    """Give every unbounded subprocess wait in the suite a timeout, preserving explicit ones.
+
+    `subprocess.run` kills the child on `TimeoutExpired`, so the bound also releases whatever the
+    wedged child was holding instead of leaving it for the next test to trip over.
+    """
+    real_run = subprocess.run
+    real_communicate = subprocess.Popen.communicate
+
+    def run(*args, **kwargs):
+        kwargs.setdefault("timeout", _SUBPROCESS_WAIT_BOUND_S)
+        return real_run(*args, **kwargs)
+
+    def communicate(self, input=None, timeout=None):
+        return real_communicate(
+            self, input=input,
+            timeout=_SUBPROCESS_WAIT_BOUND_S if timeout is None else timeout)
+
+    _isolation_patch.setattr(subprocess, "run", run)
+    _isolation_patch.setattr(subprocess.Popen, "communicate", communicate)
 
 
 @pytest.fixture(autouse=True)
@@ -179,3 +245,20 @@ def _stop_watch_schedulers_at_teardown(_isolation_patch):
             service.stop()
         except Exception:  # noqa: BLE001 - teardown must never mask the test's own outcome
             pass
+
+
+# --------------------------------------------------------------------------------------------
+# WHY THERE IS NO FIXTURE HERE REDIRECTING `ALGOTUNE_BASELINE_CACHE_DIR`.
+#
+# 2026-09-07: eight `<task>__<subset>__lane2r3.json` entries appeared in the box's live
+# `.baseline_times` -- 100 real timings each, a regime this box scores in neither way. The first
+# answer was a session fixture pointing every test at a scratch copy. It cost two tests twice:
+# `test_the_card_says_when_it_lost_its_timings` reads that directory ON PURPOSE, and its pair
+# distinguishes "card with timings" from "card without" by building from two repo roots -- an
+# environment variable that overrides the path makes those two cards identical either way.
+#
+# And it was not the fix. `/proc` named the writer: three ORPHANED `campaign.sh` processes running
+# `premint_serial_rulers`, hours after the runs that started them were killed. That is closed at the
+# source -- the pre-flight now mints only under `ALGOTUNE_PREMINT=1` -- and
+# `test_the_live_cache_is_clean_and_in_one_regime` is what catches a recurrence. A second
+# instrument that changes what the first measures is not a guard; it is the next defect.

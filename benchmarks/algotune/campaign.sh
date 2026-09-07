@@ -97,6 +97,19 @@ STALL_TIMEOUT="${STALL_TIMEOUT:-2400}"        # 40 min of total silence = hung, 
 # The graded champion pass is bounded by a WALL of its own (see its call site): it is a
 # known-shape workload with no agent in it, and it is legitimately quiet while it scores.
 CHAMPION_TIMEOUT="${CHAMPION_TIMEOUT:-14400}"
+# A TASK-ARM CANNOT COMPLETE IN FIVE SECONDS, and until 2026-09-06 the marker vocabulary had no
+# way to say so. Measured on the 2026-08-24 campaign (docs/58 s58.1): 16 of the 20 arm-A markers in
+# `final-A-wauto.log` / `final-A-w1.log` record `wall` between 3 and 19 s with
+# `rc=0 state=ran_to_completion attempt=a1` -- the gateway's model group had gone to `503 No
+# available workers` -- while the four task-arms that really ran took 2,063-2,179 s. The rc=0 meter
+# rung in `record_done` (2026-08-25) now withholds the marker when the meter proves the run bought
+# NOTHING; this is the clock half of the same fact, for the runs the meter cannot see (no meter, an
+# untagged log, or one successful call before the endpoint died). Below this many seconds an rc=0
+# exit is recorded as `state=exited_immediately`, which every reader treats as terminal, printed and
+# NEVER averaged -- the same treatment as a harness cut, for the same reason: the run did not reach
+# the ceiling every other row is compared at. 60 s is more than three times the longest of the
+# sixteen and under three percent of the shortest genuine run.
+IMMEDIATE_EXIT_S="${IMMEDIATE_EXIT_S:-60}"
 
 # `timeout 0` means "no timeout" to GNU coreutils, so one spelling serves both settings and there is
 # no second code path to keep in step.
@@ -331,6 +344,13 @@ export LOOPLAB_LLM_REASONING="${LOOPLAB_LLM_REASONING:-medium}"
 DEFAULT_REASONING_EXTRA='{"provider":{"order":["siliconflow/fp8"],"allow_fallbacks":false}}'
 export LOOPLAB_LLM_REASONING_EXTRA="${LOOPLAB_LLM_REASONING_EXTRA:-$DEFAULT_REASONING_EXTRA}"
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET_USD"
+# The Developer's stage-pipeline guidance block is OFF on this bench (docs/60 A6): measured over
+# the probe corpus, `declare_stages` was called 0 times while the block cost 4.8-6.0 % of every $1
+# run (docs/56 §24) -- an AlgoTune task declares exactly one `score` stage. It stays ON in the
+# engine default because ML tasks write `looplab_stages.json` manifests for real; the switch
+# belongs to the profile that measured the zero. `LOOPLAB_DEVELOPER_STAGE_GUIDANCE=1` in the
+# environment keeps the historical prompt for a control that needs it.
+export LOOPLAB_DEVELOPER_STAGE_GUIDANCE="${LOOPLAB_DEVELOPER_STAGE_GUIDANCE:-0}"
 
 # ARM A'S BUDGET DOES NOT LIVE HERE, and pretending otherwise is how two arms end up on two
 # budgets under one banner. `BUDGET_USD` reaches `LOOPLAB_LLM_BUDGET_USD`, which is LoopLab's
@@ -579,11 +599,30 @@ declare_baseline_ruler
 # starts: two subsets, no LLM cost, about three minutes each. A task whose ruler already exists is
 # skipped, so a resumed campaign pays nothing.
 premint_serial_rulers() {
+  # OFF BY DEFAULT, AND THAT DEFAULT WAS BOUGHT THE HARD WAY. Measured 2026-09-07: three ORPHANED
+  # `campaign.sh` processes (ppid 1) were found minting rulers into the box's LIVE `.baseline_times`
+  # on lane `0,48`, hours after the runs that started them had been killed -- every campaign test
+  # that drives this script for its preflight was also driving a real three-minute timing per task,
+  # into the one directory the whole bench divides by. Eight `__lane2r3` entries reached it that
+  # way, in a regime this box scores in neither: `ruler_check.problems` flagged them and
+  # `test_the_live_cache_is_clean_and_in_one_regime` went red twice before the writer was caught in
+  # `/proc` with the cache directory in its environment.
+  #
+  # So the pre-flight SAYS what is missing and mints only when an operator asks with
+  # `ALGOTUNE_PREMINT=1`. A campaign that needs the serial rulers still gets them -- one flag, and
+  # §322's reason is unchanged: minting them mid-run costs a node of a paid probe.
   _minted=0
+  _want=0
   for _T in $TASKS; do
     [ "$(scoring_workers "$_T")" = "1" ] || continue
     for _S in test train; do
       [ -n "$(ls "$ALGOTUNE_BASELINE_CACHE_DIR/${_T}__${_S}__lane"*.json 2>/dev/null)" ] && continue
+      _want=$((_want + 1))
+      if [ "${ALGOTUNE_PREMINT:-0}" != "1" ]; then
+        echo "  MISSING serial ruler for $_T/$_S (it is scored at one worker; §314). Mint it with" \
+             "ALGOTUNE_PREMINT=1, or that task will be REFUSED at scoring time."
+        continue
+      fi
       echo "  minting the serial ruler for $_T/$_S (it is scored at one worker; §314)"
       ALGOTUNE_EVAL_WORKERS=1 ALGOTUNE_ALLOW_NEW_REGIME=1 \
         python3 "$REPO/benchmarks/ruler_selfcheck.py" --task "$_T" --subset "$_S" \
@@ -599,6 +638,8 @@ premint_serial_rulers() {
     done
   done
   [ "$_minted" -gt 0 ] && echo "  minted $_minted serial ruler(s) before the arms started"
+  [ "$_want" -gt 0 ] && [ "${ALGOTUNE_PREMINT:-0}" != "1" ] \
+    && echo "  $_want serial ruler(s) missing; re-run with ALGOTUNE_PREMINT=1 to mint them first"
   return 0
 }
 # (called below, after `scoring_workers` and the lane plan exist -- a call placed here
@@ -907,18 +948,74 @@ marker_is_operator_skip() {   # $1 = marker text
   return 1
 }
 
+# THE ONE SHELL SPELLING of "this run exited before it could have measured anything", mirroring
+# `compare_arms.py::IMMEDIATE_EXIT_STATE`. Written by `record_done`'s rc=0 arm when the wall is
+# under `IMMEDIATE_EXIT_S`; see that variable for the sixteen markers that forced it.
+#
+# A THIRD PREDICATE, NOT A THIRD CASE ARM IN `marker_is_harness_cut`, for the resume rule's sake:
+# that predicate decides what `RETRY_WALL_CUT=1` reopens, and an immediate exit is neither a clock
+# nor a decision. It is almost always an environment condition (an endpoint down, a credential
+# refused after one call), which is exactly the kind a re-run under a repaired transport would not
+# meet -- so it IS reopenable, under its own flag, `RETRY_IMMEDIATE_EXIT=1`. Blind resumes stay
+# safe: without the flag the marker is terminal like every other `.done`.
+marker_is_immediate_exit() {   # $1 = marker text
+  case "$1" in
+    *state=exited_immediately*) return 0 ;;
+  esac
+  return 1
+}
+
 already_measured() {   # $1 = marker path. Success = do NOT run this task-arm again.
   [ -s "$1" ] || return 1
   if marker_is_harness_cut "$(cat "$1")"; then
     [ "${RETRY_WALL_CUT:-0}" = "1" ] && return 1
   fi
+  if marker_is_immediate_exit "$(cat "$1")"; then
+    [ "${RETRY_IMMEDIATE_EXIT:-0}" = "1" ] && return 1
+  fi
   return 0
 }
 
-record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpus, $5 = run dir
+# THE RULER'S IDENTITY, IN THE MARKER, FOR BOTH ARMS. A speedup is a ratio, its denominator is one
+# per-instance reference-cache entry (`<task>__<subset><regime>.json`), and until 2026-09-06 no
+# arm-A record named it at all: arm A's number comes out of AlgoTuner's own loop into
+# `agent_summary.json`, which carries a float and a model name. docs/58 s58.3: "whether the two
+# arms shared a baseline is not established" -- and eight arm-B numbers were re-scored with the
+# WIDTH recorded nowhere, a factor of ~1.6x on this box. `looplab_eval.py::_emit` now stamps the
+# width and the entry's sha256 on every arm-B line; this is the same identity for the marker, so
+# `compare_arms.py` can refuse to pair two numbers off two instruments, whichever arm produced them.
+#
+# Under the LANE's `taskset`, because the regime key includes the lane width the arena resolved; a
+# box too small for the lane list (a test box) falls back to the driver's own affinity rather than
+# stamping nothing. `?` means "could not be derived", `none` means "derived, and no cached entry
+# exists" -- the same "" / "0" distinction `successful_calls` draws, for the same reason.
+ruler_fields() {   # $1 = task, $2 = subset, $3 = cpus. Echoes "eval_workers=… regime=… baseline_sha256=…"
+  local bridge="$HERE/looplab_eval.py" out
+  out="$(taskset -c "$3" python3 "$bridge" --print-ruler --task "$1" --subset "$2" \
+           --ruler-format marker 2>/dev/null)" \
+    || out="$(python3 "$bridge" --print-ruler --task "$1" --subset "$2" --ruler-format marker \
+           2>/dev/null)" \
+    || out=""
+  case "$out" in
+    eval_workers=*regime=*baseline_sha256=*) echo "$out" ;;
+    *) echo "eval_workers=? regime=? baseline_sha256=?" ;;
+  esac
+}
+
+record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpus, $5 = run dir,
+                  # $6 = task (see below)
   RC=$2
   WALL=$(( $(date +%s) - $3 ))
-  REGIME="cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE layout=$LANE_LAYOUT"
+  # THE TASK IS A PARAMETER, not `run_one`'s global. This function's own comments contemplate a
+  # call from outside that function, and under `set -u` (line 45) reading a caller-scoped `$T`
+  # there aborts the shell BEFORE the marker is written — and an unwritten marker is precisely how
+  # a terminal task gets silently re-run (the 230-minute case the block below is about). The
+  # fallback keeps a forgetful caller writing a marker with `regime=?` rather than none at all:
+  # a missing ruler field is a recoverable gap in the record, an absent marker is a repeated run.
+  RD_TASK="${6:-${T:-}}"
+  # The ruler rides in REGIME so every marker line below carries it without a fifth edit per state.
+  # `test` is the graded split for both arms: arm A's `final_speedup` and arm B's champion pass.
+  REGIME="cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE layout=$LANE_LAYOUT $(ruler_fields "$RD_TASK" test "$4")"
   # A `.done` marker means "this task-arm reached a TERMINAL state and must not be re-run". It must
   # NOT be written for a run that was interrupted: an interrupted task has no verdict, and a marker
   # makes a later resume SKIP it silently. Measured 2026-08-20: stopping a campaign wrote six
@@ -942,9 +1039,12 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
   # recover "the clock killed this" from an integer gets it wrong: `compare_arms.py` learned to
   # match the substring `rc=124`, and nothing else did -- `final_banner` counted a wall cut into
   # `COMPLETE` and `campaign_status.py` printed it as a finished task. The vocabulary is closed:
-  #   state=ran_to_completion   rc=0,   the run ended on its own terms
+  #   state=ran_to_completion   rc=0,   the run ended on its own terms, after IMMEDIATE_EXIT_S
+  #   state=exited_immediately  rc=0,   the run exited 0 in under IMMEDIATE_EXIT_S -- terminal,
+  #                                     printed, never averaged; `RETRY_IMMEDIATE_EXIT=1` reopens
   #   state=stopped_after_start rc=2,   a typed OperatorRefusal from a run that HAD started
   #   state=wall_cut            rc=124, `timeout` sent SIGTERM at HARD_TIMEOUT
+  #   state=stall_cut           rc=143, the stall guard killed a silent lane (below)
   # `attempt=` joins the marker to the meter rows this attempt wrote (`next_attempt`); a marker
   # written outside `run_one` -- i.e. by a test driving this function -- says `attempt=none`.
   #
@@ -978,8 +1078,8 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
       # The check is positive-evidence only: it needs the meter log to be readable AND to hold rows
       # for this arm, so a missing or untagged log leaves the old behaviour rather than refusing
       # markers for runs that were fine.
-      OK_CALLS="$(successful_calls "$ARM" "$T" "${ATTEMPT:-}" "$3")"
-      if [ "$(ended_on_failure "$ARM" "$T" "${ATTEMPT:-}" "$3")" = "yes" ]; then
+      OK_CALLS="$(successful_calls "$ARM" "$RD_TASK" "${ATTEMPT:-}" "$3")"
+      if [ "$(ended_on_failure "$ARM" "$RD_TASK" "${ATTEMPT:-}" "$3")" = "yes" ]; then
         echo "  [$(date +%H:%M:%S)][$4] ENDED ON A FAILED CALL after ${WALL}s (rc=0, ok_calls=${OK_CALLS:-?})" \
              "-- the endpoint cut this run, it did not finish. No marker written, task still owed"
         return 0
@@ -987,6 +1087,16 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
       if [ "$OK_CALLS" = "0" ]; then
         echo "  [$(date +%H:%M:%S)][$4] NO SUCCESSFUL CALLS in ${WALL}s (rc=0) -- endpoint down?" \
              "no marker written, task still owed"
+        return 0
+      fi
+      # THE CLOCK HALF of the rung above, for the runs the meter cannot see: the sixteen 3-19 s
+      # "completions" of 2026-08-24 predate the meter guard, and a run that made ONE successful
+      # call before the endpoint died passes it today. The threshold is recorded beside the wall so
+      # a reader can re-derive the verdict from the marker alone.
+      if [ "$WALL" -lt "$IMMEDIATE_EXIT_S" ]; then
+        echo "wall=$WALL rc=0 state=exited_immediately threshold_s=$IMMEDIATE_EXIT_S $REGIME ok_calls=$OK_CALLS attempt=${ATTEMPT:-none}" > "$1"
+        echo "  [$(date +%H:%M:%S)][$4] EXITED IMMEDIATELY: rc=0 after ${WALL}s (< ${IMMEDIATE_EXIT_S}s)" \
+             "-- recorded, not a completion, not averaged; RETRY_IMMEDIATE_EXIT=1 reopens it"
         return 0
       fi
       echo "wall=$WALL rc=0 state=ran_to_completion $REGIME ok_calls=$OK_CALLS attempt=${ATTEMPT:-none}" > "$1" ;;
@@ -1123,6 +1233,8 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
   SKIPPED=""
   SKIPPED_N=0
   CUT_N=0
+  IMMEDIATE=""
+  IMMEDIATE_N=0
   for M in "$1/$2"-*.done; do
     [ -s "$M" ] || continue
     _MK="$(cat "$M")"
@@ -1131,20 +1243,39 @@ final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 
       SKIPPED_N=$((SKIPPED_N + 1))
     elif marker_is_harness_cut "$_MK"; then
       CUT_N=$((CUT_N + 1))
+    elif marker_is_immediate_exit "$_MK"; then
+      IMMEDIATE="$IMMEDIATE $(basename "${M%.done}")"
+      IMMEDIATE_N=$((IMMEDIATE_N + 1))
     fi
   done
-  # The TRIGGER stays the skips alone, deliberately: a banner that names no MEASURED count claims
-  # nothing, so the wall-cut-only case keeps the plain `COMPLETE (N/N markers)` it has always
-  # printed and only the arithmetic below had to be corrected.
-  if [ "$SKIPPED_N" -gt 0 ]; then
-    echo "[$(date +%H:%M:%S)] SKIPPED BY THE OPERATOR --$SKIPPED"
-    echo "  These carry a .done marker that was WRITTEN rather than earned, so a resume will not"
-    echo "  run them and nothing measured them. compare_arms.py reads these same markers, prints"
-    echo "  them as SKIPPED and leaves those pairs out of the means. Delete a marker to queue that"
-    echo "  task-arm again; RETRY_WALL_CUT does NOT reopen a skip, because a skip is a decision."
+  # AN IMMEDIATE EXIT IS NOT A MEASUREMENT EITHER, and it is the one this banner was written to
+  # miss: the 2026-08-24 campaign printed `FINAL CAMPAIGN COMPLETE` over sixteen of them. Named,
+  # with the wall each one recorded, because "16 of 20 exited in under a minute" is the sentence
+  # that says the endpoint was down, and no count of markers can say it.
+  if [ "$IMMEDIATE_N" -gt 0 ]; then
+    echo "[$(date +%H:%M:%S)] EXITED IMMEDIATELY (rc=0 in under ${IMMEDIATE_EXIT_S:-?} s) --$IMMEDIATE"
+    for M in $IMMEDIATE; do
+      echo "    $M: $(cat "$1/$M.done")"
+    done
+    echo "  A task-arm cannot complete in seconds. These carry a .done marker so a blind resume"
+    echo "  leaves them alone, but they are NOT completions: compare_arms.py prints them and keeps"
+    echo "  them out of every mean. Sixteen of twenty looked exactly like this on 2026-08-24 when"
+    echo "  the gateway went to 503. Fix the cause, then RETRY_IMMEDIATE_EXIT=1 re-runs exactly these."
+  fi
+  # The TRIGGER is the skips and the immediate exits, deliberately: a banner that names no MEASURED
+  # count claims nothing, so the wall-cut-only case keeps the plain `COMPLETE (N/N markers)` it has
+  # always printed and only the arithmetic below had to be corrected.
+  if [ "$SKIPPED_N" -gt 0 ] || [ "$IMMEDIATE_N" -gt 0 ]; then
+    if [ "$SKIPPED_N" -gt 0 ]; then
+      echo "[$(date +%H:%M:%S)] SKIPPED BY THE OPERATOR --$SKIPPED"
+      echo "  These carry a .done marker that was WRITTEN rather than earned, so a resume will not"
+      echo "  run them and nothing measured them. compare_arms.py reads these same markers, prints"
+      echo "  them as SKIPPED and leaves those pairs out of the means. Delete a marker to queue that"
+      echo "  task-arm again; RETRY_WALL_CUT does NOT reopen a skip, because a skip is a decision."
+    fi
     echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers;" \
-         "$((DONE_N - SKIPPED_N - CUT_N)) MEASURED, $SKIPPED_N SKIPPED," \
-         "$CUT_N STOPPED BY THE HARNESS) ====="
+         "$((DONE_N - SKIPPED_N - CUT_N - IMMEDIATE_N)) MEASURED, $SKIPPED_N SKIPPED," \
+         "$CUT_N STOPPED BY THE HARNESS, $IMMEDIATE_N EXITED IMMEDIATELY) ====="
     return 0
   fi
   echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers) ====="
@@ -1232,7 +1363,7 @@ run_one() {                       # $1 = task, $2 = cpu list
     run_bounded "$OUT/A-$T.log" taskset -c "$CPUS" ./algotune.sh agent --standalone \
         "$ALGOTUNE_MODEL_KEY" "$T" > "$OUT/A-$T.log" 2>&1
     RC=$?
-    record_done "$MARKER" "$RC" "$S" "$CPUS" ""
+    record_done "$MARKER" "$RC" "$S" "$CPUS" "" "$T"
     [ -s "$MARKER" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm A done ($(cat "$MARKER"))"
   else
     TASK_ROOT="$RUNS_ROOT/$T"
@@ -1316,7 +1447,7 @@ PROTEOF
         echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"
       fi
     fi
-    record_done "$MARKER" "$RC" "$S" "$CPUS" "$TASK_ROOT/run"
+    record_done "$MARKER" "$RC" "$S" "$CPUS" "$TASK_ROOT/run" "$T"
     [ -s "$MARKER" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm B done ($(cat "$MARKER"))"
   fi
 }

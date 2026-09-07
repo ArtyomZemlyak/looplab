@@ -476,3 +476,82 @@ def test_every_residue_reason_declares_whether_a_retry_could_move_it(tmp_path):
     # …and one racy reason is enough to keep the retry promise.
     assert deletion_service._residue_is_wedged(
         [*blocked, deletion_service._Residue("a mount hiccup", permanent=False)]) is False
+
+
+def test_the_absorbing_phase_stops_claiming_a_retry_can_move_it(tmp_path, monkeypatch):
+    """`quarantine_ambiguous` is the ONE state where `retryable: true` is unconditionally false.
+
+    It is absorbing by the transaction's own transition check — the test above pins that the lattice
+    has no edge out of it — and it still answered through `_pending`, which is documented as the
+    promise that pressing again can make progress. So the operator was told to retry a state whose
+    definition is "a human must reconcile the filesystem".
+
+    MUTATION: put `_pending` back -> `retryable` is True and the operator keeps pressing a button
+    that cannot ever change the answer, which is the incident in this module's header with a
+    different cause.
+    """
+    run_dir = _run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    body = _identity(run_dir)
+    _interrupted_geesefs_move(monkeypatch)
+    client.post(f"/api/runs/{RUN}/deletions", json=body)
+
+    # Plant the absorbing phase the Windows durable-move failure writes. Reached by editing the
+    # receipt rather than by simulating that failure, because the phase is what this is about and
+    # the platform-specific path that produces it is `deletion_transaction`'s to own.
+    from looplab.serve import deletion_transaction as dt
+    hits = [p for p in tmp_path.iterdir()
+            if p.name.startswith(dt.DELETE_RECEIPT_PREFIX) and p.name.endswith(".json")]
+    assert len(hits) == 1, f"expected exactly one receipt, found {[p.name for p in hits]}"
+    receipt_path = hits[0]
+    receipt = dt.load_deletion_receipt(receipt_path)
+    assert receipt is not None, "the first POST must have left a receipt to move"
+    dt.save_deletion_receipt(receipt_path, {**receipt, "phase": "quarantine_ambiguous"})
+
+    answer = client.post(f"/api/runs/{RUN}/deletions", json=body).json()
+
+    assert answer["code"] == "delete_quarantine_outcome_unknown"
+    assert answer["retryable"] is False, (
+        "an absorbing phase must not promise that pressing again can move the operation")
+    assert answer["phase"] == "quarantine_ambiguous", (
+        "the phase itself does not move — only what the answer claims about it")
+    assert "no retry can resolve it" in answer["message"]
+    assert answer["remediation"] and "by hand" in answer["remediation"], (
+        "a wedged answer owes the operator the manual step, not just a refusal")
+
+    again = client.post(f"/api/runs/{RUN}/deletions", json=body).json()
+    assert again["retryable"] is False and again["phase"] == "quarantine_ambiguous", (
+        "the same answer twice is what makes the retryable claim checkable")
+
+
+def test_the_branch_that_MINTS_the_absorbing_phase_answers_the_same_way():
+    """The FIRST answer is the one the operator decides on, and it was the false one.
+
+    The test above plants the phase and exercises the RESUME branch. The branch that actually
+    ENTERS `quarantine_ambiguous` — the Windows durable-move failure — was left on `_pending`, whose
+    `retryable: true` is documented as the promise that pressing again can make progress. So the
+    first response about this phase said "Retry or check only this exact deletion operation" and
+    only a SECOND press said no retry can resolve it: two answers about one unmoving phase, making
+    opposite promises, with the false one arriving while the operator is still deciding.
+
+    Driven on the source rather than by simulating an `os.name == "nt"` durable-move failure on
+    Linux, and the assertion is about the two branches AGREEING — which is the property, and which
+    a simulation of one of them cannot show.
+
+    MUTATION: put the minting branch back on `_pending` -> the two branches disagree and this is red.
+    """
+    import inspect
+
+    from looplab.serve import deletion_service
+
+    src = inspect.getsource(deletion_service)
+    minting = src.index('receipt = mark_deletion_quarantine_ambiguous(')
+    answer = src.index("delete_quarantine_outcome_unknown", minting)
+    window = src[minting:answer]
+    assert "_wedged(" in window and "_pending(" not in window, (
+        "the branch that mints the absorbing phase must answer with the wedge, not the promise")
+    assert src.count('"delete_quarantine_outcome_unknown"') == 2, (
+        "exactly two branches speak about this phase — the mint and the resume")
+    assert src.count("no retry can resolve it") == 2, (
+        "and they say the same sentence, so they cannot drift into describing one wedge differently")
+
