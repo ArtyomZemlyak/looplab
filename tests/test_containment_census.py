@@ -302,7 +302,7 @@ def test_the_linter_is_configured_for_exactly_this_rule():
 
 def test_the_number_claude_md_states_is_the_number_this_census_derives():
     """THE COUNT COMES FROM THE PARSER, NEVER A PERSON — CLAUDE.md's own rule, applied to the one
-    number in CLAUDE.md that describes THIS census. It said 670 while the tree held 686: written
+    number in CLAUDE.md that describes THIS census. It said 670 while the tree held 715: written
     once by hand, wrong within a day, and read by every agent turn before a single file is opened.
 
     A guard and not a re-derivation at read time, because the sentence has to be readable as prose;

@@ -11,9 +11,6 @@ and this is the only module all four may import.
 from __future__ import annotations
 
 
-class BudgetExceeded(Exception):
-    pass
-
 
 def exception_leaves(exc: BaseException):
     """Flatten an (arbitrarily nested) exception group to the exceptions it actually carries.
@@ -62,6 +59,28 @@ class OperatorRefusal(Exception):
     Concrete flavours below preserve each site's historical base class, so every existing
     `except ValueError` / `except RuntimeError` and every `pytest.raises(...)` keeps working — the
     marker only ADDS a way to recognize the family.
+    """
+
+
+class BudgetExceeded(OperatorRefusal, RuntimeError):
+    """The run reached the LLM spend ceiling the operator set (`Settings.llm_budget_usd`).
+
+    It wears the marker for the three reasons the docstring above requires: it is constructed at a
+    `raise` whose whole job is to refuse (`llm.py::CostAccountant.add`), the condition is a property
+    of the operator's own INPUT rather than of LoopLab's internal state, and the message names both
+    what was refused and the knob to change.
+
+    It was a bare `Exception` until 2026-08-20 and nobody noticed, because the ceiling had always
+    been settable only in code -- so no run had ever actually hit it. The first campaign that did
+    got 342 lines of Rich traceback and exit 1 to say "spent 0.0209 >= budget 0.0200": the exact
+    presentation this family exists to remove, and worse than cosmetic downstream, because exit 1
+    is indistinguishable from a crash. A harness cannot then tell "this task is FINISHED, it spent
+    its allowance" from "this task DIED, retry it" -- and retrying is strictly wrong here, since the
+    next attempt spends the same allowance and stops at the same wall.
+
+    The ten `except BudgetExceeded` sites in `agents/` are unaffected: they catch by name, and the
+    rule they enforce -- a hard budget stop PROPAGATES, it never degrades to a fallback that would
+    make another paid call -- is unchanged.
     """
 
 
@@ -128,3 +147,39 @@ def credential_cause(exc: BaseException) -> str:
     silently merging it with an unrelated one.
     """
     return str(getattr(exc, "cause_detail", None) or exc)
+
+
+def budget_stop_leaf(exc: BaseException | None, _depth: int = 0) -> BaseException | None:
+    """The `BudgetExceeded` inside `exc`, however deeply a task group wrapped it — or None.
+
+    ONE definition, because two callers now have to agree on it and they are on opposite sides of
+    the run. `cli/run_cmds.py::_run_engine_guarded` asks it at the very END, to record the ceiling
+    as `run_finished {"reason": "budget_exhausted"}` instead of a crash; `engine/orchestrator.py::
+    Engine._drain_inflight_evaluation` asks it one frame INSIDE `Engine.run`, to let an evaluation
+    that is already burning land its terminal before the ceiling tears the eval task group down. A
+    second, hand-synced copy would drift, and the direction it would drift in is the expensive one:
+    the engine-side copy failing to recognise a wrapped leaf silently reinstates the very defect
+    the drain exists to remove, with nothing going red.
+
+    It lives HERE rather than in either caller because `core` imports nothing above itself, so
+    this is the only module both the CLI and the engine may import (the same argument the
+    `OperatorRefusal` marker at the top of this file is placed on).
+
+    Bounded depth: an exception group can nest, and a cycle in `__cause__`/`__context__` (which a
+    caller can construct) must not turn a terminal-event handler into a hang.
+    """
+    if _depth > 8 or exc is None:
+        return None
+    if isinstance(exc, BudgetExceeded):
+        return exc
+    for inner in list(getattr(exc, "exceptions", ()) or ()):
+        found = budget_stop_leaf(inner, _depth + 1)
+        if found is not None:
+            return found
+    for attr in ("__cause__", "__context__"):
+        inner = getattr(exc, attr, None)
+        if inner is not None and inner is not exc:
+            found = budget_stop_leaf(inner, _depth + 1)
+            if found is not None:
+                return found
+    return None

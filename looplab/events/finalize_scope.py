@@ -11,12 +11,12 @@ unchanged; it remains where the finalization WRITER lives, and this is only the 
 """
 from __future__ import annotations
 
-from looplab.core.models import is_error_stop
 from looplab.events.finalize_protocol import (
     FINALIZE_STEP_ABANDONED,
     FINALIZE_STEP_BEGUN,
     FINALIZE_STEP_COMPLETE,
 )
+from looplab.core.models import RUN_STOP_ERROR
 from looplab.events.types import (
     EV_BUDGET,
     EV_CARD_ENRICHED,
@@ -117,10 +117,54 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
                 continue
             # An outer invocation guard can record the exception raised after ``begun``. It must not
             # steal the original terminal intent; recovery republishes the exact staged payload.
-            if is_error_stop(data.get("reason")):
+            if is_guarded_abort(data.get("reason")):
                 continue
         return False
     return True
+
+
+# THE GUARDED-ABORT CLASS, and why it is a predicate rather than a literal ANYWHERE.
+#
+# `reason == "error"` never meant "this run crashed". It means "this terminal event was written by
+# `cli/run_cmds.py::_run_engine_guarded`'s outer handler rather than by the engine's own clean
+# finish", and the finalization protocol keys on that distinction: an outer invocation guard may
+# record the exception raised after `begun`, and it must not steal the original terminal intent.
+#
+# Reaching the operator's spend ceiling travels that same path while being the DESIGNED end of a
+# budgeted run, so `run_finished` now names it `budget_exhausted` -- measured on the 2026-08-24
+# campaign, all eleven finishes in `runs-B` said `error` and every one was the ceiling, zero
+# genuine failures. Introducing that reason WITHOUT this predicate would have flipped all six
+# protocol checks at once and made a guarded abort look like a clean engine finish.
+#
+# The six checks in `engine/finalize.py` and this file were converted on the day the reason was
+# introduced; docs/57 (`guarded-abort-class-has-six-private-spellings`, closed 2026-09-06) then
+# found the OLDER decision sites the paragraph above had not reached, every one still comparing
+# the literal over `stop_reason` (or `run_finished.reason`) and every one an inert defense-in-depth
+# layer for the ORDINARY terminal of a budgeted campaign: `orchestrator.py::_enter_run`'s
+# abort-scope republish ("a retryable failed wrap-up", never retried for `budget_exhausted`) and
+# its `entry_finished` gate beside the re-run-wrap-up-once path; `cli/run_cmds.py::
+# classify_prior_run` (`pending_finalize` excluded the ceiling class); `serve/control_validation.py
+# ::_decide_run_abort` (an operator's abort on a ceiling-ended run answered `noop` where an `error`
+# finish got `append`); two spellings in `serve/run_commands.py`; `serve/appstate.py::phase`
+# (published the ceiling's not-yet-finalized finish as FINISHED); the observation pair
+# `serve/command_observation.py::domain_failure_after` / `has_non_error_finish_after`, which
+# `run_commands` reads its own answers off and which must therefore name a finish the same way;
+# and -- found by the tree-wide scan, not by the review that counted six -- the FOLD's own
+# crash-prefix clause in `events/replay.py::_on_run_finished`, which retained a mid-build marker
+# for resume recovery on `error` and cleared it on the ceiling written by the same guard from the
+# same exception. All route through `is_guarded_abort` now, and
+# `tests/test_budget_exhausted_is_not_an_error.py` bans every literal spelling over the whole
+# `looplab/` tree -- which is what would have caught this on the day.
+# Built FROM `core/models.py::RUN_STOP_ERROR` rather than repeating its literal (doc 52 row 6):
+# the write site in `cli/run_cmds.py` names that constant, and after the 2026-09-07 merge this
+# tuple is the only other place the word appears — two registries for one word is how the
+# eleven literals row 6 collected got there in the first place.
+GUARDED_ABORT_REASONS = (RUN_STOP_ERROR, "budget_exhausted")
+
+
+def is_guarded_abort(reason) -> bool:
+    """True when a `run_finished` reason was written by the guarded-abort path."""
+    return str(reason or "").lower() in GUARDED_ABORT_REASONS
 
 
 def incomplete_finalize_scope(events) -> str | None:
@@ -140,7 +184,7 @@ def incomplete_finalize_scope(events) -> str | None:
         )
         is_finished = (
             event.type == EV_RUN_FINISHED
-            and not is_error_stop(data.get("reason"))
+            and not is_guarded_abort(data.get("reason"))
             and _adjacent_claim(event)
         )
         scope = data.get("scope") if is_begun else data.get("finalize_scope")

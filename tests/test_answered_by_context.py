@@ -1,0 +1,466 @@
+"""The already-answered block: what it publishes, what it must never publish, and the coverage
+of the tools it was built for.
+
+These drive the PROPERTY (tier 1 of the guard-test ladder in CLAUDE.md) rather than pinning the
+prompt's text: every assertion here builds real providers over real (empty) directories and reads
+what a real `CompositeTools` merge produces. A pin on the wording would go green against a block
+that had stopped covering half its tools.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+import looplab.agents as looplab_agents
+from looplab.agents.answered_by_context import answered_by_context
+from looplab.agents.tool_loop import CompositeTools
+from looplab.core.models import RunState
+from looplab.tools._base import coerce_inventory, collect_inventory, render_inventory
+from looplab.tools.cross_run_tools import CrossRunTools
+from looplab.tools.knowledge_tools import KnowledgeTools
+from looplab.tools.run_tools import AllRunsTools, DataTools, RunTools, SiblingRunTools
+
+
+class _RepoTask:
+    """A task whose subject is source code: no dataset surface at all (the AlgoTune/repo shape)."""
+
+
+def _cold_start_toolset(tmp_path):
+    """The provider set a cold-start run actually composes, over empty stores."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    # A real run always carries a task id. Without one, SiblingRunTools correctly reports UNKNOWN
+    # scope rather than a decisive 0 (see the dedicated test below), which is a different case from
+    # "the stores are empty" and would make the zero-assertion below test the wrong thing.
+    state = RunState(goal="g", direction="max")
+    state.task_id = "toy_quadratic"
+    run_tools = RunTools()
+    run_tools.bind_state(state)
+    return CompositeTools([
+        run_tools,
+        DataTools(_RepoTask()),
+        CrossRunTools(memory, audience="portfolio"),
+        KnowledgeTools(str(knowledge)),
+        _bound(SiblingRunTools(runs), state),
+        _bound(AllRunsTools(runs), state),
+    ])
+
+
+def _bound(provider, state):
+    provider.bind_state(state)
+    return provider
+
+
+# The tools that produced the empty tail this whole mechanism exists for, measured 2026-08-19 over
+# six cold-start runs (138 of 227 calls returned nothing). Each must be answerable from the prompt,
+# or the block is publishing rows for the tools nobody was wasting calls on.
+_MEASURED_EMPTY_TAIL = (
+    "read_asset", "cross_run_search", "read_concept_tree", "data_schema", "list_themes",
+    "list_notes", "data_profile", "list_experiments", "cross_run_prior_attempts", "grep",
+    "cross_run_atlas", "cross_run_concept_map", "find_analogous_across_runs",
+    "find_concept_slugs", "cross_run_claims", "read_run_experiment", "read_research_memo",
+    "read_sibling_experiment",
+)
+
+
+def test_every_tool_of_the_measured_empty_tail_is_answered_by_the_block(tmp_path):
+    rows = collect_inventory(_cold_start_toolset(tmp_path))
+    missing = [name for name in _MEASURED_EMPTY_TAIL if name not in rows]
+    assert not missing, f"no inventory row for {missing}; these are the tools the block exists for"
+
+
+def test_a_cold_start_publishes_zero_and_not_unknown_for_every_empty_store(tmp_path):
+    """An empty store is a KNOWN emptiness. Reporting it as UNKNOWN would be safe but useless —
+    the model is told it may still be worth a call, which is the behaviour being removed."""
+    rows = collect_inventory(_cold_start_toolset(tmp_path))
+    not_zero = {name: value for name, value in rows.items()
+                if name in _MEASURED_EMPTY_TAIL and value != 0}
+    assert not not_zero, f"expected a decisive 0 on a cold start, got {not_zero}"
+
+
+def test_the_block_never_names_a_tool_the_toolset_does_not_route(tmp_path):
+    """Every row must name a tool the model can actually call.
+
+    `CrossRunTools.inventory` answers for all eight of its tools whether or not `specs()` published
+    them, so this is a live filter and not a tautology."""
+    tools = _cold_start_toolset(tmp_path)
+    routed = {(spec.get("function") or {}).get("name") for spec in tools.specs()}
+    stray = sorted(set(collect_inventory(tools)) - routed)
+    assert not stray, f"published a count for unroutable tool(s): {stray}"
+
+
+def test_a_shadowed_provider_never_supplies_the_count_for_a_name_it_cannot_serve():
+    """First-wins routing and first-wins inventory must be the SAME first."""
+    class First:
+        def specs(self):
+            return [{"type": "function", "function": {"name": "dup", "parameters": {}}}]
+
+        def execute(self, name, args):
+            return "first"
+
+        def inventory(self):
+            return {"dup": 0}
+
+    class Second:
+        def specs(self):
+            return [{"type": "function", "function": {"name": "dup", "parameters": {}}}]
+
+        def execute(self, name, args):
+            return "second"
+
+        def inventory(self):
+            return {"dup": 99}
+
+    tools = CompositeTools([First(), Second()])
+    assert tools.execute("dup", {}) == "first"
+    assert tools.inventory() == {"dup": 0}, "the count must come from the provider that answers"
+
+
+def test_a_row_for_a_tool_the_composite_does_not_route_is_dropped():
+    """The route filter in `CompositeTools.inventory` needs a provider that NAMES a tool it does
+    not OFFER — otherwise the filter is unexercised and the assertion above passes on dict
+    insertion order instead. Verified by mutation: deleting the filter used to break no test."""
+    class Ghost:
+        def specs(self):
+            return [{"type": "function", "function": {"name": "real", "parameters": {}}}]
+
+        def execute(self, name, args):
+            return ""
+
+        def inventory(self):
+            return {"real": 0, "ghost": 0}      # `ghost` is routed by nobody
+
+    assert CompositeTools([Ghost()]).inventory() == {"real": 0}
+
+
+def test_a_provider_that_raises_contributes_nothing_rather_than_a_zero():
+    class Broken:
+        def specs(self):
+            return [{"type": "function", "function": {"name": "boom", "parameters": {}}}]
+
+        def execute(self, name, args):
+            return ""
+
+        def inventory(self):
+            raise RuntimeError("nope")
+
+    assert collect_inventory(Broken()) == {}
+    assert answered_by_context(CompositeTools([Broken()])) == ""
+
+
+def test_a_provider_without_the_hook_is_silent_and_the_block_disappears():
+    class Legacy:
+        def specs(self):
+            return [{"type": "function", "function": {"name": "old", "parameters": {}}}]
+
+        def execute(self, name, args):
+            return ""
+
+    assert collect_inventory(Legacy()) == {}
+    assert answered_by_context(CompositeTools([Legacy()])) == ""
+    assert answered_by_context(None) == ""
+
+
+@pytest.mark.parametrize("value", [True, False, -1, "", "   ", None, 1.5])
+def test_ill_formed_inventory_values_are_dropped_not_rendered(value):
+    """A bool would render as the count 1 and a negative count claims fewer than none."""
+    assert coerce_inventory({"t": value}) == {}
+
+
+def test_unknown_renders_as_unknown_and_a_count_renders_as_a_number():
+    out = render_inventory({"a": 0, "b": 7, "c": "unreadable store: OSError"})
+    assert "a=0" in out and "b=7" in out
+    assert "c=UNKNOWN(unreadable store: OSError)" in out
+    assert "c=0" not in out, "an uncountable store must never be published as an empty one"
+
+
+def test_an_unavailable_concept_projection_is_unknown_and_never_a_zero(monkeypatch):
+    """`run_tools._themes` refuses to call an empty projection an empty taxonomy; the count must
+    refuse the same thing, or the block asserts what the tool declines to assert."""
+    state = RunState(goal="g", direction="max")
+    tools = RunTools()
+    tools.bind_state(state)
+
+    class _Projection:
+        status = "unavailable"
+        reasons = ("test",)
+        memberships: dict = {}
+        run_base: tuple = ()
+        trusted_memberships: dict = {}
+
+    monkeypatch.setattr(RunTools, "_concept_projection", staticmethod(lambda st: _Projection()))
+    rows = tools.inventory()
+    for name in ("list_themes", "read_concept_tree", "concept_nodes", "node_concepts"):
+        assert isinstance(rows[name], str), f"{name} must be UNKNOWN, not a count"
+        assert "unavailable" in rows[name]
+
+
+def test_an_unreadable_cross_run_store_is_unknown_not_empty(tmp_path, monkeypatch):
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    (memory / "lessons.jsonl").write_text("{}\n", encoding="utf-8")
+
+    # Patch the BUILTIN open, which is what `jsonl_row_count` uses — the counter reads bytes rather
+    # than going through `Path.open`, so patching the latter no longer reaches it.
+    import builtins
+    real_open = builtins.open
+
+    def _boom(path, *a, **k):
+        if str(path).endswith("lessons.jsonl"):
+            raise OSError("denied")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", _boom)
+    rows = CrossRunTools(memory, audience="portfolio").inventory()
+    assert isinstance(rows["cross_run_search"], str) and "unreadable" in rows["cross_run_search"]
+    # `cross_run_prior_attempts` reads only the capsule store, which is still readable.
+    assert rows["cross_run_prior_attempts"] == 0
+
+
+# ---- the spend ceiling ---------------------------------------------------------------------
+#
+# `llm_budget_usd` ships in the same change because it is the same question asked about money
+# rather than about calls: what does this run get, and how is that comparable to another loop's.
+
+
+def test_the_spend_ceiling_reaches_the_accountant_and_zero_means_no_limit():
+    from looplab.core.config import Settings
+    from looplab.core.llm import make_llm_client
+
+    common = dict(llm_model="m", llm_base_url="http://localhost:1/v1", llm_api_key="k")
+    assert make_llm_client(Settings(**common)).accountant.limit is None, (
+        "0.0 must stay the historical no-limit behaviour, not a ceiling of zero")
+    assert make_llm_client(Settings(llm_budget_usd=0.25, **common)).accountant.limit == 0.25
+
+
+def test_the_ceiling_stops_the_run_rather_than_degrading_it():
+    """`BudgetExceeded` is a hard stop every agent path propagates; the accountant must raise it
+    AT the limit, not past it, and must commit the spend it is refusing to exceed."""
+    from looplab.core.llm import BudgetExceeded, CostAccountant
+
+    acc = CostAccountant(limit=0.10)
+    acc.add(0.04)
+    acc.add(0.05)
+    assert acc.remaining() == pytest.approx(0.01)
+    with pytest.raises(BudgetExceeded):
+        acc.add(0.02)
+    assert acc.remaining() == 0.0, "a refused call still spent what it spent"
+
+
+def test_no_limit_never_raises():
+    from looplab.core.llm import CostAccountant
+
+    acc = CostAccountant()
+    for _ in range(50):
+        acc.add(1.0)
+    assert acc.remaining() is None
+
+
+# ---- the other half of the fix: the tools' own answers must be TERMINAL --------------------
+#
+# A correct count is defeated by an answer the model can read as a near-miss. Both of these were
+# measured retrying against a published zero.
+
+
+def test_read_asset_states_the_class_of_the_emptiness_not_a_near_miss():
+    answer = DataTools(_RepoTask()).execute("read_asset", {"name": "solver.py"})
+    assert "NO data assets at all" in answer
+    assert "no name will change that" in answer
+    # It must also close the door the retries were actually looking for.
+    assert "reads source files" in answer
+
+
+def test_an_empty_cross_run_store_says_so_rather_than_blaming_the_query(tmp_path):
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    answer = CrossRunTools(memory, audience="portfolio").execute(
+        "cross_run_search", {"query": "svm", "intent": "explore"})
+    assert "store is EMPTY" in answer
+    assert "no query will match" in answer
+
+
+class _CapturingClient:
+    """Captures the messages a role builds, then raises so the role's own fallback path ends the
+    call. `complete_tool` is what `parse_structured("tool_call", ...)` reaches."""
+
+    def __init__(self):
+        self.messages: list[list[dict]] = []
+
+    def complete_tool(self, messages, json_schema):
+        self.messages.append(messages)
+        raise RuntimeError("stop here — the prompt is the property")
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        self.messages.append(messages)
+        raise RuntimeError("stop here — the prompt is the property")
+
+
+def _system_prompt_of(role, state):
+    from looplab.core.models import Node
+    try:
+        role.propose(state, None if not state.nodes else next(iter(state.nodes.values()), None))
+    except Exception:                       # noqa: BLE001 - every role degrades rather than raising
+        pass
+    assert role.client.messages, "the role never built a prompt"
+    return role.client.messages[0][0]["content"]
+
+
+def test_the_tools_rule_reaches_only_a_role_that_HAS_tools():
+    """`_CONTEXT_BEFORE_TOOLS_RULE` says "a tool answers what is inside one of those things" and
+    "re-ask one after something HAPPENED". That is an instruction about a surface, and its own
+    definition says it is "appended wherever a role is offered tools".
+
+    `roles.py::LLMResearcher` is the single-shot structured role: no `tools` argument, no
+    attribute, no loop. Splicing the rule there tells a model with an empty tool list to go and
+    re-read one — the same reasoning that already took the clause off the repo Developer. Driven,
+    not pinned: both prompts are built by really calling `propose`, so a future assembly that
+    reintroduces the rule through a different constant still fails.
+    """
+    from looplab.agents.agent import ToolUsingResearcher
+    from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE, LLMResearcher
+
+    state = RunState(goal="g", direction="max")
+    state.task_id = "toy_quadratic"
+
+    plain = LLMResearcher(_CapturingClient())
+    assert not hasattr(plain, "tools"), (
+        "LLMResearcher grew a tool surface — re-derive this test rather than deleting it")
+    plain_system = _system_prompt_of(plain, state)
+    assert _CONTEXT_BEFORE_TOOLS_RULE not in plain_system, (
+        "the toolless Researcher's system prompt tells the model to consult and re-read tools it "
+        "was never offered")
+
+    # ...and the variant that DOES have the surface still carries it, or this test would be
+    # satisfied by deleting the rule outright.
+    agentic = ToolUsingResearcher(_CapturingClient(), CompositeTools([RunTools()]))
+    assert _CONTEXT_BEFORE_TOOLS_RULE in _system_prompt_of(agentic, state)
+
+
+def test_every_agent_side_toolset_is_composed_through_the_one_helper():
+    """`Settings.hide_empty_tools` is implemented on `CompositeTools`, so a call site that builds
+    one by hand silently opts its whole phase out of the flag.
+
+    That is not hypothetical. `make_deep_researcher` spelled the composition out itself while its
+    own comment claimed it used "the same capability assembly as the Researcher/Strategist" — and
+    the deep-research phase is where essentially every tool call of a cold-start run happens, so a
+    run launched with the flag ON recorded `hide_empty_tools: true` in its config snapshot and was
+    still offered every empty tool.
+
+    AST, not a substring (CLAUDE.md tier 3): a commented-out `CompositeTools(providers)` must not
+    fail this, and a live one must not pass it.
+    """
+    import ast
+
+    from _source_scan import iter_trees
+
+    # EVERY package that composes a toolset, not just `agents/`. Scoped to agents/ this guard was
+    # green while `adapters/repo_developer.py` (four phases), `serve/routers/boss.py`, `engine/`
+    # and `cli/` all built `CompositeTools` by hand — i.e. the exact defect it describes was live
+    # in nine files, four of them the Developer's own phases.
+    #
+    # The walk is `_source_scan`'s (doc 25 XP-10) rather than a private `rglob`: the copies of that
+    # walk had already diverged on DECODING, and this one had hard-coded `encoding="utf-8"`, so a
+    # single BOM'd or cp1252 source anywhere in the package would have turned this guard from a
+    # refusal into a `UnicodeDecodeError` at collection -- red for the wrong reason, and green the
+    # moment somebody widened the `except`.
+    offenders = []
+    for path, tree in iter_trees():
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "CompositeTools"
+                    and not any(kw.arg == "hide_empty_tools" for kw in node.keywords)):
+                offenders.append(f"{path.name}:{node.lineno}")
+    # DECLARED EXEMPTIONS, two-way. Widening the scan from `agents/` to the whole package exposed
+    # nine more hand-rolled composites; listing them is honest where a narrower glob was not, and
+    # the two-way assertion means a NEW bypass goes red and a FIXED one must be struck off here.
+    #
+    # The four `repo_developer.py` sites are the ones that genuinely should route through
+    # `compose_tools`: they are run-scoped agent phases and they silently ignore
+    # `hide_empty_tools`. They stay listed rather than quietly tolerated, because the flag is off
+    # by default and plumbing settings into the Developer is a change of its own.
+    #
+    # The rest are not run phases: `serve/assistant.py`, `serve/routers/boss.py` and
+    # `serve/routers/genesis.py` are operator surfaces, `engine/genesis.py` runs before a run
+    # exists, `engine/train_monitor.py` composes a watchdog's read-only log tools, `cli/__init__.py`
+    # is a one-shot command, and `tools/run_tools.py` builds a delegate for a foreign run.
+    #
+    # `engine/failure_diagnosis.py` arrived on master after this guard was written and is the same
+    # shape as `train_monitor.py`: it composes the dead eval's log-and-source readers for the
+    # DIAGNOSTICIAN, and it is reached from `triage_crash` with no `Settings` anywhere on the call
+    # path — the engine holds a run, not a settings object — so routing it through `compose_tools`
+    # would mean inventing a settings argument for four frames, not adding a keyword. Listed, not
+    # silently tolerated.  proof:absent:settings@looplab/engine/failure_diagnosis.py::_diag_tools
+    # OPEN[composite-exemptions-keyed-by-basename] the exemption set admits every file of a given
+    # NAME anywhere in the package, not the specific sites the prose above argues for.
+    # proof:`present:found = {name.split(":")[0] for name in offenders}@tests/test_answered_by_context.py`
+    # REVIEW 2026-08-25 (guard-test): offenders are keyed on `path.name` over the whole `looplab/`
+    # walk, so a NEW hand-rolled `CompositeTools(...)` in ANY `__init__.py` -- or in any future
+    # module that happens to share a basename with an exempted one (a second `assistant.py`,
+    # another `genesis.py`) -- passes this guard silently, which is precisely the "silently opts
+    # its whole phase out of the flag" defect the test exists to catch. The prose exempts SITES
+    # (`cli/__init__.py`, `serve/assistant.py`, ...) while the set exempts NAMES. Fix: key
+    # `found`/`declared` on `path.relative_to(PKG)` so each exemption names one file, and the
+    # two-way assertion keeps its teeth.
+    declared = {
+        "repo_developer.py", "__init__.py", "genesis.py", "train_monitor.py",
+        "assistant.py", "boss.py", "run_tools.py", "failure_diagnosis.py",
+    }
+    found = {name.split(":")[0] for name in offenders}
+    assert found <= declared, (
+        "a NEW hand-rolled toolset appeared, so it cannot honour hide_empty_tools: "
+        f"{sorted(found - declared)}")
+    assert declared <= found | {""}, (
+        "a declared exemption no longer bypasses `compose_tools` — strike it off this list: "
+        f"{sorted(declared - found)}")
+
+
+def test_schema_and_profile_do_not_refer_the_model_into_equally_empty_tools():
+    """A referral is only useful if the referent has something.
+
+    `data_schema` used to answer "try read_asset or data_profile" on a task with no data surface at
+    all — sending the model to two tools that are empty for the SAME reason, while the prompt was
+    already publishing zeros for all three."""
+    tools = DataTools(_RepoTask())
+    for name in ("data_schema", "data_profile"):
+        answer = tools.execute(name, {})
+        assert "NO data assets at all" in answer, name
+        assert "try read_asset" not in answer, name
+
+
+def test_an_empty_knowledge_base_says_so_rather_than_blaming_the_pattern(tmp_path):
+    knowledge = tmp_path / "kb"
+    knowledge.mkdir()
+    tools = KnowledgeTools(str(knowledge))
+    for name, args in (("list_notes", {}), ("grep", {"pattern": "svm"})):
+        answer = tools.execute(name, args)
+        assert "NO knowledge notes at all" in answer, name
+        assert "operator-authored" in answer, name
+        # Scoped, not blanket: `kb_search` also reads the case store, so this sentence must not
+        # claim there is nothing to read at all (see `tests/test_partials_wired.py`).
+        assert "kb_search" in answer, name
+
+
+def test_a_populated_knowledge_base_keeps_the_pattern_wording(tmp_path):
+    """The terminal sentence must not swallow the ordinary 'your pattern missed' answer."""
+    knowledge = tmp_path / "kb"
+    knowledge.mkdir()
+    (knowledge / "note.md").write_text("hello svm", encoding="utf-8")
+    tools = KnowledgeTools(str(knowledge))
+    assert tools.execute("list_notes", {}).strip() == "note.md"
+    assert tools.execute("grep", {"pattern": "zzzz-no-such-thing"}) == "(no matches)"
+
+
+def test_a_non_empty_store_keeps_the_query_wording(tmp_path):
+    """The empty-store sentence must not swallow the ordinary 'nothing matched' answer."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    (memory / "lessons.jsonl").write_text(
+        json.dumps({"id": "x", "text": "unrelated", "scope": "shared"}) + "\n", encoding="utf-8")
+    answer = CrossRunTools(memory, audience="portfolio").execute(
+        "cross_run_search", {"query": "zzzz-no-such-thing", "intent": "explore"})
+    assert "store is EMPTY" not in answer

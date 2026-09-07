@@ -680,3 +680,69 @@ def test_a_bare_cr_inside_a_record_is_not_a_record_boundary(tmp_path):
     assert len(rows) == 1, "a bare CR inside a record is not a record boundary"
     assert rows[0][1]["statement"] == statement, "the payload survives byte for byte"
     assert receipt["skipped"] == 0, "nothing was dropped as malformed"
+
+
+# --- one line, several verdicts ------------------------------------------------------------------
+
+def test_three_verdicts_on_ONE_line_become_three_lessons(tmp_path):
+    """`splitlines()` was the only splitter, so a model answering on one line lost every pair but one.
+
+    Measured 2026-09-01 in /home/jovyan/data/looplab-memory/lessons.jsonl: one row of 55, 861
+    characters, ZERO newlines, three lessons joined by `. P2  ` and `. P3  ` and no [GOOD]/[BAD]
+    tags. Two lessons vanished; the survivor carried the other two under P1's index and outcome; and
+    at 861 characters it was the only statement in the store the prior renderer truncates
+    (LESSON_STATEMENT_CHARS is 400) — the standing red in `test_lesson_prior_render_budget`.
+    Widening that cap, the obvious repair, would have hidden all three consequences.
+    """
+    from looplab.engine.memory import parse_credit_lessons
+
+    text = ("P1 [GOOD] Remove the hardcoded pin so the declared schedule runs. "
+            "P2  Avoid checkpoint formats the shared eval cannot consume. "
+            "P3  Keep the DCL objective on this backbone.")
+    got = parse_credit_lessons(text, 3)
+    assert len(got) == 3, got
+    assert [i for i, _, _ in got] == [0, 1, 2], [i for i, _, _ in got]
+    assert "hardcoded pin" in got[0][1] and "P2" not in got[0][1], got[0][1]
+    assert "checkpoint formats" in got[1][1]
+    assert "DCL objective" in got[2][1]
+
+
+def test_the_tags_still_attach_to_the_right_verdict_when_split_inline(tmp_path):
+    """Splitting must not smear an outcome across pairs: that is how one BAD verdict would
+    quarantine two unrelated GOOD lessons at read time (see `filter_contradicted`)."""
+    from looplab.engine.memory import parse_credit_lessons
+
+    got = parse_credit_lessons("P1 [GOOD] Reuse the fused kernel.  P2 [BAD] Do not flatten first.", 2)
+    assert len(got) == 2, got
+    assert got[0][2] == "supported" and got[1][2] == "failed", got
+
+
+def test_a_P_marker_INSIDE_a_sentence_is_not_a_split_point(tmp_path):
+    """The false positive worth caring about. Splitting mid-sentence would INVENT a lesson, which is
+    worse than the bug being fixed — losing one is recoverable from the run, inventing one is not.
+    """
+    from looplab.engine.memory import parse_credit_lessons
+
+    got = parse_credit_lessons("P1 [GOOD] Clip the P2 quantile before the P3 bucket is computed.", 1)
+    assert len(got) == 1, got
+    assert "P2 quantile" in got[0][1] and "P3 bucket" in got[0][1], got[0][1]
+
+
+def test_a_newline_separated_answer_is_unchanged(tmp_path):
+    """The format the prompt actually asks for must parse byte-identically to before."""
+    from looplab.engine.memory import parse_credit_lessons
+
+    text = "P1 [GOOD] First lesson here.\nP2 [BAD] Second lesson here."
+    got = parse_credit_lessons(text, 2)
+    assert [(i, o) for i, _, o in got] == [(0, "supported"), (1, "failed")], got
+    assert got[0][1] == "First lesson here." and got[1][1] == "Second lesson here."
+
+
+def test_the_split_respects_the_cap(tmp_path):
+    """Inline splitting must not be a way around `limit`: a single line of ten verdicts is still
+    capped, or one malformed answer floods the store."""
+    from looplab.engine.memory import parse_credit_lessons
+
+    text = " ".join(f"P{i} [GOOD] Lesson number {i} about something." for i in range(1, 11))
+    got = parse_credit_lessons(text, 10, limit=4)
+    assert len(got) == 4, len(got)

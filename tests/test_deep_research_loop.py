@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.agents.deep_research import (
     _SYSTEM,
     _STATE_BRIEF_MAX_CHARS,
@@ -191,7 +192,8 @@ def test_tool_then_stall_then_nudge_then_emit_message_parity():
 
     # Turn 1: the memo prompts plus the immutable trust-boundary suffix.
     assert client.turns[0] == [
-        {"role": "system", "content": _SYSTEM + _UNTRUSTED_RESEARCH_DATA_RULE},
+        {"role": "system",
+         "content": _SYSTEM + _UNTRUSTED_RESEARCH_DATA_RULE + _CONTEXT_BEFORE_TOOLS_RULE},
         {"role": "user", "content": state_brief(state) +
             "\nReview the run. Consult sources if useful, then emit your memo."}]
     # Final turn: system, user, assistant(tool_calls), tool result, prose, historical nudge.
@@ -215,8 +217,10 @@ def test_prompt_override_cannot_remove_untrusted_research_data_boundary(tmp_path
     DeepResearcher(client, prompts=PromptStore(str(tmp_path))).research(RunState(goal="g"))
 
     system = client.turns[0][0]["content"]
-    assert system == override + _UNTRUSTED_RESEARCH_DATA_RULE
-    assert system.endswith(_UNTRUSTED_RESEARCH_DATA_RULE)
+    # Both code-owned suffixes survive a persona override; the boundary is what this test
+    # exists for, and `_CONTEXT_BEFORE_TOOLS_RULE` is appended after it for the same reason.
+    assert system == override + _UNTRUSTED_RESEARCH_DATA_RULE + _CONTEXT_BEFORE_TOOLS_RULE
+    assert _UNTRUSTED_RESEARCH_DATA_RULE in system
 
 
 def test_untrusted_boundary_covers_free_form_current_run_fields():
@@ -691,7 +695,7 @@ def test_spawn_research_records_immediately_via_its_own_task():
     # the loop's containment `except Exception` swallows into "nothing was recorded" — the failure
     # reads as a product regression and is a stub-contract break.
     eng._record_deep_research = (
-        lambda memo, *, trigger, manual, attempt_id=None, **extra:
+        lambda memo, *, trigger, manual, attempt_id=None, superseded=None, **extra:
         recorded.append((memo, trigger, manual, attempt_id)))
 
     async def run():

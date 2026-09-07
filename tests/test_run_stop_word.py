@@ -31,6 +31,14 @@ READERS = {
     "cli/run_cmds.py", "engine/orchestrator.py", "engine/finalize.py", "events/finalize_scope.py",
     "serve/run_commands.py", "serve/appstate.py", "serve/command_observation.py",
     "serve/control_validation.py",
+    # `events/finalize_scope.py` is BOTH the helper's home and a reader (its two fold-scope
+    # clauses ask the same question), so unlike `core/models.py` it stays in the set.
+    "events/finalize_scope.py",
+    # …and `events/replay.py`, which the wider predicate reaches and the narrow one never did:
+    # the FOLD's own crash-prefix clause retained a mid-build marker on `error` and cleared it on
+    # the ceiling written by the same guard from the same exception. That is the eighth reader and
+    # the one a tree-wide scan found rather than a review — see `GUARDED_ABORT_REASONS`.
+    "events/replay.py",
 }
 
 
@@ -72,13 +80,23 @@ def test_no_site_compares_the_stop_word_as_a_literal():
 
 
 def test_the_readers_are_exactly_the_listed_modules():
+    """THE PREDICATE THE READERS SHARE IS `is_guarded_abort` SINCE THE 2026-09-07 MERGE, and the
+    set is unchanged: every module row 6 collected still asks the question through ONE helper, it
+    is just the WIDER one now — master's `events/finalize_scope.py::is_guarded_abort`, which answers
+    for the ceiling's `budget_exhausted` as well as `error`. That is the same property this scan was
+    written for (nobody decides it by hand) over a strictly larger class, so the registry travels to
+    the new name rather than being deleted with the old one.
+
+    `is_error_stop` keeps no readers on purpose and is NOT scanned for here: it is the narrow
+    predicate `GUARDED_ABORT_REASONS` is built from, and a second scan asserting an empty set would
+    fail the day someone legitimately needs the narrow question again."""
     calling = set()
     for path, tree in iter_trees(PKG):
         rel = str(path.relative_to(PKG))
         if rel == "core/models.py":
-            continue
+            continue                      # the narrow helper's own body
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "is_error_stop":
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "is_guarded_abort":
                 calling.add(rel)
     assert calling == READERS, (calling ^ READERS)
 

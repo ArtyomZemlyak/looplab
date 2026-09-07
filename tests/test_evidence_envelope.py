@@ -169,7 +169,9 @@ def _drive_tool_strategist(monkeypatch, **ctor):
 def test_the_tool_strategist_off_passes_no_label_and_the_historical_prompt(monkeypatch):
     seen = _drive_tool_strategist(monkeypatch)
     assert "tool_result_label" not in seen, "absent, not empty: the historical call byte for byte"
-    assert seen["messages"][0]["content"] == _historical_strategist_system(_TOOL_STRATEGIST_SYSTEM)
+    from looplab.agents.strategist import _CONTEXT_BEFORE_TOOLS_RULE
+    assert seen["messages"][0]["content"] == (
+        _historical_strategist_system(_TOOL_STRATEGIST_SYSTEM) + _CONTEXT_BEFORE_TOOLS_RULE)
 
 
 def test_the_tool_strategist_on_fences_its_results_with_the_marker_the_guard_names(monkeypatch):
@@ -326,8 +328,10 @@ def test_every_construction_site_threads_the_one_settings_reader():
         return False
 
     for module, name, kwarg in ((providers, "LiteratureTools", "envelope"),
-                                (factory, "WebTools", "envelope"),
-                                (deep_research, "WebTools", "envelope"),
+                                # `build_web_tools` since the 2026-09-07 merge: the ONE
+                                # constructor, so the task's `web_deny` reaches both sites.
+                                (factory, "build_web_tools", "envelope"),
+                                (deep_research, "build_web_tools", "envelope"),
                                 (factory, "UnifiedAgent", "evidence_envelope")):
         calls = calls_named(module, name)
         assert calls, f"{module.__name__} no longer constructs {name}"

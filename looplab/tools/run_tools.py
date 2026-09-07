@@ -168,6 +168,51 @@ class RunTools:
     def bind_state(self, state: RunState, parent=None) -> None:
         self.state = state
 
+    def inventory(self) -> dict[str, int | str]:
+        """How much this run holds for each tool here (`_base.INVENTORY_CONTRACT`).
+
+        Answered through the SAME private helpers the tools answer through -- `_concept_projection`,
+        `_current_theme_rollup` -- so a published count cannot drift from what a call would show. A
+        second, hand-derived reading of "what does this run contain" is how a brief comes to state a
+        number the tool then contradicts.
+
+        The concept rows are the reason the `int`/`str` split in the contract exists at all. This
+        provider already refuses to call an empty projection an empty taxonomy (`_themes` answers
+        "this is NOT proof that no themes are assigned" when the projection is not `complete`), so
+        publishing `list_themes=0` off an `unavailable` projection would assert exactly what the
+        tool declines to assert -- and would suppress the call that says so.
+        """
+        st = self.state
+        if st is None:
+            return {}                      # unbound: it has not been told which run it answers for
+        try:
+            nodes = len(getattr(st, "nodes", {}) or {})
+            memos = len(getattr(st, "research", ()) or ())
+            rows: dict[str, int | str] = {
+                "list_experiments": nodes,
+                "read_experiment": nodes,
+                "read_code": nodes,
+                "read_logs": nodes,
+                "find_analogous": nodes,
+                "read_research_memo": memos,
+            }
+            projection = self._concept_projection(st)
+            if projection.status == "complete":
+                rows["list_themes"] = len(self._current_theme_rollup(st, projection) or {})
+                tagged = sum(1 for concepts in projection.memberships.values() if concepts)
+                rows["read_concept_tree"] = tagged
+                rows["concept_nodes"] = tagged
+                rows["node_concepts"] = tagged
+                rows["node_concept_delta"] = tagged
+            else:
+                note = f"{projection.status} concept projection"
+                for name in ("list_themes", "read_concept_tree", "concept_nodes",
+                             "node_concepts", "node_concept_delta"):
+                    rows[name] = note
+            return rows
+        except Exception as exc:  # noqa: BLE001 - a prompt must never fail on an optional receipt
+            return {}
+
     def specs(self) -> list[dict]:
         return [
             fn_spec("list_experiments",
@@ -179,7 +224,10 @@ class RunTools:
                  "theme": {"type": "string", "description": "filter to one theme slug (optional)"}}),
             fn_spec("read_experiment",
                 "Read one experiment's full detail: params, metric, robustness, rationale, failure "
-                "reason, extra metrics, and — for a hyperparameter sweep — its trials. `trials` "
+                "reason, extra metrics, the eval's own account of WHY the metric is what it is when "
+                "it gave one (`metric_account` — e.g. a zero that is really 'wrong on 2 of 100 "
+                "instances' and not 'as fast as the baseline'), and — for a hyperparameter sweep — "
+                "its trials. `trials` "
                 "chooses how many sweep points to return: a number like '20' (a representative sample "
                 "spanning best→worst), or 'all' for every trial. Omit for a 10-trial sample.",
                 {"node_id": {"type": "integer"},
@@ -194,8 +242,9 @@ class RunTools:
                 "Read one experiment's EXECUTION LOGS — the captured stdout/stderr TAILS as recorded "
                 "in the event log (bounded, not the raw full stream; the END — where a traceback's "
                 "error and the final metric line live — is preserved). Far more than the 300-char "
-                "failure summary read_experiment shows. Use to see why a node failed, or what it "
-                "printed while training.",
+                "failure summary read_experiment shows. Use to see why a node failed, why a node "
+                "SCORED WHAT IT SCORED (a bad metric's reason is in the eval's stderr, not in the "
+                "number), or what it printed while training.",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
             fn_spec("find_analogous",
                 "Find experiments most similar to a given one (or to a set of params) by parameter "
@@ -311,7 +360,13 @@ class RunTools:
         else:
             node_theme = digest.node_theme(n)
         theme = f" {{{node_theme}}}" if node_theme else ""
-        line = f"#{n.id} {n.operator} {outcome} {digest.fmt_params(n.idea.params)}{theme}"
+        # `digest._node_line` carries the same trailing clause on the always-on working set; a
+        # listing that RANKS a node has to say the same thing as the line that ranks it, or the two
+        # surfaces disagree about what a 0.0 means. Trailing, in the same slot `_node_line` puts its
+        # `— triage:` on, so the params stay where a reader scanning the column expects them.
+        why = "" if n.status is NodeStatus.failed else digest.metric_account(n, brief=True)
+        why = f" — why: {why}" if why else ""
+        line = f"#{n.id} {n.operator} {outcome} {digest.fmt_params(n.idea.params)}{theme}{why}"
         return (line if len(line) <= self._MAX_LINE_CHARS else
                 line[:self._MAX_LINE_CHARS].rstrip() + " …(truncated)")
 
@@ -345,6 +400,22 @@ class RunTools:
             if theme and projection.status != "complete":
                 return (f"({self._projection_note(projection)}; no retained current experiments "
                         f"match theme={theme}; this is NOT a complete zero)")
+            # `best`/`worst` rank by metric, so `top_nodes` drops every node that has not been
+            # evaluated yet. Saying "no matching experiments" to a caller whose whole ledger is
+            # still drafts tells it NOTHING HAS BEEN TRIED, which is the one thing it must not
+            # believe: `hyp_prioritize` and `foresight_rank` exist to avoid re-proposing work that
+            # is already in flight. MEASURED over the probe corpus on 2026-08-28: 48 calls in eight
+            # runs got this empty answer while a `sort=recent` call moments away in the same run
+            # listed the drafts -- and `sort="best"` is the DEFAULT, so it is the answer a caller
+            # that passes no `sort` receives.
+            # Only when the METRIC filter is what emptied the list. A `theme=` that matches nothing
+            # is a different, honest zero, and a scored node hidden by it must keep saying so.
+            if sort != "recent" and not theme:
+                pending = [node for node in st.nodes.values() if node.id in active_nodes]
+                if pending and not any(digest.node_metric(node) is not None for node in pending):
+                    return (f"(no SCORED experiments yet; {len(pending)} current experiment(s) "
+                            f"exist but none has a metric — use sort=recent to see them, and do "
+                            f"not read this as an empty ledger)")
             return "(no matching experiments)"
         total = len(nodes)
         selected = nodes[:limit]
@@ -386,6 +457,16 @@ class RunTools:
         if n.idea.space:
             out.append(f"sweep_space={n.idea.space}")
         out.append(f"metric={digest.fmt_num(n.metric)}")
+        # THE NUMBER'S OWN ACCOUNT, on the surface that is actually called. Measured over the 20
+        # finished task-arms of `runs-B`: on the nine scored nodes whose eval said WHY it could not
+        # produce a number, agents made 61 `read_experiment` calls and 32 `read_logs` calls; the
+        # reason reached them through 32 of 32 of the latter and 0 of 61 of the former, and on
+        # `spectral_clustering` — 4 `read_experiment` calls on the node, 0 `read_logs` on the whole
+        # arm — it reached NO tool output in the run at all. Same record, same fold, one call apart:
+        # this is the read path, not a new signal (`events/digest.py::metric_account`).
+        account = digest.metric_account(n)
+        if account:
+            out.append(f"metric_account: {account}")
         if n.confirmed_mean is not None:
             out.append(f"confirmed={digest.fmt_num(n.confirmed_mean)} "
                        f"±{digest.fmt_num(n.confirmed_std)} ({n.confirmed_seeds} seeds)")
@@ -470,7 +551,9 @@ class RunTools:
 
     def _logs(self, st: RunState, nid: int) -> str:
         """The node's execution logs: the captured stdout tail (what it printed while training/eval)
-        and the stderr/error tail — bounded (a chain of tails: 64KB capture → event tail → this clip),
+        and the stderr/error tail — for a FAILED node the engine's failure text, for a SCORED one the
+        eval command's own stderr (`Node.stderr_tail`), which is the only place a bad metric's REASON
+        survives — bounded (a chain of tails: 64KB capture → event tail → this clip),
         NOT the raw full stream, but far more than the 300-char failure summary `read_experiment`
         shows. Logs are the whole point of this tool, so they get a larger budget (`_LOG_CHARS`) than
         a normal read."""
@@ -484,7 +567,16 @@ class RunTools:
             head += f" · eval={digest.fmt_num(n.eval_seconds)}s"
         out = [head]
         stdout = (n.stdout_tail or "").rstrip()
-        error = (n.error or "").rstrip()
+        # BOTH TERMINALS' stderr, through one section. `n.error` is what a node that FAILED wrote;
+        # `n.stderr_tail` is what a node that SCORED wrote (see `engine/evaluate.py::
+        # _scored_output_evidence`) — before it existed, a node with a bad metric rendered here as a
+        # stdout tail and nothing else, which is how "the metric is 0.0" reached the next proposal
+        # with no account of WHY. The fold writes at most one of them per attempt (a `node_reset`
+        # clears both), so the join is a fail-safe against a corrupt log rather than a normal shape:
+        # ordered failure-text LAST because `_clip` keeps the TAIL and the failure text is the one a
+        # reader must not lose.
+        error = "\n".join(part for part in ((n.stderr_tail or "").rstrip(),
+                                            (n.error or "").rstrip()) if part)
         budget = max(self.max_chars, self._LOG_CHARS)
         # Split the budget so a huge stdout can't crowd out the error (and vice-versa): give each the
         # larger half only when the other is short, so a lone log still gets the whole budget.
@@ -1229,6 +1321,36 @@ class SiblingRunTools(ForeignRunReader):
         self.self_run_id = self_run_id
         self.task_id = ""
 
+    def inventory(self) -> dict[str, int | str]:
+        """How many sibling runs these tools can reach (`_base.INVENTORY_CONTRACT`).
+
+        `_sibling_ids()` is the same fail-closed enumeration the listing uses -- including its
+        refusal to widen when no authoritative task id was bound -- so the published count carries
+        that boundary rather than a second, looser reading of it. Zero siblings makes all four
+        tools structurally empty, which is the whole of the default single-run case.
+        """
+        names = ("list_sibling_runs", "read_sibling_experiment",
+                 "read_sibling_code", "find_analogous_across_runs")
+        # NO TASK ID IS UNKNOWN SCOPE, NOT ZERO SIBLINGS. `_sibling_ids` returns [] there because
+        # "absence of an authoritative task id is UNKNOWN scope, not permission to widen" -- and
+        # publishing that as a decisive 0 is the int-vs-str substitution `INVENTORY_CONTRACT`
+        # forbids: with `hide_empty_tools` it withholds all four tools because the provider does not
+        # know its task, not because the root is empty.
+        if not self.task_id:
+            return {name: "sibling scope unknown (no bound task id)" for name in names}
+        # An UPPER BOUND from the directory listing, deliberately NOT `_sibling_ids()`. That helper
+        # FOLDS every candidate run's event log to filter by task, which this file's own comment
+        # measures at ~2,500 ms warm on the 59-run corpus and warns to re-measure "if a future
+        # caller pays it somewhere a fold is not already happening". This caller is on the
+        # synchronous prompt-assembly path of every phase, so it may not fold: an over-count costs
+        # one call the model would have made anyway, while the ZERO -- the only decisive value --
+        # is still exact, because no candidate ids means no siblings whatever their task.
+        try:
+            ids = sum(1 for rid in self._runs.run_ids() if rid != self.self_run_id)
+        except Exception:  # noqa: BLE001 - a prompt must never fail on an optional receipt
+            return {}
+        return {name: ids for name in names}
+
     def _scope_denial(self, run_id: str, st: RunState) -> str:
         """The same-task boundary, fail-CLOSED. Discovery is same-task scoped, but a DIRECT read takes
         a model-supplied run_id, so a caller that guesses one must not read ANOTHER task through a
@@ -1397,6 +1519,19 @@ class AllRunsTools(ForeignRunReader):
         if state is not None and getattr(state, "run_id", ""):
             self.self_run_id = state.run_id
 
+    def inventory(self) -> dict[str, int | str]:
+        """How many foreign runs these tools can reach (`_base.INVENTORY_CONTRACT`).
+
+        Self is excluded for the reason `bind_state` excludes it: this run's own experiments arrive
+        through `RunTools`, so counting itself here would promise a foreign run that is not one.
+        """
+        try:
+            ids = [rid for rid in self._runs.run_ids() if rid != self.self_run_id]
+        except Exception:  # noqa: BLE001 - a prompt must never fail on an optional receipt
+            return {}
+        return {"list_all_runs": len(ids), "read_run_code": len(ids),
+                "read_run_experiment": len(ids)}
+
     def specs(self) -> list[dict]:
         return [
             fn_spec("list_all_runs",
@@ -1474,9 +1609,59 @@ class DataTools:
         self.task = task
         self.max_chars = max_chars
         self.state: Optional[RunState] = None
+        # `inventory()` is answered from the SAME reads the tools make, so it is computed once and
+        # remembered: a task's `assets()` materializes its files, and paying that per prompt build
+        # would make publishing the count cost more than the call it saves.
+        self._inventory_cache: Optional[dict] = None
 
     def bind_state(self, state: RunState, parent=None) -> None:
+        # Drop the inventory cache: it is computed from `assets()` AND from `state.data_profile`,
+        # both of which move as a run materializes its data. Cached across a rebind, a transient
+        # adapter error pinned `read_asset=UNKNOWN(...)` for the provider's whole life, and a first
+        # call before the mounts landed pinned `read_asset=0` -- which under `hide_empty_tools`
+        # withheld all three data tools for the rest of the run.
+        if state is not self.state:
+            self._inventory_cache = None
         self.state = state
+
+    def inventory(self) -> dict[str, int | str]:
+        """How much task data each of these three tools has to show (`_base.INVENTORY_CONTRACT`).
+
+        The whole reason this provider needs the hook: on a `repo` or `toy` task there is no
+        dataset at all, so all three tools answer with an apology -- measured 2026-08-19 over six
+        cold-start runs, `read_asset` returned nothing 20 times out of 20, `data_schema` 9 of 9 and
+        `data_profile` 8 of 8, on a task that never had a row of data to show.
+
+        Computed from the same `columns()`/`assets()` surface the tools read, then cached (see
+        `__init__`). A task whose hooks RAISE is UNKNOWN rather than 0: this provider exists
+        precisely for tasks whose data lives behind an adapter, and reporting "no data" because an
+        adapter hiccuped would suppress the call that would have surfaced the failure.
+        """
+        if self._inventory_cache is not None:
+            return dict(self._inventory_cache)
+        try:
+            assets = self._assets()
+            columns = self._columns() or {}
+            tables = [name for name in assets
+                      if isinstance(assets[name], str) and name.lower().endswith((".csv", ".tsv"))]
+            # `data_schema` reads `columns()` and FALLS BACK to a parsed table, so it has something
+            # to say when either exists; `data_profile` only ever derives from a table.
+            # `_profile()` answers from `state.data_profile` FIRST and only falls back to a parsed
+            # table, so counting tables alone published a decisive 0 for a tool that would have
+            # returned a full column profile -- the "an under-count would suppress a call that had
+            # an answer" direction `INVENTORY_CONTRACT` forbids.
+            recorded = getattr(self.state, "data_profile", None) if self.state else None
+            rows: dict[str, int | str] = {
+                "read_asset": len(assets),
+                "data_schema": (len(columns) if columns
+                                else ("inferred from a table, not counted" if tables else 0)),
+                "data_profile": (len(recorded) if recorded else len(tables)),
+            }
+        except Exception as exc:  # noqa: BLE001 - an adapter that raises is UNKNOWN, never zero
+            reason = f"task data unavailable: {type(exc).__name__}"
+            rows = {"read_asset": reason, "data_schema": reason, "data_profile": reason}
+        self._inventory_cache = rows
+        return dict(rows)
 
     def specs(self) -> list[dict]:
         return [
@@ -1566,6 +1751,13 @@ class DataTools:
         # so a task that exposes no explicit columns() (e.g. mlebench_real) still gets a real schema.
         tbl = self._primary_table()
         if not tbl:
+            # A REFERRAL is only useful if the referent has something. When the task has no data
+            # surface at all, "try read_asset or data_profile" sends the model to two tools that
+            # are empty for the SAME reason -- measured 2026-08-19, that sentence was live while
+            # `read_asset=0` and `data_profile=0` were both published in the prompt. Refer only
+            # when there is something to refer to.
+            if not self._assets():
+                return self._NO_ASSETS
             return "(this task exposes no structured schema — try read_asset or data_profile)"
         name, header, rows = tbl
         lines = [f"schema inferred from {name} ({len(header)} columns, {len(rows)} rows sampled):"]
@@ -1593,6 +1785,10 @@ class DataTools:
         # categorical cardinality) when the run recorded no profile — real per-column stats, cheaply.
         tbl = self._primary_table()
         if not tbl:
+            # Same rule: distinguish "this run recorded no profile" (a profile could still be
+            # derived later) from "there is no data here to profile at all", which is terminal.
+            if not self._assets():
+                return self._NO_ASSETS
             return "(no data profile recorded for this run)"
         name, header, rows = tbl
         lines = [f"column profile from {name} ({len(rows)} rows sampled):"]
@@ -1612,10 +1808,32 @@ class DataTools:
                 lines.append(f"  {col}: categorical missing={missing:.2f} unique={len(set(present))}")
         return "\n".join(lines)[:self.max_chars]
 
+    # The last clause was added 2026-08-26 and the first three are unchanged, deliberately: the
+    # terminality is load-bearing (see `_asset`) and must survive. What it did NOT survive was a
+    # task that DESCRIBES its input somewhere else. Measured on a `convex_hull` run whose goal
+    # carries `n = 267021` and `ndarray(shape=(267021, 2), dtype=float64)`: the agent asked
+    # `data_schema` twice and was told the task has no data assets "and no name will change that"
+    # — true about this tool, and read as "nothing here knows anything about the input", which the
+    # same prompt contradicts two paragraphs up. Two parts of one card arguing is the failure
+    # `repo_developer.py` already records; saying where the answer IS costs one clause and keeps
+    # the model from spending calls looking for it here.
+    _NO_ASSETS = (
+        "(this task has NO data assets at all — not zero matching this name, zero in total, and "
+        "no name will change that. This tool reads a task's DATASET; a task whose subject is source "
+        "code has none. Nothing here reads source files. If this task's INPUT is described at all, "
+        "it is in the goal/brief you were already given — read that, not this tool.)")
+
     def _asset(self, name: Optional[str]) -> str:
         assets = self._assets()
         if not assets:
-            return "(this task has no data assets)"
+            # TERMINAL on purpose. The old text was "(this task has no data assets)", which reads as
+            # "not that one" and invites a retry with a different name -- measured 2026-08-19 on a
+            # repo task, ONE deep-research phase spent NINE `read_asset` calls walking `solver.py`,
+            # `reference_svm.py`, `reference`, `train`, `test`, ... against a task with no dataset,
+            # while the prompt was already publishing `read_asset=0`. An answer a model can read as
+            # a near-miss defeats a correct count, so the answer states the CLASS of the emptiness
+            # and that nothing else here reads files.
+            return self._NO_ASSETS
         if not name:
             return "available assets: " + ", ".join(assets)
         if name not in assets:

@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from looplab.core.evidence import envelope_enabled
-from looplab.core.llm import make_llm_client, make_llm_client_for, resolve_llm_target
+from looplab.core.llm import (make_llm_client, make_llm_client_for, resolve_llm_target,
+                              run_cost_accountant)
 # EXTRACTED 2026-09-06 (doc 52 row 14 pushed this file past its 530-line cap by six lines, and
 # `tests/test_agent_factory_split.py` prescribes an extraction over a raise): the providers every
 # agentic role shares, plus the two Memora helpers they compose, live in `agents/providers.py`.
@@ -68,6 +69,10 @@ def make_developer_factory(task: TaskAdapter, settings):
         # to one and not the other is exactly the three-way disagreement that registry closed.
         from looplab.core.config import DEVELOPER_BACKEND_ALIASES
         b = DEVELOPER_BACKEND_ALIASES.get(backend, backend)
+        # Attach the run's ONE accountant to the PARENT before forking it: `model_copy` is shallow,
+        # so a copy taken after the attach shares the ceiling and one taken before mints a second
+        # (`core/llm.py::run_cost_accountant`). A swapped-in Developer meters on the run's budget.
+        run_cost_accountant(settings)
         s = settings.model_copy(update={"developer_backend": b})
         if b == "default" and settings.developer_backend != "default":
             from looplab.agents.preflight import preflight_in_process_developer_replacement
@@ -93,14 +98,12 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
     lone provider), or None when nothing is available."""
     providers = _shared_providers(task, settings, run_dir, role="strategist")
     if getattr(settings, "web_search", False):              # web search/fetch (network-optional)
-        from looplab.tools.web import WebTools
-        providers.append(WebTools(enabled=True, envelope=envelope_enabled(settings)))
+        from looplab.tools.web import build_web_tools    # carries the task's `web_deny`
+        providers.append(build_web_tools(task, envelope=envelope_enabled(settings)))
     if not providers:
         return None
-    if len(providers) == 1:
-        return providers[0]
-    from looplab.agents.agent import CompositeTools
-    return CompositeTools(providers)
+    from looplab.agents.tool_loop import compose_tools
+    return compose_tools(providers, settings)
 
 
 def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
@@ -114,6 +117,10 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     stage gets its own client + read-only run tools for self-driving action choice."""
     from looplab.agents.strategist import make_strategist
     from looplab.agents.unified_agent import UnifiedAgent
+    # The run's ONE accountant is attached to the parent BEFORE this fork, so the split roles and
+    # the clients built from the parent afterwards (deep researcher, report writer) meter on one
+    # ceiling; the `wrap_up_only` path used to copy first and run two (`run_cost_accountant`).
+    run_cost_accountant(settings)
     split = settings.model_copy(update={"unified_agent": False})
     researcher, developer = make_roles(
         task, split, run_dir, _developer_role="implement")   # H3/stage target applied inside
@@ -183,8 +190,9 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
         # consulting the real schema/columns (e.g. a reference to a column that doesn't exist).
         # Cross-run: let the pilot look at sibling runs of the same task (read-only) so it can choose
         # to import a winning experiment from a neighbour. Needs the run's own dir; no-op without it.
-        from looplab.agents.agent import CompositeTools
-        pilot_tools = CompositeTools(_shared_providers(task, settings, run_dir, core_only=True))
+        from looplab.agents.tool_loop import compose_tools
+        pilot_tools = compose_tools(
+            _shared_providers(task, settings, run_dir, core_only=True), settings)
 
     extra_clients = [c for c in (strat_client, pilot_client) if c is not None]
     from looplab.agents.agent import loop_opts_from_settings
@@ -267,6 +275,11 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # and READS the Researcher's handoff brief; CliAgentDeveloper and the single-shot LLMDeveloper
     # never do, so the Researcher skips the per-node summary LLM call for them (handoff=False).
     _handoff_dev = False
+    # A5: ONE store per run, shared by the Researcher and the Developer's phases. Function-local
+    # like every other `looplab.agents` reach from here — `tests/test_agent_factory_split.py`
+    # holds that direction, and a module-level import would close the search<->agents cycle.
+    from looplab.agents.established import established_context_from_settings
+    _established = established_context_from_settings(settings)
     if (settings.developer_backend not in PRESETS
             and not _param_search
             and callable(getattr(task, "repo_spec", None))
@@ -276,19 +289,21 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
         from looplab.agents.agent import loop_opts_from_settings as _loop_opts
         _handoff_dev = True
         developer = LLMRepoDeveloper(  # C4: plan decomposition + hard per-session backstop
-            client, task, parser=settings.llm_parser, loop_opts=_loop_opts(settings),
+            client, task, parser=settings.llm_parser, loop_opts=_loop_opts(settings), established=_established,
             plan_decompose=getattr(settings, "developer_plan_decompose", True),
             plan_min_steps=getattr(settings, "developer_plan_min_steps", 2),
             plan_max_steps=getattr(settings, "developer_plan_max_steps", 8),
             session_max_turns=getattr(settings, "developer_session_max_turns", 500),
             session_time_budget_s=getattr(settings, "developer_session_time_budget_s", 1200.0),
+            stage_guidance=bool(getattr(settings, "developer_stage_guidance", True)),
+            step_feedback_command=getattr(settings, "developer_step_feedback_command", "") or "",
             cross_run_read_tools=getattr(settings, "cross_run_read_tools", False),   # PART V §22 (dev-scoped)
             memory_dir=getattr(settings, "memory_dir", None),
-            # F2 · the PROBE (tools/dev_probe.py). Passed as two plain values rather than the whole
-            # Settings object, like every other knob above: `make_roles` is the ONE place a setting
-            # becomes a role's behaviour, and a role that reads Settings itself is a second place.
+            # F2 · the PROBE (tools/dev_probe.py). Plain values, not the Settings object, like every
+            # knob above: `make_roles` is the ONE place a setting becomes a role's behaviour.
             probe=getattr(settings, "developer_probe", True),
             probe_timeout_s=getattr(settings, "developer_probe_timeout_s", 60.0),
+            probe_confine=getattr(settings, "developer_probe_confine", True), probe_max_calls=getattr(settings, "developer_probe_max_calls", 0),  # noqa: E501
             # Snapshot the eval trust tier here; the role/tool never reads live Settings.
             command_runtime=DeveloperCommandRuntime.from_settings(settings))
 
@@ -354,14 +369,14 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # Cross-run introspection: read-only access to SIBLING runs of the same task so the Researcher can
     # build on a neighbouring run's experiments. Needs the run's own dir; off without it (parity).
     providers = _shared_providers(task, settings, run_dir)
-    # RepoTask code-edit mode (item #3): give the Researcher read-only grep/list/read over the
-    # editable repo(s) so it proposes changes from the actual code, not blind. Skipped for the
-    # cli_overrides param-search mode (no code to read) and non-repo tasks.
-    rs_fn = getattr(task, "repo_spec", None)
-    rs = rs_fn() if callable(rs_fn) else None
-    if rs and rs.get("editables") and not _param_search:
-        from looplab.tools.knowledge_tools import RepoTools
-        providers.append(RepoTools(rs["editables"]))
+    # RepoTask code-edit mode (item #3): read-only grep/list/read over the editable repo(s) so the
+    # Researcher proposes from the actual code, not blind. The rule moved to `agents/repo_reader.py`
+    # — deep research builds from this same list and never grew a copy; see there for what it cost.
+    from looplab.agents.repo_reader import repo_reader_provider
+    rs_fn = getattr(task, "repo_spec", None)      # still read below for the sweep offer
+    _reader = repo_reader_provider(task)
+    if _reader is not None:
+        providers.append(_reader)
     # P6/P21 (docs/PROMPT_REVIEW.md): offer the intra-node sweep ONLY when the active Developer
     # actually implements `idea.space` — the in-house LLMDeveloper on script-solution (non-repo)
     # tasks. CliAgentDeveloper (external CLI presets) and LLMRepoDeveloper never read `idea.space`:
@@ -394,9 +409,10 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # skills) are configured, so the flag's meaning stays "no tool loop", not just "no run-introspection".
     if providers and getattr(settings, "researcher_tools", True):
         from looplab.agents.agent import CompositeTools, ToolUsingResearcher, loop_opts_from_settings
-        tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
+        from looplab.agents.tool_loop import compose_tools
+        tools = compose_tools(providers, settings)
         researcher = ToolUsingResearcher(
-            client, tools,
+            client, tools, established=_established,
             space_hint=getattr(researcher, "space_hint", ""),
             bounds=getattr(researcher, "bounds", None),
             parser=settings.llm_parser, prompts=prompts,

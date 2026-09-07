@@ -48,6 +48,8 @@ _LAYOUT = {
     "bundle": "engine",  # the RO-Crate reviewer bundle export (doc 52 row 23); composes events + engine, so not `events`
     "plan": "engine",  # the PLAN artifact + the endgame reserve the dispatcher honours (doc 52 row 18)
     "attribute_sites": "engine",  # the Engine attribute declaring-site registry (doc 52 row 21)
+    "established": "agents",
+    "answered_by_context": "agents",
     "agents_md": "tools",
     "appconfig": "core",
     "envsafe": "core",   # the secret screen + the DECLARED ENVIRONMENT rule all three levels share
@@ -282,6 +284,7 @@ _LAYOUT = {
     # the package-layout audit and also breaks the supported ``looplab.public_cards`` legacy alias.
     "public_cards": "serve",
     "reachability": "agents",  # task-aware inventory of reachable LLM consumers at run start
+    "repo_reader": "agents",   # the ONE rule for "may this read-only role open the task's source?"
     "read_fence": "runtime",   # the source-tree read fence: the generated per-run sitecustomize
     "metric_subject": "runtime",   # what a recorded metric is a claim ABOUT: the subject
     #                              binding the eval captures at the score stage's start
@@ -305,6 +308,7 @@ _LAYOUT = {
     "regression": "adapters",
     "repair_verify": "engine",  # did a repair DO what its rationale said? (deterministic rung)
     "replay": "events",
+    "stop_account": "events",
     "repo_developer": "adapters",
     "repo_task": "adapters",
     "repo_write_tools": "adapters",

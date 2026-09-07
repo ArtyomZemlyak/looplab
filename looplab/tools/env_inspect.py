@@ -77,7 +77,48 @@ def _suggest(name: str) -> str:
 
 class EnvInspectTools:
     """ToolProvider (specs()/execute()) giving the Developer read-only visibility into the ACTUAL
-    installed Python environment, so it grounds generated code in the real API instead of guessing."""
+    installed Python environment, so it grounds generated code in the real API instead of guessing.
+
+    `deny_packages` is the GRADER FENCE, and it is not optional decoration. Every tool here names a
+    package or module, and an evaluation harness installed into the same venv is, to this provider,
+    just another installed library -- so `read_installed`/`grep_installed` reach the checker, the
+    timer and the scorer exactly as they reach numpy.
+
+    Measured 2026-08-20 on an AlgoTune run: a Developer told (in the task goal) not to use the
+    execution probe to CHOOSE an algorithm did not stop needing the answer -- it went and read the
+    harness instead. 213 of that node's 216 env-inspection calls named `AlgoTuner`/`AlgoTuneTasks`,
+    among them `grep_installed(is_solution)`, `grep_installed(def run_isolated_benchmark)`,
+    `grep_installed(mean_speedup)` and `read_installed(AlgoTuner.utils.isolated_benchmark)`. The two
+    control runs beside it made 20 and 16 env reads and touched the harness zero times, so this is
+    a route that opens under pressure rather than one that is always taken -- which is the harder
+    kind to notice and the reason it is a FENCE and not a prompt line.
+
+    It is the same rule `runtime/read_fence.py` enforces for file reads and `tools/dev_probe.py` for
+    the probe: a candidate may not read the code that grades it. It is declared rather than derived
+    (`adapters/repo_task.py::EvalSpec.protect_packages`) because only the operator, who wrote
+    `eval.command`, knows which installed distribution is the grader; a heuristic over package names
+    would refuse a legitimate library and still miss a grader named something else.
+
+    The refusal names the package and says the tool is fenced, never pretending the package is
+    absent: "(not installed)" would send the Developer hunting for a dependency it does have, which
+    is the silent-skip failure `dev_probe`'s non-OSError refusal exists to avoid.
+    """
+
+    #: Refusal text is a CONSTANT so a test can pin the property rather than a phrasing.
+    DENIED = ("(refused: `%s` is the evaluation harness that grades this experiment, so this tool "
+              "is fenced from reading it. Reading the checker, the timer or the scorer would make "
+              "any result meaningless. It IS installed -- this is a fence, not a missing package.)")
+
+    def __init__(self, deny_packages=()):
+        # Normalized to TOP-LEVEL names once, at construction: every call site compares against
+        # `_top(...)` of whatever the model named, so `AlgoTuner.utils.isolated_benchmark` and a
+        # bare `AlgoTuner` are one rule and neither spelling can slip past the other.
+        self._deny = frozenset(_top(str(n)) for n in (deny_packages or ()) if str(n).strip())
+
+    def _fenced(self, named: str) -> str:
+        """The refusal for `named`, or "" when it is allowed. Total over all four package tools."""
+        top = _top(str(named or ""))
+        return (self.DENIED % top) if top and top in self._deny else ""
 
     def specs(self) -> list[dict]:
         return [
@@ -142,6 +183,23 @@ class EnvInspectTools:
     def execute(self, name: str, args: dict) -> str:
         args = args or {}
         try:
+            # The grader fence runs BEFORE dispatch, on every tool that names a package or module.
+            # Applying it inside each private method instead would need four correct copies, and the
+            # one that got missed would be the whole hole (see the class docstring).
+            # OPEN[grader-fence-slot-set-is-shared-with-its-guard] the fence and the test that
+            # polices it hardcode the SAME four slot names, so a future tool naming a package in a
+            # fifth slot passes dispatch AND the guard silently.
+            # proof:absent:_named_slots@looplab/tools/env_inspect.py
+            # REVIEW 2026-08-30 (guard-coverage): `test_grader_package_fence.py`'s coverage test
+            # intersects each spec's properties with this same set and `continue`s on empty — the
+            # exact miss its docstring claims to catch. Derive the slot set once (a helper here the
+            # test re-derives), and make the guard fail on a spec property that plausibly names a
+            # package but is not in the checked set.
+            for slot in ("name", "target", "module", "package"):
+                if slot in args:
+                    refusal = self._fenced(args.get(slot))
+                    if refusal:
+                        return refusal
             if name == "pkg_info":
                 return self._pkg_info(str(args.get("name", "")))
             if name == "py_api":

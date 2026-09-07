@@ -19,7 +19,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single sources shared with the LLM resolver — see core/llm.py.
 from looplab.core.llm import AGENT_STAGE_KEYS, DEFAULT_HEADER_TIMEOUT_S
-from looplab.core.models import FAILURE_REASONS
+from looplab.core.models import FAILURE_REASONS, REPAIRABLE_REASONS
 
 _LOG = logging.getLogger(__name__)
 
@@ -945,7 +945,7 @@ class Settings(BaseSettings):
     # the per-attempt triage judge can answer `abandon` at any point. A coarse filter on top of three
     # calibrated ones was not protection — it was a way for a whole class of failure to be dropped
     # without anyone deciding to drop it. Env override expects a JSON array.
-    inline_repair_reasons: tuple[str, ...] = FAILURE_REASONS
+    inline_repair_reasons: tuple[str, ...] = REPAIRABLE_REASONS
     # METRIC SALVAGE (`engine/metric_salvage.py`): what happens when a node fails for something other
     # than "the metric is absent" and the operator's OWN declared reader can still find the metric
     # that eval already produced. The case it exists for: v5 node 0 trained 76 minutes, printed
@@ -1055,10 +1055,31 @@ class Settings(BaseSettings):
     #   "algo" — the deterministic gate: numeric param-distance (`novelty_epsilon`) + optional embedding
     #            similarity (`novelty_semantic`). Cheap, no LLM call, but can't explain itself.
     #   "llm"  — an LLM adjudicates (reads the real experiments via tools) whether the idea is a
-    #            near-duplicate and, if so, asks the Researcher once more for something different. One
-    #            extra LLM call per proposal — highest quality, follows the "let the LLM decide" line.
+    #            near-duplicate and, if so, asks the Researcher once more for something different.
+    #            NOT "one extra LLM call per proposal", which this line claimed until 2026-08-20:
+    #            `novelty.py::_llm_novelty_gate` runs `agentic_struct(..., max_turns=12)` and a
+    #            rejection then runs a WHOLE SECOND Researcher proposal. MEASURED over
+    #            `/var/tmp/looplab-bench/runs-armb` (20 AlgoTune runs): 99 invocations, 823 paid
+    #            calls, **$1.77 of a $15.73 campaign and 6.6 of its 60.8 run-hours**, for 10
+    #            rejections. An admitted proposal costs a median of 4 calls / 10.6 s; a REJECTED one
+    #            costs 37 calls / 21.6 MINUTES, against a median card build of $0.077 and a median
+    #            evaluation of 34 s. Whether that is worth paying is a property of the TASK — a
+    #            duplicate GPU experiment costs far more than a duplicate 34-second one — so this
+    #            default is deliberately UNCHANGED on one task family's evidence. On AlgoTune the
+    #            gate is net-NEGATIVE ($1.77 and 6.6 h spent to avoid at most 10 duplicates worth
+    #            $0.77 and 5.7 min of evaluation); on a family whose evaluation is a GPU training
+    #            run the same fixed price buys a far larger saving, and no such run exists on this
+    #            box to measure. Flipping a product default on one family's numbers would be the
+    #            same error as fencing a proposal on the log's LENGTH. The lever an operator has
+    #            today is `novelty_mode=off`, which since 2026-08-20 is a real no-op, and the phase
+    #            is now TRACED (`engine/shared.py::_paid_progress`) so its price is visible in
+    #            `looplab timings` and the trace view instead of being 11 % of an invisible budget.
+    # THIS is the off switch ("off"), and `novelty_gate` below is NOT: it defaults False and only
+    # means "do not force the algo path". `engine/novelty.py::_apply_novelty_gate` documents the
+    # false claim that cost the campaign $1.77.
     novelty_mode: str = "llm"
-    # Legacy sub-toggles, honored by the "algo" mode (and back-compat: novelty_gate=True forces "algo"):
+    # Legacy sub-toggles, honored by the "algo" mode (and back-compat: novelty_gate=True forces "algo").
+    # novelty_gate=FALSE forces nothing — it is not the off switch, `novelty_mode="off"` is:
     novelty_gate: bool = False
     novelty_epsilon: float = 0.05
     # T5 semantic novelty (active whenever the deterministic gate runs — novelty_mode=algo,
@@ -1294,6 +1315,25 @@ class Settings(BaseSettings):
     # 0 disables it entirely. 3 rather than 1: a first node can fail on something a Developer really
     # can repair, and stopping a whole run on one crash would be worse than the grind it prevents.
     systemic_failure_stop: int = Field(default=3, ge=0)
+    # How many Developer-session CRASHES (`node_failed` with `reason: developer_crash` — the
+    # `(developer error: …)` sentinel, a provider that could not be reached even after the client's
+    # own within-call retries) a run absorbs before the circuit breaker auto-PAUSES it. Counted PER
+    # RUN over the event log, in log order: the crash whose position reaches this number requests
+    # the pause, every crash below it still terminalizes its node exactly as before and the search
+    # goes on. `1` is the historical rule — pause on the FIRST crash — and is the default because
+    # nothing about the breaker's argument has changed: a Developer that cannot finish one node has
+    # hit something a NEW node cannot fix, and rapid-firing more dead nodes is the wrong answer (the
+    # 403 blowout spun 67 of them). What changed is what a pause COSTS on an unattended stand: in the
+    # 2026-08-24 campaign 9 of 20 arm-B runs ended `PAUSED — a Developer session crashed` and were
+    # never resumed (docs/58 §58.2), each having reached ~$1.00 anyway — the pause was the end of the
+    # run, not a freeze somebody lifted. A bench profile sets `2`, i.e. one automatic retry, because
+    # there is no operator to resume and a single crashed session is, on that stand, usually one
+    # flapped socket. Per RUN and not per phase or chunk, on `_probe_call_counter`'s ground: the
+    # thing being bounded is what the whole run has spent on dead sessions. The recovery sweep
+    # (`speculation.py::_close_developer_sentinel_once`) reads the same rule, so a below-threshold
+    # crash terminal with no pause after it is the DESIGN and is not "recovered" into one.
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins a resumed pre-2026-09-06 run to `1`.
+    developer_crash_pause_after: int = Field(default=1, ge=1)
     # PART V (F1): concept CLASSIFIER re-tag + consolidation cadence, DECOUPLED from strategist_every. The
     # LLM concept map is heavier and slower-moving than a strategy consult, so it refreshes on its own
     # (sparser) interval. Researcher-authored idea.concepts still fold immediately at node_created — this
@@ -1428,9 +1468,15 @@ class Settings(BaseSettings):
     # wrongly-abandoned FAILED direction" proposal is ALLOWED through unchanged — the flat LLM/semantic
     # dedup gate can't tell "this DCL tweak" from "the whole DCL branch" and would wrongly reject a
     # legitimate variant or never re-open a sound-but-killed direction (the node_63 archetype). Levels
-    # 1/2/3 (identical / near-dup / prior-run) still fall through to the existing gate. Deterministic
-    # (heuristic tagger, no LLM), audit event `novelty_graded`, replay-safe. ON by default in the product
+    # 1/2/3 (identical / near-dup / prior-run) still fall through to the existing gate. Audit event
+    # `novelty_graded`, replay-safe. ON by default in the product
     # Settings (ce4a379), EngineOptions off; no-ops for a task with no skeleton. See search/graded_novelty.py.
+    # NOT "deterministic, no LLM", which this line claimed until 2026-08-20: the AGENTIC path
+    # (§21.4 F2, a classifier `node_concepts` cache present) calls `graded_novelty.tag_idea_llm` once
+    # per proposal. The no-LLM claim is true only of the curated-skeleton fallback. Since 2026-08-20
+    # the precheck is not reached at all when `novelty_mode` is off and the stance is not "explore",
+    # because a pre-gate whose only power is to bypass a gate that is not running cannot change the
+    # answer (`engine/novelty.py::_apply_novelty_gate`).
     graded_novelty: bool = True
     # THE NOVELTY MIRAGE (doc 52 row 32): let the novelty gates SEE the papers this run retrieved
     # (`RunState.literature`). Both gates grade a proposal against this run's own history alone, so
@@ -1970,6 +2016,21 @@ class Settings(BaseSettings):
     # is detected and retried on a fresh connection — the fix for silent multi-minute hangs. Set False
     # to use one blocking read (old per-op timeout semantics) if an endpoint streams badly.
     llm_stream: bool = True
+    # What the client does with a request whose STREAM stalled (an idle-timeout mid-body, an in-band
+    # SSE error frame, a keepalive-only 200): `True` (the historical behaviour, byte for byte) retries
+    # the next attempt of that call WITHOUT SSE and, after `core/llm.py::STREAM_STALL_DEGRADE_AFTER`
+    # stalls, stops streaming for the client's lifetime — the right trade on an endpoint that
+    # answers the same request fine without SSE while its stream wedges. `False` retries a stalled
+    # stream AS A STREAM, on the same backoff, and never degrades. It exists because on a stand
+    # whose proxy has a whole-request read timeout the non-SSE attempt is exactly the request that
+    # timeout kills: without SSE the 300 s window measures the whole generation. Measured on the
+    # 2026-09-03 bench batch (docs/56 §173-175): under `LOOPLAB_LLM_STREAM=1` `oldCK9` still sent
+    # 58 of 301 calls unstreamed on this fallback's initiative, 4 died at the 300 s wall, and
+    # $0.10 of its $1.00 went on twenty re-sends of one body. Per-run rather than per-call because
+    # the stand's property (does the proxy bound the whole request?) is a property of the endpoint,
+    # not of any one prompt. No `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: `True` IS the historical
+    # value, so a resumed run gains nothing.
+    llm_stream_stall_fallback: bool = True
     # LLM IDLE timeout (seconds). Stream mode: the INTER-TOKEN stall limit — a steady generation is
     # never cut off, only a silent endpoint. Non-stream: bounds the whole read. Raise for endpoints
     # with a long prefill on huge prompts; lower to fail fast on a flaky shared endpoint.
@@ -1985,6 +2046,73 @@ class Settings(BaseSettings):
     # ambient proxy — a picked-up proxy yields "connection refused"). Set true when the endpoint is
     # reachable ONLY via a corporate proxy or needs a custom CA bundle from the environment.
     llm_trust_env: bool = False
+    # HARD spend ceiling for this run's LLM calls, in USD. `0.0` (the default) = NO limit, which is
+    # the historical behaviour byte for byte: `CostAccountant` has always accepted a `limit` and
+    # every agent path already treats `BudgetExceeded` as a hard stop that PROPAGATES rather than
+    # degrading to a fallback (see the ten `except BudgetExceeded` sites in `agents/`) — the one
+    # thing missing was a way to SET it.
+    #
+    # It exists because a wall-clock cap is not a comparable budget across two agent loops. The
+    # external reference loop this repo is benchmarked against (AlgoTuner) is budgeted by SPEND
+    # (`spend_limit: $1.00`, `total_messages: 9999`) and pays its reference-timing pass — ~30
+    # minutes on this box — INSIDE the run at a cost of $0. Capping either arm by wall-clock would
+    # therefore charge one loop for a measurement pass neither one's agent performs, so the arms
+    # are equalised on the axis the reference harness itself uses.
+    #
+    # Deliberately NOT pinned into `run_started`: the fold never reads it, so an already-recorded
+    # run replays identically under either value, and a new unconditional `run_started` key would
+    # revoke every issued speculation-calibration receipt.
+    #
+    # NOT IN `run_started` IS NOT THE SAME AS RE-READ ON RESUME, and this comment claimed it was
+    # until 2026-08-20. The value lands in `config.snapshot.json`, which every `resume` adopts
+    # (`cli/run_cmds.py`, engine invariant #6) -- so `LOOPLAB_LLM_BUDGET_USD=0.40 looplab resume
+    # <dir>` on a run stopped at $0.15 stops again at $0.15. Measured, on the run that produced
+    # this correction. To raise a stopped run's ceiling, edit `llm_budget_usd` in that run's own
+    # `config.snapshot.json` (or use the per-run settings editor, `PUT /api/runs/{id}/config`),
+    # then resume. The refusal message says so, because it is the operator's whole instruction.
+    #
+    # Whether a spend CEILING should be snapshot-pinned at all is a real question and is
+    # deliberately not answered here. `runtime/stage_identity.py` already draws this line for a
+    # stage `timeout` -- "a leash rather than an input" -- and a budget is the same shape: it
+    # bounds what the run may spend, it is not a condition the result was produced under. But
+    # snapshot precedence IS invariant #6, so exempting one field is a change with replay
+    # consequences rather than a comment fix. Stated, not patched.
+    #
+    # Priced calls only -- a local model reports no cost and can never trip it.
+    llm_budget_usd: float = Field(default=0.0, ge=0.0)
+    # Do not OPEN a new node once `llm_budget_usd - spent` is below this many dollars; finish the run
+    # on the same `BudgetExceeded` the ceiling raises instead (`CostAccountant.require_headroom`).
+    # A node cycle that opens with less than it costs is bought and then discarded at the ceiling:
+    # measured over the 76-run AlgoTune probe corpus (docs/56 §156), $5.91 of $76.73 (7.7 %) landed
+    # AFTER the last node a run ever evaluated, and the median completed cycle costs $0.3370. The
+    # threshold is the measured knee and NOT the audit's p75 ($0.4481): replayed against every
+    # threshold, $0.10 refuses 61 empty cycles, redirects $1.54 and costs exactly ONE real node,
+    # which scored 0 — while p75 refuses 54 real nodes including the corpus's best (277.23). It is
+    # sharp: $0.15 already costs three nodes and a 211.40. Re-derive with
+    # `benchmarks/budget_gate_curve.py` before moving it; the boundary compares with a 1e-9
+    # tolerance because `1.00 - 0.92` is `0.0799…` and a cent of float error there is one 277.23.
+    # Inert without a ceiling (`llm_budget_usd` 0 = no limit, so there is no remainder to test) and
+    # `0` turns it off. Checked on the MAIN task at the node-open decision only — never inside a
+    # worker thread or an eval child — so every existing ceiling path (the deferred stop, the
+    # in-flight-eval drain, `run_finished.reason = budget_exhausted`) handles it unchanged.
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins a resumed pre-2026-09-06 run to `0.0`: a stop is new
+    # authority, and re-entry never adds one to a run already in flight.
+    node_open_budget_floor_usd: float = Field(default=0.10, ge=0.0)
+    # Stop ADVERTISING a tool whose provider reports it holds nothing right now
+    # (`tools/_base.py::INVENTORY_CONTRACT`). It is the offer that is withheld, never the route: a
+    # withheld tool still dispatches if the model calls it, so nothing becomes unreachable, and the
+    # filter is re-evaluated per PHASE (`drive_tool_loop` composes its spec list once per
+    # invocation), so a tool reappears at the next phase rather than the next turn.
+    #
+    # Only a DECISIVE zero hides anything. `UNKNOWN` -- the provider could not count -- always keeps
+    # the tool offered, which is the same asymmetry the published counts carry: an over-offer costs
+    # one call, an under-offer costs an answer.
+    #
+    # Off by default because it changes the tool SURFACE a model sees, which is a bigger claim than
+    # the prompt block that describes it. On a cold-start repo task it withholds every one of the 14
+    # provider tools, leaving the loop with `emit` alone -- correct (there is nothing to read) but
+    # not something to impose on every existing configuration without measuring it there.
+    hide_empty_tools: bool = False
     # H4/C2: compact the growing agentic tool-call history once it exceeds this many chars (auto_summary
     # LLM-summarizes the stale middle; else middle-truncate). Sized to the model's real context window so
     # files read earlier STAY in context instead of being compacted away and re-read: ~1,000,000 chars ≈
@@ -2120,6 +2248,39 @@ class Settings(BaseSettings):
     # changes no concurrency and no selection policy. A resumed run gains nothing it did not consent
     # to; it only stops paying for a sweep it was already paying for.
     triage_time_budget_s: float = 1200.0
+    # Keep the Developer's stage-pipeline guidance in its system prompt. TRUE reproduces the
+    # historical text byte for byte, which `_system_body`'s contract requires for a resumed run.
+    # Turn it OFF for tasks whose eval declares a single stage: measured 2026-08-28 on AlgoTune,
+    # `declare_stages` was called 0 times across six probes while the block cost 4.8-6.0 % of each
+    # $1 run -- 5,001 characters of GPU-training advice to a role with one `score` stage.
+    developer_stage_guidance: bool = True
+    # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
+    # implement/repair) with a small block carrying what EARLIER phases of this run already read —
+    # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
+    # and an index row for the rest. Measured over 97 AlgoTune probe runs (docs/56 §200.2):
+    # 46.7 % of tool-calling turns (11,853 of 25,381, $25.04 of $63.34 of prompt) requested
+    # nothing but content already retrieved in that run, and 11,235 of them were retrieved by a
+    # DIFFERENT phase. It changes no tool and reaches no metric, champion or selection: an empty
+    # store renders nothing, and OFF restores every prompt byte for byte. LEGACY row False, so a
+    # resumed run gains no prompt bytes it never consented to (`agents/established.py`).
+    established_context: bool = True
+    # The byte budget of that block: the most re-fetched items are carried verbatim until it is
+    # spent, the rest as one-line index rows. ~3 pages of a 3,600-char `read_file` page.
+    established_context_bytes: int = Field(default=12288, ge=0)
+    # The operator-pinned developer command the plan loop runs BETWEEN steps, handing its output to
+    # the next step ("" = off, and every prompt is byte-identical to what it was). This is our half
+    # of doc 53 item 10: AlgoTuner re-runs the real evaluation after each accepted edit and hands its
+    # agent `Speedup / Valid Solutions / Invalid / Timeouts` for free, 17-61 times per task; ours
+    # evaluates every node it builds (`node_created`:`node_evaluated` is 1:1 in every probe) but the
+    # sessions that WRITE the code never see a number, so the model buys one with a whole plan step
+    # -- 30 of 116 attributed steps in the probe corpus, 317 LLM calls, 5,762 s, for a 40 s command.
+    #
+    # OFF by default because it changes WHAT THE AGENT IS SHOWN, i.e. the measurement, the same
+    # reason `make_task.py --full-context` is off; the twenty arm-B numbers on disk were produced
+    # without it and must not share a table with numbers produced under it. It is a NAME, not a
+    # flag, because nothing in a task marks which pinned command is the scorer and a heuristic that
+    # guessed would run the wrong one; a name the task does not pin is simply no feedback.
+    developer_step_feedback_command: str = ""
     # F2 · The Developer's PROBE (`tools/dev_probe.py`): may it RUN a short Python program against
     # the real environment while it authors? ON by default, because the failure it closes is the
     # Developer inventing a workaround for a question it could have answered — the observed shape
@@ -2141,6 +2302,33 @@ class Settings(BaseSettings):
     # wall-clock ceiling (`developer_session_time_budget_s`), which a probe spends like any other
     # turn, and a second fixed counter is the shape doc 36 names as the category error.
     developer_probe_timeout_s: float = 60.0
+    # The probe's read boundary, KERNEL half (`tools/dev_probe.py` rule 1). ON: the probe may read
+    # its own replica, the interpreter and the task's declared mounts, and nothing else -- enforced
+    # by Landlock, so it holds for `ctypes`, a native reader and a child across `execve`, none of
+    # which the audit hook reaches. Measured 2026-08-21 on a live benchmark arm with it OFF: 116 of
+    # 119 probe calls read outside the workdir, including the evaluation harness that grades the
+    # run. It FAILS CLOSED -- on a kernel without Landlock the probe refuses rather than running
+    # with a boundary it does not have -- so this is the switch to flip if that trade is wrong for
+    # a given box, and the refusal names it.
+    developer_probe_confine: bool = True
+    # A probe COUNT cap, 0 = none, which is the shipped behaviour and every run in the corpus.
+    #
+    # THE COMMENT ABOVE `developer_probe_timeout_s` SAYS THERE IS DELIBERATELY NO SUCH BUDGET, and
+    # it is right about the reasoning it gives: the session already has a wall clock, and a second
+    # fixed counter is a category error as a general rule. This field is not that rule being
+    # reversed -- it is the instrument for the arm registered in §190, and it stays 0 unless an arm
+    # sets it.
+    #
+    # WHY THE ARM EXISTS. §189 measured, over the 69 `edge_expansion` runs with a champion, that of
+    # eleven process variables exactly one separates the top thirteen from the bottom thirteen:
+    # `run_probe` calls, 20 against 29 (p = 0.037), while evaluated nodes (3 vs 3), `eval_train`
+    # calls (12 vs 12), file reads, generations and every phase share are flat. Split at the corpus
+    # median of 24 probes the champion is 221.81 against 177.84 -- +43.97, two-sided p = 0.0077, and
+    # +50.03 (p = 0.0097) among the fifty runs that evaluated exactly three nodes.
+    #
+    # That is a correlation. A run that probes twenty-nine times may be probing BECAUSE it is lost,
+    # and this field is how the two get told apart rather than argued about.
+    developer_probe_max_calls: int = 0
     # Phase-handoff summaries. Each LLM phase in a node build (Researcher·propose → Developer·stages →
     # plan → implement) ends with ONE extra LLM call that distills its transcript — the repo structure
     # it mapped, files/data confirmed, decisions made — into a brief injected into the NEXT phase (even
@@ -2668,6 +2856,19 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # engine re-pinning one mid-log, and re-entry must not add that treatment to it — the same reason
     # every other concurrency row here is pinned to its historical value.
     "proposal_width": False,
+    # 2026-09-06, two rows and one named non-row. `node_open_budget_floor_usd` is a NEW STOP — a
+    # run that used to spend its last dollar on a node it could not finish now finishes early — and
+    # a stop is authority, so a resumed run keeps the `0.0` (off) it ran under. Its (c) is the
+    # commit that added the field. `developer_crash_pause_after` moved no default (1 is the rule the
+    # breaker has always applied), but a bench profile lowers the run's tolerance FROM the snapshot
+    # side and a pre-field snapshot must not adopt whatever the live profile says: pinned to the
+    # historical 1. `llm_stream_stall_fallback` gets NO row on `redact_output`'s ground (b): `True`
+    # is the historical value and the knob buys no call, no intervention and no selection policy.
+    "node_open_budget_floor_usd": 0.0,
+    "developer_crash_pause_after": 1,
+    # A5: a resumed pre-2026-09-06 run keeps its prompts byte for byte; the block is new prompt
+    # bytes at every chain root and a run in flight never consented to them.
+    "established_context": False,
     "speculation_depth": 0,
     "speculation_gate_receipt": None,
     "concurrent_research_repeat": False,
@@ -2864,6 +3065,16 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # different prompts for three roles. (c) is `False`, pointable at every commit before this one,
     # and the field's own comment states that `false` restores every prompt byte for byte.
     "evidence_envelope": False,
+    # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
+    # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
+    # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,
+    # or whose layout puts a machine tier around the editable tree in a way that cannot be punched,
+    # a confined probe REFUSES TO RUN. So a run whose first half made probes on a Landlock host and
+    # is resumed onto one without it would start refusing the same calls it had been answering —
+    # the mirror of `inline_repair_attempts: 0` above, and the reason that row exists.
+    # (c) is `False`: before this field the probe carried the write ruleset and the deny-prefix hook
+    # and nothing else, which is exactly what `developer_probe_confine=false` restores.
+    "developer_probe_confine": False,
     # THE REPAIR CRITIC'S CADENCE, added 2026-08-13 defaulting to 3 (F8). (a) holds. (b) is paid
     # work AND an intervention, the two strongest columns at once: from the 4th durable repair on a
     # node, `agents/unified_agent.py::repair_critic` is a SECOND model asked whether the chain is

@@ -710,6 +710,44 @@ class NoveltyGateMixin:
         self._append_proposal_event(EV_NOVELTY_REJECTED, {**audit, "action": action})
         return idea
 
+    @contextmanager
+    def _repropose_phase(self):
+        """Bill the gate's second proposal to `repropose`, not to `novelty`.
+
+        MEASURED, `/var/tmp/looplab-bench/runs-B` (20 AlgoTune task-arms, 2026-08-26): the `novelty`
+        phase carried $1.3151 of $17.6867 in generation spend. Walking each generation's
+        `input_from` chain back to the system prompt that ROOTED it splits that number in two: the
+        adjudicator ("You judge experiment NOVELTY…") is $0.1141 over 231 calls — 0.6 % of the run —
+        and $1.1758 over 257 calls is the Researcher and its claim-verifier, i.e. the whole second
+        proposal `_reject_and_repropose` buys when a rejection lands. On `convex_hull` the split is
+        $0.0026 adjudication against $0.1530 re-proposal, and that $0.1530 is priced exactly like an
+        ordinary `propose` phase on the same task ($0.038–$0.135) because it IS one: same two
+        Researcher chains, same verifier chain.
+
+        WHY THE LABEL IS THE DEFECT. `_paid_progress` opens the `novelty` span so the gate's money is
+        attributable at all (`engine/shared.py`), and `Tracer.span` stamps `phase=<the innermost open
+        operation>` onto every generation underneath. With no span of its own, the re-proposal
+        inherits `novelty` — so every per-phase cost question answers "the novelty gate cost 7.4 % of
+        the run" when the gate cost 0.6 % and the ideas it asked for cost the rest. Two independent
+        readings of this campaign have now drawn a conclusion from that label (doc 53 §2, and
+        `shared.py::_paid_progress`'s own $1.77 note), and the loud version of the error — "two
+        thirds of the budget" — comes from the same money being swept up by a coarser attribution.
+        A phase whose price is 10x its own work is a measurement trap, and the trap is one span deep.
+
+        SPAN ONLY, no `phase_progress` beacon. `events/types.py::PROGRESS_PHASES` already documents
+        that `novelty` "may pay for a whole second proposal", the beacon is the operator's progress
+        strip (the loop IS still inside the gate), and adding a phase there changes exact event
+        counts that `test_end_to_end` and `test_settled_width_pins` pin. The cost channel is spans;
+        this fixes the cost channel and nothing else. It opens no call, changes no verdict and
+        cannot change what `_reject_and_repropose` returns.
+        """
+        tracer = getattr(self, "tracer", None)
+        if tracer is None:                      # tests build `Engine` via `__new__`; observability
+            yield                               # may never decide whether the re-proposal runs
+            return
+        with tracer.span("repropose"):
+            yield
+
     def _repropose_with_feedback(self, repropose, hint: str, idea: Idea, researcher=None) -> Idea:
         """One informed re-propose with the duplicate surfaced as a TRANSIENT `_novelty_feedback`
         directive (shared by the LLM and semantic gates — the set/try/finally-restore discipline
@@ -723,7 +761,8 @@ class NoveltyGateMixin:
         prev = getattr(_r, "_novelty_feedback", "")
         setattr(_r, "_novelty_feedback", hint)
         try:
-            idea2 = repropose()
+            with self._repropose_phase():       # bill this call to `repropose`, not to `novelty`
+                idea2 = repropose()
             if idea2 is not None:
                 idea = idea2
         except BudgetExceeded:
@@ -1497,10 +1536,31 @@ class NoveltyGateMixin:
         (2) NUMERIC (E1 legacy): params within `novelty_epsilon` (normalized L2) of an existing
             node are deterministically nudged off the duplicate.
         Loop-safe (always returns a usable idea) and replay-safe (the final idea lands in
-        node_created; the gate is not re-run on replay). Runs when `novelty_gate` is on OR the
-        Strategist's novelty stance is "explore" (slice 5): the stance can engage a soft dedup +
-        one informed re-propose even when the static gate is off, so novelty pressure follows the
-        meta-controller. "balanced"/"exploit" (and gate off) leave this a no-op — exactly as before."""
+        node_created; the gate is not re-run on replay).
+
+        THE OFF SWITCH IS `novelty_mode`, and until 2026-08-20 the sentence here named `novelty_gate`
+        and claimed that switching it off left this a no-op. That was FALSE in the shipped default:
+        `novelty_gate` defaults False, `novelty_mode` defaults "llm", and `novelty_gate=False` only
+        means "do not force the algo path" (`orchestrator.py::Engine.__init__`). So a run whose
+        config snapshot read `novelty_gate = false` — which every run of the 2026-08-20 AlgoTune
+        campaign did — paid for a twelve-turn LLM adjudication on every proposal.
+
+        `mode == "off"` with a non-explore stance is now a REAL no-op: it returns above the graded
+        pre-gate as well as above the flat one. That ordering is the fix, not a shortcut. The graded
+        pre-gate's ONLY power is to SHORT-CIRCUIT the flat gate (see `_graded_novelty_precheck`: it
+        returns non-None exclusively for levels 4/5, and only to admit an idea the flat gate would
+        have wrongly rejected). With no flat gate to bypass it cannot change what this function
+        returns — so running it was pure cost, and it can spend: its agentic path calls
+        `tag_idea_llm` once per proposal whenever a classifier `node_concepts` cache exists. What
+        that ordering gives up with the gate off is the `novelty_graded` / `cross_run_prior`
+        observational receipts, which are receipts ABOUT an admission decision nobody is making."""
+        mode = getattr(self, "_novelty_mode", "llm")
+        # The deterministic "algo" gate below runs when mode is "algo" OR the Strategist's novelty
+        # stance is "explore" (the stance can engage a cheap soft dedup + one informed re-propose
+        # even when the mode is otherwise off), and "llm" runs the adjudicator. Anything else is a
+        # no-op, and a no-op must not reach a paid pre-gate.
+        if not (mode in {"algo", "llm"} or self._novelty_stance == "explore"):
+            return idea
         # PART IV D3 (Phase 2b): the concept-graph pre-gate runs FIRST. When it recognizes a legitimate
         # same-direction-new-implementation (level 4), or RATIFIES a re-open of a wrongly-abandoned failed
         # direction (level 5) with grounded repeated evidence, it SHORT-CIRCUITS. Every other grade (and the
@@ -1516,17 +1576,14 @@ class NoveltyGateMixin:
             # guard scanning ALL prior nodes (B1 fix), so a punctuation-only paraphrase can't reach here —
             # it falls through to the stronger `_llm_novelty_gate` below like every other grade.
             return graded
-        mode = getattr(self, "_novelty_mode", "llm")
         # "llm" -> an LLM adjudicates duplication by READING the real experiments (not an embedding/
         # distance heuristic), then re-proposes if it's a dup.
         if mode == "llm":
             return self._llm_novelty_gate(
                 state, idea, repropose, researcher=researcher,
                 prospective_node_id=prospective_node_id)
-        # The deterministic "algo" gate below runs when mode is "algo" OR the Strategist's novelty stance
-        # is "explore" (the stance can engage a cheap soft dedup + one informed re-propose even when the
-        # mode is otherwise off). "off" without explore leaves this a no-op — the Researcher's own
-        # read-the-history judgment stands.
+        # "off" reaches here only under an "explore" stance (the guard at the top of this function),
+        # which is exactly when the stance means to engage the cheap deterministic dedup.
         if not (mode == "algo" or self._novelty_stance == "explore"):
             return idea
         import random as _random

@@ -568,5 +568,12 @@ def test_tracer_facade_and_finalizer_place_the_flush_barriers():
     assert hasattr(Tracer, "force_flush") and hasattr(Tracer, "shutdown")
     finalizer = inspect.getsource(finalize.finalize_run)
     assert finalizer.index("_flush_trace_exporter(engine)") < finalizer.index("load_span_tail(")
+    # `Engine.run` still ends its exporter's lifetime in a `finally` -- but the shutdown call itself
+    # now lives in `retire_tracer`, because the CLI's guarded-abort handler defers that retirement
+    # and runs it after the terminal report (docs/53 §2c). Assert BOTH halves: the `finally` reaches
+    # the retirement, and the retirement is still a BOUNDED shutdown. Asserting only the first would
+    # go green on a `retire_tracer` that had quietly stopped shutting anything down.
     run = inspect.getsource(Engine.run)
-    assert "finally:" in run and "shutdown" in run
+    assert "finally:" in run and "retire_tracer()" in run
+    retire = inspect.getsource(Engine.retire_tracer)
+    assert "shutdown" in retire and "TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS" in retire

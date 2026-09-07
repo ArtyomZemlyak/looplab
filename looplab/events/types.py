@@ -192,7 +192,10 @@ EV_REWARD_HACK_SUSPECTED = "reward_hack_suspected"
 # and how many findings came back. Never what they read: the flagged row already carries the detail,
 # and a receipt quoting candidate text would be a second copy of the artifact inside the audit trail.
 # DIAGNOSTIC on purpose — the fold ignores it, so no selection can move, and `_proposal_authority_seq`
-# excludes DIAGNOSTIC_EVENTS wholesale so a per-node receipt cannot discard a paid proposal.
+# excludes DIAGNOSTIC_EVENTS wholesale so a per-node receipt cannot lose a reservation's CAS.
+# (That fence stopped spanning a paid proposal on 2026-08-20 — see
+# `engine/card_reservation.py::_proposal_receipt_fence` — so what the exclusion buys here is a
+# retry, not a Developer call. `trust_scan` was inside 52 of the 56 windows the old one discarded.)
 # The reader-side default lives in `trust/scan_receipt.py` and is the load-bearing half: a node with
 # no receipt reads `unknown`, NEVER `clean` — which is the inversion this event exists to prevent.
 EV_TRUST_SCAN = "trust_scan"
@@ -419,8 +422,10 @@ EV_SETUP_STEP = "setup_step"
 # it says nothing about selection, and a resume must reconstruct the same RunState from a log that has
 # these rows and from one that does not. It is safe to append from a concurrent producer for the
 # reason invariant #1 states for diagnostics — `speculation.py::_proposal_authority_seq` excludes
-# DIAGNOSTIC_EVENTS wholesale, so a beacon landing inside the paid-proposal CAS window cannot discard
-# the proposal. That exclusion is the load-bearing property, NOT "the fold ignores it".
+# DIAGNOSTIC_EVENTS wholesale, so a beacon landing inside a reservation's CAS window cannot lose it.
+# That exclusion is the load-bearing property, NOT "the fold ignores it". The beacon has a second
+# obligation since 2026-08-20 and it is the opposite kind: a phase that SPENDS must ALSO open a span
+# (`engine/shared.py::_paid_progress`), because a beacon alone leaves its money untraceable.
 EV_PHASE_PROGRESS = "phase_progress"
 
 # WHY THE RUN LOOP STOPPED. Diagnostic, appended exactly once as the loop unwinds, and it exists
@@ -663,7 +668,13 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
         "propose",     # the Researcher's proposal call — the long, wholly invisible one: it runs
                        # BEFORE `node_building` is appended, so until it returns the UI has no node
                        # to draw at all and the strip falls through to "Planning next experiment…".
-        "novelty",     # `_apply_novelty_gate`, which may pay for a whole second proposal
+        "novelty",     # `_apply_novelty_gate`, which may pay for a whole second proposal — and that
+                       # second proposal is NOT this phase's money. It gets its own nested
+                       # `repropose` SPAN (`engine/novelty.py::_repropose_phase`), because on
+                       # runs-B it was 87 % of everything stamped `novelty` and reading the label
+                       # as the gate's price is how doc 53 §2 got opened. No beacon for it: the
+                       # loop IS still inside the gate, and this table's exact rows are pinned by
+                       # `test_end_to_end` / `test_settled_width_pins`.
         "reserve",     # `_reserve_node_build` — the Card plan + the `node_building` append
         "implement",   # the Developer's implement call
         # NO `repair` phase. One existed for exactly one day: it bracketed `developer.repair` inside
@@ -705,7 +716,13 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
         # that never completes. Add it here together with its append site, not before.
     ),
 }
-PROGRESS_STATUSES: frozenset[str] = frozenset({"started", "finished"})
+# The two statuses get NAMES for the same reason the event type does: a beacon has no reader that
+# fails loudly, so a reader comparing against a bare `"started"` degrades to "nothing is open"
+# rather than raising. `PROGRESS_STATUSES` is DERIVED from them so the validation set and the
+# names cannot drift apart, and its value is unchanged.
+PROGRESS_STARTED = "started"
+PROGRESS_FINISHED = "finished"
+PROGRESS_STATUSES: frozenset[str] = frozenset({PROGRESS_STARTED, PROGRESS_FINISHED})
 
 
 def assert_progress_phase(stage: str, phase: str, status: str) -> None:
@@ -1635,7 +1652,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         ),
         optional=(
             "attempt", "extra_metrics_direction", "extra_metrics_provenance",
-            "metric_provenance", "resource_curve", "self_metric"
+            "metric_provenance", "resource_curve", "self_metric", "stderr_tail"
         ),
     ),
     "node_failed": PayloadContract(
@@ -1643,9 +1660,10 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=(),
         optional=(
             "attempt", "card_id", "engine_reason", "error", "error_evidence", "eval_seconds",
-            "failed_stage", "finish_data", "finish_report_planned", "generation", "never_evaluated",
-            "node_id", "reason", "reason_evidence", "reason_evidence_resolved", "reason_findings",
-            "reason_hypotheses", "reason_source", "reason_summary", "scope", "step",
+            "failed_stage", "finish_data", "finish_report_planned", "generation",
+            "never_evaluated", "node_id", "reason", "reason_evidence",
+            "reason_evidence_resolved", "reason_findings", "reason_hypotheses",
+            "reason_override_refused", "reason_source", "reason_summary", "scope", "step",
             "triage_rationale"
         ),
     ),
@@ -1656,11 +1674,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "rationale", "stages_passed", "triage_action"
         ),
         optional=(
-            "budget_exhausted", "code", "edit_calls", "engine_reason", "error_evidence",
-            "eval_seconds", "footprint_finalized", "idea_footprint", "param_overrides",
-            "reason", "reason_evidence", "reason_evidence_resolved", "reason_findings",
-            "reason_hypotheses", "reason_source", "reason_summary", "salvaged_metric", "unmet",
-            "unparseable_repairs", "verified"
+            "attribution", "budget_exhausted", "code", "edit_calls", "engine_reason",
+            "error_evidence", "eval_seconds", "footprint_finalized", "idea_footprint",
+            "param_overrides", "reason", "reason_evidence", "reason_evidence_resolved",
+            "reason_findings", "reason_hypotheses", "reason_override_refused", "reason_source",
+            "reason_summary", "salvaged_metric", "unmet", "unparseable_repairs", "verified"
         ),
     ),
     "node_reset": PayloadContract(
@@ -1824,8 +1842,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The run ended: the reason, the log position it ended at, and its final spend.",
         required=(),
         optional=(
-            "after_seq", "calls", "completion_tokens", "cost", "finalization_required",
-            "finalize_scope", "priced_calls", "prompt_tokens", "reason", "total_tokens"
+            "after_seq", "calls", "completion_tokens", "cost", "error",
+            "finalization_required", "finalize_scope", "priced_calls", "prompt_tokens",
+            "reason", "total_tokens"
         ),
     ),
     "run_loop_exited": PayloadContract(

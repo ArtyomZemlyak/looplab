@@ -365,6 +365,20 @@ environment, because the comparison the existing nodes belong to no longer holds
 get it: the subprocess tier merges it into the child's environment, the Docker tier forwards it as
 `-e` pairs.
 
+**Which carrier you use decides what a follow-up run inherits, and this has cost a node.** The run
+level rides `config.snapshot.json`; the two task levels ride `task.snapshot.json`. Starting the next
+run the ordinary way — by copying the previous TASK file — therefore carries the task levels and
+drops the run level. A dense-retrieval run whose corpus root lived only in `eval_env` started that
+way with no environment at all: every node hit S3 with `InvalidAccessKeyId` and paid a triage and a
+repair to rediscover the local corpus, one node died of it, and the run's numbers are not comparable
+to the champion it was meant to beat, because the corpus was chosen per node by a repair rather than
+declared once. **If the declaration belongs to the TASK — where the data is, which entrypoint, which
+device — put it in `cmd.env` and it travels with the task file.** Keep `eval_env` for what genuinely
+belongs to this RUN of it. The engine records which carrier held it: a run whose environment came
+from the setting alone stamps `run_started.eval_env_absent_from_task`, so the log answers the
+question afterwards. It is recorded, never refused — a run with no environment is legitimate, and
+only you know whether this one wanted the previous run's.
+
 **And the metric readers get it too, since 2026-09-02.** One reader EXECs — `kind: "adapter"` runs
 your ratified `read_metric` module in a subprocess — and it used to run in the ENGINE's environment
 rather than the eval's: none of this declaration, no GPU pin, and no `LOOPLAB_READ_FENCE_DIR`, so
@@ -1142,6 +1156,18 @@ is allow-listed even when it lives inside the editable tree. What stays writable
 `/tmp`, an `edit: true` mount, and nothing else under the run directory. The fence is a no-op for the
 Docker tiers (neither the source tree nor the run dir is bind-mounted into a container).
 
+**Except the fence's own file, which is the one thing in the run directory a node may not touch.**
+`<run>/.looplab-fence/sitecustomize.py` sits in that writable run directory, and until 2026-08-25 a
+node could simply overwrite it — refuse the read, `open(…/sitecustomize.py, "w")`, and every process
+the run started afterwards was unfenced, which is the incident above with none of the gates left.
+Moving the file does not help, because the only region the fence refuses is your editable tree and
+that is exactly where the engine must not write. So it is written mode `0444` (the kernel refuses the
+write; the container a node runs in holds no `CAP_DAC_OVERRIDE`) and the hook refuses every mutation
+event aimed at that directory, `os.chmod` included, whatever the allow-list says. Both rungs are
+needed: with only the mode bit a node chmods it back and rewrites the file; with only the hook, a
+native writer that raises no audit event goes straight through. What still gets past both is the
+same `python -S` child listed below — it is not fenced at all, so it can chmod and rewrite the file; that one is open.
+
 **What it cannot see, and you should know before relying on it.** It is a CPython audit hook, so it
 covers what goes through CPython and nothing else. A native reader — `safetensors`, `h5py`, `pyarrow`,
 anything calling libc directly — reads straight through it, and `safetensors` is the loader for the
@@ -1491,6 +1517,8 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `eval.stages` | Operator-declared ordered pipeline (`data_prep` → `train` → …). When set, these **are** the canonical stages and the Developer's own `looplab_stages.json` is ignored; the LAST stage's stdout carries the metric. Each stage is `{name, command:[argv], timeout?, check?, needs?, expect?, env?}` — `needs` lists the workdir-relative files the stage READS (checked before it starts) and `expect` is the stage's success contract (`{files?, assert?}`, see above); declaring either on an operator stage is how you hold a stage the agent may not edit to a condition. `env` is the stage's declared environment and is OPERATOR-ONLY (see [Declaring an eval's environment](#declaring-an-evals-environment)) |
 | `eval.env` | The DECLARED ENVIRONMENT for this task's eval: `{NAME: value}` applied to `setup`, the single `command` and EVERY stage, with a stage's own `env` overlaying it. This is where a fact about the **repo** belongs — "the local corpus lives at …" is true of the repo, not of the engine — and stating it once means every node inherits it instead of each one rediscovering it by crashing. It rides in `task.snapshot.json`, so a resume re-applies the same environment the results were produced under. Operator-only, and a secret-shaped name or value is refused: see [Declaring an eval's environment](#declaring-an-evals-environment) |
 | `eval.cwd` | Working directory for the eval, relative to the node eval workdir (default `.`) |
+| `eval.protect_packages` | The **grader fence**: top-level names of INSTALLED packages the Developer may not read (`["AlgoTuner", "AlgoTuneTasks"]`). An eval harness pip-installed into the same venv is, to the env inspector, just another library — measured 2026-08-20, one AlgoTune node made 213 of its 216 env-inspection calls against the checker, the timer and the scorer. Fences `pkg_info`/`py_api`/`read_installed`/`grep_installed` by name, and since 2026-09-06 the Developer's `run_probe` too, as directories: each name's `find_spec(...).submodule_search_locations` becomes a deny root in both rungs of the probe's read boundary, and a read inside one is refused naming the package ("it IS installed — this is a fence, not a missing package"). A dotted spelling is cut to its top level; an absent package fences nothing; a single-file module (no package directory) is a stated residual of the probe half. Declared, never derived: only you know which distribution is the grader. Default `[]` fences nothing |
+| `eval.web_deny` | The **web twin** of that fence: absolute `http(s)://` URL prefixes the Researcher's `web_fetch` may not reach — where this task's published solutions, leaderboard or grader live (`["https://github.com/oripress/AlgoTune/", "https://algotune.io/"]`). Measured over the AlgoTune probe corpus (docs/56 §150 #13), 52 of 76 runs fetched the published solver for the very task they were graded on while the card's fence was prose. Validated at submit (a bare host or a path is refused). A prefix covers its host and subdomains and the path as a prefix, compared case-insensitively and ignoring the scheme; end it with `/` to bound it to that directory (`…/AlgoTune/` covers `…/AlgoTune` and everything under it, not `…/AlgoTune-fork/`). A matching fetch — or a redirect INTO a prefix — is refused with a message naming the declaration, never a silent empty page or "(unavailable)", and the refusal rides on the tool span as `result_structured.web_fetch_refused`, so a run can be audited for it. Default `[]` fences nothing |
 | `eval.setup_timeout` | Per-node `eval.setup` budget in seconds (default `600`) |
 | `eval.run_setup` | **Run-level** setup: runs ONCE at run start in the editable repo root, not per node — the autonomy default when deps don't change between experiments. A failure aborts the run. **You usually do not need to set this.** When your first editable repo ships a `requirements.txt`, LoopLab derives `python -m pip install -r requirements.txt` and runs it here by default, so the repo's pinned versions are the versions the eval gets (`auto_install_deps`, on by default, `trusted_local` only). Setting it explicitly **replaces** that default entirely — nothing is prepended or merged — which is how you install something else, or nothing |
 | `eval.run_setup_timeout` | `run_setup` budget in seconds (default `1800`) |

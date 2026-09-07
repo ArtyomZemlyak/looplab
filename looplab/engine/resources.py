@@ -785,11 +785,24 @@ class ResourceSchedulingMixin:
         if policy == "off" or run_dir is None:
             self._read_fence_cache = None
             return None
-        if (spec or {}).get("editables"):
-            roots, allow, dropped, swallowed = read_fence.fence_inputs(
-                spec, allow=[str(run_dir)])
-        else:
-            roots, allow, dropped, swallowed = [], [], [], []
+        # THE ALLOW ENTRY IS NOT THE HOLE, and that was measured rather than argued (2026-08-25).
+        # The item that stood here said this line allow-lists the directory holding the fence's own
+        # `sitecustomize.py`, so a node could `open(fence, "w")` and disarm the run — driven end to
+        # end, and true. But re-running it with the DEFAULT layout (`--out` outside the repo) shows
+        # `fence_inputs` had already dropped this entry: it keeps only strict DESCENDANTS of an
+        # editable root, so `allow` was `()` — and the overwrite succeeded anyway. The fence's own
+        # source is unprotected because it lives outside every fenced root, which is true of every
+        # place it could legally be written; relocating it out of the allow entry's reach would have
+        # changed nothing, because "outside the allow list" is not "inside a fenced region" and the
+        # only fenced region is the operator's tree, where the engine must not write. So the fix is
+        # the other candidate, and it lives where the file is created rather than here:
+        # `read_fence.install` -> `_harden` (mode 0444, the kernel rung) plus the template's `_SELF`
+        # (which refuses the `os.chmod`/`os.remove`/`os.rename` that would undo it).
+        #
+        # This entry stays for the reason it was always there: a run may legitimately be `--out`-ed
+        # inside the repo it edits, and then its own outputs must stay readable to its own eval.
+        roots, allow, dropped, swallowed = read_fence.fence_inputs(
+            spec, allow=[str(run_dir)])
         try:
             resolved = read_fence.install(run_dir, roots=roots, allow=allow, policy=policy)
         except OSError as exc:

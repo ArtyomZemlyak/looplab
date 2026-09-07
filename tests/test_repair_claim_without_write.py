@@ -115,9 +115,11 @@ def test_the_verdict_tier_is_untouched():
 def _loop(monkeypatch, *, forced_summary, exit_kind, validate, terminal_salvage=False):
     """Drive the REAL `drive_tool_loop` to one of its forced-emit exits.
 
-    `terminal_salvage` mirrors the production kwarg and DEFAULTS FALSE exactly as the loop does, so
-    a test that wants the repair session's behaviour has to ask for it the way `repo_developer`
-    does — the one caller that opts in.
+    `terminal_salvage` is a per-CALLER policy (`08525b97`), and this harness MIRRORS
+    `drive_tool_loop`'s own default rather than the repair session's choice: the two cases below
+    are the two callers, and a harness that quietly opted one of them in would make the
+    did-not-opt-in half unwritable — it would be asserting the repair caller's contract about the
+    stages caller. So each case names its policy, and the default here is the loop's default.
     """
     from looplab.agents import tool_loop
 

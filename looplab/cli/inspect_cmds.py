@@ -33,19 +33,22 @@ from looplab.core.run_deletion import (
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed)
 from looplab.events.eventstore import EventStore
+from looplab.cli.token_report import echo_card_and_build_tables
 from looplab.events.readmodel import (
     STATUS_CURRENT, coverage_watermark, publish_readmodel, read_watermark, readmodel_status)
 from looplab.events.replay import fold
 from looplab.events.types import EV_BUDGET
 from looplab.engine.comparability import record_of as comparability_record_of
 from looplab.trust.scan_receipt import trust_scan_summary
+from looplab.events.stop_account import last_record_line
 from looplab.cli import (
     _RUN_DIR_HINT, _echo_log_integrity, _print_result, _require_run_dir, app)
 # The rendering half of `timings` and `tokens` (doc 25 CT-01's line cap, doc 52 row 31):
 # printing and the shared span vocabulary, extracted so a new diagnostic does not have to buy
 # its room by deleting why-comments.
-from looplab.cli.run_report import (echo_card_spend, echo_containments, echo_section,
-                                    minutes, span_category, span_seconds, traced_seconds)
+from looplab.cli.run_report import (echo_containments, echo_reconciliation, echo_section,
+                                    minutes, output_fingerprint, span_category,
+                                    span_seconds, stage_identity_rows, traced_seconds)
 
 
 @app.command()
@@ -240,7 +243,14 @@ def tokens(run_dir: Path = typer.Argument(...),
         typer.echo(f"residual   : {out['residual']:>14,} tokens "
                    f"({'spans over-attribute' if out['residual'] < 0 else 'unattributed by any span'})")
 
-    echo_card_spend(state, rows, ev_path, ledger_total)
+    # THE PER-CARD HALF, in `cli/token_report.py`. Phase answers "which KIND of work spent it";
+    # that module answers "which EXPERIMENT spent it, and was that experiment ever evaluated" — the
+    # question a run cannot otherwise ask, because the durable ledger carries no card and no node.
+    # It is printed by DEFAULT rather than behind a flag: the defect it closes is that nobody could
+    # see it, and an opt-in view is not seen.
+    echo_card_and_build_tables(rows, state=state, ev_path=ev_path, ledger_total=ledger_total,
+                               by_card_fold=token_spend_by_card, by_build_fold=token_spend_by_build,
+                               unattributed=CARD_UNATTRIBUTED)
     # `read_jsonl_lenient_with_health` returns a plain DICT, and its damage key is `invalid_lines`.
     # `getattr(health, "damaged", 0)` was therefore always 0 by two independent routes — a dict has
     # no such attribute and there is no such key — so an unreadable `spans.jsonl` (the routine shape
@@ -431,52 +441,8 @@ def timings(run_dir: Path = typer.Argument(...),
     # Run-scope like the reconciliation, but it needs no wall clock: a spans-only directory still
     # says what it contained.
     echo_containments(spans)
-    if wall is None or wall <= 0:
-        return
-    traced = min(traced_seconds(intervals), wall)
-    untraced = max(0.0, wall - traced)
-    typer.echo(f"\nreconciliation vs {minutes(wall)} min wall clock:")
-    typer.echo(f"  attributed {minutes(attributed):>6} min  ({round(100*attributed/wall)}%)  "
-               f"sum of the rows above; overlaps under concurrency")
-    typer.echo(f"  traced     {minutes(traced):>6} min  ({round(100*traced/wall)}%)  "
-               f"wall clock with at least one span open")
-    typer.echo(f"  untraced   {minutes(untraced):>6} min  ({round(100*untraced/wall)}%)  "
-               f"no span open — not attributable from spans.jsonl")
-
-    # WAS THIS RUN STARVED? The rows above charge wall clock to WORK; this asks the complementary
-    # question — how much of the run had no evaluation running at all — and it is folded from the
-    # DURABLE log rather than from spans, so it answers on a run whose trace was cleared or never
-    # written. Printed here because an operator reading "where did the time go" is one line away
-    # from "and how much of it bought nothing".
-    #
-    # THE BOOTSTRAP IS SEPARATED AND THAT IS THE WHOLE POINT: answering this by hand three times in
-    # one day produced two wrong numbers the same way, by counting the stretch before the first
-    # build could possibly have finished as starvation. Measured across this box's two runs — v9
-    # 6.61 h dead of a 23.66 h span (28 %) in two windows, v10 0.00 h of 2.82 h — same engine, same
-    # eval_parallel=2, opposite outcomes, and the single all-run percentage could not tell them
-    # apart. `dead_share` is over the SPAN, never over the run.
-    if durable_events is not None:
-        # No `width` is passed: capping concurrency needs the run's SETTLED eval width, and this
-        # command deliberately does not fold state — the raw count is the honest answer, and a run
-        # showing more concurrent evals than it declared is itself worth seeing.
-        occ = eval_occupancy(durable_events)
-        if occ["span_seconds"] > 0:
-            typer.echo(f"\neval occupancy (from events.jsonl, not spans):")
-            typer.echo(f"  bootstrap  {minutes(occ['bootstrap_seconds']):>6} min  "
-                       f"before the first evaluation could start — not starvation")
-            typer.echo(f"  dead       {minutes(occ['dead_seconds']):>6} min  "
-                       f"({round(100*occ['dead_share'])}% of the {minutes(occ['span_seconds'])} min "
-                       f"since) with NO evaluation running")
-            for start, end in occ["dead_windows"]:
-                typer.echo(f"    idle {minutes(start):>6}-{minutes(end):<6} min "
-                           f"({minutes(end - start)} min)")
-            busy = ", ".join(f"{k}: {minutes(v)} min"
-                             for k, v in sorted(occ["concurrency"].items()))
-            typer.echo(f"  concurrent evaluations — {busy}")
-            if occ["open_intervals"]:
-                typer.echo(f"  {occ['open_intervals']} evaluation(s) still open at the last event — "
-                           f"counted busy to there, which is true of a live run and is the most a "
-                           f"killed one can prove")
+    echo_reconciliation(wall=wall, intervals=intervals, attributed=attributed,
+                       durable_events=durable_events)
 
 
 @app.command()
@@ -507,6 +473,19 @@ def inspect(run_dir: Path = typer.Argument(...)):
         all_events = store.read_all()
         state = fold(all_events)
         _print_result(state)
+        # WHAT THE RUN WAS DOING WHEN THE RECORD STOPPED — the evidence half of the `stop:` line
+        # `_print_result` just printed. It lives here rather than there because it needs the EVENTS,
+        # which `_print_result` is not given (and must not be: four suite tests monkeypatch it with a
+        # one-argument lambda, and a run/resume exit would pay a second full read of the log for a
+        # line that is only ever asked for post hoc).
+        #
+        # Printed for every disposition, not only the ones with no boundary: on a finished run it
+        # names the finalize tail, which is how a reader knows the line is live rather than absent.
+        # Both facts are read off rows that were already being written — no event was added, and
+        # nothing had to survive the process to make this sayable.
+        _evidence = last_record_line(all_events)
+        if _evidence:
+            typer.echo(f"stop evidence: {_evidence}")
         # WHAT THIS RUN'S LOG CAN AND CANNOT SAY ABOUT ITS TRUST SCANS. `looplab inspect` is where
         # someone goes to ask what a run actually did, and until the `trust_scan` receipt existed the
         # honest answer here was unobtainable: a clean scan wrote nothing, so silence covered
@@ -786,40 +765,6 @@ def landlock_check(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
 #
 # Read-only, no model, no fold of anything but `stage_finished`. A row from before this instrument
 # shipped carries neither field and is counted as UNKEYED rather than as evidence either way.
-def _stage_identity_rows(store) -> list:
-    """Every `stage_finished` row that carries a stage-identity record, oldest first."""
-    from looplab.runtime.stage_identity import (STAGE_INPUT_KEY, STAGE_KEY_REASON,
-                                                STAGE_OUTPUTS_KEY)
-    out: list = []
-    for ev in store.read_all():
-        if getattr(ev, "type", None) != "stage_finished":
-            continue
-        data = getattr(ev, "data", None) or {}
-        out.append({"node": data.get("node_id"), "name": data.get("name"),
-                    "status": data.get("status"), "seconds": float(data.get("seconds") or 0.0),
-                    "key": data.get(STAGE_INPUT_KEY), "key_reason": data.get(STAGE_KEY_REASON),
-                    "outputs": data.get(STAGE_OUTPUTS_KEY)})
-    return out
-
-
-def _output_fingerprint(outputs) -> Optional[str]:
-    """The `(path, digest)` set a completed stage recorded, as one comparable string, or None.
-
-    The PATH travels with the digest on purpose. Two stages that wrote identical bytes to different
-    declared paths did the same work and are duplication worth reporting; two that wrote different
-    bytes to the same path are not. Folding either into the other loses one of those facts, so the
-    fingerprint carries both and the report says which question it is answering.
-    """
-    if not isinstance(outputs, list) or not outputs:
-        return None
-    parts = []
-    for row in outputs:
-        if not isinstance(row, dict) or not row.get("bound"):
-            return None                       # an unbound output names nothing anybody may compare
-        parts.append(f"{row.get('path')}={row.get('digest_mode')}:{row.get('digest')}")
-    return "|".join(sorted(parts))
-
-
 @app.command(name="repair-candidates")
 def repair_candidates(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
                       show_nodes: bool = typer.Option(
@@ -893,7 +838,7 @@ def stage_dups(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
     """
     store = _require_run_dir(run_dir)
     _echo_log_integrity(store, run_dir)
-    rows = _stage_identity_rows(store)
+    rows = stage_identity_rows(store)
     if not rows:
         typer.echo("no stage rows in this run.")
         return
@@ -911,7 +856,7 @@ def stage_dups(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
     # 1. OBSERVED duplication — identical output identity, whatever anybody declared.
     by_fp: dict = {}
     for r in done:
-        fp = _output_fingerprint(r["outputs"])
+        fp = output_fingerprint(r["outputs"])
         if fp:
             by_fp.setdefault((r["name"], fp), []).append(r)
     dup_seconds = 0.0
@@ -942,7 +887,7 @@ def stage_dups(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
             continue
         hits += 1
         saved += r["seconds"]
-        a, b = _output_fingerprint(src["outputs"]), _output_fingerprint(r["outputs"])
+        a, b = output_fingerprint(src["outputs"]), output_fingerprint(r["outputs"])
         if a is None or b is None or a != b:
             wrong += 1
             typer.echo(f"  WRONG HIT: {r['name']} node {r['node']} would have reused node "

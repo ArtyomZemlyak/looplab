@@ -47,7 +47,8 @@ from tests._source_scan import iter_trees
 FULL = LoopOptions(max_turns=5, time_budget_s=60.0, context_budget_chars=1_000_000,
                    stuck_detection=True, stuck_repeat=4, stuck_alternate=4,
                    self_plan=True, plan_reinject_every=5, auto_summary=True,
-                   summary_client=None, emit_after=300, emit_force=500)
+                   summary_client=None, emit_after=300, emit_force=500,
+                   read_loop_nudge_after=25)
 
 
 def _tool_call(name: str, args: dict) -> dict:

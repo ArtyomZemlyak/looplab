@@ -84,6 +84,41 @@ SIGNALS: tuple[SignalRoute, ...] = (
         call_sites=(("looplab/events/replay.py", "n.triage_rationale ="),
                     ("looplab/events/digest.py", "triage_rationale"))),
     SignalRoute(
+        name="scored_eval_stderr",
+        produced_by="engine/evaluate.py _scored_output_evidence (the eval command's own stderr, "
+                    "bounded + redacted, on the node_evaluated terminal)",
+        folded_into="Node.stderr_tail",
+        # PULL and deliberately not `context`: the route above is the same §1 shape for a node that
+        # FAILED, and it rides the always-on digest because a 100-char triage verdict fits there.
+        # This one is up to 4,000 characters of the eval's own text on EVERY scored node, so putting
+        # it on the digest would spend the working-set budget that lists the search itself. The
+        # defect being closed is that the signal did not EXIST, not that it was not pushed.
+        channel="pull",
+        inject="looplab.tools.run_tools:RunTools._logs",
+        consumer="Researcher / Developer (read_logs)",
+        call_sites=(("looplab/events/replay.py", "n.stderr_tail ="),
+                    ("looplab/tools/run_tools.py", "n.stderr_tail"))),
+    SignalRoute(
+        name="scored_eval_reason",
+        produced_by="the eval itself, on the final JSON stdout line the metric is read from: a "
+                    "`no_<metric key>` object stating WHY there is no number "
+                    "(benchmarks/algotune/looplab_eval.py::_no_speedup)",
+        folded_into="Node.stdout_tail (the `no_<x>` block on its final metric line)",
+        # CONTEXT where its sibling above is PULL, and the split is the same cost rule stated there:
+        # `stderr_tail` is up to 4,000 characters of free text on every scored node, while THIS is a
+        # bounded extract of a STRUCTURED block — ~84 characters on the line, 600 on the pull — and
+        # only exists on a node whose eval declined to produce a number. That is the
+        # `triage_rationale` shape, and it rides the same surface for the same reason.
+        #
+        # The defect being closed here is NOT that the signal did not exist: it reached the durable
+        # record and `read_logs` rendered it. It was off the read path the loop actually walks —
+        # measured on `runs-B`, 0 of 61 `read_experiment` calls on an affected node returned it.
+        channel="context",
+        inject="looplab.events.digest:metric_account",
+        consumer="Researcher (experiments_digest + list_experiments + read_experiment)",
+        call_sites=(("looplab/events/digest.py", "metric_account(n, brief=True)"),
+                    ("looplab/tools/run_tools.py", "digest.metric_account(n)"))),
+    SignalRoute(
         name="foresight_calibration",
         produced_by="foresight_selected events + node outcomes",
         folded_into="RunState.foresight_selected",

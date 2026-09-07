@@ -1251,7 +1251,19 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
                                     "unclassified",
                                     "expect_failed", "check_failed", "diverged", "stalled",
-                                    "needs_failed", "not_learning", "check_false_positive")
+                                    "needs_failed", "not_learning", "check_false_positive",
+                                    "rules_violation")
+
+# The ONE reason that is not eligible for inline repair, and the criterion is
+# `tests/test_inline_repair_reason_coverage.py`'s own: a reason should end a node with no repair
+# attempted only when it is evidence the HYPOTHESIS is wrong. Every other member describes a run
+# that could have worked -- a crash, a missing dependency, a metric printed one directory over.
+# `rules_violation` describes a candidate the ARENA WILL NOT ACCEPT AT ALL (its own submission
+# validator refused it before scoring), so there is nothing for a repair to fix that would not be a
+# way AROUND the rule. It ends the node and the reason travels to whoever proposes the next idea.
+NON_REPAIRABLE_REASONS: tuple[str, ...] = ("rules_violation",)
+REPAIRABLE_REASONS: tuple[str, ...] = tuple(r for r in FAILURE_REASONS
+                                            if r not in NON_REPAIRABLE_REASONS)
 
 
 # THE REASONS THE ENGINE ITSELF MINTS ON A TERMINAL, as opposed to `FAILURE_REASONS` above, which
@@ -1411,11 +1423,19 @@ class Node(BaseModel):
     # digest can feed it to the NEXT proposal instead of dropping it (signal-delivery, §1).
     triage_rationale: str = ""
     stdout_tail: str = ""
+    # The eval command's OWN diagnostic channel on a node that SCORED — `res.stderr`, bounded and
+    # redacted by `engine/evaluate.py::_scored_output_evidence` (`_SCORED_EVIDENCE_CHARS`). It is the
+    # sibling of `error` on the failure terminal: a node that exited 0 and scored badly used to keep
+    # nothing but its metric and a 500-char stdout tail, so the loop could see WHAT a node scored and
+    # never WHY. Delivered by the `read_logs` pull tool (signal-delivery, §1).
+    # Additive/reader-defaulted: absent on every log written before 2026-08-22 -> "" -> unchanged
+    # fold. A RECORD only — no selection, feasibility, salvage or repair path reads it.
+    stderr_tail: str = ""
     # ASHA past-experiment curve (#7): a bounded per-RUNG `[[rung, metric], ...]` (canonical geometric
     # rungs — powers of two — via asha_monitor._resource_rung) mined from the eval's CAPTURED stdout (the
-    # ~64 KB run tail — far larger than the 500-char `stdout_tail`, though for a very verbose or
+    # ~64 KB run tail — far larger than the 4,000-char `stdout_tail`, though for a very verbose or
     # multi-stage job not the literal full stream) at node_evaluated, set only when the task declares a
-    # stdout_json `resource_key`. The 500-char `stdout_tail` retains only the FINAL epochs, so a live node
+    # stdout_json `resource_key`. The 4,000-char `stdout_tail` retains only the FINAL epochs, so a live node
     # stopped earlier finds no comparable peers there; this durable curve lets the ASHA watchdog compare a
     # fresh sample against past experiments at the SAME rung across the WHOLE run (the shared rung
     # schedule is what makes a mid-run comparison land). Additive/reader-defaulted (None on old logs).
@@ -2086,6 +2106,19 @@ class RunState(BaseModel):
     # n_labels} — the labels themselves NEVER enter the event log. Audit/UI only.
     host_grading: Optional[dict] = None
     stop_reason: Optional[str] = None     # why the run finished (budget/leakage/done)
+    # The COARSE reason above with its own sentence beside it, folded from `run_finished.error`.
+    #
+    # Same shape and same argument as `pause_reason` below: durable text the fold was discarding.
+    # Measured over `/var/tmp/looplab-bench/runs-B`, ALL TWELVE runs that DID finish fold to
+    # `stop_reason="error"` — which reads as a crash, and none of them crashed. Every one stopped on
+    # the operator's own spend ceiling, and the `run_finished` row said so in a full sentence naming
+    # the amount, the setting and the remedy. A reader given only "error" is worse off than one given
+    # nothing: `finished=False` at least prompts a question, while `reason=error` answers it wrongly.
+    #
+    # A RECORD, never a decision input. The one predicate that branches on how a run finished —
+    # `cli/run_cmds.py::classify_prior_run`'s `stop_reason == "error"` pending-finalize rung — reads
+    # the COARSE field, and must keep reading it: the class is the engine's, the sentence is prose.
+    stop_detail: Optional[str] = None
     confirmed_done: bool = False          # the multi-seed confirmation phase completed (I12)
     # P0-2 search epoch: bumped when a FINISHED run is reopened (resume/run_reopened). The nodes
     # added after a reopen are a fresh candidate set, so the prior confirmation/approval COMPLETION
@@ -2272,6 +2305,19 @@ class RunState(BaseModel):
     pause_node_id: Optional[int] = None         # scoped auto-pause owner (None = explicit operator pause)
     pause_generation: Optional[int] = None
     pause_event_seq: Optional[int] = Field(default=None, exclude=True)
+    # WHY the run is paused, in the pausing writer's own words, folded from `pause.reason`.
+    #
+    # A RECORD, never a decision input: nothing branches on this string. The two things that DO branch
+    # — `cli/run_cmds.py::classify_prior_run` and the loop's own break — read `paused`, which is a fact
+    # the fold owns out of band. It is folded because the reason was ALREADY durable and the fold threw
+    # it away: measured over `/var/tmp/looplab-bench/runs-B` (20 real runs), 5 of the 8 that ended with
+    # no `run_finished` had written a `pause` carrying a full sentence naming both the cause and the
+    # remedy, and no reader could reach one word of it — `looplab inspect` printed `finished=False` and
+    # stopped there, which is why one of those five cost hours to investigate.
+    #
+    # Meaningful ONLY while `paused` is True — the same lifetime as `pause_node_id`/`pause_generation`
+    # above, and cleared beside them at every site that lifts a pause.
+    pause_reason: Optional[str] = None
     stop_requested: Optional[str] = None       # `run_abort`: reason; loop -> run_finished + break
     # Seq of the latest finalize intent. A request newer than the accepted finish still needs a new
     # finish/finalization boundary; an older one was already consumed by that finish.

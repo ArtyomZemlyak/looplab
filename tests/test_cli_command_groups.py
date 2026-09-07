@@ -171,27 +171,29 @@ def test_each_group_docstring_says_what_it_mutates():
 def test_no_group_is_a_god_module_again():
     """The finding's own measure. Not a style rule — 1701 lines is how three domains hid in one.
 
-    The named extraction was DONE on 2026-09-07 rather than the cap raised again: `looplab
-    edit-types` (doc 52 row 31) spent the last of the headroom at 1335 lines, so the rendering half
-    this docstring had already named — the shared span vocabulary, `echo_section`,
-    `echo_containments` and the per-card / per-build tables — moved to `looplab/cli/run_report.py`,
-    which took the module back to 1200. The cap stays 1250: the next diagnostic pays the same
-    price, and the extraction to do when THAT is spent is `timings`' own reconciliation block.
+    `inspect_cmds` gets its OWN cap and the other groups keep 1100 — master's shape, kept, because
+    this branch's single global `< 1163` bought every other group 63 lines of slack it had not
+    argued for. The NUMBER is master's 1250 re-derived against the merged file rather than carried:
+    both sides raised it on their own copy (this branch 1100 -> 1163 against a 1162-line file,
+    master 1100 -> 1250 against a 1197-line one), so neither literal was measured on the tree it
+    now guards.
 
-    `inspect_cmds` gets its own cap, raised 1100 -> 1250 on 2026-08-29, the same discipline as
-    `agents/factory.py`'s argued 520 -> 530 (see `test_agent_factory_split.py`): the crossing was
-    `looplab tokens` growing its per-card and per-build tables in-domain (1f49adfb 1053 -> 1124,
-    ad374925 -> 1148 — this guard was RED on master for a day, which is the drift it exists to
-    catch), then ec60fed2's `occupancy` command and the 2026-08-29 review annotations (-> 1197).
-    That is run diagnostics doing its job, not a second domain moving in. But three data-heavy
-    commands landed in ONE week, so the headroom is deliberately one small command wide and the
-    extraction to do when it is spent is named: the `tokens` command's rendering half (the
-    per-card / per-build table echoes) is a coherent unit that can move beside
-    `events/token_spend.py`'s pure folds into a cli-side helper module — holding the number
-    instead would incentivise deleting the why-comments to fit, the exact trade the factory raise
-    refused.
+    HOW IT GOT HERE, both halves being real work in-domain: `looplab tokens` grew its per-card and
+    per-build tables (1f49adfb 1053 -> 1124, ad374925 -> 1148 — this guard was RED on master for a
+    day, which is the drift it exists to catch), then ec60fed2's `occupancy` command and the
+    2026-08-29 review annotations took master to 1197; this branch's own additions bring the merged
+    file to 1224. That is run diagnostics doing its job, not a second domain moving in.
+
+    THE MERGE OVERRAN IT AND THE ANSWER WAS THE EXTRACTION, not a fourth raise. The merged file
+    measured 1237 against a cap of 1225, and the paragraph this one replaces had already named the
+    unit to move: the `tokens` command's rendering half — the per-card and per-build table echoes —
+    is now `cli/token_report.py::echo_card_and_build_tables`, beside `events/token_spend.py`'s pure
+    folds it renders. That took the file to 1183 and the cap DOWN to 1200 rather than up. Banking
+    the slack instead would have been a cap that stopped being consulted, the exact trade
+    `test_agent_factory_split.py` refuses next door — and the cap coming down with the extraction is
+    what keeps the next overrun a real question rather than a formality.
     """
-    caps = {"inspect_cmds": 1250}
+    caps = {"inspect_cmds": 1200}
     for module_name in GROUPS:
         lines = len((_CLI / f"{module_name}.py").read_text(encoding="utf-8").splitlines())
         assert lines < caps.get(module_name, 1100), f"{module_name} is back to {lines} lines"

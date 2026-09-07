@@ -18,7 +18,9 @@ from typing import Optional
 
 from looplab.agents.roles import DeveloperResult, developer_call_lock
 from looplab.core.llm_broker import in_llm_lane
-from looplab.core.models import Idea, RunState, normalize_researcher_footprint, is_developer_error
+from looplab.core.models import (Idea, NodeStatus, RunState, normalize_researcher_footprint,
+                                 is_developer_error, is_developer_stuck)
+from looplab.engine.costs import find_cost_accountants
 from looplab.events.types import EV_AGENT_DECISION, EV_NODE_CREATED, EV_NODE_FAILED, EV_PAUSE
 from looplab.search.operators import merge_idea
 
@@ -75,6 +77,36 @@ def developer_crash_records(node_id: int, generation: int, code: str, pause_reas
     return records
 
 
+def developer_crash_rank(state: RunState, node_id: int) -> int:
+    """This crash's 1-based position among the run's Developer-crash terminals, in log order.
+
+    THE COUNT IS THE LOG'S, NOT A PROCESS COUNTER'S. `Settings.developer_crash_pause_after` bounds
+    what a RUN has spent on dead Developer sessions, and a run outlives its process: a counter on
+    the engine restarts at zero on every `resume`, and — worse — the recovery sweep
+    (`speculation.py::_close_developer_sentinel_once`) runs every turn and reads the log to find a
+    crash terminal that owns no pause. Under any threshold above one, a below-threshold crash is
+    EXACTLY that shape by design, so the sweep and the live decision have to agree on which crashes
+    owe a pause, and the only record both can read is the terminal's own position in the log.
+
+    Rank of a node that already carries its `developer_crash` terminal is `1 + the number of such
+    terminals before it`; for a node whose terminal is NOT in `state` yet (the callers that decide
+    BEFORE appending — the speculation lane's tail-CAS plan and the recovery sweep's pending branch)
+    it is the rank the terminal WOULD take if appended now. A node reset out of its crash (its
+    current lifecycle is no longer a `developer_crash` terminal) no longer counts, which is the
+    right reading: the operator already dealt with that one.
+    """
+    crashes = [
+        node for node in state.nodes.values()
+        if node.status is NodeStatus.failed
+        and node.error_reason == "developer_crash"
+        and type(node.terminal_event_seq) is int
+    ]
+    own = next((node for node in crashes if node.id == node_id), None)
+    if own is None:
+        return len(crashes) + 1
+    return 1 + sum(1 for node in crashes if node.terminal_event_seq < own.terminal_event_seq)
+
+
 # Sentinel for `_emit_node_created`'s optional payload keys (moved with its only user):
 # distinguishes "key not passed" (the key is OMITTED from the event, matching each call site's
 # historical payload shape) from a REAL value, including None (e.g. `research_origin=None`
@@ -98,6 +130,58 @@ def accepts_co_parents(fn) -> bool:
 class NodeBuildMixin:
     """The engine's node-building helper cluster. See the module docstring for the mixin
     convention (`self` is the Engine)."""
+
+    def _developer_crash_pause_due(self, state: RunState, node_id: int) -> bool:
+        """Does THIS Developer crash trip the run-level circuit breaker?
+
+        `developer_crash_pause_after` (default 1 = the historical "pause on the FIRST crash", byte
+        for byte) against `developer_crash_rank`. The node's `node_failed` terminal is owed either
+        way and is not this method's business; only the `pause` beside it is conditional, and HOW
+        that pause is appended stays each site's own (queued from a worker, tail-CAS'd on the
+        speculation lane, sequential on the serial paths — see `developer_crash_records`).
+
+        `getattr` with the historical default because ~170 tests build the engine through `__new__`
+        without `__init__`; a junk or sub-1 value settles to 1 rather than to "never pause".
+        """
+        raw = getattr(self, "developer_crash_pause_after", 1)
+        try:
+            threshold = int(raw)
+        except (TypeError, ValueError):
+            threshold = 1
+        if isinstance(raw, bool) or threshold < 1:
+            threshold = 1
+        return developer_crash_rank(state, node_id) >= threshold
+
+    def _refuse_node_open_below_floor(self, what: str) -> None:
+        """The node-OPEN gate under the spend ceiling: `CostAccountant.require_headroom` for every
+        accountant this engine's roles meter on, with `node_open_budget_floor_usd`.
+
+        MAIN TASK ONLY, at the decision to open a unit of paid work — the serial create loop, the
+        head of a parallel-build chunk, the Card lane's staging pass and `_request_card_build`'s
+        election — and deliberately NOT inside `_create_node`: under the `llm_parallel` fan-out
+        that method runs in an `anyio.to_thread` WORKER, and a `BudgetExceeded` raised there is
+        swallowed by `_create_node_guarded` into one node's terminal instead of ending the run. Nor
+        in an eval child, where the same raise cancels sibling terminals (the `_DeferredBudgetStop`
+        docstring's open item). Raised on the main task it is exactly the ceiling's own path:
+        `Engine.run` drains the in-flight evaluation and re-raises, the CLI records
+        `budget_exhausted`.
+
+        Every reachable accountant rather than "the" accountant: `run_cost_accountant` makes them
+        one per `Settings`, but a test double or a hand-built role may carry its own, and a floor
+        asked of a subset is the split ceiling `run_cost_accountant`'s docstring measured. Inert
+        when the floor is 0/junk (the library default) or no accountant has a limit.
+        """
+        raw = getattr(self, "node_open_budget_floor_usd", 0.0)
+        try:
+            floor = float(raw)
+        except (TypeError, ValueError):
+            return
+        if isinstance(raw, bool) or not floor > 0.0:
+            return
+        for accountant in find_cost_accountants(self):
+            check = getattr(accountant, "require_headroom", None)
+            if callable(check):
+                check(floor, what)
 
     def _ensemble_idea(self, parents) -> Idea:
         """A0b: an ensembling/recombination merge — instruct the Developer to combine the parents'
@@ -286,7 +370,12 @@ class NodeBuildMixin:
         is read as before — the shape the suite's direct callers and older wrappers still use.
         """
         proposed = normalize_researcher_footprint(getattr(idea, "footprint", None))
-        if proposed is None or is_developer_error(code):
+        # BOTH SENTINELS. A footprint finalized from a build that produced no code is a claim about
+        # resources nothing will use. `empty_build_refusal` moved to the `stuck` spelling on
+        # 2026-08-28 and this reader kept testing only the crash one -- found by the cross-module
+        # invariant in `tests/test_empty_build_is_stuck_not_a_crash.py`, not by hand, after the same
+        # omission in `engine/speculation.py` had already cost dsFix1 a node.
+        if proposed is None or is_developer_error(code) or is_developer_stuck(code):
             return idea, False
         finalized = normalize_researcher_footprint(
             getattr(developer, "last_footprint", None) if footprint is _OMIT else footprint

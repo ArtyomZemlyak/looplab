@@ -1155,7 +1155,7 @@ The guide had reached 260,266 bytes by the time the budget landed (the rows the 
 `tests/test_documentation_contracts.py::CLAUDE_MD_MAX_BYTES` (100,000) refuses a guide over the
 budget; `CLAUDE.md` keeps the one-line rule per module, the seven invariants and the conventions
 (about 46 KB), and every package-map row, the full invariant account and the full convention
-bullets were archived verbatim, one section per row, in `docs/53-agent-guide-narratives-2026-09-06.md`,
+bullets were archived verbatim, one section per row, in `docs/64-agent-guide-narratives-2026-09-06.md`,
 which a second guard pins to still cover every row the guide keeps. Deleted per the index rule.*
 
 *Closed 2026-09-06 (doc 52 row 25 shipped): the marker `http-surface-has-no-generated-reference`

@@ -24,6 +24,7 @@ from typing import NamedTuple, Optional
 
 import anyio
 
+from looplab.core.errors import budget_stop_leaf
 from looplab.core.llm import BudgetExceeded, model_override
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
@@ -86,6 +87,7 @@ from looplab.engine.finalize import (
     finalize_run,
     finalize_scope_quiescent,
     incomplete_finalize_scope,
+    is_guarded_abort,
     mark_finish_report_complete,
     scoped_finish_report,
 )
@@ -111,7 +113,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS,  # noqa: F401
                                    _rule_triage, _shallow_fingerprint)
 from looplab.core.models import (
     Idea, Node, NodeStatus, RunState, durable_idea_payload, effective_card_footprint,
-    is_developer_error, is_error_stop)
+    is_developer_error, is_developer_stuck)
 from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefusal
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
@@ -197,12 +199,97 @@ class SettledWidthPinError(RunStartPinError):
     """A resume explicitly spells a concurrency width other than the one ``run_started`` pinned."""
 
 
+class _DeferredBudgetStop:
+    """A task-group facade that DEFERS a background task's `BudgetExceeded` instead of letting it
+    cancel that group's siblings -- used by `_dispatch_evals` for exactly one caller,
+    `_spawn_research`.
+
+    THE DEFECT IT CLOSES is the one `Engine._drain_inflight_evaluation` documents from the campaign
+    artefacts, seen on the OTHER dispatch path.  Under Card speculation the evaluation lives in the
+    run-scoped `eval_tg`, so the ceiling reaches it only at `Engine.run` and a drain there is enough.
+    Under `_dispatch_evals` (speculation off -- a supported configuration) the evaluation is awaited
+    INSIDE the same `bg_tg` the overlapped research runs in, so a research task that raises cancels
+    the evaluation directly, at the first checkpoint after its shielded worker thread returns: the
+    score is on disk and its `node_evaluated` is never written.  Same loss, one frame lower.
+
+    IT DOES NOT WEAKEN THE STOP, and the three things that make that true are all outside this
+    class.  (a) `_dispatch_evals` re-raises the captured exception the instant its evaluations have
+    joined -- unconditionally, unwrapped, with its own message, so the CLI still records
+    `run_finished {"reason": "budget_exhausted"}`.  (b) Both admission loops test the sink BEFORE
+    starting another evaluation, so a deferred stop starts no new work; it only finishes work
+    already paid for.  (c) Nothing in the drain window can spend anyway: `CostAccountant.add` is
+    already over the ceiling, so the very next priced call raises again.
+
+    Only `start_soon` is intercepted.  Everything else -- `cancel_scope` above all, which
+    `_dispatch_evals`'s `finally` uses to stop the repeating research loop -- is the real group's.
+
+    OPEN[eval-raised-ceiling-still-cancels-sibling-terminals] this facade covers RESEARCH only; a
+    `BudgetExceeded` raised from inside an EVALUATION (the repair path re-raises it; stage checks
+    and triage are paid calls) still cancels its sibling evals' terminals on both dispatch paths.
+    proof:absent:accountant_over_ceiling@looplab/engine/orchestrator.py
+    REVIEW 2026-08-30 (money): under Card mode that raise comes from an `eval_tg` CHILD -- the
+    group cancels `_run_with_llm_broker`, the outer handler catches the Cancelled (whose
+    `budget_stop_leaf` is None), the drain no-ops, and siblings mid-score lose their terminals:
+    the five-runs-measured loss, one seam over. Clause (c) above is true and is also the
+    mechanism -- a repeat-research capture leaves the run pinned over ceiling for hours of eval,
+    so the NEXT paid call inside any eval raises. Teach the drain hook to fire when evals are in
+    flight and the accountant is over ceiling (a fact it already holds out of band), instead of
+    keying only on the escaping exception's leaf; and let `_evaluate` land its terminal before
+    propagating a ceiling raised by its own post-score bookkeeping. Two lesser hardenings: this
+    `start_soon` drops anyio's `name=` kwarg, and `tg.start()` passes through uncaptured, so a
+    future `_spawn_research` using it silently reintroduces the defect.
+    """
+
+    __slots__ = ("_tg", "_sink")
+
+    def __init__(self, tg, sink: list):
+        self._tg = tg
+        self._sink = sink
+
+    def start_soon(self, func, *args) -> None:
+        sink = self._sink
+
+        async def _capture() -> None:
+            try:
+                await func(*args)
+            except BudgetExceeded as exc:
+                sink.append(exc)         # re-raised by `_dispatch_evals` once the evals have joined
+
+        self._tg.start_soon(_capture)
+
+    def __getattr__(self, name):
+        return getattr(self._tg, name)
+
+
 # Bounded aging for continuous eval dispatch (`_dispatch_evals`). After this many consecutive
 # bypasses the queue head gets exclusive claim on GPU releases, so a wide request stops losing every
 # partial release to the small jobs behind it. The claim ends the moment the head is admitted, or —
 # see the scan — when the pool has fully drained and the head STILL does not fit, which proves it
 # wants more than the box physically has and must not be allowed to wedge the batch.
 _HEAD_BYPASS_LIMIT = 3
+
+
+def budget_stop_recheck(budget_stop: list) -> bool:
+    """Did the spend ceiling fire while the SERIAL dispatcher was waiting for resources?
+
+    `_dispatch_evals`' serial branch tests its deferred-stop sink at the top of the queue loop and
+    nowhere else, and the resource wait below that test can last HOURS: the host GPU-pool lease
+    waits on every co-hosted run (CLAUDE.md: "potentially for hours"), re-folding every 0.5 s and
+    re-checking the LIFECYCLE gates — never the ceiling. A `BudgetExceeded` the overlapped research
+    captured during that wait was therefore never consulted, and one more evaluation was admitted
+    and STARTED on a run that was already over (docs/57 `serial-dispatch-admits-one-eval-past-the-
+    ceiling`): GPU burnt for nothing, and its first paid call then raised the ceiling from INSIDE
+    the eval, the terminal-losing shape the drain does not cover. The parallel branch gates at its
+    refill point for exactly this reason; this is that gate for the serial wait, asked at the two
+    instants a captured stop can first be seen — the head of each wait tick, and the moment a
+    reservation comes back — because the sink is appended by a task on the same event loop, so it
+    can only move across an `await`.
+
+    A named predicate rather than an inline `if budget_stop:` so the rule has a home a test can
+    point at; the dispatch test could not see the window before, because its host had no
+    `_wait_reserve_node_resources` and the `hasattr` skipped the whole wait.
+    """
+    return bool(budget_stop)
 
 
 
@@ -748,6 +835,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # STORED RAW: 0 is OFF here (every other interval knob reads 0 that way too), so a clamp
         # would turn "never stop the run for me" into "stop after one failure".
         self.systemic_failure_stop = _opt("systemic_failure_stop")
+        # STORED RAW as well; `_developer_crash_pause_due` settles a junk value to the historical 1.
+        self.developer_crash_pause_after = _opt("developer_crash_pause_after")
+        # The node-OPEN floor under the spend ceiling (`_refuse_node_open_below_floor`). Raw: 0 and
+        # junk both read as OFF there, and a positive value is only ever compared, never clamped.
+        self.node_open_budget_floor_usd = _opt("node_open_budget_floor_usd")
         self.deep_researcher = deep_researcher
         # STORED RAW, deliberately — this was `max(0, deep_research_every)` until 2026-08-07, and
         # under the new spelling that clamp is exactly backwards: `0` now means "start immediately"
@@ -1284,6 +1376,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                  lifecycle_fence=True),
                              run_id=self.run_dir.name,
                              capture_llm_io=self._trace_llm_io)
+        # Who ends that lifetime. False => `Engine.run`'s own `finally`, which is right whenever the
+        # coroutine returning IS the end of the run. A caller that still traces afterwards -- the
+        # CLI's guarded-abort handler, which buys the finish report AFTER `run()` has raised -- calls
+        # `defer_trace_retirement()` and owns `retire_tracer()` instead.
+        self._trace_retirement_deferred = False
         # Last exporter-health snapshot PUBLISHED (not merely observed): the row is a state
         # change, so an exporter that stays broken is recorded once, not once per loop turn.
         self._trace_export_health_seen: tuple = ()
@@ -1685,6 +1782,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         self._eval_task_group = eval_tg
                         try:
                             return await self._run_with_llm_broker()
+                        except BaseException as escaping:
+                            # THE CEILING MUST NOT DISCARD WORK IT HAS ALREADY PAID FOR.  See
+                            # `_drain_inflight_evaluation` for the measurement and the whole
+                            # argument; the raise below is unconditional, so the hard stop is
+                            # unchanged in class, message and timing-relative-to-finalization.
+                            await self._drain_inflight_evaluation(escaping)
+                            raise
                         finally:
                             self._eval_task_group = None
                 except BaseExceptionGroup as group:
@@ -1699,24 +1803,123 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     raise _sole_task_group_error(group) from None
         finally:
             # The raising exits' half of the run-loop exit receipt (see `_record_run_loop_exit`):
-            # a no-op when the fall-through already recorded it or the loop was never entered.
+            # a no-op when the fall-through already recorded it or the loop was never entered. It runs
+            # BEFORE the exporter is retired, so the receipt still reaches an open trace.
             self._record_run_loop_exit()
-            # Engine.run owns exactly one exporter lifetime. Always make its final barrier terminal:
-            # a background span that closes after return must be rejected rather than append behind
-            # reset/clear. Shutdown drains accepted work and, on its bounded timeout, atomically
-            # abandons anything that has not crossed the lifecycle writer fence. Python still cannot
-            # interrupt an in-progress filesystem call; a crossed writer keeps the fence until done.
-            _trace_shutdown = getattr(getattr(self, "tracer", None), "shutdown", None)
-            if callable(_trace_shutdown):
-                try:
-                    _stopped = bool(_trace_shutdown(
-                        timeout_millis=TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS))
-                except Exception:  # noqa: BLE001 - never mask cancellation/domain failure in finally
-                    _stopped = False
-                if not _stopped:
-                    _LOG.warning(
-                        "trace exporter did not stop before lifecycle release; pending rows were "
-                        "abandoned behind the trace-writer fence")
+            # ONE exporter lifetime per run, and it must end before the lifecycle lock may be
+            # released: a background span that closes after that point would append behind a
+            # reset/clear instead of being rejected.  `retire_tracer` is that terminal barrier.
+            #
+            # It is DEFERRED when the caller will still trace after this coroutine returns
+            # (`defer_trace_retirement`).  `cli/run_cmds.py::_run_engine_guarded` is exactly that
+            # caller: its outer handler writes the terminal AND buys the finish report, several
+            # frames above this `finally`.  See `defer_trace_retirement` for the measurement.
+            # BOTH lookups are defensive, and the second is not paranoia: `Engine.run` is borrowed
+            # by host stubs that are not Engines at all -- `_RunHost` in
+            # `tests/test_budget_ceiling_drains_the_inflight_eval.py` -- and by
+            # `Engine.__new__(Engine)` probes that never ran `__init__`.
+            # The code this replaced was defensive for exactly that reason
+            # (`getattr(getattr(self, "tracer", None), "shutdown", None)`); moving the guard inside
+            # `retire_tracer` left the METHOD lookup itself unguarded, and those three drain tests
+            # caught it. `hasattr` rather than a local alias, so the call site keeps the literal the
+            # source pin in `tests/test_async_trace_exporter.py` reads.
+            if not getattr(self, "_trace_retirement_deferred", False) \
+                    and hasattr(self, "retire_tracer"):
+                self.retire_tracer()
+
+    def defer_trace_retirement(self) -> None:
+        """Hand this run's exporter lifetime to the caller, which MUST call `retire_tracer`.
+
+        THE DEFECT, measured on the 2026-08-24 campaign (docs/53 §2c). Fifteen `report_generated`
+        rows across the 30-run corpus (eleven of them under `runs-B`) carry a `span_id` whose span
+        is in NO artifact -- not `spans.jsonl`, not `.spans-append.jsonl`, not `trace.json` -- and
+        no `looplab.exporter.loss` receipt anywhere names the loss. The corpus splits cleanly: every
+        one of them is the `trigger="finish"` report of a run that ended on the spend ceiling, and
+        every run that ended otherwise kept its report span.
+
+        THE CAUSE, and it is NOT "a span vanished between close and flush" as the item was filed.
+        The span never reached the exporter's queue at all. A ceiling hit escapes `Engine.run`, so
+        this `finally` retires the exporter; the CLI's guarded handler THEN opens
+        `tracer.span("report")` on the way to `run_finished`. `AsyncJsonlSpanExporter.export`
+        refuses a post-shutdown row and records the drop with `durable=False` -- deliberately, so a
+        terminal exporter cannot be resurrected as a receipt writer behind a trace reset. Refusing
+        AND leaving no receipt is right for a straggler from a background thread; it is wrong for
+        the run's own terminal report, which is synchronous, on the main thread, and still inside
+        the engine lock.
+
+        SO THE LIFETIME MOVES, NOT THE FENCE. The owner that writes the terminal owns the trace, and
+        it still retires it inside the same lock scope `Engine.run` held. Nothing about the barrier,
+        the abandon-on-timeout or the writer guard changes; a span that closes after the OWNER is
+        done is refused exactly as before.
+        """
+        self._trace_retirement_deferred = True
+
+    def retire_tracer(self) -> None:
+        """Make the exporter's final barrier terminal. Idempotent: `shutdown` is one-shot.
+
+        Drains accepted work and, on its bounded timeout, atomically abandons anything that has not
+        crossed the lifecycle writer fence. Python still cannot interrupt an in-progress filesystem
+        call; a crossed writer keeps the fence until it is done.
+        """
+        _trace_shutdown = getattr(getattr(self, "tracer", None), "shutdown", None)
+        if not callable(_trace_shutdown):
+            return
+        try:
+            _stopped = bool(_trace_shutdown(
+                timeout_millis=TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS))
+        except Exception:  # noqa: BLE001 - never mask cancellation/domain failure in finally
+            _stopped = False
+        if not _stopped:
+            _LOG.warning(
+                "trace exporter did not stop before lifecycle release; pending rows were "
+                "abandoned behind the trace-writer fence")
+
+    async def _drain_inflight_evaluation(self, escaping: BaseException) -> None:
+        """Let an evaluation that is ALREADY BURNING land its terminal before the spend ceiling
+        tears the run-scoped eval task group down.  No-op for every other failure.
+
+        THE DEFECT, measured on the 2026-08-24 campaign (`runs-B`).  Five of the twenty task-arms
+        finished with one more `score.log` on disk than they had `node_evaluated` events:
+        `integer_factorization` 4 node dirs / 4 score.logs / **3** events (the lost score was
+        4.0958), `spectral_clustering` 2/2/**1**, `max_clique_cpsat` 7/7/**6**,
+        `min_dominating_set` 3/3/**2** (1.0804), `multi_dim_knapsack` 5/5/**4** (2.8004, against a
+        champion of 2.8586 -- the closest call in the corpus).  The event tails are identical in all
+        five: `node_eval_started` -> `workspace_seeded` -> `research_attempted` -> ONE research
+        `llm_usage` -> a long gap while the evaluation runs -> the ceiling.  The evaluation FINISHED
+        and wrote its score to disk; the loop never saw a result it had already paid for.
+
+        THE MECHANISM.  `_spawn_research`'s task raises `BudgetExceeded` out of the CardSession's
+        `bg_task_group`, so it reaches `Engine.run` while the evaluation -- which lives in the
+        RUN-scoped `eval_tg`, a strictly outer group -- is still in its worker thread.  That thread
+        hop is `abandon_on_cancel=False`, i.e. shielded, so the eval is not abandoned: it runs to
+        completion and writes `score.log`.  The cancellation is delivered at the NEXT checkpoint,
+        which is inside `engine/evaluate.py` between the eval returning and its single
+        `EV_NODE_EVALUATED` append.  Nothing was saved by cancelling -- the compute was already
+        spent -- and the one durable record of it was lost.
+
+        THE FIX IS THE ORDERING, NOT THE STOP.  Draining here happens BEFORE `async with eval_tg`
+        exits, which is the only instant at which the children are neither cancelled nor already
+        gone.  `Engine.run`'s `raise` is unconditional and untouched, so the run still stops with
+        the same exception, the same message and the same `run_finished
+        {"reason": "budget_exhausted"}`; `finalize_run` then computes its champion and its budget
+        summary over a log that includes the node instead of one that silently omits it.
+
+        WHY THIS COSTS NOTHING IT SHOULD NOT.  The drain starts NO new work: `_drain_adopted_evals`
+        is a poll over `_eval_inflight`, the sessions have already returned, and no LLM call is
+        reachable from it -- so the ceiling cannot be crossed by a further dollar while it waits.
+        The wait is bounded by the evaluation the run had already committed to, which is the same
+        barrier the clean finish at `_run_with_llm_broker`'s exit and the abort gate at
+        `_settle_terminal_gate` both already pay, for the same stated reason (the run is ending,
+        there is no GPU left to idle).  Deliberately NOT shielded: an operator Ctrl-C is a real
+        cancellation and must still cut the wait short, and if this task is somehow entered with a
+        cancellation already pending the first `anyio.sleep` re-raises it and we fall through to
+        `raise` -- i.e. exactly today's behaviour, never worse.
+        """
+        if budget_stop_leaf(escaping) is None:
+            return                            # an ordinary crash keeps today's teardown, untouched
+        if not self._evals_inflight():
+            return                            # nothing paid for is in flight -- no barrier to pay
+        await self._drain_adopted_evals()
 
     def _enter_run(self) -> bool:
         """Authorize re-entry, recover, ACK and set up: everything before the first loop turn.
@@ -1844,11 +2047,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 continue
             # Terminal/operator gates precede ALL work, including reset rebuilds. An explicit pause
             # must freeze a queued rerun; a scoped developer-crash pause must stop a stale reset batch.
-            # A prior invocation guard may have appended run_finished(error) after a durable abort.
-            # That is a retryable failed wrap-up, not the abort's terminal result; republish the
-            # stable abort scope and let scoped finalization deduplicate every completed side effect.
+            # A prior invocation guard may have appended a guarded-abort run_finished (`error`, or
+            # the ceiling's `budget_exhausted`) after a durable abort. That is a retryable failed
+            # wrap-up, not the abort's terminal result; republish the stable abort scope and let
+            # scoped finalization deduplicate every completed side effect. `is_guarded_abort` and
+            # never the literal: the ceiling is the ORDINARY terminal of a budgeted campaign, and a
+            # literal `"error"` here made it read as a clean finish nothing needed to retry.
             if (state.finished and state.stop_requested
-                    and is_error_stop(state.stop_reason)):
+                    and is_guarded_abort(state.stop_reason)):
                 abort = next(
                     (event for event in reversed(decision_events)
                      if event.type == EV_RUN_ABORT),
@@ -2326,8 +2532,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         the board has nothing selectable" is already derivable — the live half from
         `Engine._eval_inflight`, the durable half from the folded board — and a row saying so would
         be a new writer for a fact nobody has to be told. A FOLDED row would move
-        `_proposal_authority_seq` and discard paid proposals; a DIAGNOSTIC row is excluded from that
-        fence today, but it would still be an append per poll turn for the whole of a multi-hour
+        `_proposal_authority_seq` (which since 2026-08-20 costs a `_reserve_node_build` CAS retry, no
+        longer a paid proposal) and the node-slot ceiling nothing; a DIAGNOSTIC row is excluded from
+        that fence today, but it would still be an append per poll turn for the whole of a multi-hour
         evaluation, i.e. an unbounded log written to record that nothing happened. The condition is
         also its own idempotence (see `occupancy_due`), so there is nothing for a receipt to fence.
         """
@@ -2687,6 +2894,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # was selected with that Node hidden, and the claim must revalidate the SAME question or
             # it retires the Card as unclaimable. Empty whenever nothing is in flight, which is every
             # ordinary create turn — that path is byte-identical.
+            # The node-OPEN floor, asked BEFORE the claim mints durable reservations: a refusal
+            # here leaves nothing reserved and nothing owed (`_refuse_node_open_below_floor`).
+            self._refuse_node_open_below_floor(f"a Card lane of {len(creates)} node(s)")
             _card_reservations = self._claim_existing_card_builds(
                 creates, ignored_pending_node_ids=self._running_eval_node_ids())
             if _card_reservations is None:
@@ -2727,6 +2937,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # (the serial path gets this for free — each node lands before the next proposes).
                 if _i:
                     state = fold(self.store.read_all())
+                # MAIN TASK, before the paid batch proposal and before any reservation: the
+                # node-OPEN floor for this whole chunk (`_refuse_node_open_below_floor`).
+                self._refuse_node_open_below_floor(f"a build chunk of {len(_chunk)} node(s)")
                 # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned
                 # 1:1 with _ideas), so each build emits ITS OWN
                 # hypothesis_ranked/foresight_selected.
@@ -2851,6 +3064,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         )
                     raise
             else:
+                # One node per iteration on this path, so the floor is asked per node — the
+                # decision `Settings.node_open_budget_floor_usd` is about, on the main task.
+                self._refuse_node_open_below_floor(f"a new {a.get('kind')} node")
                 # sequential -> deterministic ids/proposals; OFF the loop thread since 2026-09-06
                 await self._offload_node_build(a)
             if self._create_paused:
@@ -4037,11 +4253,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._repin_settled_widths(_entry)
         self._require_pinned_speculation_receipt(_entry)
         self._pending_finalize_scope = incomplete_finalize_scope(_events)
-        # A failed finalize attempt is recorded as finished(reason=error) by the CLI guard, but its
-        # durable stop is still pending. Treat that as NOT already finalized so the retry below can
-        # write run_finished(aborted) and re-run budget/archive/case/cost wrap-up exactly once.
+        # A failed finalize attempt is recorded as a guarded-abort finish (`error`, or the ceiling's
+        # `budget_exhausted`) by the CLI guard, but its durable stop is still pending. Treat that as
+        # NOT already finalized so the retry below can write run_finished(aborted) and re-run
+        # budget/archive/case/cost wrap-up exactly once. The CLASS predicate, not the literal —
+        # see `events/finalize_scope.py::GUARDED_ABORT_REASONS`.
         entry_finished = bool(_entry.finished and self._pending_finalize_scope is None and not (
-            _entry.stop_requested and is_error_stop(_entry.stop_reason)))
+            _entry.stop_requested and is_guarded_abort(_entry.stop_reason)))
         # Restore Card authority before replaying the active Strategy: its conditional governance
         # grant for card_scoring depends on this run-start-pinned value, not the ambient snapshot.
         if _entry.run_id:
@@ -4719,6 +4937,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 await anyio.to_thread.run_sync(
                     functools.partial(self._research_attempt_step, snap, trig, manual=False))
             except BudgetExceeded:
+                # Still raises, and still ends the run. What it no longer does is DISCARD the
+                # evaluation it was overlapping: `_dispatch_evals` hands this method a
+                # `_DeferredBudgetStop` facade, so the raise is captured and re-raised one join
+                # later, once that evaluation has landed its terminal. Under Card speculation the
+                # eval is in the run-scoped group instead and `Engine.run` drains it
+                # (`_drain_inflight_evaluation`). Either way the stop is unchanged; only the order
+                # is.
                 raise
             except Exception:  # noqa: BLE001 — never let deep research disturb the eval
                 pass
@@ -4883,6 +5108,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 raise                        # cooperative cancellation (evals joined) — must propagate
             except BudgetExceeded:
                 raise                        # global hard stop; never turn it into a retry tick
+                                             # (captured, not cancelled, when `_dispatch_evals`
+                                             # spawned this loop — see `_DeferredBudgetStop`)
             except Exception:  # noqa: BLE001 — an advisory tick hiccup must not disturb the eval
                 next_sleep = base
                 continue
@@ -4899,12 +5126,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # own; the evals run in / under it and, once they JOIN, the `finally` cancels `bg_tg` to stop
         # the loop. The one-shot path (repeat off, == today) is NOT cancelled — `bg_tg` waits for the
         # single memo to finish exactly as the pre-refactor single group did (byte-identical).
+        #
+        # The ceiling belongs before STARTING an evaluation, not before RECORDING one: the sink
+        # below holds a background `BudgetExceeded` until the evaluations it overlaps have landed
+        # their terminals, and this method re-raises it the moment they have.  See
+        # `_DeferredBudgetStop` for why that does not weaken the hard stop.
+        budget_stop: list[BaseException] = []
         async with anyio.create_task_group() as bg_tg:
-            self._spawn_research(bg_tg, state)
+            self._spawn_research(_DeferredBudgetStop(bg_tg, budget_stop), state)
             try:
                 if self._eval_parallel <= 1:
                     limiter = anyio.CapacityLimiter(1)
                     for a in evals:
+                        if budget_stop:
+                            break        # the ceiling fired: finish what is running, start nothing
                         cur = fold(self.store.read_all())
                         if self._skip_if_aborted(a, cur):
                             continue
@@ -4916,9 +5151,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         reservation = None
                         generation = None
                         skip_eval = False
+                        # The wait below is the one place on this branch where a deferred ceiling
+                        # can land between the loop-top `break` and `_evaluate` — see
+                        # `budget_stop_recheck` for the hours it cost. It is asked at the head of
+                        # every tick and again the instant a reservation is granted; a stop found
+                        # there skips the eval, and the loop-top test then ends the queue.
                         if node is not None and hasattr(self, "_wait_reserve_node_resources"):
                             generation = node.attempt
                             while True:
+                                if budget_stop_recheck(budget_stop):
+                                    skip_eval = True
+                                    break
                                 # Resource waits must not pin a stale fold forever.  A GPU->CPU Card
                                 # re-pin does not release a GPU (and therefore does not bump the pool
                                 # epoch), so re-fold after every bounded condition tick and fence the
@@ -4951,6 +5194,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 )
                                 if reservation is None:
                                     continue
+                                # The ceiling may have fired during the `await` that just granted
+                                # these devices. Hand them back and start nothing: the eval would
+                                # spend GPU on a run that is over and raise from inside itself.
+                                if budget_stop_recheck(budget_stop):
+                                    self._release_gpus(reservation.get("gpu_ids"))
+                                    reservation = None
+                                    skip_eval = True
+                                    break
                                 admitted = fold(self.store.read_all())
                                 live = admitted.nodes.get(node.id)
                                 if self._skip_if_aborted(a, admitted):
@@ -5066,6 +5317,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             if max_es is not None and cur.total_eval_seconds >= max_es:
                                 slots.release()
                                 break
+                            # …and the SPEND ceiling, for the same reason.  THE ONLY gate this
+                            # branch needs, and deliberately not a second one at the top of the
+                            # producer loop: `slots.acquire()` sits unconditionally between that top
+                            # and the scan below, so EVERY route to an admission — a fresh turn, a
+                            # `continue` after an unsatisfiable head, a genuine refill wait — passes
+                            # through here.  A top-of-loop copy would be unreachable-first and
+                            # therefore untestable, which is how a gate rots.  It is also the place
+                            # the stop actually lands: the refill wait is where this loop spends
+                            # nearly all of its time, and the overlapped research crosses the ceiling
+                            # while a sibling is mid-eval.
+                            if budget_stop:
+                                slots.release()
+                                break
                             # Scan for the first candidate whose complete footprint fits *now*.  A
                             # GPU-heavy head may wait while an explicit CPU node (gpus=0) behind it
                             # starts; reservation and release both use the condition-protected pool.
@@ -5177,6 +5441,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # test Engine defaults to one-shot (no cancel), == today.
                 if getattr(self, "_concurrent_research_repeat", False):
                     bg_tg.cancel_scope.cancel()
+        # THE HARD STOP, paid in full and one join later than it used to be.  Reached only when the
+        # body above did not already raise something of its own, and unconditional when it is: the
+        # run ends here with the same exception object the accountant raised, so its class, its
+        # sentence and the `run_finished {"reason": "budget_exhausted"}` derived from it are
+        # byte-identical to before.  What changed is that the evaluations it overlapped are now IN
+        # the log it stops over.
+        if budget_stop:
+            raise budget_stop[0]
 
     # ------------------------------- strategist cadence (extracted to engine/strategy.py)
     # The A7 strategist-consultation + coverage-snapshot cluster (`_strategy_core`,
@@ -5231,7 +5503,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         "_load_reflection_priors_both": ("lessons", None),
         "_empty_state_for_fp": ("lessons", None),
         "_task_fingerprint": ("lessons", None),
-        "_write_reflection_note": ("lessons", "enrichment"),
+        # `_write_reflection_note` is NOT here: it now opens its own `_op_span("reflection")` and so
+        # is no longer a one-line delegator, exactly like `_maybe_distill_lessons` /
+        # `_maybe_refresh_lessons` / `_maybe_reconcile_lessons`, which have always been out of this
+        # table for the same reason. The guard below refuses a stale entry precisely because a
+        # registry that claims to check a lane it no longer reaches "reads as coverage".
         "_reflect_lessons": ("lessons", "enrichment"),
         "_append_lessons": ("lessons", None),
         "_comparative_lessons": ("lessons", "enrichment"),
@@ -5321,7 +5597,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     @in_llm_lane("enrichment")
     def _write_reflection_note(self, final: RunState) -> None:
-        return self.lessons.write_reflection_note(final)
+        # Own op-trace, like the three `lessons_*` siblings below. Run-end reflection is PAID and
+        # sits past the last stage span, so without this its generations land with no span open at
+        # all -- billed, and absent from every trace surface. Measured 2026-08-29 over 68 probe
+        # runs: 105 of 25,430 billed calls ($0.19 of $100.27) had no `span_id`, all of them in this
+        # window, and `core/tracing.py::_note_untraced_generation` names the site in `run.log` as
+        # `<file>:<line> in <function>` -- which is `tool_loop.py::drive_tool_loop`. Spelling it as
+        # the symbol is this repo's rule (`test_claim_pins::test_no_source_citation_is_dead`); the
+        # log's own line number is NOT what the log says, so it is reported as a translation rather
+        # than as a quotation. One span here also covers what reflection calls in turn
+        # (`_reflect_lessons`, `_comparative_lessons`), which is why those two need none of their own.
+        with self._op_span("reflection"):
+            return self.lessons.write_reflection_note(final)
 
     @in_llm_lane("enrichment")
     def _reflect_lessons(self, final: RunState, best, fp: list) -> list:
@@ -5902,8 +6189,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # final writer-owned Card id first, then run the same proposal-bound novelty sidecar as the
             # ordinary draft/improve path. Reserved parallel batches bypass this helper entirely: their
             # shared proposal pass has already applied the gate.
-            with self._progress(PROGRESS_STAGE_BUILD, "novelty",
-                                node_id=prospective_node_id, prospective=True, operator=kind):
+            with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
+                                     node_id=prospective_node_id, prospective=True, operator=kind):
                 final = self._apply_novelty_gate(
                     state, linked, researcher=researcher,
                     prospective_node_id=prospective_node_id,
@@ -5917,8 +6204,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 stamp_proposal_span(_span, idea, node_id=prospective_node_id)
             if idea is None:
                 return None
-            with self._progress(PROGRESS_STAGE_BUILD, "novelty",
-                                node_id=prospective_node_id, prospective=True, operator=kind):
+            with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
+                                     node_id=prospective_node_id, prospective=True, operator=kind):
                 final = self._apply_novelty_gate(
                     state, idea,
                     repropose=lambda: _link(self._canonicalize_draft_idea(
@@ -5961,8 +6248,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             stamp_proposal_span(_span, idea, node_id=prospective_node_id)
         if idea is None:
             return None
-        with self._progress(PROGRESS_STAGE_BUILD, "novelty",
-                            node_id=prospective_node_id, prospective=True, operator=kind):
+        with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
+                                 node_id=prospective_node_id, prospective=True, operator=kind):
             final = self._apply_novelty_gate(
                 state, idea,
                 repropose=lambda p=parent: _link(self._canonicalize_idea_operator(
@@ -6236,6 +6523,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # pending, and the eval runs the PARENT's carried-over entrypoint and inherits the PARENT's
             # metric — a false success that pollutes the search (the 401-window nodes 50-54 each faked
             # the parent's 0.81 this way). node_created → node_failed keeps the one-terminal invariant.
+            # THE MODEL RAN OUT OF MOVES, WHICH IS NOT THE PROVIDER DYING. `empty_build_refusal`
+            # convicts a fresh build that wrote no candidate, and until 2026-08-28 it spelled that
+            # with the CRASH sentinel — so a session that probed 24 times and never called
+            # `write_file` paused the whole run through the provider circuit breaker.
+            # `core/models.py::DEVELOPER_STUCK_PREFIX` already states the rule this violates: "(developer error: …)
+            # routes to the provider circuit breaker and pauses the RUN, which is exactly the wrong
+            # answer for a healthy model that has simply run out of ideas about one node."
+            #
+            # Measured on the probe corpus: 2 of 106 nodes ended this way (dsNew2 node 2, qwen38f
+            # node 0) and BOTH ended their run. dsNew2 stopped at 2 evaluated nodes of 3 on a
+            # gateway that answered every call, which at 2-4 nodes per $1 run is a third of it.
+            #
+            # This branch must come FIRST and must not fall through: `is_developer_error` does not
+            # match the stuck spelling, and the fresh-build path knew only that one, so a bare
+            # respelling in the refusal would drop the sentinel into "this is solution code" — the
+            # false-success path the comment below was written for.
+            elif is_developer_stuck(code):
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": 0,
+                    "error": code,
+                    # NOT `developer_crash`: that reason is what the circuit breaker reads. This node
+                    # is finished and the run is not — the next proposal is free to try something else.
+                    "reason": "developer_stuck", "eval_seconds": 0.0,
+                })
             elif is_developer_error(code):
                 # Terminal only — see `_request_create_pause` below for why the pause is queued.
                 crash_terminal, _crash_pause = developer_crash_records(
@@ -6259,10 +6570,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # (which folds `paused=False`): a worker's byte position relative to an external
                 # control is nondeterministic. `_request_create_pause` records the intent; the MAIN
                 # task appends it where it already observes `_create_paused`, after the join.
-                self._request_create_pause(
-                    node_id,
-                    "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
-                    "unresolved within the node) — resume once it's fixed")
+                # "FIRST" is `developer_crash_pause_after`'s default; above it, this crash requests
+                # the pause only when its position in the log reaches the run's threshold, and a
+                # crash below it keeps exactly the terminal appended above (`developer_crash_rank`).
+                if self._developer_crash_pause_due(fold(self.store.read_all()), node_id):
+                    self._request_create_pause(
+                        node_id,
+                        "auto-paused: a Developer session crashed (LLM unreachable or a hard "
+                        "error, unresolved within the node) — resume once it's fixed")
         self._consume_node_build_telemetry(
             node_id, 0, researcher=researcher, developer=developer)
 
@@ -6533,12 +6848,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     drop_card=replacement_card)
                 self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
+            if is_developer_stuck(code):
+                # SAME DISTINCTION AS THE FRESH-BUILD PATH ABOVE. The model ran out of moves on this
+                # node; the provider is fine. Terminalize the node and let the run continue -- the
+                # crash branch below would route it to the circuit breaker and pause everything.
+                # Found by the cross-module invariant in
+                # `tests/test_empty_build_is_stuck_not_a_crash.py`, which counted three readers of
+                # the crash sentinel here against one of the stuck one -- my own c11251a1 taught
+                # only the first of the three.
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node.id, "generation": generation,
+                    "error": code, "reason": "developer_stuck", "eval_seconds": 0.0,
+                })
+                self._discard_node_build_telemetry()
+                return
             if is_developer_error(code):
-                for crash_type, crash_data in developer_crash_records(
-                        node.id, generation, code,
-                        "auto-paused: a Developer session crashed (LLM unreachable or a hard "
-                        "error, unresolved within the node) — resume once it's fixed"):
-                    self.store.append(crash_type, crash_data)
+                crash_terminal, crash_pause = developer_crash_records(
+                    node.id, generation, code,
+                    "auto-paused: a Developer session crashed (LLM unreachable or a hard "
+                    "error, unresolved within the node) — resume once it's fixed")
+                # Terminal first and unconditionally; the pause beside it only once this crash
+                # reaches `developer_crash_pause_after` (1 = always, the historical pair).
+                self.store.append(*crash_terminal)
+                if self._developer_crash_pause_due(fold(self.store.read_all()), node.id):
+                    self.store.append(*crash_pause)
         self._consume_node_build_telemetry(node.id, generation)
 
     def _prepare_injected_node(
@@ -6773,13 +7106,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # two sibling create paths already fix). FAIL it now (node_created → node_failed keeps the
             # one-terminal invariant) and trip the SAME developer-crash circuit-breaker, so an operator
             # inject during an LLM outage can't silently slip a garbage-code node past it.
+            if is_developer_stuck(code):
+                # SAME DISTINCTION AS THE FRESH-BUILD PATH ABOVE. The model ran out of moves on this
+                # node; the provider is fine. Terminalize the node and let the run continue -- the
+                # crash branch below would route it to the circuit breaker and pause everything.
+                # Found by the cross-module invariant in
+                # `tests/test_empty_build_is_stuck_not_a_crash.py`, which counted three readers of
+                # the crash sentinel here against one of the stuck one -- my own c11251a1 taught
+                # only the first of the three.
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": 0,
+                    "error": code, "reason": "developer_stuck", "eval_seconds": 0.0,
+                })
+                self._discard_node_build_telemetry()
+                return
             if is_developer_error(code):
-                for crash_type, crash_data in developer_crash_records(
-                        node_id, 0, code,
-                        "auto-paused: a Developer session crashed while building an injected node "
-                        "(LLM unreachable or a hard error, unresolved within the node) — resume "
-                        "once it's fixed"):
-                    self.store.append(crash_type, crash_data)
+                crash_terminal, crash_pause = developer_crash_records(
+                    node_id, 0, code,
+                    "auto-paused: a Developer session crashed while building an injected node "
+                    "(LLM unreachable or a hard error, unresolved within the node) — resume "
+                    "once it's fixed")
+                # Same split as `_rerun_node`: the terminal always, the pause at the threshold.
+                self.store.append(*crash_terminal)
+                if self._developer_crash_pause_due(fold(self.store.read_all()), node_id):
+                    self.store.append(*crash_pause)
         if developer_called:
             self._consume_node_build_telemetry(node_id, 0)
 

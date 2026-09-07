@@ -23,7 +23,7 @@ import inspect
 import re
 
 from looplab.core.config import Settings
-from looplab.core.models import FAILURE_REASONS
+from looplab.core.models import FAILURE_REASONS, NON_REPAIRABLE_REASONS
 from looplab.engine import triage
 from looplab.engine.train_monitor import MONITOR_REPAIR_REASON
 from looplab.engine.options import EngineOptions
@@ -88,7 +88,14 @@ def test_the_diagnostician_IS_a_producer_and_every_kind_it_may_name_is_selectabl
 
 
 def test_the_shipped_default_repairs_every_one_of_them():
-    assert set(Settings().inline_repair_reasons) == set(FAILURE_REASONS)
+    # Every reason is repairable EXCEPT the ones that are evidence the HYPOTHESIS is wrong, which
+    # is this file's own criterion for ending a node unrepaired (see the module docstring). Today
+    # that is `rules_violation`: the arena's submission validator refused the candidate before
+    # scoring, so a repair could only find a way AROUND the rule. The exception is named in
+    # `core/models.py::NON_REPAIRABLE_REASONS` and read from there, so the set can only change where
+    # the criterion is written down.
+    assert set(Settings().inline_repair_reasons) == (set(FAILURE_REASONS)
+                                                     - set(NON_REPAIRABLE_REASONS))
     assert "no_metric" in Settings().inline_repair_reasons, (
         "the reason that killed v5 node 0 after 76 minutes of successful training")
 
@@ -103,8 +110,9 @@ def test_the_engine_options_default_cannot_drift_from_the_settings_default():
     # the first version of this test failed on its own field comment.)
     # The FIELD default, not the instance attribute: pydantic copies the tuple on validation, so an
     # instance can never be identical to the registry even when it is bound to it.
-    assert Settings.model_fields["inline_repair_reasons"].default is FAILURE_REASONS
-    assert EngineOptions().inline_repair_reasons is FAILURE_REASONS
+    from looplab.core.models import REPAIRABLE_REASONS
+    assert Settings.model_fields["inline_repair_reasons"].default is REPAIRABLE_REASONS
+    assert EngineOptions().inline_repair_reasons is REPAIRABLE_REASONS
 
 
 def test_the_vocabulary_lives_where_config_can_reach_it():

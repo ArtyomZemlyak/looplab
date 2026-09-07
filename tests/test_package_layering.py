@@ -112,6 +112,7 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("tools", "serve"): "the declared debt: `machine_runs_tools` takes `engine_proc`/"
                         "`run_files` as its DEFAULT primitives and by injection otherwise "
                         "(`tests/test_cross_package_private_seams.py`)",
+    ("trust", "adapters"): "`critic` asks `repo_task` which argv are entrypoints, per scan",
     ("trust", "agents"): "`judge` builds its agent per invocation",
     ("trust", "engine"): "`memo_verify` reads `engine.memory` when it finalizes evidence",
     ("trust", "search"): "`lesson_guard` tags concepts inside one guard call",

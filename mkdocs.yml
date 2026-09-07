@@ -157,7 +157,7 @@ nav:
       - MLE-bench runbook: MLEBENCH.md
   - Design records:
       - Index: 00-INDEX.md
-      - Agent guide narratives, archived (2026-09-06): 53-agent-guide-narratives-2026-09-06.md
+      - Agent guide narratives, archived (2026-09-06): 64-agent-guide-narratives-2026-09-06.md
       - Development plan (2026-09-05): 52-development-plan-2026-09-05.md
       - External-works synergy II (2026-09-03): 51-external-works-synergy-2026-09-03.md
       - Whole-tree architecture review (2026-09-02): 50-architecture-review-2026-09-02.md
@@ -165,6 +165,25 @@ nav:
       - Claim surfaces root cause (2026-08-20): 45-claim-surfaces-2026-08-20.md
       - Early-stop blind classes (2026-08-20): 48-early-stop-blind-classes-2026-08-20.md
       - Day report (2026-08-21): 49-day-report-2026-08-21.md
+      # A title carrying a SECOND colon must be QUOTED: unquoted, YAML reads the first `: ` as the
+      # mapping separator and the rest as another one, which is a ScannerError and takes the whole
+      # CI docs deploy with it. The 43/44 rows that used to sit above these were pre-renumber
+      # leftovers naming files this branch does not have (the real 43/44 are the operator-list audit
+      # and the text-may-nominate doc), so `mkdocs build --strict` refused them as dead nav targets
+      # even once the file parsed.
+      - Benchmark landscape + local plan (2026-08-19): 61-benchmark-landscape-and-local-plan-2026-08-19.md
+      - "AlgoTune arm: operational notes (2026-08-20)": 62-algotune-arm-operational-notes-2026-08-20.md
+      - "Bench box: JupyterHub + L40S (2026-08-20)": 63-bench-box-jhub-l40s-2026-08-20.md
+      # 53/55/56 were written after the three rows above and never wired in; found by the
+      # 2026-08-30 mega-review (`validation.nav.omitted_files: info` means strict cannot catch an
+      # omitted page, so a nav row has to arrive WITH its document).
+      - What AlgoTune says about our loop (2026-08-26): 53-looplab-loop-defects-from-algotune-2026-08-26.md
+      - Probe results on one ruler (2026-08-27): 55-probe-results-2026-08-27.md
+      - Where the budget goes (2026-08-28): 56-where-the-budget-goes-2026-08-28.md
+      - Mega-review of the rnd branch (2026-08-30): 57-mega-review-2026-08-30.md
+      - What is confirmed and what must be checked (2026-08-31): 58-what-is-confirmed-and-what-must-be-checked-2026-08-31.md
+      - Bench results analysis and what to improve (2026-09-06): 59-bench-results-analysis-2026-09-06.md
+      - SOTA plan from the benches (2026-09-06): 60-sota-plan-2026-09-06.md
       - External-works synergy (2026-08-14): 41-external-works-synergy-2026-08-14.md
       - Pre-chewed evidence survey (2026-08-14): 42-pre-chewed-evidence-survey-2026-08-14.md
       - Mega-review of the 4-day window (2026-08-13): 40-mega-review-2026-08-13.md

@@ -26,7 +26,7 @@ from looplab.events.eventstore import EventStoreConcurrencyError
 # finalization WRITER lives, and every existing caller/patch path keeps resolving here.
 from looplab.events.finalize_scope import (  # noqa: F401
     _adjacent_claim, _finalize_begun, _scope_has_step, finalize_scope_quiescent,
-    incomplete_finalize_scope)
+    incomplete_finalize_scope, is_guarded_abort)
 # The step vocabulary and the `budget` receipt shape are the PROTOCOL, shared with every reader —
 # `search/speculation_quality.py` refuses calibration evidence whose finalization does not match it
 # exactly, and `search` may not import the engine (doc 25 SE-01).
@@ -97,7 +97,7 @@ def _scope_terminal(events, scope: str):
             for event in reversed(events)
             if event.type == EV_RUN_FINISHED
             and (event.data or {}).get("finalize_scope") == scope
-            and not is_error_stop((event.data or {}).get("reason"))
+            and not is_guarded_abort((event.data or {}).get("reason"))
             and _adjacent_claim(event)
         ),
         None,
@@ -169,7 +169,7 @@ def _scope_is_effective_terminal(events, state: RunState, scope: str) -> bool:
     data = event.data or {}
     return (
         data.get("finalize_scope") == scope
-        and not is_error_stop(data.get("reason"))
+        and not is_guarded_abort(data.get("reason"))
         and _adjacent_claim(event)
     )
 
@@ -539,10 +539,47 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
     # forever and strand the run as non-terminal in every projection — strictly worse than the narrow
     # mis-acknowledgement this guard exists to prevent. Only a finish proven to be someone else's is
     # skipped.
-    if is_error_stop(finish_data.get("reason")):
+    if is_guarded_abort(finish_data.get("reason")):
         _own_finish = _scope_finish_event(events, scope)
         _finish_is_foreign = (_own_finish is not None
                               and _own_finish.seq != state.last_finish_seq)
+        # THE RUN'S OWN MEMORY IS NOT A CASUALTY OF A GUARDED-ABORT TERMINAL (doc 53 §8).
+        #
+        # Closing this scope below takes `finalize_run`'s ENTIRE checklist with it: the
+        # `finalization_finished` append a few lines down clears `finalization_pending()`, and
+        # `_scope_is_effective_terminal` excludes the guarded-abort class by construction, so
+        # `should_finalize` is False on this pass and on every later one. Run-end REFLECTION --
+        # the meta-note, the distilled cross-run lessons and the auto-skill cards, i.e. everything
+        # a LATER run can read -- lives in that checklist, so it never ran.
+        #
+        # That made it the ORDINARY outcome rather than an edge case, because a budgeted run is
+        # SUPPOSED to end here. Measured on the 20-task AlgoTune arm-B corpus: 11 runs reached
+        # finalization, all 11 closed right here as `abandoned/error_terminal`, and the only
+        # finalize steps in the whole corpus are `begun`/`report_begun`/`report`/`abandoned` --
+        # no `reflection`, no `case`, no `budget`, no `diversity`. Across all 20 `memory/` dirs
+        # there is no `meta_notes.jsonl`, no `cases.jsonl` and no `skills/`.
+        #
+        # NOT FIXED BY NAMING THE CEILING `budget_exhausted` (docs/53 §7): that reason is in the
+        # GUARDED_ABORT_REASONS class on purpose -- `reason == "error"` never meant "crashed", it
+        # meant "written by the outer handler rather than the engine's clean finish", and six
+        # protocol sites need that distinction preserved. So the terminal classification is left
+        # exactly as it was and the reflection is run here instead, which also repairs the case
+        # this section was actually about: a genuine crash loses the run's memory too.
+        #
+        # REFLECTION FIRST, THEN CLOSE, AND IT CANNOT BLOCK THE CLOSE.
+        # `ensure_finalize_reflection` gates on this scope's own `reflection` marker, so a resume
+        # neither re-spends the reflection LLM nor duplicates a note, and `write_reflection_note`
+        # degrades to a deterministic meta-note when the provider is exhausted -- which on this
+        # path it usually is. Its two effects, `reflection_note` and `lessons_distilled`, are
+        # ALREADY allow-listed by `finalize_scope_quiescent` as a finalization's own, under a
+        # comment written for exactly this "crash after reflection_note but before the completion
+        # markers" window, so appending them here cannot make the scope read as foreign on
+        # re-entry.
+        if not _finish_is_foreign:
+            try:
+                ensure_finalize_reflection(engine, scope, state.last_finish_seq)
+            except Exception:  # noqa: BLE001 - cross-run memory must never wedge a terminal
+                pass
         if (state.finished and state.last_finish_seq >= 0 and not _finish_is_foreign
                 and not _has_finish_step(events, EV_FINALIZATION_FINISHED, state.last_finish_seq)):
             try:
@@ -653,7 +690,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
     legacy_initial = bool(
         not entry_finished
         and completed.finished
-        and not is_error_stop(finish_data.get("reason"))
+        and not is_guarded_abort(finish_data.get("reason"))
     )
     should_finalize = bool(completed.finalization_pending() or scoped_terminal or legacy_initial)
 

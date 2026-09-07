@@ -142,7 +142,13 @@ class _LoopStub(ResearchCadenceMixin):
                                      recommended_directions=["d"])
 
     def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None,
-                              **extra):
+                              superseded=None, **extra):
+        # `superseded=` is `_research_attempt_step`'s own kwarg on this branch (the
+        # `_results_since_snapshot` stamp), and the stub has to accept it for the same reason
+        # `tests/test_research_overlap.py::_LoopStub` does: this fake stands in for the real
+        # method, so a signature it cannot be CALLED with turns every assertion below into a
+        # TypeError the loop swallows as "the paid pass failed" — which is the exact shape this
+        # file exists to catch, arriving as a false green rather than a red.
         if self._fail_records > 0:
             self._fail_records -= 1
             raise OSError("store refused a projection after the memo landed")

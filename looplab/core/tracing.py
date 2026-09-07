@@ -385,6 +385,57 @@ def current_ids() -> tuple[Optional[str], Optional[str]]:
     return (st[-1]["trace_id"], st[-1]["span_id"]) if st else (None, None)
 
 
+def record_paid_call(cost, usage=None) -> bool:
+    """Stamp what one provider call COST onto the generation span open around it, AT THE MOMENT THE
+    MONEY IS COMMITTED — not after the call returns. Returns whether a generation span took it.
+
+    WHY IT IS NOT ENOUGH FOR THE CALLER TO STAMP IT. `core/llm.py` sets `.usage(...).cost(...)` on
+    the yielded handle only on the line AFTER `_post` returns, and `_post` can pay and then raise:
+    `CostAccountant.add` commits the delta, emits the durable `llm_usage` row through its sink, and
+    only then raises `BudgetExceeded`. The span is written (status=ERROR, phase intact) but
+    carries NO `cost`, so the money exists in the event log and is invisible to every sum taken over
+    the span channel — the same failure as a call with no span at all, one layer in.
+
+    MEASURED over the twenty arm-B AlgoTune runs (`/var/tmp/looplab-bench/runs-B`): 36 calls,
+    $0.1015, every one of them an aborted-on-ceiling call, concentrated in `card_build` (16), `plan`
+    (7), `novelty` (5), `propose` (4), `foresight_rank` (4). Together with the 916 rows that join
+    no span record at all it is the whole of the $2.3214 by which `sum(llm_usage.cost)` exceeded
+    `sum(generation span cost)` on that arm.
+
+    Deliberately WRITE-ONCE-FROM-BELOW: it fills `cost`/`usage` only when they are absent, and the
+    caller's own richer stamp still runs afterwards on the success path and wins. Deliberately
+    silent when nothing is traced (or the innermost span is not a generation) — like every other
+    entry point here, observability may not decide whether the paid work proceeds.
+
+    OPEN[span-cost-keeps-the-last-attempt-only] a generation billed MORE THAN ONCE — a keepalive
+    stall billed on attempt 1, a success billed on attempt 2, under ONE span — still leaves the
+    span carrying only the last attempt's cost against two ledger rows.
+    proof:`present:and "cost" not in attrs:@looplab/core/tracing.py`
+    REVIEW 2026-08-30 (money-accounting): `_account_keepalive_stall` appends an `llm_usage` row
+    and stamps here; the retry's success appends a second row and the caller's stamp overwrites
+    with attempt 2's figures alone, so `sum(llm_usage.cost) > sum(generation cost)` on any
+    stall-retry run — the exact inequality this function's own MEASURED paragraph was written to
+    close, and `tests/test_paid_calls_are_spanned.py`'s conservation check would fail on that
+    shape if a scenario produced it. Accumulate instead of write-once (and let the caller's stamp
+    add rather than replace), or narrow the headline claim to single-billing generations.
+    """
+    rec = next((r for r in reversed(_stack.get()) if r.get("kind") == "generation"), None)
+    if rec is None:
+        return False
+    try:
+        handle = SpanHandle(rec, None)
+        attrs = rec.get("attributes") or {}
+        if usage and "usage" not in attrs:
+            handle.set("usage", _norm_usage(usage))
+        if cost is not None and "cost" not in attrs:
+            value = float(cost)
+            if math.isfinite(value):
+                handle.set("cost", value)
+    except Exception:  # noqa: BLE001 - the tracer's diagnostic boundary must stay non-throwing
+        return False
+    return True
+
+
 # LLM I/O capture (ADR-17): off by default at import; each run turns it on from its own
 # Settings.trace_llm_io. When on, record_llm_call attaches the prompt+completion as a span
 # event on whatever operation span is active (propose/implement/repair), so the UI gets a bounded,
@@ -404,6 +455,26 @@ _CAPTURE_LLM_IO = False
 # the node/phase tokens, and copied across task/thread spawns like the other contextvars — so the
 # policy follows its run into the `anyio.to_thread` eval workers and the concurrent build threads.
 _capture_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_capture", default=None)
+
+
+def annotate_generation(key: str, value) -> bool:
+    """Set one attribute on the innermost OPEN generation span; True when a generation took it.
+
+    The write-anytime sibling of `record_paid_call`'s write-once stamps, for a fact that changes
+    across a call's attempts and that the caller cannot stamp afterwards because the call may raise
+    before it returns: `core/llm.py::_post` records `stream_attempts` — whether each attempt went
+    out over SSE — on every attempt, so a call the ceiling or the retry ladder ends mid-way still
+    says how it was sent. Same non-throwing, silent-when-untraced discipline as every entry point
+    here: observability never decides whether the paid work proceeds.
+    """
+    rec = next((r for r in reversed(_stack.get()) if r.get("kind") == "generation"), None)
+    if rec is None:
+        return False
+    try:
+        SpanHandle(rec, None).set(key, value)
+    except Exception:  # noqa: BLE001 - the tracer's diagnostic boundary must stay non-throwing
+        return False
+    return True
 
 
 def set_llm_capture(enabled: bool) -> None:

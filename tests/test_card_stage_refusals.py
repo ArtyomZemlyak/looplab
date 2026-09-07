@@ -1,17 +1,24 @@
 """Every staging fence names WHICH half of it moved, and the registry cannot rot.
 
 `_stage_prepared_card._plan` compares a FRESH fold against the snapshot the proposal was authored
-against. Any of eight conjuncts refuses, and the refusal is the DESIGNED answer to moved authority —
+against. Any of SIX conjuncts refuses, and the refusal is the DESIGNED answer to moved authority —
 a proposal authored against an old search state must never be relabelled as current work. None of
 that changes here. What changes is that until 2026-08-31 every refusal returned a bare `None`, so
 the loss was unattributable.
 
+SIX AND NOT EIGHT, resolved at the 2026-08-31 merge and recounted rather than carried over. This
+guard was written on master over the OLD fence, whose eight conjuncts included a whole-log max-seq,
+the champion id and a steering-cue hash. This branch had already deleted those three on a
+measurement (`50eac526`: the isolated raw lane staged 0 Cards out of 56 PAID proposals, because all
+three move on a timer inside any multi-minute propose window) and replaced the rest with
+`_proposal_receipt_fence`, which compares exactly what the Card's own receipt asserts. The NAMING
+rule is unchanged and is what this file is for; the number is derived from the fence that is here.
+
 THE BATCH LANE IS WHY IT MATTERS. Since `56764cbd` moved the paid batch propose off the event-loop
-thread there is a minutes-long SUSPENSION between the authority fold and the staging loop, so one
-best-IMPROVING eval terminal or one `research_completed`/`hint`/strategy row — all
-BACKGROUND_APPENDABLE, all hashed by `_proposal_cue_fence` — refuses EVERY idea of the batch at
-once. Pre-offload the loop was frozen and no fence input could move mid-propose, so this was
-unreachable.
+thread there is a minutes-long SUSPENSION between the fold the proposals were authored against and
+the staging loop, so anything the receipt asserts that moves in that window refuses EVERY idea of
+the batch at once. Pre-offload the loop was frozen and no fence input could move mid-propose, so
+this was unreachable.
 
 Guarded the way `CARD_BUILD_SKIP_REASONS` is one module over, and for the same reason: a typo'd slug
 does not fail at runtime. It lands on an in-process seam a caller reads and on a log line an
@@ -96,11 +103,16 @@ def test_the_registry_has_no_duplicates_and_no_blanks():
     assert all(isinstance(s, str) and s.strip() for s in CARD_STAGE_REFUSALS)
 
 
-def test_the_EIGHT_conjuncts_are_still_eight_distinct_facts():
-    """The fence was ONE compound `if` and is now eight; splitting it must not have dropped a
+def test_the_SIX_conjuncts_are_still_six_distinct_facts():
+    """The fence was ONE compound `if` and is now six; splitting it must not have dropped a
     comparison. Mutation: delete any conjunct — its slug stops being emitted and this goes red
-    through the registry test above, and the count here says which."""
-    assert len(_emitted_slugs()) == len(CARD_STAGE_REFUSALS) == 8, (
+    through the registry test above, and the count here says which.
+
+    RECOUNTED, not carried: this said EIGHT on master, over a fence that also compared
+    `_proposal_authority_seq`, `state.best_node_id` and `_proposal_cue_fence`. Those three were
+    deleted on this branch before the naming existed, so re-asserting eight here would assert the
+    presence of comparisons the measurement removed rather than the property this test is for."""
+    assert len(_emitted_slugs()) == len(CARD_STAGE_REFUSALS) == 6, (
         f"the fence emits {sorted(_emitted_slugs())}; a conjunct was added or lost without the "
         "registry moving with it")
 

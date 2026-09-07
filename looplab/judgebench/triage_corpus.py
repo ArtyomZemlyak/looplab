@@ -103,7 +103,12 @@ so from evidence:
   false refusals" as a property of the checker that ships. `CORPUS_LIMITS` says so in the header,
   so the caveat travels with the number instead of living only here.
 * 4 of the 16 are `diverged` (`loss=inf` for all 20 epochs, `loss=nan`, `loss=-1.5e+10`,
-  `-2.35e+08`) — caught by the stage CHECKER because the diverge watchdog did not exist yet;
+  `-2.35e+08`) — caught by the stage CHECKER because the diverge watchdog did not exist yet. Until
+  2026-09-06 those four were UNWINNABLE for a diagnostician: `diverged` was engine-final only, so
+  handed `check_failed` it could say `not_learning` (it did, 4 of 4) and never the truth. It is now
+  admissible over a tagged `check_failed` and nothing else
+  (`failure_diagnosis.DIAGNOSED_CONTEXT_BOUND`), and `triage_score.answerable_for` asks
+  "unwinnable" per handoff rather than once for the whole vocabulary;
 * exactly ONE — node 12 — is genuinely `not_learning`: its loss fell 0.986 → 0.0195 monotonically
   while validation recall@100 stayed at 0.0028. That is the case the word was added for, and it is
   1 of 122 rows, not 16.

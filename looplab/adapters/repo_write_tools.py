@@ -269,6 +269,12 @@ def _missing_paths_feedback(missing: list[str]) -> str:
             "given. (If a path is produced by an EARLIER stage, reference it relatively.)")
 
 
+#: The pipeline DECLARATION `declare_stages` writes. It is not a candidate: it says how to
+#: evaluate one. Named once so the rule that a build must produce actual code
+#: (`repo_developer.py::empty_build_refusal`) cannot drift from the writer.
+STAGES_MANIFEST = "looplab_stages.json"
+
+
 class RepoWriteTools:
     """Write side of the in-house repo developer (the LLM authors/edits files via tools). Writes are
     COLLECTED into `self.files` (path -> content) rather than applied to disk — the orchestrator
@@ -406,7 +412,19 @@ class RepoWriteTools:
                      + (" NOTE: THIS task's pipeline is OPERATOR-declared (`cmd.stages`) and runs "
                         "verbatim — this tool will refuse; fix the failing stage's script instead."
                         if self._operator_stages else ""),
-                     {"stages": {"type": "array", "description":
+                     # `items` is REQUIRED, not decoration. Google's function-declaration validator
+                     # rejects an `array` property that has none -- `GenerateContentRequest.tools[0]
+                     # .function_declarations[3].parameters.properties[stages].items: missing field,
+                     # INVALID_ARGUMENT` -- and it rejects the WHOLE toolset, so one such property
+                     # makes every Google model undeclarable. Measured 2026-08-21: a
+                     # `google/gemini-3.7-flash` run died on it 110 s in, at the FIRST implement
+                     # session, with `developer_crash` and an auto-pause. OpenAI and DeepSeek accept
+                     # the same schema, which is why it survived this long.
+                     #
+                     # Deliberately just `{"type": "object"}`: the stage SHAPE is in the description
+                     # below, and `_stages_emit_spec` already carries the full per-field schema. A
+                     # second copy here is a copy that drifts, and the prose is a prompt contract.
+                     {"stages": {"type": "array", "items": {"type": "object"}, "description":
                                  "ordered preceding stages, each {name, command:[argv...], timeout?, "
                                  "check?, needs?:[input paths this stage READS], "
                                  "expect?:{files:[output paths this stage WRITES], assert?}, "
@@ -490,7 +508,7 @@ class RepoWriteTools:
         collision = self.manifest_collision_refusal(clean)
         if collision is not None:
             return collision
-        self.files["looplab_stages.json"] = json.dumps({"stages": clean}, indent=1)
+        self.files[STAGES_MANIFEST] = json.dumps({"stages": clean}, indent=1)
         chain = " → ".join(s["name"] for s in clean) + " → score (operator cmd)"
         return f"declared {len(clean)} preceding stage(s): {chain}"
 

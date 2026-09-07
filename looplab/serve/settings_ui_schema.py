@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 196
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 206
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -132,15 +132,36 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # healthy TURN budget, which is the shape no turn count can see. It sits next to
 # `developer_session_time_budget_s` and carries the same 1200, because the two bound consecutive
 # phases of one blocked thread.)
-# (185 since `single_command_divergence_watch`, and this row is a CORRECTION rather than a feature.
-# The field shipped in `7813032e` with no form row and no uncurated entry, so
-# `_reconcile_settings_fields` has been RED on master since that merge — a targeted suite that did
+# (`single_command_divergence_watch` — 185 on master, the 190th row here — and it is a CORRECTION
+# rather than a feature. The field shipped in `7813032e` with no form row and no uncurated entry, so
+# `_reconcile_settings_fields` had been RED on master since that merge — a targeted suite that did
 # not include `tests/test_stage_environment.py` is what let it through, which is exactly the failure
 # mode "read the EXIT line" exists for. A row and not an uncurated entry: the honest reasons in that
 # registry are "open key set", "legacy alias", "not operator-typed" and "second-order tuning whose
 # PARENT FEATURE already has a row", and the deterministic divergence watchdog has no row of its own
 # — `train_monitor_*` is the LLM judge beside it, a different rung. So the parent clause is false
 # here and the field gets the row it should have had.)
+# (190 at the 2026-08-31 merge with master: this branch's 189 rows meeting master's one. Neither
+# side's digest is carried — each was pinned against a tree that did not contain the other's rows —
+# so it is RE-DERIVED over the merged keyset, the way the 2026-08-13 five-branch entry above says.
+# Verified by intersection rather than by bumping the number: 184 rows common to both files, +5 this
+# branch authored, +1 master's, 190 with no duplicate key.)
+# (193 since the three 2026-09-06 bench-driven knobs, each a row rather than an uncurated omission
+# because each is a behaviour the operator has to be able to read and revert from the form:
+# `llm_stream_stall_fallback` beside `llm_stream` — whether a stalled stream is retried without SSE
+# (the historical client) or as a stream, a per-ENDPOINT property the bench stand's whole-request
+# proxy timeout made expensive (docs/56 §173-175); `node_open_budget_floor_usd` beside
+# `llm_budget_usd` — a new STOP, the node-open floor under the ceiling, at the measured $0.10 knee
+# and not the audit's p75 (docs/56 §156); and `developer_crash_pause_after` beside
+# `systemic_failure_stop` — its companion bound, how many crashed Developer sessions a run absorbs
+# before the breaker pauses it, 1 = the historical rule (docs/58 §58.2). Re-derived over the whole
+# keyset, 190 + 3, no duplicate key.)
+# (195 since A5, 2026-09-06: `established_context` and `established_context_bytes` beside
+# `developer_stage_guidance` — the block that seeds each chain root with what EARLIER phases of
+# the run already read, and its byte budget. A row rather than an uncurated omission for the
+# same reason as the three above: it changes what every prompt in the run carries, so the
+# operator has to be able to read it and turn it off. Re-derived over the whole keyset,
+# 193 + 2, no duplicate key.)
 # 2026-09-03: +`agent_timeout`. It is an operator-typed WALL on an external process, and the
 # row exists because the field does: `CliAgentDeveloper` carried a composition-independent
 # `timeout: float = 600.0` that `agents/factory.py` never passed, so the operator could not
@@ -148,6 +169,26 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # worktree. None of the four registered omission clauses applies: the key set is closed, it is
 # not an alias, it is exactly operator-typed, and its parent feature (the external coding-agent
 # Developer) has rows of its own.
+# 196 + 196 -> 206 on 2026-09-07, at the MERGE with master, and BOTH histories below are
+# real: each side grew its own copy from a common 186 and neither literal was measured
+# against a tree holding the other's rows. Verified as every entry below prescribes —
+# by INTERSECTION, never by adding the integers: 186 keys are common to the two files,
+# this branch adds ten (diagnosis_hypotheses, endgame_reserve_frac, evidence_envelope,
+# llm_cost_limit, llm_token_limit, mcts_cost_weight, novelty_literature,
+# stage_check_tools, steady_state_build, syscall_fence) and master ten
+# (developer_crash_pause_after, developer_probe_confine, developer_stage_guidance,
+# developer_step_feedback_command, established_context, established_context_bytes,
+# hide_empty_tools, llm_budget_usd, llm_stream_stall_fallback,
+# node_open_budget_floor_usd), giving 206 with no duplicate key. The keyset revision is
+# RE-DERIVED over the merged keyset for the same reason.
+# (196 at the 2026-09-06 MERGE with master, and BOTH histories above are real: this
+# branch's ten rows meeting master's one (`agent_timeout`). Neither side's digest is
+# carried — each was pinned against a tree that did not contain the other's rows — so it
+# is RE-DERIVED over the merged keyset, the way the 2026-08-31 entry above prescribes.
+# Verified by intersection rather than by adding the integers: 185 rows common to both
+# files, +10 this branch authored, +1 master's, 196 with no duplicate key. The file also
+# returns to master's (and the merge base's) 2-space indentation; the branch's 1-space
+# rewrite was the deviation.
 # 2026-09-06: +`stage_check_tools` (doc 52 row 9). A row for the reason `train_monitor_tools` and
 # `repair_log_tools` beside it are rows — it changes what the evidence for a paid, NODE-ENDING
 # judgement IS, it buys extra round trips when on, and it changes a PROMPT, so an operator must
@@ -164,7 +205,7 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # 2026-09-06: +`syscall_fence` (doc 52 row 28): the kernel syscall policy beside `landlock`. A row
 # for the reason `landlock` is one — an operator turns a kernel rung on for a run whose inputs are
 # all declared, and must see the switch that took the network away from the eval.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "9d393ac8f007fb17d7f6d3d8d30d6f0168752c03cf4fc38125ca4031dd5fa9fb"
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "ec1940e33f798a1bddae3fa1a0d4d33ebb7c11ddd60b02d06e1a042ffaef1052"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
@@ -245,6 +286,13 @@ SETTINGS_UI_SCHEMA_UNCURATED_FIELDS: dict[str, str] = {
         "open key set AND a value the form should not invite: it refuses secret-shaped names on "
         "purpose, and a browser field labelled 'environment variables' is how one gets pasted into "
         "a run's durable snapshot — declared in the config file or `-s eval_env=NAME=VALUE`"),
+    "developer_probe_max_calls":
+        "an EXPERIMENT instrument, not an operator knob: it exists to run the registered arm in "
+        "docs/56 §190 (does capping `run_probe` raise the score, or is a high probe count a symptom "
+        "of a run already lost) and its default of 0 is what every run in the corpus did. A form "
+        "row would invite operators to set a number the benchmark has not yet shown to be good — "
+        "set it with `-s developer_probe_max_calls=N` for an arm, and give it a row when an arm "
+        "says which N is right",
 }
 
 

@@ -64,10 +64,11 @@ from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # affected and fails if a new one appears without this note being true of it.
 from looplab.core.llm_transient import (  # noqa: F401
     BACKOFF_CAP_S, LLM_FAILURE_CAUSES, RETRY_AFTER_CAP_S, _REASONING_REJECT_KEYS, _backoff,
-    _err_body, _is_reasoning_reject, _is_stream_options_reject, _is_throttle_403,
-    _retry_after_of, _retry_after_seconds, _sdk_transient, classify_llm_failure)
+    _err_body, _inband_stream_error, _is_reasoning_reject, _is_stream_options_reject,
+    _is_throttle_403, _retry_after_of, _retry_after_seconds, _sdk_transient, classify_llm_failure)
 from looplab.core.llm_streaming import (  # noqa: F401
-    _chunk_has_content, _shutdown_pool_sockets, _stream_raw_socket, _stream_with_idle_guard)
+    _chunk_has_content, _shutdown_pool_sockets, _sse_is_done, _sse_is_error, _stream_raw_socket,
+    _stream_with_idle_guard, defer_inband_error)
 from looplab.core.llm_toolcall import (  # noqa: F401
     _ANSWER_FIELDS, _CODE_SPAN_RE, _FINAL_NAMES, _NATIVE_INVOKE_RE, _NATIVE_OPEN_RE,
     _NATIVE_PARAM_RE, _apply_native_tool_calls, _args_complete, _assistant_text, _clean_thinking,
@@ -548,6 +549,128 @@ def _stream_envelope_is_billable(*, usage_observed: bool, delegated_to_fallback:
     return stream_completed or produced_content
 
 
+# The `finish_reason` a SALVAGED envelope carries — the one durable mark saying this answer is the
+# part of a stream that arrived before the transport cut it. Deliberately NOT OpenAI's `"length"`:
+# that names a TOKEN LIMIT the model ran into, a fact about the generation, and this cut is the
+# gateway's. Nothing in `looplab/` reads a finish_reason VALUE (`_keepalive_stall` reads only its
+# presence), so the honest word costs nothing here while the borrowed one would have asserted
+# something false about the model on every truncated call.
+STREAM_TRUNCATED_FINISH_REASON = "truncated"
+
+
+def _interrupted_stream_is_salvageable(*, produced_content: bool, produced_tool_calls: bool,
+                                       produced_reasoning: bool) -> bool:
+    """An HTTP-200 stream broke mid-body. KEEP what it produced, or discard it and re-ask?
+
+    Hoisted for the same reason as `_stream_envelope_is_billable`: it lives inside
+    `_accumulate_stream`'s `except`, where no caller can reach it, and it decides the branch with
+    the most expensive failure mode in this client. Stated here so the trade-off can be READ.
+
+    The rule: an interrupted stream that yielded ANY of content / tool_calls / reasoning is a
+    TRUNCATED ANSWER and is returned; one that yielded nothing is a failed attempt and is re-raised
+    for `_RETRY_POLICY` to retry. That is the same judgement `_keepalive_stall` already makes about
+    a stream that ended CLEANLY with nothing usable, and the same one `complete_text_stream`'s
+    `except openai.APIError:` has always made (`if not pieces:` delegate, else `break` and keep what
+    arrived) — this path was the one place the client disagreed with itself.
+
+    WHY NOT SIMPLY RETRY. Measured over one 20-run AlgoTune campaign (`/var/tmp/looplab-bench/runs-B`
+    against `meter/meter.jsonl`, 2026-08-22/23) through a gateway that cuts any generation at
+    ~1800 s: 26 cut streams across 10 of the 20 tasks, each carrying 196,286-238,423 forwarded
+    content deltas at 1815-1830 s and costing $0.055-$0.067. The scarce resource is WALL CLOCK, not
+    just money — those 26 streams burned 13.15 hours, 18.7-94.6 % of each affected run's entire
+    lifetime, and produced nothing. `count_riemann_zeta_zeros` spent 94.6 % of a 3.21-hour run
+    inside six of them and reached ZERO nodes; `pde_heat1d` and `sparse_eigenvectors_complex` were
+    pushed into the harness's own 4-hour kill (3.99 h and 3.98 h wall) with no terminal event at
+    all. Re-asking under `max_retries=8` multiplies that by up to eight — ~4 hours and ~$0.52 on
+    ONE call against a $1.00 run ceiling — and the cut RECURS, so the retries would be spent rather
+    than saved. `_keepalive_stall` already warns that retrying a truncated-but-usable response "5x
+    regenerates minutes of reasoning tokens"; here it is thirty minutes, eight times over.
+
+    WHY THE BARREN CASE STILL RETRIES, and why this needs no retry cap of its own: the cost of a
+    retry is exactly what the aborted attempt generated. This rule sends the productive streams
+    (expensive to repeat, and already answered) down the salvage path and the barren ones (nothing
+    generated, so nothing to repeat) down the retry path, and neither branch is the costly one. On
+    the corpus above the split is 26 salvaged / 0 retried, which is why a retry CAP of its own would
+    be a knob defending against a case this rule already removes.
+    """
+    return produced_content or produced_tool_calls or produced_reasoning
+
+
+# Where a BARREN cut carries the usage its gateway still priced. `_accumulate_stream` is a
+# staticmethod with no accountant in reach, and the only thing that leaves it on the barren path
+# is the exception -- so the usage rides on the exception, and `_post`'s one `except` bills it
+# through `_bill_barren_cut` before the retry policy runs. A private attribute rather than a wrapper
+# exception, because every `_RETRY_POLICY` row keys on the SDK's own class and a wrapper would send
+# a stream cut to the unclassified tail.
+_BARREN_CUT_USAGE_ATTR = "_looplab_barren_cut_usage"
+
+
+def _stamp_barren_cut_usage(exc: BaseException, usage: Optional[dict]) -> bool:
+    """Carry the usage a cut-and-barren stream reported out with the exception that ends it.
+
+    The productive cut is billed by `_post` off the body `_accumulate_stream` returns; the barren
+    one re-raises, and until this stamp the `usage` frame `defer_inband_error` had reordered past
+    the error frame -- precisely so it could be read -- died with the exception. Driven with an
+    error frame plus a $0.01 / 50-token usage frame and `max_retries=1`: two real HTTP requests,
+    `calls == 1, priced_calls == 0, spent == 0.0`. The call reached the ledger as neither spend nor
+    a CALL, and the retry then re-spent past a ceiling the ledger could not see.
+
+    `_stream_envelope_is_billable`'s first rule is the whole justification: `usage_observed` wins
+    over everything, including what happened afterwards. `complete_text_stream` already bills this
+    exact shape through that rule; this keeps the two streaming paths on ONE rule rather than one
+    and a half. Only usage with something in it is stamped -- an empty frame is no evidence of a
+    call, and `_bill_barren_cut` must not mint a `calls` row for it. Returns whether it stamped.
+    """
+    if not usage:
+        return False
+    normalized = _normalize_usage(usage)
+    if not (normalized["total_tokens"] or normalized["cost"]):
+        return False
+    try:
+        setattr(exc, _BARREN_CUT_USAGE_ATTR, dict(usage))
+    except Exception:  # noqa: BLE001 -- an exception type refusing attributes still propagates
+        return False
+    return True
+
+
+def salvaged_lengths(message: Optional[dict]) -> dict[str, int]:
+    """How much of a salvaged answer is WHERE, in characters. One rule, because a notice that
+    measures the wrong part of an answer is how a working fix gets read as a broken one.
+
+    The first version of `_note_truncated_stream` measured `message["content"]` alone and reported
+    `keeping the 0 characters that arrived` about a call that had in fact retained 220,685 deltas —
+    all of them REASONING. That is the normal shape here, not a corner: a reasoning model cut by a
+    gateway mid-think has spent everything on `reasoning_content` and has not begun its answer, and
+    `_keepalive_stall` already names that case a real-if-truncated response. The notice said nothing
+    was kept, and the salvage was reported as a failure on live fire.
+
+    So all three carriers are counted, and separately, because they mean different things to a
+    reader: `content` is the answer, `reasoning` is what the model spent the money thinking, and
+    `tool_arguments` is an answer delivered as a call — a completion that never touches `content` at
+    all, which is also why `benchmarks/meter`'s delta counter under-reads a tool-call stream fivefold.
+    """
+    msg = message or {}
+    calls = msg.get("tool_calls") or []
+    return {
+        "content": len(msg.get("content") or ""),
+        "reasoning": len(msg.get("reasoning") or ""),
+        "tool_arguments": sum(len((c.get("function") or {}).get("arguments") or "")
+                              for c in calls if isinstance(c, dict)),
+    }
+
+
+def _envelope_is_truncated(body: Optional[dict]) -> bool:
+    """Did this chat body come out of `_accumulate_stream`'s salvage rather than a whole stream?
+
+    A named predicate rather than an inline comparison because two unrelated decisions read it —
+    the T7 cache must never store a truncated answer under a deterministic request's key, and the
+    operator notice must fire exactly once per salvaged call — and a second spelling of "is this
+    the truncated shape?" is how one of them starts answering a slightly different question.
+    """
+    choices = (body or {}).get("choices") or []
+    return bool(choices) and (choices[0] or {}).get("finish_reason") == STREAM_TRUNCATED_FINISH_REASON
+
+
 def _stream_usage(value) -> dict:
     """Best-effort mapping extraction for an SDK streaming usage object."""
     if isinstance(value, dict):
@@ -559,6 +682,64 @@ def _stream_usage(value) -> dict:
     return dumped if isinstance(dumped, dict) else {}
 
 
+# Which request fields set the reasoning DEPTH, and — where a field carries more than the depth —
+# WHICH of its members do. `None` means the whole key is a depth knob; a tuple names the depth
+# members and says nothing about the rest of that key.
+#
+# The distinction is the point. This table's first cut was the flat key set
+# `("reasoning", "reasoning_effort", "chat_template_kwargs", "thinking")`, which conflates "sets the
+# depth" with "uses that key for anything" — and both of those keys have documented NON-depth
+# members that `llm_reasoning_extra` is the escape hatch FOR:
+#   * OpenRouter `reasoning.exclude` hides the reasoning tokens from the RESPONSE. It changes what
+#     comes back, not how hard the model thinks, and `{"reasoning": {"exclude": true}}` beside
+#     `llm_reasoning="high"` is a complete, coherent configuration that the flat set refused.
+#   * A Qwen chat template takes arbitrary `chat_template_kwargs`; `enable_thinking` is the one that
+#     is ours. Refusing every other member made the template unreachable on a qwen model.
+# A key whose value is not a mapping cannot be inspected, so it counts as the whole knob — fail
+# closed, since an operator writing `reasoning: "high"` means the depth.
+# OPEN[reasoning-depth-knobs-missing-live-spellings] the registry omits depth spellings real
+# endpoints accept, so the clash refusal silently admits for them exactly the double-spelling it
+# exists to refuse.
+# proof:`absent:"think":@looplab/core/llm.py`
+# REVIEW 2026-08-30 (registry-coverage): unregistered but live: top-level `enable_thinking`
+# (SGLang/vLLM take it in `extra_body` directly, outside `chat_template_kwargs`), and Ollama's
+# native boolean knob for the same thing. An operator setting `llm_reasoning="high"` beside one of
+# those in `llm_reasoning_extra` ships both spellings and the provider picks — the measured
+# $0.019/25-minute failure mode, un-refused. The conflict test is parametrized from this registry,
+# so each addition is one line here and zero elsewhere.
+REASONING_DEPTH_KNOBS: dict = {
+    "reasoning_effort": None,                                   # OpenAI / Ollama-v1 / DeepSeek
+    "thinking": None,                                           # Anthropic: type + budget_tokens
+    "reasoning": ("effort", "enabled", "max_tokens"),           # OpenRouter (`exclude` is not depth)
+    "chat_template_kwargs": ("enable_thinking", "thinking_budget"),   # Qwen3 on vLLM/SGLang
+}
+
+
+def reasoning_depth_keys(fields: Optional[dict]) -> list[str]:
+    """The reasoning-DEPTH knobs `fields` actually sets, named the way an operator can act on.
+
+    Hoisted out of `reasoning_body` because the clash rule below is a rule nobody could state: it
+    lived inside a `raise` reachable only by building a client, so "is `reasoning.exclude` a depth
+    setting?" had no answer anywhere a reader or a test could ask it. Same treatment, same reason,
+    as `_stream_envelope_is_billable`.
+
+    Returns `"<key>"` for a whole-key knob and `"<key>.<member>[+<member>]"` for a scoped one, so
+    the refusal message names the field the operator has to edit rather than just its container.
+    """
+    named: list[str] = []
+    for key, members in REASONING_DEPTH_KNOBS.items():
+        if not fields or key not in fields:
+            continue
+        value = fields[key]
+        if members is None or not isinstance(value, dict):
+            named.append(key)
+        else:
+            hits = [member for member in members if member in value]
+            if hits:
+                named.append(f"{key}.{'+'.join(hits)}")
+    return named
+
+
 def reasoning_body(model: str, mode: str = "", style: str = "auto",
                    extra: Optional[dict] = None) -> dict:
     """The provider-specific request fields that TOGGLE a reasoning/thinking model — providers differ:
@@ -567,7 +748,19 @@ def reasoning_body(model: str, mode: str = "", style: str = "auto",
     `mode`: "" = inject nothing (use the server default — unchanged behavior); off|none = disable;
     on = enable at default depth; low|medium|high = enable at that effort. `style`: auto picks `qwen`
     for qwen* models else `effort`. `extra` is merged last (escape hatch, e.g. Anthropic
-    `{"thinking": {"type": "enabled", "budget_tokens": N}}`)."""
+    `{"thinking": {"type": "enabled", "budget_tokens": N}}`).
+
+    WHERE THE DEPTH REFUSAL FIRES, and why it stays here rather than moving to `Settings`. It is not
+    a per-REQUEST check and never was: `make_llm_client` is this function's only production caller,
+    so it runs once per client, at construction, and `self.reasoning` is the frozen dict every later
+    request merges. Moving it up to `Settings._check_enum_fields` would look earlier and be WRONG,
+    because the predicate is a function of the MODEL: `style="auto"` shapes `chat_template_kwargs`
+    for a qwen target and `reasoning_effort` for every other one, and one `Settings` resolves many
+    targets (`llm_model`, the per-role models, `agent_stage_models`, every `llm_profiles` entry). A
+    qwen researcher beside a non-qwen developer genuinely clashes on one and not the other, and a
+    model-blind check would have to over-refuse to stay sound. The endpoint preflight cannot cover
+    it either — `agents/preflight.py::_probe_factory` passes `disable_reasoning=True`, so the probe
+    never calls this function. Client construction is the earliest site that knows enough."""
     mode = (mode or "").strip().lower()
     body: dict = {}
     if mode:
@@ -585,7 +778,52 @@ def reasoning_body(model: str, mode: str = "", style: str = "auto",
                 body["reasoning_effort"] = "medium" if mode == "on" else mode
         # st == "none": shape nothing (rely solely on `extra`)
     if extra:
-        body = {**body, **extra}
+        # A CONTRADICTION, not an override. `extra` is merged by KEY, and a provider's own spelling
+        # of the effort knob is a DIFFERENT key from ours -- OpenRouter takes `reasoning.effort`
+        # where OpenAI takes `reasoning_effort` -- so an operator who sets the one in `extra`
+        # meaning "use medium" does not replace `llm_reasoning`, they ship both and let the provider
+        # pick. Measured 2026-08-20 on an AlgoTune run configured exactly that way: the request
+        # carried `reasoning_effort: high` beside `reasoning: {effort: medium}`, and two `propose`
+        # calls burned the FULL 65,536-token completion cap without emitting a tool call -- 889 s
+        # and 593 s, $0.019, both ERROR ("no tool_calls in response"), both retried. The operator's
+        # `medium` had never taken effect on any call in that run.
+        #
+        # Refusing beats picking a winner: which of the two the provider honours is its business and
+        # it is not documented, so a silent precedence rule here would be a guess presented as a
+        # setting. `ConfigRefusal` names both spellings and says to keep one -- and the fix is one
+        # word either way (`llm_reasoning="medium"`, or drop the key from `llm_reasoning_extra`).
+        # The clash is BETWEEN SPELLINGS, so comparing like keys finds nothing -- that was this
+        # guard's first cut and it detected exactly zero of the case it was written for. What
+        # matters is that BOTH sides name the DEPTH, whatever key each one uses.
+        #
+        # "Names the depth", not "names the key": the second cut was the flat key set and it refused
+        # `llm_reasoning="high"` beside OpenRouter's `{"reasoning": {"exclude": true}}` -- the
+        # hide-the-reasoning-tokens option, which sets no depth at all -- and every non-thinking
+        # `chat_template_kwargs` on a qwen model. Both are exactly what the `extra` in this
+        # function's own docstring is FOR. `REASONING_DEPTH_KNOBS` is where that distinction lives.
+        ours = reasoning_depth_keys(body)
+        theirs = reasoning_depth_keys(extra)
+        if ours and theirs:
+            from looplab.core.errors import ConfigRefusal
+            raise ConfigRefusal(
+                f"llm_reasoning={mode!r} and llm_reasoning_extra both set the reasoning depth "
+                f"({' + '.join(sorted(set(ours) | set(theirs)))}). "
+                "They are DIFFERENT request keys, so the second does not override the first -- both "
+                "are sent and the provider chooses. Set the depth in ONE place: either "
+                "llm_reasoning, or the provider's own key in llm_reasoning_extra with "
+                "llm_reasoning=\"\".")
+        # MEMBER-wise for a key both sides shape, not a whole-key overwrite. `chat_template_kwargs`
+        # is that key today: on a qwen model we put `enable_thinking` in it, so a flat
+        # `{**body, **extra}` dropped it the moment an operator added any OTHER template kwarg --
+        # turning the loud refusal above into a silent loss of the depth setting, which is the
+        # failure this whole guard exists to stop. Permitting the non-depth use REQUIRES this merge.
+        # Anything `extra` names that is also ours wins per MEMBER, so the escape hatch still works.
+        merged = dict(body)
+        for key, value in extra.items():
+            mine = merged.get(key)
+            merged[key] = ({**mine, **value} if isinstance(mine, dict) and isinstance(value, dict)
+                           else value)
+        body = merged
     return body
 
 
@@ -695,7 +933,8 @@ class OpenAICompatibleClient:
                  stream: bool = True, cache: bool = False,
                  header_timeout: Optional[float] = None, trust_env: bool = False,
                  max_retries: int = 8, wall_timeout: Optional[float] = None,
-                 retry_after_cap: Optional[float] = None):
+                 retry_after_cap: Optional[float] = None,
+                 stream_stall_fallback: bool = True):
         # The live transport needs the openai SDK + httpx. They are declared deps, but the module
         # import is guarded (offline/replay import-safety), so fail with a clear, actionable message
         # here rather than an opaque `NoneType has no attribute 'OpenAI'` if someone stripped them.
@@ -782,6 +1021,14 @@ class OpenAICompatibleClient:
         # for this client's lifetime. Bounded worst case: one idle-timeout, not retries ×
         # idle-timeout of silence.
         self._stream_stalls = 0
+        # Whether the two degradations above are TAKEN at all (`Settings.llm_stream_stall_fallback`).
+        # `True` is the historical client byte for byte. `False` keeps counting stalls but retries a
+        # stalled stream AS A STREAM on the same backoff and never degrades: on a stand whose proxy
+        # bounds the WHOLE request (nginx `proxy_read_timeout 300`), the non-SSE attempt is exactly
+        # the one that wall kills — measured on `oldCK9` (docs/56 §173-175): 58 of 301 calls sent
+        # unstreamed on this fallback's initiative under a streaming flag, 4 of them dead at 300.0 s,
+        # and $0.10 of a $1.00 run spent re-sending one body twenty times.
+        self._stream_stall_fallback = bool(stream_stall_fallback)
         # H1: when the endpoint supports constrained decoding (vLLM/SGLang), drive structured calls
         # from the Pydantic JSON schema — `response_format` json_schema (OpenAI-standard, vLLM+SGLang)
         # + `guided_json` (vLLM extra) — so a weak model can't emit invalid JSON. Off by default
@@ -1053,41 +1300,92 @@ class OpenAICompatibleClient:
         """Reassemble an SDK streaming response into the non-streaming body shape. Merges tool_call
         deltas by index (partial name/arguments concatenated), captures reasoning deltas, and keeps
         the final include_usage chunk. httpx's read timeout bounds each iteration — a stall surfaces
-        as openai.APITimeoutError out of this loop, caught by `_post`."""
+        as openai.APITimeoutError out of this loop, caught by `_post`.
+
+        A stream the endpoint ENDS in band is not a failed attempt. The SDK raises an
+        `openai.APIError` out of this loop when a `data: {"error": …}` frame arrives inside an
+        HTTP-200 body (`llm_transient.py::_inband_stream_error` is that family, and says why the
+        class is a precise reading of it). Whatever already arrived is a real, truncated answer, and
+        it used to be thrown away with the exception: 200,438 forwarded deltas and thirty minutes of
+        generation, discarded, unbilled, re-asked. `_interrupted_stream_is_salvageable` decides; a
+        stream with nothing to salvage re-raises, so `_policy_stream_interrupted` still owns that
+        case — carrying any usage the stream DID report (`_stamp_barren_cut_usage`), which is the
+        only way that spend can reach the accountant from a staticmethod. Every OTHER mid-stream
+        failure — an idle-guard kill, a reset, an EOF — re-raises here with the same stamp and
+        keeps `_policy_connection`'s existing degrade-and-retry.
+        """
         content: list[str] = []
         reasoning: list[str] = []
         tcs: dict[int, dict] = {}
         finish = None
         usage: dict = {}
-        for ev in _stream_with_idle_guard(stream, idle_limit, first_byte_limit):
-            if getattr(ev, "usage", None):
-                # Same tolerant extractor `complete_text_stream` uses: a provider (or a test mock)
-                # whose final chunk carries `usage` as a PLAIN DICT has no `.model_dump()`, and the
-                # AttributeError aborted the entire call over optional telemetry.
-                usage = _stream_usage(ev.usage)
-            if not ev.choices:
-                continue
-            ch = ev.choices[0]
-            d = ch.delta
-            if getattr(d, "content", None):
-                content.append(d.content)
-            r = getattr(d, "reasoning", None) or getattr(d, "reasoning_content", None)
-            if r:
-                reasoning.append(r)
-            for tc in (getattr(d, "tool_calls", None) or []):
-                tcd = tc.model_dump()               # reuse the tested index-merge logic (_tool_call_slot)
-                idx = _tool_call_slot(tcs, tcd)     # provider-omitted `index` must not collapse calls
-                slot = tcs.setdefault(idx, {"id": None, "type": "function",
-                                            "function": {"name": "", "arguments": []}})
-                if tcd.get("id"):
-                    slot["id"] = tcd["id"]
-                fn = tcd.get("function") or {}
-                if fn.get("name"):
-                    slot["function"]["name"] = fn["name"]
-                if fn.get("arguments"):
-                    slot["function"]["arguments"].append(fn["arguments"])
-            if ch.finish_reason:
-                finish = ch.finish_reason
+        truncated = False
+        # Read the stream to its END even if it reports a failure part-way through: the usage frame
+        # a gateway synthesises for a cut generation arrives AFTER its error frame, and the SDK's own
+        # iteration would close the response at the error and lose it forever. See
+        # `llm_streaming.defer_inband_error` for the measurement that cost.
+        inband = defer_inband_error(stream)
+        try:
+            for ev in _stream_with_idle_guard(stream, idle_limit, first_byte_limit):
+                if getattr(ev, "usage", None):
+                    # Same tolerant extractor `complete_text_stream` uses: a provider (or a test mock)
+                    # whose final chunk carries `usage` as a PLAIN DICT has no `.model_dump()`, and the
+                    # AttributeError aborted the entire call over optional telemetry.
+                    usage = _stream_usage(ev.usage)
+                if not ev.choices:
+                    continue
+                ch = ev.choices[0]
+                d = ch.delta
+                if getattr(d, "content", None):
+                    content.append(d.content)
+                r = getattr(d, "reasoning", None) or getattr(d, "reasoning_content", None)
+                if r:
+                    reasoning.append(r)
+                for tc in (getattr(d, "tool_calls", None) or []):
+                    tcd = tc.model_dump()               # reuse the tested index-merge logic (_tool_call_slot)
+                    idx = _tool_call_slot(tcs, tcd)     # provider-omitted `index` must not collapse calls
+                    slot = tcs.setdefault(idx, {"id": None, "type": "function",
+                                                "function": {"name": "", "arguments": []}})
+                    if tcd.get("id"):
+                        slot["id"] = tcd["id"]
+                    fn = tcd.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"].append(fn["arguments"])
+                if ch.finish_reason:
+                    finish = ch.finish_reason
+        except openai.APIError as exc:
+            # NARROW twice over. `openai.APIError` (not `Exception`) for the reason
+            # `_policy_unparseable` states: a ValueError/AttributeError out of the merge code above
+            # is OUR bug and must propagate loudly rather than be laundered into a plausible-looking
+            # partial answer. Then the family test again, so a stall or a reset keeps
+            # `_policy_connection`'s answer and only the family this fix has evidence about changes.
+            #
+            # `inband` wins over the exception's own class. Once the endpoint has said in band that
+            # it failed, that IS why this call ended; if the socket then went silent and the idle
+            # guard fired, the APITimeoutError is a fact about the socket arriving after the fact
+            # about the call. Reading the class alone would send a 220k-token cut generation to
+            # `_policy_connection` and re-buy thirty minutes of it.
+            if not ((_inband_stream_error(exc) or "held" in inband)
+                    and _interrupted_stream_is_salvageable(
+                        produced_content=bool(content), produced_tool_calls=bool(tcs),
+                        produced_reasoning=bool(reasoning))):
+                # The BARREN cut. Nothing to return, so the usage this loop already captured — the
+                # frame `defer_inband_error` reordered past the error precisely so it could be
+                # read — would die with the exception and the call would reach the ledger as
+                # neither spend nor a CALL. It rides out on the exception instead; `_post` bills
+                # it (`_bill_barren_cut`) before `_retry_or_raise` decides anything, so the
+                # ceiling sees this attempt before a retry re-spends. See
+                # `_stamp_barren_cut_usage` for the driven shape.
+                _stamp_barren_cut_usage(exc, usage)
+                raise
+            truncated = True
+        if truncated:
+            # Overwrite any finish_reason the stream had already delivered: the mark is what stops
+            # `_post` caching this body, and a stream that broke after its finish_reason still lost
+            # whatever came next (the usage frame most of all). Over-marking only costs a cache miss.
+            finish = STREAM_TRUNCATED_FINISH_REASON
         msg: dict = {"role": "assistant", "content": "".join(content)}
         if reasoning:
             msg["reasoning"] = "".join(reasoning)
@@ -1165,6 +1463,18 @@ class OpenAICompatibleClient:
         ((openai.RateLimitError, openai.InternalServerError), "_policy_throttled"),
         (openai.APIConnectionError, "_policy_connection"),
         (openai.PermissionDeniedError, "_policy_forbidden"),
+        # The last three rows are ONE decision read in order, and the first two exist only to hold
+        # the tail still while the third widens. An `openai.APIError` row on its own would also
+        # claim every STATUS-bearing error no row above named — 404 (wrong model), 409, 422 — and
+        # retry a permanent request defect eight times with backoff. So: anything carrying an HTTP
+        # status keeps the fail-fast answer it has always had, `APIResponseValidationError` (the
+        # only OTHER member of the status-less family) keeps it too, and what reaches
+        # `_policy_stream_interrupted` is exactly the bare `APIError` the SDK builds for an in-band
+        # error frame on a 200 stream. Expressed in the table's own vocabulary rather than as a
+        # predicate inside a handler, because ORDER is what this table is for.
+        (openai.APIStatusError, "_policy_unclassified"),
+        (openai.APIResponseValidationError, "_policy_unclassified"),
+        (openai.APIError, "_policy_stream_interrupted"),
     ) if openai is not None else ()) + (
         (json.JSONDecodeError, "_policy_unparseable"),
         (None, "_policy_unclassified"),
@@ -1295,6 +1605,36 @@ class OpenAICompatibleClient:
             return False
         raise LLMError(f"LLM request to {self.base_url} returned an unparseable body") from exc
 
+    def _policy_stream_interrupted(self, exc, attempt: int, use_stream: bool) -> bool:
+        # A bare `openai.APIError` — the SDK builds one at exactly four sites, all in
+        # `_streaming.py`, all for an in-band `data: {"error": …}` frame inside an HTTP-200 SSE
+        # body. The endpoint accepted the request and started answering, then its own upstream
+        # broke and it told us so on the wire. That is a TRANSPORT failure, the family
+        # `_sdk_transient`'s docstring already calls "a transient hiccup on a busy gateway ->
+        # retry" — but classification never reached it, because a bare APIError is not an
+        # APIConnectionError, so it fell to the unclassified tail and raised on the FIRST attempt
+        # with `max_retries=8` untouched. Measured on 20 AlgoTune runs (2026-08-22/23): the run's
+        # own span shows ONE 1818 s attempt and no second one.
+        #
+        # Only a STREAM can produce this error, so a non-stream attempt keeps the fail-fast answer
+        # (see `_policy_unclassified`) rather than retrying an error it could not have caused.
+        # `use_stream` is also the returned flag: the next attempt drops SSE, which is the whole
+        # point — `_nonstream_bounded` reads the body under one wall-clock guard, so the in-band
+        # frame that cut this attempt cannot cut that one the same way. Ratcheting `_stream_stalls`
+        # alongside it is the same judgement `_policy_connection` makes about a stalled stream: an
+        # endpoint whose SSE keeps breaking mid-body should stop being asked for SSE.
+        #
+        # This branch only ever sees a stream that produced NOTHING — `_accumulate_stream` already
+        # returned any interrupted stream that produced content, tool_calls or reasoning as a
+        # truncated answer (see `_interrupted_stream_is_salvageable`, which is where the argument
+        # for not re-generating 200k tokens lives). So the retry it asks for is a retry of a
+        # generation that generated nothing, and costs a backoff.
+        if use_stream and attempt < self._max_retries:
+            self._stream_stalls += 1
+            time.sleep(_backoff(attempt))
+            return True
+        raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+
     def _policy_unclassified(self, exc, attempt: int, use_stream: bool) -> bool:
         # The ladder's final `except openai.APIError`: any other SDK-level protocol error -> clean
         # LLMError. `_post` catches only APIError|JSONDecodeError, so nothing else reaches here.
@@ -1334,6 +1674,31 @@ class OpenAICompatibleClient:
             self.accountant.add(usage["cost"], usage=usage)
             self._last_usage = usage
 
+    def _bill_barren_cut(self, exc: BaseException) -> None:
+        """Bill the usage a cut-and-barren stream stamped on its exception, BEFORE the retry policy.
+
+        `_account_keepalive_stall`'s sibling, for the same money rule from the other streaming
+        failure: a stream the gateway ended in band having produced nothing is still a provider call
+        the gateway may have PRICED (`_stamp_barren_cut_usage` says how the price gets here). The
+        order matters twice over. `CostAccountant.add` is where the ceiling raises, so billing
+        first means an over-ceiling barren cut stops the run here rather than buying one more
+        attempt the ledger never saw; and `_retry_or_raise` raises `LLMError` on every
+        non-retryable path, so a bill placed after it would be skipped exactly when the call was
+        the run's last. The stamp is consumed so the same attempt can never be billed twice through
+        a re-raised or chained exception.
+        """
+        usage = getattr(exc, _BARREN_CUT_USAGE_ATTR, None)
+        if usage is None:
+            return
+        try:
+            delattr(exc, _BARREN_CUT_USAGE_ATTR)
+        except Exception:  # noqa: BLE001 -- billing does not depend on the stamp being removable
+            pass
+        normalized = _normalize_usage(usage)
+        if normalized["total_tokens"] or normalized["cost"]:
+            self.accountant.add(normalized["cost"], usage=normalized)
+            self._last_usage = normalized
+
     def _post(self, payload: dict) -> dict:
         # T7 LLM response cache: serve an identical DETERMINISTIC (temp 0) request from cache instead
         # of re-hitting the model — cuts cost on retry/panel/verify flows. Sampling calls (temp>0)
@@ -1351,6 +1716,7 @@ class OpenAICompatibleClient:
         # free tier) rate-limit bursts, and a single 429 shouldn't crash the whole run.
         body = None
         _stalled_prev = False               # this call's previous attempt stalled mid-stream
+        stream_attempts: list[bool] = []    # per-attempt `use_stream`, stamped on the generation span
         for attempt in range(self._max_retries + 1):
             # Build the request per attempt so a param-compat retry (see `_retry_or_raise`) can drop
             # the reasoning toggle. `_reasoning_ok` starts True and flips off permanently for THIS
@@ -1361,8 +1727,17 @@ class OpenAICompatibleClient:
             # often answers the SAME request fine without SSE while its stream wedges mid-generation.
             # Streaming is decided HERE, per attempt — never by the caller's payload (`_sdk_chat`
             # reads no `stream` key from it), so every call site gets the same degrade behaviour.
-            use_stream = (self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER
-                          and not _stalled_prev)
+            # With the fallback OFF (`stream_stall_fallback=False`) the decision is `self.stream`
+            # alone: the ratchets above still COUNT (a trace can say how often the endpoint
+            # stalled) but never change what is asked for.
+            use_stream = (self.stream and (
+                not self._stream_stall_fallback
+                or (self._stream_stalls < STREAM_STALL_DEGRADE_AFTER and not _stalled_prev)))
+            # Say, per ATTEMPT, whether this call went out streamed. The generation span used to
+            # carry no record of it at all, so an unstreamed call under a streaming flag could only
+            # be found in the proxy's own ledger (docs/56 §173 counted 1,201 of them there).
+            stream_attempts.append(bool(use_stream))
+            tracing.annotate_generation("stream_attempts", list(stream_attempts))
             try:
                 # admit immediately around the real provider attempt, not around a
                 # whole node build. Retries take fresh fair turns and nested build -> novelty work
@@ -1376,6 +1751,10 @@ class OpenAICompatibleClient:
                 # two families are what the ladder caught: every SDK error derives from
                 # `openai.APIError`, and a keepalive-only 200 body escapes the SDK's decoder as a RAW
                 # `json.JSONDecodeError` that is NOT an APIError.
+                # Money before policy: a barren cut the gateway priced is billed here, so the
+                # ceiling can refuse the retry `_retry_or_raise` is about to grant (and so the
+                # bill is not skipped when the policy raises instead). See `_bill_barren_cut`.
+                self._bill_barren_cut(e)
                 _stalled_prev = self._retry_or_raise(e, attempt, use_stream) or _stalled_prev
                 continue
             else:
@@ -1415,8 +1794,51 @@ class OpenAICompatibleClient:
         if "choices" not in body or not body["choices"]:
             # Ollama/vLLM emit {"error": ...} envelopes on a bad request — don't index [0] blind.
             raise LLMError(f"LLM response had no choices: {str(body)[:200]}")
+        if _envelope_is_truncated(body):
+            self._note_truncated_stream(body, usage)
+            return body                          # NEVER cached — see `_note_truncated_stream`
         self._cache_put(ck, body)                # T7
         return body
+
+    def _note_truncated_stream(self, body: dict, usage: dict) -> None:
+        """Say out loud that a salvaged answer is partial, and why its price may be missing.
+
+        Two things happen to a truncated envelope that the caller cannot see and must not have to
+        infer. It is NOT cached: a truncated answer stored under a deterministic (temperature 0)
+        request's key would be served to every later identical ask for the rest of the process, so
+        one cut stream becomes a permanently amputated answer — the T7 cache's own reason for
+        existing (a retry, a panel re-ask, a verify pass) is exactly the traffic that would hit it.
+        And it may arrive UNPRICED. The provider's usage frame is the LAST thing on the wire, so
+        whether a cut call can be priced at all depends on whether anything followed the failure.
+        `defer_inband_error` is what makes that question winnable — it reads the stream to its end
+        rather than stopping at the error frame — so a gateway that synthesises usage for what it
+        already forwarded now prices the call normally, and the run's ledger reconciles to the cent
+        instead of reporting 4.8 % of a $1.00 ceiling against a real 11.0 %. When nothing follows,
+        `CostAccountant.add` has still run: the call counts (`calls` +1) and counts as unpriced
+        (`priced_calls` +0) rather than never reaching the ledger at all. What it must never do is
+        invent an amount — `cost_is_reported`'s rule is that UNPRICED IS NOT FREE, and a token count
+        this client derived from its own delta count would be a number nobody measured (`meter`'s
+        own delta estimator reads five times low on a tool-call stream).
+
+        The notice therefore says WHICH of the two happened, because they ask different things of
+        the operator: a priced cut is spend the budget will enforce, an unpriced one is spend only
+        the invoice will ever show.
+
+        WARNING, at the level and for the reason `_policy_throttled`'s backoff notice uses: it is
+        what logging's `lastResort` handler puts on stderr in a CLI run that configured no logging,
+        and a silent under-count is what let five arms of one 20-run campaign overrun a $1.00
+        ceiling by 6.5-19.2 % while their own ledgers reported them under it.
+        """
+        kept = salvaged_lengths(((body.get("choices") or [{}])[0] or {}).get("message"))
+        _LOG.warning(
+            "%s cut a streaming response mid-body; keeping the %d characters that arrived "
+            "(%s) rather than regenerating them, and NOT caching them. %s",
+            self.base_url, sum(kept.values()),
+            " + ".join(f"{n} {where}" for where, n in kept.items() if n) or "nothing usable",
+            f"Priced at ${usage['cost']:.6f} from the usage the stream did report."
+            if usage.get("priced") else
+            "The provider reported no usage for it, so this call is recorded as UNPRICED — real "
+            "spend that this run's ledger cannot state and the endpoint's invoice will.")
 
     def _model_params(self) -> dict:
         """The generation's model_parameters (Langfuse generation metadata): sampling temperature +
@@ -1521,6 +1943,13 @@ class OpenAICompatibleClient:
                             # socket stayed open until GC, so a UI reader that navigates away mid-answer
                             # leaked a live connection out of the shared pool.
                             _stream = self._bounded_create(kwargs, header_join)
+                            # Same reorder as `_accumulate_stream`, for the same money rule: the
+                            # usage frame a gateway synthesises for a cut generation arrives after
+                            # its error frame, and `_stream_envelope_is_billable`'s `usage_observed`
+                            # row is worth nothing if the SDK closes the response before we reach it.
+                            # Keeping the two streaming paths on ONE rule is also the point — them
+                            # disagreeing about a cut stream is the defect this whole change fixes.
+                            defer_inband_error(_stream)
                             _body = self._streaming_body()
                             _body.__enter__()
                             try:
@@ -1614,6 +2043,33 @@ class OpenAICompatibleClient:
                                 for c in msg["tool_calls"]])
             return msg
 
+    @staticmethod
+    def _stamp_unusable_generation(gen, msg: dict, usage, reason: str) -> None:
+        """Record WHAT the model said on a generation that produced no usable tool call.
+
+        The error branches used to stamp `usage`, `cost` and `error` and drop `output`/`thinking` on
+        the floor -- so the trace said a call cost 65,536 completion tokens and could not say what a
+        single one of them was. That is exactly backwards: a generation that returned the answer is
+        the one you never need to read, and one that burned the whole completion cap without
+        emitting the forced call is the only evidence of WHY.
+
+        Measured 2026-08-20 on an AlgoTune `propose` phase: two calls, 889 s and 593 s, $0.019, both
+        `no tool_calls in response`, both at exactly the 65,536-token cap -- 25 minutes of a run
+        whose wall clock is 68-94 % LLM calls, and nothing recorded but the number. Comparing an OK
+        span's attributes with an ERROR span's across three runs, the ERROR span is missing
+        `output`, `thinking` and `tool_calls` every time (and in one run `cost`/`usage` as well, so
+        those three calls are opaque even as to their size).
+
+        The content is already in hand here -- `msg` is the parsed message -- so this costs one
+        stamp, bounded by `tracing._TRACE_TEXT_CAP` (64,000 chars) like every other traced text.
+        """
+        thinking, answer = _clean_thinking(msg.get("content") or "", _reasoning_of(msg))
+        # Split over two lines like the sibling stamp in `chat`'s success path: the run of spaces
+        # mid-chain that used to sit here was a dropped ` \` continuation, valid Python that read as
+        # a merge artifact at ~150 columns.
+        gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking) \
+           .usage(usage).cost(_usage_cost(usage)).error(reason)
+
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:
         tool = {"type": "function",
                 "function": {"name": "emit", "description": "Emit the structured result.",
@@ -1642,8 +2098,8 @@ class OpenAICompatibleClient:
                     msg["content"] = _clean
             calls = msg.get("tool_calls")
             if not calls:  # endpoint ignored tool_choice -> let parse.py fall back to text
-                usage = body.get("usage")
-                gen.usage(usage).cost(_usage_cost(usage)).error("no tool_calls in response")
+                self._stamp_unusable_generation(gen, msg, body.get("usage"),
+                                                "no tool_calls in response")
                 raise KeyError("no tool_calls in response")
             # This endpoint FORCES `tool_choice: emit`, so the result must actually be that call.
             # Taking `calls[0]` blindly let a backend that ignores tool_choice have some OTHER tool's
@@ -1654,8 +2110,8 @@ class OpenAICompatibleClient:
             # back to the text path, which is the honest reading of an endpoint that ignored the force.
             emit = next((c for c in calls if (c.get("function") or {}).get("name") == "emit"), None)
             if emit is None:
-                usage = body.get("usage")
-                gen.usage(usage).cost(_usage_cost(usage)).error("forced emit not honored")
+                self._stamp_unusable_generation(gen, msg, body.get("usage"),
+                                                "forced emit not honored")
                 raise KeyError("no tool_calls in response")
             args = emit["function"]["arguments"]
             # Reasoning models emit their chain-of-thought (a `reasoning` field, or inline <think> in
@@ -1696,6 +2152,20 @@ class CostAccountant:
         self.on_delta = on_delta
         self.last_sink_error: Optional[str] = None
         self._lock = threading.Lock()
+
+    def __deepcopy__(self, memo):
+        """A deep copy of anything holding this accountant holds THIS accountant.
+
+        The accountant is a run's spend IDENTITY, not data: `run_cost_accountant` attaches it to the
+        run's `Settings` so every client built from them meters on one ceiling, and a copy of those
+        settings that minted a private accountant would be a second ceiling (docs/57
+        `run-accountant-splits-on-settings-copy`). `copy.deepcopy(settings)` used to raise instead
+        -- `_lock` cannot be pickled -- which was the latent half of the same defect: a deep copy
+        can neither share the ledger nor be refused quietly. Sharing is the only answer that keeps
+        `llm_budget_usd` a ceiling on the RUN.
+        """
+        memo[id(self)] = self
+        return self
 
     def set_sink(self, callback: Optional[Callable[[dict], None]]) -> None:
         """Install/replace the post-commit delta sink used by a durable run ledger."""
@@ -1783,6 +2253,13 @@ class CostAccountant:
             sink = self.on_delta
             committed_spent = self.spent
 
+        # The span channel is settled HERE, on the committed delta, and not on the line after the
+        # provider call returns — because `exceeded` below raises out of this method and the caller
+        # never reaches its own `.usage(...).cost(...)`. See `tracing.record_paid_call`: on arm B
+        # that gap was 36 calls / $0.1015 of generation spans that name a phase and no money.
+        # Write-once-from-below: the caller's richer stamp still runs and wins on the success path.
+        tracing.record_paid_call(safe_cost, normalized)
+
         if sink is not None:
             try:
                 sink(dict(delta))
@@ -1793,8 +2270,60 @@ class CostAccountant:
                 with self._lock:
                     self.last_sink_error = None
         if exceeded:
-            raise BudgetExceeded(f"spent {committed_spent:.4f} >= budget {self.limit:.4f}")
+            # The message IS the operator-facing output now (the marker turns this into one
+            # printed line at `cli/__init__.py`'s refusal boundary), so it has to name the
+            # knob and not only the arithmetic.
+            raise BudgetExceeded(
+                f"LLM spend ceiling reached: ${committed_spent:.4f} of the ${self.limit:.4f} "
+                f"set by `llm_budget_usd`. The run stops here rather than spending more. "
+                f"To continue, raise `llm_budget_usd` in this run's `config.snapshot.json` "
+                f"(0 = no limit) and resume -- an env var will NOT do it, every resume adopts "
+                f"the snapshot (engine invariant #6).")
         return committed_spent
+
+    def require_headroom(self, floor: float, what: str) -> None:
+        """Refuse to OPEN `what` when less than `floor` dollars of the ceiling remain.
+
+        The ceiling in `add` stops a run the moment a priced call crosses the limit — AFTER the
+        money is spent, in the middle of whatever was buying it. This is the same stop asked one
+        step earlier, at the decision to open a unit of work that is known to cost more than what
+        is left: a node cycle is a median $0.3370 on the AlgoTune corpus (docs/56 §156), so a node
+        opened on the last few cents is bought and then discarded, and $5.91 of $76.73 (7.7 %)
+        landed that way after the last node those runs ever evaluated.
+
+        SAME CLASS, SAME HANDLING. It raises `BudgetExceeded`, not a new type, so everything built
+        for the ceiling handles it unchanged: `_DeferredBudgetStop`, `Engine._drain_inflight_
+        evaluation` (an eval already burning still lands its terminal), `cli/run_cmds.py`'s
+        `run_finished {"reason": "budget_exhausted"}` and the one-line `Refused:` presentation.
+        And the message keeps the ceiling's own opening words, because `events/stop_account.py`
+        recovers "this was the operator's spend ceiling" from that sentence.
+
+        Inert without a ceiling (`limit is None`: there is no remainder to test) and at `floor <= 0`.
+        The boundary is `remaining < floor - 1e-9`, and the tolerance is load-bearing rather than
+        tidy: `1.00 - 0.92` is `0.07999999999999996`, which is BELOW an $0.08 floor by 4e-17, and
+        §156's replay found one 277.23 sitting on exactly such an edge. `what` names the unit the
+        caller was about to open so the refusal says which decision it pre-empted.
+        """
+        try:
+            floor = float(floor)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(floor) or floor <= 0.0:
+            return
+        with self._lock:
+            if self.limit is None:
+                return
+            remaining = self.limit - self.spent
+            limit = self.limit
+        if remaining < floor - 1e-9:
+            raise BudgetExceeded(
+                f"LLM spend ceiling reached before opening {what}: ${max(0.0, remaining):.4f} of "
+                f"the ${limit:.4f} set by `llm_budget_usd` remains, below the "
+                f"`node_open_budget_floor_usd` of ${floor:.4f} a new node needs. The run stops "
+                f"here rather than open work it cannot finish. To continue, raise "
+                f"`llm_budget_usd` (or lower `node_open_budget_floor_usd`, 0 = off) in this "
+                f"run's `config.snapshot.json` and resume -- an env var will NOT do it, every "
+                f"resume adopts the snapshot (engine invariant #6).")
 
     def remaining(self) -> Optional[float]:
         with self._lock:
@@ -2331,6 +2860,59 @@ def validate_bound_profiles(
             "LLM credential preflight failed: " + render_credential_failures(failures))
 
 
+_RUN_ACCOUNTANT_ATTR = "_looplab_run_accountant"
+
+
+def run_cost_accountant(settings) -> "CostAccountant":
+    """The ONE `CostAccountant` every client built from these `settings` shares.
+
+    `llm_budget_usd` is documented as a ceiling on "this run's LLM calls", and a per-CLIENT
+    accountant cannot be that. A run builds many clients -- one per role target
+    (`llm_credential_consumers` lists researcher/propose/implement/repair/pilot/strategy plus the
+    default), the history compressor, the Memora abstract/embed pair, the deep researcher --
+    which is exactly why `engine/costs.py::find_cost_accountants` exists to walk and dedupe them.
+    Measured before this fix: two clients from ONE `Settings` produced two accountants, each with
+    `limit=1.0`, so the effective ceiling was 2.0 and a real run's was N x whatever the operator
+    typed. `BudgetExceeded` then fired only when a SINGLE client passed the limit on its own.
+
+    Cached on the settings OBJECT, which is the run's own identity here: a `Settings` is built once
+    per run and handed to every factory. `object.__setattr__` because pydantic does not accept a
+    stray attribute, and a module-level map keyed by `id()` would alias across runs once an id is
+    reused. A caller that builds a fresh `Settings` per client is asking for separate budgets and
+    gets them -- there is no run to share.
+
+    Cost accounting for a run whose ceiling is 0.0 (no limit) is unchanged: the accountant is still
+    shared, which only makes `find_cost_accountants` dedupe to one entry instead of N.
+
+    THE IDENTITY SURVIVES A COPY ONLY IF IT EXISTS BEFORE THE COPY, and that used to be luck
+    (docs/57 `run-accountant-splits-on-settings-copy`, closed 2026-09-06). The cache rides the
+    settings object's `__dict__`, and pydantic's `model_copy` copies that dict SHALLOWLY -- so a
+    copy taken AFTER the attach shares this accountant while a copy taken BEFORE mints its own
+    (driven: `Settings()`, copy, call this on both -> two objects; attach first, copy after -> one
+    shared object). The default `run` path was saved by ordering alone --
+    `agents/preflight.py::preflight_role_endpoints` happened to build the first client from the
+    PARENT before `agents/factory.py::build_unified_agent` forked it -- and on the `wrap_up_only`
+    path (`cli/run_cmds.py` builds the finalize engine with preflight SKIPPED) the copy came
+    FIRST: the unified roles' clients metered on the copy's accountant while the
+    deep-researcher/report-writer clients built from the parent metered on a second one, the 2x
+    ceiling this docstring says was removed, back on the one entry point that still spends. So
+    the ATTACH is now explicit at every fork: `cli/__init__.py::_engine` calls this right after
+    settings resolve, and both fork sites in `agents/factory.py` call it on the PARENT before
+    their `model_copy`, so a copy can no longer come first. `copy.deepcopy(settings)` shares it
+    too -- see `CostAccountant.__deepcopy__` -- rather than raising on the accountant's lock.
+    """
+    existing = getattr(settings, _RUN_ACCOUNTANT_ATTR, None)
+    if isinstance(existing, CostAccountant):
+        return existing
+    accountant = CostAccountant(
+        limit=(float(getattr(settings, "llm_budget_usd", 0.0) or 0.0) or None))
+    try:
+        object.__setattr__(settings, _RUN_ACCOUNTANT_ATTR, accountant)
+    except Exception:  # noqa: BLE001 - an exotic settings object still gets a working accountant
+        pass
+    return accountant
+
+
 def make_llm_client(settings, *, model: str | None = None,
                     base_url: str | None = None,
                     timeout: float | None = None,
@@ -2379,10 +2961,14 @@ def make_llm_client(settings, *, model: str | None = None,
     return OpenAICompatibleClient(
         model=mdl, base_url=endpoint, api_key=key,
         temperature=(temperature if temperature is not None else settings.llm_temperature),
-        accountant=CostAccountant(),
+        # `llm_budget_usd` 0.0 = no ceiling, which is what every historical caller got.
+        accountant=run_cost_accountant(settings),
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
         stream=(getattr(settings, "llm_stream", True) if stream is None else stream),
+        # Does a stalled stream retry without SSE and eventually stop streaming for good (the
+        # historical client), or retry as a stream? Per endpoint, so it rides the run's Settings.
+        stream_stall_fallback=bool(getattr(settings, "llm_stream_stall_fallback", True)),
         # Fall back to the CONSTANT this module declares as the single source of the default (which
         # config.py imports for its own field default) — a literal here would drift the moment it moved.
         header_timeout=float(getattr(settings, "llm_header_timeout", DEFAULT_HEADER_TIMEOUT_S)

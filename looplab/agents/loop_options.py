@@ -80,6 +80,7 @@ class LoopOptions(Mapping):
 
     max_turns: int | _Unset = UNSET
     time_budget_s: float | _Unset = UNSET
+    cost_budget_usd: float | _Unset = UNSET
     context_budget_chars: int | None | _Unset = UNSET
     stuck_detection: bool | _Unset = UNSET
     stuck_repeat: int | _Unset = UNSET
@@ -90,6 +91,11 @@ class LoopOptions(Mapping):
     summary_client: object | _Unset = UNSET
     emit_after: int | _Unset = UNSET
     emit_force: int | _Unset = UNSET
+    # A9 (docs/60 §60.9; evidence docs/56 §164): reads of ONE path inside one loop after which
+    # every further read of it carries `tool_loop._READ_LOOP_NOTE`. Config-shaped (a threshold, not
+    # a callback or a prompt), so it rides the bundle; the loop's own default (25) is the corpus's
+    # normal ceiling — see `drive_tool_loop`.
+    read_loop_nudge_after: int | _Unset = UNSET
 
     # ---------------------------------------------------------------- Mapping (so `**opts` works)
     def __iter__(self):
@@ -163,6 +169,10 @@ EXPLICIT_ONLY_LOOP_ARGS: tuple[str, ...] = (
     "finalize", "fallback", "validate",         # per-call result handling
     "on_step", "on_text", "cancel_check", "on_tool_result",  # per-call observers / provenance hook
     "on_budget",                                # …and the one that fires when the loop RAN OUT
+    "budget_note",                              # per-call: renders the CURRENT spend each turn, so it
+                                                # must be a live callable owned by the caller, never a
+                                                # bundle-carried value frozen at session start — that
+                                                # freezing is exactly the defect 453c83d9 repaired
     "nudge_prompt", "stuck_prompt",             # prompt CONTRACTS — kept verbatim at the owning site
     "emit_retries",                             # per-call; nothing derives it from Settings
     # Whether a forced emit on an exit with NO retry turn may skip `validate`. A per-call

@@ -38,6 +38,7 @@ from looplab.core.run_deletion import (
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed)
 from looplab.events.eventstore import INTEGRITY_COMPLETE, EventStore, integrity_sentence
+from looplab.events.stop_account import stop_account
 from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import (
     Engine,
@@ -722,12 +723,19 @@ def _make_calibration_roles(task: TaskAdapter, settings: Settings, run_dir: Path
 def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             crash_after: Optional[int], *, speculation_gate_calibration: bool = False,
             wrap_up_only: bool = False) -> Engine:
-    from looplab.core.llm import validate_bound_profiles
+    from looplab.core.llm import run_cost_accountant, validate_bound_profiles
     from looplab.core.tracing import set_llm_capture
     from looplab.agents.reachability import llm_consumer_plan
     from looplab.agents.preflight import (credential_free_wrap_up_settings,
                                           preflight_role_endpoints, wrap_up_credential_warning,
                                           wrap_up_endpoint_warning)
+    # The run's ONE spend ceiling is minted HERE, before anything forks these settings. Every
+    # `model_copy` below (the credential-free wrap-up copy a few lines down, the role factories'
+    # `unified_agent=False` and `developer_backend` forks) copies the settings `__dict__` shallowly
+    # and therefore INHERITS an accountant attached before it — and mints a second one for a copy
+    # taken first. `core/llm.py::run_cost_accountant` records the 2x ceiling that ordering luck
+    # produced on the wrap-up-only path; attaching at the entry point makes the order irrelevant.
+    run_cost_accountant(settings)
     # Everything this entry point may lose to a missing model, in the order the two gates run. A
     # wrap-up entry collects instead of raising (see below) and the commands close by naming it.
     _degradations: list[str] = []
@@ -997,8 +1005,23 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
 
 
 def _print_result(state) -> None:
+    """The run summary every entry point closes with, and `looplab inspect` re-prints.
+
+    WHY THE STOP LINE IS HERE AND UNCONDITIONAL. `finished={state.finished}` was the whole of what
+    this said about a run's lifecycle, and `False` covers three unrelated things: an auto-pause that
+    is resumable and already carries a written reason, an operator stop, and a run whose process was
+    killed with nothing recorded. Measured over `/var/tmp/looplab-bench/runs-B` (20 real runs), 8
+    printed `finished=False` — 5 of them paused with a full sentence naming the cause and the remedy
+    sitting unread in `events.jsonl`, 3 of them killed at a harness wall clock. One of the five cost
+    hours of investigation that the string it had already written would have ended.
+
+    Printed for EVERY disposition including `finished`, on the same argument as the `comparability:`
+    line in `inspect_cmds.py`: a line that appears only when there is something to say makes its own
+    absence invisible on exactly the runs where it matters most.
+    """
     best = state.best()
     typer.echo(f"run={state.run_id} task={state.task_id} finished={state.finished}")
+    typer.echo(f"stop: {stop_account(state).line}")
     typer.echo(f"nodes={len(state.nodes)} evaluated={len(state.evaluated_nodes())}")
     if best is not None:
         m = best.robust_metric

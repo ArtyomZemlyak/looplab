@@ -1,0 +1,1076 @@
+2026-08-22 03:59:53 - INFO - Using data directory: /var/tmp/looplab-bench/AlgoTune/data
+2026-08-22 03:59:53 - INFO - Data directory listing (first 10 lines):
+2026-08-22 03:59:53 - INFO -   
+2026-08-22 03:59:53 - INFO - Starting evaluation with results_dir=results, data_dir=/var/tmp/looplab-bench/AlgoTune/data
+2026-08-22 03:59:53 - INFO - Loaded generation data for 154 tasks
+2026-08-22 03:59:53 - INFO - Discovered 100 models: ['Claude Opus 4.1', 'Claude Opus 4.5', 'Claude Opus 4.6', 'Claude Opus 4', 'GLM-4.5', 'GPT-5 Pro (medium)', 'GPT-5-mini', 'GPT-5.2', 'GPT-5.4', 'GPT-5', 'GPT-OSS-120b', 'Gemini 2.5 Pro', 'Gemini 3 Pro Preview', 'Gemini 3.1 Pro Preview', 'Qwen3 Coder', 'R1', 'o4-mini', 'RuleCheck-2032717', 'RuleCheck-2039528', 'RuleCheck-2042978', 'LoopLab-2315031', 'LoopLab-2316987', 'LoopLab-2322186', 'LoopLab-2371570', 'LoopLab-2375561', 'LoopLab-2377961', 'LoopLab-2428249', 'LoopLab-2430429', 'LoopLab-2482098', 'LoopLab-2484648', 'LoopLab-2533300', 'LoopLabFinal-2533383', 'LoopLabFinal-2533385', 'LoopLabFinal-2533388', 'LoopLabFinal-2533390', 'LoopLab-2584101', 'LoopLab-2634650', 'LoopLab-2688836', 'LoopLab-2743395', 'LoopLab-2800768', 'LoopLab-2859785', 'LoopLab-2912643', 'LoopLab-2962342', 'LoopLabFinal-3016008', 'LoopLab-3070128', 'LoopLabFinal-3118763', 'LoopLab-3169677', 'LoopLab-3218593', 'LoopLab-3281890', 'LoopLab-3335351', 'LoopLabFinal-3383720', 'LoopLabFinal-3449732', 'LoopLab-3498754', 'LoopLab-3499801', 'LoopLab-3548675', 'LoopLab-3637066', 'LoopLab-3686369', 'LoopLab-3687624', 'LoopLab-3689622', 'LoopLab-3691957', 'LoopLabFinal-3693773', 'LoopLab-3695078', 'LoopLab-3743982', 'LoopLab-3745471', 'LoopLabFinal-3745606', 'LoopLab-3842238', 'LoopLab-3843046', 'LoopLabFinal-3843693', 'LoopLab-3892382', 'LoopLab-3895557', 'LoopLabFinal-3899181', 'LoopLab-3901486', 'LoopLab-3953067', 'LoopLabFinal-3965318', 'LoopLab-3968135', 'LoopLab-4016978', 'LoopLab-4018962', 'LoopLabFinal-4021152', 'LoopLab-4023591', 'LoopLab-4024799', 'LoopLab-4026924', 'LoopLabFinal-4028112', 'LoopLab-4030669', 'LoopLab-4043287', 'LoopLab-4094895', 'LoopLab-4143738', 'LoopLab-4145743', 'diag_spectral-4148783', 'LoopLab-4149383', 'diag2', 'LoopLab-4159524', 'diag_rbf_cached-4162940', 'LoopLabFinal-4163069', 'diag_rbf_fresh-20814', 'LoopLabFinal-25124', 'LoopLab-25211', 'LoopLab-36452', 'diag_pair_nocap-88525', 'diag_pair_cap-89074', 'REC-90409']
+2026-08-22 03:59:53 - INFO - Evaluating 1 model/task combinations
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+WARNING:root:CODE_DIR not set when initializing DaCe for process 90414
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/huggingface_hub/utils/_validators.py:205: UserWarning: The `local_dir_use_symlinks` argument is deprecated and ignored in `snapshot_download`. Downloading to a local directory does not use symlinks anymore.
+  warnings.warn(
+
+Downloading bytes:           |  0.00B            
+
+Reconstructing (incomplete total...): |          |  0.00B /  0.00B            [A
+
+
+Fetching 202 files:   0%|          | 0/202 [00:00<?, ?it/s][A[A
+
+
+Fetching 202 files:  43%|████▎     | 86/202 [00:00<00:00, 823.20it/s][A[A
+
+
+Fetching 202 files:  89%|████████▊ | 179/202 [00:00<00:00, 882.04it/s][A[A
+Fetching 202 files: 100%|██████████| 202/202 [00:00<00:00, 886.81it/s]
+
+Download complete: :           |  0.00B            
+
+Reconstruction complete: |          |  0.00B /  0.00B                         [AAttempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+Attempting to load config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+Successfully loaded config from: /var/tmp/looplab-bench/AlgoTune/AlgoTuner/config/config.yaml
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+
+Reconstruction complete: |          |  0.00B /  0.00B            
+
+Download complete: :           |  0.00B            
+
+Downloading bytes:           |  0.00B            
+
+Reconstructing (incomplete total...): |          |  0.00B /  0.00B            [A
+
+
+Fetching 202 files:   0%|          | 0/202 [00:00<?, ?it/s][A[A
+
+
+Fetching 202 files:  35%|███▌      | 71/202 [00:00<00:00, 689.46it/s][A[A
+
+
+Fetching 202 files:  72%|███████▏  | 145/202 [00:00<00:00, 718.38it/s][A[A
+Fetching 202 files: 100%|██████████| 202/202 [00:00<00:00, 736.87it/s]
+
+Download complete: :           |  0.00B            
+
+Reconstruction complete: |          |  0.00B /  0.00B                         [A
+Reconstruction complete: |          |  0.00B /  0.00B            
+
+Download complete: :           |  0.00B            
+
+Downloading bytes:           |  0.00B            
+
+Reconstructing (incomplete total...): |          |  0.00B /  0.00B            [A
+
+
+Fetching 202 files:   0%|          | 0/202 [00:00<?, ?it/s][A[A
+
+
+Fetching 202 files:  34%|███▍      | 69/202 [00:00<00:00, 686.74it/s][A[A
+
+
+Fetching 202 files:  72%|███████▏  | 145/202 [00:00<00:00, 720.44it/s][A[A
+Fetching 202 files: 100%|██████████| 202/202 [00:00<00:00, 734.27it/s]
+
+Download complete: :           |  0.00B            
+
+Reconstruction complete: |          |  0.00B /  0.00B                         [A
+Download complete: :           |  0.00B            
+
+Reconstruction complete: |          |  0.00B /  0.00B            
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Failed consensus of quality signals (no hacks detected strongly enough).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Failed consensus of quality signals (no hacks detected strongly enough).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Detected argmax over a k-column subset (suspicious).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Detected argmax over a k-column subset (suspicious).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Detected argmax over a k-column subset (suspicious).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Detected argmax over a contiguous k-column window (hard fail).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Failed consensus of quality signals (no hacks detected strongly enough).
+ERROR:root:Failed consensus of quality signals (no hacks detected strongly enough).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Detected argmax over a k-column subset (suspicious).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Detected argmax over a k-column subset (suspicious).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Detected argmax over a contiguous k-column window (hard fail).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Detected argmax over a k-column subset (suspicious).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Detected argmax over a k-column subset (suspicious).
+ERROR:root:Detected argmax over a k-column subset (suspicious).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Detected argmax over a contiguous k-column window (hard fail).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+ERROR:root:Failed consensus of quality signals (no hacks detected strongly enough).
+ERROR:root:Failed consensus of quality signals (no hacks detected strongly enough).
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+/var/tmp/looplab-bench/AlgoTune/.venv/lib/python3.11/site-packages/sklearn/manifold/_spectral_embedding.py:325: UserWarning: Graph is not fully connected, spectral embedding may not work as expected.
+  warnings.warn(
+2026-08-22 04:07:31 - INFO - Evaluation complete: 0/1 successful
+2026-08-22 04:07:31 - INFO - Compilation needed: 0 tasks
+2026-08-22 04:07:31 - WARNING - Failed evaluations: 1
+2026-08-22 04:07:31 - WARNING -   spectral_clustering/REC-90409: Speedup N/A due to invalid results: 94/100 valid (94.0%)
+2026-08-22 04:07:31 - INFO - Updated summary for spectral_clustering/REC-90409: N/A
+2026-08-22 04:07:31 - INFO - Results written to: /var/tmp/looplab-bench/AlgoTune/reports/evaluate_summary.90409.json

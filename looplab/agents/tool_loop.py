@@ -16,6 +16,7 @@ import contextlib
 import contextvars
 import hashlib
 import itertools
+import difflib
 import inspect
 import json
 import logging
@@ -29,7 +30,7 @@ from looplab.core.phase_events import (PHASE_CHECKPOINTED, PHASE_COMPLETED, PHAS
                                        emit_phase_event)
 from looplab.tools.clock import LoopClock, set_current_clock
 from looplab.core.llm import BudgetExceeded
-from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult,
+from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult, collect_inventory,
                                  capability_manifest)
 from looplab.core.redact import redact_secrets
 # The result FENCE is `core/evidence.py`'s (doc 52 row 13); re-exported under the names this
@@ -44,6 +45,11 @@ from looplab.agents.loop_options import (  # noqa: F401
 # notions can't drift. (`StuckDetector` itself stays a function-local import in `drive_tool_loop`:
 # a FRESH detector is built per call, so nothing about it is module state.)
 from looplab.agents.stuck import _canonical
+# The file readers' own page width (`RepoScoutTools._paginate`'s cap, which `repo_read` and
+# `read_installed` both delegate to), reused by the read-loop nudge below so the page it tells the
+# model to ask for is the page the tool actually returns. `reposcout` imports only `core` and
+# `tools._base`, so this edge closes no cycle.
+from looplab.tools.reposcout import _MAX_READ as _READ_PAGE_CHARS
 
 
 # A configured compressor that cannot be constructed must not silently fall back to the main
@@ -58,8 +64,13 @@ class CompositeTools:
     """Merge several tool providers (each with .specs()/.execute()) into one toolset,
     so the Researcher can use knowledge + skills + memory tools together."""
 
-    def __init__(self, providers: list, *, strict_collisions: bool = False):
+    def __init__(self, providers: list, *, strict_collisions: bool = False,
+                 hide_empty_tools: bool = False):
         self.providers = providers
+        # Withhold the SPEC of a tool whose provider reports a decisive zero (see `specs`).
+        # An UNKNOWN never hides anything: "I could not count it" is not "it is empty",
+        # and hiding on it would remove a tool that had something to return.
+        self.hide_empty_tools = bool(hide_empty_tools)
         self._route: dict[str, object] = {}
         self._capabilities: dict[str, ToolCapability] = {}
         # De-dup by function name (FIRST provider wins): two providers registering the same tool name
@@ -79,7 +90,13 @@ class CompositeTools:
                 except Exception as exc:  # noqa: BLE001 - metadata must not disable a legacy tool
                     _LOG.warning("ignoring invalid capability metadata from %s: %s",
                                  type(p).__name__, exc)
-            for spec in p.specs():
+            # `all_specs()` when the provider has one, i.e. when it is itself a CompositeTools.
+            # `specs()` on a hide-enabled nested composite is already FILTERED, and routing off a
+            # filtered list bakes the filter into THIS object's `_route` -- which would make a
+            # withheld tool genuinely undispatchable and break the "the offer is withheld, never the
+            # route" invariant `specs()` documents. Measured before this fix: an outer composite
+            # over a hide-enabled pilot answered `(unknown tool: read_asset)` instead of running it.
+            for spec in (p.all_specs() if callable(getattr(p, "all_specs", None)) else p.specs()):
                 fname = (spec.get("function") or {}).get("name")
                 if not fname:
                     continue
@@ -110,12 +127,97 @@ class CompositeTools:
         self._manifest, self.manifest_hash = capability_manifest(
             self._specs, self._capabilities.values())
 
-    def specs(self) -> list[dict]:
+    def all_specs(self) -> list[dict]:
+        """Every spec this composite ROUTES, unfiltered — what a wrapping composite must build from.
+
+        `specs()` is the OFFER and may withhold; `_route` is the reach and never does. A caller that
+        composes this object into a bigger one needs the reach, or the outer object inherits an
+        offer-time filter as a routing decision.
+        """
         return list(self._specs)
+
+    def specs(self) -> list[dict]:
+        """The tools to OFFER this turn.
+
+        Filtered live, never at construction, and only ever the OFFER: `_route` keeps every provider
+        it ever routed, so a tool withheld here still DISPATCHES if the model calls it from history
+        or from a spec it saw a turn ago. Nothing becomes unreachable — a tool only stops being
+        advertised while it provably has nothing to say.
+
+        `hide_empty_tools` is off by default and the reason is the caching: this object is built
+        ONCE per role, so a filter applied in `__init__` would hide a tool for the whole run on the
+        strength of what was true at construction — `list_experiments` would vanish at node 0 and
+        never come back. Re-asking here makes the offer track the PHASE.
+
+        NOT the turn, and the difference matters: `drive_tool_loop` computes `tool_specs` once per
+        invocation (see its `_compose_loop_tool_specs` call) and reuses that list for every turn, so
+        a tool that gains content mid-phase stays withheld until the next phase. An earlier version
+        of this docstring and of the `hide_empty_tools` setting claimed "re-evaluated every turn",
+        which the code never did. Recomputing per turn would put the whole provider sweep on every
+        turn of every phase; the phase boundary is where it is affordable, and the flag is off by
+        default partly for this reason.
+        """
+        if not self.hide_empty_tools:
+            return list(self._specs)
+        empty = {name for name, value in self.inventory().items()
+                 if isinstance(value, int) and value == 0}
+        if not empty:
+            return list(self._specs)
+        return [spec for spec in self._specs
+                if (spec.get("function") or {}).get("name") not in empty]
+
+    def inventory(self) -> dict[str, int | str]:
+        """Merge the providers' optional `inventory()` receipts (`tools/_base.INVENTORY_CONTRACT`).
+
+        Filtered through `self._route`, which is what makes the merge correct rather than merely
+        convenient: a name registered by two providers is DISPATCHED to the first and the second is
+        shadowed, so publishing the shadowed provider's count would state a number no call can
+        return. Same first-wins rule, one source.
+
+        A name this composite does not route at all is dropped for the same reason -- a provider
+        may know about a tool it is not currently offering (`CrossRunTools` answers for all eight of
+        its tools whether or not `specs()` published them), and a count for a tool the model cannot
+        call is noise in a block whose entire value is that every row names a real tool.
+        """
+        merged: dict[str, int | str] = {}
+        for provider in self.providers:
+            for name, value in collect_inventory(provider).items():
+                if self._route.get(name) is provider and name not in merged:
+                    merged[name] = value
+        return merged
+
+    def _unknown(self, name: str) -> str:
+        """The refusal, with the two things a model needs to correct itself in one turn.
+
+        MEASURED over the 46-probe corpus, 2026-09-02: 36 tool calls named something this toolset
+        does not route, and every one was answered with the bare string `(unknown tool: <name>)`.
+        The distribution is not random noise -- 31 of the 36 are `write_file` called during `plan`,
+        in 20 of the 46 probes, and `write_file` is a REAL tool that works 391 times in `plan_step`
+        and 14 in `card_build`. The Developer is reaching, while it plans, for the tool it will have
+        while it executes.
+
+        The bare message cannot correct that. It does not say the name is right and the PHASE is
+        wrong, it does not name one tool that IS reachable, and there is nothing in it to act on --
+        so the model either repeats the call or invents another name (`read_memo`, `python`: four
+        more calls, same answer). Naming the near neighbours and the count turns a dead end into a
+        correction that costs one line of prompt.
+
+        Bounded on purpose: at most five suggestions and a count, because this string is pasted into
+        a context window whose budget the rest of this file spends care on.
+        """
+        known = sorted(self._route)
+        close = difflib.get_close_matches(name or "", known, n=3, cutoff=0.6)
+        # Exact-name-elsewhere is the `write_file`-in-`plan` case and deserves its own sentence: the
+        # model did not misspell anything, it asked at the wrong moment.
+        if not close and known:
+            close = known[:5]
+        hint = (" available here: " + ", ".join(close)) if close else ""
+        more = f" (+{len(known) - len(close)} more)" if len(known) > len(close) else ""
+        return f"(unknown tool: {name};{hint}{more})" if hint else f"(unknown tool: {name})"
 
     def execute(self, name: str, args: dict) -> str:
         p = self._route.get(name)
-        return p.execute(name, args) if p else f"(unknown tool: {name})"
+        return p.execute(name, args) if p else self._unknown(name)
 
     def execute_result(self, name: str, args: dict, *, cancel_check=None) -> ToolResult:
         """Typed dispatch, additive to the historical string-returning ``execute`` contract.
@@ -127,7 +229,7 @@ class CompositeTools:
         """
         p = self._route.get(name)
         if p is None:
-            return ToolResult(content=f"(unknown tool: {name})", is_error=True,
+            return ToolResult(content=self._unknown(name), is_error=True,
                               retryable=False, provenance={"source": "composite"})
         typed = getattr(p, "execute_result", None)
         if callable(typed):
@@ -160,6 +262,20 @@ class CompositeTools:
         for p in self.providers:
             if hasattr(p, "bind_state"):
                 p.bind_state(state, parent)
+
+
+def compose_tools(providers: list, settings):
+    """Turn a provider list into the toolset a role is handed — the ONE place that decision lives.
+
+    A single provider is normally handed over bare. But `Settings.hide_empty_tools` (stop
+    advertising a tool whose provider reports it currently holds nothing) is implemented by
+    `CompositeTools.specs`, so a bare provider would silently opt that configuration out of the
+    filter. Lives here rather than in `agents/factory.py` because the rule is a property of this
+    class, and because two call sites spelling it out is how they come to disagree.
+    """
+    hide = bool(getattr(settings, "hide_empty_tools", False))
+    return (providers[0] if len(providers) == 1 and not hide
+            else CompositeTools(providers, hide_empty_tools=hide))
 
 
 def _force_emit(client, messages: list, emit_spec: dict) -> Optional[dict]:
@@ -216,7 +332,117 @@ _DEADLINE_NOTE = ("\n(deadline: {remaining:.0f}s of this session's {budget:.0f}s
                   "remain — finish and call `{emit}` now)")
 _DEADLINE_WARN_FRACTION = 0.2
 _DEADLINE_WARN_MIN_S = 120.0
+# A9 (docs/60 §60.9; evidence docs/56 §164). The PATH-keyed read ledger: how many times ONE file has
+# been fetched inside ONE loop invocation, whatever the ranges. `oldCK8` (2026-09-03) spent $0.9574
+# of its $1.00 inside `propose` and minted no node, reading the same 248-line
+# `reference_edge_expansion.py` 189 times with `{"lines": 1, "start_line": 25}`, `26`, `27`… — 72-102
+# chars per call, a whole re-sent conversation per turn. Every net above and below missed it, each
+# for its own reason: `_REPEAT_NOTE` keys on identical `(tool, canonical-args)` and the arguments
+# incremented (`repeat_streak` was 1 on 192 of 194 reads); the identical-RESULT half keys on the
+# result and every line was different; the StuckDetector's 1-/2-cycle window sees no cycle in a
+# monotone walk; and `agent_max_turns` is 0 in every probe. The one thing constant across all 189
+# calls was the path, which is what `benchmarks/read_loops.py` counts and what this ledger keys on.
+#
+# A NUDGE, NOT A CAP: nothing is refused and the read still executes and returns exactly what it
+# always did — the operator's always-re-read decision (P3) stands. The note tells the model what it
+# has done (N reads of this one file this phase), what the file is (T lines, about M pages at the
+# widest page, when the reader's own `(lines a-b of T)` header made that derivable) and the one
+# call that ends the walk — spelled as the actual tool and argument, never "read it whole" in the
+# abstract. The threshold (25, `read_loop_nudge_after`) is the corpus's NORMAL behaviour, not a
+# guess: every probe re-reads the reference 25-38 times inside `plan_step` and the next-worst
+# triple after oldCK8's 186 is 38, so at 25 the corpus fires only on oldCK8-shaped runs. Like
+# `_REPEAT_NOTE`, it rides OUTSIDE the cap so it can never be truncated away, and it fires on the
+# threshold read and on EVERY read after it — a one-shot note is one turn of context away from
+# being compacted out of a loop that has already shown it does not stop on its own.
+#
+# The registry of READERS: tool name -> (the argument that names the file, whether the tool pages
+# by `start_line`/`lines`). Only tools that return a FILE's content belong here — a grep, a listing
+# or a write of the same path is not a read of it (`read_loops.py`'s rule, pinned by
+# `tests/test_read_loop_nudge.py`). `read_asset` has no window and no page; its remedy is
+# different and `_READ_LOOP_NOTE_UNPAGED` says so. The stage-log readers (`read_log`) are
+# deliberately absent: a 45 MB training log is not something to "read whole".
+_READ_TOOL_PATH_SLOTS: dict[str, tuple[str, bool]] = {
+    "read_file": ("path", True),          # tools/reposcout.py — the paginator every other reader uses
+    "repo_read": ("path", True),          # tools/knowledge_tools.py — delegates to the scout's read
+    "read_installed": ("module", True),   # tools/env_inspect.py — same `_paginate`, a dotted module
+    "read_asset": ("name", False),        # tools/run_tools.py — one bounded sample, no window
+}
+# `{fit}` is either "" or the sentence `_read_loop_fit` derives; the rest is fixed text. `{page}` is
+# the reader's own page width so the number the model is told matches the tool's own description.
+_READ_LOOP_NOTE = (
+    "\n(note: `{path}` has now been read {n}× this phase.{fit} Stop re-reading it piecemeal: call "
+    "`{tool}({slot}=\"{path}\")` with `lines` OMITTED to get one ~{page}-char page per call, follow "
+    "each page's 'continue with start_line=N' marker to the end, and then work from the copy in "
+    "this conversation instead of reading it again)")
+_READ_LOOP_NOTE_UNPAGED = (
+    "\n(note: `{path}` has now been read {n}× this phase via `{tool}({slot}=\"{path}\")`; its "
+    "content has not changed — work from the copies already in this conversation instead of "
+    "fetching it again)")
+# The paginator's own header, `(lines A-B of T)`, written by `RepoScoutTools._paginate` on every
+# WINDOWED read (a `start_line` or a `lines`) — the exact shape of the oldCK8 walk — and the one
+# place a reader states the file's total length. `re.M` because `read_installed` prefixes an
+# origin line before the page.
+_LINES_OF_RE = re.compile(r"^\(lines (\d+)-(\d+) of (\d+)\)$", re.M)
 
+
+def _canonical_read_path(name: str, args: dict) -> str | None:
+    """The ledger key for a read-type tool call, or None when `name` is not a registered reader or
+    names no file. Separators are normalized and a leading `./` stripped (the scout's own overlay
+    rule), and NOTHING else: `<repo>/<path>` and a bare `<path>` are two keys, because resolving
+    them is the provider's business and a wrong merge would nudge two different files as one."""
+    slot = _READ_TOOL_PATH_SLOTS.get(name)
+    if slot is None:
+        return None
+    raw = (args or {}).get(slot[0])
+    if raw is None:
+        return None
+    path = str(raw).replace("\\", "/").strip()
+    while path.startswith("./"):
+        path = path[2:]
+    return path or None
+
+
+def _read_loop_fit(entry: dict) -> str:
+    """The `{fit}` sentence: the file's total length and about how many widest pages it is, derived
+    ONLY from what the reader's own headers said (`(lines a-b of T)` gives T; the windows seen give
+    the mean chars per line). An estimate, and it says so — the page is a char budget and the file
+    is counted in lines, so no exact figure exists before the whole file has been read; an empty
+    string when no header has been seen, because a number nobody derived is worse than none."""
+    total = entry.get("lines_total")
+    lines_seen = entry.get("lines_seen") or 0
+    if not total or not lines_seen:
+        return ""
+    est_chars = total * (entry.get("chars_seen", 0) / lines_seen)
+    pages = max(1, -(-int(est_chars) // _READ_PAGE_CHARS))
+    return (f" It is {total} lines — about {pages} such page{'s' if pages != 1 else ''} in"
+            f" total.")
+
+
+def _note_path_read(read_state: dict, name: str, args: dict, result: str,
+                    nudge_after: int) -> tuple[int, str]:
+    """Charge one read of `(name, args)`'s path to the caller's ledger and return
+    `(reads_of_this_path, note)` — the note is "" below `nudge_after` (or when it is <= 0, the OFF
+    switch), and `_READ_LOOP_NOTE`/`_READ_LOOP_NOTE_UNPAGED` on the threshold read and every read
+    after it. `0` reads means `name` is not a reader at all, so the caller stamps nothing."""
+    path = _canonical_read_path(name, args)
+    if path is None:
+        return 0, ""
+    entry = read_state.setdefault(path, {"reads": 0, "lines_total": None,
+                                         "lines_seen": 0, "chars_seen": 0})
+    entry["reads"] += 1
+    header = _LINES_OF_RE.search(result[:400])
+    if header is not None:
+        first, last, total = (int(g) for g in header.groups())
+        if total > 0 and last >= first:
+            entry["lines_total"] = total
+            entry["lines_seen"] += last - first + 1
+            entry["chars_seen"] += max(0, len(result) - header.end())
+    if nudge_after <= 0 or entry["reads"] < nudge_after:
+        return entry["reads"], ""
+    slot, paged = _READ_TOOL_PATH_SLOTS[name]
+    template = _READ_LOOP_NOTE if paged else _READ_LOOP_NOTE_UNPAGED
+    return entry["reads"], template.format(path=path, n=entry["reads"], tool=name, slot=slot,
+                                           fit=_read_loop_fit(entry), page=_READ_PAGE_CHARS)
 
 def _deadline_note(clock: "LoopClock", emit_name: str) -> str:
     """The note, or "" while the wall is comfortably far (or there is none)."""
@@ -410,8 +636,11 @@ def _tool_call_args(tc: dict) -> tuple[str, dict]:
 
 
 def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
-                   on_tool_result=None, cancel_check=None) -> tuple[str, str]:
-    """Execute ONE retrieval tool call and return `(capped_result, repeat_note)`.
+                   on_tool_result=None, cancel_check=None, read_state: dict | None = None,
+                   read_loop_nudge_after: int = 25) -> tuple[str, str]:
+    """Execute ONE retrieval tool call and return `(capped_result, note)`, where `note` is the
+    identical-result repeat note (`_REPEAT_NOTE`) followed by the path-keyed read-loop nudge
+    (`_READ_LOOP_NOTE`), each "" when it did not fire.
 
     Every tool call ALWAYS executes and returns fresh content. The G2 read-dedup cache
     that used to stub an exact repeat ("already ran … use the earlier output") was
@@ -423,6 +652,8 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
     note below covers the 3+-call round-robins B1's 1-/2-cycle window can't see.
 
     `repeat_state` is the caller's per-invocation ledger (see `_REPEAT_NOTE`), mutated here.
+    `read_state` is its PATH-keyed sibling (see `_READ_TOOL_PATH_SLOTS`), also mutated here; `None`
+    keeps the read-loop nudge off, so a caller that only wants the repeat ledger is unchanged.
     """
     # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
     # under the active operation span next to the generations that decided the call.
@@ -505,9 +736,23 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
         _tool_obs.set("repeat_streak", streak)
         if repeat_note:
             _tool_obs.set("repeat_note_sent", True)
+        # A9: the PATH-keyed read ledger, the net for the walk the two ledgers above cannot see
+        # (see `_READ_TOOL_PATH_SLOTS`). Same trace discipline: `path_reads` rides on EVERY read
+        # of a registered reader — the denominator a firing rate needs — and `repeat_path_note_sent`
+        # only when the note really went. The note is appended AFTER the repeat note so that one
+        # stays byte-identical (`tests/test_tool_repeat_streak_is_traced.py`), and outside the cap.
+        path_note = ""
+        if read_state is not None:
+            path_reads, path_note = _note_path_read(read_state, name, args, result,
+                                                    read_loop_nudge_after)
+            if path_reads:
+                _tool_obs.set("path_reads", path_reads)
+            if path_note:
+                _tool_obs.set("repeat_path_note_sent", True)
+    note = repeat_note + path_note
     if on_tool_result is not None:      # provenance hook: exceptions propagate
-        on_tool_result(name, args, result + repeat_note)
-    return result, repeat_note
+        on_tool_result(name, args, result + note)
+    return result, note
 
 
 # Every way this loop can stop WITHOUT the model having emitted an answer of its own accord. The
@@ -522,7 +767,50 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
 # file.") presented as the answer, with nothing anywhere saying the investigation had been cut off.
 # That is the operator's "the assistant hangs around 40 tool uses and then a bare tool use arrives as
 # the reply", reproduced exactly.
-LOOP_CUTOFF_KINDS = ("time", "turns", "stuck", "stalled", "emit_force")
+LOOP_CUTOFF_KINDS = ("time", "cost", "turns", "stuck", "stalled", "emit_force")
+
+
+def _accountant_spend(client) -> float | None:
+    """The run's spend so far, or None when this client has no accountant.
+
+    None rather than 0.0 on purpose: 0.0 is a real reading (a run that has not spent yet) and would
+    make a missing accountant look like a fresh one, which is how a money ceiling would silently
+    become a ceiling on nothing. Every accountant-derived rung in this codebase is opt-out-by-absence
+    and none may ever raise — a bookkeeping error must not end a session that is working.
+    """
+    acct = getattr(client, "accountant", None)
+    if acct is None:
+        return None
+    try:
+        spent = float(getattr(acct, "spent", None))
+    except (TypeError, ValueError):
+        return None
+    return spent if spent >= 0 else None
+
+
+def _session_spend(client, at_start: float | None) -> float | None:
+    """What THIS session has spent, or None when it cannot be known."""
+    if at_start is None:
+        return None
+    now = _accountant_spend(client)
+    if now is None:
+        return None
+    return max(0.0, now - at_start)
+
+
+def _spend_detail(client, at_start, ceiling: float) -> str:
+    """"$X of $Y for this session", or "" when the spend cannot be known.
+
+    Shared by the wall-clock and money branches so a cut session reports the SAME pair either way:
+    what it had spent and what it was allowed. The money branch always had this sentence; the wall
+    branch is the one that actually fires, and it did not.
+    """
+    sp = _session_spend(client, at_start)
+    if sp is None:
+        return ""
+    if ceiling:
+        return f"${sp:.4f} of ${ceiling:.4f} for this session"
+    return f"${sp:.4f} for this session, no money ceiling set"
 
 
 def _note_budget(on_budget, kind: str, *, turns, seconds, detail: str = "") -> None:
@@ -547,16 +835,18 @@ def _note_budget(on_budget, kind: str, *, turns, seconds, detail: str = "") -> N
 
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     max_turns: int = 0, context_budget_chars: int | None = None,
-                    time_budget_s: float = 0.0, finalize=None, fallback=None, on_budget=None,
+                    time_budget_s: float = 0.0, cost_budget_usd: float = 0.0,
+                    finalize=None, fallback=None, on_budget=None,
                     on_plan=None, phase_label: str = "",
                     stuck_detection: bool = True,
                     stuck_repeat: int = 4, stuck_alternate: int = 4,
                     self_plan: bool = False, plan_reinject_every: int = 5,
                     auto_summary: bool = False, summary_client=None, on_step=None, on_text=None,
                     cancel_check=None, on_tool_result=None,
-                    nudge_prompt: str = "", stuck_prompt: str = "",
+                    nudge_prompt: str = "", stuck_prompt: str = "", budget_note=None,
                     validate=None, emit_retries: int = 2, emit_after: int = 0, emit_force: int = 0,
-                    terminal_salvage: bool = False, tool_result_label: str = ""):
+                    terminal_salvage: bool = False, tool_result_label: str = "",
+                    read_loop_nudge_after: int = 25):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -568,6 +858,18 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
       - `time_budget_s` (0 = off): WALL-CLOCK ceiling across turns — a new turn is not started once
         exceeded (a turn already in flight isn't interrupted — that's the LLM client's per-call
         timeout's job). Set it to bound an interactive request behind a proxy gateway timeout.
+      - `cost_budget_usd` (0 = off): MONEY ceiling for THIS session, measured as spend since the
+        session started (not the run's total), on the same "do not start another turn" rule as the
+        wall clock. Needs `client.accountant`; without one it is silently off, like every other
+        accountant-derived rung in this codebase.
+
+        WHY A THIRD CURRENCY. Measured 2026-08-31 over 7 AlgoTune probes: the two ceilings above are
+        denominated in turns and seconds, and what actually ends a run is money. On `pde_heat1d` a
+        SINGLE plan step took 48 % of a $1.00 run (72 generations) and was cut by the 1200 s wall at
+        1212 s — the wall worked, and half the budget was already gone when it fired. `accPde` the
+        same: 1212 s, 28 %. The same ceiling on `edge_expansion` never bit at all (worst step 8-9 %),
+        so seconds and dollars are not proxies for each other across tasks, and bounding one does not
+        bound the other.
 
     Safe-by-default unlimited operation (the point of "the agents may loop forever in their own
     loop"): `max_turns`/`time_budget_s` are only BACKSTOPS. What actually stops a stuck loop is the
@@ -575,6 +877,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     ping-pongs between two, or keeps hitting the SAME error) with no progress, we force the final
     emit and finish instead of spinning forever. Thresholds are config-driven (`stuck_repeat` /
     `stuck_alternate`); a FRESH detector is built per call so state never leaks across loops.
+
+      - `read_loop_nudge_after` (25; 0 = off): reads of ONE file inside this loop after which every
+        further read of it carries `_READ_LOOP_NOTE` — the path-keyed net for a model walking a file
+        one line at a time (A9, docs/56 §164: 189 `repo_read`s of one 248-line file, $0.96, no node).
+        A nudge and never a cap: the read still executes and returns what it always did. The default
+        is the corpus's normal re-read count (25-38 per phase), so it fires only on the runaway.
 
     Optional long-horizon aids:
       - `self_plan` (C1): expose a TodoWrite-style `update_plan` tool so the agent keeps its OWN
@@ -619,6 +927,16 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             on_step(ev)
         except Exception:               # noqa: BLE001 - transparency must not change behaviour
             pass
+    # OPEN[turn-zero-duplicate-budget-reminder] seeding the ledger empty makes the first loop
+    # iteration inject a "Reminder — BUDGET: $0.0000 ..." user message that duplicates the budget
+    # line both wired callers already lead their opening turn with.
+    # proof:`present:_last_budget_note = [""]@looplab/agents/tool_loop.py`
+    # REVIEW 2026-08-30 (prompt-noise): reproduced with a stub client — nothing has been spent,
+    # `budget_note()` renders the same text as the opener, `"" != note`, and the reminder lands
+    # before the first model call, against the budget block's own "a turn that spent nothing adds
+    # nothing". Seed with one render before the loop (or let the caller pass the opening figure).
+    _last_budget_note = [""]        # last note actually injected; see the budget block below
+
     def _text(content):                 # interstitial assistant prose (a message written BEFORE a tool
         if on_text is None:             # round) — surfaced live so the chat reads like Claude Desktop
             return                      # (what the agent is thinking out loud between tool calls).
@@ -647,6 +965,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # is kept (not a hash): it is already capped at RESULT_CAP, and byte-identity must be exact —
     # no collision caveat. `_run_tool_call` owns the ledger's updates.
     repeat_state: dict[str, tuple[str, int]] = {}
+    # A9: the PATH-keyed read ledger beside it, the same lifetime for the same reason — a fresh
+    # dict per invocation, so a file legitimately re-read across phases (the reference in every
+    # `plan_step`) never accumulates a count from an earlier loop. `_run_tool_call` owns its updates.
+    read_state: dict[str, dict] = {}
     tool_specs = _compose_loop_tool_specs(tools, emit_spec, self_plan=self_plan)
     current_plan = ""
     started = time.monotonic()
@@ -745,6 +1067,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         another turn, so only it can honour a bounce; see `_accept_forced`."""
         return _accept_forced(_force_emit(client, messages, emit_spec), may_retry=may_retry)
 
+    # Read once, before the first turn: the ceiling is for THIS session, and the accountant it
+    # reads is the RUN's, already carrying whatever earlier phases spent.
+    _spend_at_start = _accountant_spend(client)
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly
@@ -755,8 +1080,26 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # right — but presenting a cut-short investigation as a finished one is how "the
             # assistant hangs around 40 tool uses and then something odd comes back" reads to an
             # operator who was never told the turn ran out of wall clock.
-            _note_budget(on_budget, "time", turns=turn_idx, seconds=time.monotonic() - started)
+            # AND HOW MUCH MONEY IT HAD SPENT BY THEN. Measured 2026-09-01 over 30 probes: twelve
+            # sessions were cut, ALL of them by this wall and none by the money ceiling below --
+            # and how far the money ceiling was from firing could not be recovered from the corpus,
+            # because the only thing recorded was the word "time". A ceiling whose distance from
+            # firing is unobservable cannot be tuned, defended or removed; it can only be asserted
+            # about, which is what happened for several weeks.
+            _note_budget(on_budget, "time", turns=turn_idx, seconds=time.monotonic() - started,
+                         detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
             break                       # out of wall-clock budget -> salvage an emit below
+        if cost_budget_usd:
+            _sp = _session_spend(client, _spend_at_start)
+            if _sp is not None and _sp > cost_budget_usd:
+                exhausted = True
+                # Same reason the wall clock tells someone: a session cut for money that reports
+                # nothing looks exactly like one that finished, and the operator reads the short
+                # answer as the model's considered one.
+                _note_budget(on_budget, "cost", turns=turn_idx,
+                             seconds=time.monotonic() - started,
+                             detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
+                break                   # out of money for THIS session -> salvage an emit below
         _compact_in_place(messages, context_budget_chars, auto_summary, summarize)
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A
         # `user`-role reminder, not `system`: the plan is verbatim MODEL output (from update_plan
@@ -766,6 +1109,27 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             messages.append({"role": "user",
                              "content": "Reminder — your current plan/TODO (update it via update_plan "
                                         "as you make progress):\n" + current_plan})
+        # THE BUDGET MOVES INSIDE A SESSION; A PROMPT BUILT AT SESSION START DOES NOT. Measured on
+        # dsBN 2026-08-28: `deep_research`'s budget line read "$0.0000 of $1.0000 spent" for all
+        # SEVEN generations of its first session and "$0.3210" for all four of its second, because
+        # the line is baked into `messages` once and replayed every turn. `plan_step` behaves the
+        # same ($0.0935 eight times running). For a stage with no turn cap and no money cap that is
+        # exactly the wrong shape: `opus5` spent $1.0204 inside ONE research session, so a
+        # session-start figure would have said $0.0000 for all ten of its generations and warned
+        # nobody.
+        #
+        # `user`-role for the same reason the plan reminder above is: this is a reminder, not an
+        # instruction carrying system authority. Injected only when the rendered note CHANGES, so a
+        # turn that spent nothing adds nothing, and never when the caller supplies no callable --
+        # every existing caller keeps a byte-identical message list.
+        if budget_note is not None:
+            try:
+                _note = budget_note() or ""
+            except Exception:               # noqa: BLE001 - an extra rung must not end a session
+                _note = ""
+            if _note and _note != _last_budget_note[0]:
+                _last_budget_note[0] = _note
+                messages.append({"role": "user", "content": "Reminder — " + _note.strip()})
         # NB: a transport failure (LLMError after the client's retries) PROPAGATES out of the loop by
         # design — the caller decides how to degrade. The assistant's `run_turn` surfaces it as an
         # error dict; the engine's agentic callers (ToolUsingResearcher.propose /
@@ -821,7 +1185,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         stuck_reason = None
         investigated = False            # did any call this turn actually RUN a tool (see call_turns)
         for tc in calls:
-            repeat_note = ""            # per-call: set only when an executed call is a 3rd+ repeat
+            repeat_note = ""            # per-call: the repeat note and/or the read-loop nudge, else ""
             name, args = _tool_call_args(tc)     # args HARDENED to a dict (see there)
             if name == emit_name:
                 # Bounce a malformed emit BACK to the model with the concrete error instead of silently
@@ -893,7 +1257,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 set_current_clock(clock)
                 result, repeat_note = _run_tool_call(tools, name, args, repeat_state=repeat_state,
                                                      on_tool_result=on_tool_result,
-                                                     cancel_check=_cancelled)
+                                                     cancel_check=_cancelled,
+                                                     read_state=read_state,
+                                                     read_loop_nudge_after=read_loop_nudge_after)
                 if not deadline_warned:
                     _note = _deadline_note(clock, emit_name)
                     if _note:

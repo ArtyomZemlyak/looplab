@@ -13,6 +13,7 @@ Layering: no runtime import of the orchestrator and never serve — only core, e
 stdlib (the trust verifier / role parser stay lazy, method-local, as they were)."""
 from __future__ import annotations
 
+import contextlib
 from typing import Optional
 
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
@@ -36,7 +37,17 @@ class VerifierTiebreakMixin:
         best-effort (no client / any failure -> skip). Emits one atomic
         `verifier_group_scored` record; the fold reads it ONLY as a tie-break — it can never override
         a strictly-better metric (§21.7). No-op when `select_verifier` is off. Runs in the sync cadence
-        (like the Strategist consult), so a blocking LLM call here matches the established pattern."""
+        (like the Strategist consult), so a blocking LLM call here matches the established pattern.
+
+        SPANNED like that consult, and for the reason doc 53 §2b measured: `_run_cadences` runs its
+        steps with NO span open, and `core/tracing.py::generation` yields a NULL handle when nothing
+        is being traced — so a paid step that opens no span of its own writes its `llm_usage` rows
+        with `trace_id=null, span_id=null` and lands in no span at all. Its siblings on that line
+        (`_maybe_snapshot_concept_coverage`, `_maybe_consult_strategist`) each open one; this one did
+        not. Found by INSPECTION, not by measurement: `select_verifier` is off by default and the
+        arm-B corpus that measured the other two sites bought nothing here, so no dollar figure is
+        attached — which is the point of fixing it now rather than after a campaign runs with the
+        knob on. Opened only past the cheap gates, so a run with the feature off adds no span."""
         if not state.select_verifier_tiebreak:
             return state
         # The producer and replay validator must agree on the selection contract before any paid
@@ -63,47 +74,49 @@ class VerifierTiebreakMixin:
             attempted = self._verify_attempted = set()
         budget = 8                       # per-cadence NODE cap so a big tie cluster can't burst cost
         done = False
-        for group in groups:
-            # ATOMIC per group: score EVERY unscored member of a tie or NONE of it. A half-scored group
-            # would leave an unscored sibling at the neutral 0.5 midpoint, which could outrank a
-            # verified-but-low member — deciding the tie by verify TIMING/BUDGET rather than soundness. So
-            # a group with a prior FAILED member (can never be fully scored) is skipped entirely (its tie
-            # falls back to the id tie-break), and a group larger than the cadence budget is left for a
-            # later cadence (a group larger than the cap is never verified — honest + bounded).
-            attempted_keys = {
-                n.id: (n.id, n.attempt, verifier_evidence_digest(state.direction, n)) for n in group}
-            if any(attempted_keys[n.id] in attempted for n in group):
-                continue
-            # Re-score the complete current tie. Carrying an older member score into a newly expanded group
-            # would mix treatments and let one node influence two incompatible evidence snapshots.
-            todo = list(group)
-            if len(todo) > budget:
-                continue
-            verdicts, failed = [], False
-            for n in todo:
-                v = self._verifier_soundness(state, n, client)
-                budget -= 1
-                if v is None:
-                    attempted.add(attempted_keys[n.id])  # failure abstains this evidence revision hereafter
-                    failed = True
+        _span = getattr(self, "_op_span", None)
+        with (_span("verifier_tiebreak") if callable(_span) else contextlib.nullcontext()):
+            for group in groups:
+                # ATOMIC per group: score EVERY unscored member of a tie or NONE of it. A half-scored group
+                # would leave an unscored sibling at the neutral 0.5 midpoint, which could outrank a
+                # verified-but-low member — deciding the tie by verify TIMING/BUDGET rather than soundness. So
+                # a group with a prior FAILED member (can never be fully scored) is skipped entirely (its tie
+                # falls back to the id tie-break), and a group larger than the cadence budget is left for a
+                # later cadence (a group larger than the cap is never verified — honest + bounded).
+                attempted_keys = {
+                    n.id: (n.id, n.attempt, verifier_evidence_digest(state.direction, n)) for n in group}
+                if any(attempted_keys[n.id] in attempted for n in group):
+                    continue
+                # Re-score the complete current tie. Carrying an older member score into a newly expanded group
+                # would mix treatments and let one node influence two incompatible evidence snapshots.
+                todo = list(group)
+                if len(todo) > budget:
+                    continue
+                verdicts, failed = [], False
+                for n in todo:
+                    v = self._verifier_soundness(state, n, client)
+                    budget -= 1
+                    if v is None:
+                        attempted.add(attempted_keys[n.id])  # failure abstains this evidence revision hereafter
+                        failed = True
+                        break
+                    verdicts.append((n, v))
+                if not failed:
+                    # Publish the complete selector-reachable tie group in one durable event;
+                    # per-node appends expose crash prefixes that can change the winner during replay.
+                    self.store.append(EV_VERIFIER_GROUP_SCORED, {
+                        "v": 1, "contract": VERIFIER_SELECTION_CONTRACT,
+                        "requested_samples": state.select_verifier_samples,
+                        "members": [{
+                            "node_id": n.id, "generation": n.attempt,
+                            "score": round(v["score"], 4), "n_samples": v["n_samples"],
+                            "agreement": v["agreement"], "method": v["method"],
+                            "evidence_digest": verifier_evidence_digest(state.direction, n),
+                        } for n, v in verdicts],
+                    })
+                    done = True
+                if budget <= 0:
                     break
-                verdicts.append((n, v))
-            if not failed:
-                # Publish the complete selector-reachable tie group in one durable event;
-                # per-node appends expose crash prefixes that can change the winner during replay.
-                self.store.append(EV_VERIFIER_GROUP_SCORED, {
-                    "v": 1, "contract": VERIFIER_SELECTION_CONTRACT,
-                    "requested_samples": state.select_verifier_samples,
-                    "members": [{
-                        "node_id": n.id, "generation": n.attempt,
-                        "score": round(v["score"], 4), "n_samples": v["n_samples"],
-                        "agreement": v["agreement"], "method": v["method"],
-                        "evidence_digest": verifier_evidence_digest(state.direction, n),
-                    } for n, v in verdicts],
-                })
-                done = True
-            if budget <= 0:
-                break
         return fold(self.store.read_all()) if done else state
 
     def _metric_tie_groups(self, state: RunState) -> list:

@@ -26,7 +26,7 @@ from looplab.engine.orchestrator import (
     SPECULATION_CALIBRATION_PROFILE_DIGEST,
     RunStartPinError,
 )
-from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
+from looplab.engine.finalize import finalize_run, incomplete_finalize_scope, is_guarded_abort
 from looplab.events.replay import fold
 from looplab.adapters.repo_task import (eval_entrypoint_unprotected, eval_reader_path_errors,
                                         eval_source_tree_command_paths, eval_workspace_conflicts)
@@ -86,9 +86,48 @@ def _refuse_wrap_up_engine_that_could_propose(eng) -> None:
     raise wrap_up_lift_refusal(kind, getattr(eng, "wrap_up_degradation_warning", None))
 
 
+def _budget_leaf(exc: BaseException, _depth: int = 0):
+    """The `BudgetExceeded` inside `exc`, however deeply a task group wrapped it — or None.
+
+    The definition moved to `core/errors.py::budget_stop_leaf` when the engine acquired a second
+    caller for it (`Engine._drain_inflight_evaluation`, which has to recognise the SAME wrapped
+    leaf one frame inside `Engine.run` in order to let a paid-for evaluation land its terminal).
+    This name stays as the local spelling every call site here already uses.
+    """
+    from looplab.core.errors import budget_stop_leaf
+
+    return budget_stop_leaf(exc, _depth)
+
+
 def _run_engine_guarded(eng: Engine):
     """Drive the engine loop to completion, funneling any fatal abort into a terminal event.
-    Shared by `run` and `resume` (previously duplicated verbatim in both)."""
+
+    THIS FUNCTION OWNS THE RUN'S TRACE LIFETIME, because it owns the run's TERMINAL. Its outer
+    handler writes `run_finished` and buys the finish report several frames above `Engine.run`'s own
+    `finally`, so leaving the exporter to be retired there put the report span outside the tracer's
+    life: measured on the campaign corpus, fifteen `report_generated` rows name a `span_id` that is
+    in no artifact and in no loss receipt, and every one of them is a ceiling-terminated run
+    (docs/53 §2c, `Engine.defer_trace_retirement`). The retirement is the same terminal barrier at
+    the same lock scope -- only later than the frame that used to run it.
+
+    Shared by `run` and `resume` (previously duplicated verbatim in both).
+    """
+    _defer = getattr(eng, "defer_trace_retirement", None)
+    if callable(_defer):
+        _defer()
+    try:
+        return _drive_engine_to_terminal(eng)
+    finally:
+        # Unconditional: a refusal that never entered the loop must not leave a live exporter behind
+        # the lifecycle lock either. `retire_tracer` is idempotent and a no-op on a stub engine.
+        _retire = getattr(eng, "retire_tracer", None)
+        if callable(_retire):
+            _retire()
+
+
+def _drive_engine_to_terminal(eng: Engine):
+    """The guarded drive itself. Split out only so `_run_engine_guarded` can wrap it in the
+    trace-lifetime `finally` above without re-indenting the terminal-recovery body."""
     _refuse_wrap_up_engine_that_could_propose(eng)
     started = time.time()
     try:
@@ -115,7 +154,30 @@ def _run_engine_guarded(eng: Engine):
             error_text = str(e)[:500]
         except BaseException:  # noqa: BLE001 — an adversarial __str__ must not replace the root exception
             error_text = type(e).__name__
-        error = {"reason": RUN_STOP_ERROR, "error": error_text}
+
+        # REACHING THE CEILING IS THE DESIGNED END OF A BUDGETED RUN, NOT A CRASH.
+        #
+        # Measured on the 2026-08-24 campaign: ALL ELEVEN `run_finished` rows in `runs-B` carry
+        # `reason: "error"`, and every one of them is the spend ceiling -- zero genuine failures.
+        # A reader keying on the class cannot tell a healthy budgeted finish from a crash, and the
+        # campaign driver had to learn the difference from an exit code instead. `stop_account.py`
+        # already repairs this at READ time by printing the sentence; this repairs it at write time
+        # so a programmatic reader does not have to grep prose.
+        #
+        # THE SEARCH IS RECURSIVE because of the very wrapping this function's docstring describes:
+        # anything raised inside the eval task group escapes as the GROUP's "unhandled errors in a
+        # TaskGroup (1 sub-exception)", and the leaf message never reaches this event. Walking the
+        # group recovers both the class AND the sentence, so a ceiling hit inside a concurrent eval
+        # is recorded the same way as one on the serial path -- previously it would not have been.
+        budget = _budget_leaf(e)
+        if budget is not None:
+            try:
+                error_text = str(budget)[:500]
+            except BaseException:                       # noqa: BLE001 - keep the class at minimum
+                error_text = type(budget).__name__
+            error = {"reason": "budget_exhausted", "error": error_text}
+        else:
+            error = {"reason": RUN_STOP_ERROR, "error": error_text}
         try:
             events = eng.store.read_all()
             current = fold(events)
@@ -282,8 +344,11 @@ def classify_prior_run(prior, prior_events) -> str:
     """
     if terminal_projection_incomplete(prior, prior_events):
         return "finalization_pending"
+    # The CLASS, not the literal: a ceiling-ended run finishes `budget_exhausted` through the same
+    # guarded path as `error`, and a literal here excluded it from `pending_finalize` — the
+    # ordinary terminal of every budgeted campaign read as a clean finish with nothing owed.
     if prior.stop_requested and (
-            not prior.finished or is_error_stop(prior.stop_reason)):
+            not prior.finished or is_guarded_abort(prior.stop_reason)):
         return "pending_finalize"
     if prior.finished:
         return "finished"

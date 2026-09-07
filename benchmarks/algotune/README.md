@@ -1,0 +1,567 @@
+# AlgoTune arm — running LoopLab against AlgoTune, and against everyone else
+
+[AlgoTune](https://github.com/oripress/AlgoTune) (MIT, [arXiv 2507.15887](https://arxiv.org/abs/2507.15887))
+is 154 numerical/CS functions where the agent must produce code that matches a reference
+implementation's output while running faster. It is the cleanest external arena LoopLab has on a
+single box, for four reasons:
+
+1. **The metric is a ratio measured locally.** `speedup = baseline_ms / optimized_ms`, both timed on
+   the same machine in the same pass — so it self-normalises against hardware.
+2. **The environment is the operator's job, not the agent's.** AlgoTune's agent has no shell and no
+   `pip`; its whole command set is `ls`, `view_file`, `edit`, `delete`, `revert`, `reference`, `eval`,
+   `eval_input`, `profile`, `profile_lines`, and the prompt *enumerates* the 27 packages it may use.
+   So the benchmark measures algorithm work, not environment wrangling.
+3. **It is CPU-bound**, so GPU-generation issues (see the FML-bench notes in
+   [doc 61](../../docs/61-benchmark-landscape-and-local-plan-2026-08-19.md)) do not arise.
+4. **It ships 17 models × 154 tasks = 2,595 reference solvers** under `results/`, which can be
+   **re-timed on our machine** rather than compared against published numbers from someone else's.
+
+## What is in here
+
+| File | Purpose |
+|---|---|
+| `looplab_eval.py` | The eval bridge. Copies a candidate `solver.py` into `results/<model>/<task>/`, runs **AlgoTune's own** `evaluate_results.py`, prints `speedup` as stdout JSON. Holds the parity cache (below). |
+| `make_task.py` | Generates a LoopLab `repo` task spec + workspace for one AlgoTune task. |
+| `patch_baseline_cache.py` | Patches `BaselineManager` on disk to give it a **persistent** baseline cache. Without it the reference pass is re-measured on **every node** — see Parity below. Idempotent, keeps a `.orig`, `--revert` undoes it. |
+| `patch_eval_subset.py` | Patches `evaluate_results.py` to honour `ALGOTUNE_EVAL_SUBSET`, so the LoopLab arm can iterate on **train** like AlgoTuner's own agent. **Required** — without it every node is scored on test. |
+| `patch_invalid_solution_analysis.py` | Patches the evaluator and `evaluate_results.py` so AlgoTune's per-instance `invalid_solution_analysis` — the code context of the `is_solution` line that rejected an instance, which AlgoTuner's own agent is shown three of — survives into `evaluate_summary.json` and therefore into the bridge's `no_speedup` block. Without it a wrong solver is told *how often* and never *why*. Idempotent, keeps a `.analysis.orig`, `--revert` undoes it. |
+| `extract_champion.py` | Writes the champion node's `solver.py` out of a run's folded event log, for the final test scoring. |
+| `setup_algotune.sh` | Applies every deviation from upstream a published number depends on. Idempotent; run on each machine and after any `git pull` in the checkout. |
+| `campaign.sh` | One ARM per invocation (`ARM=A` / `ARM=B`), tasks in parallel lanes sized to the machine. Writes the per-task-arm `.done` markers every reader keys on — see "What the record carries" below for the closed state vocabulary. |
+| `run_final.sh` | The whole campaign: arm A to completion, then arm B in the same regime, through `campaign.sh`. ONE attempt per task-arm (no loop in the file, `RETRY_*` refused), ONE configuration (recorded before the first task, a resume under a different one refused), every log line carrying the ISO date, and a refusal to run under `/var/tmp` without `ALLOW_VOLATILE_ROOT=1` — the three things the uncommitted 2026-08-24 driver got wrong (docs/58 §58.1, §58.7). |
+| `pick_tasks.py` | Ranks all 154 tasks by evaluation cost — how the 20-task list was chosen, committed so the choice is reproducible. |
+| `campaign_status.py` | Live status while a campaign runs: what finished vs what actually SCORED (`N/A` is neither a zero nor a low score). **Per arm, out of that arm's own files**: arm A from `reports/agent_summary.json`, arm B from `B-<task>.final.json` — only arm A writes the summary, so reading it for arm B printed arm A's number under arm B's banner. |
+| `compare_arms.py` | Summarises a campaign: arm A from `reports/agent_summary.json`, arm B from `B-<task>.final.json` (the champion's TEST score; the run's own metric is a TRAIN number and only a fallback). A missing arm prints `--`, never `0`, and two numbers are averaged together ONLY when both record the same width and the same baseline digest — otherwise the row and the footer say why. |
+| `.baseline_cache.json` | Written at runtime; the per-task AGGREGATE baseline (stabilises the denominator). Not committed. |
+| `.baseline_times/` | Written at runtime by the patched `BaselineManager`; the per-INSTANCE reference timings, one file per `<task>__<subset><regime>.json`. Not committed. The sha256 of the entry a score divided by is stamped on that score (`baseline_cache_sha256`), which is what makes two numbers comparable or provably not. |
+
+## Running this on another machine
+
+Everything a published number depends on is in this directory; nothing lives in a shell history.
+
+```bash
+git clone --depth 1 https://github.com/oripress/AlgoTune.git /srv/AlgoTune
+cd /srv/AlgoTune && uv venv --python 3.11 .venv && uv pip install -e .
+echo "OPENROUTER_API_KEY=sk-or-..." > .env
+
+benchmarks/algotune/setup_algotune.sh /srv/AlgoTune     # idempotent; re-run after any git pull
+ALGOTUNE_ROOT=/srv/AlgoTune ARM=A benchmarks/algotune/campaign.sh
+```
+
+`campaign.sh` sizes itself: `lanes = (nproc - 2) / CORES_PER_LANE`, capped at the task count. On
+this 8-core box that is 3 lanes; on a 90-vCPU server it is 20 — every task at once, so an arm is
+one round (~3 h) instead of seven (~21 h). Two cores per lane covers the measured 1.3-core appetite;
+`CORES_PER_LANE` and `LANES` override it. Do not oversubscribe a lane: a throttled lane still
+measures its own ratio correctly but stops being comparable to one that was not throttled, and
+cross-task comparison is the whole output.
+
+Arm B additionally needs a **rebase onto master first** — its number is a claim about a VERSION of
+LoopLab, and the only version worth benchmarking is the one that ships. Both arms must run with the
+same `LANES` and `CORES_PER_LANE`; every `.done` row records them so a mismatch is visible.
+
+### The model, pinned
+
+Both arms: `deepseek/deepseek-v4-flash-0731` via OpenRouter, provider pinned to `siliconflow/fp8`,
+`temperature 0.0`, `reasoning.effort medium`, spend limit `$0.02` per task-arm. The pin is not
+cosmetic — see "Model pinning" below for what an unpinned slug measured.
+
+## Setup (once)
+
+AlgoTune is Linux-first and its own pins have rotted; the working recipe on this box is:
+
+```bash
+git clone --depth 1 https://github.com/oripress/AlgoTune.git
+cd AlgoTune
+uv venv --python 3.11 .venv          # requirements.txt needs >=3.11 despite the README saying 3.10
+uv pip install -e .                  # resolve pyproject, NOT requirements.txt (it pins pot==1.0.0, which does not exist)
+echo "OPENROUTER_API_KEY=sk-or-..." > .env
+```
+
+Use `uv`, not `pip`: pip's resolver thrashes on this dependency tree (measured: 464 MB downloaded
+and 9 s of CPU across 40 minutes before making progress).
+
+### Known upstream bug you must patch
+
+`AlgoTuner/utils/isolated_benchmark.py` iterates `sys.modules.items()` while `inspect.getmembers()`
+inside the loop triggers lazy imports and mutates it, raising
+`RuntimeError: dictionary changed size during iteration`. This fails **every** benchmark run, so no
+speedup can ever be recorded (measured: 224 occurrences in one run). There are **two** occurrences —
+patch both:
+
+```bash
+sed -i 's/for module_name, module in sys.modules.items():/for module_name, module in list(sys.modules.items()):/g' \
+    AlgoTuner/utils/isolated_benchmark.py
+```
+
+### The three patches this arm REQUIRES
+
+None is optional, and skipping the second or the third is silent:
+
+```bash
+python benchmarks/algotune/patch_eval_subset.py    --algotune-root /path/to/AlgoTune
+python benchmarks/algotune/patch_baseline_cache.py --algotune-root /path/to/AlgoTune
+python benchmarks/algotune/patch_invalid_solution_analysis.py --algotune-root /path/to/AlgoTune
+```
+
+`patch_eval_subset.py` is what makes `--subset train` mean anything. `evaluate_results.py` hardcodes
+`subset="test"` at three sites; unpatched, it ignores `ALGOTUNE_EVAL_SUBSET` and scores **every
+LoopLab node on the test split** while `looplab_eval.py` still stamps `"subset": "train"` into its
+output — so the train/test leak is present *and* the recorded provenance says it was closed.
+
+`patch_invalid_solution_analysis.py` is what makes a `0.0` say WHICH zero it is. AlgoTune builds the
+`is_solution` code context for up to three rejected instances and hands it to AlgoTuner's own agent
+(`message_writer.py:726-750`); `evaluate_code_on_dataset` attaches that list only under
+`if baseline_manager and …` — an argument that chooses where the *reference timings* come from and
+that `evaluate_results.py` does not pass — and `update_single_result` writes a summary whose entire
+payload is `{"final_speedup": "<str>"}`. Unpatched, the bridge's only channel is the evaluator's
+stderr, so arm B's proposer learns 94/100 and nothing about which check failed. All three scripts
+are idempotent, keep a backup, and support `--revert`; this one backs up to `.analysis.orig` rather
+than `.orig` precisely so reverting it cannot undo `patch_eval_subset.py` on the same file.
+
+## Running an arm
+
+**Reference arm** — AlgoTune's own agent, so the comparison has a same-model control:
+
+```bash
+cd AlgoTune && source .venv/bin/activate && set -a && source .env && set +a
+./algotune.sh agent --standalone openrouter/deepseek/deepseek-v4-flash-0731 svm
+```
+
+Note the model name is the **full config key** from `AlgoTuner/config/config.yaml` — the lookup is an
+exact `config["models"].get(name)`, not a suffix match.
+
+**LoopLab arm:**
+
+```bash
+python benchmarks/algotune/make_task.py \
+    --algotune-root /path/to/AlgoTune --task svm --out-dir /path/to/workspaces
+looplab run /path/to/workspaces/algotune_svm.json --out runs/algotune-svm-looplab --backend llm
+```
+
+**The whole campaign, both arms** (the driver the 2026-08-24 campaign ran on was never committed
+and died with `/var/tmp`; this one lives here):
+
+```bash
+source benchmarks/box-jhub-l40s.sh            # the box's paths and gateway (puts the bench under /var/tmp)
+benchmarks/meter/start_meter.sh                # once per boot
+ALLOW_VOLATILE_ROOT=1 benchmarks/algotune/run_final.sh
+```
+
+It runs arm A to completion and then arm B in the same regime, one attempt per task-arm, and
+records the measuring configuration into `$CAMPAIGN_OUT/run_final.CONFIGURATION` before the first
+task; a resume over the same output directory under different settings is refused with a diff. It
+exits 3 if either arm did not finish and prints the summary command rather than running it.
+
+**A single probe** (`run_probe.sh <model> <label> <lane> [task] [meter] [budget]`) is a CONTROL
+when it runs the shipped card and settings, and an ARM when `PROBE_MAKE_TASK_ARGS` or
+`PROBE_LOOPLAB_SETTINGS` varies either. An arm refuses to start (exit 4) unless
+`<probe dir>/PREREGISTERED.txt` already names the primary outcome, the size in paired batches, the
+power at that size and the `benchmarks/arm_power.py` command line that computed it — docs/56 §187
+measured 24 unpreregistered probes buying a power of 0.24. The instrument record pins the file's
+digest.
+
+**Summarising a campaign:**
+
+```bash
+python benchmarks/algotune/compare_arms.py --algotune-root /path/to/AlgoTune --runs-root /path/to/camp-runs --final-dir /path/to/campaign --reference
+```
+
+**Re-timing the shipped reference solvers on this machine:**
+
+```bash
+cd AlgoTune
+python scripts/evaluate_results.py --models "GPT-5.4" "Claude Opus 4.6" --tasks svm
+```
+
+## Parity — read this before trusting any timing
+
+AlgoTune's own loop pays the reference ("oracle") timing **once per run**: `BaselineManager` keeps it
+in-process and every later `eval` is cheap. Measured here (RTX 5090, 2026-08-19), that one-time cost
+is ~150 instances at ~3 s each — **about 30 minutes for a single task**.
+
+A bridge that shells out once per candidate re-pays that on *every* node. The resulting slowdown
+would be a property of the wiring, not of the agent under test, and granting more wall-clock does not
+fix it because the overhead scales with node count.
+
+So `looplab_eval.py` measures each task's baseline once, caches it, and scores later candidates as
+`cached_baseline_ms / freshly_measured_solver_ms`. **This is parity restoration, not a protocol
+deviation** — it is exactly what `BaselineManager` does inside an AlgoTuner run — but it *is* a
+departure from a naive reading of the harness, so state it in any published methods note. Use
+`--no-cache` to force full re-measurement.
+
+### The trap has a second half, and caching the number does not close it
+
+The cache above fixes the **denominator**. It does not fix the **cost**: `looplab_eval.py` shells out
+to `evaluate_results.py`, which builds a fresh `BaselineManager` in a fresh interpreter — and that
+class caches in `self._cache`, *process memory*. So the whole reference pass was still re-measured
+per node; only its result was being thrown away.
+
+Measured 2026-08-19: the pass advances at ~2.4 s/instance and one task's pass took **100 instances /
+~15 minutes**. `patch_baseline_cache.py` patches `BaselineManager` itself (an in-process wrapper was
+tried first and is gone) to keep the per-instance timings on disk, one file per
+`<task>__<subset><regime>.json` under `ALGOTUNE_BASELINE_CACHE_DIR`. It never caches across tasks,
+across the train/test split, or across evaluation REGIMES — those are different reference sets, and
+on this box the serial and the parallel reference for one task differ by 24 % — and the bridge
+refuses to score when its regime's entry is absent while another regime's is present
+(`baseline_regime_mismatch`), or when the entry appeared during the pass (`baseline_measured_in_pass`:
+the arena timed the reference, not the candidate). `--revert` undoes the patch.
+
+### The budget must be SPEND, not wall-clock
+
+Arm A's own startup log settles this:
+
+```
+INFO - Configuration loaded successfully. Budget: $1.0000
+INFO - Config loaded: spend_limit=1.0 total_messages=9999 max_messages_in_history=5
+```
+
+AlgoTuner is budgeted by **money**, with an effectively unlimited message count, and its ~15-minute
+reference pass costs **$0** of it. A wall-clock cap therefore charges one loop for a measurement pass
+neither one's *agent* performs — and on the 20-minute cap originally planned, arm B would have
+completed zero evaluations.
+
+**But $1 is not a budget for a cheap model.** Measured here: seven agent messages cost **$0.0071**,
+so $1 buys ~1,000 messages; one svm run went 3,462 s / ~16 messages without approaching it. The
+campaign uses **$0.02 on both arms** (~20 messages, ~1 h per task-arm): AlgoTuner's
+`config.yaml global.spend_limit`, and LoopLab's `LOOPLAB_LLM_BUDGET_USD`.
+
+### Where the wall clock really goes: one process PER TIMED RUN
+
+`isolated_benchmark.py`:
+
+```python
+for idx in range(num_runs):
+    # Each run: one fork does warmup+timed sequentially, then dies
+    proc = ctx.Process(target=_fork_run_worker, ...)
+```
+
+So the run count multiplies **process spawns**, and spawning is ~98 % of the per-instance cost
+(measured: the timed solver calls are 0.1–0.9 s inside ~16 s). A first reading of this mistook one
+`run_isolated_benchmark` **call** for one process and concluded that lowering the run count saved
+~3 %; that was wrong — the saving is close to linear.
+
+**The fork itself must stay.** Warmup deliberately runs a *different* problem from the timed one —
+the worker asserts `Problems are different objects` — so the code paths are warm and the **answer**
+is not. Do N timed calls on one problem inside one process and calls 2…N hit whatever the solver
+cached on call 1: a memoising solver reports near-zero time and an unbounded speedup. The per-run
+fork is anti-cheat, and its cost is paid identically by both arms.
+
+The campaign therefore pins `runs`, `dev_runs` and `eval_runs` all to **3** — the safe half of "stop
+restarting the process" — and pins the benchmark to a fixed CPU set (below).
+
+### Pin the CPUs, and reap the workers
+
+Pinning is **per lane**, owned by `campaign.sh`'s lane scheduler: `CORES_PER_LANE` (default 2)
+dedicated cores per task-arm, `LANES` lanes (default: as many as fit, leaving two cores for the
+driver, the LLM client and the OS), `CORE_OFFSET` to run a second campaign beside a live one on
+disjoint cores. Both arms run under the same lane layout, and every `.done` marker records the
+`cpus=`, `lanes=` and `cores_per_lane=` it ran with so a mismatch is visible afterwards. There is
+no single mask variable to export — a task-arm floating across every core is what the lanes exist
+to prevent. A timing taken on a busy core is not comparable to one taken on an idle core, and no
+amount of averaging recovers that after the fact.
+
+Two traps found doing this:
+
+* **`pkill -f <name>` does not reach multiprocessing forkservers.** Their command line is
+  `python -c "from multiprocessing.forkserver import main; ..."` — no app name, no script name. Ten
+  orphans were alive and burning CPU after a series of restarts, contending on exactly the pinned
+  cores and inflating every timing taken while they were up. The campaign now reaps them at start
+  and after each arm; check `pgrep -f forkserver | wc -l` before trusting any measurement here.
+* **This box presents 8 cores from a 16-core part** (`nproc` 8, `Win32_Processor.NumberOfCores` 8,
+  affinity mask `255`, no `processors=` in `.wslconfig`) — a CCD disabled in firmware, with SMT off.
+  The missing 8 are unavailable to any process, so they cannot be pinned to. Re-enabling them in
+  BIOS would roughly double this machine for a workload that is mostly process spawn.
+
+### Choose the task set by EVALUATION COST, not by what sounds interesting
+
+The first 20-task list was picked for topic coverage. It could not finish: arm A on `svm` ran
+**4 h 24 m**, was cut by the safety net at 12 of ~20 messages, and wrote no result — ~22 minutes per
+agent message, i.e. ~7 h to spend one arm's budget, ~280 h for 40 task-arms.
+
+The cost is knowable in advance and free. `reports/generation.json` carries, for all 154 tasks,
+`baseline_runs[*].eval_duration_ms` — one full evaluation pass on the authors' machine. This box
+measures ~14–19x slower than that reference (`svm` 65 s there, ~15 min here; `discrete_log` 35 s
+there, 668 s here cold / 215 s warm), so the ranking transfers even though the absolute numbers do
+not.
+
+**The mean is not the story — the worst case is.** The old list carried `btsp` at **772 s per pass**,
+i.e. ~3 h for a SINGLE evaluation here, so that task-arm could never finish inside any sane net.
+
+```bash
+python - <<'EOF'
+import json, statistics
+d = json.load(open("reports/generation.json"))
+rows = []
+for task, meta in d.items():
+    runs = (meta or {}).get("baseline_runs") or {}
+    durs = [r["eval_duration_ms"] for r in runs.values()
+            if isinstance(r, dict) and r.get("success") and r.get("eval_duration_ms")]
+    if durs:
+        rows.append((statistics.median(durs) / 1000.0, task))
+for cost, task in sorted(rows)[:20]:
+    print(f"{task:<32} {cost:6.1f}s")
+EOF
+```
+
+The campaign uses the 20 cheapest: worst case **60 s** instead of 772 s, total 957 s instead of
+1882 s, and 14 of the 20 originally chosen tasks survive. Cost is the ONLY axis this selection uses
+and it is applied identically to both arms, so it cannot favour either — and the set still spans
+number theory, combinatorial optimisation, geometry, interpolation, graphs, clustering, sparse linear
+algebra and PDEs.
+
+### Three defects that made the bridge score 0.0 for everything
+
+All three were found by validating end to end rather than by inspection, and any one of them alone
+would have produced a campaign of zeros that looked like a bad agent.
+
+1. **`RLIMIT_AS` killed every evaluation.** `validation_pool.disable_rlimit_as: false` caps VIRTUAL
+   address space, which JAX/torch/BLAS reserve in tens of GB without touching. Every run died with
+   *"A process in the process pool was terminated abruptly"* — at 14 GB and again at 30 GB, on a
+   321 MB task and on a 28 KB one, with 45 GB free. Set `disable_rlimit_as: true`. Applies to both
+   arms.
+
+2. **The summary reader was keyed on fields nothing writes.** `evaluate_summary.json` is
+   `{"discrete_log": {"BV4": {"final_speedup": "0.9963"}}}` — no `task_name`, no `speedup`, and the
+   value is a **string**. `looplab_eval.py` searched for `task_name`/`speedup`, so it reported
+   `speedup: 0.0` on a summary that had just been written successfully. It could never have returned
+   a number, for any task, on any node.
+
+3. **Wrapping `BaselineManager` in-process crashed the pool.** The persistent cache was first
+   implemented by patching the class from the parent and running the script via `runpy`. Same task,
+   same config: direct → `0.9963x`; through the wrapper → pool crash. The cache now ships as an
+   on-disk patch (`patch_baseline_cache.py`), applied before anything imports the module.
+
+Measured after all three: `discrete_log` scores end to end, and the cache takes a repeat evaluation
+from **668 s to 215 s** (3.1x).
+
+### The metric is noisy on small tasks, and both arms are noisy the same way
+
+The same solver on `discrete_log` scored **1.0006** and then **1.4468** on consecutive runs. The
+cache reuses the baseline from an earlier pass while re-timing the solver now, so machine drift no
+longer cancels between numerator and denominator.
+
+**This is not an asymmetry.** AlgoTuner's own `BaselineManager` does exactly the same thing inside a
+run — reference measured once at the start, every later `eval` timed against it — so both arms carry
+it. What follows is about how to READ the results: a single task's ratio is weak evidence, and the
+aggregate over the 20 tasks is the comparison. `compare_arms.py` prints per-task rows precisely so a
+single wild row cannot hide inside a mean.
+
+### Bound `baseline_timeout`, or one bad candidate eats the campaign
+
+Shipped default 60 s per instance. Measured 2026-08-19: after its 14th message, one arm-A run spent
+**87 minutes on a single candidate** — 69 isolated benchmark runs, **zero problems completed** —
+because a solver that times out costs 60 s × ~100 instances, i.e. up to 100 minutes for ONE
+evaluation. That run was then cut by the campaign's wall-clock net and wrote **no `final_speedup` at
+all**, so the pathological case does not merely slow a campaign, it empties it.
+
+The campaign sets `benchmark.baseline_timeout: 10000`. It applies to **both** arms (both evaluate
+through this harness), so it is parity-preserving, and it cannot flatter either one: a solver slower
+than 10 s per instance on a task whose target is `oracle_time_limit: 100` ms is already 100x off and
+scores 0 either way.
+
+**Corollary for the wall-clock net:** it must sit far ABOVE what a task-arm needs. A run cut by the
+clock writes nothing, so a binding net does not shorten the campaign — it deletes rows from it.
+Measured 2026-08-24, a 4 h wall cut 13 of arm A's 19 task-arms and three of those had not spent the
+budget they were compared at, so the wall is now OFF by default (`HARD_TIMEOUT=0`) and a STALL bound
+replaces it: `STALL_TIMEOUT` (default 2400 s) kills a lane only when its own event log has not grown
+for that long. Either kill is recorded as its own marker state (`wall_cut` / `stall_cut`), shown and
+never averaged.
+
+### The first eval of a task downloads its dataset
+
+`evaluate_results.py` fetches from HuggingFace into `.hf_datasets/` (19 GB for the whole repo is not
+unusual — `base64_encoding` alone is 19 GB, while `svm` is 24 MB and `discrete_log` is 28 KB). This
+is a once-per-machine, per-task cost, but it means the first eval of a task can look hung. If you
+are validating the bridge, **pick a small task**: an hour spent thinking the pipeline was broken here
+was really just base64_encoding being enormous.
+
+### Two parity choices that cost LoopLab something, on purpose
+
+* **Reasoning effort `medium` on both arms.** Measured: medium 21.5 s/call, high 111.3 s/call, with
+  quality at `high` *not* measured either way. Under any bounded budget `high` buys so few calls that
+  the comparison is between two truncated runs.
+* **Cross-run memory off.** LoopLab can read its own past runs and a shared memory store; AlgoTuner
+  has no equivalent and each of its runs starts blind. Left shared, arm B would reach task 12 with
+  eleven prior runs to mine — measuring a capability the other arm lacks rather than the loop. Each
+  task gets its own run root and memory dir. This **discards a real LoopLab advantage**, which is the
+  direction that cannot flatter us.
+
+> **General rule this instance illustrates.** When the reference agent has an in-process cache and
+> our integration is out-of-process, equal *budgets* are not equal *work*. Compare the cost structure
+> of the two loops before trusting any timing — the same question applies to FML-bench (`conda run`
+> per command) and to MLE-bench.
+
+## What the record carries
+
+Every reader — `campaign.sh`'s own resume and banner, `campaign_status.py`, `compare_arms.py` —
+keys on the same two records, and both are closed vocabularies.
+
+**The `.done` marker** (`<arm>-<task>.done`, one line, written by `campaign.sh::record_done` only
+for a TERMINAL state) names its state in words, with `rc=` beside it for markers written before
+the field existed:
+
+| `state=` | meaning | averaged? | reopened by |
+|---|---|---|---|
+| `ran_to_completion` | rc=0 after `IMMEDIATE_EXIT_S` (60 s), with a successful call on the meter | yes | — |
+| `exited_immediately` | rc=0 in under `IMMEDIATE_EXIT_S`; the marker carries `wall=` and `threshold_s=`. Sixteen of the twenty arm-A markers of 2026-08-24 were 3–19 s "completions" while the gateway was down (docs/58 §58.1) | **no** | `RETRY_IMMEDIATE_EXIT=1` |
+| `stopped_after_start` | rc=2 (a typed `OperatorRefusal`, usually the spend ceiling) from a run whose event log proves it started | yes | — |
+| `wall_cut` / `stall_cut` | killed by `HARD_TIMEOUT` / the stall guard — a clock, not the budget | **no** | `RETRY_WALL_CUT=1` |
+| `operator_skip` | written by hand to stop a running campaign taking new work | **no** | delete the marker |
+
+rc=0 with the meter proving NO successful call, a refusal to start (exit 2 with no event log) and
+an interruption (130/137/143) get NO marker and stay owed. Every marker also carries the REGIME
+(`cpus=`, `lanes=`, `cores_per_lane=`, `layout=`) and, since 2026-09-06, the RULER —
+`eval_workers=`, `regime=`, `baseline_sha256=` — because arm A's number passes through no
+`final.json` and the marker is the only place it can carry one (`campaign.sh::ruler_fields`, run
+under the lane's `taskset`; `?` = could not derive, `none` = derived and the cache was cold).
+
+**The score line** (`looplab_eval.py`'s stdout JSON; `B-<task>.final.json` is the champion's) always
+carries, beside `speedup`: `eval_regime` (the key, `__lane<N>r3` serial or `__w<W>x<C>r3`
+parallel, plus the resolved `workers`); `eval_workers`, the resolved count as a string
+(top-level numerics are swept into a node's `extra_metrics`, so it is deliberately not an int);
+`baseline_cache_file` and `baseline_cache_sha256`, the entry the ratio's denominator came from
+and its digest — or `null` with `baseline_cache_missing` saying why; and `no_speedup.reason` for
+any non-positive number. Width moves a speedup ~1.6× on this box and eight campaign numbers were
+re-scored without recording it (docs/58 §58.3), which is why the width is on every line.
+
+**Pairing.** `compare_arms.py` averages arm A against arm B for a task only when neither side is
+cut, skipped, owed or refused AND both record the same regime, the same width and the same
+baseline digest. Anything else is printed with its number and the reason it was not paired
+(`NOT PAIRED: …` on the row, a footer naming each task). A row from before these fields existed
+is refused, not assumed to match.
+
+## Things that will bite you
+
+- `evaluate_results.py`'s docstring says it "reads generation.json for baseline timings". **It does
+  not.** `generation_data` is used only for the task list, task filtering and summary formatting; the
+  baseline is always re-measured locally. (That property is what makes re-timing other agents' code
+  here valid — it just should not be paid per node.)
+- **100 % instance validity is required for any speedup at all.** A solver wrong on one instance
+  scores 0, not a partial credit.
+- `data/` starts empty and is regenerated per run; `./algotune.sh generate` persists it.
+- `pkill -f 'AlgoTuner.main'` matches its **own** `bash -lc` command line and kills your shell. Use
+  `pkill -f 'AlgoTuner[.]main'`.
+
+## What this comparison does and does not isolate
+
+The 17 shipped arms were all produced by *AlgoTuner's* loop driving different models, so re-timing
+them compares **artifacts**; a LoopLab-vs-reference row mixes "different loop" with "different model".
+The controlled comparison is **LoopLab vs AlgoTuner on the same model**, produced here. The 17 are
+context, not controls.
+
+| Arm | Loop | Model | Provenance |
+|---|---|---|---|
+| A | AlgoTuner | `deepseek-v4-flash-0731` | produced here |
+| B | LoopLab | `deepseek-v4-flash-0731` | produced here — **the control** |
+| ref ×17 | AlgoTuner | GPT-5.4, Opus 4.6, Gemini 3.1 Pro, R1, … | shipped, re-timed here |
+
+## Model pinning
+
+Use a **dated** OpenRouter slug and pin the provider, or the same "model" silently varies between
+requests. Measured 2026-08-19: three unpinned calls to `deepseek/deepseek-v4-flash-0731` hit **two
+different fp4 providers** and returned 96 / 17 / 96 completion tokens for one prompt; 24 endpoints
+serve that slug at fp4/fp8/bf16. Pin in `AlgoTuner/config/config.yaml`:
+
+```yaml
+  openrouter/deepseek/deepseek-v4-flash-0731:
+    api_key_env: "OPENROUTER_API_KEY"
+    temperature: 0.0
+    drop_params: true
+    usage: {include: true}
+    extra_body:
+      provider:
+        order: ["siliconflow/fp8"]
+        allow_fallbacks: false      # without this, `order` is only a preference
+```
+
+### Bound the reasoning budget, or every call is a runaway
+
+**Measured 2026-08-19 on `deepseek-v4-flash-0731`.** With no reasoning bound the model thinks
+without limit — this endpoint's ceiling is `max_completion_tokens: 393216`, and nothing else stops
+it. In one LoopLab run, **6 calls held 84 % of all completion tokens and 84 % of a 45-minute phase**;
+the largest returned **66,459 completion tokens** from a 13,193-token prompt. An isolated probe of a
+default call did not finish inside 10 minutes.
+
+**Capping `max_tokens` instead is a trap that fails silently.** At `max_tokens: 4096`, all 4,096
+tokens went to reasoning and the answer came back **empty** — the run would not crash, it would just
+receive nothing and look like a stupid model.
+
+| config | wall | completion | reasoning | answer |
+|---|---:|---:|---:|---:|
+| default | **>600 s (timeout)** | — | — | — |
+| `max_tokens: 4096` | 40.2 s | 4,096 | **4,096** | **empty** |
+| `reasoning: {enabled: false}` | 18.6 s | 2,861 | 0 | 5.4 KB |
+| **`reasoning: {max_tokens: 2000}`** | **30.4 s** | 3,555 | 1,916 | 5.4 KB |
+| `reasoning: {effort: medium}` | 23.0 s | 2,754 | 1,062 | 5.9 KB |
+
+Use an explicit **`reasoning: {max_tokens: N}`** rather than `effort`: providers interpret an effort
+level however they like, whereas a token budget reads the same on both arms — and parity requires
+both arms carry the *same* bound. Disabling reasoning entirely also works but handicaps the model's
+quality, which is not what we want to measure.
+
+> **What the campaign actually uses, and why it is not this.** `reasoning: {max_tokens: N}` was
+> measured NOT to hold on the real prompts (see below: 21,759 reasoning tokens against a 2,000
+> budget), so the bound it promises is not one it delivers. The campaign pins `effort: medium` on
+> both arms instead — the same value on both, which is what parity requires; the level itself is
+> chosen because `high` is 5x slower for no measured quality gain.
+
+Effect on the LoopLab arm after applying it: max completion 66,459 → **1,957**, gaps over 60 s
+**6 → 0**, longest gap 1,089 s → **26.9 s**.
+
+### Where the tokens actually go: the model solves the task inside its scratchpad, then throws it away
+
+Traced through `spans.jsonl` on a real LoopLab run, 2026-08-19. **6 calls out of 89 held 84 % of all
+completion tokens.** The largest:
+
+```
+duration 310 s | prompt 12,677 | completion 21,759
+thinking:      64,000 characters  — a COMPLETE SMO solver, written out in full
+visible output:   157 characters  + 3 tool calls
+```
+
+The model receives the task, the reference implementation and a set of evidence-gathering tools in
+the same turn. It solves the whole problem in its reasoning trace, then — because the prompt asks it
+to gather evidence first — emits only tool calls. **Verified: none of that reasoning is carried into
+the next call's input.** The work is done and discarded.
+
+This is not a defect either side introduced. It is what reasoning models do inside tool loops, and
+the same model shows it on the AlgoTuner arm too (29 calls across 2 hours). **Both arms pay the same
+tax, so the comparison stays valid — the cost is wall-clock, not money** (a run is cents).
+
+**`reasoning: {max_tokens: N}` does not reliably bound it.** The parameter is accepted and sent, and
+on synthetic prompts of the same shape it is honoured (23–119 reasoning tokens against a 2,000
+budget) — but on the real prompts it is ignored (21,759 against the same budget). It holds when
+there is little to think about and lapses when there is something to chew on.
+
+If this ever needs fixing, disable reasoning **only on the evidence-gathering phases** and keep it
+where the answer matters — and apply the same split to both arms, or the parity above is lost.
+
+### Reasoning effort levels, measured
+
+| effort | wall | note |
+|---|---:|---|
+| `low` | 20.8 s | |
+| **`medium`** | **21.5 s** | the working setting |
+| `high` | **111.3 s** | 5x slower; answer quality NOT measured, do not assume either way |
+| `max`, `xhigh` | **hangs** | no response and no error — this killed one benchmark script outright |
+
+### Provider selection: measured, and the answer is that it barely matters
+
+13 providers, `effort=medium`, 3 calls each; then the top two re-measured with 6 calls because three
+samples decide nothing:
+
+| provider | 3-sample | **6-sample** |
+|---|---|---|
+| `coreweave/fp8` | 11.4 s / 162 tok/s | **21.1 s / 98 tok/s** |
+| `siliconflow/fp8` | 20.4 s / 112 tok/s | **20.7 s / 106 tok/s** |
+
+The three-sample run said coreweave was 1.8x faster. **The six-sample run says they are
+indistinguishable** — spread is 16–38 s, so three samples can order them any way you like. Seven
+providers all land around 20 s / ~100 tok/s.
+
+What *does* differ is availability: `baseten` 0/3 (429), `novita` and `fireworks` 1/3, `baidu` and
+`together` 2/3, and DeepSeek's own first-party endpoint returns **404** through OpenRouter. Pick on
+stability, not on a speed difference that is not there.
+
+Verify the pin rather than trusting it: published `uptime_last_30m` did not predict availability
+here (DeepInfra at 99.0 % returned 502; Novita at 99.5 % hung for 300 s).

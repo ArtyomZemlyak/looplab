@@ -158,7 +158,7 @@ def test_curve_metric_at_snaps_the_query_to_its_rung():
 
 
 def test_sibling_metrics_prefer_the_durable_curve_over_the_truncated_tail():
-    # #7 core: the 500-char stdout_tail retains only each sibling's FINAL epoch (rung 8). A live node at
+    # #7 core: the 4,000-char stdout_tail retains only each sibling's FINAL epoch (rung 8). A live node at
     # an EARLY step (1 -> rung 1) — the only time an ASHA kill actually saves compute — finds NO peer in
     # those tails. The durable per-rung curve keeps the early rung, so the population is discoverable.
     state = _fake_state(
@@ -214,7 +214,7 @@ def test_earliest_per_band_does_not_false_flag_a_node_just_into_a_band():
 
 def test_sibling_with_no_curve_is_excluded_not_substituted_from_the_tail():
     # Peer review: a sibling contributes ONLY its per-rung curve (a START-of-band checkpoint). The
-    # 500-char stdout_tail holds only FINAL epochs, so any in-band value there is END-of-band (~2× more
+    # 4,000-char stdout_tail holds only FINAL epochs, so any in-band value there is END-of-band (~2× more
     # trained); substituting it would false-flag a live node just into the band and mix start/end-of-band
     # values in one population. A sibling with no curve at this rung is EXCLUDED, never tail-substituted.
     state = _fake_state(

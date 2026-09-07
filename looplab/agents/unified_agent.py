@@ -322,7 +322,13 @@ class UnifiedAgent(WrapsDeveloper):
         loop_opts = self._loop_opts
         if extra_tools is not None:
             from looplab.agents.agent import CompositeTools
-            tools = (CompositeTools([self._pilot_tools, extra_tools])
+            # A MERGE of two already-built toolsets, so there is no `settings` here to read — carry
+            # the pilot's own setting forward instead. Dropping it would let one phase of a run
+            # offer tools every other phase withholds, which is worse than either policy applied
+            # consistently. `False` when the pilot is a bare provider, which is what it had.
+            tools = (CompositeTools([self._pilot_tools, extra_tools],
+                                    hide_empty_tools=bool(getattr(
+                                        self._pilot_tools, "hide_empty_tools", False)))
                      if self._pilot_tools is not None else extra_tools)
             _configured = int(getattr(loop_opts, "max_turns", 0) or 0)
             if _configured > 0 and extra_turns > 0:
@@ -557,7 +563,15 @@ class UnifiedAgent(WrapsDeveloper):
         "  - 'no_metric': it completed and simply never produced the number.\n"
         "  - 'check_failed': the declared condition really did not hold and that IS the whole "
         "story.\n"
-        "Choose from those FIVE only. The other kinds — timeout, diverged, stalled, drift, setup "
+        "  - 'diverged': ONLY when the tagged kind is 'check_failed' and what the check refused is "
+        "a NON-FINITE or exploded loss (inf, nan, |loss| in the 1e+8 range) — the objective blew "
+        "up numerically, which is neither 'not learning' nor a bug. On any other tagged kind the "
+        "divergence watchdog was watching and did not fire, and 'diverged' is refused.\n"
+        "Choose from those only. When the tagged kind is 'check_failed' and you answer "
+        "'not_learning', cite a 'log' source — the loss series is what that claim is ABOUT, and "
+        "the check's refusal is the sentence you are contradicting, not evidence for it; an "
+        "override cited from the error text alone is refused and the check's verdict is kept. The "
+        "other kinds — timeout, stalled, drift, setup "
         "and the two filesystem stage contracts (needs/expect) — are facts the ENGINE recorded out "
         "of band about what IT did or stat'ed, they are never in question here, and you will not be "
         "asked about one. In particular do NOT answer 'timeout' for a run that ran out of budget: "
@@ -740,6 +754,24 @@ class UnifiedAgent(WrapsDeveloper):
         model at all is a different branch (`triage._rule_triage`, which stamps the unforgeable
         `DIAGNOSIS_UNAVAILABLE_KEY`) and is unchanged byte for byte.
 
+        EVERYTHING THIS CALL AUTHORS IS A PROPOSAL, and the durable record used to present it as a
+        description (doc 53 §3, the repair half). This runs BEFORE the repair session opens —
+        `engine/evaluate.py` calls `_triage_crash` some three hundred lines above its `_repair` —
+        so `rationale`, `reason_summary` and `reason_findings` are all written against the CRASH,
+        by a judge that has read logs and code and has changed nothing. The engine then stamps them
+        onto `node_repaired` beside the `files` the session produced, and the row reads as one
+        account. `runs-B/count_riemann_zeta_zeros` node 0 is the corpus specimen and the only
+        `node_repaired` row in twenty arms: this call prescribed a capitulation ("replace the whole
+        port with a direct call to mp.nzeros(t) … speedup ~1.0"), the session kept the mpmath port
+        on a private `mp.clone()` instead, and the node scored 6.0212. The record credited the
+        triage for a fix that contradicted it.
+
+        NOTHING IS PREVENTED AND NOTHING HERE CHANGED. A repair that overrides its triage on
+        evidence is the loop working, and no deterministic rung grades this prose anyway — see
+        `engine/repair_verify.py::repair_attribution`, which measures why and which now stamps the
+        provenance (`prose_authored: before_repair`) and what the session actually wrote onto the
+        same row, so a later reader can tell the proposal from the artefact.
+
         NEITHER degradation path answers "repair", and they answer DIFFERENT things: `_finalize`'s
         out-of-enum branch says `unreadable` (the model is alive, this node stops) and `_fallback`
         says `unanswerable` with the engine-side transport marker (the endpoint is gone, the run
@@ -827,11 +859,13 @@ class UnifiedAgent(WrapsDeveloper):
                 # relabel a watchdog kill, a deadline, a drift rejection, a setup failure or a
                 # FILESYSTEM stage contract into something the memory playbook answers, which is
                 # precisely the incident `tests/test_watchdog_kill_is_not_an_oom.py` exists to
-                # prevent. `not_learning` is the one member that is on BOTH lists and it is a
-                # registered exception with its argument at `DIAGNOSED_ENGINE_FINAL_OVERLAP`: the
-                # engine produces it from a watchdog KILL, the diagnostician answers it about a run
-                # nothing killed, and the asymmetry (never asked when the engine already said it) is
-                # what keeps the two apart.
+                # prevent. `not_learning` and `diverged` are the two members on BOTH lists and each
+                # is a registered exception with its argument at `DIAGNOSED_ENGINE_FINAL_OVERLAP`:
+                # the engine produces them from a watchdog KILL, the diagnostician answers them
+                # about a run nothing killed, and the asymmetry (never asked when the engine already
+                # said it) is what keeps the two apart. `diverged` is further bound by
+                # `DIAGNOSED_CONTEXT_BOUND` to a tagged `check_failed` — the enum cannot express
+                # that, so the description says it and `diagnosed_failure_reason` enforces it.
                 "failure_kind": {"type": "string", "enum": list(DIAGNOSED_FAILURE_REASONS),
                                  "description": "What this failure really was. The tagged kind is "
                                                 "what the engine saw from outside the process; "
@@ -845,7 +879,16 @@ class UnifiedAgent(WrapsDeveloper):
                                                 "that refused and says nothing about why; if you "
                                                 "believe the check was a false positive, that IS "
                                                 "the diagnosis and the repair is pointed at the "
-                                                "check rather than at the experiment."},
+                                                "check rather than at the experiment. "
+                                                "`diverged` is admissible ONLY when the tagged kind "
+                                                "is `check_failed` and the check refused a "
+                                                "non-finite or exploded loss (inf/nan, |loss| in "
+                                                "the 1e+8 range); on any other tagged kind it is "
+                                                "refused as out of vocabulary. `not_learning` "
+                                                "over a tagged `check_failed` stands only if you "
+                                                "cite a 'log' source (the loss series); cited "
+                                                "from the error text alone, the check's own "
+                                                "verdict is kept."},
                 # WHERE THE DIAGNOSIS STANDS, in three fields rather than folded into `rationale`.
                 # Separate because the ENGINE re-resolves the locator against the workdir and
                 # records whether it resolved (`failure_diagnosis.evidence_citation_resolves`),

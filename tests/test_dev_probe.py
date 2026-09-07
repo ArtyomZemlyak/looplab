@@ -11,18 +11,77 @@ none of those four is observable in-process.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import textwrap
 from pathlib import Path
 
 import pytest
 
-from looplab.runtime import landlock, read_fence
+from looplab.runtime import landlock, read_allowlist, read_fence
 from looplab.tools import dev_probe
 from looplab.tools._base import RESULT_CAP, stream_tails
-from looplab.tools.dev_probe import _MAX_TIMEOUT, DevProbeTools
+from looplab.tools.dev_probe import _MAX_CODE_CHARS, _MAX_TIMEOUT, DevProbeTools
+
+# WHY A PROBE-EXECUTING TEST CAN SKIP, AND EXACTLY ONE CANNOT.
+#
+# `confine_reads` defaults True and FAILS CLOSED: on a kernel with no Landlock the probe REFUSES to
+# run rather than running with a boundary it does not have. That is the right production behaviour
+# and it is what this container has ("no Landlock support"; Docker's default seccomp answers ENOSYS,
+# so a great many CI sandboxes qualify) — so every test here that actually EXECUTES a probe died on
+# `exit=3 ... landlock_create_ruleset failed`, including pre-existing ones whose subject is not
+# confinement at all, and the repo's own "the suite runs fully offline" contract went with them.
+#
+# The gate wraps `execute` rather than being a module-level `pytestmark` for two reasons: a
+# file-level mark also skips the many tests here that only DERIVE (grants, fence inputs, the
+# mutation-event table re-derivation), which run perfectly well on any kernel; and wrapping the one
+# entry point every probe goes through means a test added later inherits it without having to know.
+# An arm that explicitly asks for `confine_reads=False` — the hook is the confinement there — still
+# runs everywhere, as it always did.
+#
+# And the refusal itself is a documented contract, so it gets the one test below that runs ONLY on
+# such a kernel. Before this it was exercised by accident, as 21 unexplained failures.
+_NO_LANDLOCK = landlock.unavailable_reason()
+
+
+@pytest.fixture(autouse=True)
+def _skip_when_the_kernel_cannot_confine(monkeypatch, request):
+    """Skip any test that EXECUTES a confined probe on a kernel without Landlock.
+
+    Wrapped at `execute` rather than at `_probe`, because a third of the probe-running tests here
+    build their own `DevProbeTools` (they need a repo spec, a mount, a staged workdir) and call
+    `execute` directly — a gate on the helper would have left those red. The wrapper runs inside the
+    TEST's own frame, so `pytest.skip` propagates as a skip rather than being caught by anything.
+
+    Tests that only DERIVE — grants, fence inputs, the mutation-event table re-derivation from a
+    recording audit hook — never reach `execute` and go on running everywhere, which is why this is
+    not a module-level `pytestmark`. An arm that explicitly asks for `confine_reads=False` (the hook
+    is the confinement there) also runs everywhere, unchanged.
+    """
+    # The exclusion is keyed on the SPECIFIC marker the fail-closed test carries
+    # (`landlock_refusal`), not on any `skipif`: keyed on `skipif`, an unrelated os.name skipif
+    # waved `test_the_engines_own_interpreter_is_what_answers` through and it failed on
+    # `landlock_create_ruleset failed` (2026-08-30 review, baseline-red). And the gate sits on
+    # `execute_result`, the funnel `execute` delegates to, so a test that calls the funnel directly
+    # is skipped too instead of red.
+    if not _NO_LANDLOCK or request.node.get_closest_marker("landlock_refusal"):
+        return
+    original = DevProbeTools.execute_result
+
+    def _guarded(self, name, args, **kw):
+        # Only a call that would really LAUNCH a child. The argument-validation arms
+        # (`{}`, `None`, blank code, over-long code) are refused by `_probe` before any interpreter
+        # starts, so they are kernel-independent and must keep running here.
+        code = str((args or {}).get("code") or "") if isinstance(args, dict) else ""
+        launches = bool(code.strip()) and len(code) <= _MAX_CODE_CHARS
+        if name == "run_probe" and launches and getattr(self, "confine_reads", True):
+            pytest.skip(f"the probe's kernel read rung fails closed here: {_NO_LANDLOCK}")
+        return original(self, name, args, **kw)
+
+    monkeypatch.setattr(DevProbeTools, "execute_result", _guarded)
 
 
 def _probe(code, **kw):
@@ -47,6 +106,17 @@ _LANDLOCK_REASON = landlock.unavailable_reason()
 _needs_landlock = pytest.mark.skipif(
     _LANDLOCK_REASON is not None,
     reason=f"needs the Landlock rung; this kernel has none ({_LANDLOCK_REASON})")
+
+
+@pytest.mark.landlock_refusal
+@pytest.mark.skipif(not _NO_LANDLOCK, reason="this kernel HAS Landlock, so nothing is refused")
+def test_a_confined_probe_refuses_to_run_at_all_where_the_kernel_cannot_confine_it():
+    """FAIL CLOSED, said out loud. The alternative — running unconfined and reporting success — is
+    the two-day gap this rung was added to close, so the refusal must name the missing mechanism
+    rather than look like an ordinary probe failure."""
+    out = DevProbeTools(timeout_s=30).execute("run_probe", {"code": "print('should not run')"})
+    assert "should not run" not in out, "a probe RAN on a kernel that cannot confine it"
+    assert "andlock" in out or "confine" in out, out
 
 
 @pytest.fixture()
@@ -120,11 +190,48 @@ def test_a_probe_cannot_delete_rename_or_mkdir(outside):
     assert not (outside / "newdir").exists()
 
 
-def test_a_probe_cannot_read_a_file_it_may_not_read_but_may_read_the_ones_it_may(outside):
+def test_a_probe_may_still_read_its_own_workdir(tmp_path):
     """Rule 2 is about WRITES only. A probe that could not read would be useless — reading is the
-    whole job — so this pins that the write rule did not quietly become a read rule."""
+    whole job — so this pins that neither the write rule nor the confinement below quietly became a
+    ban on reading.
+
+    Scoped to the probe's OWN directory, which is what it was always really asserting: the file it
+    used to reach lived outside, and reaching outside is now refused on purpose (see the companion
+    test)."""
+    # It must actually OPEN something. `pathlib.Path('mine.txt')` only constructs a path object and
+    # raises no `open` audit event at all, so the previous form passed unchanged even if the confine
+    # fence refused every read in the probe's own workdir -- exactly the regression it claims to
+    # guard.
+    #
+    # The file is STAGED rather than written by the probe. Writing it here was this test's own
+    # bug: rule 2 is "it cannot write. Anywhere." -- the probe's own cwd included, because a probe
+    # that could write its workspace would make `node_created.files` stop being the whole record
+    # of what the Developer built. So the write was refused, the probe exited 1, and the read this
+    # test exists to pin was never reached. It went unnoticed because it is red only where the
+    # rest of the suite is already red for the platform -- which is the argument for reading a
+    # DIFF against master rather than a failure count.
+    out = DevProbeTools(timeout_s=30, staged=_Staged({"mine.txt": "hello"})).execute(
+        "run_probe", {"code": "print('cwd-read-ok:', open('mine.txt').read())"})
+    assert "exit=0" in out and "cwd-read-ok: hello" in out
+
+
+def test_a_probe_cannot_read_outside_its_own_workdir(outside):
+    """CONFINEMENT (2026-08-19). The probe's read fence used to be the ENGINE's denylist — it fenced
+    the editable source tree and, when a task declared none, installed no fence at all.
+
+    That was measured wrong in the sharpest way: on an AlgoTune benchmark run a Developer spent 150
+    of its 239 tool calls inside `run_probe`, reading the BENCHMARK HARNESS sitting beside the run —
+    `validation_pipeline.py` (how solutions are checked) and `isolated_benchmark.py` (how they are
+    timed). A solver written after reading the checker is not a result; and the reference agent it
+    was being compared against has no filesystem access at all, so the asymmetry also destroyed the
+    comparison the probe was serving.
+
+    The fence is now an ALLOW-LIST (`read_fence.render(confine=True)`): the probe's own replica plus
+    what the interpreter needs to import, and nothing else. Cross-run and cross-node knowledge is
+    unaffected — that never travelled through the probe's filesystem."""
     out = _probe(f"print(open({str(outside / 'existing.txt')!r}).read())")
-    assert "exit=0" in out and "original" in out
+    assert "exit=0" not in out, "the probe read a file outside its own workdir"
+    assert "original" not in out, "the probe returned content from outside its workdir"
 
 
 def test_the_kernel_backstop_is_armed_independently_of_the_audit_hook():
@@ -438,6 +545,382 @@ def test_a_task_with_no_editable_tree_gets_no_fence_and_still_probes():
     assert "exit=0" in out and "fine" in out
 
 
+# ---------------------------- rule 1, the case a `tmp_path` fixture cannot reach: a MACHINE TIER
+#                               that CONTAINS the editable tree
+#
+# Everything above puts the source tree under `tmp_path`, and the shared temp roots are dropped from
+# the grant list, so no fixture here ever had a machine tier sitting ABOVE a root. That is the
+# blind spot that let a version ship where the tiers were concatenated onto the grant list AFTER
+# `fence_inputs` returned, skipping both guarantees that function exists to give: the `_norm_root`
+# normalization and the refusal of an allow prefix that CONTAINS a root. `/opt` granted with the
+# repo at `/opt/myrepo` is not a wide grant, it is rule 1 switched off — in BOTH halves, because
+# the same tuple reaches the kernel rung.
+#
+# These fixtures therefore use REAL machine tiers: `~/.cache` (a tier `machine_read_tiers` yields
+# unconditionally, on the model-cache row) and `sys.prefix` (this interpreter's own, which is what
+# makes "just drop the tier" unusable — drop it and python cannot start).
+
+@pytest.fixture()
+def under_cache_tier():
+    """An editable source tree INSIDE a machine tier, holding the operator's artifact.
+
+    `~/.cache` and not `tmp_path`: the tier has to be one the probe's grant derivation really
+    produces, and the temp tiers are the one family it deliberately drops."""
+    root = Path.home() / ".cache" / f"looplab-fence-test-{os.getpid()}-{id(object())}"
+    try:
+        (root / "experiments").mkdir(parents=True)
+    except OSError as exc:                              # noqa: PERF203 - a read-only HOME is a skip
+        pytest.skip(f"cannot create a fixture under ~/.cache: {exc}")
+    (root / "experiments" / "final.txt").write_text("A HUMAN'S CHECKPOINT", encoding="utf-8")
+    try:
+        yield DevProbeTools({"editables": [{"name": ".", "path": str(root)}]}, timeout_s=60), root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_source_tree_under_a_machine_tier_is_still_fenced(under_cache_tier):
+    """The reproduction, driven end to end: the tier is granted, the repo is inside it, and the
+    probe must still be refused the operator's file. Pre-fix this returned `exit=0` and the
+    checkpoint's own bytes in the tool result — the v6 node 4 defect, performed by the tool that
+    exists to make it impossible."""
+    tools, root = under_cache_tier
+    secret = root / "experiments" / "final.txt"
+    out = tools.execute("run_probe", {"code": f"print(open({str(secret)!r}).read())"})
+    assert "A HUMAN'S CHECKPOINT" not in out, "the tier above the root granted the root"
+    assert "exit=0" not in out
+
+
+def test_the_kernel_half_refuses_it_too_where_the_audit_hook_cannot_look(under_cache_tier):
+    """BOTH halves, not one. `ctypes` into libc raises no audit event at all (the module's own
+    stated residual), so what answers here is only the Landlock rung — and it was handed the SAME
+    un-normalized tuple, which is why one fix has to close both. `EACCES` is the whole answer a
+    kernel refusal can give, hence the read is driven and not the message."""
+    tools, root = under_cache_tier
+    secret = root / "experiments" / "final.txt"
+    out = tools.execute("run_probe", {"code": (
+        "import ctypes, os\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        f"fd = libc.open({str(secret)!r}.encode(), os.O_RDONLY)\n"
+        "print('DENIED' if fd < 0 else os.read(fd, 64))\n")})
+    assert "DENIED" in out, f"libc read through the kernel rung was permitted: {out}"
+    assert "A HUMAN'S CHECKPOINT" not in out
+
+
+@pytest.fixture()
+def under_interpreter_tier():
+    """The same shape one tier up: the editable tree inside the INTERPRETER's own prefix.
+
+    This is the tier the probe's child derives for ITSELF (`sys.prefix`, in the real interpreter,
+    where the parent cannot see it), so it is the only fixture that drives the containment rule at
+    that second site — and it is the case that makes "just drop the swallowing tier" unusable,
+    because a confined process without its own prefix does not start."""
+    root = Path(sys.prefix) / f"looplab-fence-test-{os.getpid()}-{id(object())}"
+    if not os.access(sys.prefix, os.W_OK):
+        pytest.skip("this interpreter's prefix is read-only")
+    (root / "experiments").mkdir(parents=True)
+    (root / "experiments" / "final.txt").write_text("A HUMAN'S CHECKPOINT", encoding="utf-8")
+    try:
+        yield DevProbeTools({"editables": [{"name": ".", "path": str(root)}]}, timeout_s=60), root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_source_tree_under_the_interpreters_own_prefix_is_still_fenced(under_interpreter_tier):
+    """A venv with the checkout inside it, or a conda prefix with one. The grant that swallows the
+    root here is not on any list this process wrote — the probe's own interpreter derives it — and
+    it is refused there for the same reason and by the same rule."""
+    tools, root = under_interpreter_tier
+    secret = root / "experiments" / "final.txt"
+    out = tools.execute("run_probe", {"code": f"print(open({str(secret)!r}).read())"})
+    assert "A HUMAN'S CHECKPOINT" not in out and "exit=0" not in out
+
+
+def test_the_kernel_half_refuses_the_interpreters_prefix_case_too(under_interpreter_tier):
+    """And through the rung the audit hook cannot stand in for. The hook answers the `open` above
+    whatever the kernel was granted, so only a read it cannot see says which half is holding —
+    `ctypes` into libc raises no audit event, and this is the tier the CHILD granted itself."""
+    tools, root = under_interpreter_tier
+    secret = root / "experiments" / "final.txt"
+    out = tools.execute("run_probe", {"code": (
+        "import ctypes, os\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        f"fd = libc.open({str(secret)!r}.encode(), os.O_RDONLY)\n"
+        "print('DENIED' if fd < 0 else os.read(fd, 64))\n")})
+    assert "DENIED" in out, f"the child granted the tier its own root sits under: {out}"
+    assert "A HUMAN'S CHECKPOINT" not in out
+
+
+def test_the_interpreters_own_tier_survives_a_root_inside_it(under_interpreter_tier):
+    """The other half of the same fixture, and the reason the swallowing tier is EXPANDED rather
+    than dropped: dropping `sys.prefix` fences the probe by making python unable to import — the
+    failure `read_fence._too_broad` exists to prevent one layer down, arriving through the grant
+    list instead of the root list. Refusing a read and refusing to run are different answers.
+
+    The witness is DERIVED, not named: an import only proves the tier survived if the module it
+    imports really lives in that tier, and a hard-coded `numpy` asserts a fact about what the box
+    has installed rather than about the fence (measured 2026-08-22 — the venv this suite runs under
+    on one box has no numpy, so the test was red for a reason that was not the boundary). `pytest`
+    is in `purelib` by construction here: it is what is running this."""
+    tools, _root = under_interpreter_tier
+    purelib = _interpreter_witness()
+    out = tools.execute("run_probe", {"code": "import pytest; print('imports ok', pytest.__file__)"})
+    assert purelib in out, "the witness came from somewhere other than the interpreter tier"
+    assert "imports ok" in out and "exit=0" in out, out
+
+
+def test_a_grant_the_child_derives_for_itself_says_so_when_it_refuses_it(under_interpreter_tier):
+    """A derivation the parent cannot see is one the parent cannot fence, so the roots travel with
+    the grants and the rule is applied again where the grant is made. LOUD, because a dropped grant
+    IS a denial and a silent one reads as a broken interpreter — the same sentence the skipped-rule
+    line exists to say."""
+    tools, _root = under_interpreter_tier
+    out = tools.execute("run_probe", {"code": "print('the-probe-executed')"})
+    assert "the fence wins over the grant" in out, out
+    assert sys.prefix in out and "exit=0" in out
+
+
+def test_a_confinement_that_cannot_be_built_refuses_to_run_and_says_so():
+    """The one case the expansion cannot answer: the grant IS the root (the repo and the
+    interpreter prefix are the same directory). There is no subtree left to grant, and the two
+    alternatives are to run unfenced or to say so. It says so — a probe may fail loudly, it may
+    never run silently unfenced."""
+    tools = DevProbeTools({"editables": [{"name": ".", "path": sys.prefix}]}, timeout_s=30)
+    result = tools.execute_result("run_probe", {"code": "print('the-probe-executed')"})
+    assert result.is_error and "the-probe-executed" not in result.content
+    assert "cannot be built" in result.content and sys.prefix in result.content
+
+
+def test_a_grant_list_that_swallows_a_root_is_never_installed_as_a_fence(monkeypatch):
+    """The last check before the file is written, driven with the DEFECT as its input.
+
+    `read_fence.fence_inputs` already refuses an allow prefix that contains a root — "not dead
+    weight, a disabled fence" — and returns it in `swallowed`. The version this replaces discarded
+    that fourth element and then appended the machine tiers past it, which is how the derivation and
+    the enforcement came apart in the first place. So `swallowed` is asserted rather than assumed:
+    if the two ever disagree again the probe refuses to run, which is the one outcome that is never
+    silently unfenced."""
+    def pre_fix_derivation(self, work_root):
+        _roots, allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
+        tiers = tuple(path for path, _mode in read_allowlist.machine_read_tiers())
+        return tuple(allow) + tiers + (str(work_root),)
+
+    monkeypatch.setattr(DevProbeTools, "_confined_allow", pre_fix_derivation)
+    root = str(Path.home() / ".cache" / "looplab-fence-test-absent")
+    tools = DevProbeTools({"editables": [{"name": ".", "path": root}]}, timeout_s=30)
+    result = tools.execute_result("run_probe", {"code": "print('the-probe-executed')"})
+    assert result.is_error and "the-probe-executed" not in result.content
+    assert "source root" in result.content
+
+
+def test_the_kernel_rungs_grant_list_is_itself_refused_a_swallower_not_only_the_hook(monkeypatch):
+    """The swallowed net must live at the DERIVATION, not only at `_install_fence`.
+
+    `_confined_allow` is the ONE list both halves of rule 1 project from. The HOOK re-derives
+    `fence_inputs` in `_install_fence` and re-checks `swallowed`; the KERNEL rung reads the same
+    list through `_read_allow`, which does NOT pass through `_install_fence`. So a `confine_grants`
+    regression that returned a grant CONTAINING a root without flagging it in `refused` -- the exact
+    "the derivation and the enforcement came apart" drift this slice's history is about -- reached
+    the kernel allow-list unchecked, and an allow-list holding the root's own ANCESTOR is rule 1
+    switched off in the kernel half. Before the fix, `_confined_allow` returned it silently and only
+    `_install_fence`'s separate, order-dependent re-check stood between it and a run.
+
+    Driven by injecting that regression into `confine_grants` directly (empty `refused`), so the
+    property is proven at the derivation and does not depend on any real filesystem layout."""
+    root = "/opt/looplab-swallow-guard/repo"      # a normal 2+ component root, not `_too_broad`
+
+    def buggy_confine_grants(candidates, roots):
+        # Keep the root's ANCESTOR verbatim and flag nothing -- a future derivation bug.
+        rootv = tuple(r for r in (read_fence._norm_root(x) for x in roots) if r)
+        kept = {read_fence._norm_root(c) for c in candidates}
+        kept.discard(None)
+        kept.add("/opt/")                          # the swallower: an ancestor of the root
+        return tuple(sorted(kept)), ()
+
+    monkeypatch.setattr(read_fence, "confine_grants", buggy_confine_grants)
+    tools = DevProbeTools({"editables": [{"name": ".", "path": root}]}, timeout_s=5)
+
+    # (1) the KERNEL rung's own grant list must refuse to be built -- not merely `_install_fence`.
+    with pytest.raises(dev_probe.ProbeRefusal) as caught:
+        tools._read_allow(Path(tempfile.gettempdir()) / "swallow-guard" / "work")
+    assert "/opt/" in str(caught.value) and "source root" in str(caught.value)
+
+    # (2) end to end, the probe refuses the RUN rather than handing `/opt/` to the kernel allow-list.
+    result = tools.execute_result("run_probe", {"code": "print('the-probe-executed')"})
+    assert result.is_error and "the-probe-executed" not in result.content
+    assert "source root" in result.content
+
+
+def test_the_hook_and_the_kernel_are_told_the_same_thing_about_every_path():
+    """THE property. Two enforcement points for one rule, and the day their lists differ the weaker
+    one is the boundary. Both halves are projections of `_confined_allow`, so this drives them
+    against each other over a corpus of paths that matters: what is inside the tree, what is a
+    declared mount inside it, what the interpreter needs, and the sibling that a prefix compare
+    without a trailing separator would confuse for the tier.
+
+    The second assertion is the incident that made the single derivation a rule: the kernel rung
+    `open(O_PATH)`s each of its grants IN the interpreter the hook is already live in, so a grant
+    the hook refuses kills the probe while it is ADDING the rule."""
+    root = Path(sys.prefix) / "looplab-fence-test-absent"
+    mount = root / "datasets"
+    spec = {"editables": [{"name": ".", "path": str(root)}],
+            "data": {"train": {"path": str(mount), "mount": True}}}
+    tools = DevProbeTools(spec, timeout_s=30)
+    grants = tools._confined_allow(Path(tempfile.gettempdir()) / "looplab-probe-x" / "work")
+    fenced = _fence_predicate(tools, grants)
+
+    def granted(path):
+        p = path if path.endswith(os.sep) else path + os.sep
+        return any(p.startswith(g) for g in grants)
+
+    # (1) nothing under the root is reachable through either half — except the declared mount,
+    #     which is the sanctioned channel and must stay open in both.
+    # Files, not the root directory itself: opening a directory raises `IsADirectoryError` before
+    # it can read anything, which is why the `open` hot path does not pay for the trailing-separator
+    # compare (`_prefixed` is where a directory is judged, on `os.chdir`).
+    for inside in (str(root / "experiments" / "final.txt"), str(root / "train.py")):
+        assert not granted(inside), f"the kernel would grant {inside}"
+        assert fenced(inside) is not None, f"the hook would allow {inside}"
+    assert granted(str(mount / "train.csv")) and fenced(str(mount / "train.csv")) is None
+    # (2) every grant the kernel is asked to open passes the hook that is already live.
+    for g in grants:
+        assert fenced(g) is None, f"the hook refuses a path the kernel rung must open: {g}"
+    # (3) the interpreter still has its stdlib, or the probe is fenced by not starting.
+    assert granted(os.path.join(sysconfig.get_paths()["stdlib"], "json", "__init__.py"))
+
+
+def test_a_grant_of_a_tier_does_not_admit_its_sibling():
+    """`/opt` must not admit `/optfoo` — the `/src` vs `/srcfoo` bug `_norm_root`'s own docstring
+    says it exists to prevent, arriving through the grant list, where under `_CONFINE` the hot path
+    is a bare `startswith` against exactly these strings."""
+    tools = DevProbeTools({"editables": [{"name": ".", "path": "/opt/looplab-fence-test-absent"}]},
+                          timeout_s=30, confine_reads=False)   # the HOOK is the confinement here
+    grants = tools._confined_allow(Path(tempfile.gettempdir()) / "looplab-probe-x" / "work")
+    fenced = _fence_predicate(tools, grants)
+    for g in grants:
+        assert g.endswith(os.sep), f"a grant without a trailing separator: {g}"
+    for sibling in ("/optfoo/secret", "/usrfoo/secret", "/etcfoo/secret"):
+        assert fenced(sibling) is not None, f"a sibling of a granted tier was admitted: {sibling}"
+
+
+def test_a_task_with_no_editable_tree_installs_no_hook_at_all(tmp_path):
+    """`_install_fence` returning False is not a tidiness point: the fence directory goes FIRST on
+    the child's PYTHONPATH, so an inert `sitecustomize` of ours displaces the box's own for every
+    probe of every non-repo task. There is nothing for a denylist with no roots to refuse — the
+    probe is confined by the kernel rung, which is a different rung and still on."""
+    fence_dir = tmp_path / "fence"
+    fence_dir.mkdir()
+    assert DevProbeTools({}, timeout_s=5)._install_fence(fence_dir) is False
+    assert list(fence_dir.iterdir()) == []
+    # ...and when the HOOK is the confinement, an empty root list is not inert at all: its allow
+    # list is the whole boundary, so the fence must still be written.
+    assert DevProbeTools({}, timeout_s=5, confine_reads=False)._install_fence(fence_dir) is True
+    assert (fence_dir / "sitecustomize.py").exists()
+
+
+def test_the_probe_of_a_task_with_no_editable_tree_is_still_confined(tmp_path):
+    """The companion to the guard above, and why restoring it costs nothing: the AlgoTune shape —
+    no editable tree at all, the benchmark harness sitting beside the run — is refused by the
+    kernel rung, which is what `confine_reads` turned on."""
+    victim = tmp_path / "harness" / "validation_pipeline.py"
+    victim.parent.mkdir()
+    victim.write_text("HOW SOLUTIONS ARE CHECKED", encoding="utf-8")
+    out = _probe(f"print(open({str(victim)!r}).read())", repo_spec={})
+    assert "HOW SOLUTIONS ARE CHECKED" not in out and "exit=0" not in out
+
+
+def _interpreter_witness() -> str:
+    """`purelib`, having checked that importing `pytest` really exercises it.
+
+    A guard on the guard: if this interpreter's pytest were vendored or on `PYTHONPATH` rather than
+    installed in `purelib`, an import of it would prove nothing about the tier and the test above
+    would be green whatever the grant list said."""
+    purelib = sysconfig.get_paths()["purelib"]
+    if not str(Path(pytest.__file__).resolve()).startswith(purelib):
+        pytest.skip("this interpreter's pytest is not in purelib, so it witnesses nothing")
+    return purelib
+
+
+def test_the_grants_always_cover_the_interpreter_that_will_run_the_probe():
+    """The invariant behind every "and it still works" assertion in this file, stated once and
+    derived from the running interpreter rather than from what this box looks like.
+
+    It is here because it was FALSE and nothing said so: `/tmp` and `/var/tmp` are dropped from the
+    grant list (they are granted whole by `read_allowlist`, and granting them hands a probe the
+    checkout beside the run), and the drop tested CONTAINMENT — so on a box whose venv is
+    `/var/tmp/<checkout>/.venv`, `sys.prefix` and its `site-packages` went with them and a confined
+    probe could not import an installed package. A boundary that removes the interpreter has not
+    fenced anything; it has stopped the process, which is the outcome `_too_broad` exists to
+    prevent one layer down."""
+    grants = DevProbeTools({}, timeout_s=5)._confined_allow(
+        Path(tempfile.gettempdir()) / "looplab-probe-x" / "work")
+    covered = lambda p: any((str(p) + os.sep).startswith(g) for g in grants)     # noqa: E731
+    for needed in (sys.prefix, sys.base_prefix, sysconfig.get_paths()["purelib"],
+                   sysconfig.get_paths()["stdlib"]):
+        assert covered(os.path.realpath(needed)), f"the probe's own interpreter lost {needed}"
+
+
+def _venv_under_a_temp_root(tmp_path):
+    """A plausible interpreter laid out under a shared temp root — `uv`'s default on this box is
+    `/var/tmp/<checkout>/.venv`, and `tmp_path` is under `/tmp` for the same reason."""
+    prefix = tmp_path / "checkout" / ".venv"
+    (prefix / "lib" / "python3.11" / "site-packages").mkdir(parents=True)
+    (prefix / "bin").mkdir()
+    return prefix
+
+
+def test_an_interpreter_under_a_shared_temp_root_is_still_granted(tmp_path, monkeypatch):
+    """The tier and a path INSIDE it are different statements. What was measured is that granting
+    `/tmp` and `/var/tmp` WHOLE hands a probe the AlgoTune checkout beside the run; a venv that
+    happens to live under one is not that, and granting it grants no other part of the checkout.
+
+    Driven with a fabricated interpreter so the property does not depend on where this box put its
+    python — which is exactly how it shipped broken on the box that puts it under `/var/tmp`."""
+    prefix = _venv_under_a_temp_root(tmp_path)
+    monkeypatch.setattr(DevProbeTools, "_interpreter_allow",
+                        staticmethod(lambda: (str(prefix) + os.sep, "/tmp/", "/var/tmp/", "/usr/")))
+    grants = DevProbeTools({}, timeout_s=5)._confined_allow(tmp_path / "probe" / "work")
+    covered = lambda p: any((str(p) + os.sep).startswith(g) for g in grants)     # noqa: E731
+    assert covered(prefix / "lib" / "python3.11" / "site-packages")
+    assert not covered(tmp_path / "checkout" / "harness")
+    for tier in ("/tmp", "/var/tmp", os.path.realpath(tempfile.gettempdir())):
+        assert not covered(tier), f"the shared temp root {tier} was granted whole"
+
+
+def test_a_root_that_is_the_interpreter_is_refused_wherever_the_interpreter_lives(tmp_path,
+                                                                                  monkeypatch):
+    """The second half of the same seam, and the one that decides a guarantee: a candidate the
+    derivation drops before `confine_grants` sees it can neither be punched NOR refused, so the
+    probe ran without its interpreter and without anyone saying so. It was still fenced — the root
+    was granted by nothing — but "refuses to run" was not true on that path, and a guarantee that
+    holds only where the box puts python outside `/var/tmp` is not a guarantee."""
+    prefix = _venv_under_a_temp_root(tmp_path)
+    monkeypatch.setattr(DevProbeTools, "_interpreter_allow",
+                        staticmethod(lambda: (str(prefix) + os.sep, "/usr/")))
+    tools = DevProbeTools({"editables": [{"name": ".", "path": str(prefix)}]}, timeout_s=5)
+    with pytest.raises(dev_probe.ProbeRefusal) as caught:
+        tools._confined_allow(tmp_path / "probe" / "work")
+    assert str(prefix) in str(caught.value) and "cannot be built" in str(caught.value)
+
+
+def _fence_predicate(tools, grants):
+    """The generated hook's own `_fenced`, for the fence THIS provider would install.
+
+    Exec'd under `read_fence._PROBE_NAME`, the seam that yields the pure predicate without
+    installing an irreversible audit hook — and rendered through the same projection
+    `_install_fence` uses, so what is driven is the file the probe would really carry."""
+    # `_fence_spec()`, not `repo_spec`: the grader roots (`protect_roots`) are folded into the
+    # editable list the fence is derived from, and a predicate over the bare spec would render a
+    # fence the probe never installs.
+    roots, hook_allow, _dropped, swallowed = read_fence.fence_inputs(tools._fence_spec(), allow=grants)
+    assert not swallowed, f"a grant contains a root: {swallowed}"
+    confine = not tools.confine_reads
+    src = read_fence.render(roots, grants if confine else hook_allow, policy="deny",
+                            run="developer-probe", confine=confine)
+    ns = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "<fence>", "exec"), ns)       # probe name: no audit hook installed
+    return ns["_fenced"]
+
+
 # ------------------------------------------------------- rule 4: it cannot disturb a sibling's GPU
 
 def test_a_probe_sees_no_gpu_so_it_cannot_allocate_on_one_a_running_node_holds():
@@ -744,3 +1227,216 @@ def test_a_spliced_event_is_live_in_a_real_probe_child(outside, event):
     assert "THROUGH" not in out and event in read_fence.MUTATION_EVENTS
     assert victim.exists() and victim.read_text(encoding="utf-8") == "original"
     assert victim.stat().st_mode == before.st_mode and victim.stat().st_mtime == before.st_mtime
+
+
+# ------------------------------------ rule 1, the GRADER: what `protect_packages` fences, the probe
+#                                      refuses too (docs/60 §60.9 A3, ex-OPEN[probe-reads-what-the-
+#                                      grader-fence-refuses])
+#
+# `EvalSpec.protect_packages` fenced `env_inspect` and the probe was composed BESIDE it, with a read
+# confinement that granted site-packages whole — so `run_probe(inspect.getsource(<grader>))`
+# returned what `read_installed` refused, in one toolset. The declaration now reaches the probe as
+# DIRECTORIES (`grader_package_roots`, `find_spec(...).submodule_search_locations`), folded into the
+# fence's own root list so both rungs refuse them by the machinery they already have.
+#
+# The fixture lives under `~/.cache`, not `tmp_path`, for `under_cache_tier`'s reason: the grader
+# has to sit INSIDE a tier the grant derivation really produces, because the whole defect is a
+# granted tier containing the thing the fence should hide. The confined-by-default variants skip
+# where the kernel cannot confine (the autouse gate); the `confine_reads=False` variant drives the
+# HOOK rung everywhere.
+
+@pytest.fixture()
+def fake_grader():
+    """A `site/` holding an installed GRADER package (secret inside) beside an unrelated one."""
+    root = Path.home() / ".cache" / f"looplab-grader-test-{os.getpid()}-{id(object())}"
+    site = root / "site"
+    name = f"fakegrader_{os.getpid()}"
+    try:
+        (site / name).mkdir(parents=True)
+    except OSError as exc:                              # noqa: PERF203 - a read-only HOME is a skip
+        pytest.skip(f"cannot create a fixture under ~/.cache: {exc}")
+    (site / name / "__init__.py").write_text("SECRET = 'HOW SOLUTIONS ARE CHECKED'\n",
+                                             encoding="utf-8")
+    (site / name / "checker.py").write_text("def is_solution(x):\n    return True\n",
+                                            encoding="utf-8")
+    (site / "otherpkg").mkdir()
+    (site / "otherpkg" / "__init__.py").write_text("HELLO = 'AN ORDINARY DEPENDENCY'\n",
+                                                   encoding="utf-8")
+    try:
+        yield site, name
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_grader_package_roots_resolves_a_declared_name_to_its_directory(fake_grader, monkeypatch):
+    """The name the operator declared becomes the directory the interpreter imports it from — in
+    THIS interpreter, which is the one the probe runs on. A dotted spelling is one declaration, an
+    absent package fences nothing (the inspector already answers "(not installed)" for it)."""
+    site, name = fake_grader
+    monkeypatch.syspath_prepend(str(site))
+    roots = dev_probe.grader_package_roots([name, f"{name}.checker", "definitely_not_installed_xyz"])
+    assert roots == {name: (str(site / name),)}
+    assert dev_probe.grader_package_roots([]) == {}
+    # A single-FILE module has no search locations and is a STATED residual, not a silent fence.
+    (site / "onefile_grader.py").write_text("X = 1\n", encoding="utf-8")
+    assert dev_probe.grader_package_roots(["onefile_grader"]) == {}
+
+
+def _grader_probe(site, name, **kw):
+    return DevProbeTools({}, timeout_s=60,
+                         protect_roots=dev_probe.grader_package_roots([name]) or
+                         {name: (str(site / name),)}, **kw)
+
+
+def test_the_probe_refuses_the_grader_in_the_hook_rung_and_names_the_package(fake_grader,
+                                                                              monkeypatch):
+    """`confine_reads=False`: the HOOK is the confinement, so this drives everywhere. The read is
+    refused, the secret never reaches the tool result, and the refusal is `env_inspect`'s — it
+    names the PACKAGE and says it is installed, never "under the operator's SOURCE tree" (false,
+    and unactionable: there is no workdir-relative spelling of the checker)."""
+    site, name = fake_grader
+    monkeypatch.syspath_prepend(str(site))
+    tools = _grader_probe(site, name, confine_reads=False)
+    out = tools.execute("run_probe", {"code": f"print(open({str(site / name / '__init__.py')!r}).read())"})
+    assert "HOW SOLUTIONS ARE CHECKED" not in out and "exit=0" not in out
+    assert f"`{name}`" in out and "fenced" in out and "IS installed" in out, out
+    assert "operator's SOURCE tree" not in out
+    # `import` is the route the review measured: the module's own bytes through the loader. The
+    # fixture goes on the CHILD's path from inside the program (a real grader is on it from
+    # site-packages; `monkeypatch.syspath_prepend` reaches only this interpreter).
+    out = tools.execute("run_probe", {"code": (
+        f"import sys; sys.path.insert(0, {str(site)!r})\n"
+        f"import inspect, {name}.checker as m; print(inspect.getsource(m))")})
+    assert "def is_solution" not in out and "exit=0" not in out
+    assert f"`{name}`" in out and "fenced" in out, out
+    # An unrelated package in the same tier is readable: the tier was PUNCHED, not dropped.
+    out = tools.execute("run_probe", {"code": f"print(open({str(site / 'otherpkg' / '__init__.py')!r}).read())"})
+    assert "exit=0" in out and "AN ORDINARY DEPENDENCY" in out, out
+
+
+def test_the_probe_refuses_the_grader_under_full_default_confinement(fake_grader, monkeypatch):
+    """BOTH rungs, on a kernel that has the second one (skipped by the autouse gate otherwise).
+    This is the review's own reproduction — "under full default confinement" — driven verbatim."""
+    site, name = fake_grader
+    monkeypatch.syspath_prepend(str(site))
+    tools = _grader_probe(site, name)
+    out = tools.execute("run_probe", {"code": (
+        f"import sys; sys.path.insert(0, {str(site)!r})\n"
+        f"import inspect, {name}.checker as m; print(inspect.getsource(m))")})
+    assert "def is_solution" not in out and "exit=0" not in out
+    assert f"`{name}`" in out and "fenced" in out, out
+    # …the kernel half too, where the audit hook cannot look.
+    secret = site / name / "__init__.py"
+    out = tools.execute("run_probe", {"code": (
+        "import ctypes, os\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        f"fd = libc.open({str(secret)!r}.encode(), os.O_RDONLY)\n"
+        "print('DENIED' if fd < 0 else os.read(fd, 64))\n")})
+    assert "DENIED" in out and "HOW SOLUTIONS ARE CHECKED" not in out
+    out = tools.execute("run_probe", {"code": f"print(open({str(site / 'otherpkg' / '__init__.py')!r}).read())"})
+    assert "exit=0" in out and "AN ORDINARY DEPENDENCY" in out, out
+
+
+@pytest.mark.parametrize("confine", [True, False])
+def test_the_grader_root_is_in_both_projections_of_rule_one(fake_grader, confine):
+    """Derivation only, no child: the kernel's grant list holds no grant covering the grader and
+    one covering its sibling; the roots that travel to the child name it; and the hook the probe
+    would install refuses the grader's file and admits the sibling's. Runs on any kernel."""
+    site, name = fake_grader
+    tools = _grader_probe(site, name, confine_reads=confine)
+    grader = read_fence._norm_root(site / name)
+    grants = tools._confined_allow(Path(tempfile.gettempdir()) / "looplab-probe-x" / "work")
+    assert not any(grader.startswith(g) for g in grants), "a grant contains the grader"
+    assert any(read_fence._norm_root(site / "otherpkg").startswith(g) for g in grants), \
+        "the sibling package lost its grant: the tier was dropped rather than punched"
+    assert grader in tools._read_deny()
+    fenced = _fence_predicate(tools, grants)
+    assert fenced(str(site / name / "checker.py")) is not None
+    assert fenced(str(site / "otherpkg" / "__init__.py")) is None
+
+
+def test_the_refusal_is_rewritten_from_the_fences_own_sentence(fake_grader):
+    """The message rung, driven on the exact text the fence emits (`read_fence.REFUSAL_MESSAGE`,
+    spliced — a reworded fence goes red here rather than silently un-annotated), and on the
+    kernel's `PermissionError` for a native reader. A path outside every grader root, a successful
+    exit and a probe with no grader declared all leave the stderr byte for byte."""
+    site, name = fake_grader
+    tools = _grader_probe(site, name)
+    inside = str(site / name / "checker.py")
+    fence_line = "LoopLabReadFenceRefused: " + read_fence.REFUSAL_MESSAGE.format(path=inside)
+    got = tools._name_the_grader(1, "Traceback...\n" + fence_line + "\n")
+    assert dev_probe.GRADER_REFUSAL.format(path=inside, package=name) in got
+    assert "operator's SOURCE tree" not in got
+    kernel_line = f"PermissionError: [Errno 13] Permission denied: '{inside}'"
+    got = tools._name_the_grader(1, kernel_line + "\n")
+    assert kernel_line in got and f"LOOPLAB probe: refused: {inside} is inside `{name}`" in got
+    elsewhere = "LoopLabReadFenceRefused: " + read_fence.REFUSAL_MESSAGE.format(path="/src/repo/x.py")
+    assert tools._name_the_grader(1, elsewhere) == elsewhere
+    assert tools._name_the_grader(0, fence_line) == fence_line
+    assert tools._name_the_grader(1, f"printed {inside} and exited\n") == f"printed {inside} and exited\n"
+    assert DevProbeTools({}, timeout_s=5)._name_the_grader(1, fence_line) == fence_line
+
+
+def test_an_empty_protect_declaration_renders_the_unfenced_probe_byte_for_byte(tmp_path):
+    """`protect_packages: []` — the default — must change NOTHING: the grants, the roots that
+    travel to the child, the rendered fence, the launcher and the tool spec."""
+    spec = {"editables": [{"name": ".", "path": str(tmp_path / "repo")}]}
+    (tmp_path / "repo").mkdir()
+    plain, empty = DevProbeTools(spec, timeout_s=5), DevProbeTools(spec, timeout_s=5, protect_roots={})
+    assert empty.protect_roots == {} and DevProbeTools(spec, protect_roots=()).protect_roots == {}
+    assert empty._fence_spec() == spec
+    work = tmp_path / "w"
+    assert plain._confined_allow(work) == empty._confined_allow(work)
+    assert plain._read_deny() == empty._read_deny()
+    assert plain.specs() == empty.specs()
+    assert dev_probe.render_launcher("p.py", read_allow=plain._read_allow(work),
+                                     read_deny=plain._read_deny()) == dev_probe.render_launcher(
+        "p.py", read_allow=empty._read_allow(work), read_deny=empty._read_deny())
+    for d in (tmp_path / "f1", tmp_path / "f2"):
+        d.mkdir()
+    plain._install_fence(tmp_path / "f1")
+    empty._install_fence(tmp_path / "f2")
+    assert ((tmp_path / "f1" / "sitecustomize.py").read_text(encoding="utf-8")
+            == (tmp_path / "f2" / "sitecustomize.py").read_text(encoding="utf-8"))
+    # …and a declared grader is what makes the spec say so.
+    assert "fenced as the evaluation harness" not in json.dumps(plain.specs())
+    assert "fenced as the evaluation harness" in json.dumps(
+        DevProbeTools(spec, protect_roots={"g": (str(tmp_path / "g"),)}).specs())
+
+
+def test_a_grader_inside_the_stdlib_tier_is_refused_loudly_not_punched(tmp_path):
+    """Punching a tier loses its loose FILES (`_grant_expansion`'s residual). Under a venv that is
+    `six.py`; under a conda/system interpreter `site-packages` sits INSIDE the stdlib directory and
+    the loose files are `os.py` — a broken interpreter, not a fence. Refuse and name the shape."""
+    stdlib = Path(sysconfig.get_paths()["stdlib"])
+    tools = DevProbeTools({}, timeout_s=5, protect_roots={"jsongrader": (str(stdlib / "json"),)})
+    with pytest.raises(dev_probe.ProbeRefusal) as refused:
+        tools._confined_allow(tmp_path / "work")
+    assert "jsongrader" in str(refused.value) and "stdlib" in str(refused.value)
+    assert "Running without the fence is not the alternative" in str(refused.value)
+
+
+def test_the_developer_hands_the_probe_the_same_declaration_as_the_inspector(fake_grader,
+                                                                              monkeypatch):
+    """The composition point, driven: the probe `_scout_tools` builds carries the grader roots
+    resolved from the task's OWN `protect_packages` — the same accessor `EnvInspectTools` is built
+    from one line over — and a task that declares none hands it nothing."""
+    site, name = fake_grader
+    monkeypatch.syspath_prepend(str(site))
+
+    class _Task:
+        def __init__(self, spec):
+            self._spec = spec
+
+        def eval_spec(self):
+            return self._spec
+
+    dev = _developer(True)
+    dev.task = _Task({"command": ["python", "x.py"], "protect_packages": [name, "not_installed_zz"]})
+    probe = next(t for t in dev._scout_tools(None) if isinstance(t, DevProbeTools))
+    assert probe.protect_roots == {name: (read_fence._norm_root(site / name),)}
+    assert dev._grader_roots() == {name: (str(site / name),)}
+    dev.task = _Task({"command": ["python", "x.py"]})
+    assert next(t for t in dev._scout_tools(None) if isinstance(t, DevProbeTools)).protect_roots == {}
+    # …and a developer with no task at all (the `__new__`-built shape ~170 tests use) fences nothing.
+    assert _developer(True)._grader_roots() == {}

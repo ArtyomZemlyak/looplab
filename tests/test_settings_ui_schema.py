@@ -100,7 +100,45 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 196
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 206
+    # 196 + 196 -> 206 on 2026-09-07, at the MERGE with master, and BOTH histories below are
+    # real: each side grew its own copy from a common 186 and neither literal was measured
+    # against a tree holding the other's rows. Verified as every entry below prescribes —
+    # by INTERSECTION, never by adding the integers: 186 keys are common to the two files,
+    # this branch adds ten (diagnosis_hypotheses, endgame_reserve_frac, evidence_envelope,
+    # llm_cost_limit, llm_token_limit, mcts_cost_weight, novelty_literature,
+    # stage_check_tools, steady_state_build, syscall_fence) and master ten
+    # (developer_crash_pause_after, developer_probe_confine, developer_stage_guidance,
+    # developer_step_feedback_command, established_context, established_context_bytes,
+    # hide_empty_tools, llm_budget_usd, llm_stream_stall_fallback,
+    # node_open_budget_floor_usd), giving 206 with no duplicate key. The keyset revision is
+    # RE-DERIVED over the merged keyset for the same reason.
+    # 195 + 1 -> 196 on 2026-09-06, at the MERGE with master: this branch's ten rows
+    # meeting master's `agent_timeout`. Verified as every entry below prescribes rather
+    # than by adding the integers: 185 rows are common to the two files, ours adds ten and
+    # master one, and removing exactly those eleven gives back 185 with no duplicate key.
+    # 190 + 3 -> 193 on 2026-09-06: the three bench-driven knobs of docs/60 §60.9 (A7/A10/A12),
+    # `llm_stream_stall_fallback`, `node_open_budget_floor_usd` and `developer_crash_pause_after`,
+    # each beside the row it modifies (`llm_stream`, `llm_budget_usd`, `systemic_failure_stop`).
+    # Verified as 190 keys common to the previous keyset plus exactly those three, no duplicate.
+    # 189 + 1 -> 190 on 2026-08-31, at the MERGE with master, and BOTH histories under it are real.
+    # Master's row is `single_command_divergence_watch`, and it is a CORRECTION rather than a
+    # feature: the field shipped in `7813032e` with neither a form row nor an uncurated entry, so
+    # `_reconcile_settings_fields` was RED on master from that merge until `9a07427f` — a targeted
+    # suite that did not include `tests/test_stage_environment.py` is what let it through. A ROW and
+    # not an uncurated entry because none of that registry's four honest reasons holds: it is not an
+    # open key set, not a legacy alias, not a load-time binding, and the "second-order tuning whose
+    # PARENT already has a row" clause is false — the deterministic divergence watchdog has no row
+    # of its own, and the `train_monitor_*` family beside it is the LLM judge, a different rung.
+    # Verified as the paragraph prescribes rather than by bumping the number: 184 rows are common to
+    # the two files, this branch adds five and master one, and removing exactly those six gives back
+    # 184 with no duplicate key.
+    # 184 + 5 -> 189 on 2026-08-29, at the previous MERGE with master: master's 184 catalogued rows
+    # meeting the five this branch authored (`llm_budget_usd`, `hide_empty_tools`,
+    # `developer_probe_confine`, `developer_step_feedback_command`, `developer_stage_guidance`).
+    # Verified as the paragraph prescribes rather than by bumping the number: master's file
+    # carried 184 keys, ours 188, the intersection 183, and re-adding exactly those five to
+    # master's catalogue gives 189 with no duplicate key.
     # 195 -> 196 on 2026-09-07: `steady_state_build`, the build fan-out as a refilling lane
     # (doc 52 row 33). A row because it changes how many provider calls a build batch makes.
     # 194 -> 195 on 2026-09-07: `diagnosis_hypotheses`, the competing explanations the crash
@@ -151,6 +189,21 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # node 2 spent 88.3 min and 206 provider calls re-sweeping one 663-line file INSIDE a healthy
     # turn budget, which is the shape no turn count can see. It carries the same 1200 as
     # `developer_session_time_budget_s` because the two bound consecutive phases of one thread.
+    # 220 -> 221 Settings and 187 -> 188 catalogued rows on 2026-08-28: +developer_stage_guidance,
+    # the switch that drops ~5,000 characters of stage-pipeline advice from the Developer prompt
+    # for single-stage tasks. Default TRUE so a resumed run keeps its historical prompt.
+    # 219 -> 220 Settings and 186 -> 187 catalogued rows on 2026-08-27:
+    # `developer_step_feedback_command`, the operator-pinned command the Developer's plan loop runs
+    # BETWEEN steps so a writing session sees a number (doc 53 item 10, our half). A row rather than
+    # an uncurated omission on this list's usual grounds: "" is the HISTORICAL behaviour and an
+    # operator must be able to get back to it, and it changes a PROMPT — what the agent is SHOWN,
+    # which is the measurement. It also spends real wall clock (~40 s per step that edits a file),
+    # so the switch that buys it has to be visible.
+    # 183 -> 186 on 2026-08-21, at the REBASE onto master: three rows this branch authored
+    # (`llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`) meeting master's own
+    # additions. The count moved by exactly the three, which is the check that the rebase carried
+    # the branch's catalogue rather than resolving them away — they WERE resolved away first, and
+    # were lifted back from the pre-rebase head rather than retyped.
     # 218 -> 219 Settings and 182 -> 183 catalogued rows on 2026-08-20:
     # `train_monitor_contract`, whether the live training-log watchdog is shown the stage's
     # own declared contract (`expect.assert` / `expect.files`) and the engine's reading of
@@ -209,6 +262,19 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # (there is no container filesystem to make read-only), so a form row would offer every operator
     # a knob that does nothing on their box, and the operators who DO run the container tiers set
     # them together in a config file.
+    # 222 -> 223 Settings on 2026-08-31, at the MERGE: master's `single_command_divergence_watch`.
+    # It reached master in `7813032e` WITHOUT this pin or a catalogue row, which is why the
+    # reconciliation was red there from that merge until `9a07427f` — see the catalogue note above
+    # for why it gets a form row rather than an uncurated entry.
+    # 223 -> 224 on 2026-09-04: `developer_probe_max_calls`, the instrument for the arm registered
+    # in docs/56 §190. It is UNCURATED on purpose and the reason is in the dict beside the others:
+    # a form row would invite operators to set a probe cap the benchmark has not yet shown to be
+    # good. §189 is the measurement behind the arm -- of eleven process variables only probe count
+    # separates the best `edge_expansion` runs from the worst (20 vs 29, p = 0.037), and a median
+    # split at 24 gives champions of 221.81 against 177.84 (p = 0.0077) -- and it is a correlation
+    # until the arm runs. It gets a row when an arm says which N is right.
+    # 224 -> 227 on 2026-09-06: docs/60 §60.9's three bench-driven knobs (A7 engine half, A10,
+    # A12), all CURATED — see the 190 -> 193 note above; the two counts move together.
     # 217 -> 218 Settings on 2026-08-30: `single_command_divergence_watch`. It reached master
     # in `7813032e` WITHOUT this pin or a catalogue row, which is why the reconciliation was
     # red from that merge until now — see the catalogue note above for why it gets a form row
@@ -216,6 +282,14 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 218 -> 219 Settings on 2026-09-03: `agent_timeout`. See the catalogue note above for why it
     # is a form row; the reason it is a Settings field at ALL is that it previously was not, and the
     # constructor default it replaced was therefore the only value a composed run could ever have.
+    # 230 + 230 -> 241 on 2026-09-07, at the MERGE with master: re-derived from the
+    # MERGED model, not added — an AST scan of `Settings` against both parents reports
+    # exactly the twenty catalogued additions above plus each side's uncatalogued ones,
+    # and none removed.
+    # 229 + 1 -> 230 on 2026-09-06, at the MERGE with master: master's `agent_timeout`
+    # meeting this branch's ten. Re-derived from the merged model, not added: an AST scan
+    # of `Settings` against both parents reports exactly those eleven added and none
+    # removed.
     # 219 -> 220 Settings on 2026-09-06: `stage_check_tools`. See the catalogue note above.
     # 220 -> 221 Settings on 2026-09-06: `evidence_envelope`. See the catalogue note above.
     # 221 -> 223 Settings on 2026-09-06: `llm_cost_limit` + `llm_token_limit`. See the catalogue note.
@@ -226,7 +300,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 227 -> 228 Settings on 2026-09-07: `novelty_literature` (doc 52 row 32; a row).
     # 228 -> 229 Settings on 2026-09-07: `diagnosis_hypotheses` (doc 52 row 32; a row).
     # 229 -> 230 Settings on 2026-09-07: `steady_state_build` (doc 52 row 33; a row).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 230
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 241
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

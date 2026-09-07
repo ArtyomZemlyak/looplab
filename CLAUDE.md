@@ -42,7 +42,7 @@ The suite runs fully offline in ~1-2 minutes; live-LLM tests auto-skip (opt in w
 `LOOPLAB_LIVE_SCENARIOS=1`). There is no formatter and ONE lint rule, and that rule is a CENSUS, not a
 style: `[tool.ruff]` selects `BLE` only (doc 52 row 14), so `python -m ruff check looplab` lists every
 blind `except Exception`/`BaseException`/bare `except` that carries no `# noqa: BLE001 — <why this is
-safe to contain>`. Containment is the house posture (686 such handlers), so the rule is not "do not
+safe to contain>`. Containment is the house posture (715 such handlers), so the rule is not "do not
 write one" but "say why"; `tests/test_containment_census.py` re-derives the same census by AST with no
 `ruff` installed, refuses a NEW blind handler that states no reason, and keeps the 103 pre-existing
 reason-less sites as a shrink-only backlog in `tests/data/containment_unreviewed.txt` (review one =
@@ -74,10 +74,10 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 
 The one-line rule per module lives here; the MEASUREMENTS behind each rule (corpus counts, the
 runs that motivated a design, the alternatives refused) live in
-[`docs/53-agent-guide-narratives-2026-09-06.md`](docs/53-agent-guide-narratives-2026-09-06.md),
+[`docs/64-agent-guide-narratives-2026-09-06.md`](docs/64-agent-guide-narratives-2026-09-06.md),
 one section per row below, and in the numbered docs and module docstrings they were written from.
 This file is on a byte budget (`tests/test_documentation_contracts.py::CLAUDE_MD_MAX_BYTES`): add a
-rule here, put its story in doc 53 or the module docstring, never both.
+rule here, put its story in doc 64 or the module docstring, never both.
 
 | Path | Contents |
 |---|---|
@@ -139,7 +139,7 @@ rule here, put its story in doc 53 or the module docstring, never both.
    always add new event types to the registry.
 
 The full account of every seam above — the measurements, the incidents and the alternatives
-refused — is in `docs/53-agent-guide-narratives-2026-09-06.md` ("Engine invariants").
+refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invariants").
 
 ## Conventions and traps
 
@@ -147,7 +147,7 @@ refused — is in `docs/53-agent-guide-narratives-2026-09-06.md` ("Engine invari
   refuses a guide over the budget, because every agent turn pays for every byte here before a
   single file is read (the guide was 259 KB on 2026-09-06, 75 % of it package-map narrative). A
   RULE belongs here; the measurement, the incident and the alternatives refused belong in the
-  module docstring, the numbered doc, or `docs/53-agent-guide-narratives-2026-09-06.md`, which is
+  module docstring, the numbered doc, or `docs/64-agent-guide-narratives-2026-09-06.md`, which is
   where every row and bullet of this file was archived verbatim when the budget landed. Cite by
   `<mod>.py::<symbol>`, never by line number.
 - **Back-compat import shim**: `looplab/__init__.py` aliases every pre-split flat module path via
@@ -270,7 +270,7 @@ refused — is in `docs/53-agent-guide-narratives-2026-09-06.md` ("Engine invari
   italic closure note saying what landed). Prefer a proof over the fix's own symbol, then over the
   defect's text, then over the item's home. The guard strips every marker and `proof:` line before
   evaluating. Rejected alternatives (`TODO(slug)`, `STILL OPEN`, a separate `OPEN.md`, a status
-  field, a hard-coded rollup) and the drift they were measured against are in doc 53; the counts
+  field, a hard-coded rollup) and the drift they were measured against are in doc 64; the counts
   in this file were the first thing to drift, so **the count comes from the parser, never a
   person**.
 - **A recorded fact is pinned to the site that DECIDES it, and a machine constraint is MEASURED

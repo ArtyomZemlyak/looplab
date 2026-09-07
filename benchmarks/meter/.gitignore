@@ -1,0 +1,6 @@
+# Written at runtime: the call log and the proxy pidfile. A meter log is evidence for ONE campaign
+# on ONE box, so it belongs beside that campaign's output, not in the repository.
+meter.jsonl
+*.pid
+endpoint-probe.json
+proxy-probe.json

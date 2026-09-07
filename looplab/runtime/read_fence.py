@@ -97,7 +97,15 @@ ALSO appended to the fence's own diagnostic log beside the run.
 WHAT IT DOES NOT FENCE (by construction, and each is deliberate)
 ----------------------------------------------------------------
 * the node's own workdir, the run directory, `/tmp`, site-packages, the HF/model cache — none of
-  them are under an editable source root, so the prefix test never matches;
+  them are under an editable source root, so the prefix test never matches. THE ONE EXCEPTION IS
+  THIS FENCE'S OWN GENERATED FILE, which lives in that same unfenced run directory and, until
+  2026-08-25, could therefore simply be overwritten by the process it fences — refuse the read,
+  `open(<run_dir>/.looplab-fence/sitecustomize.py, "w")`, and every process the run starts after
+  that is unfenced. Relocating it does not help (there is nowhere outside the operator's tree that
+  the denylist covers), so it is protected by two rungs of its own instead: the kernel one
+  (`_harden`, mode 0444) and the hook one (`_SELF`, which refuses every mutation event aimed at the
+  fence directory whatever `_ROOTS`/`_ALLOW` say). Both are needed and neither is sufficient —
+  measured, with one rung removed at a time;
 * `data:` / `references:` mount SOURCES — allow-listed explicitly, because a data source is legally
   allowed to live INSIDE the editable tree and mounts are exactly the sanctioned read channel;
 * the engine's own machinery — seeding (`engine/workspace.py`), the git plumbing, the fault
@@ -212,6 +220,11 @@ VIOLATION_LOG = "violations.log"
 # launch of the run (the node workdirs, the confirm-phase workdirs, the metric adapter's exec) and
 # only the launch knows which of them it is. Inherited by every child, like the marker.
 WORKDIR_ENV = "LOOPLAB_EVAL_WORKDIR"
+
+# The mode `install` leaves on the generated `sitecustomize.py`: readable by every interpreter that
+# has to IMPORT it, writable by nobody — see `_harden` for why this is the rung that carries the
+# self-protection and `_SELF` in the template for the rung that guards it.
+FENCE_FILE_MODE = 0o444
 
 # The policy rungs, in increasing strictness. See `Settings.read_fence` for why `deny` is the
 # default rather than `warn`.
@@ -407,6 +420,131 @@ def fence_inputs(repo_spec: Optional[dict], *, allow: Iterable = ()) -> tuple:
     return roots, allowed, dropped, swallowed
 
 
+# The ceiling on what one swallowing grant may be expanded into (see `confine_grants`). A tier with
+# more entries than this is refused rather than turned into a thousand-rule ruleset: Landlock adds
+# one `open(O_PATH)` + one syscall per rule, the hook compares a `startswith` tuple per read, and a
+# grant list nobody can read is a boundary nobody can check. It is a bound on the EXPANSION, not on
+# the caller's own list. Sized against what a punch really has to enumerate, measured on this box:
+# a machine tier is tens of entries (`/opt` 5, `/usr` 10), a venv is 5, a stdlib 206, and the widest
+# thing a root can plausibly sit inside is a fat `site-packages` at 540. It is deliberately several
+# times that rather than snug — an expansion is a REFUSAL when it is exceeded, so a bound set at the
+# largest observed case turns a new dependency into a probe that will not run. What it catches is a
+# tier that is not a tier.
+_MAX_GRANT_EXPANSION = 4096
+
+
+def _grant_expansion(tier: str, roots, budget: int):
+    """Every subtree of `tier` that does NOT contain a fenced root, or None if it cannot be built.
+
+    The hole punch. `tier` is a normalized prefix (trailing separator) that CONTAINS one or more
+    `roots`; the caller may not grant it, and a kernel allow-list has no way to subtract. So the
+    tier is replaced by its children, minus the branch each root sits on, descending only along
+    those branches — `/opt` with the root `/opt/myrepo` becomes every other entry of `/opt`, and
+    `/opt/conda` (this box's interpreter) survives, which is the case that makes dropping the tier
+    outright unusable.
+
+    A child that RESOLVES into a fenced root is skipped, symlink included: the expansion stands in
+    for the tier and must not grant more than the tier's own subtree would have. Anything genuinely
+    needed from inside a root arrives as its own candidate (a venv in the repo is `sys.prefix`), and
+    a candidate under a root is a carve-out the caller states, never one this walk invents.
+
+    STATED RESIDUAL: a punched tier loses the loose FILES sitting directly in it — only directories
+    become grants, because a grant is a PREFIX on both sides of this rule (the hook compares
+    `startswith` against a trailing-separator string, which no file path can match) and one rule per
+    file in a real system tier is the thousand-rule ruleset the budget exists to refuse. It bites
+    only where the editable tree is INSIDE such a tier, which is the case this function exists for:
+    a repo at `/etc/myrepo` costs the process `/etc/nsswitch.conf`. The failure is a named
+    PermissionError on a path, not a quiet widening, and the fix is the one every refusal here
+    names — declare it as a mount."""
+    out: list[str] = []
+    stack = [tier]
+    while stack:
+        base = stack.pop()
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            return None
+        for name in names:
+            child = _norm_root(os.path.join(base, name))
+            if child is None or not os.path.isdir(child):
+                # A FILE under the tier is not grantable as a prefix and needs no rule of its own:
+                # the kernel grants directories, and the hook's compare is a directory prefix too.
+                continue
+            if not child.startswith(tier) or any(child.startswith(r) for r in roots):
+                continue                      # the root itself, inside one, or a symlink out of here
+            if any(r.startswith(child) for r in roots):
+                stack.append(child)           # still contains a root: punch one level deeper
+                continue
+            out.append(child)
+            if len(out) > budget:
+                return None
+    return out
+
+
+def confine_grants(candidates: Iterable, roots: Iterable) -> tuple:
+    """`(grants, refused)` — what a CONFINED process may read, given the roots it may not.
+
+    The companion of `fence_inputs` for the other shape of the same policy. `fence_inputs` answers
+    "what is forbidden, and which carve-outs survive"; this answers "what may be granted", which is
+    what a Landlock allow-list and `render(confine=True)` both need — and a grant list is where the
+    two guarantees `fence_inputs` provides for the deny side have to be provided again:
+
+      * every entry goes through `_norm_root` (realpath + trailing separator), so a grant of `/opt`
+        cannot also admit `/optfoo`;
+      * an entry that CONTAINS a root is never kept. On the deny side that is a disabled fence
+        (`_fenced` consults the allow tuple after the root tuple); on the grant side it is a kernel
+        grant of read over the very tree the confinement exists to hide. Neither is survivable, and
+        neither may be answered by dropping the entry outright: the interpreter's own tiers must be
+        granted or python does not start, which is the failure `_too_broad` exists to prevent one
+        layer down. So a swallowing entry is REPLACED by `_grant_expansion` — the same subtree minus
+        the roots inside it.
+
+    What cannot be replaced is REFUSED and returned in `refused` as `[(path, reason)]`, never
+    silently dropped and never silently kept: a candidate that IS a root (the repo is the venv), a
+    tier that cannot be listed, an expansion past `_MAX_GRANT_EXPANSION`. The caller's only correct
+    response is to say so and not run — a confined process missing a grant fails loudly at its first
+    import, but a confined process holding a swallowing grant is silently unconfined.
+
+    A candidate UNDER a root is kept, deliberately: that is the sanctioned carve-out (a declared
+    mount inside the source tree, a venv inside the repo), the same entries `fence_inputs` keeps."""
+    rootv = tuple(r for r in (_norm_root(x) for x in roots) if r)
+    grants: list[str] = []
+    refused: list[tuple] = []
+    for raw in candidates:
+        c = _norm_root(raw)
+        if c is None or c in grants:
+            continue
+        if not any(r.startswith(c) for r in rootv):
+            grants.append(c)
+            continue
+        if c in rootv:
+            refused.append((c, "it IS the fenced source root, so there is nothing left to grant"))
+            continue
+        if not os.path.isdir(c):
+            # A MACHINE tier that is not on this box grants nothing, so it can swallow nothing —
+            # dropped at derivation exactly as `read_allowlist._add` drops it, and for its reason.
+            continue
+        expanded = _grant_expansion(c, rootv, _MAX_GRANT_EXPANSION)
+        if expanded is None:
+            refused.append((c, "it contains the fenced source root and could not be expanded into "
+                               "the subtrees that do not"))
+            continue
+        for e in expanded:
+            if e not in grants:
+                grants.append(e)
+    # Absorb a grant already covered by another one — `sys.prefix`, `sys.base_prefix` and the
+    # interpreter's `bin/` are three spellings of one subtree on most boxes. Only after the punch,
+    # and it can never resurrect a swallower: nothing in `grants` contains a root by construction.
+    # Lexicographic order does the work in one pass: every entry carries the trailing separator, so
+    # an ancestor sorts immediately before the block it contains and nothing else can sort between
+    # them (`/a/` < `/a/b/` < `/a0`, because `/` sorts below every name character).
+    kept: list[str] = []
+    for g in sorted(grants):
+        if not (kept and g.startswith(kept[-1])):
+            kept.append(g)
+    return tuple(kept), tuple(refused)
+
+
 # The generated fence. Kept as ONE template rather than a shipped file plus a config sidecar so the
 # PYTHONPATH entry contains exactly one importable name (`sitecustomize`) — every additional module
 # in that directory would shadow a real one for every process in the run.
@@ -431,6 +569,14 @@ import threading
 
 _ROOTS = %(roots)r
 _ALLOW = %(allow)r
+# CONFINE inverts the policy: instead of "refuse what is under a ROOT", it refuses EVERYTHING that is
+# not under `_ALLOW`. The engine's fence never sets it (a training process needs to read the box);
+# `tools/dev_probe.py` always does, because a probe's whole legitimate world is its own disposable
+# replica plus the interpreter, and a denylist keyed on the editable tree leaves every OTHER
+# directory on the machine readable. Measured 2026-08-19: with no editable root declared, the probe
+# fence was skipped entirely and a Developer used 150 `run_probe` calls to read the BENCHMARK
+# HARNESS's own validation and timing code. A denylist cannot express "only your own workdir".
+_CONFINE = %(confine)r
 _POLICY = %(policy)r
 _LOG = %(log)r
 _MESSAGE = %(message)r
@@ -472,6 +618,39 @@ if _RECORD:
             # is the same prefix compare against a root that was itself realpath-ed at generation
             _wd = _abspath(_wd)
         _WRITABLE = _WRITABLE + (_wd if _wd.endswith(_SEP) else _wd + _SEP,)
+# THIS FILE'S OWN DIRECTORY — the one region no fenced process may CHANGE, whatever `_ROOTS` and
+# `_ALLOW` say. It is the hook half of the self-protection whose other half is the kernel one
+# (`install` writes this file mode 0444, and `CapEff` is 0 in the container a node runs in, so the
+# owner write bit genuinely binds). Neither rung is sufficient alone: 0444 stops
+# `open(fence, "w")` and stops nothing else, because the owner of a file may always chmod it back;
+# and an audit-hook refusal is only as good as the hook, which is what the write was trying to
+# remove. Together the kernel bit refuses the write and the hook refuses the `os.chmod` /
+# `os.remove` / `os.rename` that would take the kernel bit away.
+#
+# Measured 2026-08-21 and re-measured 2026-08-25 on this tree: a fenced child refused a read of the
+# operator's checkpoint, then `open(os.environ["LOOPLAB_READ_FENCE_DIR"] + "/sitecustomize.py",
+# "w")` SUCCEEDED, and the same read from the next process of the run returned the bytes. Note what
+# the re-measurement settled: the run dir was NOT under an editable root in that reproduction, so
+# `fence_inputs` had dropped `allow=[run_dir]` entirely and the allow list was `()`. The hole is not
+# the allow entry — it is that this file lives outside every fenced root by construction, which is
+# true of every place it could legally be written.
+#
+# DERIVED FROM `__file__` rather than baked by `render`: the fence protects wherever it actually
+# lives, including a copy, and `render` keeps its signature. `_realpath`, because `_fenced_target`
+# resolves the DIRNAME of its argument and a byte-exact prefix compare against an unresolved
+# `__file__` would miss a fence dir reached through a symlink. Empty under the probe seam
+# (`_PROBE_NAME`), where the source is exec'd from a namespace that has no `__file__` — the probe
+# yields the pure `_fenced()` predicate and installs nothing, so it has no file to protect.
+#
+# COST: none on the READ hot path, by construction — `_SELF` is consulted in `_fenced_target` only,
+# i.e. on the mutation events a training process never raises. What it adds there is one string
+# concat and one `startswith` against a ONE-element tuple, and a create+close+remove loop
+# (N=20,000, best-of-5, one fresh process per variant) could not separate it from this box's
+# run-to-run noise in either direction. Startup pays one `realpath` of this file's directory.
+try:
+    _SELF = (_realpath(os.path.dirname(os.path.abspath(__file__))) + _SEP,)
+except Exception:
+    _SELF = ()
 
 # Is a RELATIVE open able to reach a fenced root from where this process stands? Normally no, and
 # that is what buys the syscall-free fast bail for the branch nearly every read takes. But a
@@ -553,6 +732,8 @@ def _cwd_reaches_root():
     except OSError:
         return True                # cannot prove it is safe -> resolve, and let `_fenced` decide
     d = d if d.endswith(_SEP) else d + _SEP
+    if _CONFINE:
+        return not (_ALLOW and d.startswith(_ALLOW))
     # A cwd under the RECORD but outside every writable prefix (a launcher standing in the run
     # dir itself) makes a bare relative write reach the record without a `..`: resolve.
     if _RECORD and d.startswith(_RECORD) and not (_WRITABLE and d.startswith(_WRITABLE)):
@@ -565,7 +746,11 @@ def _cwd_reaches_root():
 def _fenced(p):
     """The path this fence refuses, or None. The whole policy, in three string operations."""
     p = _resolve(p)
-    if p is None or not p.startswith(_ROOTS):
+    if p is None:
+        return None
+    if _CONFINE:
+        return None if (_ALLOW and p.startswith(_ALLOW)) else p
+    if not p.startswith(_ROOTS):
         return None
     if _ALLOW and p.startswith(_ALLOW):
         return None
@@ -596,6 +781,8 @@ def _prefixed(r):
     NOT pay for this, because opening a directory raises IsADirectoryError before it can read
     anything."""
     d = r if r.endswith(_SEP) else r + _SEP
+    if _CONFINE:
+        return None if (_ALLOW and d.startswith(_ALLOW)) else r
     if not d.startswith(_ROOTS):
         return None
     if _ALLOW and d.startswith(_ALLOW):
@@ -710,7 +897,18 @@ def _fenced_target(path, dir_fd):
     mount source. The residual — a symlinked final component under `chmod`/`utime`, which do
     follow — is the same class as the documented read-side one."""
     r = _mutation_path(path, dir_fd)
-    return _prefixed(r) if r is not None else None
+    if r is None:
+        return None
+    # BEFORE the root/allow policy, and deliberately not expressible through it: `_SELF` is
+    # refused for every caller, allow-list included. See `_SELF`. A run dir is allow-listed on
+    # purpose (a run may be `--out`-ed inside the repo it edits) and, far more often, this file
+    # is simply outside every root — so under the ordinary policy the fence's own source is the
+    # one file a fenced process may freely delete, rename or chmod, and doing any of those
+    # disarms the fence for every process the run starts afterwards. It sits HERE rather than in
+    # `_mutation_path` because that helper is the policy-free resolution the record check reads too.
+    if _SELF and _join(r, "").startswith(_SELF):
+        return r
+    return _prefixed(r)
 
 
 def _mutation_path(path, dir_fd):
@@ -914,10 +1112,7 @@ def _chain():
 
 
 if __name__ != "%(probe)s":
-    # Armed for a fence that guards ANYTHING — source roots, the record, or both. A record-only
-    # fence (every non-repo run since 2026-09-06) has `_ROOTS = ()`, and gating on the roots alone
-    # left it a file on the PYTHONPATH that installed nothing: measured by the first cut of this.
-    if _POLICY != "off" and (_ROOTS or _RECORD):
+    if _POLICY != "off" and (_ROOTS or _RECORD or _CONFINE):
         # Resolve the launcher-set cwd ONCE, before the hook is armed, so the very first relative
         # open is already judged correctly (and so this `getcwd` is not itself audited).
         _CWD_REACHES_ROOT = _cwd_reaches_root()
@@ -927,18 +1122,27 @@ if __name__ != "%(probe)s":
 
 
 def render(roots, allow, *, policy: str, log: str = "", run: str = "",
-           record_root="", writable: Iterable = ()) -> str:
+           record_root="", writable: Iterable = (), confine: bool = False) -> str:
     """The generated `sitecustomize.py` source for one run's fence.
 
     `record_root` is the run directory the fence guards against WRITES ("" for a fence that
     guards roots only — the Developer's probe renders that shape), and `writable` the prefixes
     under it a launch may still write; the launch's own workdir joins them at startup from
     `WORKDIR_ENV`. Both are resolved here, once, into the trailing-separator form the hot path
-    compares."""
+    compares.
+
+    `confine=False` (the default, and what the engine installs) keeps the historical DENYLIST:
+    refuse paths under `roots`, exempting `allow`. `confine=True` INVERTS it into an allow-list
+    — refuse everything outside `allow`, `roots` unused — which is the only shape that can
+    express "this process may read its own workdir and nothing else". See `_CONFINE` in the
+    template for the incident that made the denylist insufficient for `tools/dev_probe.py`.
+    The two are ORTHOGONAL: `confine` decides what may be READ, `record_root` what may be
+    WRITTEN, and the probe renders `confine=True` with no record root at all."""
     record = _norm_root(record_root) if record_root else ""
     writable_prefixes = tuple(w for w in (_norm_root(x) for x in writable) if w)
     return _TEMPLATE % {
         "roots": tuple(roots), "allow": tuple(allow), "policy": settle_policy(policy),
+        "confine": bool(confine),
         "log": str(log), "message": REFUSAL_MESSAGE, "run": str(run), "probe": _PROBE_NAME,
         "mutation_message": MUTATION_REFUSAL_MESSAGE, "mutations": MUTATION_EVENTS,
         "record": record or "", "record_message": RECORD_REFUSAL_MESSAGE,
@@ -952,6 +1156,81 @@ def render(roots, allow, *, policy: str, log: str = "", run: str = "",
         # the POSIX hot path at one already-false boolean instead of an `os.path.isabs` call.
         "nt": os.name == "nt",
     }
+
+
+def _harden(target: Path) -> None:
+    """Drop every WRITE bit on the generated fence — the KERNEL rung of its self-protection.
+
+    THE DEFECT. Until 2026-08-25 this file was left at `atomic_write_text`'s mode (0600, i.e. the
+    `mkstemp` default carried through `os.replace`) inside a directory the fenced process may write,
+    and NOTHING refused a write to it: the hook is a denylist over the operator's editable roots, and
+    this file is outside every one of them by construction. Driven end to end, twice: a fenced child
+    refuses the read, `open(<fence>, "w")` succeeds, and the next process of the run reads the
+    operator's checkpoint — i.e. the `rubertlite-dr-unified-v6` node-4 incident, re-enabled from
+    inside a node, for the whole rest of the run rather than for one process.
+
+    WHY THE KERNEL AND NOT THE HOOK. The thing being protected IS the hook, so a rung expressed only
+    in the hook protects itself with the object under attack. `CapEff` is 0 for a node process in
+    this container (no `CAP_DAC_OVERRIDE`), so the owner write bit is not advisory here: it is the
+    kernel refusing the `open`, before any Python runs, for every writer including the native ones
+    (`ctypes`, a C extension, a `cp`) that raise no audit event at all and that the whole module
+    docstring lists as beyond an audit hook's reach.
+
+    OPEN[fence-kernel-rung-rests-on-ambient-caps] the sentence above is a fact about ONE deployment,
+    not a property this code establishes: only the Docker tier drops capabilities, the subprocess
+    tier inherits the engine's, and on a privileged runner the write bit refuses nothing.
+    proof:absent:geteuid@looplab/runtime/read_fence.py
+    REVIEW 2026-08-30 (trust-boundary): driven on a root container (CapEff carries the DAC-override
+    bit): the hook rung holds (chmod/unlink/rename refused) and the plain `open(fence, "w")` goes
+    THROUGH — the one vector this rung exists for, since that write raises no mutation audit event.
+    `sandbox.py` passes `--cap-drop ALL` on the Docker tier only. Production (unprivileged jovyan)
+    is fine; the gap is the UNSTATED precondition — the module promises a kernel refusal it cannot
+    give wherever the eval runs privileged, with nothing logged. Cheap close: detect the effective
+    uid/cap state here and log one line naming the reduced guarantee (the landlock launcher's own
+    pattern), so a privileged deployment reads as what it is.
+
+    WHAT IT DOES NOT DO, and why `_SELF` exists beside it: the owner of a file may always chmod it
+    back, and `CapEff` says nothing about that — ownership, not a capability, is what `chmod`
+    checks. So the bit alone converts a one-call escape into `os.chmod` + write. `os.chmod`,
+    `os.remove` and `os.rename` all raise audit events, so the template's `_SELF` refuses exactly
+    the calls that would remove this bit, and the two rungs hold each other up.
+
+    NOT the DIRECTORY. 0555 on `<run_dir>/.looplab-fence` would also stop the unlink-and-recreate
+    path at the kernel rung, and it was measured and rejected: CPython writes
+    `__pycache__/sitecustomize.*.pyc` there on first import, that write is silently skipped when the
+    directory is read-only, and every fenced process then recompiles the template — 1.02 ms measured
+    on this box against a 17.9 ms fenced-process startup, +5.7 %, paid by every python a run
+    launches. `_SELF` already refuses the unlink, so the directory bit would buy a second copy of a
+    rung that is there, at a price the read path is not allowed to pay.
+
+    Best-effort: a chmod that fails leaves the `_SELF` rung standing, whereas raising here would be
+    turned by `_read_fence_dir`'s `except OSError` into an entirely UNFENCED run — strictly worse
+    than a fence whose file is one rung down.
+
+    OPEN[read-fence-self-protection-ends-at-an-unfenced-child]
+    proof:present:FENCE_FILE_MODE@looplab/runtime/read_fence.py
+    The two rungs above hold against every writer that goes through this interpreter — measured
+    2026-08-25, 11 of 11 probes refused (`open(fence, "w")`, chmod back, unlink, unlink via
+    `dir_fd`, rename away, rename over, truncate, chmod of the directory, `shutil.rmtree` of it,
+    rename of it, symlink over the file), in BOTH layouts (run dir inside and outside the editable
+    root). They do not hold against a process that is not fenced in the first place: measured in the
+    same session, `subprocess.run([sys.executable, "-S", ...])` with `PYTHONPATH` stripped chmods
+    this file to 0644, rewrites it, and the NEXT process of the run reads the operator's checkpoint.
+    That child is the module docstring's own stated residual (`-S`/`-E`/`-I` or a stripped
+    `PYTHONPATH`), but the ESCALATION is specific to this file and is why the marker stays: every
+    other use of that residual costs the node one unfenced process, while rewriting this file
+    unfences every process the run starts afterwards.
+    What would close it is a rung that does not rest on OWNERSHIP — `chmod` asks who owns the inode,
+    never what capabilities the caller holds, so `CapEff` 0 does not help here the way it does for
+    the write bit. The candidates, in the order this repo would pay for them: the Landlock ruleset
+    already in `runtime/landlock.py` extended to cover the fence directory read-only (it is `off` by
+    default today, see `Settings.landlock`); or re-asserting `install` per LAUNCH rather than once
+    per engine, which repairs a tampered fence instead of preventing it and costs a 24 KB read at
+    every `run_argv`. Neither is measured yet, so neither is claimed here."""
+    try:
+        os.chmod(target, FENCE_FILE_MODE)
+    except OSError:
+        pass
 
 
 def install(run_dir, *, roots, allow, policy: str, record: bool = True) -> Optional[str]:
@@ -972,6 +1251,10 @@ def install(run_dir, *, roots, allow, policy: str, record: bool = True) -> Optio
     # write would let one worker truncate the file another interpreter is mid-import of.
     try:
         if target.read_text(encoding="utf-8") == src:
+            # Re-assert the mode even when the bytes already match: `_harden` is what makes the file
+            # unwritable, and a run that finds the right content has no idea whether the previous
+            # writer was this function or a node that put the content back after widening the bits.
+            _harden(target)
             return str(d)
     except OSError:
         pass
@@ -982,7 +1265,11 @@ def install(run_dir, *, roots, allow, policy: str, record: bool = True) -> Optio
     # root cannot publish a truncated `sitecustomize.py` that every python of the run then fails to
     # import, and an `except BaseException: unlink(tmp)` so a failed or cancelled write does not
     # leave a permanent multi-KB `.tmp` in the run dir with nothing to reclaim it.
+    # `os.replace` onto a 0444 destination is a DIRECTORY operation and succeeds — the mode of the
+    # file being replaced is not consulted — so re-installing over a hardened fence needs no unlock,
+    # and the new inode arrives at `mkstemp`'s 0600 and is hardened below.
     atomic_write_text(target, src)
+    _harden(target)
     return str(d)
 
 

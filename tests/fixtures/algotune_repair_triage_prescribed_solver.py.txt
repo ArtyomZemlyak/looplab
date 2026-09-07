@@ -1,0 +1,97 @@
+from typing import Any
+
+from mpmath import mp
+from mpmath.functions.zetazeros import (
+    gram_index,
+    find_rosser_block_zero,
+    search_supergood_block,
+    separate_zeros_in_block,
+    comp_fp_tolerance,
+)
+
+
+def _siegelz_sign(t):
+    """Sign of siegelz(t).
+
+    Uses float64 (mp._fp.siegelz) for speed, falling back to high-precision
+    mp.siegelz when |Z| is so small that the float64 sign is unreliable
+    (|Z| < t * 2^-45).
+    """
+    v = mp._fp.siegelz(t)
+    if abs(v) < t * 2.0 ** -45:
+        v = mp.siegelz(t)
+    return v
+
+
+def _count_to(t, T, V):
+    """Exact port of mpmath's count_to, but the final siegelz(t) sign uses
+    the float64-with-fallback _siegelz_sign instead of a high-precision call."""
+    count = 0
+    vold = V[0]
+    told = T[0]
+    tnew = T[1]
+    k = 1
+    while tnew < t:
+        vnew = V[k]
+        if vold * vnew < 0:
+            count += 1
+        vold = vnew
+        k += 1
+        tnew = T[k]
+    a = _siegelz_sign(t)
+    if a * vold < 0:
+        count += 1
+    return count
+
+
+def _nzeros(t):
+    """Exact port of mpmath.mp.nzeros with the two high-precision siegelz(t)
+    calls (the initial `a` and the one inside count_to) replaced by float64
+    siegelz plus a high-precision fallback when the sign is unreliable."""
+    if t < 14.1347251417347:
+        return 0
+    x = gram_index(mp, t)
+    k = int(mp.floor(x))
+    wpinitial = mp.prec
+    wpz, fp_tolerance = comp_fp_tolerance(mp, k)
+    mp.prec = wpz
+    a = _siegelz_sign(t)
+    if k == -1 and a < 0:
+        mp.prec = wpinitial
+        return 0
+    elif k == -1 and a > 0:
+        mp.prec = wpinitial
+        return 1
+    if k + 2 < 400000000:
+        Rblock = find_rosser_block_zero(mp, k + 2)
+    else:
+        Rblock = search_supergood_block(mp, k + 2, fp_tolerance)
+    n1, n2 = Rblock[1]
+    if n2 - n1 == 1:
+        b = Rblock[3][0]
+        if a * b > 0:
+            mp.prec = wpinitial
+            return k + 1
+        else:
+            mp.prec = wpinitial
+            return k + 2
+    my_zero_number, block, T, V = Rblock
+    zero_number_block = n2 - n1
+    T, V, separated = separate_zeros_in_block(
+        mp, zero_number_block, T, V, limitloop=mp.inf, fp_tolerance=fp_tolerance
+    )
+    n = _count_to(t, T, V)
+    mp.prec = wpinitial
+    return n + n1 + 1
+
+
+class Solver:
+    def solve(self, problem: dict[str, Any], **kwargs) -> Any:
+        """Count Riemann zeta zeros in the critical strip with imag(z) <= t.
+
+        Exact port of mpmath's nzeros algorithm, with the two high-precision
+        siegelz(t) calls replaced by float64 siegelz (plus a high-precision
+        fallback when the float64 sign is unreliable).
+        """
+        t = problem["t"]
+        return {"result": _nzeros(t)}

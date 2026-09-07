@@ -137,6 +137,12 @@ EXPECTED = {
     # environment defect. The library declares 0 = OFF: a bare `Engine(...)` must not acquire a
     # NEW terminal it never had, and every embedding caller decides its own stopping policy.
     "systemic_failure_stop": (3, 0),
+    # The node-OPEN floor under the spend ceiling (docs/56 §156): the product ships the measured
+    # knee ($0.10 refuses 61 empty cycles for one real node that scored 0) because the operator is
+    # paying for a node that the ceiling would discard mid-cycle. The library declares 0.0 = OFF on
+    # `systemic_failure_stop`'s exact ground: it is a NEW STOP, and a bare `Engine(...)` must not
+    # acquire a terminal it never had — even one that only fires beside a ceiling the caller set.
+    "node_open_budget_floor_usd": (0.10, 0.0),
 }
 # Divergent by SHAPE, not a scalar worth freezing: the product default is a non-trivial
 # structure; the library default is "off". Assert the shape relationship, not the payload.

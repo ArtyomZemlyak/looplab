@@ -73,20 +73,103 @@ def test_index_mentions_every_numbered_document():
     #   48 -> 49 (2026-08-21): the day report (doc 49). No collision — the number was claimed by
     #   checking the glob AND the index table together, and no sibling worktree held an unmerged
     #   `49-` at the time.
+    #   49 -> 52 (2026-08-21, REBASE onto master): the SIXTH collision, and the largest so far.
+    #   This branch held 47/48/49 (benchmark landscape, AlgoTune arm notes, the second box) while
+    #   master concurrently landed 47/48/49 of its own (a day report, early-stop blind classes, a
+    #   second day report). Both sides were right when they looked; nothing short of a lock prevents
+    #   it, which every earlier entry here has already weighed and rejected. Resolved the same way
+    #   as the fifth: the LATER-merged trio is renumbered, to 50/51/52, keeping master's three in
+    #   place because they are cross-referenced from `train_monitor.py` and from each other while
+    #   ours were referenced only from `benchmarks/algotune/` and from one another.
+    #   52 -> 53 (2026-08-26): doc 53, the AlgoTune campaign read as evidence about our own
+    #   loop. No collision this time — 53 was free, and the row went into the index in the
+    #   same change that moved this number, which is the whole point of the literal.
+    #   54 -> 55 (2026-08-28): doc 56, where arm B's budget goes. Row and count moved in ONE
+    #   change, which is the lesson 55 paid for.
+    #   53 -> 54 (2026-08-27): doc 55, the eleven probe results on one ruler. No collision — 54 was
+    #   never allocated and 55 was free, and the row went into the index in the same change that
+    #   moves this number, which is the whole point of the literal. It did NOT go in together the
+    #   first time: `af0c99c0` added the document alone and left both guards red for half an hour,
+    #   which is exactly the drift this count exists to catch, caught by it.
+    #   55 -> 56 (2026-08-30): doc 57, the mega-review of the rnd branch. No collision — 57 was
+    #   free. The document, its index row, its mkdocs nav row and this count move in one change;
+    #   the same change also wires 53/55/56 into the nav, which their own changes had not.
+    #   56 -> 57 (2026-08-31): doc 58, the audit of what this programme has actually established.
+    #   57 was taken by the mega-review, so it landed at 58. The row went into `00-INDEX.md` and this number did NOT move
+    #   with it: `f316f392` added the document and the index row together and left this guard red,
+    #   the same half-hour drift `af0c99c0` paid for one entry up, and the reason it is caught at
+    #   all is that the count is a separate literal from the membership check. Two guards, because
+    #   a document ADDED to the index still moves the inventory and only one of them can see that.
+    #   57 -> 58 (2026-09-06): doc 59, the bench-results analysis. The document, its index row, its
+    #   mkdocs nav row and this count move in one change — and the same change wires doc 58 into the
+    #   nav, which `f316f392` had not (57 was there, 58 was not; `omitted_files: info` cannot see it).
+    #   NOTE for the merge: `origin/master` independently holds a `50-` and a `51-` with different
+    #   content from this branch's 50/51 — the SEVENTH collision, two blocks this time.
+    #   58 -> 59 (2026-09-06): doc 60, the SOTA plan derived from the benches. Document, index row,
+    #   nav row and this count in one change.
     #   49 -> 50 (2026-09-02): the whole-tree architecture review (doc 50). No collision — the number
     #   was claimed by checking the glob AND the index table together.
     #   50 -> 51 (2026-09-03): the second external-works synergy pass (doc 51). No collision — the
     #   number was claimed by checking the glob AND the index table together, and no sibling
     #   worktree held an unmerged `51-` at the time.
+    #   61 + 2 -> 63 (2026-09-07), at the MERGE with master, and the EIGHTH collision. Master's
+    #   block (50/51 architecture-review + external-works-synergy, and its own 53) is the
+    #   published line and keeps its numbers, as the seventh entry decided; this branch's two
+    #   (52-development-plan-2026-09-05 and 53-agent-guide-narratives-2026-09-06) meet it.
+    #   Only ONE number actually collided —
+    #   `53-agent-guide-narratives-2026-09-06` against master's
+    #   `53-looplab-loop-defects-from-algotune-2026-08-26` — so the LATER-merged document is
+    #   renumbered 53 -> 64, with `CLAUDE.md`'s two prose `doc 53` references, the mkdocs nav,
+    #   the index's first column and `docs/50`'s link moved in this same change. 52 did not
+    #   collide (master renumbered its own 52 to 63 at the seventh). The pre-existing DOUBLE 18
+    #   is on both parents and is not this merge's to resolve.
+    #   59 + 2 -> 61 (2026-09-06), at the MERGE with master, and this is the SEVENTH
+    #   collision — the first where two BLOCKS met rather than two documents. Master held
+    #   `50-architecture-review-2026-09-02` and `51-external-works-synergy-2026-09-03`;
+    #   this branch held `50-benchmark-landscape`, `51-algotune-arm-operational-notes` and
+    #   `52-bench-box-jhub-l40s`. Resolved as the SIXTH was: master's numbers stay (they
+    #   are the published line, and the two are cross-referenced from each other and from
+    #   the index), and the LATER-merged block is renumbered — 50/51/52 -> 61/62/63,
+    #   contiguous so the trio that cross-references itself stays together, with every
+    #   link, every prose `doc NN`, the index's first column, the mkdocs nav and
+    #   `benchmarks/algotune/README.md` moved in this same change. 54 remains the gap it
+    #   already was. Master's two documents are the +2; nothing was dropped.
+    assert len(numbered) == 63, "the derived numbered-document inventory changed"
     #   51 -> 52 (2026-09-05): the development plan (doc 52). No collision — the number was
     #   claimed by checking the glob AND the index table together.
     #   52 -> 53 (2026-09-06): the agent guide's narratives, archived verbatim when `CLAUDE.md`
     #   went on a byte budget (doc 53, doc 52 row 20). No collision — the number was claimed by
     #   checking the glob AND the index table together.
-    assert len(numbered) == 53, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
+
+
+def test_claude_md_does_not_grow():
+    """A RATCHET, not a target: `CLAUDE.md` may shrink freely and may not grow.
+
+    It is read in full at the head of every agent turn in this repository — 247,023 bytes here,
+    about 58,000 tokens, paid again on every turn of every session. The 2026-09-02 whole-tree
+    review named the absence of any bound on it (`claude-md-has-no-size-budget`); this is that
+    bound, in the only form that costs nothing to adopt. It deliberately does NOT prescribe a
+    smaller size — half the file is measurements that belong in `docs/` and moving them is real
+    work with real judgement in it — it only stops the file getting worse while nobody is looking.
+
+    RAISING THE NUMBER IS THE THING THIS EXISTS TO MAKE DELIBERATE. A row that genuinely belongs
+    here (a new package, a rule an agent must not rediscover) is worth its bytes; a paragraph of
+    measurement is worth a doc and a one-line pointer. If you are about to raise it, ask which of
+    the two you have — and if it is the first, raise it and say in the note below what bought it.
+    """
+    #   247,023 -> 252,338 at the 2026-09-06 MERGE with master, and this is the one raise the
+    #   docstring above says to make deliberately: master's own additions to the `core/` and
+    #   `events/` rows (`run_identity.py`, `trust_gate.py`) plus its 99 commits' worth of rules,
+    #   meeting this branch's. Both sides' bytes are rules an agent must not rediscover, which is
+    #   the first of the two cases named above; not one byte of measurement was added by the merge.
+    size = (ROOT / "CLAUDE.md").stat().st_size
+    assert size <= 252_338, (
+        f"CLAUDE.md grew to {size:,} bytes (the ratchet is 252,338). Every agent turn in this "
+        "repository pays for it. Move the measurement into docs/ and leave a pointer, or raise "
+        "the ratchet here and say what bought the bytes.")
 
 
 def test_all_relative_markdown_links_resolve():
@@ -263,7 +346,77 @@ def test_the_package_map_names_each_package_exactly_once():
 # The number-words the three surfaces below spell out. Short on purpose: a registry that outgrew
 # this map would be a registry whose enumerations should stop being written by hand at all.
 _COUNT_WORDS = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen",
-                14: "fourteen"}
+                14: "fourteen", 15: "fifteen", 16: "sixteen", 17: "seventeen"}
+
+
+def _table_cells(line: str):
+    """The cells of one markdown table row, or None when the line is not one.
+
+    Split on BARE pipes only: a `\\|` is an escaped literal (`min \\| max`) and a pipe inside a
+    code span is data, not a column edge — mis-counting either turns a correct row into a finding
+    and teaches the reader to widen the guard.
+    """
+    s = line.strip()
+    if not s.startswith("|"):
+        return None
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    cells, buf, in_code, escaped = [], [], False, False
+    for ch in s[1:]:
+        if escaped:
+            buf.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            buf.append(ch)
+            continue
+        if ch == "`":
+            in_code = not in_code
+        if ch == "|" and not in_code:
+            cells.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    cells.append("".join(buf))
+    return cells
+
+
+def test_every_guide_table_row_has_the_columns_its_header_declares():
+    """A row with an EXTRA cell loses it — silently, and exactly where a reader needs it.
+
+    Markdown renders a row against the header's column count and DROPS the overflow. The
+    `hide_empty_tools` row landed in llm-and-agents.md's two-column "Setting | What it adds" table
+    as three cells (`| key | \`false\` | Stop ADVERTISING ... |`), so the only place that guide
+    explained the setting rendered as the single word `false` and the whole explanation was thrown
+    away by the renderer. `mkdocs build --strict` does not warn: the table is well-formed, it just
+    means something else. Nothing in the suite could see it, because every check on that guide reads
+    the SOURCE, where the text is still present.
+
+    Only whole guide pages are scanned, and only against their own header — this is a shape rule,
+    not a content one.
+    """
+    problems = []
+    for path in sorted((DOCS / "guide").glob("*.md")):
+        width = None
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            cells = _table_cells(line)
+            if cells is None:                       # a non-row ends the table
+                width = None
+                continue
+            if width is None:                       # the header decides the column count
+                width = len(cells)
+                continue
+            joined = "".join(cells).strip()
+            if joined and set(joined) <= set("-: "):        # the `|---|---|` separator
+                continue
+            if len(cells) != width:
+                problems.append(
+                    f"{path.relative_to(ROOT)}:{number} has {len(cells)} cells in a "
+                    f"{width}-column table (the renderer keeps {width}): {line.strip()[:110]}")
+    assert not problems, (
+        "markdown table rows whose extra cells are dropped when rendered:\n  "
+        + "\n  ".join(problems))
 
 
 def test_every_failure_reason_surface_names_all_of_them():
@@ -292,9 +445,20 @@ def test_every_failure_reason_surface_names_all_of_them():
     """
     from looplab.core.models import FAILURE_REASONS
 
-    reasons = list(FAILURE_REASONS)
+    # The two doc surfaces describe REPAIR eligibility, so they are checked against the repairable
+    # subset — the registry gained its first non-repairable member on 2026-08-21
+    # (`rules_violation`), and a guard that kept demanding the whole registry would have forced the
+    # guide to claim a repair that does not happen.
+    from looplab.core.models import NON_REPAIRABLE_REASONS, REPAIRABLE_REASONS
+
+    reasons = list(REPAIRABLE_REASONS)
     word = _COUNT_WORDS.get(len(reasons))
-    assert word, f"FAILURE_REASONS has {len(reasons)} members — extend _COUNT_WORDS"
+    assert word, f"REPAIRABLE_REASONS has {len(reasons)} members — extend _COUNT_WORDS"
+    # The REGISTRY's own size, which is a different number from the eligible one as soon as any
+    # member is non-repairable — and the two being different is exactly what let a surface keep
+    # saying "ALL <eligible-count> FAILURE_REASONS" after the registry grew past it.
+    registry_word = _COUNT_WORDS.get(len(FAILURE_REASONS))
+    assert registry_word, f"FAILURE_REASONS has {len(FAILURE_REASONS)} members — extend _COUNT_WORDS"
     problems = []
 
     # 1. The settings table's DEFAULT cell, parsed as the JSON array it is printed as.
@@ -316,24 +480,65 @@ def test_every_failure_reason_surface_names_all_of_them():
     # registry-derivation check that a REFLOW can redden teaches "re-wrap until green", which is the
     # opposite of what it is for — the rule is about which reasons are named, never about where the
     # line ends.
-    bullet = re.search(r"\*\*any\*\* of the (\w+) `FAILURE_REASONS`(.{0,600}?)mechanical\s+three",
-                       concepts, re.S)
+    bullet = re.search(r"\*\*any but one\*\* of the (\w+) `FAILURE_REASONS`(.{0,600}?)"
+                       r"mechanical\s+three", concepts, re.S)
     assert bullet, "the concepts.md inline-repair bullet moved — re-derive this check"
-    if bullet.group(1) != word:
-        problems.append(f"docs/guide/concepts.md says '{bullet.group(1)}' FAILURE_REASONS, not '{word}'")
+    # The count word here is the REGISTRY's, not the eligible subset's ("any but one OF the N"),
+    # and it was matched as a bare `\w+` — i.e. not checked at all. A surface that names a count
+    # has to name the right one, which is the whole rule this test exists for.
+    if bullet.group(1).lower() != registry_word:
+        problems.append(f"docs/guide/concepts.md says FAILURE_REASONS has "
+                        f"{bullet.group(1)!r} members, not {registry_word!r}")
     missing = [r for r in reasons if f"`{r}`" not in bullet.group(2)]
+    # ...and the exception has to be NAMED, right after the list it is an exception to. A bullet
+    # that says "any but one" without saying which one is worse than the miscounts this guard was
+    # written for: the reader now knows there is a rule they have not been told.
+    for excluded in NON_REPAIRABLE_REASONS:
+        if f"`{excluded}`" not in concepts[concepts.index("mechanical"):][:800]:
+            problems.append(f"docs/guide/concepts.md excludes {excluded} from repair without "
+                            f"naming it beside the list")
     if missing:
         problems.append(f"docs/guide/concepts.md's inline-repair list omits {missing}")
 
     # 3. The process diagram (CLAUDE.md: stale diagram is a bug, in the SAME change).
+    #
+    # BOTH counts, and the exclusion BY NAME — the same three obligations the concepts.md half
+    # above carries, because this surface is the one that got them wrong. When the registry gained
+    # `rules_violation` the diagram kept saying "ALL FOURTEEN FAILURE_REASONS": the eligible count
+    # was still fourteen, so a check that read only the count word stayed GREEN while the sentence
+    # around it had become false — `FAILURE_REASONS` was fifteen and "ALL" of it was no longer the
+    # default. A count word is not the claim; the claim is the whole phrase, so the phrase is what
+    # is derived here. `ALL` is refused outright while any member is non-repairable, in the text
+    # rather than through the count, because that is the word that made the sentence a lie.
     diagram = (DOCS / "infographic" / "agent-architecture.html").read_text(encoding="utf-8")
-    block = re.search(r"reasons = ALL (\w+) FAILURE_REASONS by default \(([^)]*)\)", diagram)
-    assert block, "the diagram's inline-repair block moved — re-derive this check"
-    if block.group(1).lower() != word:
-        problems.append(f"the process diagram says 'ALL {block.group(1)}', not '{word.upper()}'")
-    missing = [r for r in reasons if r not in block.group(2)]
-    if missing:
-        problems.append(f"the process diagram's inline-repair list omits {missing}")
+    claim = re.search(r"reasons = [^·(]*?FAILURE_REASONS by default", diagram)
+    assert claim, "the diagram's inline-repair block moved — re-derive this check"
+    if NON_REPAIRABLE_REASONS and re.search(r"\bALL\b", claim.group(0)):
+        problems.append(
+            f"the process diagram claims ALL of FAILURE_REASONS are repairable by default, but "
+            f"{list(NON_REPAIRABLE_REASONS)} are not: {claim.group(0)!r}")
+    block = re.search(r"reasons = (\w+) of the (\w+) FAILURE_REASONS by default(.{0,500}?)"
+                      r"inline_repair_reasons narrows it", diagram, re.S)
+    if block is None:
+        # An unparseable claim is only tolerated when the sentence has ALREADY been convicted
+        # above — otherwise the block genuinely moved and this check has to be re-derived rather
+        # than silently skipped.
+        assert problems, "the diagram's inline-repair block moved — re-derive this check"
+    else:
+        eligible, registry, listed = block.group(1).lower(), block.group(2).lower(), block.group(3)
+        if eligible != word:
+            problems.append(f"the process diagram says {eligible!r} reasons are eligible, "
+                            f"not {word!r}")
+        if registry != registry_word:
+            problems.append(f"the process diagram says FAILURE_REASONS has {registry!r} members, "
+                            f"not {registry_word!r}")
+        missing = [r for r in reasons if r not in listed]
+        if missing:
+            problems.append(f"the process diagram's inline-repair list omits {missing}")
+        for excluded in NON_REPAIRABLE_REASONS:
+            if excluded not in listed:
+                problems.append(f"the process diagram excludes {excluded} from repair without "
+                                "naming it beside the list")
 
     assert not problems, (
         "FAILURE_REASONS surfaces disagree with the registry — update them in the SAME change as "
@@ -347,7 +552,7 @@ def test_every_failure_reason_surface_names_all_of_them():
 # The budget is a CEILING with headroom for rules, not a target: a rule added here costs a line,
 # a story added here costs the budget, and the remedy is doc 53 or a docstring, never the ceiling.
 CLAUDE_MD_MAX_BYTES = 100_000
-_NARRATIVES = DOCS / "53-agent-guide-narratives-2026-09-06.md"
+_NARRATIVES = DOCS / "64-agent-guide-narratives-2026-09-06.md"
 
 
 def test_the_agent_guide_stays_under_its_byte_budget():

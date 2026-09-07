@@ -67,6 +67,7 @@ from looplab.events.card_ledger import (
     derive_cards as _derive_cards,
 )
 from looplab.events.comment_projection import apply_comment_event
+from looplab.events.finalize_scope import is_guarded_abort
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
@@ -957,8 +958,14 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.terminal_event_seq = e.seq
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             n.stdout_tail = d.get("stdout_tail", "")
+            # WHY this node scored what it scored, in the eval's own words — see
+            # `engine/evaluate.py::_scored_output_evidence`. Reader-defaulted to "" so every log
+            # written before the column existed folds byte-identically; `str()` because assignment
+            # validation is off and a corrupt/hand-edited row must not land a non-string here where
+            # `run_tools._logs` will `.rstrip()` it.
+            n.stderr_tail = str(d.get("stderr_tail", "") or "")
             # ASHA past-experiment curve (#7): a bounded [[resource, metric], ...] the ASHA watchdog
-            # reads to find same-resource peers for an EARLY live sample (the 500-char stdout_tail keeps
+            # reads to find same-resource peers for an EARLY live sample (the 4,000-char stdout_tail keeps
             # only the final epochs). Reader-defaulted to None so pre-#7 logs fold byte-identically.
             # NORMALIZED (#7 review): assignment validation is off, so an untrusted/corrupt event could
             # otherwise land a scalar or huge nested value here despite the 32-point bound; coerce it.
@@ -1291,6 +1298,10 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.error_reason = ""
         n.triage_rationale = ""
         n.stdout_tail = ""
+        # ...and the eval's own account of the number that attempt produced. Reset with its
+        # sibling above: a re-evaluated node that keeps the PREVIOUS attempt's stderr shows the
+        # loop a reason for a metric that no longer exists.
+        n.stderr_tail = ""
         n.resource_curve = None            # #7: the prior attempt's curve no longer describes this node
         n.eval_seconds = None
         n.never_evaluated = False          # the discard receipt described the prior attempt
@@ -1554,6 +1565,7 @@ def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
         st.paused = False
         st.pause_node_id = None
         st.pause_generation = None
+        st.pause_reason = None
     if st.building and st.building.get("node_id") in affected:
         st.building = None
     for _aff in affected:
@@ -1596,6 +1608,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             st.paused = False
             st.pause_node_id = None
             st.pause_generation = None
+            st.pause_reason = None
         n.status = NodeStatus.pending
         n.terminal_event_seq = None
         n.metric = None
@@ -1608,6 +1621,10 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.eval_activity_started = False
         n.eval_started_at = None
         n.stdout_tail = ""
+        # ...and the eval's own account of the number that attempt produced. Reset with its
+        # sibling above: a re-evaluated node that keeps the PREVIOUS attempt's stderr shows the
+        # loop a reason for a metric that no longer exists.
+        n.stderr_tail = ""
         n.resource_curve = None            # #7: the abandoned attempt's curve no longer describes this node
         n.extra_metrics = {}
         # ...and so did the CHANNEL map describing where those extras came from.
@@ -1745,6 +1762,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # left alone — that's the operator's separate resume.)
         st.finished = False
         st.stop_reason = None
+        st.stop_detail = None
         st.stop_requested = None
 
 def _stage_epoch(row) -> int:
@@ -3548,10 +3566,19 @@ def _on_run_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if not bool(d.get("finalization_required", False)):
             st.finalized_finish_seq = e.seq
     st.stop_reason = d.get("reason")
-    # Drop dangling markers on normal completion. Error finishes deliberately retain crash prefixes:
-    # older/external writers may need resume recovery to append the missing node_failed receipt. Other
-    # terminal reasons must not leave a false in-flight pulse on a run that is over.
-    if d.get("reason") != "error":
+    # …and the finishing writer's own sentence beside the class. Folded for the same reason the
+    # `pause` reason is: it was already durable on the row and no reader could reach it. `error` is
+    # the class the engine decided; this is the account it wrote at the same moment.
+    _detail = d.get("error")
+    st.stop_detail = str(_detail) if isinstance(_detail, str) and _detail.strip() else None
+    # Drop dangling markers on normal completion. GUARDED-ABORT finishes deliberately retain crash
+    # prefixes: older/external writers may need resume recovery to append the missing node_failed
+    # receipt. Other terminal reasons must not leave a false in-flight pulse on a run that is over.
+    # The CLASS predicate (`finalize_scope.is_guarded_abort`), not the literal: the ceiling's
+    # `budget_exhausted` is written by the SAME outer guard, from the same mid-build exception, so
+    # the recovery this clause preserves the prefix for applies to it identically — docs/57's ninth
+    # site, found by the tree-wide literal scan and not by the review that counted six.
+    if not is_guarded_abort(d.get("reason")):
         st.building = None
         st.buildings.clear()
 
@@ -3609,8 +3636,10 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
     st.paused = False
     st.pause_node_id = None
     st.pause_generation = None
+    st.pause_reason = None
     st.finished = False
     st.stop_reason = None
+    st.stop_detail = None
     st.stop_requested = None
 
 # --- live operator control events (UI intervention). Intent only; the engine reads
@@ -3679,6 +3708,16 @@ def _on_pause(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.paused = True
     if previous != (st.paused, st.pause_node_id, st.pause_generation):
         st.pause_event_seq = e.seq
+        # …and the pausing writer's own words, beside the seq that identifies the row they came from.
+        # Under the SAME guard on purpose: a second `pause` that does not change the triple did not
+        # take effect (the run was already paused by the first), so the reason a reader is owed is the
+        # first one's, exactly as `pause_event_seq` already answers with the first one's row.
+        #
+        # NOT capped, and that is the faithful choice: this field is a projection of a byte range that
+        # is already durable in `events.jsonl`, so a cap here would make `looplab replay` disagree with
+        # the log it replayed. Every producer already bounds its own text at the append site.
+        reason = d.get("reason")
+        st.pause_reason = str(reason) if isinstance(reason, str) and reason.strip() else None
 
 
 def _on_restart(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -3713,6 +3752,7 @@ def _on_node_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             st.paused = False
             st.pause_node_id = None
             st.pause_generation = None
+            st.pause_reason = None
         _purge_node_requests(st, {nid})
         if st.approval_subject == nid or st.approved_node_id == nid:
             # A FINISHED run keeps its certificates; only the grant that named THIS node is void.

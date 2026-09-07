@@ -23,10 +23,12 @@ exporting them, and this module needs nothing from `repo_task` at import time (n
 """
 from __future__ import annotations
 
+import math as _math
+
 from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
-from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX
+from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
 
@@ -61,6 +63,38 @@ _REPO_DEV_SYSTEM_INTRO = (
     "implementation: the researcher proposed the experiment CONCEPT and "
     "hyperparameters; YOU decide how to realise it in code — which existing scripts to "
     "orchestrate, the stage structure, and how to compute + read the metric. ")
+
+# THE PLAN PHASE IS READ-ONLY AND ITS SYSTEM PROMPT SAYS THE OPPOSITE.
+#
+# `_propose_plan` builds a CompositeTools with no writer, and its user message says so in words --
+# "you CANNOT write code yet". The SYSTEM prompt above it opens with "You improve an existing
+# experiment repository by WRITING code with the write_file and edit_file tools", and the system
+# prompt is the one the model believes.
+#
+# MEASURED over the 76-run probe corpus on 2026-09-03: `write_file` is called 51 times from the
+# `plan` phase and ALL 51 error, against 716 calls from `plan_step` (which does have the tool) and
+# 15 from `card_build`. 504 of the 528 `plan` chain-roots (95.5 %) carry a system prompt naming
+# `write_file`. So one run in ten spends a turn discovering a contradiction the prompt put there.
+#
+# WIRED IN 2026-09-04, at the top of `_propose_plan`, once §115's arm closed (§180). Before that
+# the function existed and changed nothing, on purpose: it alters what every probe is told, and an
+# arm in flight is the wrong time to alter that.
+def read_only_intro(system: str) -> str:
+    """`system` with the write-tools promise replaced by the truth for a read-only phase.
+
+    Returns the string unchanged when the sentence is not there, so an operator who has overridden
+    `repo_developer_system_intro` through the prompt store gets their own text back untouched
+    rather than a silently half-rewritten one.
+    """
+    promise = ("You improve an existing experiment repository by WRITING code with the write_file "
+               "and edit_file tools (edit_file for changes to existing files, write_file for new "
+               "ones).")
+    truth = ("You improve an existing experiment repository by writing code -- but NOT in this "
+             "phase: here you can only READ, and write_file and edit_file are not available to "
+             "you. They come back in the stage after this one.")
+    return system.replace(promise, truth, 1)
+
+
 # 2026-08-07: the "THAT FILE MUST EXIST in the workspace after your edits" rule below carries exactly
 # one carve-out — "unless the operator PROTECTED an existing scorer, which you must NOT rewrite" — and
 # that sentence is only TRUE because `engine/workspace.py::seed_protected_files` materializes the
@@ -406,6 +440,71 @@ def co_parent_block(co_parents, base: dict) -> str:
     return "\n".join(out)
 
 
+
+
+# --- the between-steps MEASUREMENT (doc 53 item 10, the LoopLab half) ------------------------
+#
+# MEASURED, 2026-08-27, over the eleven AlgoTune model probes in `/var/tmp/looplab-bench/
+# model-probes/*/runs/*/run/spans.jsonl`. The engine already evaluates EVERY node it builds --
+# `node_created` and `node_evaluated` are 1:1 in every probe (12/12 on `sol10`, 11/11 on
+# `gpt56luna`; the two shortfalls are runs the spend ceiling cut mid-eval). What the loop does NOT
+# do is let the role that WRITES the code see a number while it is still writing. The parent block
+# below carries `metric=` and reaches only the single-session fallback: across 1,055 `plan_step`
+# generations and 296 `plan` generations in that corpus, the string "PARENT SOLUTION" appears
+# ZERO times. So on the DEFAULT path (`developer_plan_decompose`) every writing session is blind.
+#
+# The model's own answer to being blind is what this costs: of 116 attributed plan steps, 30 (26 %)
+# are titled as a measurement and nothing else -- "Run eval_train and verify speedup", "Measure
+# once with the real evaluator", "Run the real evaluator on the train split" -- and 21 of those 30
+# WROTE NOTHING AT ALL (`noop`). Those 30 steps spent **317 LLM calls** (median 7 per step) and
+# **5,762 s**, i.e. 30 % of all plan-step generations and 36 % of all plan-step wall clock, to buy a
+# subprocess that takes 40 s (`run_dev_command`, n=76, median 39.6 s, p90 45.8 s). A whole bounded
+# session -- system prompt, repo preview, tool loop -- is being spent to press a button.
+#
+# So the command is run BETWEEN steps, by the engine, and its output is handed to the next step.
+# Three properties are deliberate:
+#   * it runs OUTSIDE `run_phase`, so it spends no part of `developer_session_time_budget_s` (1200 s)
+#     -- the step sessions it sits between are median 58.9 s / p90 296.3 s and are not squeezed;
+#   * it does NOT run after the LAST step, which has no consumer: the node goes straight to the
+#     engine's own evaluation, which is the number that counts. 72 of the 116 steps are non-final;
+#   * it is a PROMPT input and nothing else. `DevCommandTools` runs in a disposable candidate tree
+#     it deletes on return, so this cannot write a node file, cannot become `last_files`, and cannot
+#     reach `node_evaluated.metric`. The reported speedup and the champion still come from
+#     `engine/evaluate.py` alone -- see `tests/test_developer_step_feedback.py`.
+#
+# OFF unless the operator names the command (`Settings.developer_step_feedback_command`). Not
+# timidity and not a guess-avoidance ritual: it CHANGES WHAT THE AGENT IS SHOWN, which is the
+# measurement, exactly as `make_task.py --full-context` does (doc 53 item 10), and the arm-B numbers
+# already on disk were produced without it. Choosing the command by heuristic was rejected for the
+# reason `_grader_packages` gives one paragraph up -- a fence that guesses refuses the real thing.
+#
+# The output cap. Measured over the 81 `run_dev_command` results in the probe corpus: median 782
+# chars, p90 2,541, max 2,614 -- so 6,000 clips nothing that has actually been produced and bounds a
+# command whose stderr runs away. `DevCommandTools` already caps the raw streams at 64 KB.
+_STEP_FEEDBACK_CAP = 6000
+# What the reference agent tells its model before EVERY message and we told ours never: how much of
+# the run's money is left. `AlgoTuner/utils/message_writer.py:1442` renders "You have sent N messages
+# and have used up $X. You have $Y remaining." and `format_message_with_budget` puts it FIRST, and the
+# effect is visible in the arm-A logs -- 112 messages landing on $0.9952 of $1.0000. Ours flew blind:
+# 0 of 317 `plan_step` prompts in dsFB3 carried any spend figure, and the ceiling arrives as a node
+# CRASH ("LLM spend ceiling reached: $1.0024 of the $1.0000") that throws that node's work away.
+# Overshoot measured across finished probes: $1.002 to $1.091.
+_REPO_DEV_BUDGET_LINE = (
+    "BUDGET: ${spent:.4f} of ${limit:.4f} spent, ${remaining:.4f} left ({pct:.0f} % gone). Every "
+    "message you send spends it, and NOTHING you write after it runs out is measured -- the step is "
+    "lost, not saved. Spend what is left on the edit most likely to move the number; if little "
+    "remains, make this step small and finish it.\n\n")
+_REPO_DEV_STEP_FEEDBACK_BLOCK = (
+    "\n\n=== MEASUREMENT OF THE WORK SO FAR (run for you, automatically) ===\n"
+    "The operator's `{name}` command was run on your working set as it stands after the previous "
+    "step. You did not spend a turn on it and you do not need to run it yourself -- it runs again "
+    "after every step that changes a file, so do NOT spend a step on measuring. Read the numbers "
+    "below and let them decide what this step does.\n{output}\n")
+# The measured starting point, for the sessions that actually write code. `implement_from` already
+# computes it (`parent experiment #N, metric=M`) and the plan/step prompts dropped it on the floor.
+_REPO_DEV_BASELINE_LINE = (
+    "\nMEASURED STARTING POINT: {note}. That is the number your edits have to beat; a change that "
+    "does not move it is not an improvement.\n")
 _REPO_DEV_REPAIR_BLOCK = (
     "\n\nThe PREVIOUS attempt FAILED — fix ONLY the stage that failed (see the error) with "
     "MINIMAL edit_file hunks on the offending file(s) (re-write a file only if it is beyond patching). "
@@ -446,6 +545,167 @@ _FENCE_INHERITANCE_NOTE = (
     "ordinal you did not derive from `torch.cuda.device_count()`."
 )
 
+
+def plan_step_attribution(steps, observed, shipped) -> dict:
+    """Reconcile the PLAN against the ARTEFACT and return the record of the difference.
+
+    The plan is a PROPOSAL: `_propose_plan` runs BEFORE a byte is written and its steps are
+    advisory — a step session may legitimately do something else (on `runs-B/discrete_log` the plan
+    phase MEASURED the card's Pollard-rho hypothesis losing to BSGS and planned the opposite, which
+    is the loop working), do nothing at all, or overwrite what an earlier step wrote. That is by
+    design and is not what this function is for. What it is for is that the difference used to leave
+    NO TRACE: `_run_step` returns "" on success, every step's writes land in one flat `write.files`
+    map with no author, and the durable record (`node_created.files` + the card's `idea.rationale`,
+    written before the repo was read) therefore presents a proposal as if it described the artefact.
+    Measured on the 20-task `runs-B` corpus at 2026-08-26: 63 of 70 builds ran a plan phase, ZERO of
+    those plans appear anywhere in `events.jsonl`, and of the 46 builds whose plan actually drove
+    execution (113 steps) ALL 46 contained at least one step that wrote nothing (46 steps, only 7
+    of them explained by the existing `plan_steps_failed` span) or a file finished by a LATER step
+    than the one the plan says produces it (22 rewrites across 18 builds).
+
+    So: RECORD, don't prevent. `observed` is one `{"wrote": [...], "deleted": [...], "error": str}`
+    per executed step, in plan order, diffed from the working set before and after that step;
+    `shipped` is the final working set. The result names, for every step, what it actually changed
+    and whether it superseded an earlier step — and, for every shipped file, the step that last
+    wrote it (`authors`) or the fact that no step touched it (`unattributed`: it came from the
+    parent/base preload, not from this plan). That is what lets a later reader attribute an eval
+    failure to the step that caused it, which is the whole point of decomposing into steps.
+    """
+    author: dict = {}
+    rows: list = []
+    noop: list = []
+    superseding: list = []
+    cut: list[int] = []
+    for index, step in enumerate(steps, 1):
+        obs = observed[index - 1] if index - 1 < len(observed) else {}
+        wrote = list(obs.get("wrote") or [])
+        removed = list(obs.get("deleted") or [])
+        # "Superseded" is about AUTHORSHIP inside this plan, not about the repo: a path an EARLIER
+        # step of THIS plan already wrote and this one has now replaced. A path inherited from the
+        # base preload has no step author yet, so the first step to touch it is its author, not a
+        # superseder.
+        over = sorted({p for p in wrote if p in author})
+        for p in wrote:
+            author[p] = index
+        for p in removed:
+            author.pop(p, None)
+        row = {"step": index, "title": str(step.get("title") or "")[:160], "wrote": wrote}
+        if removed:
+            row["deleted"] = removed
+        if over:
+            row["superseded"] = over
+            superseding.append(index)
+        if not wrote and not removed:
+            # A step that ran to completion and changed nothing. Distinct from an ERRORED step
+            # (`plan_steps_failed` already names those): this one reported success, so nothing
+            # downstream could tell that the plan's stated work never happened.
+            row["noop"] = True
+            noop.append(index)
+        if obs.get("error"):
+            row["error"] = str(obs["error"])[:300]
+        # WHICH BOUND ENDED THIS STEP'S SESSION, and until 2026-08-31 nothing durable said.
+        # `_note_session_budget` stores the kind on the developer, and the ONLY place it was ever
+        # snapshotted into a row is the node-REPAIR path in `engine/evaluate.py`. A plan step is not
+        # a repair, so a step cut by turns, wall clock or money left no trace at all: measured over
+        # all 22 run trees on this box, the field appears zero times.
+        #
+        # That became urgent the day a MONEY ceiling was added to these sessions (`_step_cost_ceiling`):
+        # a bound whose firing cannot be observed is a bound nobody can trust or tune.
+        if obs.get("cutoff"):
+            row["cutoff"] = str(obs["cutoff"])[:32]
+            # The two numbers that make the cut readable. Omitted when absent rather than written
+            # as null: this row is what lands in the durable span, and an always-present
+            # "cutoff_spend": null makes a step whose spend was UNKNOWABLE (no accountant) look
+            # identical to one that spent nothing.
+            if obs.get("cutoff_seconds") is not None:
+                row["cutoff_seconds"] = round(float(obs["cutoff_seconds"]), 1)
+            if obs.get("cutoff_detail"):
+                row["cutoff_spend"] = str(obs["cutoff_detail"])[:120]
+            cut.append(index)
+        rows.append(row)
+    return {"total": len(steps), "steps": rows, "noop_steps": noop,
+            "cut_steps": cut,
+            "superseding_steps": superseding,
+            "authors": {p: author[p] for p in sorted(author)},
+            "unattributed": sorted(p for p in (shipped or {}) if p not in author)}
+
+
+def empty_build_refusal(*, error, base, base_deleted, files, deleted) -> str:
+    """The refusal for a BUILD that wrote nothing, or "" when there is something to evaluate.
+
+    Hoisted out of `_run`'s exit rather than left inline, on CLAUDE.md's tier-2 ground: the rule
+    decides whether a node exists, no call site could reach it to state it, and a rule nobody can
+    state is a rule nobody reviews. Its truth table is `tests/test_empty_build_guard.py`.
+
+    Measured 2026-08-20 on an AlgoTune `discrete_log` run: the implement phase spent 19 generations
+    calling `run_probe` 24 times, `read_file` 8 and `grep` 7 -- and `write_file`/`edit_file` ZERO
+    times. The session ended on its own wall budget, `_run` returned "" (no error), and the engine
+    committed a node whose `node_created.files` is `{}`. Its `solver.py` was the untouched template
+    (`raise NotImplementedError`), the evaluation ran honestly, and the run recorded `speedup: 0.0`
+    after 195 paid calls and $0.18.
+
+    The wasted evaluation is not the cost. A real 0.0 is EVIDENCE -- an idea that was tried and did
+    not work, which the next Researcher turn reads and builds on -- and this one is an empty box
+    wearing its clothes. Nothing downstream could tell them apart.
+
+    The cause is a missing forcing function rather than a confused model: probing is cheap and
+    commits to nothing while writing commits, so with no bound the safe move is always one more
+    probe. `agent_emit_after`/`agent_emit_force` are TURN counts (300/500) and that session ended at
+    19, so neither was ever in play. Fixing the INCENTIVE belongs upstream in the prompt and the
+    emit contract; this rung keeps the failure visible and cheap in the meantime.
+
+    Scoped to a FRESH build. `implement_from` / `repair_from` pre-load the working set from a base,
+    so an unchanged set there is a NO-OP EDIT -- a different fact, already judged one rung over by
+    `engine/repair_verify.py`'s `inert` verdict and bounded by INERT_REPAIR_LIMIT. Convicting it
+    here too would charge one event under two vocabularies that mean different things: "nothing was
+    built" and "nothing was CHANGED".
+    """
+    if error is not None or base is not None or base_deleted is not None:
+        return ""
+    # The manifest is not a candidate. `declare_stages` writes `looplab_stages.json` -- the
+    # DECLARATION of how to evaluate an experiment -- through a different tool from the
+    # `write_file`/`edit_file` that produce the experiment itself, so a working set holding only it
+    # is a build that planned an evaluation and never wrote the thing to evaluate.
+    #
+    # This clause is the 2026-08-21 correction, and the run that forced it is the reason the rule
+    # cannot just be "did anything get written". A Gemini-3.7-flash run reached FIVE nodes -- the
+    # first arm-B run ever to evaluate anything -- and every one carried exactly one file, a
+    # 200-290 byte manifest declaring a single stage `python -c "print('Ready')"` with
+    # `expect.assert: "Check solver environment readiness"`. `solver.py` was the untouched
+    # `raise NotImplementedError` template in all five. Each evaluated honestly in 12-17 s and
+    # recorded 0.0, at $0.63 of a $1.00 budget.
+    #
+    # So the empty-set check passed a DECOY: a file that satisfies "something was written" while
+    # containing no implementation. A rule keyed on the count of files is one filename away from
+    # being satisfied by any placeholder, which is why this one is keyed on WHICH file and names
+    # the manifest from its own writer (`repo_write_tools.STAGES_MANIFEST`) rather than repeating
+    # the literal.
+    #
+    # RESIDUAL, stated rather than hidden: a fresh build whose genuine intent is "run the repo's
+    # existing code under a different pipeline" is refused here too. Nothing on this corpus does
+    # that -- a fresh build exists to produce a candidate, and re-declaring a pipeline over pristine
+    # code measures the baseline, not an experiment -- but it is the case that would need an
+    # exemption if one ever appears, and it should arrive as a declaration rather than as a
+    # loosening of this predicate.
+    from looplab.adapters.repo_write_tools import STAGES_MANIFEST
+    authored = [name for name in (files or {}) if name != STAGES_MANIFEST]
+    if not authored and not deleted:
+        only_manifest = bool(files)
+        # SPELLED AS "STUCK", NOT AS A CRASH, since 2026-08-28. The docstring above already says
+        # why: the cause is "a missing forcing function rather than a confused model" and the
+        # session ended on its own wall budget with a live provider. `DEVELOPER_ERROR_PREFIX` routes
+        # to the provider circuit breaker and PAUSES the run (`core/models.py::DEVELOPER_STUCK_PREFIX`), which ended
+        # dsNew2 at 2 evaluated nodes of 3 and qwen38f at its first — 2 of 106 nodes on the corpus,
+        # both of them run-ending, on a gateway that answered every call. The node still dies; the
+        # run no longer does. `engine/orchestrator.py` gained the matching branch in the same change.
+        return (f"{DEVELOPER_STUCK_PREFIX} the implement session ended having written "
+                + ("only the stage manifest" if only_manifest else "nothing at all")
+                + ", so there is no candidate to evaluate -- "
+                + ("declaring how to run an experiment is not writing one; " if only_manifest else "")
+                + "the workdir would hold the untouched template.)")
+    return ""
+
+
 class LLMRepoDeveloper:
     """In-house LLM developer for repo tasks — no external coding agent (opencode/aider/…) required.
     It reads the repo with the read-only scout tools and AUTHORS the file(s) the eval needs with
@@ -470,8 +730,11 @@ class LLMRepoDeveloper:
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
                  plan_min_steps: int = 2, plan_max_steps: int = 8,
                  session_max_turns: int = 500, session_time_budget_s: float = 1200.0,
+                 stage_guidance: bool = True,
                  prompts=None, cross_run_read_tools: bool = False, memory_dir=None,
-                 probe: bool = False, probe_timeout_s: float = 60.0, command_runtime=None):
+                 probe: bool = False, probe_timeout_s: float = 60.0,
+                 probe_confine: bool = True, probe_max_calls: int = 0, command_runtime=None,
+                 step_feedback_command: str = "", established=None):
         self.client = client
         self.task = task
         self.parser = parser
@@ -490,6 +753,14 @@ class LLMRepoDeveloper:
         self._plan_max_steps = max(1, int(plan_max_steps))
         self._session_max_turns = int(session_max_turns)
         self._session_time_budget_s = float(session_time_budget_s)
+        # False drops the stage-pipeline block from the system prompt (`_drop_stage_guidance`).
+        # True is the default and keeps the historical text byte for byte.
+        self._stage_guidance = bool(stage_guidance)
+        # A5 (docs/60): the run's `agents/established.py::EstablishedContext`, shared with the
+        # Researcher by `make_roles`. None (the ctor default, and `Settings.established_context=
+        # False`) leaves every phase prompt byte-identical; a store that recorded nothing renders
+        # nothing, so the plain tests that never read a file are unchanged either way.
+        self._established = established
         # F2 · the PROBE (tools/dev_probe.py). The ctor default is OFF while `Settings.developer_probe`
         # is ON, deliberately: `make_roles` is the operator's knob and passes the setting, and the ~170
         # direct `LLMRepoDeveloper(...)`/`__new__` constructions in the suite are not asking for a live
@@ -497,6 +768,12 @@ class LLMRepoDeveloper:
         # every one of them.
         self._probe = bool(probe)
         self._probe_timeout_s = float(probe_timeout_s)
+        self._probe_confine = bool(probe_confine)
+        # 0 = uncapped, the shipped behaviour; see `Settings.developer_probe_max_calls` and §190.
+        self._probe_max_calls = max(0, int(probe_max_calls or 0))
+        # ONE counter for the whole run, not one per phase -- `_scout_tools` builds a fresh probe
+        # provider every phase, and §189's effect is measured per RUN. See `_probe_call_counter`.
+        self._probe_calls = {"n": 0}
         self.brief = task.agent_brief()
         rs = task.repo_spec()
         self._surface = rs["edit_surface"]
@@ -512,6 +789,12 @@ class LLMRepoDeveloper:
         # read above, once per node build rather than once per phase.
         self._dev_commands = list(rs.get("developer_commands") or [])
         self._command_runtime = command_runtime
+        # The operator-pinned command the plan loop runs BETWEEN steps ("" = the feature is off and
+        # the prompts are byte-identical to what they have always been). Stored as a NAME, resolved
+        # against `_dev_commands` at use time: a name the task does not pin is silently no feedback,
+        # never an invented command -- `DevCommandTools` would refuse it anyway, and turning that
+        # refusal into a prompt block would teach the model that the measurement is broken.
+        self._step_feedback_command = str(step_feedback_command or "").strip()
         self._probe_repo_spec = rs if (probe or self._dev_commands) else None
         self.last_files: dict[str, str] = {}
         self.last_deleted: list[str] = []
@@ -728,6 +1011,35 @@ class LLMRepoDeveloper:
                                             "the same budget a forced full re-train does, so use it "
                                             "when you have evidence, not on a hunch."}}, [])
 
+    # THE STAGE GUIDANCE IS CUT OUT BY TEXT, NOT BY RESTRUCTURING THE LITERAL.
+    #
+    # 5,001 source characters about GPU training, checkpoints, shards and `train.py`, addressed to a
+    # role that on a single-stage task has nothing to declare. MEASURED 2026-08-28 over six probes:
+    # `declare_stages` was called ZERO times while the rendered block sat in every
+    # `plan`/`plan_step`/`card_build` system prompt, costing 4.8-6.0 % of a $1 run ($0.057 of $1.013
+    # on dsFix1, then $0.049, $0.060, $0.080) -- about a sixth of a node at the measured $0.35/node.
+    #
+    # Cut by slicing between two sentinels rather than by hoisting the text into its own constant:
+    # three attempts at the hoist broke the adjacent-string literal, and a surgical slice cannot.
+    # If either sentinel ever stops matching the body returns UNCHANGED, which is the safe direction
+    # -- an operator gets the historical prompt, not a mangled one.
+    #
+    # DEFAULT ON. `_system_body`'s contract is that `developer_probe=False` reproduces the historical
+    # prompt BYTE FOR BYTE via `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, so a resumed pre-2026-08-13 run
+    # keeps the prompt its first half ran under. Only an explicit setting turns it off.
+    _STAGE_GUIDANCE_OPEN = "TRAIN-THEN-SCORE PIPELINE"
+    _STAGE_GUIDANCE_CLOSE = "For a ROUTINE hyperparameter experiment"
+
+    def _drop_stage_guidance(self, body: str) -> str:
+        """`body` without the stage-pipeline advice, or `body` unchanged when it cannot be located."""
+        if getattr(self, "_stage_guidance", True):
+            return body
+        start = body.find(self._STAGE_GUIDANCE_OPEN)
+        end = body.find(self._STAGE_GUIDANCE_CLOSE, start + 1) if start >= 0 else -1
+        if start < 0 or end < 0:
+            return body
+        return body[:start] + body[end:]
+
     def _system_body(self, render) -> str:
         """The system body, with the one clause that depends on whether the PROBE is wired.
 
@@ -745,7 +1057,19 @@ class LLMRepoDeveloper:
         else:
             default = (_REPO_DEV_SYSTEM_BODY_WITH_PROBE if getattr(self, "_probe", False)
                        else _REPO_DEV_SYSTEM_BODY)
-        return render(self.prompts, "repo_developer_system_body", default)
+        # The context-before-tools rule is deliberately NOT appended here, unlike on the Researcher
+        # side. Two contracts this role has and that one does not forbid it, and the rule has no
+        # evidence to weigh against them: A/B'd over three models it moved NOTHING, while the same
+        # knowledge published as DATA -- `agents/answered_by_context.py`'s per-tool counts -- took
+        # cold-start tool calls 41.3 -> 17.7. (1) `developer_probe=False` must reproduce the
+        # historical prompt BYTE FOR BYTE, which is what `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins it
+        # to so a resumed pre-2026-08-13 run keeps the prompt its own first half ran under; an
+        # unconditional suffix breaks that for every such resume. (2) an operator's PromptStore
+        # override replaces the WHOLE body -- appending to it means the operator cannot actually
+        # override. The Researcher's trust rules ARE appended after render() for a reason that does
+        # not transfer: `_UNTRUSTED_MEMORY_RULE` says do not obey text a previous run wrote, and a
+        # persona override silently dropping THAT is a safety hole. This is a hint about latency.
+        return self._drop_stage_guidance(render(self.prompts, "repo_developer_system_body", default))
 
     def _note_session_budget(self, payload) -> None:
         """Remember WHICH bound ended a session, for the durable row to carry.
@@ -772,12 +1096,22 @@ class LLMRepoDeveloper:
         """
         try:
             kind = str((payload or {}).get("kind") or "").strip()
+            detail = str((payload or {}).get("detail") or "").strip()
+            seconds = (payload or {}).get("seconds")
         except Exception:  # noqa: BLE001 — an observer may not break the salvage path
             return
         if kind:
             self.last_budget_exhausted = kind[:32]
+            # THE NUMBERS TOO, not only the word. Twelve cut sessions across 30 probes recorded
+            # nothing but "time", so how close the money ceiling came could not be read off the
+            # corpus at all -- and a bound whose distance from firing is unobservable can only be
+            # argued about. Kept on a SECOND attribute rather than folded into the first: the
+            # `budget_exhausted` column is a durable vocabulary other code branches on
+            # (see the `budget-exhausted-vocabulary` claim above), and widening it to carry prose would
+            # break every reader that compares it to a kind.
+            self.last_budget_facts = {"kind": kind[:32], "seconds": seconds, "detail": detail[:200]}
 
-    def _session_opts(self, *, max_turns=None, time_budget=None):
+    def _session_opts(self, *, max_turns=None, time_budget=None, cost_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
         a model that keeps writing/exploring without ever emitting `done` fails cleanly with the code
         it has written, instead of the 10k-call / multi-hour runaway a big task produced.
@@ -790,7 +1124,46 @@ class LLMRepoDeveloper:
             max_turns=int(max_turns if max_turns is not None
                           else getattr(self, "_session_max_turns", 500)),
             time_budget_s=float(time_budget if time_budget is not None
-                                else getattr(self, "_session_time_budget_s", 1200.0)))
+                                else getattr(self, "_session_time_budget_s", 1200.0)),
+            # 0.0 = off, and that is the default: only the plan-step caller passes one, because it
+            # is the only session measured eating a run. See `_step_cost_ceiling`.
+            cost_budget_usd=float(cost_budget or 0.0))
+
+    def _step_cost_ceiling(self) -> float:
+        """The most ONE plan step may spend, or 0.0 (= off) when there is no budget to divide.
+
+        The other two ceilings on a step session are turns (500) and wall clock (1200 s), and what
+        actually ends a run is money. Measured 2026-08-31 across 7 AlgoTune probes, the most
+        expensive single step as a share of what remained when it started:
+
+            remPde   66 %   remPde2  49 %   accPde  32 %   remDL2  72 %
+            remEE    18 %   remEE2    8 %   accEE    7 %
+
+        remPde's step ran 72 generations and was cut by the 1200 s wall at 1212 s -- the wall did
+        its job, and 48 % of the dollar was already gone. On edge_expansion the same wall never bit
+        (worst step 8-9 %), so seconds do not stand in for dollars across tasks.
+
+        HALF OF WHAT REMAINS, but never less than a FIFTH OF THE WHOLE RUN. The second clause is
+        what keeps this from punishing a legitimate late step: remDL2's 72 % was its LAST step
+        spending $0.1679 of a $0.2322 remainder, which is a run finishing properly, and half-of-
+        remaining alone would have cut it. Against the seven measured steps this bites exactly one --
+        remPde's runaway -- and leaves every other one untouched, which is the whole of what it is
+        for. Seven runs is a thin basis for a constant and that is why it is a ratio of two numbers
+        the run already knows rather than a dollar figure typed in.
+
+        A cut step is not a lost step: the loop salvages an emit from whatever the session wrote.
+        """
+        acct = getattr(getattr(self, "client", None), "accountant", None)
+        if acct is None:
+            return 0.0
+        try:
+            limit = float(getattr(acct, "limit", None) or 0.0)
+            spent = float(getattr(acct, "spent", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if limit <= 0 or not _math.isfinite(limit) or not _math.isfinite(spent) or spent < 0:
+            return 0.0
+        return max(0.5 * max(0.0, limit - spent), 0.2 * limit)
 
     def _plan_emit_spec(self) -> dict:
         from looplab.tools._base import fn_spec
@@ -807,14 +1180,37 @@ class LLMRepoDeveloper:
                             "required": ["title"]}}},
                         ["steps"])
 
-    def _propose_plan(self, system: str, idea: Idea, write=None) -> list:
+    def _propose_plan(self, system: str, idea: Idea, write=None, baseline_note: str = "") -> list:
         """Plan phase: a READ-ONLY stage — the developer inspects the real code/experiments (it CANNOT
         write here), and its only exit is `propose_plan` (the ordered atomic plan). Returns a list of
         {title, detail}; [] on empty/failure so the caller falls back to one session."""
         from looplab.agents.agent import run_phase, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
+        # §153 measured what the unwired version cost: `write_file` was called 51 times from this
+        # phase and ALL 51 errored, while 504 of 528 `plan` chain-roots carried a system prompt
+        # naming it. Held back while §115's arm ran; that arm closed at 24 probes in §180.
+        system = read_only_intro(system)
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
+        # THE PHASE THAT DECIDES HOW MANY STEPS TO BUY COULD NOT SEE THE PRICE.
+        #
+        # `_run_step` has carried `_budget_note()` since it was written, so every INDIVIDUAL step is
+        # told what is left -- 72.8 % of `plan_step` generations in the corpus carry a money figure.
+        # The phase that chooses how many of those steps to write carried none: `plan` is 0 of 2,236.
+        # That is the wrong way round. A step told "little remains, make this step small" can only
+        # shrink the step it is already in; the plan is where the COUNT is decided, and the count is
+        # what the money actually buys.
+        #
+        # Measured over the 8 probes on this box (3,071 generations, $11.7552): `plan` is 16.2 % of
+        # spend, second only to `plan_step` (34.8 %) and `propose` (19.2 %). And the failure it
+        # feeds is on record -- `remPde` spent 74 % of its dollar before a single node existed, on
+        # 103 `plan_step` generations against 34 proposals, then produced one plain-Python node
+        # where every other probe on that task carried a numba kernel. A planner that knew it had
+        # 26 cents left would not have planned that.
+        #
+        # The same note, deliberately, not a second wording: two roles told one budget in two
+        # formats is a defect this file already names one layer down.
         plan_user = (
+            f"{self._budget_note()}"
             f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters: {params}.\n"
             "This is the PLANNING stage. You can READ and inspect the repo (read_file — it paginates, so "
             "read a file ONCE, don't re-read; grep, find_files, list_dir, pkg_info, py_api, gpu_info) but "
@@ -823,12 +1219,37 @@ class LLMRepoDeveloper:
             "what to change — THEN call propose_plan with an ordered list of ATOMIC, independently-"
             "testable steps, each naming concretely what to change and why. Do NOT guess from the "
             "truncated preview; the implement stage (and update_plan) come next.")
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
+        # 26 % of the 116 attributed plan steps in the probe corpus are a measurement and nothing
+        # else, and 21 of those wrote no file at all -- 317 LLM calls and 5,762 s spent pressing a
+        # button. When the engine presses it between steps, say so HERE, where the steps are chosen:
+        # a planner that does not know the measurement is free will keep buying it with a session.
+        auto_measured = self._step_feedback_command_name()
+        if auto_measured:
+            plan_user += (
+                "\n\nDo NOT plan a step whose only job is to measure or verify: after EVERY step "
+                f"that changes a file the engine runs the operator's `{auto_measured}` command for "
+                "you and hands the result to the next step. Every step you plan should CHANGE "
+                "something; the numbers arrive on their own.")
+        if baseline_note:
+            plan_user += _REPO_DEV_BASELINE_LINE.format(note=baseline_note)
         # READ-ONLY toolset: repo scouts + env inspection, but NO write tools — the plan stage's only
         # output is the plan. (This used to be tools=None to force convergence, which made the planner
         # work BLIND off the truncated preview; the read_file pagination fix + emit_after/emit_force
         # convergence backstop now let it read PROPERLY without exploring forever.)
-        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
+        #
+        # Composed BEFORE the messages, because the user turn names what this toolset already holds
+        # (`agents/answered_by_context.py`). Composition only reads each provider's `specs()`, so the
+        # reorder costs nothing and changes no dispatch.
+        # NO `answered_by_context` HERE, deliberately. It was spliced in and measured INERT: the
+        # block is built from providers' optional `inventory()` hook, and none of this toolset's
+        # providers (`EnvInspectTools`, `RepoScoutTools`, `DevCommandTools`, `DevProbeTools`)
+        # implements it -- so it rendered "" at every call while its comment claimed the user turn
+        # "names what this toolset already holds". A count-publishing block cannot express "how much
+        # is under this repo path" anyway; giving the scouts a real inventory is the fix, and until
+        # one exists the honest state is no block rather than an empty string and a false comment.
+        read_only = CompositeTools([EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
+        plan_user += self._established_block()
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
         try:
             # Full session budget — same contract as every other phase: the soft nudge at
             # agent_emit_after (300) and the forced emit at agent_emit_force (500) ride in via
@@ -839,6 +1260,7 @@ class LLMRepoDeveloper:
                 self.client, read_only, messages, self._plan_emit_spec(),
                 label="Developer·plan", next_label="the implement phase",
                 finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
+                on_tool_result=self._established_hook("plan"),
                 **self._session_opts())
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise
@@ -851,8 +1273,81 @@ class LLMRepoDeveloper:
                               "detail": str(s.get("detail", "")).strip()})
         return steps
 
+    def _step_feedback(self, write, *, index: int = 0) -> str:
+        """Run the operator-pinned feedback command on the working set and return its rendered output.
+
+        Returns "" for every reason a caller might want a reason for -- no command named, the name is
+        not one the task pinned, no command runtime, the runner raised -- because this is an EXTRA
+        rung and a build must never fail over it. The step it feeds simply gets no measurement block,
+        which is the pre-2026-08-27 behaviour.
+
+        It goes through `DevCommandTools` rather than a private `subprocess` call so the argv, the
+        trust tier, the disposable candidate, the secret screen and the receipts are the SAME ones
+        `run_dev_command` gets. A second spelling of "run the operator's command" is the shape doc 25
+        SE-08 names: the tool would be hardened and this path would not.
+        """
+        name = self._step_feedback_command_name()
+        if not name:
+            return ""
+        from looplab.core import tracing
+        from looplab.tools.dev_commands import DevCommandTools
+        try:
+            tools = DevCommandTools(getattr(self, "_probe_repo_spec", None),
+                                    runtime=getattr(self, "_command_runtime", None), staged=write)
+            with tracing.operation("step_feedback", index=int(index), command=name):
+                result = tools.execute_result("run_dev_command", {"name": name})
+        except Exception:  # noqa: BLE001 — an extra rung never breaks the build it is helping
+            return ""
+        text = str(getattr(result, "content", "") or "")
+        # OPEN[step-feedback-keeps-the-head-of-the-output] when the cap binds it keeps the START of
+        # a command's output and drops the END — the half this module everywhere else treats as the
+        # one a reader must not lose.
+        # proof:`present:text[:_STEP_FEEDBACK_CAP]@looplab/adapters/repo_developer.py`
+        # REVIEW 2026-08-30 (consistency): the measured corpus (median 782, max 2,614 chars) makes
+        # the 6,000 cap inert today; the day a runaway command hits it, the failure text at the
+        # tail is what vanishes. `_clip(keep="tail")` / `stream_tails` are the house rule and one
+        # import away.
+        return text[:_STEP_FEEDBACK_CAP]
+
+    def _budget_note(self) -> str:
+        """The run's remaining LLM spend, worded for the session that is spending it, or "".
+
+        Returns "" for every reason a caller might want one -- no client, no accountant, no limit,
+        a non-finite or unparseable figure -- because this is an EXTRA rung and a build must never
+        fail over it. A run with no `llm_budget_usd` gets a byte-identical prompt to before.
+        """
+        acct = getattr(getattr(self, "client", None), "accountant", None)
+        if acct is None:
+            return ""
+        try:
+            limit = float(getattr(acct, "limit", None) or 0.0)
+            spent = float(getattr(acct, "spent", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return ""
+        if limit <= 0 or not _math.isfinite(limit) or not _math.isfinite(spent) or spent < 0:
+            return ""
+        return _REPO_DEV_BUDGET_LINE.format(
+            spent=spent, limit=limit, remaining=max(0.0, limit - spent),
+            pct=min(100.0, 100.0 * spent / limit))
+
+    def _step_feedback_command_name(self) -> str:
+        """The pinned command this developer may auto-run between steps, or "" when there is none.
+
+        Resolution is against the TASK's own `developer_commands`, not against the setting alone, so
+        an operator who names `eval_train` on a run whose tasks do not pin it gets silence rather
+        than a refusal block in every step prompt."""
+        name = str(getattr(self, "_step_feedback_command", "") or "").strip()
+        if not name:
+            return ""
+        for raw in (getattr(self, "_dev_commands", None) or ()):
+            row = raw.model_dump() if hasattr(raw, "model_dump") else dict(raw)
+            if str(row.get("name") or "") == name:
+                return name
+        return ""
+
     def _run_step(self, idea: Idea, step: dict, idx: int, total: int, write, system: str,
-                  stage_note: str = "", validate=None) -> str:
+                  stage_note: str = "", baseline_note: str = "", feedback: str = "",
+                  validate=None) -> str:
         """Execute ONE atomic plan step in a FRESH bounded session, on top of the files accumulated so
         far (carried in `write.files`; syntax is validated per write by the write tool). A step's own
         error never aborts the plan — later steps + the eval still run on whatever got written.
@@ -862,6 +1357,7 @@ class LLMRepoDeveloper:
         from looplab.tools.env_inspect import EnvInspectTools
         done_so_far = ", ".join(write.files) or "(none yet)"
         step_user = (
+            f"{self._budget_note()}"
             f"You are implementing a multi-step plan — STEP {idx} of {total}.\n"
             f"Overall experiment: {idea.rationale}\n{stage_note}\n"
             f"THIS STEP — {step['title']}:\n{step.get('detail') or step['title']}\n\n"
@@ -870,22 +1366,60 @@ class LLMRepoDeveloper:
             "Make ONLY the edits THIS step needs with write_file/edit_file — PATCH existing files, don't "
             "regenerate untouched ones — then call done. Do the minimum for this step; later steps handle "
             "the rest. If this is the last step, make sure the eval entrypoint runs end-to-end.")
+        # The two measured facts this session used to be denied: what the parent SCORED (computed by
+        # `implement_from`, and reaching only the single-session fallback until 2026-08-27) and what
+        # the LAST step's edit did to that score. Appended, not spliced, so a run with neither is
+        # byte-identical to the old prompt.
+        if baseline_note:
+            step_user += _REPO_DEV_BASELINE_LINE.format(note=baseline_note)
+        if feedback:
+            step_user += _REPO_DEV_STEP_FEEDBACK_BLOCK.format(
+                name=self._step_feedback_command_name() or "the operator's evaluation",
+                output=feedback)
+        step_user += self._established_block()
         messages = [{"role": "system", "content": system}, {"role": "user", "content": step_user}]
         try:
             # implement steps CONSUME the stages/plan briefs, but don't
             # contribute (their writes add length faster than signal, and the last step is terminal) —
             # so the ledger stays the 3 exploration briefs (propose/stages/plan), never K-step bloat.
-            run_phase(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write)),
+            run_phase(self.client, CompositeTools([write, EnvInspectTools(self._grader_packages())] + self._scout_tools(write)),
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
                       validate=validate,
                       fallback=lambda m: "", on_budget=self._note_session_budget,
-                      **self._session_opts())
+                      on_tool_result=self._established_hook("plan_step"),
+                      **self._session_opts(cost_budget=self._step_cost_ceiling()))
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise
         except Exception as e:  # noqa: BLE001
             return f"(step {idx} error: {e})"
         return ""
+
+    def _probe_call_counter(self) -> dict:
+        """The run-scoped probe tally handed to every `DevProbeTools` this developer builds.
+
+        Lazy because ~170 tests construct this class through `__new__` without running `__init__`;
+        a missing attribute there would turn a cap into an AttributeError at the first probe."""
+        counter = getattr(self, "_probe_calls", None)
+        if not isinstance(counter, dict):
+            counter = {"n": 0}
+            self._probe_calls = counter
+        return counter
+
+    def _established_block(self) -> str:
+        """The "already established" block for a chain root, or "" (see `agents/established.py`).
+        Appended, never spliced, so a run with nothing recorded is byte-identical to the old prompt."""
+        store = getattr(self, "_established", None)
+        if store is None:
+            return ""
+        block = store.render()
+        return ("\n\n" + block) if block else ""
+
+    def _established_hook(self, phase: str):
+        """The `on_tool_result` a phase hands `run_phase`, or None when there is no store — `run_phase`
+        forwards it to the tool loop, whose per-call hook is the one recording site."""
+        store = getattr(self, "_established", None)
+        return None if store is None else store.hook(phase)
 
     def _scout_tools(self, write=None):
         """Read-only repo scouts (read_file / grep / find_files / list_dir) so the Developer can READ
@@ -917,6 +1451,14 @@ class LLMRepoDeveloper:
             # the probe cannot write, so nothing it does can flow back into the build.
             extra.append(DevProbeTools(getattr(self, "_probe_repo_spec", None),
                                        timeout_s=getattr(self, "_probe_timeout_s", 60.0),
+                                       confine_reads=getattr(self, "_probe_confine", True),
+                                       max_calls=getattr(self, "_probe_max_calls", 0),
+                                       counter=self._probe_call_counter(),
+                                       # THE SAME declaration `EnvInspectTools` is built with, as
+                                       # directories: a grader fenced in one provider of this
+                                       # toolset and readable in the next was the route that
+                                       # opened under pressure (2026-08-30 review).
+                                       protect_roots=self._grader_roots(),
                                        staged=write))
         # PART V §22 — the Developer's read-only cross-run knowledge (dev-routed lessons: what code
         # change fixed a crash across runs). Advisory only; role-scoped so it doesn't see the R&D claims.
@@ -1057,6 +1599,30 @@ class LLMRepoDeveloper:
                                                       "artifacts — print such a quantity instead."}}}},
                             "required": ["name", "command"]}}},
                         ["stages"])
+
+    def _grader_packages(self) -> tuple:
+        """Installed packages the env inspector must refuse -- `EvalSpec.protect_packages`.
+
+        Read through `_cmd_context`'s own source (the task's `eval_spec`) rather than stashed at
+        construction, so a task whose spec is resolved late still fences. Total and quiet: a task
+        with no eval_spec, or an adapter that raises, fences NOTHING, which is the historical
+        behaviour and the right default -- a fence that guesses would refuse a real dependency.
+        """
+        try:
+            ev = self.task.eval_spec() or {}
+        except Exception:  # noqa: BLE001 - same contract as _cmd_context: no spec => no fence
+            return ()
+        names = ev.get("protect_packages") or ()
+        return tuple(str(n) for n in names if str(n).strip())
+
+    def _grader_roots(self) -> dict:
+        """`_grader_packages` as DIRECTORIES, for the probe -- `dev_probe.grader_package_roots`.
+
+        Resolved here, at composition, and not inside the probe: the probe is handed a spec and
+        must not go looking for a task, while this class already reads the task's `eval_spec` for
+        the inspector one line over. Same total-and-quiet contract -- no spec, no fence."""
+        from looplab.tools.dev_probe import grader_package_roots
+        return grader_package_roots(self._grader_packages())
 
     def _cmd_context(self) -> tuple[dict, bool]:
         """The operator's scoring contract (eval_spec) + whether one exists. The stages phase shows it to
@@ -1535,10 +2101,18 @@ class LLMRepoDeveloper:
         import json as _json
         ev, has_cmd = self._cmd_context()
         reserved = ("score",)   # `score` is ALWAYS the engine-appended final stage — consume-side reserves it too
+        # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo.
+        # Composed first so the user turn can name what it already holds — see the plan phase above.
+        # NO `answered_by_context` HERE, deliberately. It was spliced in and measured INERT: the
+        # block is built from providers' optional `inventory()` hook, and none of this toolset's
+        # providers (`EnvInspectTools`, `RepoScoutTools`, `DevCommandTools`, `DevProbeTools`)
+        # implements it -- so it rendered "" at every call while its comment claimed the user turn
+        # "names what this toolset already holds". A count-publishing block cannot express "how much
+        # is under this repo path" anyway; giving the scouts a real inventory is the fix, and until
+        # one exists the honest state is no block rather than an empty string and a false comment.
+        read_only = CompositeTools([EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": self._stages_user(idea, ev, has_cmd)}]
-        # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo
-        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
 
         def _validate(args):                      # bounce a malformed manifest back to the model
             stages = (args or {}).get("stages")
@@ -1595,7 +2169,9 @@ class LLMRepoDeveloper:
                 self.client, read_only, messages, self._stages_emit_spec(),
                 label="Developer·stages", next_label="the plan & implement phases",
                 finalize=_finalize, fallback=lambda m: [], validate=_validate,
-                on_budget=self._note_session_budget, **self._session_opts()) or []
+                on_budget=self._note_session_budget,
+                on_tool_result=self._established_hook("stages"),
+                **self._session_opts()) or []
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise
         except Exception:  # noqa: BLE001 — a failed stages phase degrades to the operator cmd alone
@@ -1713,6 +2289,7 @@ class LLMRepoDeveloper:
         #   3. IMPLEMENT: write the code, one bounded session per plan step (each step its own trace block).
         # A REPAIR (error set) OR a bare / __new__-constructed dev (unit tests, no `_editables`) skips
         # straight to a single bounded session — repair is already narrow; the toy dev has no repo to stage.
+        user += self._established_block()
         is_fresh_repo = error is None and getattr(self, "_editables", None)
         from looplab.agents.agent import CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
@@ -1775,7 +2352,7 @@ class LLMRepoDeveloper:
             # Compose the write/edit tools with read-only ENVIRONMENT INTROSPECTION (pkg_info / py_api /
             # read_installed / grep_installed) so the Developer grounds generated code in the ACTUAL
             # installed API/version instead of guessing (the precision='16-mixed'-on-Lightning-1.5 class).
-            tools = CompositeTools([write, EnvInspectTools()] + self._scout_tools(write))
+            tools = CompositeTools([write, EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
             # ONE BOUNCE PER SESSION, shared by the build rule and the repair rule below. A second
             # would spend the session arguing instead of editing, and the model has already been
             # told exactly what to do; `agent_emit_force` bounds the loop but must not be what stops
@@ -1817,17 +2394,67 @@ class LLMRepoDeveloper:
                 steps = []
                 if getattr(self, "_plan_decompose", False):
                     with tracing.operation("plan"):
-                        steps = self._propose_plan(system, idea, write)
+                        steps = self._propose_plan(system, idea, write, baseline_note=base_note)
                 if len(steps) >= getattr(self, "_plan_min_steps", 2):
                     # A step error deliberately can't abort the plan — later steps and the eval still
                     # run on whatever got written. But it must not vanish either: discarded, a later
                     # eval failure could never be attributed to the step that broke. Collect them and
                     # stamp ONE span so the trace says which steps failed and why.
-                    step_errors = [note for i, step in enumerate(steps, 1)
-                                   if (note := self._run_step(idea, step, i, len(steps), write,
-                                                              system, stage_note=stage_note,
-                                                              validate=(_validate_build
-                                                                        if i == len(steps) else None)))]
+                    #
+                    # The SAME argument applies to a step that does not error: the plan is a
+                    # proposal, the artefact is the truth, and until this loop diffed the working set
+                    # around each step nothing recorded which step actually produced which shipped
+                    # file (or that a step produced nothing at all). Each step now gets its own
+                    # `plan_step` trace band — which is what the phase list above has claimed since
+                    # it was written, and was not true: `_run_step` calls `run_phase`, which opens no
+                    # operation span, so all K sessions collapsed into one band with no ordinal — and
+                    # the reconciliation is stamped as `plan_steps` (see `plan_step_attribution`).
+                    step_errors: list = []
+                    observed: list = []
+                    # The measurement the NEXT step is handed. Empty for step 1 (nothing has been
+                    # edited yet) and re-emptied after every step, so a stale number from two steps
+                    # ago can never be presented as this step's result.
+                    feedback = ""
+                    for i, step in enumerate(steps, 1):
+                        before, before_deleted = dict(write.files), set(write.deleted)
+                        # Cleared per step, not per plan: `last_budget_exhausted` is sticky on the
+                        # developer, so without this a single cut step would mark every later one.
+                        self.last_budget_exhausted = ""
+                        self.last_budget_facts = {}
+                        with tracing.operation("plan_step", index=i, total=len(steps),
+                                               title=str(step.get("title") or "")[:120]):
+                            note = self._run_step(
+                                idea, step, i, len(steps), write, system, stage_note=stage_note,
+                                baseline_note=base_note, feedback=feedback,
+                                # The manifest-vs-script bounce belongs to the LAST step, which is
+                                # the one already told to make the entrypoint run end to end.
+                                validate=_validate_build if i == len(steps) else None)
+                        step_cutoff = str(getattr(self, "last_budget_exhausted", "") or "").strip()
+                        # Compare CONTENT, not just presence: `edit_file` patches in place, and a
+                        # step that rewrote a file byte-for-byte changed nothing and must not be
+                        # credited with authoring it.
+                        observed.append({
+                            "wrote": sorted(p for p, body in write.files.items()
+                                            if before.get(p) != body),
+                            "deleted": sorted(set(write.deleted) - before_deleted),
+                            "cutoff": step_cutoff,
+                            # What the cut step had spent and how long it ran. Empty for a step
+                            # that finished on its own terms, which is most of them.
+                            "cutoff_seconds": (getattr(self, "last_budget_facts", {}) or {}).get("seconds"),
+                            "cutoff_detail": (getattr(self, "last_budget_facts", {}) or {}).get("detail") or "",
+                            "error": note})
+                        if note:
+                            step_errors.append(note)
+                        # Measure only when this step actually CHANGED the working set, and never
+                        # after the last step: the final artefact goes straight to the engine's own
+                        # evaluation, so a run here would have no reader and would cost 40 s.
+                        feedback = ""
+                        if i < len(steps) and (observed[-1]["wrote"] or observed[-1]["deleted"]):
+                            feedback = self._step_feedback(write, index=i)
+                    with tracing.operation(
+                            "plan_steps",
+                            **plan_step_attribution(steps, observed, write.files)):
+                        pass
                     if step_errors:
                         with tracing.operation("plan_steps_failed", failed=len(step_errors),
                                                total=len(steps),
@@ -1841,6 +2468,7 @@ class LLMRepoDeveloper:
                               finalize=lambda a: (a or {}).get("summary", ""),
                               validate=_validate_build,
                               fallback=lambda m: "", on_budget=self._note_session_budget,
+                              on_tool_result=self._established_hook("implement"),
                       **self._session_opts())
             else:
                 # repair / toy single session — terminal, so no summary (and repair isn't in a scope
@@ -1904,6 +2532,7 @@ class LLMRepoDeveloper:
                           self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
                           finalize=_finish, validate=_validate_repair,
+                          on_tool_result=self._established_hook("repair" if error else "implement"),
                           # THE ONE CALLER THAT OPTS IN. On an exit with no turn left, bouncing this
                           # summary only drops it and falls to the `lambda m: ""` below — which
                           # discards `rollback_stage` and leaves `repair_verdict` empty, so
@@ -1939,6 +2568,34 @@ class LLMRepoDeveloper:
         from looplab.core.models import is_developer_stuck
         if error is not None and is_developer_stuck(repair_verdict):
             return repair_verdict
+        # A BUILD that wrote NOTHING did not build anything, and must not become a node.
+        #
+        # Measured 2026-08-20 on an AlgoTune `discrete_log` run: the implement phase spent 19
+        # generations calling `run_probe` 24 times, `read_file` 8 and `grep` 7 -- and `write_file` /
+        # `edit_file` ZERO times. The session ended on its own time budget, `_run` returned "" (no
+        # error), `last_files` was `{}`, and the engine committed a node whose `node_created.files`
+        # is the empty dict. Its `solver.py` was therefore the untouched template, `raise
+        # NotImplementedError`; the evaluation ran honestly and recorded `speedup: 0.0` after 195
+        # paid calls and $0.18. Nothing in the loop could tell that apart from an experiment that
+        # was tried and failed -- which is the expensive half, because a real 0.0 is EVIDENCE and
+        # this one is an empty box wearing its clothes.
+        #
+        # The cause is a missing forcing function, not a confused model: probing is cheap and
+        # commits to nothing while writing commits, so with no bound the safe move is always one
+        # more probe. `agent_emit_after`/`agent_emit_force` are TURN counts (300/500) and this
+        # session ended at 19, so neither was ever in play; the session's wall budget cut it first.
+        # Fixing the incentive belongs upstream in the prompt and the emit contract. This is the
+        # rung that keeps its failure VISIBLE and cheap in the meantime.
+        #
+        # Scoped to a FRESH build: `implement_from` and `repair_from` pre-load `write.files` from a
+        # base, so an unchanged working set there is a NO-OP EDIT and a different fact, already
+        # judged one rung over by `engine/repair_verify.py`'s `inert` verdict and its
+        # INERT_REPAIR_LIMIT. Convicting it here too would double-charge the same event under two
+        # vocabularies.
+        refusal = empty_build_refusal(error=error, base=base, base_deleted=base_deleted,
+                                      files=write.files, deleted=write.deleted)
+        if refusal:
+            return refusal
         return ""
 
     def implement(self, idea: Idea) -> str:

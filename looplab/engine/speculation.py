@@ -23,7 +23,7 @@ from looplab.core.models import (
     NodeStatus,
     RunState,
     card_ownership_receipt,
-    durable_idea_payload, is_developer_error)
+    durable_idea_payload, is_developer_error, is_developer_stuck)
 from looplab.core.llm_broker import in_llm_lane
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.replay import fold
@@ -178,11 +178,9 @@ class SpecRawStageResult:
     generation: int
     action: dict[str, Any]
     proposal_state: RunState = field(compare=False, repr=False)
-    proposal_authority_seq: int
     proposal_node_ceiling: int
     at_node: int
     source: str
-    cue_fence: bytes
     success: bool
     idea: Optional[Idea] = None
     steering_context: tuple[Any, ...] = ()
@@ -482,11 +480,20 @@ class SpeculationMixin:
     def _proposal_authority_seq(events: list) -> int:
         """Latest selection-authority seq, ignoring everything that carries no selection authority.
 
-        EVERY DIAGNOSTIC EVENT, not just the two LLM accounting rows this used to name. The fence is
-        captured before the slow paid `_prepare_node_idea` and compared for EQUALITY at commit
-        (`card_reservation.py`), so any row appended in that window discards a proposal the run has
-        already paid a Developer call for — reported as "a control/research/lifecycle event won the
-        CAS", which is exactly what it was not.
+        ONE CALLER SINCE 2026-08-20, and the scope matters: `card_reservation.py::_reserve_node_build`
+        compares this for EQUALITY across the CAS RETRIES of one reservation, inside `_id_lock`. That
+        window is microseconds long and nothing paid is at risk in it — a retry just re-plans.
+
+        IT NO LONGER FENCES A PAID PROPOSAL. `_stage_prepared_card` used to take it and compare it
+        across the whole slow `_prepare_node_idea` call, and that was the wrong comparison rather
+        than the wrong exclusion list: "nothing at all happened" is a strict superset of "nothing
+        this proposal's receipt asserts moved", and the difference is exactly the concurrent research
+        task and the node terminals — the rows a multi-minute window is CERTAIN to contain. Measured
+        over `/var/tmp/looplab-bench/runs-armb` (20 runs, 2026-08-20): 56 isolated raw proposals, 56
+        discards, 0 Cards, $3.89, with `research_attempted` inside 100 % of the windows. Twice before
+        this the answer was to widen the list below (the two LLM rows -> `DIAGNOSTIC_EVENTS` ->
+        `SETUP_THREAD_APPENDABLE`); the list was never the defect. See
+        `card_reservation.py::_proposal_receipt_fence` for what replaced it and what still refuses.
         `train_monitor_alert` and the two ASHA rows are ON by default and fire on a TIMER from
         concurrent evals, so they land in that window as a matter of course; measured, each moves the
         fence 1 -> 2. `deps_installed` and `full_retrain_charged` do the same from the attempt loop.
@@ -734,10 +741,18 @@ class SpeculationMixin:
 
     @staticmethod
     def _developer_sentinel(node) -> bool:
+        # BOTH SPELLINGS. `empty_build_refusal` moved from `(developer error:` to
+        # `(developer stuck:` on 2026-08-28 (c11251a1) and only `engine/orchestrator.py` was taught
+        # the new one, so this predicate stopped recognising a build that wrote nothing. Measured
+        # the same morning on dsFix1 node 2: the refusal fired, this returned False, the sentinel
+        # fell through as if it were solution code, and the engine committed a node with
+        # `files: {}` and spent 36.1 s evaluating the untouched `raise NotImplementedError`
+        # template for a 0.0 -- one node slot of three. A sentinel is only as safe as its LEAST
+        # aware reader.
         return bool(
             node is not None
             and isinstance(getattr(node, "code", None), str)
-            and is_developer_error(node.code)
+            and (is_developer_error(node.code) or is_developer_stuck(node.code))
         )
 
     @staticmethod
@@ -1310,6 +1325,17 @@ class SpeculationMixin:
                 )
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
+            if is_developer_stuck(result.code):
+                # The model ran out of moves on THIS card; the run is not in trouble. Terminalize
+                # the build and let the next speculative action proceed -- no crash record, no
+                # circuit breaker, which is the distinction `core/models.py::DEVELOPER_STUCK_PREFIX` draws and which
+                # the crash branch below would erase.
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": generation,
+                    "error": result.code, "reason": "developer_stuck", "eval_seconds": 0.0,
+                })
+                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+                return
             if is_developer_error(result.code):
                 # The terminal and its circuit-breaker are one event-log transaction. A process
                 # crash may leave the preceding node_created durable, but can never leave a new
@@ -1325,12 +1351,19 @@ class SpeculationMixin:
                         or terminal_node.status is not NodeStatus.pending
                     ):
                         return None
-                    self.store.append_many(developer_crash_records(
+                    records = developer_crash_records(
                         node_id, terminal_node.attempt, result.code,
                         "auto-paused: a Developer session crashed (LLM unreachable or a hard "
                         "error, unresolved within the node) — resume once it's fixed",
-                    ), expected_last_seq=tail)
-                    self._create_paused = True
+                    )
+                    # `terminal_state` is the exact prefix this CAS appends onto, so the rank the
+                    # terminal takes is decidable before it lands: below
+                    # `developer_crash_pause_after` the transaction is the terminal alone.
+                    pause_due = self._developer_crash_pause_due(terminal_state, node_id)
+                    self.store.append_many(records if pause_due else records[:1],
+                                           expected_last_seq=tail)
+                    if pause_due:
+                        self._create_paused = True
                     return None
 
                 # A crash terminal that could not land leaves the node pending: the ordinary
@@ -1503,6 +1536,9 @@ class SpeculationMixin:
         self._refresh_speculation_budget(state)
         if self._node_reservation_slots_remaining(state, events=events) < 1:
             return False
+        # The node-OPEN floor, before a build is elected: a prefetch is a node cycle bought early,
+        # and one the ceiling would discard is not worth requesting (`_refuse_node_open_below_floor`).
+        self._refuse_node_open_below_floor("a speculative Card build")
         excluded = self._election_excluded_card_ids(state)
         actions = speculative_card_actions(
             state,
@@ -1914,14 +1950,12 @@ class SpeculationMixin:
         proposal_events: list,
         proposal_state: RunState,
         proposal_node_ceiling: int,
-        cue_fence: bytes,
         roles: tuple[Any, Any],
     ) -> SpecRawStageResult:
         """Worker-only proposal half: no selection-affecting event may escape this call."""
 
         raw_action = dict(action)
         generation = proposal_state.search_epoch
-        proposal_authority_seq = self._proposal_authority_seq(proposal_events)
         researcher, developer = roles
         source = "engine" if raw_action.get("kind") == "merge" else "researcher"
         self._discard_node_build_telemetry(researcher=researcher, developer=developer)
@@ -1953,11 +1987,9 @@ class SpeculationMixin:
                 generation=generation,
                 action=raw_action,
                 proposal_state=proposal_state,
-                proposal_authority_seq=proposal_authority_seq,
                 proposal_node_ceiling=proposal_node_ceiling,
                 at_node=proposal_node_ceiling,
                 source=source,
-                cue_fence=cue_fence,
                 success=idea is not None,
                 idea=idea,
                 steering_context=steering,
@@ -1970,11 +2002,9 @@ class SpeculationMixin:
                 generation=generation,
                 action=raw_action,
                 proposal_state=proposal_state,
-                proposal_authority_seq=proposal_authority_seq,
                 proposal_node_ceiling=proposal_node_ceiling,
                 at_node=proposal_node_ceiling,
                 source=source,
-                cue_fence=cue_fence,
                 success=False,
                 audit_events=tuple(audit_events),
                 error=producer_error_text(exc),
@@ -1988,7 +2018,6 @@ class SpeculationMixin:
         proposal_events: list,
         proposal_state: RunState,
         proposal_node_ceiling: int,
-        cue_fence: bytes,
         roles: tuple[Any, Any],
         notify,
     ) -> None:
@@ -2002,7 +2031,6 @@ class SpeculationMixin:
                         proposal_events,
                         proposal_state,
                         proposal_node_ceiling,
-                        cue_fence,
                         roles,
                     ),
                     abandon_on_cancel=False,
@@ -2021,11 +2049,9 @@ class SpeculationMixin:
                     generation=proposal_state.search_epoch,
                     action=dict(action),
                     proposal_state=proposal_state,
-                    proposal_authority_seq=self._proposal_authority_seq(proposal_events),
                     proposal_node_ceiling=proposal_node_ceiling,
                     at_node=proposal_node_ceiling,
                     source="engine" if action.get("kind") == "merge" else "researcher",
-                    cue_fence=cue_fence,
                     success=False,
                     error=producer_error_text(exc),
                 )
@@ -2076,13 +2102,11 @@ class SpeculationMixin:
             result.action,
             result.idea,
             proposal_state=result.proposal_state,
-            proposal_authority_seq=result.proposal_authority_seq,
             proposal_node_ceiling=result.proposal_node_ceiling,
             at_node=result.at_node,
             source=result.source,
             steering_context=result.steering_context,
             cross_run_receipt=result.cross_run_receipt,
-            proposal_cue_fence=result.cue_fence,
         )
         if card_id is None:
             if getattr(self, "_card_stage_attached_to", None) is not None:
@@ -2128,6 +2152,11 @@ class SpeculationMixin:
             records = developer_crash_records(
                 node.id, node.attempt, node.code,
                 "auto-paused: recovered a Developer crash before GPU dispatch")
+            # The terminal this sweep appends takes the next crash rank; below the run's
+            # `developer_crash_pause_after` it owns no pause, exactly as the live sites decide.
+            pause_due = self._developer_crash_pause_due(state, node.id)
+            if not pause_due:
+                records = records[:1]
         else:
             # A legacy writer (or a crash in the old two-append path) may already have made the
             # sentinel terminal while losing only its pause. Folded ``paused`` cannot distinguish
@@ -2142,6 +2171,9 @@ class SpeculationMixin:
                     and candidate.id not in state.aborted_nodes
                     and not candidate.tombstoned
                     and type(candidate.terminal_event_seq) is int
+                    # A crash whose log position is below `developer_crash_pause_after` never
+                    # owed a pause: a missing one there is the DESIGN, not a lost append.
+                    and self._developer_crash_pause_due(state, candidate.id)
                     and not self._has_exact_developer_pause(
                         events,
                         node_id=candidate.id,
@@ -2158,11 +2190,13 @@ class SpeculationMixin:
             records = developer_crash_records(
                 node.id, node.attempt, node.code,
                 "auto-paused: recovered a terminal Developer crash", terminal=False)
+            pause_due = True
         tail = events[-1].seq if events else -1
         try:
             async with self._write_lock:
                 self.store.append_many(records, expected_last_seq=tail)
-            self._create_paused = True
+            if pause_due:
+                self._create_paused = True
             return True
         except EventStoreConcurrencyError:
             return True
@@ -2720,8 +2754,8 @@ class SpeculationMixin:
             # owns its own tail/generation/parent CAS and may safely decline a stale
             # proposal if an eval changes the search state during the paid call.
             # Selection and proposal share one immutable log snapshot.  A second
-            # read here would let an old raw action inherit a newer best/parent/cue
-            # fence and make the main-task commit validate the wrong authority.
+            # read here would let an old raw action inherit a newer epoch/parent
+            # receipt fence and make the main-task commit validate the wrong authority.
             # Deliberately NOT `_fold_current`: this pair is the proposal's OWN authority snapshot,
             # handed whole to a worker that outlives the turn, and its explicit read/fold pairing is
             # what `test_raw_action_selection_and_worker_share_one_proposal_snapshot` reads.
@@ -2772,7 +2806,6 @@ class SpeculationMixin:
                             proposal_events,
                             proposal_state,
                             proposal_node_ceiling,
-                            self._proposal_cue_fence(proposal_state),
                             roles,
                             session.notify,
                         )

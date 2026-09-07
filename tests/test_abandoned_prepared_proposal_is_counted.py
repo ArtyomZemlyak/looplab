@@ -52,10 +52,14 @@ def _serve(eng, session):
 
 
 def _result(*, success, idea=None, audit_events=()):
+    # `proposal_authority_seq` and `cue_fence` are GONE from this record, not renamed: the
+    # whole-log max-seq fence they carried was replaced by `card_reservation.py::
+    # _proposal_receipt_fence`, which compares only what `card_added` goes on to assert. Nothing
+    # here turns on either — every case below is about the ABANDON REASON the commit reports.
     return SpecRawStageResult(
         generation=0, action={"kind": "draft"}, proposal_state=None,
-        proposal_authority_seq=-1, proposal_node_ceiling=0, at_node=0,
-        source="researcher", cue_fence=b"", success=success, idea=idea,
+        proposal_node_ceiling=0, at_node=0,
+        source="researcher", success=success, idea=idea,
         audit_events=audit_events)
 
 

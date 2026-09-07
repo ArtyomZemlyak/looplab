@@ -18,6 +18,7 @@ hard stop.
 """
 from __future__ import annotations
 
+import math as _math
 from typing import Optional
 
 import json
@@ -25,6 +26,8 @@ import logging
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from looplab.agents.answered_by_context import answered_by_context
+from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.agents.loop_options import LoopOptions
 from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
 from looplab.core.fitness import is_usable_metric
@@ -44,11 +47,30 @@ from looplab.core.source_identity import canonical_source_ref
 
 
 _LOG = logging.getLogger(__name__)
+_RESEARCH_BUDGET_LINE = (
+    "BUDGET: ${spent:.4f} of ${limit:.4f} spent, ${remaining:.4f} left ({pct:.0f} % gone). "
+    "Research that leaves no money for experiments buys nothing — size this memo to what is left.\n\n"
+)
 
 _MAX_SOURCES = MAX_RESEARCH_SOURCES
 _STATE_BRIEF_MAX_NODES = 80
 _STATE_BRIEF_MAX_CHARS = 32_000
 _STATE_BRIEF_GOAL_CHARS = 800
+# AND THE SAME AGAIN FROM THE END. A goal cut to its first 800 characters is not a short goal, it is
+# a goal whose LAST section was deleted -- and the last section is where an operator puts the facts
+# about the environment, because that is where they read naturally. Measured 2026-08-28 on the
+# AlgoTune card (13,686 chars): the sentence "the harness runs `setup.py build_ext --inplace`"
+# reached `propose` in 26/32 prompts, `plan` in 45/47 and `plan_step` in 118/139 -- and
+# `deep_research` in 0 of 23, 0 of 38, 0 of 49 and 0 of 22 across four runs, because it sits past
+# character 800. So the phase that DECIDES what to try was the one phase told the toolchain did not
+# exist, and it said so in its own words: "What about using numba/cython? Not available in this
+# environment presumably ... Pure stdlib is safest."
+#
+# This is not a space problem. The whole brief is allowed `_STATE_BRIEF_MAX_CHARS` = 32,000 and the
+# board rows take the rest; 800 was simply never revisited. A head-and-tail excerpt costs ~200
+# prompt tokens per research generation -- about $0.0014 over a whole run at the measured
+# $0.14/Mtok -- and stops silently deleting the half of the contract that names the tools.
+_STATE_BRIEF_GOAL_TAIL_CHARS = 800
 _STATE_BRIEF_OPERATOR_CHARS = 120
 _STATE_BRIEF_FAILURE_CHARS = 300
 _STATE_BRIEF_RATIONALE_CHARS = 120
@@ -457,6 +479,28 @@ _UNTRUSTED_RESEARCH_DATA_RULE = (
 )
 
 
+def _goal_excerpt(goal, brief_text) -> str:
+    """The goal's head AND tail, so a long contract does not lose its environment section.
+
+    Returns the plain head when the goal fits, so a short goal is byte-identical to before. The
+    elision marker names how much was dropped rather than hiding it, because a reader who cannot
+    see that something was cut cannot ask for it.
+    """
+    try:
+        raw = "" if goal is None else str(goal)
+    except Exception:  # noqa: BLE001 — diagnostic text must not perturb the research stage
+        # NOT `brief_text(goal, ...)`: that would hand the same unstringifiable object to the same
+        # `str()` and depend on the CALLER catching what this function already caught. A guarantee
+        # that leans on someone else's except block is not a guarantee.
+        return "<goal unavailable>"
+    if len(raw) <= _STATE_BRIEF_GOAL_CHARS + _STATE_BRIEF_GOAL_TAIL_CHARS:
+        return brief_text(raw, _STATE_BRIEF_GOAL_CHARS + _STATE_BRIEF_GOAL_TAIL_CHARS)
+    head = brief_text(raw[:_STATE_BRIEF_GOAL_CHARS], _STATE_BRIEF_GOAL_CHARS)
+    tail = brief_text(raw[-_STATE_BRIEF_GOAL_TAIL_CHARS:], _STATE_BRIEF_GOAL_TAIL_CHARS)
+    dropped = len(raw) - _STATE_BRIEF_GOAL_CHARS - _STATE_BRIEF_GOAL_TAIL_CHARS
+    return f"{head} [... {dropped} chars of the goal elided ...] {tail}"
+
+
 def state_brief(state: RunState, max_nodes: int = 40) -> str:
     """Coverage-aware bounded view for deep research, plus THE BOARD THIS STAGE ITSELF FILLS.
 
@@ -607,7 +651,7 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
         # `round` can duplicate an index for tiny inputs; deterministically spend spare capacity.
         add(remaining)
     add(reversed(active))
-    goal = brief_text(state.goal, _STATE_BRIEF_GOAL_CHARS) or "(unknown)"
+    goal = _goal_excerpt(state.goal, brief_text) or "(unknown)"
     prefix_lines = [f"goal: {goal}  direction: {state.direction}"]
     if best is not None:
         best_metric = (evaluated_metric_evidence(best)
@@ -789,6 +833,35 @@ class DeepResearcher:
             "name": "emit", "description": "Emit the final research memo.",
             "parameters": _MemoOut.model_json_schema()}}
 
+    def _budget_note(self) -> str:
+        """The run's remaining LLM spend, or "" — this stage is the one that could not see it.
+
+        MEASURED over the probe corpus on 2026-08-28: `deep_research` carried a budget line in 2 of
+        2,549 generations (0 %), against 84 % for `plan_step`, 85 % for `propose`, 91 % for `plan`
+        and 100 % for `strategist_consult`. It is also the ONLY stage with no turn cap and no money
+        cap of its own (`agent_max_turns` / `agent_time_budget_s` both default to 0 = unlimited), so
+        the one stage that cannot see the budget is the one that can spend all of it. `opus5` did
+        exactly that: ten generations, $1.0204 of a $1.00 run, ZERO nodes, ending in
+        `finalize_step: abandoned / error_terminal`. Corpus median share for this stage is 12.9 %.
+
+        Returns "" for every reason a caller might want one -- no client, no accountant, no limit, a
+        non-finite or unparseable figure -- so a run with no `llm_budget_usd` gets a byte-identical
+        prompt to before. This is an EXTRA rung; research must never fail over it.
+        """
+        acct = getattr(getattr(self, "client", None), "accountant", None)
+        if acct is None:
+            return ""
+        try:
+            limit = float(getattr(acct, "limit", None) or 0.0)
+            spent = float(getattr(acct, "spent", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return ""
+        if limit <= 0 or not _math.isfinite(limit) or not _math.isfinite(spent) or spent < 0:
+            return ""
+        return _RESEARCH_BUDGET_LINE.format(
+            spent=spent, limit=limit, remaining=max(0.0, limit - spent),
+            pct=min(100.0, 100.0 * spent / limit))
+
     def research(self, state: RunState, trigger: str = "") -> ResearchMemo:
         memo = ResearchMemo(at_node=len(state.nodes), trigger=trigger)
         if self.tools is not None and hasattr(self.tools, "bind_state"):
@@ -796,8 +869,12 @@ class DeepResearcher:
         messages = [
             {"role": "system", "content":
                 render(self.prompts, "deep_research_system", _SYSTEM)
-                + _UNTRUSTED_RESEARCH_DATA_RULE},
-            {"role": "user", "content": state_brief(state) +
+                + _UNTRUSTED_RESEARCH_DATA_RULE + _CONTEXT_BEFORE_TOOLS_RULE},
+            # The tool-surface join goes in the USER turn, beside the snapshot it describes, and
+            # is built from the BOUND provider rather than re-derived here — see
+            # `agents/answered_by_context.py` for why this is data and not another prompt rule.
+            {"role": "user", "content": self._budget_note() + state_brief(state) +
+                answered_by_context(self.tools) +
                 "\nReview the run. Consult sources if useful, then emit your memo."},
         ]
         sources: list[dict] = []
@@ -879,6 +956,9 @@ class DeepResearcher:
                 fallback=lambda msgs: self._forced(msgs, memo, sources),
                 on_tool_result=_record,
                 on_plan=_plan, phase_label="deep_research",
+                # Live, not the session-start snapshot the user turn carries: this stage has no turn
+                # cap and no money cap, so it must hear the figure MOVE. See `tool_loop.py`.
+                budget_note=self._budget_note,
                 nudge_prompt="Now call `emit` with your memo.",
                 stuck_prompt="Stop: you appear to be stuck ({reason}). Call `emit` with your memo now.",
                 **self.loop_opts)
@@ -1029,17 +1109,33 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     # knowledge gets the configured embedder/Memora/case layer, and memory/skills/literature follow
     # the same gates.  Deep Research still owns only its WebTools addition below.
     from looplab.agents.factory import _shared_providers
+    from looplab.agents.repo_reader import repo_reader_provider
     from looplab.core.evidence import envelope_enabled
     providers = _shared_providers(task, settings, run_dir, role="researcher")
+    # …and the editable-repo READER the Researcher has always had, which this site never appended.
+    # `_shared_providers` covers the run/knowledge/memory stores; on a cold start EVERY one of them
+    # is empty by construction, so without this the stage that mints the run's first hypotheses is
+    # handed a surface whose every row reads zero and cannot open the one thing on disk that answers
+    # the task. It said so itself in 70% of the memos it wrote. See `repo_reader_provider`.
+    _repo_reader = repo_reader_provider(task)
+    if _repo_reader is not None:
+        providers.append(_repo_reader)
     if getattr(settings, "web_search", False):
-        from looplab.tools.web import WebTools
-        # Marked at the tool (`core/evidence.py`, doc 52 row 13): this loop states the boundary in
-        # `_UNTRUSTED_RESEARCH_DATA_RULE` and its fetched pages used to arrive bare beside it.
-        providers.append(WebTools(enabled=True, envelope=envelope_enabled(settings)))
-    tools = None
-    if providers:
-        from looplab.agents.agent import CompositeTools
-        tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
+        # Through the tool module's one constructor, so the task's `EvalSpec.web_deny` reaches the
+        # stage that makes essentially every `web_fetch` of a run (docs/56 §150 #13: 52 of 76 runs
+        # fetched their own task's published solver here) — and, on the same call, the envelope:
+        # this loop states the boundary in `_UNTRUSTED_RESEARCH_DATA_RULE` and its fetched pages
+        # used to arrive bare beside it (`core/evidence.py`, doc 52 row 13).
+        from looplab.tools.web import build_web_tools
+        providers.append(build_web_tools(task, envelope=envelope_enabled(settings)))
+    # Through `compose_tools`, not a hand-rolled `CompositeTools(providers)`. The comment above says
+    # this stage uses the same capability assembly as the Researcher — and then the composition step
+    # was spelled out separately, which is how it silently missed `Settings.hide_empty_tools`:
+    # measured 2026-08-19, a run launched with the flag ON recorded it as `true` in
+    # `config.snapshot.json` and still offered every empty tool here, because this is the phase that
+    # makes essentially all of a cold-start run's tool calls.
+    from looplab.agents.tool_loop import compose_tools
+    tools = compose_tools(providers, settings) if providers else None
     # `loop_opts_from_settings(settings)` MINUS this stage's summary-client divergence, instead of the nine
     # individually re-plumbed settings this used to spell out (doc 25 AG-01). The bundle also
     # carries the operator's `self_plan` setting and the D11 `summary_client` (compressor_model — this

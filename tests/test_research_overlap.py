@@ -172,7 +172,7 @@ class _LoopStub(ResearchCadenceMixin):
         return f"attempt-{len(self.attempts)}"
 
     def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None,
-                              **extra):
+                              superseded=None, **extra):
         self.recorded.append((research_memo_sig(memo), trigger))
         self.recorded_attempts.append(attempt_id)
 
@@ -746,8 +746,13 @@ class _ConvergeStub(ResearchCadenceMixin):
         tag = "same" if self.computes <= self._switch else f"new-{self.computes}"
         return types.SimpleNamespace(summary=tag, recommended_directions=["d"])
 
-    def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None, converged_skips=0):
-        self.recorded.append({"summary": memo.summary, "converged_skips": converged_skips})
+    def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None,
+                              converged_skips=0, superseded=None):
+        # Both receipts are listed rather than swallowed with `**_`: this file's own note two
+        # stubs up is that a double whose signature the production call site cannot satisfy
+        # tests nothing — it raised TypeError here and the loop recorded nothing at all.
+        self.recorded.append({"summary": memo.summary, "converged_skips": converged_skips,
+                              "superseded": superseded})
 
 
 def test_a_recorded_memo_carries_how_many_PAID_passes_were_skipped_before_it():

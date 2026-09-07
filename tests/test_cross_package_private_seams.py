@@ -51,10 +51,23 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         # declaration family should be reaching for it, and this registry is what makes a future
         # rename a red test instead of a submit-time validator that silently stops running.
         "looplab.runtime.command_eval": ("_validate_rel_paths",),
+        # STRUCK OFF 2026-08-21: `adapters/repo_developer.py` no longer splices
+        # `agents.roles._CONTEXT_BEFORE_TOOLS_RULE`. Not a refactor — the clause was removed from
+        # that prompt on evidence (A/B'd over three models it moved nothing, while the same
+        # knowledge published as DATA took cold-start tool calls 41.3 -> 17.7), and the role's two
+        # byte-for-byte prompt contracts forbid an unconditional suffix. The seam is gone, so the
+        # debt shrinks here rather than being carried as a comment.
     },
     "agents": {
         "looplab.core.llm": ("_reasoning_of",),
         "looplab.runtime.sandbox": ("_kill_tree",),
+        # A9 (docs/60): the path-keyed read nudge tells the model how many PAGES the file it
+        # keeps re-reading actually is, and the page width has to be the reader's OWN — a
+        # second copy of `RESULT_CAP - 400` in the loop is a number that goes stale the day
+        # the reader's budget moves, in a sentence whose whole job is to be arithmetic the
+        # model can act on. Declared rather than promoted: the constant is private because
+        # `reposcout` owns the page, and this registry is what makes a rename a red test.
+        "looplab.tools.reposcout": ("_MAX_READ",),
     },
     "cli": {
         "looplab.adapters.tasks": ("_make_abstractor",),
@@ -90,6 +103,15 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         # private on purpose, and this registry is what turns a future rename into a red test
         # instead of a silent break.
         "looplab.events.finalize_scope": ("_adjacent_claim", "_finalize_begun", "_scope_has_step"),
+        # ADDED at the 2026-08-31 merge, and it is master's `6262f3a1` paying a debt it opened
+        # without declaring: `engine/card_reservation.py` imports `_drop_author` so the engine's
+        # retire idempotence replays the FOLD's own drop/reopen rule instead of re-inventing it —
+        # that function's docstring is explicit that there must be "ONE spelling, because three
+        # readers ask it and they must not drift", and the retire scan is now a fourth. Declared
+        # rather than promoted for exactly the reason the docstring above gives: the name is
+        # private because the ledger owns the rule, and this row is what makes a rename a red test
+        # instead of an engine that silently re-retires a card the operator reopened.
+        "looplab.events.card_ledger": ("_drop_author",),
         "looplab.runtime.command_eval": ("_LABEL_KEYS", "_PRED_KEYS", "_as_list"),
         # THE ONE FILE-DIGEST RULE, sampling above `SAMPLE_ABOVE` with the mode in the preimage so a
         # sampled entry can never collide with a fully-read one. `engine/workspace.py`'s build-delta

@@ -72,31 +72,38 @@ _LOG = logging.getLogger(__name__)
 # WHICH FENCE REFUSED A STAGED PROPOSAL, named rather than collapsed into one silent `None`.
 #
 # `_stage_prepared_card._plan` compares a FRESH fold against the snapshot the proposal was authored
-# against, and any of eight conjuncts refuses. THE REFUSAL IS THE DESIGNED ANSWER to moved authority
+# against, and any of SIX conjuncts refuses. THE REFUSAL IS THE DESIGNED ANSWER to moved authority
 # — a proposal authored against an old search state must never be relabelled as current work — and
 # nothing here changes it. What changes is that the loss was invisible: every refusal returned a
 # bare `None` and the caller simply dropped it.
 #
-# THE BATCH LANE IS WHY IT MATTERS NOW. Since the paid batch propose moved off the event-loop thread
-# (`56764cbd`) there is a minutes-long SUSPENSION between the authority fold and the staging loop,
-# so one best-IMPROVING eval terminal, or one `research_completed`/`hint`/strategy row — all
-# BACKGROUND_APPENDABLE, all hashed by `_proposal_cue_fence` — refuses EVERY idea of the batch at
-# once. Pre-offload the loop was frozen and no fence input could move mid-propose, so this was
-# unreachable; the occupancy-paced create the batch branch's own comment advertises makes it
-# routine. N paid ideas at once, where the per-action lane risks one.
+# SIX AND NOT EIGHT, and the difference is not a dropped comparison. The naming landed on master
+# (`6262f3a1`) over the OLD fence, which also compared a whole-log max-seq (`authority_seq_moved`),
+# the champion id (`best_moved`) and a steering-cue hash (`cues_moved`). This branch had already
+# deleted those three in `50eac526`, on a measurement: the isolated raw lane staged 0 Cards out of
+# 56 PAID proposals because all three of those inputs move on a timer inside any multi-minute
+# propose window, while epoch/parents/ceiling moved in 0 of the 56. `_proposal_receipt_fence`
+# replaced them with what the Card's own receipt ASSERTS, so this registry names the conjuncts the
+# fence in this tree actually has: the lifecycle stop, the node-slot ceiling, and the three fields
+# of the receipt plus its own "not scorable at all" answer.
+#
+# THE BATCH LANE IS WHY THE NAMING MATTERS. Since the paid batch propose moved off the event-loop
+# thread (`56764cbd`) there is a minutes-long SUSPENSION between the fold the proposal was authored
+# against and the staging loop, so anything the receipt asserts that moves in that window refuses
+# EVERY idea of the batch at once. Pre-offload the loop was frozen and no fence input could move
+# mid-propose, so this was unreachable; the occupancy-paced create the batch branch's own comment
+# advertises makes it routine. N paid ideas at once, where the per-action lane risks one.
 #
 # A typo'd slug does not fail: it lands on an in-process seam a caller reads and on a log line an
 # operator greps, so `tests/test_card_stage_refusals.py` re-derives this set from `_plan`'s own AST
 # in BOTH directions — the way `CARD_BUILD_SKIP_REASONS` is guarded one module over.
 CARD_STAGE_REFUSALS = (
-    "authority_seq_moved",   # a non-diagnostic row landed inside the proposal's equality window
-    "search_epoch_moved",    # the search epoch rotated under the proposal
     "run_stopping",          # paused / finished / stop requested
-    "best_moved",            # a best-IMPROVING terminal landed — the anchor this was scored against
-    "cues_moved",            # a steering cue changed (research memo, hint, strategy)
     "node_ceiling_moved",    # the future node-slot ceiling advanced
+    "receipt_unscorable",    # the parent or the score anchor stopped being scorable at all
+    "search_epoch_moved",    # the search epoch rotated under the proposal
     "parent_moved",          # the parent snapshot (kind/parents/generations) changed
-    "score_moved",           # the score snapshot of the anchor changed
+    "score_moved",           # the score snapshot of the anchor the receipt names changed
 )
 
 from looplab.search.card_selection import (META_CARD_ID, SpeculativeSelectionContext,
@@ -1319,31 +1326,97 @@ class CardReservationMixin:
             # No reservation was made, so nothing leaks; the caller returns to the selection boundary.
             return retry_tail_cas(self.store, _plan, on_exhaust=lambda: None)
 
-    @staticmethod
-    def _proposal_cue_fence(state: RunState) -> bytes:
-        """Bounded proposal authority that may move without changing the search epoch."""
+    @classmethod
+    def _proposal_receipt_fence(cls, state: RunState, action: dict, *, scored_against):
+        """What a staged proposal's own ``card_added`` receipt ASSERTS about the world, or None.
 
-        return orjson.dumps({
-            "pending_hints": state.pending_hints,
-            "research_count": len(state.research),
-            "latest_research": state.research[-1] if state.research else None,
-            "pending_strategy": state.pending_strategy,
-            "active_strategy": state.active_strategy,
-        }, option=orjson.OPT_SORT_KEYS)
+        THE SHAPE IS THE POINT. A staged Card is INVENTORY: it reserves no node, spends nothing and
+        runs nothing, so the only way a late commit can be WRONG is by writing a receipt that is
+        FALSE. Everything else a concurrent append can change makes the proposal less INFORMED —
+        a different and much cheaper problem, because the run has ALREADY PAID for this one and the
+        next proposal reads the newer world anyway. This fence therefore carries exactly the values
+        `_card_added_payload` goes on to assert and nothing else: the search epoch the proposal
+        belongs to, the exact parent generations its action names, and the SCORE ANCHOR identity
+        (`scored_against` / `_generation` / `_empty`) the receipt records for it.
+
+        `scored_against` IS AN ARGUMENT AND NOT `state.best_node_id`, which is the whole reason this
+        fence can be evaluated twice. The commit-side call must ask about the ANCHOR THE PROPOSAL
+        NAMED; re-reading the champion from the commit fold would compare the receipt against a
+        question the proposal never asked, and `_card_score_snapshot(state, None)` answers with
+        WHOEVER IS CHAMPION NOW — which is how a proposal authored against an empty board came to
+        mint `scored_against=0`. Callers pass `proposal_state.best_node_id`, unchanged, to both.
+
+        MEASURED, `/var/tmp/looplab-bench/runs-armb` (20 AlgoTune runs, 2026-08-20): the isolated
+        raw proposal lane staged **0 Cards out of 56 paid proposals**, $3.89. All 56 windows had a
+        `research_attempted` land inside them, 52 a `node_evaluated` and a `stage_finished`, 42 a
+        `hint`/`research_completed` — the rows a multi-minute proposal window is CERTAIN to contain,
+        because the concurrent research task and the evaluation children are on a timer. Re-derived
+        against the same logs, epoch/parents/ceiling moved in **0** of the 56 and the run was live in
+        all 56. The old fence was reading the log's LENGTH where it meant to read the receipt.
+
+        DELIBERATELY NOT IN HERE, and each one is a prompt INPUT that no receipt field records:
+          * `pending_hints`, `pending_strategy`, `active_strategy` and the research memo count — the
+            `_proposal_cue_fence` this replaces. `render_hint_directives(state.pending_hints)` is the
+            ONLY reader of a pending hint and staging consumes none of them, so a directive that
+            lands mid-proposal is still pending for the next one. Nothing is lost by staging this.
+          * `state.best_node_id` moving to a DIFFERENT node. The receipt does not name the champion;
+            it names `scored_against`, and this fence pins THAT — the anchor id the proposal was
+            written against, its generation and the empty flag — so an unrelated node outscoring the
+            incumbent mid-proposal changes nothing here. What is NOT delegated to `_plan_native_card`
+            is the anchor's own identity: it re-derives the triple from the COMMIT fold and refuses
+            only when the anchor is UNSCORABLE (tombstoned/aborted/out of range), so on its own it
+            admits the two changes that make the receipt FALSE rather than merely stale — an anchor
+            RE-ATTEMPTED under the proposal (`node_reset` is a control event and lands from an
+            out-of-band writer, so `scored_against_generation` is re-derived as the NEW generation,
+            which has produced no metric at all, and `core/cards.py::card_score_fence_state` then
+            reads the card `current` instead of `stale`) and an empty board acquiring a champion
+            (`scored_against_empty=True` is re-derived as `scored_against=<the new champion>`).
+            Measured over `/var/tmp/looplab-bench/runs-B` (20 AlgoTune runs of this code): 2 of the
+            68 staged Cards carry a `scored_against` that differs from the best node at their
+            `propose` span's start, i.e. 2 receipts that assert a comparison their proposal never
+            made. Both are refused here now, and refusing is the only available answer — minting the
+            PROPOSAL-time triple instead would publish a Card the fold blocks `freshness_stale`
+            forever, which is dead durable inventory rather than a saved proposal.
+          * a max-seq over the whole log (`_proposal_authority_seq`, which this call site no longer
+            takes). "Nothing at all happened" is a strict superset of "nothing this receipt asserts
+            moved", and the set difference is precisely the concurrent research task and the node
+            terminals. Widening that exclusion list is what the previous two fixes did; the list is
+            not the defect, comparing the wrong thing is. The seq fence REMAINS in
+            `_reserve_node_build`, where it fences a CAS retry loop inside `_id_lock` and no paid
+            proposal is at risk.
+
+        A STALE-WORLD PROPOSAL STILL FAILS, and these are the five doors it fails through: an epoch
+        bump (an explicit "everything before this is superseded"), a parent that was re-attempted or
+        tombstoned under it, a SCORE ANCHOR that moved the same two ways, a node id ceiling that
+        moved (someone took the slot this proposal was written against), and a lifecycle stop —
+        plus `_plan_native_card`'s own duplicate/attach re-derivation, which is computed against the
+        COMMIT state and not fenced at all.
+        """
+
+        parent = cls._build_parent_snapshot(state, action)
+        if parent is None:
+            return None
+        # `is None` BEFORE unpacking, per `_card_score_snapshot`'s contract: a bare None is "this
+        # anchor is not scorable", which is a refusal, while `(None, None, True)` is the valid
+        # empty-board snapshot and must compare equal to itself across the two folds.
+        score = cls._card_score_snapshot(state, scored_against)
+        if score is None:
+            return None
+        return state.search_epoch, parent, score
 
     def _stage_prepared_card(self, action: dict, idea: Idea, *, proposal_state: RunState,
                              proposal_node_ceiling: int, at_node: int, source: str,
-                             steering_context=(), cross_run_receipt=None,
-                             proposal_cue_fence: Optional[bytes] = None,
-                             proposal_authority_seq: Optional[int] = None) -> Optional[str]:
+                             steering_context=(), cross_run_receipt=None) -> Optional[str]:
         """Commit one concrete proposal as a ready Card, without reserving a Node.
 
         Layer 5 needs durable inventory *before* it can elect a request-driven producer.  Proposal is
         slow and therefore happens outside ``_id_lock``; this short commit re-folds and accepts the
-        result only while its epoch, parents, best anchor and future node-slot ceiling are unchanged.
-        Serial callers may retry harmless tail churn; isolated RAW callers additionally fence every
-        non-LLM-telemetry event. A lifecycle move returns to the outer loop so a proposal authored
-        against an old search state can never be relabelled as current work.
+        result only while the run is live and everything the Card's own receipt asserts is still
+        true — its epoch, its parent generations, the score anchor it names and the node-slot
+        ceiling it was written against.
+        `_proposal_receipt_fence` states that rule and carries the measurement that narrowed it; both
+        lanes (the serial outer batch and the isolated RAW producer) now answer to the SAME fence,
+        because "which caller am I" was never a property of what makes a proposal stale.
 
         Sets ``_card_stage_attached_to`` when the refusal was the PERMANENT one (the proposal is a
         repair of a question a live Card already owns); see the `attach` branch below. Cleared here
@@ -1361,22 +1434,21 @@ class CardReservationMixin:
         if (type(proposal_node_ceiling) is not int or proposal_node_ceiling < 0
                 or type(at_node) is not int or at_node < proposal_node_ceiling):
             return None
-        if (proposal_authority_seq is not None
-                and (type(proposal_authority_seq) is not int
-                     or proposal_authority_seq < -1)):
-            return None
         bounded_steering = normalize_steering_context(steering_context)
         if bounded_steering is None:
             return None
-        expected_parent = self._build_parent_snapshot(proposal_state, action)
-        expected_score = self._card_score_snapshot(
-            proposal_state, proposal_state.best_node_id)
-        expected_cues = (
-            self._proposal_cue_fence(proposal_state)
-            if proposal_cue_fence is None else proposal_cue_fence
-        )
-        if expected_parent is None or expected_score is None:
+        # THE ANCHOR IS PINNED HERE and handed to both evaluations of the fence. `_plan_native_card`
+        # below is passed the same value, so the receipt, the proposal and the commit-time check all
+        # name ONE node — see `_proposal_receipt_fence` for what re-reading the champion instead did.
+        score_anchor = proposal_state.best_node_id
+        expected_receipt = self._proposal_receipt_fence(
+            proposal_state, action, scored_against=score_anchor)
+        # An unscorable baseline at PROPOSAL time is refused by that same call: the proposal named a
+        # `scored_against` that was already tombstoned/aborted when it was written, which is a
+        # malformed action and not a race.
+        if expected_receipt is None:
             return None
+        expected_parent = expected_receipt[1]
 
         # A Researcher declaration is persisted as the effective, schedulable request.  In particular,
         # an over-declared GPU count must not become an immutable receipt that Layer 4 later clamps to a
@@ -1399,26 +1471,33 @@ class CardReservationMixin:
             # `_id_lock`: they scale with run history and may invoke bounded hashing/validation.  The
             # append's tail CAS is the authority for the snapshot.  If another reservation or control
             # wins after this plan, the CAS loses and the next turn recomputes every derived value.
-            # The isolated RAW worker is authorized by one exact semantic proposal prefix. LLM usage
-            # telemetry is worker-owned and may advance the physical tail, but every other event is
-            # authority-bearing. Serial outer batches omit this optional fence and retain CAS retries.
-            if (proposal_authority_seq is not None
-                    and self._proposal_authority_seq(events) != proposal_authority_seq):
-                return _refuse("authority_seq_moved")
             state = _fold(events)
-            if state.search_epoch != proposal_state.search_epoch:
-                return _refuse("search_epoch_moved")
             if state.paused or state.finished or state.stop_requested:
                 return _refuse("run_stopping")
-            if state.best_node_id != proposal_state.best_node_id:
-                return _refuse("best_moved")
-            if self._proposal_cue_fence(state) != expected_cues:
-                return _refuse("cues_moved")
             if self._node_id_ceiling(events, state) != proposal_node_ceiling:
                 return _refuse("node_ceiling_moved")
-            if self._build_parent_snapshot(state, action) != expected_parent:
-                return _refuse("parent_moved")
-            if self._card_score_snapshot(state, proposal_state.best_node_id) != expected_score:
+            # ONE FENCE, EVALUATED ONCE, THEN ATTRIBUTED — the 2026-08-31 merge of two changes that
+            # met here. The COMPARISON is this branch's and is untouched: `_proposal_receipt_fence`
+            # against the value pinned at proposal time, i.e. exactly what the Card's own receipt
+            # asserts and nothing else (see that method for the 0-of-56 measurement that narrowed
+            # it). What master's `6262f3a1` brought is that a refusal must NAME which half of the
+            # fence moved instead of returning a bare `None` — three of its eight slugs described
+            # conjuncts this branch had already deleted on that measurement (`authority_seq_moved`,
+            # `best_moved`, `cues_moved`), so the naming is applied to the fence that is actually
+            # here. Nothing is re-derived to do it: the branch reads the tuple the one call already
+            # returned, so the ORDER and the RESULT are identical to the single `!=` it replaces.
+            fresh_receipt = self._proposal_receipt_fence(
+                state, action, scored_against=score_anchor)
+            if fresh_receipt != expected_receipt:
+                if fresh_receipt is None:
+                    # The parent or the score anchor stopped being SCORABLE at all (tombstoned /
+                    # aborted / re-attempted out of range), which is `_proposal_receipt_fence`'s
+                    # own refusal rather than a field that merely moved.
+                    return _refuse("receipt_unscorable")
+                if fresh_receipt[0] != expected_receipt[0]:
+                    return _refuse("search_epoch_moved")
+                if fresh_receipt[1] != expected_receipt[1]:
+                    return _refuse("parent_moved")
                 return _refuse("score_moved")
             kind, parents, parent_generations = expected_parent
             del kind
@@ -1428,7 +1507,7 @@ class CardReservationMixin:
                 clean,
                 parents=parents,
                 parent_generations=parent_generations,
-                scored_against=proposal_state.best_node_id,
+                scored_against=score_anchor,
                 source=source,
                 at_node=at_node,
                 steering_context=bounded_steering,
@@ -1525,6 +1604,9 @@ class CardReservationMixin:
                if isinstance(action, dict) and META_CARD_ID not in action]
         if not raw:
             return []
+        # MAIN TASK, before the paid proposal(s) and before any Card receipt: the node-OPEN floor
+        # (`_refuse_node_open_below_floor`) — a Card staged here is the run's next node cycle.
+        self._refuse_node_open_below_floor(f"{len(raw)} Card proposal(s)")
         proposal_events = self.store.read_all()
         proposal_state = _fold(proposal_events)
         proposal_node_ceiling = self._node_id_ceiling(proposal_events, proposal_state)
@@ -1540,15 +1622,17 @@ class CardReservationMixin:
                 # timer could land. On the shipped default width it is the path a run takes.
                 #
                 # THE FENCE CAN MOVE ACROSS THIS AWAIT, and since 2026-08-31 that is COUNTED. This
-                # is the batch branch's first suspension point between the authority fold above and
-                # the staging loop, and `_stage_prepared_card._plan` compares the fresh fold against
-                # that snapshot — so one best-IMPROVING eval terminal, or one
-                # `research_completed`/`hint`/strategy row (all BACKGROUND_APPENDABLE, all hashed by
-                # `_proposal_cue_fence`), landing during the minutes-long paid propose refuses EVERY
-                # idea of the batch at staging. Pre-offload this was unreachable: the frozen loop
-                # meant no fence input could move mid-propose. The occupancy-paced create this very
-                # comment advertises makes it routine, and one moved fence discards N paid ideas
-                # where the per-action lane risks one.
+                # is the batch branch's first suspension point between the fold the proposals were
+                # authored against and the staging loop, and `_stage_prepared_card._plan` compares a
+                # fresh fold against that snapshot — so anything the Card's own receipt asserts
+                # (`_proposal_receipt_fence`: the search epoch, the parent generations, the score
+                # anchor's identity) moving during the minutes-long paid propose refuses EVERY idea
+                # of the batch at staging. Pre-offload this was unreachable: the frozen loop meant no
+                # fence input could move mid-propose. The occupancy-paced create this very comment
+                # advertises makes it routine, and one moved fence discards N paid ideas where the
+                # per-action lane risks one. What it can NO LONGER discard them for is a concurrent
+                # `research_completed`/`hint`/strategy row or an unrelated champion change — those
+                # were measured to refuse 56 of 56 paid proposals and were deleted in `50eac526`.
                 #
                 # The refusal itself is the designed answer to moved authority and is unchanged;
                 # what was missing is that the loss was unattributable. Each conjunct now names
@@ -1687,9 +1771,10 @@ class CardReservationMixin:
             # paid propose discarded N ideas with NOTHING on the record — no receipt, no line, and
             # then one more paid serial try plus a re-paid batch next turn.
             #
-            # NOT AN EVENT, and that is a decision. A folded row here would move
-            # `_proposal_authority_seq` — the very fence this reports on — and a diagnostic row per
-            # refused idea is an append per staging turn for a fact that repeats. The refusal is
+            # NOT AN EVENT, and that is a decision. A folded row here would move the
+            # `_proposal_authority_seq` max-seq that still fences `_reserve_node_build`'s CAS one
+            # method over, and a diagnostic row per refused idea is an append per staging turn for a
+            # fact that repeats. The refusal is
             # already the DESIGNED answer to moved authority; what was missing was only that nobody
             # could count it. `_admissible_beliefs`' "Not silent" logging is the precedent one
             # cadence over.

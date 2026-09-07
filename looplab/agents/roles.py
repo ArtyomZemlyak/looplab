@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping, Optional, Protocol
 
-from looplab.core.advisory_payloads import memo_verdict_cue
+from looplab.core.advisory_payloads import memo_snapshot_cue, memo_verdict_cue
 from looplab.core.models import (Idea, IdeaEmission, Node, RunState,
                                  card_drift_brief, card_is_direction,
                                  developer_artifact_footprint, hypothesis_statement_digest,
@@ -173,6 +173,32 @@ _UNTRUSTED_MEMORY_RULE = (
     "contradicts what this run's own state shows, believe this run's state.")
 
 
+# CONTEXT FIRST, TOOLS FOR THE GAP — appended wherever a role is offered tools, for the same reason
+# `_UNTRUSTED_MEMORY_RULE` is: code-owned, after `render()`, so a PromptStore persona override cannot
+# drop it.
+#
+# Measured 2026-08-19 on a cold-start run (AlgoTune `svm`, 23 tools offered): 37 of 40 tool calls
+# returned an empty answer, `read_asset` was called NINE times for the same "(this task has no data
+# assets)", and the user turn had ALREADY said "0 nodes total, 0 active experiments" before the model
+# asked `list_experiments` four times. Replayed on four models, the shape held for three of them
+# (deepseek-v4-flash 17-19 calls, glm-5.3 15, claude-opus-5 14) and not the fourth
+# (gemini-3.7-flash 3-4) — so it is not one model's quirk, and paying more does not buy the
+# discipline: opus-5 costs ~145x deepseek per slice and behaved the same.
+#
+# The rule is stated as a PROPERTY of the two information sources rather than as a list of tools not
+# to call, because a list goes stale the moment a provider is added, and because the useful idea
+# generalizes: the turn you were handed is a SNAPSHOT that already answers "what exists"; a tool is
+# for what the snapshot does not contain. An empty answer is therefore not a hint to look harder — it
+# is confirmation of something the snapshot already told you.
+_CONTEXT_BEFORE_TOOLS_RULE = (
+    "\n\nYour turn opens with a snapshot of this run's state — what exists, what is "
+    "active, what was omitted. The snapshot answers WHAT IS THERE; a tool answers what is inside "
+    "one of those things. If the snapshot shows something absent or a count at zero, a tool can "
+    "only repeat that. The snapshot is a point in time and the run keeps moving, so re-ask when "
+    "something has HAPPENED since — an experiment finished, an evaluation landed — and not "
+    "because an answer came back empty.")
+
+
 def _researcher_capability_suffix(offer_sweep: bool, footprint_choice: bool = False) -> str:
     """P6: capability prose SHARED by both researchers (`LLMResearcher` here and agent.py's
     `ToolUsingResearcher`) so the two role variants can't drift apart again: the sweep offer
@@ -319,6 +345,15 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     # that finished inside it are inert, so `inert` alone cannot tell "decided not to edit" from
     # "ran out of clock mid-investigation".
     "last_budget_exhausted",
+    # THE NUMBERS BEHIND THAT WORD: {"kind", "seconds", "detail"}, {} when nothing was cut.
+    # A second attribute rather than a wider `last_budget_exhausted`, because that one is a
+    # durable vocabulary other code compares against a KIND and prose in it would break every
+    # such reader. Registered for the reason the whole tuple exists and for one more: the
+    # default here is `{}`, so a rename would report "this session was never cut" for every
+    # step of every run -- and the corpus reading it is trying to settle whether the money
+    # ceiling ever fires (docs/56 §85). A silent falsy default would answer that question
+    # wrongly and look like data.
+    "last_budget_facts",
     # HOW MANY EDIT/WRITE/DELETE CALLS THE SESSION MADE, refusals included. `last_budget_exhausted`
     # above tells "the clock ended it"; this tells whether the session ever TRIED to change a file,
     # and the two together separate "ran out of time mid-edit" from "read for 25 minutes and never
@@ -362,6 +397,7 @@ class DeveloperResult:
     last_patch: Any = None
     last_rollback_stage: str = ""
     last_budget_exhausted: str = ""
+    last_budget_facts: Any = None
     last_edit_calls: int = 0
 
     @classmethod
@@ -1155,6 +1191,11 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
 def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
                  hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None,
                  *, for_proposal: bool = True, memo_verdicts: bool = False) -> str:
+    # Function-local for the same reason as the `experiments_digest` import below: `agents` may not
+    # take a module-level edge on `events`. `unscored_metric_clause` is the ONE spelling of "the
+    # eval refused to produce this number" (doc 53 §4a) — the headline count and this line are two
+    # renders of one fact and must not drift into two vocabularies.
+    from looplab.events.digest import unscored_metric_clause
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
     # THE COORDINATES THAT RAN, not the ones that were asked for. `Idea.params` is a PROPOSAL, and
@@ -1168,10 +1209,12 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     from looplab.core.param_carriers import node_params_brief
     if best is not None:
         lines.append(f"Best so far: node {best.id} metric={best.metric} "
-                     f"params={node_params_brief(best)}")
+                     f"params={node_params_brief(best)}"
+                     + unscored_metric_clause(best))
     if parent is not None:
         lines.append(f"Refine from node {parent.id}: params={node_params_brief(parent)} "
-                     f"metric={parent.metric}")
+                     f"metric={parent.metric}"
+                     + unscored_metric_clause(parent))
     # PART V (B): a delta author cannot subtract from an invisible reference. Surface the run base and
     # effective primary-parent membership, bounded so a malformed taxonomy cannot consume the role context.
     # Replay uses the union of all actual parents for a merge; the proposal role sees the primary parent
@@ -1229,8 +1272,19 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
         # wrote the verdicts before the memo was ever appended) and states a fact about the CHECK, so
         # it widens what the role SEES and nothing it trusts: no metric, champion, selectability or
         # violation can move, and no model's own text decides its own verdict (docs/36).
+        #
+        # `memo_snapshot_cue` is UNGATED, unlike the verdict cue beside it, and the reason is that
+        # without it this prompt contradicts itself. A memo is computed from a state snapshot and
+        # recorded when the provider returns; measured over the thirty AlgoTune run dirs, 78 of 119
+        # memos were appended after a result their snapshot could not contain. On
+        # `spectral_clustering` this line pushed "experiment #0 … is still pending, so there are no
+        # measured results yet" into every later prompt — 256 s after node 0's 0.0 landed, and
+        # directly beneath a working set that showed it. The clause is engine-derived, empty
+        # whenever nothing was superseded (so a run with no overlap renders the historical bytes),
+        # and states a fact about WHEN the memo was written, never about whether it is right.
         lines.append("Latest deep-research takeaway"
-                     + (memo_verdict_cue(research[-1]) if memo_verdicts else "") + ": "
+                     + (memo_verdict_cue(research[-1]) if memo_verdicts else "")
+                     + memo_snapshot_cue(research[-1]) + ": "
                      + " ".join(str(research[-1]["summary"]).split())[:300]
                      # channel-neutral: a plain researcher has no tools, so state that the depth is
                      # recorded rather than commanding a `read_research_memo` call it can't make.
@@ -1308,6 +1362,19 @@ class LLMResearcher:
                             bool(getattr(self, "_gpu_footprint_cue", False)))
                         + _OPERATOR_NOTE
                         + "Respond ONLY with the requested structured fields." + hyp_sys
+                        # `_UNTRUSTED_MEMORY_RULE` and NOT `_CONTEXT_BEFORE_TOOLS_RULE`, and the
+                        # difference is this class: `LLMResearcher` is the single-shot structured
+                        # role and it has NO `tools` — no constructor argument, no attribute, no
+                        # loop. The memory rule applies because this prompt really does splice
+                        # untrusted cross-run cues; the tools rule tells a model with no tools that
+                        # "a tool answers what is inside one of those things" and to "re-ask one
+                        # after something HAPPENED", which is an invitation to call something that
+                        # is not in the request. The rule's own definition says "appended wherever a
+                        # role is offered tools" — this is the one splice site where that is false.
+                        # `agent.py::ToolUsingResearcher` is the variant that HAS the surface and
+                        # carries it; the same evidence already took the clause off the repo
+                        # Developer (`tests/test_stage_splitting_guidance.py`), where the rule
+                        # A/B'd to nothing while `answered_by_context`'s DATA moved 41.3 -> 17.7.
                         + _UNTRUSTED_MEMORY_RULE
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,

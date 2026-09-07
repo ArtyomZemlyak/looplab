@@ -26,10 +26,10 @@ from typing import Callable, Optional
 from fastapi import HTTPException
 
 from looplab.core.atomicio import file_identity
-from looplab.core.models import Event, is_error_stop
+from looplab.core.models import Event
 from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
-from looplab.engine.finalize import incomplete_finalize_scope
+from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
 from looplab.events.authoring_projection import card_authoring
 from looplab.events.eventstore import integrity_wire, iter_event_jsonl, log_integrity
 from looplab.events.replay import fold
@@ -90,7 +90,7 @@ _DELETE_SERVICE_PREFIXES = (
 # wherever it is nested (not only under nodes — inject_requests also carries full code/file maps).
 _PUBLIC_STATE_RAW_KEYS = {
     "abs_path", "annotations", "code", "comments", "deleted", "files", "preview", "raw",
-    "stderr", "stdout", "stdout_tail", "triage_rationale",
+    "stderr", "stdout", "stdout_tail", "stderr_tail", "triage_rationale",
 }
 
 
@@ -511,6 +511,18 @@ class AppState:
             # in the stdout tail. Drop stdout_tail entirely (the full tail is behind the token-gated
             # node-detail endpoint) and redact the short error message the node table still shows.
             n.pop("stdout_tail", None)
+            # …and the SCORED node's own stderr tail beside it, for the identical reason: it is
+            # captured program output on the same untoken-gated projection, and a node that
+            # scored is exactly as able to have printed a secret as one that crashed.
+            # OPEN[stderr-tail-scrub-untested-at-the-boundary] the stdout drop one line up is
+            # regression-tested; this new sibling pop has no test, on a DENY-LIST projection where
+            # a dropped pop leaks captured output with nothing red.
+            # proof:absent:stderr_tail@tests/test_server.py
+            # REVIEW 2026-08-30 (security-guard): `tests/test_server.py` asserts the stdout tail is
+            # absent from /state and still behind the token-gated detail; per CLAUDE.md's contract
+            # rule, drive the same pair for this field (the reviews router is safe by construction
+            # — its allow-list excludes both tails; /state is the one deny-style surface).
+            n.pop("stderr_tail", None)
             # Redact BEFORE truncating: a secret straddling byte 160 would otherwise lose its tail,
             # leaving a prefix too short for the pattern/entropy rules to catch (fragment leak).
             n["error"] = redact_secrets(n.get("error") or "")[:160]
@@ -831,9 +843,11 @@ class AppState:
         # A pending run_abort is not an ordinary pause: the engine must preserve it, write
         # run_finished, and complete the wrap-up. Surface this before paused because finalize-after-
         # stop intentionally has both stop_requested and paused set. An error finish is not a
-        # successful finalize either: explicit retry preserves the stop and re-enters wrap-up.
+        # successful finalize either: explicit retry preserves the stop and re-enters wrap-up. The
+        # guarded-abort CLASS (`is_guarded_abort`), because the ceiling's `budget_exhausted` is the
+        # same not-yet-finalized finish as `error` and a literal here published it as finished.
         if finalize_incomplete or (st.stop_requested and (
-                not st.finished or is_error_stop(st.stop_reason))):
+                not st.finished or is_guarded_abort(st.stop_reason))):
             return PHASE_FINALIZING
         if st.finished:
             return PHASE_FINISHED

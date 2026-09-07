@@ -16,6 +16,7 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 events and stdlib (the trust/search deps are lazy, method-local imports)."""
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import statistics
@@ -24,6 +25,7 @@ from typing import Iterable, NamedTuple, Optional
 
 from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
+from looplab.core.advisory_payloads import MAX_SUPERSEDED_NODE_REFS
 from looplab.core.cards import hypothesis_id
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
@@ -645,11 +647,9 @@ class ResearchCadenceMixin:
         """Execute one Deep-Research step (serial path) and record it, then re-fold. Always records a
         `research_completed` event (even with no model wired, so a manual request's gate advances and
         the loop doesn't spin)."""
-        # One trace for the whole serial step: compute WITHOUT its own inner span (trace=False) so the
-        # research LLM spans + the research_completed append both live in THIS op-trace → the event is
-        # stamped with it (UI scopes the event's trace to just the research, not a node).
-        with self._op_span("deep_research", trigger=trigger):
-            self._research_attempt_step(state, trigger, manual=manual)
+        # The `deep_research` op-trace is opened by `_research_attempt_step` itself, so this path and
+        # BOTH concurrent seams get exactly one — see that method for why it moved down there.
+        self._research_attempt_step(state, trigger, manual=manual)
         return fold(self.store.read_all())
 
     def _research_attempt_step(self, state: RunState, trigger: str, *, manual: bool = False,
@@ -684,19 +684,71 @@ class ResearchCadenceMixin:
         Returns `(sig, recorded)`: the memo's content signature (None when the compute yielded
         nothing) and whether it was appended. `last_sig` is the repeated-overlap convergence gate —
         an identical re-run is not re-recorded (that pass rides a TIME cadence and is deliberately
-        unreceipted, so nothing is spent by skipping it)."""
-        attempt_id = self._record_research_attempt(state, trigger=trigger, manual=manual)
-        memo = self._compute_deep_research(state, trigger, trace=False)
-        if memo is None:
-            # Contractually unreachable (`_compute_deep_research` degrades to a stub memo rather than
-            # returning None), and kept only so a stubbed/foreign compute cannot crash the record.
-            return None, False
-        sig = research_memo_sig(memo)
-        if last_sig is not None and sig == last_sig:
-            return sig, False
-        self._record_deep_research(memo, trigger=trigger, manual=manual, attempt_id=attempt_id,
-                                   converged_skips=converged_skips)
-        return sig, True
+        unreceipted, so nothing is spent by skipping it).
+
+        IT OPENS THE `deep_research` OP-TRACE, and that is why the span moved here out of
+        `_run_deep_research`. `core/tracing.py::generation` yields a NULL handle whenever no span is
+        open, so a paid call made outside one is written to `events.jsonl` with
+        `trace_id=null, span_id=null` and lands in NO span: real money attributable to nothing, and
+        invisible to `looplab timings`, the trace view and every per-phase cost question. Only the
+        SERIAL caller opened a span, so the two CONCURRENT seams — the ones that actually run under
+        the shipped `concurrent_research` — paid entirely outside the span channel.
+
+        MEASURED over the twenty arm-B AlgoTune runs (`/var/tmp/looplab-bench/runs-B`): 817 of the
+        campaign's 6,819 paid calls and $2.1921 of its $20.0081 — 11.0 % of the arm; 94.4 % of the
+        $2.3214 by which the event log exceeded the span channel, and 98.7 % of the $2.2198 that
+        opened no span at all — against the $0.8352 the serial path DID file under `deep_research`.
+        Deep research is the run's fourth-largest consumer at ~$3.03 (15 %), not the 4.7 % the trace
+        reported.
+
+        Opening it HERE rather than at each seam is the argument indivisibility already makes for
+        this method: one spelling, three callers, and a fourth cannot forget it. SPAN ONLY — no
+        `phase_progress` beacon — because no new operator-facing phase exists and that table's exact
+        rows are pinned by `test_end_to_end` / `test_settled_width_pins`; it opens no provider call
+        of its own and changes no decision, exactly like `novelty.py::_repropose_phase`.
+
+        `_op_span` is resolved defensively: `test_research_overlap.py` drives this method on a stub
+        host with no Engine helpers, and observability may never decide whether the work runs."""
+        _span = getattr(self, "_op_span", None)
+        with (_span("deep_research", trigger=trigger) if callable(_span)
+              else contextlib.nullcontext()):
+            attempt_id = self._record_research_attempt(state, trigger=trigger, manual=manual)
+            memo = self._compute_deep_research(state, trigger, trace=False)
+            if memo is None:
+                # Contractually unreachable (`_compute_deep_research` degrades to a stub memo rather
+                # than returning None), kept so a stubbed/foreign compute cannot crash the record.
+                return None, False
+            sig = research_memo_sig(memo)
+            if last_sig is not None and sig == last_sig:
+                return sig, False
+            self._record_deep_research(
+                memo, trigger=trigger, manual=manual, attempt_id=attempt_id,
+                superseded=self._results_since_snapshot(state),
+                converged_skips=converged_skips)
+            return sig, True
+
+    def _results_since_snapshot(self, snapshot: RunState) -> dict:
+        """Which evaluated nodes landed while THIS think was running — `{"nodes": […], "count": n}`.
+
+        The memo was computed from `snapshot`; the provider call then ran for minutes. Everything
+        that finished in that window is invisible to the memo and visible to every prompt that will
+        quote it, so the gap is stamped ON the memo rather than left for a reader to infer from two
+        timestamps. See `core/advisory_payloads.py::memo_snapshot_cue` for the measurement —
+        including why "fold fresh at generation time", the repair doc 53 §4a proposed, recovers
+        nothing: the snapshot is already fresh when the call starts.
+
+        Best-effort and never raising: a fold that fails yields an EMPTY receipt, which renders the
+        historical line unchanged. Degrading to "no claim" is the right direction here — the clause
+        exists to stop a memo asserting more than it knows, and a receipt invented from a failed
+        read would do exactly that.
+        """
+        try:
+            known = {n.id for n in snapshot.evaluated_nodes()}
+            fresh = fold(self.store.read_all())
+            landed = sorted(n.id for n in fresh.evaluated_nodes() if n.id not in known)
+        except Exception:  # noqa: BLE001 - research is advisory; a diagnostic may not stall a memo
+            return {"nodes": [], "count": 0}
+        return {"nodes": landed[:MAX_SUPERSEDED_NODE_REFS], "count": len(landed)}
 
     def _record_research_attempt(self, state: RunState, *, trigger: str,
                                  manual: bool) -> Optional[str]:
@@ -731,7 +783,13 @@ class ResearchCadenceMixin:
         so it can run in a worker thread concurrently with an eval while the engine stays the sole
         writer. Best-effort for ordinary failures (a crash/None model yields a stub so the gate still
         advances); the global `BudgetExceeded` hard stop always propagates.
-        `trace=False` skips the span: the tracer is not safe to write from the concurrent worker."""
+        `trace=False` skips the INNER span because the caller (`_research_attempt_step`) already
+        opened the `deep_research` op-trace and two nested spans of one name double-count the phase
+        — NOT because the tracer is unsafe off the main task. It is not: `Tracer.span` keeps its
+        stack in a contextvar and `AsyncJsonlSpanExporter` serializes writers under a lock, and
+        `_maybe_merge_hypotheses` has always opened `hypothesis_merge` from the very same
+        `anyio.to_thread.run_sync` hop in `_research_overlap_loop`. Reading the older wording as "the
+        concurrent path must stay spanless" is what left 817 paid calls in no span at all."""
         from looplab.core.models import ResearchMemo
         if self.deep_researcher is None:
             return ResearchMemo(at_node=len(state.nodes), trigger=trigger,
@@ -754,6 +812,7 @@ class ResearchCadenceMixin:
     @in_llm_lane("deep_research")
     def _record_deep_research(self, memo, *, trigger: str, manual: bool,
                               attempt_id: Optional[str] = None,
+                              superseded: Optional[dict] = None,
                               converged_skips: int = 0) -> None:
         """Append the memo to the event log. Called from BOTH the main-task cadence AND the
         concurrent research task — see the note above; every append here must stay in
@@ -762,6 +821,11 @@ class ResearchCadenceMixin:
         `attempt_id` closes this think's paid-attempt receipt (`_record_research_attempt`). Absent
         for `repeat` passes and for any caller that predates the receipt, in which case the trigger
         gates fall back to counting recorded memos alone — exactly the old behavior.
+
+        `superseded` is `_results_since_snapshot`'s receipt: the results that landed while the
+        provider was answering. Stamped INSIDE the memo payload, because the fold keeps only
+        `d["memo"]` and this fact has to reach the prompt that quotes the summary. `None` (every
+        caller that predates it) and an empty receipt both leave the payload byte-identical.
 
         `converged_skips` MAKES THE CONVERGENCE GATE OBSERVABLE, and until 2026-08-31 it was not.
         The repeat loop pays a provider for every tick and, when `research_memo_sig` matches the
@@ -794,6 +858,12 @@ class ResearchCadenceMixin:
         # this durable writer must explicitly carry the original pre-cap denominator across sanitizers.
         if getattr(memo, "claims_receipt", None) is not None:
             memo_payload["claims_receipt"] = memo.claims_receipt
+        # ENGINE-DERIVED, so it goes on before the verifier and before the id is minted, exactly
+        # like `verification` below: the memo id is the hash of the FINAL canonical payload, and a
+        # fact added after it would be carried by a memo whose id does not cover it. Only stamped
+        # when non-empty, so a memo that superseded nothing keeps the historical bytes.
+        if superseded and (superseded.get("count") or superseded.get("nodes")):
+            memo_payload["snapshot_superseded"] = superseded
         memo_d = sanitize_research_memo_payload(memo_payload)
         # D8 · decoupled Verifier: check the memo's claims against their CITED evidence before the
         # memo is recorded — synthesis is the documented weak link (Kosmos: 57.9% accurate).
@@ -1552,9 +1622,12 @@ class ResearchCadenceMixin:
             row decides whether the operator's drop lands on the alias or on the surviving canonical
             card. `tests/test_hypothesis_merge.py` drives exactly that splice.
           * `speculation._proposal_authority_seq` does. It excludes `DIAGNOSTIC_EVENTS` wholesale and
-            the two LLM-accounting rows; `hypothesis_merged` is FOLDED, so it is none of those. A
-            background merge landing in the window where `_prepare_node_idea` makes the Developer call
-            moves the fence and discards a proposal the run has already paid for.
+            the two LLM-accounting rows; `hypothesis_merged` is FOLDED, so it is none of those. That
+            fence no longer spans a paid proposal (2026-08-20 — see
+            `card_reservation.py::_proposal_receipt_fence`), so what a background merge costs there is
+            one `_reserve_node_build` CAS retry rather than a Developer call. It is still a reader
+            keyed on position, and the merge is still a Card LIFECYCLE input, which is why it stays
+            out of `BACKGROUND_APPENDABLE`.
 
         So the answer to a board that fills faster than it drains is NOT to let this run in the
         background. It is to stop the background writer overfilling it: `_admissible_beliefs` bounds

@@ -456,7 +456,32 @@ proxy/WAF burst-throttle, not a real auth failure) is treated as retryable and b
 client makes up to **8 retries** (429 / 5xx / throttle-403) before surfacing an error. If the model
 is genuinely unreachable, a Developer session crashes (`developer_crash`); the engine then **pauses
 the whole run** on the *first* such crash (an `EV_PAUSE`) rather than rapid-firing dozens of dead
-nodes — resume once the endpoint is back.
+nodes — resume once the endpoint is back. *First* is `developer_crash_pause_after`'s default (`1`);
+a bench profile sets `2` — one automatic retry — because on an unattended stand the pause is the
+end of the run (9 of 20 campaign runs ended that way and nobody resumed them, docs/58 §58.2). The
+count is per run, in event-log order, and every crash below it still fails its own node.
+
+**A stream the gateway CUTS mid-answer is kept, not re-asked.** A proxy whose own upstream dies
+half-way through a generation reports it *in band* — a `data: {"error": …}` frame inside a response
+that already returned HTTP 200 and has been streaming for minutes — so the client is holding a real,
+truncated answer, not a failed request. It keeps it: the reassembled body comes back with
+`finish_reason` `truncated`, the call reaches the accountant, and it is deliberately **never
+cached**, so a later identical temperature-0 ask re-issues instead of being served an amputated
+answer. **The stream is read to its END, not to its error frame** — the openai SDK treats the first
+error frame as terminal and closes the response, so a gateway that reports the failure and *then*
+reports what it billed for the tokens it already forwarded would have its price thrown away
+permanently. The client holds that frame back, reads the rest, and lets the SDK raise it last, so
+such a call is priced normally; only a cut with genuinely nothing behind it is recorded as
+**unpriced**, which is not the same as free. Only a cut that produced *nothing at all* is retried —
+and that retry drops SSE for the next attempt, exactly as a stalled stream does. The split is what
+keeps the retries affordable: re-asking happens only where re-asking is free. Measured on a 20-run
+AlgoTune campaign, 26 cut streams burned **13.15 hours** — 18.7–94.6 % of each affected run's
+lifetime — and $1.66 that reached no ledger; one task spent 94.6 % of its run inside six of them
+and produced zero nodes. Each cut is announced at **WARNING** naming what was kept and what it
+cost, because a shorter answer and a missing price are both invisible from the call site — and
+"what was kept" counts reasoning and tool-call arguments, not just `content`: a reasoning model cut
+mid-think has spent everything on its chain of thought and has not begun its answer, which is the
+normal shape of a cut here rather than a corner.
 
 The same circuit-breaker covers a provider that stops working **mid-run**, during an *inline repair*
 rather than a build. A failed repair *call* is not a repair, in any of the four ways the call can
@@ -474,7 +499,7 @@ answer decides how much it stops, because only one of the two ways is evidence a
 
 | What happened | Verdict | What stops |
 |---|---|---|
-| **Nobody answered** — the request never completed: the call raised, the endpoint was unreachable, a 401/402, a transport error surviving the client's own retry ladder | `unanswerable` | The node (`developer_crash`) **and the run**: one run-level pause naming the provider, `resume` once it is back |
+| **Nobody answered** — the request never completed: the call raised, the endpoint was unreachable, a 401/402, a transport error surviving the client's own retry ladder | `unanswerable` | The node (`developer_crash`) **and the run**: one run-level pause naming the provider, `resume` once it is back — once the run's crash count reaches `developer_crash_pause_after` (default `1`: this one) |
 | **The model answered something unreadable** — an action outside `repair`/`abandon`/`reject_idea`, an empty or missing one, the literal word `unanswerable` arriving from the wire, **or no emit at all** (prose replies your endpoint would not force into a tool call, the stuck detector, the turn/wall-clock budget) | `unreadable` | **Only the node**, terminalized like an `abandon` with the eval's own failure reason, so a node reset re-opens it. No pause — the endpoint just answered |
 
 Either way the engine **re-asks once** before acting: one non-answer is not a diagnosis, and a single
@@ -501,6 +526,17 @@ one real run turned an out-of-credits `402` into **2345 `node_repaired` events o
 3.5 hours**. Use [`looplab timings RUN_DIR`](cli-reference.md#timings) to see where a run's
 wall-clock actually went (LLM vs eval vs repair vs tools, per node **and** run-level, reconciled
 against the run's real duration with the untraced remainder named).
+
+**A phase that spends must open a span, or `timings` cannot see it.** A `phase_progress` beacon
+alone appends an event and opens nothing, and an LLM call made outside every span is written to
+`events.jsonl` with `trace_id: null` and lands in no span at all. Measured over a 20-run AlgoTune
+campaign on 2026-08-20, **1,579 of 6,002 paid calls (26 %) were untraced**, $1.77 of them the
+novelty gate — a beacon-only phase running a 12-turn agentic loop plus a whole second Researcher
+proposal on each rejection, 11 % of the budget and 6.6 of 60.8 run-hours with nothing saying so.
+`SharedEngineMixin._paid_progress` is the beacon and the span together; the novelty phase uses it
+since 2026-08-20, so its cost now appears under `phase=novelty` like every other phase. Turn the
+gate off with `novelty_mode=off` (**not** `novelty_gate=false`, which is a legacy alias that forces
+nothing) — see [configuration](configuration.md).
 
 ### What the triage judge is allowed to look at
 
@@ -775,9 +811,15 @@ text is what docs/36 forbids.
 resolves *and* that a synthetic input's content actually reaches the rendered output. A signal added
 to the registry without a delivery probe fails the suite — so *"the signal silently stopped being
 delivered"* is a red test, not the next review's finding. Three of the routes (trust flags, watchdog
-signals, operator directives) are **push** (the engine injects them), one (deep-research memo) is
-**pull** (a tool the
-agent may call for depth), and the rest ride the always-on folded-state briefs. The full rationale is
+signals, operator directives) are **push** (the engine injects them), two (deep-research memo,
+and the scored eval's own stderr via `read_logs`) are **pull** (a tool the
+agent may call for depth), and the rest ride the always-on folded-state briefs.
+The scored-eval route (`Node.stderr_tail`, written by `engine/evaluate.py::_scored_output_evidence`)
+is deliberately pull rather than context: the `triage_rationale` route carries a ~100-char verdict
+about a node that FAILED on the always-on digest, while this one is up to 4,000 characters of the
+eval's own text on EVERY scored node, and the always-on working set is under a hard char cap. Before
+it existed a node that exited 0 and scored badly kept nothing but its metric and a 500-char stdout
+tail — so the loop could see *what* a node scored and never *why*. The full rationale is
 in `docs/14-agent-framework-mega-review-2026-07-10.md` §1.
 
 Deep Research uses the shared `agent_self_plan` setting. With the shipped default enabled, the
@@ -876,6 +918,7 @@ Give the agentic Researcher extra context and tools:
 | `researcher_tools` | (on) Read its own experiments + the task data mid-loop |
 | `cross_run_tools` | (on) Read-only tools over sibling runs (same task id, same run-root). Fails **closed**: with no authoritative task id — an unbound provider, or a legacy log whose `run_started` carried none — it lists and serves nothing, rather than widening to every task |
 | `all_runs_tools` | (on) Read-only tools over every run **under this run-root**, across ALL tasks — read any experiment's code + result to reuse it. Bound to the configured run-root, not the machine, so absence here is not machine-wide absence |
+| `hide_empty_tools` | (off) Stop ADVERTISING a tool whose provider reports it holds nothing right now. Only the OFFER is withheld — a hidden tool still dispatches if called — and the check is re-made once per agent PHASE. Only a definite `0` hides; a store that could not be counted stays offered. The prompt publishes the same counts either way. |
 | `literature_search` | An arXiv search tool (network-optional) |
 | `web_search` | Web search/fetch for the Deep-Research stage (network-optional) |
 

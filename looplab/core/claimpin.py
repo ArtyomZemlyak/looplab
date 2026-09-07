@@ -326,8 +326,16 @@ def check_text(text: str, label: str, *, root: Path, allow_absolute: bool) -> li
     for slug, window in iter_claims(text):
         decided = DECIDED.search(window)
         if not decided:
+            # THE CITATION CASE, NAMED. Five reds in this family came from the same move: prose
+            # or a comment REFERRING to an existing claim wrote the slug in bracket form, and the
+            # scanner read the reference as a second declaration. The convention already answers
+            # it -- one slug names exactly one claim, so a reference drops the brackets -- but the
+            # message did not say so, and "carries no `decided:` clause" reads like an instruction
+            # to add one, which is the wrong repair and creates a duplicate declaration instead.
             out.append(f"{label}: CLAIM[{slug}] carries no `decided:` clause within {WINDOW} "
-                       "chars — an unpinned claim is the sentence this convention replaces")
+                       "chars — an unpinned claim is the sentence this convention replaces. "
+                       f"If you meant to CITE the existing claim, drop the brackets and write "
+                       f"`{slug}`: one slug names exactly one declaration site.")
             continue
         for pred in decided_predicates(decided).split("+"):
             holds, why = predicate_holds(pred, root=root, allow_absolute=allow_absolute)

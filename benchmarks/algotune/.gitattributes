@@ -1,0 +1,4 @@
+# Shell scripts here are executed on Linux (the AlgoTune host), so they must keep LF endings
+# whatever the checkout platform does. Committed from Windows, a CRLF conversion makes them fail
+# with `bad interpreter: /bin/bash^M` — a failure that looks like a missing shell, not a line ending.
+*.sh text eol=lf
