@@ -100,7 +100,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 193
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 194
+    # 193 -> 194 on 2026-09-07: `novelty_literature`, the retrieved papers reaching the
+    # novelty gates (doc 52 row 32). A row because it changes what the re-proposal prompt
+    # says, which is the kind of switch an operator has to be able to see and turn off.
     # 192 -> 193 on 2026-09-07: `mcts_cost_weight`, the cost term of the cost-constrained
     # MCTS (doc 52 row 31). A row rather than an omission for the same reason the spend caps
     # are rows: it is a number an operator types to trade speed against score, and it is
@@ -215,7 +218,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 224 -> 225 Settings on 2026-09-06: `model_arms`, the operator x model router's arms (doc 52 row 19; uncurated, open-keyed).
     # 225 -> 226 Settings on 2026-09-06: `syscall_fence`, the kernel syscall policy beside `landlock` (doc 52 row 28; a row).
     # 226 -> 227 Settings on 2026-09-07: `mcts_cost_weight`, the cost term of the cost-constrained MCTS (doc 52 row 31; a row).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 227
+    # 227 -> 228 Settings on 2026-09-07: `novelty_literature` (doc 52 row 32; a row).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 228
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

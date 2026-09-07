@@ -538,10 +538,26 @@ LLM verifier; MLReplicate's 59 % says fabricated numbers are what survives revie
 decimal against the CITED nodes' recorded metrics needs no classifier. Measure the match rate over
 the corpus first. proof:missing:docs/audit/memo-number-fidelity.md
 
-OPEN[novelty-gates-never-consult-literature] both novelty gates and `search/graded_novelty.py` grade
-against this run's history and never against retrieved literature — the form RQ-Bench measured as a
-"novelty mirage"; doc 51's `retrieved-literature-is-never-durable` is the retrieval half.
-proof:absent:literature@looplab/engine/novelty.py
+*Closed 2026-09-07 (row 32 shipped): the marker `novelty-gates-never-consult-literature` stood here.
+`engine/novelty.py::literature_overlap` is the deterministic, model-free overlap between a proposal
+and the papers THIS RUN retrieved (`RunState.literature`, the retrieval half doc 52 row 16 made
+durable), and `_literature_note` puts it on the three audit rows the gates already write —
+`novelty_rejected`, `novelty_graded`, `cross_run_prior` — with the overlapping titles also named in
+the re-proposal the gate was already buying, behind `Settings.novelty_literature` (off, because that
+half changes a prompt). **It never rejects**: running an experiment a paper describes is often
+exactly right, so the overlap is evidence for a reader, never a verdict, and the function states
+that its recall is a FLOOR — no stemming, no synonyms, so an empty result is not evidence of
+novelty, which is precisely why nothing may act on it. `tests/test_novelty_literature.py` drives it,
+including the paraphrase it misses. What is NOT done here and is now its own item: the graded gate's
+LEVEL still comes from the run's history alone. Deleted per the index rule.*
+
+OPEN[graded-novelty-level-ignores-the-literature-overlap] `_literature_note` records the overlap and
+`search/graded_novelty.py::grade_novelty` still grades levels 0-5 from the concept graph and this
+run's nodes alone, so a proposal the run's own reading describes can still be graded `novel` and
+short-circuit the flat gate at level 4/5. The overlap is on the row beside the grade and is read by
+nothing that decides. Needs the level rubric to take prior art as an input, which is a prompt change
+and a grade-semantics change — measure the overlap rate on real runs first.
+proof:absent:literature@looplab/search/graded_novelty.py
 
 *Closed 2026-09-07 (row 30 shipped): the marker `prov-export-carries-no-claims` stood here. The
 export now carries the claims half: one activity per deep-research memo (its trigger, summary,

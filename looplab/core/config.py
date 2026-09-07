@@ -1432,6 +1432,15 @@ class Settings(BaseSettings):
     # (heuristic tagger, no LLM), audit event `novelty_graded`, replay-safe. ON by default in the product
     # Settings (ce4a379), EngineOptions off; no-ops for a task with no skeleton. See search/graded_novelty.py.
     graded_novelty: bool = True
+    # THE NOVELTY MIRAGE (doc 52 row 32): let the novelty gates SEE the papers this run retrieved
+    # (`RunState.literature`). Both gates grade a proposal against this run's own history alone, so
+    # an idea reads as new because nothing here tried it while the run's own reading describes it —
+    # the form RQ-Bench measured. On, the deterministic overlap (`engine/novelty.py::
+    # literature_overlap`, lexical, no model, no call) rides on the novelty audit rows AND is named
+    # in the re-proposal the gate was already buying. It NEVER rejects: running an experiment a
+    # paper describes is often exactly right, so the overlap is evidence, not a verdict. Off by
+    # default because the second half changes a prompt.
+    novelty_literature: bool = False
     # PART IV Phase 2b — D7 capability-expansion forced-jump DIRECTIVE (§21.8/§21.13, issue #7). When on
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
     # branch for a long consecutive streak) on an `explore` stance, the Researcher's novelty hint

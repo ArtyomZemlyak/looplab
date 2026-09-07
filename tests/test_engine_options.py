@@ -152,6 +152,7 @@ ATTR_BY_FIELD = {
     "cadence_while_evaluating": "_cadence_while_evaluating",
     "concept_pivot": "_concept_pivot",
     "graded_novelty": "_graded_novelty",
+    "novelty_literature": "_novelty_literature",
     "capability_expansion": "_capability_expansion",
     "fingerprint_universal": "_fingerprint_universal",
     "cross_run_concepts": "_cross_run_concepts",

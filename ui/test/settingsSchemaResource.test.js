@@ -129,7 +129,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   192 -> 193 (2026-09-07): `mcts_cost_weight`, the cost term of the cost-constrained MCTS
   //   (doc 52 row 31) — a form row because it is a number an operator types to trade speed
   //   against score, and its unit (relative to the run's mean eval second) has to be shown.
-  assert.equal(Object.keys(schema.fieldByKey).length, 193)
+  //   193 -> 194 (2026-09-07): `novelty_literature`, the retrieved papers reaching the novelty
+  //   gates (doc 52 row 32) — a row because it changes what the re-proposal prompt says.
+  assert.equal(Object.keys(schema.fieldByKey).length, 194)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
   assert.equal(schema.fieldByKey.triage_time_budget_s.default, 1200.0)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')

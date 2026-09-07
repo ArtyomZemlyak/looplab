@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-147 event types — 109 folded into `RunState`, 38 diagnostic; 779 declared payload keys; 26 types whose whole payload is stored by the fold.
+147 event types — 109 folded into `RunState`, 38 diagnostic; 782 declared payload keys; 26 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -70,7 +70,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `confirm_done` | folded | The fulfillment receipt for one `force_confirm` request. | `generation`, `node_id` | `attempt` |
 | `confirm_eval` | folded | One seed of a champion-confirmation re-evaluation, with its metric and eval seconds. | `eval_seconds`, `generation`, `metric`, `node_id`, `seed` | `attempt`, `error`, `reason`, `superseded` |
 | `coverage_snapshot` | folded · whole | The search's coverage snapshot at one node. | — | `at_node`, `dominant_theme_frac`, `niches`, `nodes`, `operators`, `projection_token`, `recent_dominant_frac`, `theme_entropy`, `themes`, `top_themes` |
-| `cross_run_prior` | folded · whole | Concepts of this proposal a SIMILAR earlier run already tried, and how those runs went. | — | `concept_source`, `matched_concepts`, `prior_runs`, `prior_runs_complete`, `prior_runs_omitted`, `prior_runs_total`, `stance`, `v` |
+| `cross_run_prior` | folded · whole | Concepts of this proposal a SIMILAR earlier run already tried, and how those runs went. | — | `concept_source`, `literature`, `matched_concepts`, `prior_runs`, `prior_runs_complete`, `prior_runs_omitted`, `prior_runs_total`, `stance`, `v` |
 | `data_leakage` | folded · whole | The deterministic leakage scan's verdicts over the task's data. | `leak`, `verdicts` | — |
 | `data_profiled` | folded | The task's data profile: the columns the bounded profiler read. | `columns` | — |
 | `data_provenance` | folded · whole | Where each of the task's declared data assets came from. | `assets` | — |
@@ -122,8 +122,8 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `node_reset` | folded | The operator re-ran an existing node in place from a named stage. | `node_id` | `attempt`, `from_stage`, `generation` |
 | `node_tombstoned` | folded | Nodes struck from selection without deleting their history. | `node_ids` | — |
 | `node_verified` | folded | The selection verifier's score for one node, over a named evidence digest. | — | `attempt`, `evidence_digest`, `generation`, `node_id`, `score` |
-| `novelty_graded` | folded · whole | The graded-novelty verdict on a proposal the flat gate would have rejected. | — | `grade`, `level`, `rationale`, `recommendation`, `shared_concepts`, `stance` |
-| `novelty_rejected` | folded · whole | A near-duplicate proposal the novelty gate nudged off, with the distance that decided it. | — | `action`, `distance`, `generation`, `kind`, `node_id`, `nudged`, `original`, `reason`, `stance` |
+| `novelty_graded` | folded · whole | The graded-novelty verdict on a proposal the flat gate would have rejected. | — | `grade`, `level`, `literature`, `rationale`, `recommendation`, `shared_concepts`, `stance` |
+| `novelty_rejected` | folded · whole | A near-duplicate proposal the novelty gate nudged off, with the distance that decided it. | — | `action`, `distance`, `generation`, `kind`, `literature`, `node_id`, `nudged`, `original`, `reason`, `stance` |
 | `pause` | folded | The run paused — by an operator, or by the engine with a stated reason. | — | `attempt`, `detail`, `generation`, `node_id`, `reason` |
 | `phase_progress` | diagnostic | One build/eval phase started or finished — the live activity feed's row. | `phase`, `stage`, `status` | — |
 | `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `endgame_start`, `phases`, `reason`, `reserve` |

@@ -127,7 +127,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-09-06  + model_arms (doc 52 row 19: the operator x model router's arms, uncurated and
 #               open-keyed). 221 -> 222, both pins re-set. Inert for a calibration replicate —
 #               the profile's `EngineOptions` declares no arm and the toy policy runs no bandit.
-_EXPECTED_DIGEST = "sha256:83113f0a8efcc8197bc578e597edbd0512c6a6bdb14c26be6c1933f9d0e38c19"
+_EXPECTED_DIGEST = "sha256:f6d0b007558ac9de99a297688fc1d0f7bf4965772987617e92018304bd51fad8"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -465,7 +465,13 @@ _EXPECTED_DIGEST = "sha256:83113f0a8efcc8197bc578e597edbd0512c6a6bdb14c26be6c193
 #               deliberately not clever enough to exempt either fact — the digest binds the COMPLETE
 #               non-variant envelope, which is what makes it a receipt rather than a summary.
 #               `_EXPECTED_FIELD_COUNT` goes 223 -> 224 and both pins are re-set.
-_EXPECTED_FIELD_COUNT = 224
+#   2026-09-07  + novelty_literature  (doc 52 row 32: the retrieved papers reach the novelty gates).
+#               The 'field set changed too' branch. Ships off, and the calibration profile retrieves
+#               no literature at all, so a replicate is unaffected either way — but the digest binds
+#               the COMPLETE non-variant envelope on purpose, and the flag's ON path changes a
+#               re-proposal prompt, which is exactly the kind of difference a receipt must not span.
+#               `_EXPECTED_FIELD_COUNT` goes 224 -> 225 and both pins are re-set.
+_EXPECTED_FIELD_COUNT = 225
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

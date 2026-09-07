@@ -1369,8 +1369,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "Concepts of this proposal a SIMILAR earlier run already tried, and how those runs went.",
         required=(),
         optional=(
-            "concept_source", "matched_concepts", "prior_runs", "prior_runs_complete",
-            "prior_runs_omitted", "prior_runs_total", "stance", "v"
+            "concept_source", "literature", "matched_concepts", "prior_runs",
+            "prior_runs_complete", "prior_runs_omitted", "prior_runs_total", "stance", "v"
         ),
         stored_whole=True,
     ),
@@ -1679,15 +1679,18 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "novelty_graded": PayloadContract(
         "The graded-novelty verdict on a proposal the flat gate would have rejected.",
         required=(),
-        optional=("grade", "level", "rationale", "recommendation", "shared_concepts", "stance"),
+        optional=(
+            "grade", "level", "literature", "rationale", "recommendation", "shared_concepts",
+            "stance"
+        ),
         stored_whole=True,
     ),
     "novelty_rejected": PayloadContract(
         "A near-duplicate proposal the novelty gate nudged off, with the distance that decided it.",
         required=(),
         optional=(
-            "action", "distance", "generation", "kind", "node_id", "nudged", "original",
-            "reason", "stance"
+            "action", "distance", "generation", "kind", "literature", "node_id", "nudged",
+            "original", "reason", "stance"
         ),
         stored_whole=True,
     ),
