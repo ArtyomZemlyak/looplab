@@ -39,10 +39,19 @@ def test_growth_alone_is_not_a_problem():
     assert ruler_check.problems(rows, "w22x1r3") == []
 
 
-def test_a_second_regime_is(tmp_path):
+def test_a_regime_this_box_does_not_measure_in_is(tmp_path):
+    """Until 2026-09-06 this asserted that ANY second regime was a problem, `lane22r3` included.
+    §314 then made the serial regime the only one CP-SAT can be scored in, and §318 used it to
+    price the gap on four tasks that are scored wide (pde_heat1d -4.5 %, discrete_log -2.5 %,
+    edge_expansion and pagerank +0.3 %) -- so the entries this rule called mistakes were the
+    measurement the sweep asks for. What remains a mistake is a regime this box scores in NEITHER
+    way: `w4x1r3` here, from a run with four evaluation workers on a twenty-two-wide lane."""
     d = _cache(tmp_path, GOOD + ["pagerank__test__lane22r3.json"])
-    said = ruler_check.problems(ruler_check.entries(d), "w22x1r3")
-    assert said and "lane22r3" in said[0], said
+    assert ruler_check.problems(ruler_check.entries(d), "w22x1r3") == []
+    (tmp_path / "third").mkdir()
+    d2 = _cache(tmp_path / "third", GOOD + ["pagerank__test__w4x1r3.json"])
+    said = ruler_check.problems(ruler_check.entries(d2), "w22x1r3")
+    assert said and "w4x1r3" in said[0], said
     assert "not comparable" in said[0]
 
 
@@ -71,16 +80,24 @@ def test_the_live_cache_is_clean_and_in_one_regime():
     assert ruler_check.problems(rows, "w22x1r3") == [], ruler_check.problems(rows, "w22x1r3")
 
 
-def test_a_serial_entry_is_only_forgiven_for_the_tasks_it_scores():
-    """§314 lets a CP-SAT task keep a `lane22r3` ruler beside the wide one, because that is the
-    regime it is scored in. The forgiveness has to be per task: a serial entry for `pagerank`, which
-    is scored twenty-two wide, is the §149 mistake and must still be a problem. Every real serial
-    entry on this box belongs to a CP-SAT task, so only a fixture can tell the two rules apart."""
+def test_a_second_regime_per_task_is_evidence_and_a_third_is_a_stray():
+    """The rule written here on 2026-09-06 -- that a serial entry is forgiven only for CP-SAT tasks
+    -- was refuted the same night by the measurement the sweep asks for. §318 needed serial rulers
+    for four tasks that are scored WIDE, to find out what the regime is worth: pde_heat1d -4.5 %,
+    discrete_log -2.5 %, edge_expansion and pagerank +0.3 %.
+
+    What §149 forbids is one SCORE whose numerator and denominator come from different regimes, and
+    the regime key makes that impossible: a run finds its own key or refuses. So a task may carry
+    either of the two regimes this box measures in -- the campaign's and the serial one -- and a
+    THIRD is still a stray, which is the fixture below: `w4x1r3` on a box whose lanes are
+    twenty-two wide. Which regime a task is JUDGED in stays `scoring_regime`'s business."""
     rows = [
         {"file": "max_clique_cpsat__test__lane22r3.json", "ok_name": True, "n": 100,
          "task": "max_clique_cpsat", "subset": "test", "regime": "lane22r3"},
         {"file": "pagerank__test__lane22r3.json", "ok_name": True, "n": 100,
          "task": "pagerank", "subset": "test", "regime": "lane22r3"},
+        {"file": "pagerank__test__w4x1r3.json", "ok_name": True, "n": 100,
+         "task": "pagerank", "subset": "test", "regime": "w4x1r3"},
     ]
     said = ruler_check.problems(rows, "w22x1r3")
-    assert len(said) == 1 and "1 entry in regime lane22r3" in said[0], said
+    assert len(said) == 1 and "1 entry in regime w4x1r3" in said[0], said

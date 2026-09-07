@@ -211,7 +211,13 @@ def check_ruler_constants(bench: str):
             # on demand. It generated three predictions here, two of them refuted, before the
             # spread was measured instead of assumed.
             if busy == 0:
-                pool.setdefault(task, []).extend(
+                # POOLED PER REGIME. §317 pooled every quiet value together, and the hour both
+                # regimes existed for these four tasks that blend changed the verdict: pde_heat1d's
+                # eight wide reads (mean 1.0331) and four serial ones (0.9865) came out as twelve
+                # reads meaning 1.0177, a number measured nowhere. The same mixing §314 forbade,
+                # reintroduced by the fix for a different mistake, in the file about that mistake.
+                reg = row.get("regime") or ruler_check.CAMPAIGN_REGIME
+                pool.setdefault((task, reg), []).extend(
                     float(v) for v in (row.get("values") or [med])
                     if isinstance(v, (int, float)))
     except OSError as exc:
@@ -255,7 +261,7 @@ def check_ruler_constants(bench: str):
         # AND outside the tolerance: the first test is what stops a +-4 % instrument reporting a
         # 3 % drift every other sitting, the second is what stops a very tight instrument reporting
         # a difference too small to act on.
-        vals = pool.get(task) or []
+        vals = pool.get((task, ruler_check.CAMPAIGN_REGIME)) or []
         n = len(vals)
         if n >= 2:
             mean = statistics.fmean(vals)
@@ -263,8 +269,17 @@ def check_ruler_constants(bench: str):
             delta = (mean - quoted) / quoted
             moved = abs(mean - quoted) > 2 * sem and abs(delta) > DRIFT_TOLERANCE
             off += 1 if moved else 0
-            said.append(f"{task}: list {quoted:.4f}, {n} quiet read(s) mean {mean:.4f} "
-                        f"+-{sem:.4f} ({100 * delta:+.1f} %){'  <-- ' if moved else ''}")
+            # AND THE OTHER REGIME BESIDE IT, because it is now measured and it is not the same
+            # number: -4.7 % on pde_heat1d, -2.4 % on discrete_log, +0.3 % on edge_expansion and
+            # pagerank. The gap is a property of the task, not a constant of the box, so it has to
+            # be shown rather than assumed either way.
+            other = pool.get((task, ruler_check.SERIAL_REGIME)) or []
+            beside = (f"; {len(other)} serial read(s) mean {statistics.fmean(other):.4f} "
+                      f"({100 * (statistics.fmean(other) - mean) / mean:+.1f} % vs wide)"
+                      if len(other) >= 2 else "")
+            said.append(f"{task}: list {quoted:.4f}, {n} quiet wide read(s) mean {mean:.4f} "
+                        f"+-{sem:.4f} ({100 * delta:+.1f} %){beside}"
+                        f"{'  <-- ' if moved else ''}")
             continue
         delta = (got - quoted) / quoted
         mark = "" if abs(delta) <= DRIFT_TOLERANCE else "  <-- "

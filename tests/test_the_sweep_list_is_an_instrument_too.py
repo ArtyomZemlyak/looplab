@@ -404,9 +404,9 @@ def _drift_log(tmp_path, rows):
     return str(tmp_path)
 
 
-def _reads(task, values, stamp="2026-09-06T21:00:00"):
+def _reads(task, values, stamp="2026-09-06T21:00:00", regime="w22x1r3"):
     """One recorded sitting on a quiet box."""
-    return {"task": task, "subset": "test", "lane": "33-43,81-91", "regime": "w22x1r3",
+    return {"task": task, "subset": "test", "lane": "33-43,81-91", "regime": regime,
             "busy_cpus_outside_lane": 0, "stamp": stamp,
             "values": values, "median": sorted(values)[len(values) // 2]}
 
@@ -424,7 +424,7 @@ def test_a_constant_is_judged_against_the_scatter_of_its_own_readings(tmp_path):
                        [_reads("pagerank", [1.030, 1.031, 1.029, 1.030, 1.031, 1.029])])
     ok, detail = sweep_claims.check_ruler_constants(tight)
     assert not ok and "<--" in detail, detail
-    assert "6 quiet read(s) mean 1.0300" in detail, detail
+    assert "6 quiet wide read(s) mean 1.0300" in detail, detail
 
     noisy = _drift_log(tmp_path / "noisy",
                        [_reads("pagerank", [0.980, 1.080, 0.985, 1.075, 1.010, 1.050])])
@@ -454,3 +454,34 @@ def test_a_difference_too_small_to_act_on_is_not_a_moved_constant(tmp_path):
     line = [p for p in detail.split("; ") if p.startswith("pagerank")][0]
     assert "<--" not in line, line
     assert "+0.3 %" in line, line
+
+
+def test_the_two_regimes_are_pooled_apart(tmp_path):
+    """Measured 2026-09-06, once both regimes existed for the same four tasks: pde_heat1d reads
+    1.0331 +-0.0068 over eight quiet WIDE values and 0.9865 over four SERIAL ones, and pooling them
+    together produced 1.0177 -- a number measured nowhere, and the §314 mixing reintroduced by
+    §317's fix for a different mistake.
+
+    The fixture separates the two by 5 %, the size of the real gap on pde_heat1d, so a check that
+    pools them lands halfway and fails both assertions."""
+    both = _drift_log(tmp_path / "both", [
+        _reads("pagerank", [1.030, 1.031, 1.029, 1.030]),
+        _reads("pagerank", [0.980, 0.981, 0.979, 0.980], regime="lane22r3"),
+    ])
+    _, detail = sweep_claims.check_ruler_constants(both)
+    line = [p for p in detail.split("; ") if p.startswith("pagerank")][0]
+    assert "4 quiet wide read(s) mean 1.0300" in line, line
+    assert "4 serial read(s) mean 0.9800" in detail, detail
+    assert "-4.9 % vs wide" in detail, detail
+
+
+def test_a_reading_written_before_the_regime_key_counts_as_the_wide_one(tmp_path):
+    """Twenty rows predate the key and were all taken twenty-two wide; dropping them would empty
+    the pool for every task that has not been re-read since."""
+    old = _drift_log(tmp_path / "old", [
+        {"task": "pagerank", "subset": "test", "busy_cpus_outside_lane": 0,
+         "stamp": "2026-09-06T12:00:00", "values": [1.030, 1.031], "median": 1.0305},
+    ])
+    _, detail = sweep_claims.check_ruler_constants(old)
+    line = [p for p in detail.split("; ") if p.startswith("pagerank")][0]
+    assert "2 quiet wide read(s)" in line, line

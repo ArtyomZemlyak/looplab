@@ -13375,3 +13375,52 @@ With the evidence pooled, the four constants read:
 So `pde_heat1d`'s constant really has moved — five standard errors, with a fresh ruler underneath it
 — and the other three hold. The conclusion §316 reached is the one that survives; the reasoning it
 used to get there did not, and the difference is eight readings.
+
+## §318 — the regime gap is a property of the task, and the pooling I shipped mixed the regimes
+
+§317 pooled every quiet reading of a task to judge its constant. The hour both regimes existed for
+the same four tasks, that pooling started mixing them: `pde_heat1d`'s eight quiet WIDE values (mean
+1.0331) and four SERIAL ones (0.9865) came out as twelve reads meaning **1.0177** — a number
+measured nowhere, and precisely the mixing §314 forbade, reintroduced by the fix for a different
+mistake in the file about that mistake. The pool is now keyed by `(task, regime)`, the verdict is
+taken in the regime the task is scored in, and the other regime is printed beside it. Three
+mutations red, including the one that pools them together and the one that lets an unstamped legacy
+row count as serial.
+
+The measurement that exposed it also answers the question §316 left. **Prediction 10** — that
+`pde_heat1d`'s excess is the same pass asymmetry CP-SAT shows, so a serial read lands near 1.03 —
+was refuted: serially it reads **0.9865**, and the spread collapses from ±4 % to ±0.4 %. So both
+the bias and the scatter belong to the twenty-two-wide regime. **Prediction 11** — that the other
+three constants therefore also read 2–5 % lower serially — was half refuted:
+
+| task | quiet wide | serial | gap |
+|---|---|---|---|
+| pde_heat1d | 1.0331 ± 0.0068 (8) | 0.9869 (4) | **−4.5 %** |
+| discrete_log | 1.0192 ± 0.0034 (4) | 0.9939 (4) | **−2.5 %** |
+| edge_expansion | 0.9948 ± 0.0016 (4) | 0.9976 (4) | +0.3 % |
+| pagerank | 0.9968 ± 0.0029 (3) | 1.0000 (4) | +0.3 % |
+
+Two tasks carry a real regime gap and two carry none, so it is **not** a uniform bench bias and
+"score everything serially" is not warranted by this evidence. What is warranted is what the check
+now does: state the number in the regime that will be used, and state the other one beside it, per
+task, from readings rather than from a rule.
+
+For the campaign that means three populations, not two: ten tasks that rule as is at twenty-two
+wide, six CP-SAT tasks that rule only serially (§314, refused outright at twenty-two since §315),
+and — new here — `pde_heat1d` and `discrete_log`, which rule at both but not to the same number, so
+whichever regime a probe on them was scored in has to be recorded with the score.
+
+### And the cache rule I wrote yesterday was refuted by the measurement it forbade
+
+`ruler_check.problems` forgave a serial entry only for CP-SAT tasks — written that way on
+2026-09-06 with a fixture asserting that a serial `pagerank` entry "is still the §149 mistake".
+Taking §318's measurement required minting exactly those entries for four tasks that are scored
+wide, and the live-cache test went red the same night on rulers that had just produced the numbers
+above.
+
+What §149 forbids is one SCORE whose numerator and denominator come from different regimes, and the
+regime key makes that impossible: a run finds its own key or is refused `baseline_regime_mismatch`.
+So the cache may hold either of the two regimes this box measures in, per task; a THIRD — `w4x1r3`
+from a four-worker run on a twenty-two-wide lane — is still a stray, and that is what the test now
+pins. Which regime a task is JUDGED in stays `scoring_regime`'s business, and the second attempt at
+this rule, which keyed the allowance on that, still flagged the four rulers §318 had just used.

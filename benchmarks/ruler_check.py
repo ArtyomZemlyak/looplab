@@ -278,10 +278,24 @@ def problems(rows, expect_regime: str | None = None, min_instances: int = 100) -
         for row in rows:
             if not row["ok_name"] or row["regime"] == expect_regime:
                 continue
-            # A CP-SAT task's own scoring regime is not a stray entry; anything else is, including
-            # a serial entry for a task that is scored wide -- which is the fixture that keeps this
-            # branch honest, since every real serial entry on this box belongs to a CP-SAT task.
-            if row["regime"] == scoring_regime(row["task"]) != expect_regime:
+            # A SECOND REGIME PER TASK IS EVIDENCE, NOT A MISTAKE -- the rule written here
+            # yesterday said otherwise and was refuted the same night by the measurement the sweep
+            # asks for. §318 needed serial rulers for four tasks that are scored WIDE, to measure
+            # what the regime is worth: pde_heat1d -4.5 %, discrete_log -2.5 %, edge_expansion and
+            # pagerank +0.3 %. Taking those readings meant minting exactly the entries this branch
+            # was calling the §149 mistake.
+            #
+            # What §149 actually forbids is one SCORE whose numerator and denominator come from
+            # different regimes, and the regime key makes that impossible by construction: a run
+            # looks up its own key or refuses (`baseline_regime_mismatch`). So the cache may hold,
+            # per task, the regime the campaign scores it in AND the regime that task rules in --
+            # and nothing else. A `w4x1r3` entry on a box whose lanes are 22 wide is still a stray.
+            # THE TWO REGIMES THIS BOX MEASURES IN, for any task: the one a campaign scores in and
+            # the serial one that CP-SAT needs and that §318 used to price the gap. Which of them a
+            # given task is JUDGED in is `scoring_regime`'s business, not this branch's -- keying
+            # the allowance on it was the second version of this rule and it still flagged the four
+            # serial rulers §318 had just measured with.
+            if row["regime"] in (CAMPAIGN_REGIME, SERIAL_REGIME):
                 continue
             stray[row["regime"]] += 1
         for reg, n in stray.items():
