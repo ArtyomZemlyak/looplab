@@ -116,6 +116,56 @@ def wchan(pid) -> str:
         return "gone"
 
 
+def timer_processes(table) -> dict:
+    """The snapshot DAEMONS in a process table, told apart from the forks of a cycle in flight.
+
+    Measured 2026-09-08: the sweep's own scan -- "every process whose cmdline holds
+    `snapshot_timer.sh` and `_loop`" -- read **five** where there is one. Four were gone a second
+    later: bash forks for a pipeline or a command substitution inherit the parent's cmdline, so a
+    timer that is mid-cycle looks like five timers to a matcher that only reads `/proc/<pid>/cmdline`.
+    A duplicate timer is a real hazard (two snapshots at once, which §313 drove: the loser exits 3
+    having written nothing), and that is exactly why the count may not cry wolf every time a cycle
+    happens to be running when the sweep looks.
+
+    The discriminator is the PARENT. The daemon is started with `nohup ... &` and reparented to
+    init; a fork of its cycle has the daemon as its parent. Neither is a matter of timing, and both
+    are in the same table this reads once.
+
+    `table` is a list of `{"pid", "ppid", "cmdline"}` so the rule can be tested against a fabricated
+    process tree -- `/proc` cannot be arranged to hold two timers on demand.
+    """
+    daemons, forks = [], []
+    for row in table:
+        cmd = row.get("cmdline") or ""
+        if "snapshot_timer.sh" not in cmd or "_loop" not in cmd:
+            continue
+        (daemons if str(row.get("ppid")) == "1" else forks).append(str(row.get("pid")))
+    inside = {p for p in forks}
+    return {"daemons": daemons, "forks": sorted(inside),
+            "duplicate": len(daemons) > 1}
+
+
+def process_table(root="/proc") -> list:
+    """`/proc` as the list `timer_processes` reads. One pass, and a process that exits under us is
+    skipped rather than raising -- the scan is a census, not a transaction."""
+    out = []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return out
+    for pid in names:
+        if not pid.isdigit():
+            continue
+        try:
+            cmd = open(f"{root}/{pid}/cmdline", "rb").read().decode("utf-8", "replace")
+            status = open(f"{root}/{pid}/status", encoding="utf-8").read()
+            ppid = next(l.split()[1] for l in status.splitlines() if l.startswith("PPid:"))
+        except (OSError, StopIteration, IndexError):
+            continue
+        out.append({"pid": pid, "ppid": ppid, "cmdline": cmd.replace("\0", " ")})
+    return out
+
+
 def orphans(bench: str) -> dict:
     """Bench workers still pinned to a lane whose parent is gone (ppid 1).
 
@@ -193,6 +243,20 @@ def main(argv=None) -> int:
     newest = check_money.endpoint_health(ledger)["newest"]
     live = lanes.probes(args.bench)
     running = {r["probe"] for r in live if r["probe"]}
+    # THE TIMER, ONCE, WITH ITS FORKS NAMED AS FORKS. Point 1 of the sweep asks whether the
+    # snapshot timer is alive; a matcher on the cmdline alone answers "five" whenever a cycle is
+    # running, and a DUPLICATE timer is a real thing to catch (two snapshots at once; §313 drove
+    # the loser exiting 3 with nothing written).
+    timers = timer_processes(process_table())
+    if timers["duplicate"]:
+        print(f'DUPLICATE snapshot timer: daemons {", ".join(timers["daemons"])} -- two timers mean '
+              "two snapshots racing for one lock; kill all but one BY PID")
+    elif timers["daemons"]:
+        cycle = f', {len(timers["forks"])} fork(s) of a cycle in flight' if timers["forks"] else ""
+        print(f'snapshot timer {timers["daemons"][0]} alive{cycle}')
+    else:
+        print("NO snapshot timer running")
+
     orph = orphans(args.bench)
     if orph["count"]:
         # PRINTED BEFORE THE EARLY RETURN, because an idle box is exactly when nothing else would
