@@ -3452,6 +3452,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # would revoke every issued calibration receipt, and the calibration
                             # profile declares no environment.
                             **({"eval_env": dict(self._eval_env)} if self._eval_env else {}),
+                            # …and WHICH DECLARATION carried it, because the two layers travel
+                            # differently and only one of them survives a copied task file. A run's
+                            # environment may come from `Settings.eval_env` (the run level, which
+                            # rides `config.snapshot.json`) or from `EvalSpec.env` (the task level,
+                            # which rides `task.snapshot.json`); `_declared_eval_env` merges them.
+                            # The operator's ordinary gesture for a follow-up run is to copy the
+                            # previous TASK file — and a run whose corpus root lived only in the
+                            # setting then starts with no environment at all, which is not a
+                            # comparable run: every node rediscovers the corpus through a paid
+                            # triage and repair, and the record afterwards cannot say the metric
+                            # was measured against the same data. Recorded rather than refused:
+                            # a run with no environment is legitimate, and only the operator knows
+                            # whether this one wanted the setting's. Conditional on there BEING an
+                            # environment, on the same two grounds as the key above — the default
+                            # payload stays byte-identical, and the calibration profile (which
+                            # declares none) keeps the key SET
+                            # `speculation_quality._CALIBRATION_RUN_STARTED_FIELDS` compares.
+                            **({"eval_env_absent_from_task": True}
+                               if (self._eval_env and not (self._eval_spec or {}).get("env"))
+                               else {}),
                             # The SETTLED widths, not their AUTO sentinel: re-entry must never
                             # re-derive this run's execution treatment from a different box.
                             **self._run_start_settled_widths(),

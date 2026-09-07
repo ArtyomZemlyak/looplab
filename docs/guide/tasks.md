@@ -285,6 +285,20 @@ environment, because the comparison the existing nodes belong to no longer holds
 get it: the subprocess tier merges it into the child's environment, the Docker tier forwards it as
 `-e` pairs.
 
+**Which carrier you use decides what a follow-up run inherits, and this has cost a node.** The run
+level rides `config.snapshot.json`; the two task levels ride `task.snapshot.json`. Starting the next
+run the ordinary way — by copying the previous TASK file — therefore carries the task levels and
+drops the run level. A dense-retrieval run whose corpus root lived only in `eval_env` started that
+way with no environment at all: every node hit S3 with `InvalidAccessKeyId` and paid a triage and a
+repair to rediscover the local corpus, one node died of it, and the run's numbers are not comparable
+to the champion it was meant to beat, because the corpus was chosen per node by a repair rather than
+declared once. **If the declaration belongs to the TASK — where the data is, which entrypoint, which
+device — put it in `cmd.env` and it travels with the task file.** Keep `eval_env` for what genuinely
+belongs to this RUN of it. The engine records which carrier held it: a run whose environment came
+from the setting alone stamps `run_started.eval_env_absent_from_task`, so the log answers the
+question afterwards. It is recorded, never refused — a run with no environment is legitimate, and
+only you know whether this one wanted the previous run's.
+
 Three things it refuses, all at declaration time:
 
 * **The Developer may not declare it.** `env` is operator-only — on `cmd.stages[].env`, `cmd.env` or
