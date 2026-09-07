@@ -813,6 +813,13 @@ class ResearchCadenceMixin:
                 raise
             except Exception:  # noqa: BLE001 — ordinary verifier failures do not block the memo
                 pass
+        # WHAT SHARE OF THIS MEMO'S SYNTHESIS NAMES EVIDENCE (doc 52 row 32). Deterministic and
+        # free — no model, no provider call — so it is computed for every memo, including the ones
+        # with no claims at all, which are exactly the memos whose synthesis is least supported and
+        # which the verifier above never sees. Selection-neutral like every other memo field: it is
+        # recorded, and nothing reads it to decide anything (AAR's measure is an instrument first).
+        from looplab.trust.memo_verify import provenance_coverage
+        memo_d["provenance"] = provenance_coverage(memo_d)
         # The model, tool ledger, and verifier are all untrusted text producers. This
         # writer-side pass is the invariant: custom researchers cannot bypass redaction, control
         # stripping, list caps, or the aggregate text budget before any durable derivative.

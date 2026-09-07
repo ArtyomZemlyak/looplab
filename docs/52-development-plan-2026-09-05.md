@@ -518,11 +518,19 @@ on operator traces) and SandMLE (+20–67 % relative) train operators from exact
 `spans.jsonl` holds; `cli/export_cmds.py` exports MLflow and a notebook only. Enabling work, ranked
 late. proof:absent:sft@looplab/cli/export_cmds.py
 
-OPEN[memo-synthesis-statements-have-no-provenance-coverage] `trust/memo_verify.py` reads only the
-`claims` list; `summary` / `findings` / `directions` — the synthesis statements Kosmos measured at
-57.9 % accurate — are neither bound to evidence nor counted, so AAR's first measure cannot be computed
-for a LoopLab memo. Instrument first: a coverage number per memo section.
-proof:absent:provenance_coverage@looplab/trust/memo_verify.py
+*Closed 2026-09-07 (row 32 shipped): the marker `memo-synthesis-statements-have-no-provenance-coverage`
+stood here. `trust/memo_verify.py::provenance_coverage` counts, per section — `summary` (split into
+sentences), `findings`, `recommended_directions` — how many synthesis statements name something the
+memo itself can resolve: a node id ITS OWN claims cite, an evidence id they are bound to, or a URL /
+source title it lists. A statement naming node 12 in a memo that cites no node 12 is UNBOUND, which
+is the honest reading — a lenient matcher would report the opposite of the thing being measured —
+and fragments below 20 characters are not counted at all, so the denominator is not padded. It is
+deterministic and free (no model), so `_record_deep_research` computes it for EVERY memo, including
+the claim-less ones the D8 verifier never sees, and the sanitizer bounds the counts and RECOMPUTES
+the share so a payload cannot persist an aggregate that disagrees with its own rows; a memo written
+before the measure existed still folds to exactly what it folded to. Selection-neutral and read by
+nothing that decides — the instrument first, as the row asked (`tests/test_memo_provenance.py`).
+Deleted per the index rule.*
 
 OPEN[memo-quoted-numbers-unmatched-against-cited-metrics] the deterministic verifier declines to
 match numbers (a regex cannot tell an arXiv id from a metric) and leaves numeric correctness to the

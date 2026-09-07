@@ -747,6 +747,50 @@ def memo_verdict_cue(memo) -> str:
             "nothing verifies the summary itself]")
 
 
+#: The memo's PROVENANCE-COVERAGE block (doc 52 row 32): how much of the memo's synthesis names
+#: evidence the memo itself can resolve. Computed by `trust/memo_verify.py::provenance_coverage`
+#: (deterministic, no model) and named here because the SANITIZER has to know its shape — the
+#: version and the section list are one spelling, not two.
+PROVENANCE_COVERAGE_VERSION = 1
+PROVENANCE_COVERAGE_SECTIONS = ("summary", "findings", "recommended_directions")
+#: Per section, and the same bound the writer applies — so a hand-authored block cannot
+#: claim a denominator the instrument could never have produced.
+PROVENANCE_COVERAGE_MAX_STATEMENTS = 64
+
+
+def _provenance(value):
+    """Bound one provenance block, or None when it is not one.
+
+    The counts are the record; `coverage` is RECOMPUTED from them here rather than trusted, for the
+    same reason `_verification` recomputes `unsupported`: a persisted aggregate that disagrees with
+    the rows beside it is the one number a reader cannot check, and this one exists to be read by a
+    person deciding whether a memo's conclusions are supported at all.
+    """
+    if not isinstance(value, dict) or value.get("v") != PROVENANCE_COVERAGE_VERSION:
+        return None
+    out = {"v": PROVENANCE_COVERAGE_VERSION}
+    total = bound_total = 0
+    for section in PROVENANCE_COVERAGE_SECTIONS:
+        row = value.get(section)
+        row = row if isinstance(row, dict) else {}
+        statements = row.get("statements")
+        bound = row.get("bound")
+        statements = (statements if type(statements) is int
+                      and 0 <= statements <= PROVENANCE_COVERAGE_MAX_STATEMENTS else 0)
+        # `bound <= statements` is enforced, not assumed: the block rides in a payload a custom
+        # researcher can author, and "97 of 3 statements are supported" is exactly the shape a
+        # reader would quote without checking.
+        bound = bound if type(bound) is int and 0 <= bound <= statements else 0
+        out[section] = {"statements": statements, "bound": bound}
+        total += statements
+        bound_total += bound
+    out["statements"] = total
+    out["bound"] = bound_total
+    # None, never 0.0 — a memo with nothing to measure has not failed the measurement.
+    out["coverage"] = (bound_total / total) if total else None
+    return out
+
+
 def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dict:
     """Canonicalize a model-, tool-, or legacy-event research memo."""
     src = payload if isinstance(payload, dict) else {}
@@ -771,6 +815,12 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
     }
     if valid_advisory_ref(src.get("memo_id"), "memo"):
         out["memo_id"] = src["memo_id"]
+    # THE MEMO'S OWN COVERAGE (doc 52 row 32), when the writer computed one. Never manufactured
+    # here: a row written before the measure existed must fold to exactly what it always folded to,
+    # so an absent block stays absent rather than becoming a confident `0 of 0`.
+    provenance = _provenance(src.get("provenance"))
+    if provenance is not None:
+        out["provenance"] = provenance
     if "verification" in src:
         # Reserve a bounded slice for trust output before model narrative/proposals. The shared 64k
         # cap must not persist recommendations while silently erasing unsupported verdicts.
