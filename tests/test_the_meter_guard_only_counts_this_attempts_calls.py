@@ -95,11 +95,21 @@ def test_this_attempts_own_call_still_writes_the_marker(tmp_path):
     marker, said = _marker(tmp_path, rows, started=int(now) - 7)
     assert marker is not None, said
     assert "ok_calls=1" in marker, f"the stale pair is still being counted: {marker!r}"
-    # A 7-second rc=0 run IS `exited_immediately` since 2026-09-06 (`IMMEDIATE_EXIT_S`, the clock
+    # A ~7-second rc=0 run IS `exited_immediately` since 2026-09-06 (`IMMEDIATE_EXIT_S`, the clock
     # half of the rung this file is about), and the marker is written either way -- this test's
     # property is the WINDOW, i.e. that the row inside it was counted. The state's own falsifiers
     # live in `test_algotune_immediate_exit_is_not_a_finish.py`.
-    assert "state=exited_immediately" in marker and "wall=7" in marker, marker
+    #
+    # THE WALL IS A RACE AND `wall=7` PINNED THE LOSING SIDE. It is `date +%s` inside `record_done`
+    # minus the `int(now) - 7` this test passed in, i.e. a difference between two clock reads with a
+    # subprocess spawn between them: under a loaded full suite the second read crosses a second
+    # boundary and the marker says `wall=8`. Seen once in a whole-suite run and never in isolation,
+    # which is exactly the shape of a test that is right about its subject and wrong about its
+    # clock. Bounded instead: at least the elapsed time the test constructed, and below
+    # `IMMEDIATE_EXIT_S` (60), which is the only thing the state assertion beside it depends on.
+    assert "state=exited_immediately" in marker, marker
+    wall = int(re.search(r"wall=(\d+)", marker).group(1))
+    assert 7 <= wall < 60, f"the wall left the window this test constructed: {marker!r}"
 
 
 def test_a_cut_run_is_still_read_off_its_own_last_call(tmp_path):
