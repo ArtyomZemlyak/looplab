@@ -250,6 +250,30 @@ React control plane (built artifacts served by `serve/server.py`). The house pat
 
 ## Conventions and traps (the full account)
 
+### A phase that SPENDS must open a SPAN
+
+RESTORED 2026-09-07. This rule was master's and the merge resolved `CLAUDE.md` by taking the other
+parent's shrunk file wholesale, so for a day it existed in NEITHER the guide nor this archive —
+which is the one thing this archive is for. The guide keeps the rule; the measurement is here.
+
+`_progress` (`engine/shared.py`) appends an event and opens nothing; `core/tracing.py::generation`
+yields a NULL handle whenever `_current_tracer` is unset, and `Tracer.span` is its only binder. So
+every provider call a beacon-only phase makes is written with `trace_id=null, span_id=null` and
+lands in no span — real money attributable to nothing, invisible to `looplab timings`, to the trace
+view and to every per-phase cost question.
+
+Measured over `/var/tmp/looplab-bench/runs-armb` (20 AlgoTune runs, 2026-08-20): **1,579 of 6,002
+paid calls (26 %) carried a null trace**, and the beacon-only novelty gate was 823 of them — $1.77
+of $15.73 and 6.6 of 60.8 run-hours, with nothing in the run saying where any of it went.
+`SharedEngineMixin::_paid_progress` is the beacon AND the span; use it wherever the bracketed body
+can reach a role or a client.
+
+Still open at that measurement and NOT fixed by it: the isolated raw speculation lane's own propose
+calls, 628 calls / $1.21, untraced for a second reason — its `tracer.span("propose")` exists in
+`spans.jsonl` for 52 of its 53 windows, yet every usage row inside them is null, while the serial
+lane's identical propose calls are all traced.
+
+
 - **Back-compat import shim**: `looplab/__init__.py` aliases every pre-split flat module path
   (`looplab.orchestrator` → `looplab.engine.orchestrator`, …) via a meta-path finder; both names
   resolve to the SAME module object, so monkeypatching either path works. Many tests use old flat
